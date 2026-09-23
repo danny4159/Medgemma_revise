@@ -1,0 +1,35 @@
+# Assessment
+
+이번 반복은 **CPU 측정 기반 구축 범위에서 success**다. 계획·보고서·실제 코드·테스트 JSON·실행 로그를 대조했다. 검토 중 실험이나 테스트를 재실행하지 않았으며, 저장 NPZ와 원본 파일 hash만 읽어 확인했다.
+
+QES verification 집합 재생성, 평가 실패 시 이전 산출물 무효화, NIH 필수 검사 연결, 클래스별 target 생성은 계획에 부합한다. `lesion_probe_ready=false`는 좌표 근거 부족을 정확히 드러낸 결과로서 이번 계획의 실패가 아니다. **Pooling probe·feature 추출·head 학습은 실험 미실행**이며, 이번 CPU 계획에서 제외됐고 엄격한 데이터 gate도 아직 통과하지 않았다.
+
+# Key Findings
+
+- 실행 로그와 결과 JSON에서 QES 신규 32/32, 진입점 회귀 25/25, 기존 CPU 회귀 42/42, NIH readiness 42/42, 클래스 target 22/22, target 회귀 21/21을 확인했다. 합계 184건이며 모두 통과했다. 초기 QES harness의 JSON 예외 처리 실패와 수정 후 재실행도 기록에 있다.
+- `qes/preflight.py`는 실제 입력으로 재생성한 requests에서 `fixed_subsets()`를 계산한다. verification 목록과 기록의 동시 축소·공집합·동일 크기 교체를 거부하며, 목록 순서만 바뀐 경우는 허용한다.
+- `evaluate_qes.py`는 평가 시작 시 완료 상태를 해제하고 이전 산출물을 이동한다. staging 게시와 완료 상태 기록을 분리했으며, 계산·게시 실패 후 무효화와 복구를 fixture에서 확인했다.
+- `readiness_iter006.json`과 `nih_reaudit_checks.json`에서 필수 검사 13개 통과, 160명 및 80/32/48 split 보존, canvas=`assumed`, readiness=false를 확인했다. 현재 영상 160개 모두 manifest의 file hash와 일치했다. 입력 173개 파일의 감사 전후 digest 일치는 실행 기록으로 확인했다.
+- NPZ를 직접 열어 fine `(160,4,64,64)`, coarse `(160,4,16,16)`, 관측 image–class 쌍 167개와 160개 고유 patient를 확인했다. 저장 결과의 coarse 평균 오차는 0, 직접 16-grid 계산과의 오차는 약 1.11e-16이다.
+- 실제 iter_004 재감사는 1,680 predictions와 12 verification을 통과시켰지만 구형 selection의 `requests_digest` 누락으로 incomplete다. 과거 결과를 새 기준의 complete로 재승인하지 않은 처리가 적절하다.
+
+# Problems / Concerns
+
+1. **좌표 근거가 남은 진입 blocker다.** 저장 README는 배포 해상도와 xywh 의미를 설명하지만 둘을 직접 연결하지 않는다. 공식 Box 파일 본문은 미확인이다. 저장 문서 3개의 실제 hash는 수집 기록과 일치하지만, 이는 공식 배포본과의 동일성을 뜻하지 않는다. 공식 목록과 미러 README·Data_Entry의 크기 차이도 해소되지 않았다. 이를 이유 없이 `documented_direct`로 승격하면 안 된다.
+2. **검증 범위를 구분해야 한다.** 수정된 `prepare_grounding_data.py`의 전체 main은 재실행하지 않았고 공통 readiness 함수만 기존 자료로 확인했다. `changes.patch`도 README diff만 담고 있어 변경 전체의 증거로 충분하지 않다. 이번 검토는 신규·수정 소스와 실행 기록을 직접 읽어 보완했다.
+3. **실제 target 독립 검사는 제한적이다.** 손계산 fixture는 클래스 분리와 면적을 검증하지만 실제 자료의 독립 raster 검사는 자기 box 영역 밖 누출을 검사한다. 모든 fractional occupancy 값을 독립 구현으로 재검증한 것은 아니다. 현재 코드와 결과를 무효화할 문제는 발견하지 않았다.
+4. **후속 재사용 조건을 명시해야 한다.** `image_swap_derangement()`는 영상 index를 순환시킨다. 현재 1명당 1영상에서는 다른 patient 조건이 성립하지만, 여러 영상이 있는 patient로 확장하면 보장되지 않는다. 현 split에 대한 제한을 명시하거나 확장 시 patient 조건을 강제해야 한다.
+5. **Metric 해석과 전처리가 남아 있다.** `soft-IoU(t,t)=1` 테스트는 binary fixture에서만 성립한다. 실제 fractional occupancy에서는 일반적으로 1이 아니므로 이를 완전 일치 상한으로 해석하면 안 된다. RGBA 영상의 alpha 처리와 공간 변환, 학습 loss의 해상도, seed별 결과의 bootstrap 집계 순서도 GPU 실행 전에 고정해야 한다.
+6. **일반화·leakage 한계가 유지된다.** 공식 test에서 만든 supervised development split이며 공식 benchmark 평가가 아니다. Patient 분리는 probe 학습 leakage를 줄이지만 MedGemma 사전학습 노출은 해결하지 않는다. 클래스별 test 양성은 12–13개로 작고, 양성 bbox만 평가하므로 음성에서의 오탐이나 미세 결절 전반의 grounding 성능을 주장할 수 없다.
+
+# Interpretation
+
+이번 결과는 잘못된 입력과 오래된 평가 산출물을 배제하고 클래스 조건부 측정을 수행할 기반이 갖춰졌다는 증거다. 현재 자료에서 결과를 뒤집는 구현 결함은 확인되지 않았고, 재사용 가능한 CPU 기준점으로 커밋할 가치가 있다.
+
+다만 pooling의 정보 손실, MedGemma의 근본적 한계, 새로운 방법론의 효과는 아직 입증되지 않았다. 이후 MLP 차이가 관찰되더라도 먼저 제한된 readout에서의 공간 정보 접근성 차이로 해석해야 한다. 이번은 기반 보완 단계이므로 연구 마일스톤이나 논문 추천으로 확대하지 않는다.
+
+# Recommended Next Experiment
+
+공식 README·FAQ·bbox 자료 확인을 15분·20 MiB 이내로 마무리하고, 미러와의 차이 및 canvas 근거를 기록한다. 직접 근거를 못 찾으면 엄격한 readiness=false를 유지하고, 가정을 명시한 탐색 probe를 별도 허용할지 다음 계획에서 명시적으로 판단한다. 문서 탐색만 반복하지 않는다.
+
+좌표 사용 조건이 확정되면 RGBA 처리·target 정렬·loss 해상도·seed 집계를 고정하고 train 영상 몇 장으로 비용을 실측한다. 이후 동일 용량 linear/MLP의 Z 대 U(P(Z)), train 위치 prior, 같은 클래스 image-swap, 3 seed 및 공유 patient bootstrap을 비교한다. Hyperparameter 선택은 validation에서 끝내고 test는 최종 비교에 사용한다. 기존 투자 기준인 coarse soft-IoU 차이 0.03, paired CI 하한 양수, 대조군 대비 각각 0.03 및 최소 두 클래스의 일관된 방향을 유지한다.

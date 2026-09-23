@@ -131,3 +131,18 @@ MedGemma 1.5로 연구하는 것 자체가 큰 제약이라고 판단되면, 근
   - 다음: NIH bbox 좌표 기준의 명시적 근거를 확보하고 readiness를 보강한다. QES verification 집합을 결정적으로 재생성해 대조하고 실패 시 이전 완료 산출물을 무효화한다. 이후 클래스별 target 정의를 확정해 pooling probe로 진행한다.
 - 📁 원본: `agent/runs/iter_005/`
 
+## iter_006 — Grounding 데이터·측정 기반 구축 (2번째 시도) · 2026-09-24 05:31
+
+- 🧭 **계획** (GPT normal): NIH 좌표 근거·readiness와 QES 검증 상태 전이를 보완하고 클래스별 target을 고정해 pooling probe의 신뢰할 수 있는 진입 조건을 만든다.
+  - 대안: 1) Grounding 데이터·측정 기반 구축: 확보한 split을 유지하면서 검증 결함과 target 정의를 CPU에서 해결한다. · 2) Pooling 전후 frozen feature probe: 데이터·측정 gate 통과 후 동일 readout으로 공간 정보 접근성을 비교한다. · 3) 해부구조에서 병변으로 grounding 전이: 정답 윤곽선 없는 anatomy 자료를 확보한 뒤 직접 병변 학습과 비교한다.
+  - 1순위 선택 근거: 직전 리뷰의 결함은 구체적이고 CPU에서 수정·검증할 수 있다. 이를 먼저 해결해야 후속 probe의 결과를 해석할 수 있으며, 추가 데이터나 연구 방향에 관한 사람의 판단은 필요하지 않다.
+- ▶ **결정**: 자동 진행 (smart) — 1순위로 진행
+- 🔧 **Claude** (heavy): QES subset 재생성·평가 fail-closed(32/32, 회귀 25/25·42/42)와 NIH 필수 gate 결함 주입(42/42), 클래스별 target(22/22)을 CPU에서 모두 통과했습니다. 160명 split과 hash는 보존됐지만, bbox canvas의 직접 문서 근거가 없어 엄격한 lesion_probe_ready=false(assumed)입니다. 미러 README·Data_Entry는 공식 Box 목록과 크기가 달라 원본 동일성도 미확인이고, prepare_grounding_data main은 재실행하지 않았습니다. [자체 검증 FAIL, 파일 783개 변경]
+  - 브랜치 `approach/grounding-data-audit`에서 계속
+  - ⚠ 권한 거부 1건
+- 🔍 **리뷰** (GPT normal): [CONTINUE / success] CPU 검사 184건 통과와 NIH 160명 자료 보존을 확인했으며, 측정 기반은 보완됐지만 좌표 canvas 근거 부족으로 GPU probe는 아직 진입 불가다.
+  - 접근법 판단: 이번 계획의 CPU 검증·target 정의는 달성했다. 좌표 근거 부족을 readiness=false로 반환하는 것도 계획된 성공 조건이며, GPU probe 준비 완료와는 구분한다.
+  - 다음: 공식 NIH README·FAQ·bbox 파일을 제한된 소량 조회로 확인해 canvas 및 미러 차이를 정리한다. 이어 RGBA 전처리와 probe 학습·평가 규약을 확정하고, 좌표 gate가 해결되면 train 소표본으로 추출 비용을 측정한 뒤 pooling 전후 frozen feature probe를 수행한다.
+- 💾 **커밋** `68117cf` (approach/grounding-data-audit): 검증 집합 재생성과 평가 무효화, NIH 필수 감사 및 클래스별 grounding target 구현
+- 📁 원본: `agent/runs/iter_006/`
+

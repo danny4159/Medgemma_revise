@@ -11,6 +11,7 @@
 - iter_003 [CONTINUE] (deep/creative/deep) <3D 근거 보존 context 안정화: abandon> 294개 본실행 결과를 확인했으며, context 민감성은 관찰됐지만 paired 보정은 정확도와 안정성을 모두 악화시켰다. → 다음: 재사용할 파이프라인의 예산 축소·hash 검증 결함을 수정하고, 다음 후보인 질문 조건부 2D 근거 선택을 검토한다. unique-slice mean을 필수 baseline으로 두고 GT 없는 선택 규칙, 해부학적 confound 대조군, 독립 subject 평가 및 선행 방법과의 차별성을 갖춘 소규모 실험을 설계한다.
 - iter_004 [CONTINUE] (deep/heavy/normal) <질문 조건부 2D 근거 선택: abandon> 1,680건 실험 완료를 확인했지만 contrastive 선택의 개선은 작고 위치 prior보다 낮았으며, 재사용 파이프라인의 검증 결함도 남아 있다. → 다음: 해부구조→병변 grounding 전이의 선행 방법·데이터·경량 학습 가능성을 비교하고 최소 반증 실험을 설계한다. 재사용할 코드에는 실제 입력 hash 재검증, verification 완료 강제, selection digest 연결 검증을 먼저 보완한다.
 - iter_005 [CONTINUE] (deep/heavy/normal) <Grounding 데이터·측정 기반 구축: improve> NIH 160명 확보와 SCR 정답 노출 차단은 확인했지만, 준비 완료 판정과 QES 검증에 결함이 남아 있다. → 다음: NIH bbox 좌표 기준의 명시적 근거를 확보하고 readiness를 보강한다. QES verification 집합을 결정적으로 재생성해 대조하고 실패 시 이전 완료 산출물을 무효화한다. 이후 클래스별 target 정의를 확정해 pooling probe로 진행한다.
+- iter_006 [CONTINUE] (normal/heavy/normal) <Grounding 데이터·측정 기반 구축: success> 💾68117cf CPU 검사 184건 통과와 NIH 160명 자료 보존을 확인했으며, 측정 기반은 보완됐지만 좌표 canvas 근거 부족으로 GPU probe는 아직 진입 불가다. → 다음: 공식 NIH README·FAQ·bbox 파일을 제한된 소량 조회로 확인해 canvas 및 미러 차이를 정리한다. 이어 RGBA 전처리와 probe 학습·평가 규약을 확정하고, 좌표 gate가 해결되면 train 소표본으로 추출 비용을 측정한 뒤 pooling 전후 frozen feature probe를 수행한다.
 
 ## 이전 목표들의 접근법 (참고용, 시도 횟수 제한에는 안 들어감)
 
@@ -20,12 +21,12 @@
 
 - 3D 근거 보존 context 안정화 [approach/context-evidence-stability]: 1회 (iter_003), 최근 판정: abandon, 커밋: 없음
 - 질문 조건부 2D 근거 선택 [approach/question-evidence-selection]: 1회 (iter_004), 최근 판정: abandon, 커밋: 없음
-- Grounding 데이터·측정 기반 구축 [approach/grounding-data-audit]: 1회 (iter_005), 최근 판정: improve, 커밋: 없음
+- Grounding 데이터·측정 기반 구축 [approach/grounding-data-audit]: 2회 (iter_005, iter_006), 최근 판정: success, 커밋: 68117cf
 
 현재 연구 브랜치: approach/grounding-data-audit (코드 위치: /SSD1_1TB/home/milab/daniel/08_medgemma/research)
 
 ### 최근 계획의 대안 순위
 
-1. Grounding 데이터·측정 기반 구축: 소량 데이터 확보·분할·좌표·캐시 검증을 먼저 완료해 후속 표현 분석의 실행 가능성을 확정한다.
-2. Pooling 전후 frozen feature probe: 병변 데이터 요건 충족 후 동일 readout과 fine/coarse 평가로 공간 정보 접근성 차이를 검증한다.
-3. 해부구조에서 병변으로 grounding 전이: 표현 분석과 데이터 확보 이후 동일 supervision·학습 예산의 직접 병변 학습과 anatomy 보조 학습을 비교한다.
+1. Grounding 데이터·측정 기반 구축: 확보한 split을 유지하면서 검증 결함과 target 정의를 CPU에서 해결한다.
+2. Pooling 전후 frozen feature probe: 데이터·측정 gate 통과 후 동일 readout으로 공간 정보 접근성을 비교한다.
+3. 해부구조에서 병변으로 grounding 전이: 정답 윤곽선 없는 anatomy 자료를 확보한 뒤 직접 병변 학습과 비교한다.

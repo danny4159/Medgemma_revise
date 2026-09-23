@@ -1758,3 +1758,256 @@ Affine 교환법칙 검증은 구현 대조군이다. 향후 MLP 차이가 나�
 먼저 CPU에서 좌표 근거와 readiness 조건을 보완하고, verification 집합 축소·공집합·교체 및 성공 후 실패 재평가를 검사한다. 확보한 160명 split은 유지한다.
 
 그다음 target·클래스 집계·soft-IoU 수식을 고정하고 train 영상으로 feature 추출 비용을 실측한다. 검증을 통과하고 45 device-min 예산에 들어가면 계획된 Z 대 U(P(Z))의 linear/MLP 비교, 위치 prior·동일 클래스 image-swap, 3 seed와 patient bootstrap 평가를 진행한다. SCR 원본 확보는 이 NIH probe의 선행 조건으로 두지 않는다.
+
+
+## iter_006 GPT PLAN [Grounding 데이터·측정 기반 구축 / proceed] — 2026-09-24 05:31:49
+
+# Current Understanding
+
+iter_005는 NIH 160명과 고정 split을 확보했지만 readiness를 완전히 신뢰하기에는 좌표 근거와 필수 검증 연결이 부족하다. QES에도 verification 집합 변경과 실패 후 오래된 완료 산출물이 남는 문제가 있다. SCR 공개 영상은 정답 윤곽선이 포함되어 있어 anatomy 입력으로 사용할 수 없다.
+
+이번은 `Grounding 데이터·측정 기반 구축`의 두 번째 시도다. 확보한 split과 원본 자료를 유지하면서 CPU 보완을 완료한다. 이전에 abandon한 QES 방법을 재실험하지 않는다.
+
+# Hypothesis
+
+현재 결함은 새 데이터나 모델 추론 없이 수정할 수 있다. 결정적으로 재생성한 verification 집합, fail-closed readiness, 클래스별 target 계약을 적용하면 유효한 입력은 통과하고 조작·누락·오래된 결과는 거부하는 측정 기반을 만들 수 있다.
+
+이는 검증 파이프라인에 관한 가설이다. pooling의 정보 손실이나 새로운 방법론의 효과는 이번 반복의 검증 대상이 아니다.
+
+# Proposed Experiment
+
+CPU에서 정상 자료 재감사와 결함 주입 검사를 수행한다. GPU 예산은 0 device-min이다.
+
+1. NIH 좌표 근거를 문서화한다. 발견한 저자 README의 미러 PDF와 공식 자료에서 해상도·xywh 의미·좌표 canvas 설명을 구분해 기록한다. 문서 URL, 페이지, hash와 명시된 내용·추론을 분리한다. 공식 자료 조회는 15분·20 MiB 이내로 제한하고 전체 영상 archive는 받지 않는다. 직접적인 canvas 근거가 없으면 `documented`와 `assumed`를 구분하고 엄격한 `lesion_probe_ready`를 false로 유지한다. 영상 크기나 육안 overlay만으로 verified로 승격하지 않는다.
+2. 현재 NIH 160명과 80/32/48 split을 그대로 재감사한다. 기존 hash·patient 분리 검사를 유지하면서 metadata·annotation 오류를 필수 gate에 연결한다.
+3. QES verification 집합의 축소·공집합·교체와 성공→실패→복구 상태 전이를 fixture에서 검사한다.
+4. 동일 NIH split에서 image–class별 target을 생성하고, pooling probe에 사용할 metric·대조군·집계 규약을 확정한다. 모델 추출이나 head 학습은 실행하지 않는다.
+
+# Implementation Tasks for Claude
+
+1. `qes/preflight.py`에서 검증된 requests로 `fixed_subsets()`를 재생성하고 저장된 calibration·verification의 필수 key와 구성원을 대조한다. 중복·누락·추가·교체를 거부한다. 목록 순서가 의미 있는지 명시하고 정규화 규칙을 고정한다. runner resume·selector·evaluator가 같은 검사를 사용해야 한다.
+2. `evaluate_qes.py`에서 평가 시작 시 현재 상태를 incomplete로 전환하고 이전 평가 산출물을 무효화한다. gate 실패, 필수 파일 누락, JSON 파싱 실패, 평가 도중 예외에도 현재 유효한 complete/투자 판정이 남지 않도록 한다. 모든 산출물이 성공적으로 기록된 뒤 완료 상태를 게시한다. prediction 수집 완료와 평가 완료를 구분한다.
+3. NIH readiness를 필수 검사와 경고로 명확히 분리한다. bbox header·행 형식, 유한 좌표와 양의 크기, metadata ID 중복, finding 연결, patient 연결, metadata blob 무결성, 실제 영상 hash·크기·split 중복을 검사한다. 필수 검사가 누락되거나 false이면 readiness도 false여야 한다. 미러 원배포 동일성 미확인은 별도 provenance 한계로 남긴다.
+4. 기존 자료를 읽기 전용 입력으로 재사용할 수 있도록 감사 경로를 만든다. 새 산출물은 `research/results/iter_006/`에 저장하고 iter_004·iter_005 결과와 split을 덮어쓰지 않는다. `package_complete`가 감사 실행 완료인지 데이터 준비 완료인지 명시해 혼동을 없앤다.
+5. target을 `(image_id, class)`별 해당 클래스 bbox union으로 만든다. 주분석 클래스는 Atelectasis, Effusion, Cardiomegaly, Pneumonia로 고정한다. bbox가 없는 클래스는 unknown으로 mask하고 음성 GT로 간주하지 않는다. fine 64×64 occupancy와 그 4×4 평균인 coarse 16×16 target을 저장한다. 다중 클래스 영상에서 클래스 간 box가 섞이지 않는 fixture를 추가한다.
+6. 후속 probe 명세를 갱신한다. 동일 용량의 4-output pointwise linear/MLP head와 관측 클래스 loss mask를 명시한다. soft-IoU는 `sum(p*t)/(sum(p)+sum(t)-sum(p*t))`로 고정하고 유효한 양성 target만 평가한다. coarse prediction은 `sigmoid(P(logits))`로 고정한다. 영상 안의 관측 클래스 점수를 먼저 평균한 뒤 patient macro를 계산하며 클래스별 결과도 별도 보고한다. 위치 prior는 train의 클래스별 target 평균, image-swap은 같은 split·같은 클래스의 다른 patient에 대한 고정 derangement로 정의한다. bootstrap은 patient를 단위로 모든 방법에 동일한 재표집을 적용한다.
+7. 새 결함 주입 테스트와 기존 관련 CPU 회귀 검사를 실행한다. 변경 파일, 실제 명령, 통과·실패 수, 남은 blocker를 보고한다. 오래된 명세의 '차이가 없으면 LLM/decoder 병목' 문장을 삭제하고 미확정으로 교정한다.
+
+# Evaluation (성공/실패 기준 포함)
+
+- 정상 QES fixture는 통과하고 verification 목록과 기록의 동시 축소·공집합·동일 크기 ID 교체·필수 key 누락은 모든 관련 진입점에서 거부되어야 한다.
+- 정상 평가 완료 후 입력 변형 또는 필수 파일 손상으로 재평가하면 현재 complete metrics·표·투자 판정이 남지 않아야 한다. 원상복구 후 재평가는 다시 complete가 되어야 한다.
+- NIH 필수 gate 각각에 단일 결함을 주입했을 때 readiness가 false가 되어야 한다. NaN/Inf 좌표와 metadata blob 불일치도 포함한다.
+- 기존 160명, patient별 영상, 80/32/48 split과 원본 파일 hash가 보존되어야 한다. 자료를 바꾸거나 표본 수를 줄여 gate를 통과시키면 실패다.
+- 클래스별 target은 다른 클래스 box를 포함하지 않아야 하며, coarse와 fine 평균의 오차는 1e-10 이하이어야 한다. unknown annotation은 loss·metric에 포함하지 않는다.
+- 좌표 근거가 부족할 때 false readiness와 구체적인 blocker를 반환하는 것은 검증 구현의 성공이다. 다만 데이터 준비 완료 및 GPU probe 진입 성공과는 분리해 보고한다.
+- 후속 pooling 투자 기준은 기존 기준을 유지한다: 3 seed 평균 MLP coarse soft-IoU 차이 0.03 이상, paired patient bootstrap 95% CI 하한 양수, 위치 prior·image-swap 대비 각각 0.03 이상, 최소 두 클래스에서 같은 방향. 이번에는 이 수치를 측정하지 않는다.
+
+# Risks / Checks
+
+- README의 배포 해상도와 xywh 설명을 bbox canvas의 직접 명시로 과장하지 않는다. 공식 Box 접근 실패는 자료의 부재를 뜻하지 않는다.
+- NIH split은 공식 test 자료에서 만든 supervised development split이다. 공식 benchmark test 성능이나 사전학습 중복 해소로 표현하지 않는다.
+- bbox occupancy는 병변 segmentation GT가 아니다. 특히 현재 클래스 구성으로 미세 결절 전반의 한계를 주장할 수 없다.
+- 자동 무효화는 현재 평가 산출물에만 적용하고 원시 prediction·과거 반복 결과를 삭제하지 않는다.
+- 네트워크 시간을 기록할 때 실제 계상 범위와 wall-clock을 구분한다. 기존 다운로드 ledger 수치를 전체 네트워크 비용으로 소급 해석하지 않는다.
+- 새로운 검증 프레임워크로 범위를 넓히지 않고 확인된 결함과 후속 target 계약에 집중한다.
+
+## 대규모 GPU 필요 후보
+
+- 고해상도 vision tower와 pooling/projector 공동 학습으로 병변 공간 정보를 보존하는 의료 VLM 중간학습.
+- anatomy·phrase grounding·보고서를 결합한 대규모 공동학습. 현재는 데이터 준비와 저비용 frozen feature probe를 우선한다.
+
+# 계획의 근거 (GPT 조사 노트)
+
+직전 리뷰와 `research/qes/preflight.py`, `research/evaluate_qes.py`, `research/prepare_grounding_data.py`, `research/grounding_data/nih.py`, 후속 probe 명세를 확인했다. 실험은 실행하지 않았다.
+
+- iter_005 리뷰에서 NIH 160명과 80/32/48 split, 영상 hash 일치를 확인했다. 현재 접근법은 1회 시도 후 improve이므로 같은 접근법을 이어간다.
+- `check_manifest()`는 subsets의 ID 존재·중복만 검사한다. `fixed_subsets(reqs)`의 결정적 재생성 결과와 비교하지 않아 verification 목록과 기록의 동시 축소를 막지 못한다.
+- evaluator는 gate 실패 시 기존 `metrics.json`·`eval_table.md`를 무효화하지 않는다. 성공→실패 상태 전이 검사가 필요하다.
+- NIH readiness의 `canvas_verified_1024`는 실제 해상도·README 문자열·좌표 범위로 결정된다. header 오류, metadata 중복, finding 연결 오류와 blob 불일치도 필수 gate에 연결해야 한다.
+- 추가 검색으로 NIH 저자 README의 미러 PDF를 열었다. 1쪽은 배포 PNG가 1024×1024임을, 2쪽은 bbox의 x,y가 좌상단이고 w,h가 폭·높이임을 명시한다. 다만 bbox canvas를 직접 1024로 지정하는 문장은 없으므로 두 설명의 연결은 추론이며, 공식 배포본과 미러의 동일성도 미확인이다. [NIH 저자 README 미러](https://huggingface.co/datasets/roy-jarjoura/ChestXrays/resolve/main/README_CHESTXRAY.pdf?download=true). 공식 Box 페이지는 이번 웹 도구에서 접근하지 못했다.
+- 현재 NPZ의 전체 클래스 union은 클래스 조건부 target이 아니다. 후속 probe는 image–class별 bbox union과 annotation 유효성 mask를 사용하도록 정의해야 한다.
+- pooling probe는 아직 미실행이다. 이번에는 CPU 검증과 측정 명세를 완료하고 GPU 비교는 후속 반복으로 분리한다.
+
+
+
+## iter_006 CLAUDE REPORT — 2026-09-24 05:48:15
+
+# Work Performed
+
+계획의 CPU 작업 7개를 모두 구현하고 실제로 실행했습니다. GPU는 쓰지 않았고(0 device-min), 모델도 불러오지 않았습니다.
+
+결론부터: 자료 무결성 검사는 13개 모두 통과했지만, **엄격한 `lesion_probe_ready`는 false**입니다. bbox 좌표가 1024×1024 영상 기준이라고 직접 적은 문서를 찾지 못했기 때문입니다. 계획 기준으로는 "근거가 부족하면 false와 구체적 blocker를 낸다"가 검증 구현의 성공입니다. 다만 데이터 준비 완료나 GPU probe 진입과는 구분해야 합니다.
+
+1. **NIH 좌표 근거 수집** (`fetch_nih_coord_evidence.py`, `grounding_data/coord_evidence.py`)
+   - 받은 자료: 저자 README 미러 PDF, 원논문(arXiv 1705.02315v5), 공식 Box 폴더 페이지. 인용문이 해당 쪽에 실제로 있는지는 코드가 확인합니다.
+   - 문서에 명시된 것:
+     - README 1쪽: 배포 PNG가 1024×1024
+     - README 2쪽: x,y는 box 좌상단, w,h는 폭·높이
+     - 논문 4쪽: 영상을 1024×1024로 resize
+     - 논문 8쪽: 원 영상 크기(1024×1024)와 비교하는 간접 언급
+   - 추론인 것: "bbox 좌표 = 1024 PNG pixel 좌표". 이를 직접 말하는 문장은 없어서 판정은 `assumed`입니다.
+   - 논문은 983영상·1,600 box라고 적었지만 배포 CSV는 880영상·984 box입니다. 수치가 서로 다릅니다.
+   - 새로 알게 된 점: 공식 Box 목록과 파일 크기를 비교해 보니 미러 README PDF와 `Data_Entry_2017_v2020.csv`가 공식본과 **크기가 다릅니다**.
+     - README: 847,223 B / 848,327 B
+     - Data_Entry: 9,003,499 B / 9,003,496 B
+     - BBox CSV와 두 list 파일은 크기가 같습니다. 다만 크기가 같다고 동일한 파일이라는 보장은 없어서, 미러의 원본 동일성은 여전히 unverified입니다.
+2. **QES verification 집합 재생성 검사** (`qes/preflight.py`)
+   - `check_subsets()`가 저장된 목록을 `fixed_subsets(requests)`로 다시 만든 결과와 대조합니다. 대조 대상은 현재 입력에서 재계산한 requests입니다.
+   - 필수 key가 빠지거나 추가 key가 있거나, 중복·누락·추가·같은 크기의 ID 교체가 있으면 거부합니다.
+   - 목록 순서는 의미가 없는 것으로 정했습니다. 중복은 정규화 전에 거부하고, 그다음 ID 집합으로 비교합니다.
+   - 필수 파일이 없거나 JSON 파싱이 실패해도 `PreflightError`가 납니다. runner·selector·evaluator가 모두 이 검사를 거칩니다.
+3. **평가 상태 fail-closed** (`evaluate_qes.py`)
+   - 평가를 시작하면 상태를 running으로 바꾸고, 이전 metrics·표·overlay·gate 기록을 `invalidated/<run_id>_start/`로 옮깁니다. 삭제하지 않습니다.
+   - 모든 산출물을 staging에 다 쓴 뒤에만 게시합니다. 이후 `evaluation_status.json`에 complete와 산출물 hash를 기록합니다.
+   - gate 실패, 예외, 게시 도중 실패가 나면 이미 게시된 산출물도 무효화합니다.
+   - prediction 수집 완료(`prediction_collection`, selector의 `completion.json`의 `scope`)와 평가 완료(`evaluation`)는 서로 다른 필드로 분리했습니다.
+   - `load_complete_metrics()`는 상태와 hash가 모두 맞을 때만 metrics를 돌려줍니다.
+4. **NIH readiness 필수 검사와 경고 분리** (`grounding_data/nih_audit.py`)
+   - 필수 검사 13개를 둡니다. 검사 key가 없거나 값이 정확히 `True`가 아니면 실패로 봅니다.
+   - 경고는 readiness에 영향을 주지 않습니다: Infiltrate→Infiltration 표기 대응, 선택 영상 모두가 공식 test 소속이라는 점.
+   - `prepare_grounding_data.py`의 과대 판정 `canvas_verified_1024`는 일관성 검사로 이름과 의미를 낮췄습니다.
+   - 엄격한 readiness는 공통 감사를 호출해 판정합니다. `package_complete`는 `audit_run_complete`(감사 실행 완료)로 바꿨습니다.
+5. **읽기 전용 재감사 경로** (`audit_grounding_iter006.py`): iter_005 자료를 입력으로만 씁니다. 실행 전후 입력 173개 파일의 hash가 같은지 기록합니다.
+6. **클래스별 target과 probe 규약** (`grounding_data/class_targets.py`)
+   - `(image, class)`별로 그 클래스 bbox만 합칩니다. fine은 64×64, coarse는 16×16입니다.
+   - bbox가 없는 클래스는 unknown으로 두고 loss·metric에서 제외합니다.
+   - 규약 함수: soft-IoU, `sigmoid(P(logits))`, masked BCE, 영상→patient 집계, train 위치 prior, 같은 split·같은 클래스 내 고정 derangement, 공유 patient bootstrap.
+7. **명세 정정**: iter_005 노트의 "거짓이면 LLM/decoder 병목" 문장을 "미확정"으로 고쳤습니다. `lesion_probe_ready=true` 옆에는 정정 주석을 달았고, 새 명세 `notes/grounding_probe_spec_iter006.md`를 썼습니다.
+
+# Files Changed
+
+- **신규**
+  - 실행·감사: `fetch_nih_coord_evidence.py`, `audit_grounding_iter006.py`
+  - 모듈: `grounding_data/coord_evidence.py`, `grounding_data/nih_audit.py`, `grounding_data/class_targets.py`
+  - 테스트: `test_qes_iter006.py`, `test_nih_readiness_iter006.py`, `test_class_targets_iter006.py`
+  - 노트: `notes/grounding_probe_spec_iter006.md`
+- **수정**: `qes/preflight.py`, `evaluate_qes.py`, `select_qes.py`(completion scope 필드), `prepare_grounding_data.py`, `notes/grounding_probe_spec_iter005.md`, `README.md`
+- `legacy/`, `hf_cache/`, `agent/`, `results/iter_004`, `results/iter_005`는 수정하지 않았습니다. 입력 digest가 전후로 같습니다.
+
+# Commands / Experiments (실제 실행한 명령과 성공/실패)
+
+모든 명령은 `research/`를 기준으로 실행했습니다.
+
+| 명령 | 결과 |
+|---|---|
+| `python fetch_nih_coord_evidence.py --out results/iter_006/coord_evidence` | 성공. 3개 자료, ledger 9.46 MiB, 2.9초, wall 3.7초 |
+| `python test_qes_iter006.py --out results/iter_006/qes_iter006_tests` | 1회차: 테스트 harness 버그. JSON 파싱 예외를 `SystemExit`로만 잡으려 했습니다. 수정 후 **32/32 PASS** |
+| `python test_qes_preflight.py --out results/iter_006/qes_entry_tests_regression` | **25/25 PASS** (회귀) |
+| `python test_qes.py --out results/iter_006/qes_cpu_tests_regression` | **42/42 PASS** (회귀) |
+| `python audit_qes_iter004.py --src results/iter_004 --out results/iter_006/qes_reaudit_iter004.json` | 실제 iter_004 자료에서 manifest(새 subset 재생성 검사 포함), predictions, verification이 통과. selection은 iter_005와 같이 구형식이라 incomplete |
+| `python audit_grounding_iter006.py --src results/iter_005 --evidence results/iter_006/coord_evidence --out results/iter_006` | 성공 |
+| `python test_nih_readiness_iter006.py ...` | **42/42 PASS** |
+| `python test_class_targets_iter006.py ...` | **22/22 PASS** |
+| `python test_grounding_targets.py --out results/iter_006/targets_tests_regression.json` | **21/21 PASS** (회귀) |
+| `python -c` 두 번 | 1) `prepare_grounding_data.nih_readiness_from_outputs`를 iter_005 자료에 호출: 근거 있음 → integrity true / ready false / assumed, 근거 없음 → undocumented / false. 2) 전체 테스트 후 입력 digest 재확인: 동일 |
+
+권한이 거부된 명령은 `git status --short -uall` 하나였고, 우회하지 않았습니다.
+
+# Results (수치와 결과 파일 경로)
+
+**QES**
+- 다음 변형은 runner·selector·evaluator가 모두 거부했고, 현재 위치에 complete 산출물이 남지 않았습니다:
+  - verification 목록과 기록의 동시 축소, 공집합
+  - 같은 크기의 ID 교체(형식상 유효한 기록을 함께 넣은 경우)
+  - 필수 key 누락(두 key 각각), 추가 key, 중복 ID, calibration 축소, list가 아닌 값
+  - 파일 없음, JSON 손상
+- 순서만 바꾼 목록은 통과했습니다.
+- 상태 전이 B1–B17을 모두 확인했습니다:
+  - 정상 평가 → complete
+  - 다음 경우에는 incomplete가 되고 metrics·표·overlay·투자 판정이 남지 않음: 축소된 verification, verification 기록 수치 실패, `predictions.jsonl` JSON 손상, `selections.json` 누락, `requests.jsonl` 누락, 계산 도중 예외, complete 기록 직전 예외
+  - 원상복구할 때마다 다시 complete
+  - 게시 후 산출물을 변조하면 `load_complete_metrics`가 None을 반환
+  - 원시 prediction은 옮겨지지 않음
+- 결과 파일: `results/iter_006/qes_iter006_tests/qes_iter006_tests.json`
+
+**NIH 재감사** (`results/iter_006/readiness_iter006.json`, `nih_reaudit_checks.json`, `nih_coord_evidence_judgement.json`)
+- `audit_run_complete=true`, `integrity_gate_pass=true`, `coordinate_canvas_status=assumed`, **`lesion_probe_ready=false`**. blocker는 canvas 직접 근거 부재 하나뿐입니다.
+- 보존 확인:
+  - 160명, 80/32/48 split
+  - 영상 160장의 file·pixel hash 일치
+  - 입력 173개 파일 digest `a4c8ce3f…`가 감사 전후와 전체 테스트 후에 같음
+  - split 재생성 결과가 manifest와 일치
+- 결함 주입: 필수 검사 13개 각각이 최소 한 결함에서 실패함을 확인했습니다. 주입한 결함 종류:
+  - bbox CSV: header 변경, trailing 값, 5열 행, 빈 행, NaN/Inf/-Inf 좌표, 0 폭, 음수 높이, 음수 원점, canvas 초과
+  - Data_Entry·목록: 중복 ID, finding 연결 끊김, patient ID 변경, 열 누락, test_list 중복
+  - metadata: blob 불일치(Data_Entry·README), listed blob id 누락
+  - manifest: split 이동, 두 split에 같은 patient, 표본 삭제, annotation·patient 변조
+  - 영상: pixel 1개 변경, 재인코딩, resize, 파일 누락, 다른 split 영상으로 교체
+  - readiness 함수에 key 누락이나 True가 아닌 값(문자열, None, 1, dict 아님)을 넣은 경우
+
+**클래스별 target** (`results/iter_006/nih_class_targets.npz`, `nih_class_targets_summary.json`)
+- 크기: 160×4×64×64(fine), 160×4×16×16(coarse)
+- 관측 쌍 167개. 다중 클래스 영상은 22장이며, 22장 모두 클래스별 target이 전체 union과 다릅니다.
+- 오차: coarse와 fine 평균은 0.0, 직접 계산한 16 격자와는 1.1e-16입니다.
+- 독립 raster로 확인한 클래스 간 누출은 0입니다.
+- 관측 수(train/val/test): Atelectasis 22/10/13, Effusion 20/9/13, Cardiomegaly 20/8/12, Pneumonia 20/8/12.
+
+# Problems
+
+1. 좌표 canvas의 직접 근거가 없습니다. 공식 Box는 폴더 목록만 봤고 README 본문은 받지 않았습니다. 목록에 hash가 없어서 미러가 공식본과 같은지 확인할 수 없고, README·Data_Entry는 크기부터 다릅니다.
+2. `prepare_grounding_data.py`의 `main()`은 수정 후 다시 실행하지 않았습니다. 다시 실행하면 재다운로드가 일어나기 때문입니다. 새 readiness 함수만 iter_005 자료로 직접 호출해 확인했습니다.
+3. `audit_grounding_iter006.py`의 실제 자료 누출 검사는 target과 같은 함수를 쓰므로 순환 검사에 가깝습니다. 독립적인 확인은 `test_class_targets_iter006.py`의 손계산 fixture와 독립 raster 검사가 맡습니다.
+4. 선택 영상 중 1장은 RGBA 모드입니다. hash와 크기는 맞지만 probe 입력 전처리에서 따로 처리해야 합니다.
+5. pooling probe, feature 추출, head 학습은 계획대로 실행하지 않았습니다. 투자 기준 수치는 측정하지 않았습니다.
+
+# Recommendation to GPT
+
+- 측정 기반(QES gate, NIH 무결성, 클래스별 target, metric 규약)은 CPU 수준에서 닫혔습니다. 남은 것은 좌표 canvas를 `assumed`로 둔 채 probe를 진행할지에 대한 결정입니다. 선택지는 두 가지입니다:
+  - (a) `assumed`를 명시한 채 "조건부 readiness"로 GPU probe에 진입한다. target이 이 가정에 의존한다는 caveat를 붙입니다.
+  - (b) 공식 Box README 본문과 FAQ를 받아 hash와 문장을 확인한다. 소량 조회이며, Box 다운로드 API 접근이 가능한지부터 확인이 필요합니다.
+- (a)로 가면 다음 반복에서 할 일:
+  - vision tower feature 추출 비용을 train 영상 몇 장으로 실측합니다.
+  - `class_targets.py` 규약 그대로 Z 대 U(P(Z))의 linear/MLP 비교를 합니다. 3 seed, 위치 prior, image-swap, 공유 bootstrap을 적용합니다.
+- RGBA 영상 1장의 grayscale 변환 규칙을 probe 명세에 추가해야 합니다.
+
+SELF_CHECK: FAIL
+SUMMARY: QES subset 재생성·평가 fail-closed(32/32, 회귀 25/25·42/42)와 NIH 필수 gate 결함 주입(42/42), 클래스별 target(22/22)을 CPU에서 모두 통과했습니다. 160명 split과 hash는 보존됐지만, bbox canvas의 직접 문서 근거가 없어 엄격한 lesion_probe_ready=false(assumed)입니다. 미러 README·Data_Entry는 공식 Box 목록과 크기가 달라 원본 동일성도 미확인이고, prepare_grounding_data main은 재실행하지 않았습니다.
+
+# [orchestrator] 권한 거부된 도구 호출
+- Bash: git -C /SSD1_1TB/home/milab/daniel/08_medgemma/research status --short -uall
+
+
+
+## iter_006 GPT REVIEW [CONTINUE] — 2026-09-24 05:50:33
+
+# Assessment
+
+이번 반복은 **CPU 측정 기반 구축 범위에서 success**다. 계획·보고서·실제 코드·테스트 JSON·실행 로그를 대조했다. 검토 중 실험이나 테스트를 재실행하지 않았으며, 저장 NPZ와 원본 파일 hash만 읽어 확인했다.
+
+QES verification 집합 재생성, 평가 실패 시 이전 산출물 무효화, NIH 필수 검사 연결, 클래스별 target 생성은 계획에 부합한다. `lesion_probe_ready=false`는 좌표 근거 부족을 정확히 드러낸 결과로서 이번 계획의 실패가 아니다. **Pooling probe·feature 추출·head 학습은 실험 미실행**이며, 이번 CPU 계획에서 제외됐고 엄격한 데이터 gate도 아직 통과하지 않았다.
+
+# Key Findings
+
+- 실행 로그와 결과 JSON에서 QES 신규 32/32, 진입점 회귀 25/25, 기존 CPU 회귀 42/42, NIH readiness 42/42, 클래스 target 22/22, target 회귀 21/21을 확인했다. 합계 184건이며 모두 통과했다. 초기 QES harness의 JSON 예외 처리 실패와 수정 후 재실행도 기록에 있다.
+- `qes/preflight.py`는 실제 입력으로 재생성한 requests에서 `fixed_subsets()`를 계산한다. verification 목록과 기록의 동시 축소·공집합·동일 크기 교체를 거부하며, 목록 순서만 바뀐 경우는 허용한다.
+- `evaluate_qes.py`는 평가 시작 시 완료 상태를 해제하고 이전 산출물을 이동한다. staging 게시와 완료 상태 기록을 분리했으며, 계산·게시 실패 후 무효화와 복구를 fixture에서 확인했다.
+- `readiness_iter006.json`과 `nih_reaudit_checks.json`에서 필수 검사 13개 통과, 160명 및 80/32/48 split 보존, canvas=`assumed`, readiness=false를 확인했다. 현재 영상 160개 모두 manifest의 file hash와 일치했다. 입력 173개 파일의 감사 전후 digest 일치는 실행 기록으로 확인했다.
+- NPZ를 직접 열어 fine `(160,4,64,64)`, coarse `(160,4,16,16)`, 관측 image–class 쌍 167개와 160개 고유 patient를 확인했다. 저장 결과의 coarse 평균 오차는 0, 직접 16-grid 계산과의 오차는 약 1.11e-16이다.
+- 실제 iter_004 재감사는 1,680 predictions와 12 verification을 통과시켰지만 구형 selection의 `requests_digest` 누락으로 incomplete다. 과거 결과를 새 기준의 complete로 재승인하지 않은 처리가 적절하다.
+
+# Problems / Concerns
+
+1. **좌표 근거가 남은 진입 blocker다.** 저장 README는 배포 해상도와 xywh 의미를 설명하지만 둘을 직접 연결하지 않는다. 공식 Box 파일 본문은 미확인이다. 저장 문서 3개의 실제 hash는 수집 기록과 일치하지만, 이는 공식 배포본과의 동일성을 뜻하지 않는다. 공식 목록과 미러 README·Data_Entry의 크기 차이도 해소되지 않았다. 이를 이유 없이 `documented_direct`로 승격하면 안 된다.
+2. **검증 범위를 구분해야 한다.** 수정된 `prepare_grounding_data.py`의 전체 main은 재실행하지 않았고 공통 readiness 함수만 기존 자료로 확인했다. `changes.patch`도 README diff만 담고 있어 변경 전체의 증거로 충분하지 않다. 이번 검토는 신규·수정 소스와 실행 기록을 직접 읽어 보완했다.
+3. **실제 target 독립 검사는 제한적이다.** 손계산 fixture는 클래스 분리와 면적을 검증하지만 실제 자료의 독립 raster 검사는 자기 box 영역 밖 누출을 검사한다. 모든 fractional occupancy 값을 독립 구현으로 재검증한 것은 아니다. 현재 코드와 결과를 무효화할 문제는 발견하지 않았다.
+4. **후속 재사용 조건을 명시해야 한다.** `image_swap_derangement()`는 영상 index를 순환시킨다. 현재 1명당 1영상에서는 다른 patient 조건이 성립하지만, 여러 영상이 있는 patient로 확장하면 보장되지 않는다. 현 split에 대한 제한을 명시하거나 확장 시 patient 조건을 강제해야 한다.
+5. **Metric 해석과 전처리가 남아 있다.** `soft-IoU(t,t)=1` 테스트는 binary fixture에서만 성립한다. 실제 fractional occupancy에서는 일반적으로 1이 아니므로 이를 완전 일치 상한으로 해석하면 안 된다. RGBA 영상의 alpha 처리와 공간 변환, 학습 loss의 해상도, seed별 결과의 bootstrap 집계 순서도 GPU 실행 전에 고정해야 한다.
+6. **일반화·leakage 한계가 유지된다.** 공식 test에서 만든 supervised development split이며 공식 benchmark 평가가 아니다. Patient 분리는 probe 학습 leakage를 줄이지만 MedGemma 사전학습 노출은 해결하지 않는다. 클래스별 test 양성은 12–13개로 작고, 양성 bbox만 평가하므로 음성에서의 오탐이나 미세 결절 전반의 grounding 성능을 주장할 수 없다.
+
+# Interpretation
+
+이번 결과는 잘못된 입력과 오래된 평가 산출물을 배제하고 클래스 조건부 측정을 수행할 기반이 갖춰졌다는 증거다. 현재 자료에서 결과를 뒤집는 구현 결함은 확인되지 않았고, 재사용 가능한 CPU 기준점으로 커밋할 가치가 있다.
+
+다만 pooling의 정보 손실, MedGemma의 근본적 한계, 새로운 방법론의 효과는 아직 입증되지 않았다. 이후 MLP 차이가 관찰되더라도 먼저 제한된 readout에서의 공간 정보 접근성 차이로 해석해야 한다. 이번은 기반 보완 단계이므로 연구 마일스톤이나 논문 추천으로 확대하지 않는다.
+
+# Recommended Next Experiment
+
+공식 README·FAQ·bbox 자료 확인을 15분·20 MiB 이내로 마무리하고, 미러와의 차이 및 canvas 근거를 기록한다. 직접 근거를 못 찾으면 엄격한 readiness=false를 유지하고, 가정을 명시한 탐색 probe를 별도 허용할지 다음 계획에서 명시적으로 판단한다. 문서 탐색만 반복하지 않는다.
+
+좌표 사용 조건이 확정되면 RGBA 처리·target 정렬·loss 해상도·seed 집계를 고정하고 train 영상 몇 장으로 비용을 실측한다. 이후 동일 용량 linear/MLP의 Z 대 U(P(Z)), train 위치 prior, 같은 클래스 image-swap, 3 seed 및 공유 patient bootstrap을 비교한다. Hyperparameter 선택은 validation에서 끝내고 test는 최종 비교에 사용한다. 기존 투자 기준인 coarse soft-IoU 차이 0.03, paired CI 하한 양수, 대조군 대비 각각 0.03 및 최소 두 클래스의 일관된 방향을 유지한다.
+
+
+## iter_006 GIT COMMIT — 2026-09-24 05:50:33
+
+68117cf (approach/grounding-data-audit) 검증 집합 재생성과 평가 무효화, NIH 필수 감사 및 클래스별 grounding target 구현
