@@ -1,89 +1,109 @@
 # Current Understanding
 
-현재 평가는 2D QA·분류·위치 추정뿐 아니라 공식 형식의 3D CT/MR까지 폭넓게 다룹니다. 특히 비공식 위치 프롬프트의 퇴화, 클래스 불균형, 기준선, 프롬프트 민감도 등을 대조 실험으로 확인한 점은 강점입니다.
+현재 평가는 VQA, 흉부 X-ray 다중라벨 분류, 병변 위치 추정, 공식 형식의 3D CT/MR까지 포함합니다. 기존 로그가 지적한 3D 프롬프트 누출도 중요하지만, 더 넓은 결과와 실무 권고에 영향을 주는 최우선 문제는 **CheXpert 분류의 정답 구성과 AUC 추정 방식**입니다.
 
-가장 중요한 문제는 **3D CT와 단일 슬라이스 비교에서 프롬프트 조건이 통제되지 않았다는 것**입니다.
+- 메타데이터는 `unlabeled`, `uncertain`, `absent`, `present`를 구분합니다: [fix_chexpert_meta.py](/SSD1_1TB/home/milab/daniel/08_medgemma/scripts/01_data/fix_chexpert_meta.py:14)
+- 그러나 생성 응답 채점은 uncertain만 제외하고, present가 아닌 모든 라벨을 `no`로 처리합니다: [score_eval.py](/SSD1_1TB/home/milab/daniel/08_medgemma/scripts/02_eval/score_eval.py:219)
+- 로그확률 평가도 같은 방식으로 `gt = int(label in present)`를 사용합니다: [remedy_logprob_classification.py](/SSD1_1TB/home/milab/daniel/08_medgemma/scripts/05_remedy/remedy_logprob_classification.py:73)
 
-- 3D 조건은 프롬프트에서 이미 입력이 `"CT slices"`임을 알려 줍니다: [rerun_ct3d_official.py](/SSD1_1TB/home/milab/daniel/08_medgemma/rerun_ct3d_official.py:115)
-- 단일 슬라이스 조건에는 이미지와 질문만 주어집니다: [rerun_ct3d_official.py](/SSD1_1TB/home/milab/daniel/08_medgemma/rerun_ct3d_official.py:131)
-- 그런데 주요 정량 결과가 바로 모달리티 인식 `3D 3/3 vs single 2/3`입니다: [MEDGEMMA_1.5_평가정리.txt](/SSD1_1TB/home/milab/daniel/08_medgemma/MEDGEMMA_1.5_평가정리.txt:442)
+현재 10개 CheXpert 영상의 140개 image-label pair는 다음과 같습니다.
 
-따라서 현재 결과만으로는 s0338의 개선이 여러 슬라이스를 본 효과인지, 프롬프트에서 “CT”라는 정답을 읽은 효과인지 구분할 수 없습니다. 문서의 “같은 볼륨·같은 질문, 입력 방식만 변경”이라는 설명도 엄밀히는 성립하지 않습니다.
+| 상태 | 개수 |
+|---|---:|
+| present | 16 |
+| absent | 14 |
+| uncertain | 7 |
+| unlabeled | 103 |
 
-MR 비교에도 유사한 비대칭이 있고, 3D는 t1c만 사용하지만 단일 결과는 네 시퀀스 12개를 합산하므로 `3/3 vs 0/12` 역시 완전한 matched comparison은 아닙니다: [rerun_mr3d_official.py](/SSD1_1TB/home/milab/daniel/08_medgemma/rerun_mr3d_official.py:76), [rerun_mr3d_official.py](/SSD1_1TB/home/milab/daniel/08_medgemma/rerun_mr3d_official.py:100).
+따라서 보고된 133개 평가쌍의 음성 117개 중 103개, 즉 88%가 명시적 absent가 아니라 unlabeled입니다.
+
+또한 서로 다른 14개 질문 라벨의 점수를 하나의 pooled AUC로 합쳤습니다. 이 경우 영상 판별력이 없어도 모델이 특정 라벨 질문에 더 높은 `yes` 점수를 주는 것만으로 AUC가 상승할 수 있습니다. 그럼에도 문서는 CheXpert AUC 0.700, p=0.0043을 “변별 신호가 실재한다”고 해석합니다: [MEDGEMMA_1.5_평가정리.txt](/SSD1_1TB/home/milab/daniel/08_medgemma/docs/MEDGEMMA_1.5_평가정리.txt:668)
+
+기존 결과를 수정하지 않고 재계산한 예비 수치는 다음과 같습니다.
+
+- 현재 방식 pooled AUC: 0.700
+- 라벨별 평균 점수만 사용한 baseline AUC: 0.666
+- 라벨별 AUC의 macro 평균: 0.588
+- 라벨 내부에서만 정답을 순열한 검정: p≈0.064
+- 명시적 present/absent만 남기면 30쌍이며, 양성과 음성이 모두 존재하는 라벨은 Pneumothorax 하나뿐입니다(1 positive, 2 negative).
+
+즉, 현재 표본으로는 CheXpert의 영상 기반 분류 능력을 안정적으로 추정하기 어렵습니다.
 
 # Hypothesis
 
-**H1:** CT 모달리티 인식 개선의 일부 또는 전부는 다중 슬라이스 자체가 아니라 프롬프트의 `"CT slices"` 단서에서 발생한다.
+**주가설:** 보고된 CheXpert AUC 0.700의 상당 부분은 영상과 정답의 대응이 아니라 다음 두 요인에서 발생한다.
 
-대립되는 영상정보 가설은 다음과 같습니다.
+1. `unlabeled → negative` 정책  
+2. 서로 다른 질환 질문의 점수 offset을 합친 pooled AUC
 
-**H2:** 모달리티 이름을 프롬프트에서 제거해도 동일한 85장 입력은 단일 슬라이스보다 CT를 더 안정적으로 인식한다.
+따라서 라벨별 기저율을 보존하는 검정과 명시적 present/absent 분석에서는 “유의한 영상 변별 신호” 결론이 약화되거나 추정 불가능해질 것이다.
 
-이 구분이 중요한 이유는 현재 프로젝트가 MedGemma의 강한 프롬프트 민감도를 이미 확인했기 때문입니다. 정답을 포함한 프롬프트로 측정된 모달리티 정확도를 영상 이해의 증거로 사용하면 3D 성능을 과대평가할 수 있습니다.
+반대 결과는 여러 개별 라벨에서 AUC가 일관되게 0.5를 넘고, 영상 대응을 라벨 내부에서 섞었을 때 실제 AUC가 유의하게 높게 남는 경우입니다.
 
 # Proposed Experiment
 
-기존 TotalSegmentator 3케이스와 현재 전처리를 그대로 사용해 **2×2 요인 실험**을 수행합니다.
+새 추론 없이 기존 [remedy_logprob.jsonl](/SSD1_1TB/home/milab/daniel/08_medgemma/eval_results/remedy_logprob.jsonl)만 재분석하는 **CheXpert estimand sensitivity audit**를 수행합니다.
 
-| 조건 | 입력 영상 | 사전 지시문 |
+세 가지 분석을 나란히 보고합니다.
+
+| 분석 | 정답 정책 | 통계 단위 |
 |---|---|---|
-| A | 중앙 슬라이스 1장 | 중립: “Review the medical image(s) carefully.” |
-| B | 중앙 슬라이스 1장 | CT 명시: 현재의 “CT slices from a body scan” |
-| C | 동일 볼륨의 85장 | 중립: “Review the medical images carefully.” |
-| D | 동일 볼륨의 85장 | CT 명시: 현재 공식 조건 |
+| A: 현재 방식 재현 | uncertain 제외, unlabeled=negative | 전체 pooled AUC |
+| B: label-controlled | A와 동일 | 라벨별 AUC, macro AUC, 라벨 내부 순열검정 |
+| C: explicit-only | present/absent만 사용 | 라벨별 AUC; 불가능하면 `not estimable` |
 
-모든 조건에 정확히 같은 질문을 사용합니다.
+추가 대조군:
 
-> What imaging modality is this? Answer with a short term only.
-
-추가 비용을 거의 들이지 않고 영상 의존성을 더 강하게 확인하려면 각 조건에 아래 질문도 넣습니다.
-
-> Which region of the body is shown? Answer with a short term only.
-
-D는 기존 결과를 재사용할 수 있습니다. A도 현재 single-slice modality 결과를 사실상 재사용할 수 있으므로 새 추론은 주로 B와 C, 총 6회입니다. 완전한 실행 재현성을 원하면 12개 조건을 모두 다시 실행합니다.
-
-핵심 비교는 `C−A`, 즉 **모달리티 단서가 없는 상태에서 슬라이스 수만 바꾼 차이**입니다. `B−A`는 프롬프트 누출 효과를 측정하는 positive control입니다.
+- 각 라벨의 다른 영상들에서 계산한 평균 점수를 사용하는 leave-one-image-out label-only baseline
+- NIH 데이터에 동일한 label-controlled 분석 적용  
+  - NIH 결과가 유지되고 CheXpert만 붕괴하면 분석법 자체가 무조건 보수적인 것이 아님을 확인할 수 있습니다.
+- 불확실성은 133개 pair를 독립 표본으로 간주하지 말고, 10개 영상을 cluster 단위로 bootstrap합니다.
 
 # Implementation Tasks for Claude
 
-1. 기존 파일을 덮어쓰지 말고 `diagnose_3d_prompt_leakage.py` 같은 독립 스크립트를 만든다.
-2. CT 로딩, HU 3중 윈도우, 85장 균등 샘플링, greedy decoding은 현재 구현에서 그대로 재사용한다.
-3. 다음 두 변수만 직교하도록 조건을 생성한다.
-   - `n_slices`: `1`, `85`
-   - `modality_hint`: `neutral`, `ct_explicit`
-4. 조건별로 실제 전송한 전체 프롬프트를 결과 JSONL에 저장한다.
-5. 결과 레코드에 최소한 다음 필드를 기록한다.
-   - `case`
-   - `n_slices`
-   - `modality_hint`
-   - `query`
-   - `output`
-   - `modality_correct`
-   - `bodypart_correct` 또는 수동 검토 대상 값
-6. 출력은 새 파일 `eval_results/diagnostics_3d_prompt_leakage.jsonl`에 저장한다.
-7. 네 조건의 case-level 결과를 한 표로 출력하는 간단한 분석 함수를 포함한다.
-8. 이번 실험에서는 슬라이스 수 sweep, 새 데이터 다운로드, LoRA 학습을 추가하지 않는다. 먼저 현재 핵심 결론의 내부 타당성을 확인한다.
+1. `scripts/03_diagnosis/audit_classification_estimand.py`를 추가한다.
+2. CheXpert 메타데이터와 기존 로그확률 결과를 `(file, label)`로 결합한다.
+3. 각 행에 `present/absent/uncertain/unlabeled` 상태를 명시적으로 부여한다.
+4. 다음 개수를 assertion으로 검증한다.
+   - present 16
+   - absent 14
+   - uncertain 7
+   - unlabeled 103
+5. 외부 의존성을 추가하지 않고 NumPy 기반 pairwise AUC를 구현한다.
+6. 다음 결과를 출력한다.
+   - 현재 pooled AUC 재현
+   - 라벨별 `n_pos`, `n_neg`, AUC
+   - evaluable label만의 macro AUC
+   - leave-one-image-out label-only baseline
+   - 라벨 내부 정답 순열검정 10,000회
+   - image-cluster bootstrap 95% CI
+7. explicit-only 분석에서 양성과 음성이 모두 없는 라벨은 0.5로 대체하지 말고 `not estimable`로 기록한다.
+8. NIH에 같은 분석을 적용해 대조군 결과를 출력한다.
+9. 결과는 `eval_results/diagnostics_classification_estimand.json`에 저장하되, 기존 점수·문서·추론 파일은 수정하지 않는다.
+10. 이번 단계에서는 모델 재실행, 새 데이터 다운로드, 임계값 재최적화는 하지 않는다.
 
 # Evaluation
 
-일차 지표는 case-level CT 인식 정확도입니다. `"ct"` 또는 `"computed tomography"`를 정답으로 인정하고 X-ray 등은 오답으로 처리합니다.
+가설을 지지하는 기준:
 
-판정 기준:
+- pooled AUC 0.700은 재현되지만 label-controlled permutation p≥0.05 또는 cluster-bootstrap CI가 0.5를 포함한다.
+- macro AUC가 pooled AUC보다 현저히 낮다.
+- label-only baseline이 pooled AUC의 대부분을 설명한다.
+- explicit-only 조건에서는 평가 가능한 라벨이 부족하여 CheXpert 성능이 `not estimable`로 판정된다.
 
-- **3D 영상정보 효과 지지:** 중립 조건에서 C가 A보다 개선되고, 특히 기존 실패 사례 s0338이 `A=X-ray`, `C=CT`가 된다.
-- **프롬프트 누출 가설 지지:** B가 A보다 개선되지만 C는 A와 같거나, s0338이 `B=CT`, `C=X-ray`가 된다.
-- **두 효과 모두 존재:** B와 C가 모두 A를 개선한다. 이 경우 현재 `3/3 vs 2/3` 결론은 방향은 유지되지만 효과 크기는 분리해서 보고해야 한다.
-- **판단 불가:** 모든 조건이 3/3이거나 출력이 불안정해 차이가 사라진다. 그러면 3케이스로는 결론을 내리지 않고 표본 확대가 필요하다.
+가설을 반박하는 기준:
 
-n=3이므로 통계적 유의성 검정보다는 세 케이스의 paired outcome을 그대로 보고해야 합니다. 이 실험은 논문급 성능 추정이 아니라 **현재 인과 해석의 오류 여부를 확인하는 작은 진단 실험**입니다.
+- 최소 2개 이상의 라벨에서 양성과 음성이 모두 충분히 존재하고,
+- label-controlled macro AUC가 일관되게 0.5를 넘으며,
+- 영상 단위 bootstrap CI와 순열검정이 모두 신호를 지지한다.
+
+현재 예비 재계산은 가설을 지지하는 방향입니다. 따라서 감사 결과가 확정되면 CheXpert AUC 0.700을 “성공한 remedy” 또는 triage 근거로 사용해서는 안 됩니다. NIH 결과는 별도로 유지될 수 있습니다.
 
 # Risks / Checks
 
-- `"CT"`가 들어간 조건의 모달리티 정확도는 성능 지표가 아니라 프롬프트 순응 대조군으로만 사용해야 합니다.
-- 중립 지시문에 `volume`, `scan`, `axial`처럼 모달리티를 암시하는 단어를 넣지 않아야 합니다.
-- 단일 조건은 반드시 85장 조건에 포함된 동일한 중앙 슬라이스를 사용해야 합니다.
-- 전처리, 질문, 생성 설정, 슬라이스 방향은 조건 간 동일해야 합니다.
-- 현재 데이터에는 병리 판독 정답이 없으므로 생성된 소견의 구체성이나 길이를 정확도로 해석하면 안 됩니다.
-- 결과가 가설을 지지하면 문서의 “3D에서 모달리티가 정확해졌다”는 결론을 수정하고, 이후 3D 평가 전반에 prompt-information audit을 적용해야 합니다.
-- 이 검토에서는 요청대로 코드를 수정하거나 새 실험을 실행하지 않았습니다.
+- `unlabeled→negative`는 특정 CheXpert 평가 관행에서 선택 가능한 정책일 수 있습니다. 따라서 오류라고 단정하기보다 `U-zero` 정책으로 명시하고 explicit-only 결과와 함께 보고해야 합니다.
+- explicit-only 30쌍은 라벨별 균형이 없어 pooled AUC 역시 해석하면 안 됩니다.
+- 133개 image-label pair는 독립 표본 133개가 아닙니다. 유효 영상 수는 10개입니다.
+- 같은 라벨 안에서 양성과 음성을 비교하지 않는 pooled AUC는 질환별 질문 편향을 영상 판별력으로 오인할 수 있습니다.
+- 이후 확장이 필요하면 먼저 2–3개 질환을 정하고 각 질환별 positive/negative를 균형 있게 사전 선택해야 합니다. 현재처럼 “첫 10개 영상 × 모든 라벨”을 늘리는 방식은 피해야 합니다.
+- 이번 검토에서는 실제 코드나 결과 파일을 수정하지 않았습니다.

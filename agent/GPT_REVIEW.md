@@ -1,117 +1,111 @@
 # Assessment
 
-Claude Code의 검토는 기존 평가의 핵심 confound를 정확히 발견한 설계 감사입니다. 그러나 새 실험은 전혀 실행되지 않았으므로 원래 가설 H1/H2를 검증하지는 못했습니다.
+판정은 **“부분 검증, 기존 결론은 기각 또는 최소한 보류”**입니다.
 
-따라서 현재 결론은 다음처럼 제한해야 합니다.
+Claude Code의 원래 보고만 놓고 보면 스크립트를 실행하지 않았으므로 가설을 실제로 검증하지 못했습니다. 다만 이번 검토에서 직접 실행한 결과 모든 assertion이 통과했고, [결과 JSON](/SSD1_1TB/home/milab/daniel/08_medgemma/eval_results/diagnostics_classification_estimand.json)이 생성됐습니다.
 
-- 증명됨: 기존 `3/3 vs 2/3` 비교만으로는 다중 슬라이스 효과와 프롬프트 단서 효과를 분리할 수 없다.
-- 미검증: s0338이 실제로 `"CT slices"` 문구 때문에 CT로 바뀌었는지 여부.
-- 미검증: 중립 프롬프트에서도 85장이 단일 슬라이스보다 우수한지 여부.
-- 미검증: 85장 효과가 진정한 체적 통합인지, 단순한 다중 이미지 형식 prior인지 여부.
+실행 결과는 다음을 지지합니다.
 
-즉, 결과는 가설 검증 결과가 아니라 “기존 인과 해석이 성립하지 않는다”는 타당한 반증입니다.
+- CheXpert pooled AUC 0.700과 기존 p=0.0043은 재현된다.
+- 그러나 label-controlled 분석에서는 통계적 근거가 사라진다.
+- 따라서 “CheXpert에 영상 기반 변별 신호가 확실히 존재한다”는 기존 결론은 지지되지 않는다.
+
+다만 `unlabeled→negative`가 AUC를 얼마나 부풀렸는지는 검증되지 않았습니다. Explicit-only 표본이 너무 희소해 비교 자체가 불가능하기 때문입니다. 즉 가설의 “label offset” 부분은 지지되지만, “unlabeled 정책의 인과적 영향”은 확인되지 않았습니다.
 
 # Key Findings
 
-1. CT 비교에는 명백한 target leakage가 있다.
+| 분석 | CheXpert | NIH |
+|---|---:|---:|
+| Pooled AUC | 0.700 | 0.673 |
+| 기존 global permutation p | 0.0043 | 0.0206 |
+| Macro AUC | 0.588, 6 labels | 0.733, 5 labels |
+| Within-label macro p | 0.1970 | 0.0306 |
+| Within-label pooled p | 0.0629 | 0.0001 |
+| Label-only baseline AUC | 0.659 | 0.477 |
+| Macro bootstrap 95% CI | [0.444, 0.866] | [0.639, 1.000] |
 
-3D 조건은 프롬프트에서 정답인 `"CT"`를 직접 제공합니다. 동시에 `"contiguous block"`, `"slices"`, `"body scan"`, 반복되는 `"SLICE n"`도 제공됩니다. 반면 단일 조건은 이미지와 질문만 받습니다: [rerun_ct3d_official.py](/SSD1_1TB/home/milab/daniel/08_medgemma/scripts/04_official_format/rerun_ct3d_official.py:115).
+주요 해석은 다음과 같습니다.
 
-따라서 두 조건은 슬라이스 수 외에도 다음이 다릅니다.
-
-- 모달리티 정답 단서
-- 단면영상이라는 형식 단서
-- 시스템 역할에 가까운 교육자 지시문
-- 이미지별 번호 태그
-- 전체 텍스트 및 이미지 토큰 수
-
-문서의 “입력 방식만 변경” 및 “강하게 증명됨”이라는 표현은 지지되지 않습니다.
-
-2. CT headline은 사실상 s0338 한 건에 의존한다.
-
-s0147과 s1394는 단일 슬라이스에서도 이미 CT를 맞혔습니다. 관찰된 개선은 s0338의 `Chest X-ray → CT` 한 건뿐입니다. 따라서 `3/3 vs 2/3`은 일반적인 3D 효과라기보다 단일 discordant pair입니다.
-
-3. F 조건 제안은 유용하지만, 해석 범위를 명확히 해야 한다.
-
-85장의 동일한 중앙 슬라이스를 반복하는 조건은 “이미지가 많다는 형식 자체”와 “서로 다른 슬라이스가 제공하는 추가 정보”를 분리하는 데 유용합니다.
-
-다만 C가 F보다 좋아도 곧바로 “3D 이해”가 증명되는 것은 아닙니다. 서로 다른 2D 뷰 중 하나에서 CT 특징을 찾았을 수도 있기 때문입니다. 진정한 순서·체적 통합을 주장하려면 슬라이스 순서 섞기 같은 대조군이 추가로 필요합니다.
-
-4. MR 분모 수정은 타당하지만 결과의 의미는 여전히 과장돼 있다.
-
-t1c끼리 맞춘 비교는 `3/3 vs 0/3`입니다. `0/12`는 3D에서 보지 않은 t1n·t2f·t2w까지 합친 수치이므로 matched comparison이 아닙니다: [rerun_mr3d_official.py](/SSD1_1TB/home/milab/daniel/08_medgemma/scripts/04_official_format/rerun_mr3d_official.py:82).
-
-그러나 `3/3`을 “종양 유형을 정확히 진단했다”고 해석하는 것도 조심해야 합니다. 로컬 자료에는 세 환자 각각의 병리학적 subtype 정답이 없습니다. BraTS-GLI 소속은 glioma 계열이라는 데이터셋 수준 정보이지, 각 사례가 histologically confirmed glioblastoma라는 근거는 아닙니다. 따라서 이 결과는 최대한 “모델이 더 구체적인 glioma-family label을 생성했다”로 표현해야 합니다.
-
-5. MR 결과에는 target-label prompt leakage는 없지만 다른 confound가 있다.
-
-`glioblastoma`라는 단어는 3D 프롬프트에 없으므로 CT와 같은 직접 누출은 아닙니다. 하지만 3D와 단일 조건은 여전히 프롬프트, 이미지 수, 태그, 문맥 길이가 함께 바뀝니다. 그러므로 “MR 결과는 leakage critique를 완전히 통과했다”기보다는 “직접적인 정답 단어 누출은 없다”가 정확합니다.
+- CheXpert within-label permutation 귀무분포의 평균 자체가 0.637입니다. 즉 질문 라벨별 점수·유병률 차이만으로 pooled AUC가 상당히 높아질 수 있습니다.
+- 모든 영상을 사용한 순수 label-mean baseline도 AUC 0.666입니다. 다만 AUC 차이를 “몇 %가 설명됐다”처럼 선형 분해해서는 안 됩니다.
+- Explicit-only에서는 Pneumothorax만 계산 가능하며 표본은 1 positive / 2 negative, AUC 0.0입니다. CheXpert 전체 성능은 추정 불가능합니다.
+- CheXpert macro AUC 0.588도 `No Finding` AUC 0.920의 영향을 크게 받습니다. 이를 제외하면 disease-only macro AUC는 0.521, 탐색적 within-label p≈0.44입니다.
+- NIH에서는 label-controlled 신호가 유지됩니다. 따라서 분석법이 무조건 보수적인 것은 아닙니다. 그러나 NIH 표본 자체가 10장 중 7장이 Hernia여서 일반화 가능한 대조군은 아닙니다.
 
 # Problems / Concerns
 
-- 가장 큰 문제는 실험 미실행입니다. 새 스크립트와 결과 파일이 없으므로 H1/H2에 관한 결과가 없습니다.
-- “완성된 스크립트가 준비되어 있다”는 주장은 파일이 존재하지 않아 검증할 수 없습니다.
-- 기존 A 결과를 재사용하면 안 됩니다. 제안된 A에는 중립 지시문이 있지만 기존 단일 조건에는 지시문 자체가 없습니다. 새 A와 기존 A는 같은 조건이 아닙니다.
-- 기존 D 역시 다른 조건들과 함께 같은 실행 환경에서 재실행하는 편이 안전합니다. 모델·processor 버전과 직렬화 차이를 제거할 수 있습니다.
-- 2×2라고 하면서 `"SLICE n"` 태그를 85장 조건에만 넣으면 실제로는 두 변수만 직교하지 않습니다. 공식 형식 재현은 별도 조건으로 분리해야 합니다.
-- `"CT"` 명시 조건의 모달리티 정확도는 모델 성능이 아니라 instruction-following 측정입니다. 정확도 표에 일반 성능처럼 합쳐서는 안 됩니다.
-- body-part에는 명시적인 case-level ground truth와 채점 규칙이 없습니다. 따라서 `bodypart_correct`를 자동 기록하려면 먼저 정답 라벨을 독립적으로 구축해야 합니다.
-- s0338의 `Chest`와 간 병변 언급은 약한 근거일 뿐입니다. 흉복부 범위를 함께 포함하는 CT라면 두 답변이 반드시 모순인 것은 아닙니다.
-- CT case 선정 과정이 보고되지 않았습니다. 사후적으로 흥미로운 실패 사례를 선택했다면 표본 선택 편향 가능성이 있습니다.
-- 이는 프롬프트 내 정답 누출이지, 현재 증거만으로 train/test contamination을 의미하지는 않습니다.
-- 슬라이스 샘플링 수식은 `nz < 85`에서 전 범위를 덮지 못하는 잠재 버그가 있습니다. 현재 세 CT에는 영향을 주지 않았지만 `linspace(0, nz-1, min(85,nz))` 방식으로 고쳐야 합니다.
-- findings에는 병리 정답이 없으므로 구체성, 길이, 일관성을 정확도로 취급할 수 없습니다.
+1. **표본 추출과 독립성 문제가 가장 큽니다.**
+
+   CheXpert와 NIH 모두 community mirror의 `train` split에서 스트리밍 순서상 첫 10장을 가져옵니다: [download_eval_samples.py](/SSD1_1TB/home/milab/daniel/08_medgemma/scripts/01_data/download_eval_samples.py:96). 무작위 표본이 아닙니다.
+
+   CheXpert에는 동일 연령·성별·라벨을 가진 frontal/lateral 영상 쌍이 보여 동일 환자 또는 연구일 가능성이 큽니다. 그런데 원래 patient/study ID를 버리고 `00.jpg` 형식으로 바꿔 저장했기 때문에 확인하거나 patient-level clustering을 할 수 없습니다. 따라서 “10개 독립 영상”을 전제로 한 bootstrap도 낙관적일 수 있습니다.
+
+2. **Permutation test가 영상 단위 의존성을 보존하지 않습니다.**
+
+   [현재 구현](/SSD1_1TB/home/milab/daniel/08_medgemma/scripts/03_diagnosis/audit_classification_estimand.py:107)은 각 라벨의 정답을 서로 독립적으로 섞습니다. 이는 라벨별 유병률은 보존하지만, 한 영상 안의 질환 공존 구조와 예측점수 상관을 파괴합니다.
+
+   더 적절한 검정은 환자 단위로 전체 라벨 벡터와 점수 벡터의 대응을 함께 섞는 synchronized cluster permutation입니다. 현재 결과가 비유의라는 방향은 설득력 있지만 p-value 자체를 확정값으로 취급하면 안 됩니다.
+
+3. **Bootstrap macro AUC의 estimand가 반복마다 달라집니다.**
+
+   재표집할 때마다 양성과 음성이 모두 남은 라벨만 평균하므로 bootstrap replicate별로 서로 다른 라벨 집합을 측정합니다: [audit script](/SSD1_1TB/home/milab/daniel/08_medgemma/scripts/03_diagnosis/audit_classification_estimand.py:138). 표본도 10개 cluster뿐이라 percentile CI의 안정성이 낮습니다.
+
+4. **Explicit-only는 더 좋은 gold standard가 아닙니다.**
+
+   현재 데이터는 radiologist image annotation이 아니라 `train` 보고서에서 자동 추출된 라벨입니다. `absent`는 보고서에 명시적으로 부정된 경우이고, `unlabeled`는 언급되지 않은 경우입니다. Explicit-only는 특이도가 높을 수 있지만 심한 선택 편향을 가집니다.
+
+   따라서 이를 “정답 분석”으로, blank-as-negative를 “오류”로 표현하면 과장입니다. 또한 현재 방식은 uncertain을 제외하므로 일반적으로 uncertain을 0으로 바꾸는 “U-zero”와도 다릅니다. 정확한 명칭은 `unmentioned-as-negative + uncertain-ignore`가 낫습니다. 공식 CheXpert 평가에서는 별도의 radiologist-consensus validation/test set을 사용합니다. [CheXpert 원 논문](https://arxiv.org/abs/1901.07031)
+
+5. **Pooled AUC는 triage metric으로 부적절합니다.**
+
+   서로 다른 질환 질문의 점수는 동일한 척도로 보정되어 있지 않습니다. 실제 triage는 일반적으로 특정 질환 내에서 환자를 순위화하므로 per-label AUC 또는 사전에 고정한 macro AUC가 맞습니다. `No Finding`, 질환, `Support Devices`를 하나의 순위로 합치는 현재 pooled AUC는 임상적 의미가 불명확합니다.
+
+6. **LOIO label-only baseline 구현이 순수 label-only 점수가 아닙니다.**
+
+   [구현](/SSD1_1TB/home/milab/daniel/08_medgemma/scripts/03_diagnosis/audit_classification_estimand.py:67)은 현재 행의 점수를 평균에서 제외합니다. 이 때문에 같은 라벨 안에서도 baseline이 현재 점수와 반대 방향으로 변합니다. 순수한 기술적 label-offset baseline이라면 라벨별 전체 평균을 모든 행에 동일하게 부여해야 합니다. 그 값은 0.666입니다. 확증적 baseline은 별도 calibration set에서 추정해야 합니다.
+
+7. **`No Finding`이 결과를 크게 좌우합니다.**
+
+   `No Finding`은 다른 병변들과 논리적으로 상보적이며 가장 높은 AUC를 보입니다. 이를 질환별 macro에 동일 가중으로 넣으면 영상의 정상/비정상 구분 능력을 병변별 식별 능력으로 오인할 수 있습니다.
+
+8. **직접적인 answer leakage는 보이지 않지만 contamination은 배제되지 않았습니다.**
+
+   프롬프트에는 질환명만 들어가며 정답 자체는 들어가지 않습니다. 반면 `not_in_training` 디렉터리명만으로 모델과 데이터의 비중복을 보장할 수는 없습니다. MedGemma 모델 카드도 공개 의료 데이터 평가에서 사전학습 contamination 위험을 명시적으로 경고합니다. 특히 ChestX-ray14는 모델 카드 데이터 항목에도 등장합니다. [MedGemma 1.5 모델 카드](https://developers.google.cn/health-ai-developer-foundations/medgemma/model-card)
+
+9. **로그확률 계산도 검증이 필요합니다.**
+
+   원래 추론 코드는 `"Yes"`, `"yes"`, `" Yes"` 각각의 토큰화 결과에서 첫 토큰만 사용하고 `logsumexp`합니다: [remedy_logprob_classification.py](/SSD1_1TB/home/milab/daniel/08_medgemma/scripts/05_remedy/remedy_logprob_classification.py:51). 다중 토큰 표현이거나 동일 토큰 ID가 중복되면 확률을 잘못 합산할 수 있습니다. tokenizer별 single-token 여부와 ID 중복 assertion이 필요합니다.
+
+10. **사후 분석입니다.**
+
+    현재 문제와 분석법은 이미 AUC 0.700을 본 뒤 선택됐습니다. 감사 목적에는 유효하지만 새 p-value를 확증적 발견으로 취급해서는 안 됩니다. 기존에 여러 remedy를 시도한 다중성도 반영되지 않았습니다.
 
 # Interpretation
 
-현재 자료가 지지하는 가장 강한 결론은 다음입니다.
+현재 결과가 의미 있는 이유는 **성능을 입증해서가 아니라 기존 성능 주장의 estimand가 잘못되었음을 보여주기 때문**입니다.
 
-> 기존 CT 실험은 다중 슬라이스의 효과를 측정하도록 통제되지 않았으며, 따라서 `2/3 → 3/3`을 3D 영상 이해의 개선으로 귀속할 수 없다.
+정당한 결론은 다음과 같습니다.
 
-반대로 다음 결론들은 아직 지지되지 않습니다.
-
-- 프롬프트 누출이 실제로 s0338의 답을 바꿨다.
-- 85장이 중립 조건에서도 우수하다.
-- 모델이 슬라이스 사이의 3D 관계를 통합했다.
-- MR에서 glioblastoma를 임상적으로 정확하게 진단했다.
-
-Claude의 감사 결과 자체는 의미가 큽니다. 기존 문서의 강한 인과 주장을 무효화하고, 어떤 대조군이 필요한지 구체화했기 때문입니다. 다만 새로운 모델 성능 결과로 간주해서는 안 됩니다.
-
-문서에서는 즉시 다음을 수정하는 것이 타당합니다.
-
-- CT 결과를 “강하게 증명됨”에서 “prompt-confounded preliminary observation”으로 하향
-- “입력 방식만 변경” 삭제
-- MR `0/12`를 matched t1c 비교인 `0/3`으로 수정
-- “종양 유형 정답”을 “glioma-family label specificity” 정도로 완화
+- CheXpert pooled AUC 0.700은 재현 가능한 기술 통계다.
+- 그러나 그 수치가 질환별 영상 판별 능력을 나타낸다는 근거는 부족하다.
+- 현재 표본으로는 CheXpert의 영상 기반 분류 성능이 있는지 없는지 판단할 수 없다.
+- 비유의 결과는 “신호가 없다”는 증명이 아니라 “유효 표본이 너무 적어 입증하지 못했다”는 뜻이다.
+- 따라서 기존 문서의 “성공”, “견고한 성과”, “triage 도구로 사용” 표현은 철회하거나 `exploratory pooled result; not estimable per condition`으로 낮춰야 한다.
+- NIH 결과는 이 10장 안에서는 고무적이지만, 편향된 표본과 contamination 가능성 때문에 외부 성능 근거로 사용할 수 없다.
 
 # Recommended Next Experiment
 
-우선 동일한 3개 사례에서 아래 진단 실험을 모두 새로 실행하는 것이 좋습니다. 기존 A/D 결과는 재사용하지 않습니다.
+가장 작은 확증 실험은 **2–3개 질환에 대한 patient-disjoint, explicit-reference 평가**입니다.
 
-| 조건 | 영상 | 지시문/태그 | 측정 목적 |
-|---|---|---|---|
-| A | 중앙 1장 | 중립, 태그 없음 | 기준선 |
-| B | 중앙 1장 | CT 명시, 태그 없음 | 직접 prompt-cue 효과 |
-| C | 서로 다른 85장 | 중립, 태그 없음 | 추가 영상정보 효과 |
-| D | 서로 다른 85장 | CT 명시, 태그 없음 | cue와 영상 수의 결합 |
-| F | 중앙 영상 85회 반복 | 중립, 태그 없음 | 다중 이미지 형식 prior |
-| O | 서로 다른 85장 | 기존 공식 문구와 `SLICE n` | 공식 형식 재현 |
+1. 공식 CheXpert radiologist-annotated validation set에서 Cardiomegaly, Edema, Pleural Effusion 등 2–3개 질환을 사전 지정합니다.
+2. 질환마다 최소 30 positive / 30 negative를 무작위 추출하고, 환자당 한 study만 사용합니다. 예산이 작다면 20/20은 pilot으로만 표시합니다.
+3. patient ID, study ID, view를 보존합니다. 가능하면 frontal 영상으로 제한합니다.
+4. 정답과 무관하게 선택된 모든 이미지–라벨 쌍을 추론해 missingness가 정답에 의존하지 않게 합니다.
+5. 1차 endpoint는 질환별 AUROC와 AUPRC로 고정합니다. Pooled AUC는 계산하지 않습니다.
+6. 고정된 라벨 집합의 macro AUC, patient-cluster bootstrap CI, synchronized patient-level permutation을 사용합니다.
+7. 영상 신호를 직접 검증하기 위해 동일 라벨 안에서 correct-image 점수와 patient-shuffled-image 점수를 비교합니다. Text-only 또는 blank-image 점수는 질문 prior 대조군으로 추가할 수 있습니다.
+8. `present/absent` radiologist reference를 primary로 하고, unmentioned/uncertain 정책은 별도 sensitivity analysis로 둡니다.
+9. tokenizer에서 `Yes`/`No` 완성문의 전체 sequence log-likelihood를 계산하거나, single-token·unique-ID임을 assertion으로 검증합니다.
+10. 분석 코드와 임계값을 잠근 뒤 현재 10장과 겹치지 않는 untouched 표본에서 한 번만 실행합니다.
 
-가능하면 잘못된 단서 조건도 추가하십시오.
-
-- 중앙 1장 + “MRI images”
-- 85장 + “MRI images”
-
-정답 단서와 충돌할 때 모델이 픽셀보다 텍스트를 따르는지 직접 측정할 수 있어, 단순한 correct-hint 조건보다 leakage 검증력이 높습니다.
-
-해석은 다음처럼 제한합니다.
-
-- `B−A`: 직접 CT 단서 효과
-- `C−A`: 서로 다른 다중 이미지가 주는 추가 증거
-- `F−A`: 이미지 개수 또는 반복 형식 prior
-- `C−F`: 서로 다른 슬라이스의 정보 효과
-- `O−D`: `"contiguous/slices/body scan/SLICE n"` 형식 효과
-
-일차 지표는 사전 정의한 CT 문자열 판정에 따른 case-level paired outcome으로 하고, 모든 원출력을 함께 공개해야 합니다. body-part와 findings는 독립 정답이 마련되기 전까지 탐색적 결과로만 둡니다.
-
-이 n=3 실험은 파이프라인 sanity check로 사용하고, 조건과 채점 규칙을 고정한 뒤 사전 선택한 10–15개 이상의 CT 볼륨으로 확대해야 합니다. 확대 표본은 신체 부위와 `nz` 범위를 미리 층화하고 결과를 보기 전에 case 목록을 확정해야 합니다. 그래야 현재 한 사례에 의존하는 결론에서 벗어날 수 있습니다.
+현재 10장에 통계 기법만 더 적용하는 것은 한계가 있습니다. 다음 자원은 재분석보다 **환자 독립적이고 라벨별 균형이 잡힌 확증 표본 확보**에 쓰는 것이 맞습니다.
