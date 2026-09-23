@@ -26,6 +26,8 @@ GPT가 Claude 보고서를 직접 읽고 확인한다.
     smart  : (기본) 계획이 ask_human이거나 규칙 위반일 때만 확인, 나머지는 1순위 대안으로 진행
     full   : 계획 확인 없이 진행 (--auto와 같음)
     어떤 모드든 리뷰가 NEEDS_HUMAN이면 사람에게 묻는다.
+    --no-ask-until "09:00": 그 시각까지는 사람이 없다고 보고 계획 확인과 NEEDS_HUMAN 모두
+    묻지 않고 GPT 제안대로 진행한다 (물었을 지점은 "사람 부재로 자동 결정"으로 기록·알림).
 
 접근법 관리: 계획은 대안 순위(alternatives)와 이번 approach를 내고, 리뷰는 approach를
 success / improve / abandon으로 판정한다. 같은 approach는 --max-attempts번까지만 시도하고
@@ -873,6 +875,9 @@ def iteration_block(n):
             lines.append(f"  - {label}: {ev.get('decision_reason', '')}")
         elif stage == "decision" and ev.get("by") == "auto":
             lines.append(f"- ▶ **결정**: 자동 진행 ({ev.get('mode')}) — {ev.get('result')}")
+            for concern in ev.get("concerns") or []:
+                if concern != plan_question:
+                    lines.append(f"  - 원래 물어볼 이유: {concern}")
         elif stage == "decision":
             lines.append(f"- 🙋 **결정 (사람)**: \"{ev.get('reply')}\" → {ev.get('result')}")
             for concern in ev.get("concerns") or []:
@@ -1119,14 +1124,19 @@ def step_checkpoint(args, n):
     approach = plan.get("approach", "?")
     attempt = approach_ledger(upto=n).get(approach_key(plan), {}).get("attempts", 1)
 
-    if args.autonomy == "full" or (args.autonomy == "smart" and not concerns):
-        print(f"\n자동 진행 ({args.autonomy}): {approach} {attempt}번째 시도")
+    away = human_away(args) and bool(concerns)
+    if args.autonomy == "full" or (args.autonomy == "smart" and not concerns) or away:
+        mode = "사람 부재" if away else args.autonomy
+        print(f"\n자동 진행 ({mode}): {approach} {attempt}번째 시도")
+        note = ("\n원래는 물어볼 지점이었지만 사람 부재 시간이라 1순위로 진행:\n"
+                + "\n".join(f"• {c}" for c in concerns)) if away else ""
         notify(
             f"▶ iter_{n:03d} 자동 진행: {approach} ({attempt}번째 시도)\n"
             f"근거: {plan.get('decision_reason', '')}\n"
-            f"Claude {claude_tier(args, n)} / 리뷰 {plan.get('review_mode', 'full')}"
+            f"Claude {claude_tier(args, n)} / 리뷰 {plan.get('review_mode', 'full')}{note}"
         )
-        record_event(n, "decision", by="auto", mode=args.autonomy, result="1순위로 진행")
+        record_event(n, "decision", by="auto", mode=mode, result="1순위로 진행",
+                     concerns=concerns if away else [])
         return "go"
 
     def decided(action, result, reply):
@@ -1659,6 +1669,7 @@ def parse_args():
     p.add_argument("--autonomy", choices=["manual", "smart", "full"], default="smart",
                    help="계획 확인: manual=매번, smart=애매할 때만(기본), full=안 함")
     p.add_argument("--auto", action="store_true", help="--autonomy full과 같음")
+    p.add_argument("--no-ask-until", help="이 시각까지는 사람에게 묻지 않고 진행. 예: 09:00 또는 '2026-09-24 09:00'")
     p.add_argument("--max-attempts", type=int, default=MAX_ATTEMPTS, help="같은 접근법 최대 시도 횟수")
     p.add_argument("--max-think-rounds", type=int, default=4, help="반복당 GPT 사고 라운드 최대 횟수")
     p.add_argument("--goal", help="새 연구 목표. 이전 기록을 이어받아 새 목표로 다시 계획한다")
@@ -1675,6 +1686,7 @@ def parse_args():
     args = p.parse_args()
     if args.auto:
         args.autonomy = "full"
+    args.no_ask_until = parse_until(args.no_ask_until)
     return args
 
 
@@ -1739,6 +1751,24 @@ def load_goal(args):
     if not GOALS_FILE.exists():
         save(GOALS_FILE, json.dumps(goals, ensure_ascii=False, indent=2))
     return goals[-1]["goal"], False
+
+
+def parse_until(text):
+    """'09:00'(가장 가까운 그 시각) 또는 '2026-09-24 09:00'."""
+    if not text:
+        return None
+    now_dt = datetime.datetime.now()
+    try:
+        return datetime.datetime.strptime(text, "%Y-%m-%d %H:%M")
+    except ValueError:
+        t = datetime.datetime.strptime(text, "%H:%M").time()
+        target = datetime.datetime.combine(now_dt.date(), t)
+        return target if target > now_dt else target + datetime.timedelta(days=1)
+
+
+def human_away(args):
+    """--no-ask-until 시각 전이면 True (사람에게 묻지 않고 진행)."""
+    return bool(args.no_ask_until) and datetime.datetime.now() < args.no_ask_until
 
 
 def status_text():
@@ -1812,7 +1842,9 @@ def main():
             return
 
     first_line = goal.splitlines()[0][:200] if goal else ""
-    notify(f"▶ 연구 루프 시작 (iter_{current_iteration():03d}부터, 최대 {args.max_iters}회)\n목표: {first_line}")
+    away_text = (f"\n{args.no_ask_until:%m-%d %H:%M}까지는 묻지 않고 진행합니다 (그 후 원래 규칙)."
+                 if args.no_ask_until else "")
+    notify(f"▶ 연구 루프 시작 (iter_{current_iteration():03d}부터, 최대 {args.max_iters}회)\n목표: {first_line}{away_text}")
 
     first = current_iteration()
     events_file = iter_dir(first) / "events.jsonl"
@@ -1886,7 +1918,13 @@ def main():
                 notify(f"🎉 iter_{n:03d} 연구 목표 완료 (DONE)\n{review['one_line_summary']}")
             set_post_flag(n, "notified")
 
-        if review["verdict"] == "NEEDS_HUMAN":
+        if review["verdict"] == "NEEDS_HUMAN" and human_away(args):
+            record_event(n, "needs_human", question=review["reason"], reply="(사람 부재, 자동)",
+                         result="GPT 제안대로 계속")
+            rebuild_index()
+            notify(f"🙋 iter_{n:03d} 원래는 결정을 물어볼 지점이지만 사람 부재 시간이라 GPT 제안대로 계속합니다.\n"
+                   f"질문: {review['reason'][:500]}\n진행: {review['next_task'][:300]}")
+        elif review["verdict"] == "NEEDS_HUMAN":
             set_stage(n, "사람 결정 대기")
             if not handle_needs_human(review, n):
                 commit_records(f"research records: iter_{n:03d} waiting for human decision")
