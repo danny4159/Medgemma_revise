@@ -185,6 +185,8 @@ claude_report = run_command([
     "claude",
     "--permission-mode",
     "acceptEdits",
+    "--allowedTools",
+    "Bash(python:*),Bash(python3:*),Bash(nvidia-smi:*),Bash(git status:*),Bash(git diff:*)",
     "-p",
     claude_prompt
 ])
@@ -217,6 +219,14 @@ review_prompt = f"""
 Claude Code가 수행한 결과:
 
 {claude_report}
+
+중요 규칙:
+- 이 단계에서는 코드를 수정하거나 새로운 실험을 실행하지 않는다.
+- Claude가 생성한 코드, 결과 파일, 로그를 읽고 검증 및 해석만 한다.
+- Claude가 실험을 실행하지 못했다면 직접 대신 실행하지 않는다.
+- 실험이 실행되지 않았다면 "실험 미실행"으로 명확히 보고하고,
+  실행이 필요한 이유와 다음 단계만 제안한다.
+- 새로운 파일을 생성하거나 기존 파일을 수정하지 않는다.
 
 위 결과를 비판적으로 검토하라.
 
