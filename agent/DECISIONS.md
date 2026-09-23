@@ -146,3 +146,18 @@ MedGemma 1.5로 연구하는 것 자체가 큰 제약이라고 판단되면, 근
 - 💾 **커밋** `68117cf` (approach/grounding-data-audit): 검증 집합 재생성과 평가 무효화, NIH 필수 감사 및 클래스별 grounding target 구현
 - 📁 원본: `agent/runs/iter_006/`
 
+## iter_007 — Pooling 전후 frozen feature probe (1번째 시도) · 2026-09-24 05:52
+
+- 🧭 **계획** (GPT normal): 좌표 가정을 명시한 소규모 pooling 전후 frozen feature probe로, 비선형 readout의 병변 위치 정보 접근성 차이가 후속 방법론 투자를 정당화하는지 검증한다.
+  - 대안: 1) Pooling 전후 frozen feature probe: 동일 coarse loss와 readout으로 pooling 전후 공간 정보 접근성을 비교한다. · 2) 해부구조에서 병변으로 grounding 전이: 윤곽선 없는 anatomy 입력을 확보한 뒤 직접 병변 학습과 비교한다. · 3) 독립 grounding 데이터에서 재검증: NIH 좌표 가정에 모순이 발견되면 좌표 정의가 명확한 자료로 측정 대상을 바꾼다.
+  - 1순위 선택 근거: 측정 기반 구축은 success로 종료됐고, 다음 가설을 기존 160명과 45 device-min 이내에서 반증할 수 있다. 문서 조회만 반복하지 않도록 assumed 상태의 탐색 실행을 이번 계획에서 명시적으로 허용하되, 엄격한 readiness 판정과 확증적 결론은 유지하지 않는다.
+- ▶ **결정**: 자동 진행 (smart) — 1순위로 진행
+- 🔧 **Claude** (heavy): 공식 NIH 자료 대조 후 탐색 gate를 통과해 MedGemma 1.5 Z 대 U(P(Z)) probe 24개를 완료했다. MLP coarse soft-IoU 차이는 +0.0003 (CI −0.0010~+0.0016)으로 투자 기준에 미달해, 이번 설정에서 pooling 가설은 지지되지 않았다. [자체 검증 PASS, 파일 71개 변경]
+  - 새 브랜치 `approach/pooling-feature-probe` ← approach/grounding-data-audit (68117cf)
+  - ⚠ 권한 거부 4건
+- 🔍 **리뷰** (GPT normal): [CONTINUE / abandon] 24개 학습의 실제 실행과 원시 결과를 확인했으며, pooling 전후 MLP 차이 +0.000304는 사전 투자 기준을 충족하지 못했다.
+  - 접근법 판단: 계획한 coarse probe에서 차이와 CI가 투자 기준에 크게 미달했다. 일반적 정보 보존을 증명하지는 않지만, 현재 pooling 보존형 adapter 방향의 추가 투자 근거는 부족하다.
+  - 다음: 재사용 코드의 완료 판정·provenance 검증·GPU 가시성 처리를 보완하고, 남은 anatomy→lesion grounding 전이를 우선 검토한다. 직접 병변 학습 대비 전이 이득을 반증할 최소 실험과 독립 평가 자료를 설계하며, decoder 병목은 별도 미검증 후보로 비교한다.
+- 🏁 **마일스톤**: Coarse grounding에서 pooling 이전 feature의 추가 이득이 관찰되지 않음 — JOURNEY.md
+- 📁 원본: `agent/runs/iter_007/`
+

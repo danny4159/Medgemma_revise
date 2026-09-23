@@ -80,3 +80,17 @@ MedGemma 1.5로 연구하는 것 자체가 큰 제약이라고 판단되면, 근
 - 접근법: 질문 조건부 2D 근거 선택 (`approach/question-evidence-selection`), 시도: iter_004
 - 커밋: 없음
 - 자세히: DECISIONS.md의 iter_004, `agent/runs/iter_004/review.md`
+
+## 🏁 Coarse grounding에서 pooling 이전 feature의 추가 이득이 관찰되지 않음
+*iter_007 · 2026-09-24 06:08 · 판정: CONTINUE / abandon*
+
+**고민:** 의료 VLM의 grounding 한계가 vision projector의 공간 pooling에서 비롯되는지 확인할 필요가 있었다.
+**시도:** 앞선 context 보정과 질문 조건부 선택은 성능 개선 근거가 부족해 종료했고, NIH 160명의 측정 기반을 구축했다.
+**개발:** 좌표 가정을 명시한 탐색 gate 아래 동일 coarse loss·초기화·학습 순서로 Z와 U(P(Z))의 linear·MLP probe 24개를 실행했다.
+**결과:** test 48명에서 MLP 차이는 +0.000304, 95% CI [−0.001012, +0.001611]로 투자 기준 0.03에 미달했다.
+**대조:** Z는 위치 prior보다 +0.0823, image-swap보다 +0.0991 높았고, linear 두 조건은 수치적으로 일치했다.
+**의미:** 현재 coarse 평가에서는 pooling 보존형 adapter를 개발할 근거가 부족하다. 일반적 정보 무손실이나 decoder 병목을 주장하지 않고, anatomy→lesion 전이 등 남은 방향으로 이동한다.
+
+- 접근법: Pooling 전후 frozen feature probe (`approach/pooling-feature-probe`), 시도: iter_007
+- 커밋: 없음
+- 자세히: DECISIONS.md의 iter_007, `agent/runs/iter_007/review.md`

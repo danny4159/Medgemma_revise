@@ -1,0 +1,71 @@
+# Current Understanding
+
+`grounding-data-audit`는 2회 후 success로 종료됐다. 이번에는 새 접근법 `pooling-feature-probe`를 시작한다. 포기한 context 보정과 QES 선택은 재시도하지 않는다.
+
+NIH 160명, 80/32/48 patient split과 4개 클래스 target은 확보됐다. 엄격한 readiness는 좌표 canvas 직접 근거 부족으로 false다. 모델 feature 추출과 probe 학습은 아직 실행하지 않았다. 이 자료는 공식 test를 재분할한 supervised development set이며 공식 benchmark 평가가 아니다.
+
+# Hypothesis
+
+같은 coarse target과 동일 용량 pointwise MLP를 사용하면, pooling 전 feature Z가 U(P(Z))보다 image-specific 병변 위치 정보를 더 잘 읽어낼 수 있게 한다. P는 실제 projector의 4×4 average pooling이며 U는 nearest upsampling이다.
+
+주가설은 coarse patient-macro soft-IoU에서 Z가 우세하고 위치 prior 및 같은 클래스 image-swap보다 낫다는 것이다. 선형 head는 pooling 교환법칙이 성립하는 구현 대조군이다. 양성 결과도 정보의 완전 소실이나 LLM의 인과 병목을 증명하지 않는다.
+
+# Proposed Experiment
+
+1. 공식 README·FAQ·BBox CSV·Data_Entry 조회를 최대 15분·20 MiB로 제한한다. 공개 접근만 사용하고 실제 받은 문서의 URL·버전·hash·쪽수를 기록한다. 미러와 byte 차이가 있으면 구조화된 내용 차이도 확인한다. 인증 또는 대용량 다운로드가 필요하면 종료한다.
+2. 직접 근거가 없더라도 기존 13개 무결성 검사 통과, coordinate status=assumed, 새로운 모순 없음이면 탐색 probe를 허용한다. `lesion_probe_ready`는 false로 유지하고 별도 `exploratory_probe_allowed`와 가정·근거 digest를 기록한다. undocumented, 좌표 모순, 선택 자료의 annotation/patient 차이 또는 integrity 실패는 GPU 진입을 막는다. 직접 근거가 발견되면 원문 확인 후 엄격한 gate를 재평가한다.
+3. 기존 split·클래스·관측 mask를 고정한다. train 4장으로 추출과 학습 비용을 실측하고, 전체 160장 feature를 한 번만 추출한다. test 영상의 비지도 추출은 허용하되 test 성능은 설정 고정 후에만 계산한다.
+4. Z와 U(P(Z)) 각각에 linear 및 1-hidden-layer MLP를 학습한다. 주분석 loss는 두 경로 모두 `BCEWithLogits(P(head(feature)), coarse_target)`다. 관측 image–class 쌍마다 공간 평균을 계산한 뒤 쌍 평균을 취한다. unknown 클래스는 제외한다.
+5. train 위치 prior와 학습된 각 head의 같은 클래스 image-swap을 비교한다. fine 결과는 같은 head의 부차 분석으로만 보고하며 별도 fine-loss 실험은 이번 범위에서 제외한다.
+
+# Implementation Tasks for Claude
+
+1. 환경과 provenance를 기록한다. Python·torch·transformers 버전, 모델 revision, config, processor 설정, 사용 소스 경로를 보존한다. 지정 환경과 실제 실행기가 다르면 설치하거나 임의 환경에서 강행하지 말고 명확한 blocker로 보고한다.
+2. 공식 자료 조회 결과와 탐색 허용 정책을 구현한다. strict readiness를 덮어쓰지 않는다. 기존 iter_005/006 입력은 수정하지 않고 이번 산출물은 `results/iter_007/`에 저장한다.
+3. 전처리를 고정한다. L은 동일 값을 RGB 세 채널로 복제한다. RGBA는 alpha 및 채널 통계를 기록하고 검정 배경에 alpha composite한 RGB를 사용한다. 모두 opaque이면 RGB 유지와 동일함을 확인한다. 비불투명 alpha가 있으면 해당 영상 제외 민감도 결과도 보고한다. 공식 processor의 resize·정규화를 사용하고 임의 crop·flip·augmentation은 하지 않는다. 실제 공간 변환을 기록하며 예상 밖 crop/padding이 있으면 정렬을 해결하기 전 추출을 중단한다.
+4. 캐시된 실제 모델 코드에서 projector에 들어가는 vision feature 지점을 확인한다. 임의 hidden layer를 선택하지 않는다. 예상 shape 64×64×1152, 실제 pooling 결과 16×16, token 순서 및 pooling 호출과의 수치 일치를 확인한다. RMSNorm·projection은 비교에 섞지 않는다. backbone은 eval/no_grad로 고정한다.
+5. feature cache에 image/patient ID, 입력 hash, processor·모델 digest, shape·dtype를 연결한다. 두 조건은 같은 캐시에서 생성한다. 추출은 bf16을 허용하고 head 연산은 float32로 수행한다. feature별 표준화나 조건별 정규화는 추가하지 않는다.
+6. head는 linear 1152→4, MLP 1152→128→4와 GELU, dropout 없음으로 고정한다. AdamW, weight_decay=0, batch size=8, 200 updates, learning rate 후보 {1e-3, 3e-4}, seed {0,1,2}를 사용한다. paired 조건은 초기 가중치·batch 순서·update 수를 공유한다. 각 head 종류에서 두 조건과 3 seed의 validation coarse soft-IoU 평균으로 공통 learning rate 하나를 고른다. 동률이면 작은 learning rate를 선택하고, 마지막 update를 평가한다. 전체 24개 학습이며 test를 본 뒤 설정을 바꾸지 않는다.
+7. 실행 전 `nvidia-smi`로 가용 메모리가 많은 허용 GPU를 선택한다. train pilot으로 추출·24개 학습·평가 예상 시간을 계산하고 총 45 device-min 상한을 적용한다. 상한 초과 예상 또는 실제 도달 시 중단하고 partial로 보고하며, seed나 표본을 몰래 줄여 complete로 표시하지 않는다. 다른 사용자의 프로세스는 건드리지 않는다.
+8. 의미 있는 검증을 추가한다. 합성 공간 패턴의 token 정렬, 실제 P와 재구현 일치, affine head의 coarse logits·loss·gradient 동등성, unknown mask의 gradient 차단, ID 교체와 cache 변조 거부, 다른 patient donor 보장, seed 평균 후 paired bootstrap을 검사한다. linear는 작은 float64 fixture에서 엄격히 검증하고 실제 float32 비교 허용오차는 test 평가 전에 고정한다.
+9. 원시 seed별 prediction, validation 선택표, patient/class별 metric, 학습 loss, bootstrap index와 실행 시간을 보존한다. 필수 조건 및 산출물 hash가 모두 확인된 경우에만 평가 complete를 기록한다.
+
+# Evaluation (성공/실패 기준 포함)
+
+주지표는 coarse soft-IoU다. 각 seed에서 영상 내 관측 클래스 점수를 평균하고 patient 점수로 만든 다음, 같은 patient의 3 seed 점수를 평균한다. 이 48명 벡터에 공유 patient bootstrap 2,000회를 적용해 paired 95% CI를 계산한다. seed를 독립 patient처럼 취급하지 않는다. 클래스별 결과와 seed별 차이도 별도로 보고한다.
+
+후속 방법론 투자 기준은 모두 충족해야 한다:
+
+- MLP의 Z − U(P(Z)) 평균 차이 ≥ 0.03.
+- 해당 paired CI 하한 > 0.
+- Z가 train 위치 prior 및 Z-head의 같은 클래스 image-swap보다 각각 ≥ 0.03 우세.
+- 최소 2개 클래스에서 Z − U(P(Z))가 양수.
+- 무결성·공간 정렬·linear 대조군·완료 상태 검증 통과.
+
+위치 prior는 train의 클래스별 coarse target 평균이다. image-swap은 같은 test split·클래스에서 다른 patient의 prediction을 donor로 쓰며 고정된 mapping을 모든 조건에 공유한다. train의 평균 target과 frozen model 출력을 test 정답으로 보정하지 않는다.
+
+모든 기준을 통과하면 pooling 보존형 경량 adapter를 검토할 근거로 삼는다. assumed 상태의 통과는 조건부 탐색 신호이며 확증 결과로 승격하지 않는다. fine에서만 이득이면 subcell 위치 접근성 차이로 해석한다. 유효한 완료 실험에서 투자 기준 미달이면 이번 설정의 pooling 가설은 지지되지 않은 것으로 판정한다. gate·예산·학습 발산 문제로 미완료하면 가설 실패와 구분한다.
+
+# Risks / Checks
+
+- bbox occupancy는 segmentation GT가 아니고, 현재 클래스는 미세 결절 전반을 대표하지 않는다.
+- fractional soft-IoU에서 target 자기 일치 점수를 1 또는 최적 상한으로 해석하지 않는다.
+- 동일 파라미터 수라도 Z 경로의 연산량은 더 크다. head 파라미터 수와 실행 시간을 함께 보고한다.
+- coarse loss를 명시한 것은 기존 미정 규약을 실행 전에 확정한 것이다. 결과를 보고 loss나 성공 기준을 바꾸지 않는다.
+- 적은 test 양성, 사전학습 노출 미확인, 한 데이터셋 및 제한된 head 용량 때문에 일반적 정보 손실·진단 성능·novelty를 주장할 수 없다.
+- 공식본에서 선택 자료와 관련된 모순을 발견하면 탐색 허용으로 우회하지 않는다.
+
+## 대규모 GPU 필요 후보
+
+- 고해상도 vision tower와 pooling/projector 공동학습: 위치 정보를 유지하면서 언어 정렬을 보존하는 중간학습 후보이며 현재 pilot보다 큰 영상·텍스트 학습 예산이 필요하다.
+- Anatomy·phrase grounding·보고서 공동학습: 일반화 가능한 근거 연결 학습 후보이나 대규모 자료와 다중 목적 학습 비용 때문에 이번 반복에서는 실행하지 않는다.
+
+# 계획의 근거 (GPT 조사 노트)
+
+직전 리뷰·보고서, `research/notes/grounding_probe_spec_iter00{5,6}.md`, `grounding_data/class_targets.py`, `coord_evidence.py`를 확인했다. 저장 기록상 CPU 검사 184건이 통과했고 NIH 160명은 train/validation/test 80/32/48명으로 보존됐다. 관측 image–class 쌍은 167개이며 test 클래스별 양성은 12–13개다. 엄격한 `lesion_probe_ready=false`의 blocker는 bbox canvas의 직접 문서 근거 부재다.
+
+이번 웹 조회에서도 [NIH 공식 배포 페이지](https://nihcc.app.box.com/v/ChestXray-NIHCC) 본문 접근은 실패했다. [저자 공개 논문](https://lelu007.github.io/publication/CVPR2017_ChestX-Ray8.pdf)은 1024 영상과 저해상도 heatmap의 차이를 설명하지만, 배포 CSV 좌표계의 직접 정의를 확보한 것은 아니다. 조회한 저자 PDF는 v1이고 기존 저장 근거는 v5이므로 버전을 혼동하지 않는다. 공식 파일과 미러의 동일성은 미확인 상태를 유지한다.
+
+기존 명세는 loss 해상도가 미정이었다. 주분석에서 coarse BCE를 공통 적용하면 affine head의 pooling 교환법칙을 출력뿐 아니라 학습 대조에도 사용할 수 있다. MLP 차이는 제한된 비선형 readout에서의 접근성 차이로 해석한다. 현재 soft-IoU는 fractional target의 자기 일치 점수가 일반적으로 1이 아니므로 상한으로 쓰지 않는다.
+
+환경 확인에서 `which python`은 `/home/milab/anaconda3/bin/python`을 반환했다. 구현 단계는 실제 Python·torch·transformers 경로를 기록하고 지정 환경과 맞는지 먼저 확인해야 한다. 이번 단계에서는 파일 수정·생성·실험 실행을 하지 않았다.

@@ -2011,3 +2011,236 @@ QES verification 집합 재생성, 평가 실패 시 이전 산출물 무효화,
 ## iter_006 GIT COMMIT — 2026-09-24 05:50:33
 
 68117cf (approach/grounding-data-audit) 검증 집합 재생성과 평가 무효화, NIH 필수 감사 및 클래스별 grounding target 구현
+
+
+## iter_007 GPT PLAN [Pooling 전후 frozen feature probe / proceed] — 2026-09-24 05:52:51
+
+# Current Understanding
+
+`grounding-data-audit`는 2회 후 success로 종료됐다. 이번에는 새 접근법 `pooling-feature-probe`를 시작한다. 포기한 context 보정과 QES 선택은 재시도하지 않는다.
+
+NIH 160명, 80/32/48 patient split과 4개 클래스 target은 확보됐다. 엄격한 readiness는 좌표 canvas 직접 근거 부족으로 false다. 모델 feature 추출과 probe 학습은 아직 실행하지 않았다. 이 자료는 공식 test를 재분할한 supervised development set이며 공식 benchmark 평가가 아니다.
+
+# Hypothesis
+
+같은 coarse target과 동일 용량 pointwise MLP를 사용하면, pooling 전 feature Z가 U(P(Z))보다 image-specific 병변 위치 정보를 더 잘 읽어낼 수 있게 한다. P는 실제 projector의 4×4 average pooling이며 U는 nearest upsampling이다.
+
+주가설은 coarse patient-macro soft-IoU에서 Z가 우세하고 위치 prior 및 같은 클래스 image-swap보다 낫다는 것이다. 선형 head는 pooling 교환법칙이 성립하는 구현 대조군이다. 양성 결과도 정보의 완전 소실이나 LLM의 인과 병목을 증명하지 않는다.
+
+# Proposed Experiment
+
+1. 공식 README·FAQ·BBox CSV·Data_Entry 조회를 최대 15분·20 MiB로 제한한다. 공개 접근만 사용하고 실제 받은 문서의 URL·버전·hash·쪽수를 기록한다. 미러와 byte 차이가 있으면 구조화된 내용 차이도 확인한다. 인증 또는 대용량 다운로드가 필요하면 종료한다.
+2. 직접 근거가 없더라도 기존 13개 무결성 검사 통과, coordinate status=assumed, 새로운 모순 없음이면 탐색 probe를 허용한다. `lesion_probe_ready`는 false로 유지하고 별도 `exploratory_probe_allowed`와 가정·근거 digest를 기록한다. undocumented, 좌표 모순, 선택 자료의 annotation/patient 차이 또는 integrity 실패는 GPU 진입을 막는다. 직접 근거가 발견되면 원문 확인 후 엄격한 gate를 재평가한다.
+3. 기존 split·클래스·관측 mask를 고정한다. train 4장으로 추출과 학습 비용을 실측하고, 전체 160장 feature를 한 번만 추출한다. test 영상의 비지도 추출은 허용하되 test 성능은 설정 고정 후에만 계산한다.
+4. Z와 U(P(Z)) 각각에 linear 및 1-hidden-layer MLP를 학습한다. 주분석 loss는 두 경로 모두 `BCEWithLogits(P(head(feature)), coarse_target)`다. 관측 image–class 쌍마다 공간 평균을 계산한 뒤 쌍 평균을 취한다. unknown 클래스는 제외한다.
+5. train 위치 prior와 학습된 각 head의 같은 클래스 image-swap을 비교한다. fine 결과는 같은 head의 부차 분석으로만 보고하며 별도 fine-loss 실험은 이번 범위에서 제외한다.
+
+# Implementation Tasks for Claude
+
+1. 환경과 provenance를 기록한다. Python·torch·transformers 버전, 모델 revision, config, processor 설정, 사용 소스 경로를 보존한다. 지정 환경과 실제 실행기가 다르면 설치하거나 임의 환경에서 강행하지 말고 명확한 blocker로 보고한다.
+2. 공식 자료 조회 결과와 탐색 허용 정책을 구현한다. strict readiness를 덮어쓰지 않는다. 기존 iter_005/006 입력은 수정하지 않고 이번 산출물은 `results/iter_007/`에 저장한다.
+3. 전처리를 고정한다. L은 동일 값을 RGB 세 채널로 복제한다. RGBA는 alpha 및 채널 통계를 기록하고 검정 배경에 alpha composite한 RGB를 사용한다. 모두 opaque이면 RGB 유지와 동일함을 확인한다. 비불투명 alpha가 있으면 해당 영상 제외 민감도 결과도 보고한다. 공식 processor의 resize·정규화를 사용하고 임의 crop·flip·augmentation은 하지 않는다. 실제 공간 변환을 기록하며 예상 밖 crop/padding이 있으면 정렬을 해결하기 전 추출을 중단한다.
+4. 캐시된 실제 모델 코드에서 projector에 들어가는 vision feature 지점을 확인한다. 임의 hidden layer를 선택하지 않는다. 예상 shape 64×64×1152, 실제 pooling 결과 16×16, token 순서 및 pooling 호출과의 수치 일치를 확인한다. RMSNorm·projection은 비교에 섞지 않는다. backbone은 eval/no_grad로 고정한다.
+5. feature cache에 image/patient ID, 입력 hash, processor·모델 digest, shape·dtype를 연결한다. 두 조건은 같은 캐시에서 생성한다. 추출은 bf16을 허용하고 head 연산은 float32로 수행한다. feature별 표준화나 조건별 정규화는 추가하지 않는다.
+6. head는 linear 1152→4, MLP 1152→128→4와 GELU, dropout 없음으로 고정한다. AdamW, weight_decay=0, batch size=8, 200 updates, learning rate 후보 {1e-3, 3e-4}, seed {0,1,2}를 사용한다. paired 조건은 초기 가중치·batch 순서·update 수를 공유한다. 각 head 종류에서 두 조건과 3 seed의 validation coarse soft-IoU 평균으로 공통 learning rate 하나를 고른다. 동률이면 작은 learning rate를 선택하고, 마지막 update를 평가한다. 전체 24개 학습이며 test를 본 뒤 설정을 바꾸지 않는다.
+7. 실행 전 `nvidia-smi`로 가용 메모리가 많은 허용 GPU를 선택한다. train pilot으로 추출·24개 학습·평가 예상 시간을 계산하고 총 45 device-min 상한을 적용한다. 상한 초과 예상 또는 실제 도달 시 중단하고 partial로 보고하며, seed나 표본을 몰래 줄여 complete로 표시하지 않는다. 다른 사용자의 프로세스는 건드리지 않는다.
+8. 의미 있는 검증을 추가한다. 합성 공간 패턴의 token 정렬, 실제 P와 재구현 일치, affine head의 coarse logits·loss·gradient 동등성, unknown mask의 gradient 차단, ID 교체와 cache 변조 거부, 다른 patient donor 보장, seed 평균 후 paired bootstrap을 검사한다. linear는 작은 float64 fixture에서 엄격히 검증하고 실제 float32 비교 허용오차는 test 평가 전에 고정한다.
+9. 원시 seed별 prediction, validation 선택표, patient/class별 metric, 학습 loss, bootstrap index와 실행 시간을 보존한다. 필수 조건 및 산출물 hash가 모두 확인된 경우에만 평가 complete를 기록한다.
+
+# Evaluation (성공/실패 기준 포함)
+
+주지표는 coarse soft-IoU다. 각 seed에서 영상 내 관측 클래스 점수를 평균하고 patient 점수로 만든 다음, 같은 patient의 3 seed 점수를 평균한다. 이 48명 벡터에 공유 patient bootstrap 2,000회를 적용해 paired 95% CI를 계산한다. seed를 독립 patient처럼 취급하지 않는다. 클래스별 결과와 seed별 차이도 별도로 보고한다.
+
+후속 방법론 투자 기준은 모두 충족해야 한다:
+
+- MLP의 Z − U(P(Z)) 평균 차이 ≥ 0.03.
+- 해당 paired CI 하한 > 0.
+- Z가 train 위치 prior 및 Z-head의 같은 클래스 image-swap보다 각각 ≥ 0.03 우세.
+- 최소 2개 클래스에서 Z − U(P(Z))가 양수.
+- 무결성·공간 정렬·linear 대조군·완료 상태 검증 통과.
+
+위치 prior는 train의 클래스별 coarse target 평균이다. image-swap은 같은 test split·클래스에서 다른 patient의 prediction을 donor로 쓰며 고정된 mapping을 모든 조건에 공유한다. train의 평균 target과 frozen model 출력을 test 정답으로 보정하지 않는다.
+
+모든 기준을 통과하면 pooling 보존형 경량 adapter를 검토할 근거로 삼는다. assumed 상태의 통과는 조건부 탐색 신호이며 확증 결과로 승격하지 않는다. fine에서만 이득이면 subcell 위치 접근성 차이로 해석한다. 유효한 완료 실험에서 투자 기준 미달이면 이번 설정의 pooling 가설은 지지되지 않은 것으로 판정한다. gate·예산·학습 발산 문제로 미완료하면 가설 실패와 구분한다.
+
+# Risks / Checks
+
+- bbox occupancy는 segmentation GT가 아니고, 현재 클래스는 미세 결절 전반을 대표하지 않는다.
+- fractional soft-IoU에서 target 자기 일치 점수를 1 또는 최적 상한으로 해석하지 않는다.
+- 동일 파라미터 수라도 Z 경로의 연산량은 더 크다. head 파라미터 수와 실행 시간을 함께 보고한다.
+- coarse loss를 명시한 것은 기존 미정 규약을 실행 전에 확정한 것이다. 결과를 보고 loss나 성공 기준을 바꾸지 않는다.
+- 적은 test 양성, 사전학습 노출 미확인, 한 데이터셋 및 제한된 head 용량 때문에 일반적 정보 손실·진단 성능·novelty를 주장할 수 없다.
+- 공식본에서 선택 자료와 관련된 모순을 발견하면 탐색 허용으로 우회하지 않는다.
+
+## 대규모 GPU 필요 후보
+
+- 고해상도 vision tower와 pooling/projector 공동학습: 위치 정보를 유지하면서 언어 정렬을 보존하는 중간학습 후보이며 현재 pilot보다 큰 영상·텍스트 학습 예산이 필요하다.
+- Anatomy·phrase grounding·보고서 공동학습: 일반화 가능한 근거 연결 학습 후보이나 대규모 자료와 다중 목적 학습 비용 때문에 이번 반복에서는 실행하지 않는다.
+
+# 계획의 근거 (GPT 조사 노트)
+
+직전 리뷰·보고서, `research/notes/grounding_probe_spec_iter00{5,6}.md`, `grounding_data/class_targets.py`, `coord_evidence.py`를 확인했다. 저장 기록상 CPU 검사 184건이 통과했고 NIH 160명은 train/validation/test 80/32/48명으로 보존됐다. 관측 image–class 쌍은 167개이며 test 클래스별 양성은 12–13개다. 엄격한 `lesion_probe_ready=false`의 blocker는 bbox canvas의 직접 문서 근거 부재다.
+
+이번 웹 조회에서도 [NIH 공식 배포 페이지](https://nihcc.app.box.com/v/ChestXray-NIHCC) 본문 접근은 실패했다. [저자 공개 논문](https://lelu007.github.io/publication/CVPR2017_ChestX-Ray8.pdf)은 1024 영상과 저해상도 heatmap의 차이를 설명하지만, 배포 CSV 좌표계의 직접 정의를 확보한 것은 아니다. 조회한 저자 PDF는 v1이고 기존 저장 근거는 v5이므로 버전을 혼동하지 않는다. 공식 파일과 미러의 동일성은 미확인 상태를 유지한다.
+
+기존 명세는 loss 해상도가 미정이었다. 주분석에서 coarse BCE를 공통 적용하면 affine head의 pooling 교환법칙을 출력뿐 아니라 학습 대조에도 사용할 수 있다. MLP 차이는 제한된 비선형 readout에서의 접근성 차이로 해석한다. 현재 soft-IoU는 fractional target의 자기 일치 점수가 일반적으로 1이 아니므로 상한으로 쓰지 않는다.
+
+환경 확인에서 `which python`은 `/home/milab/anaconda3/bin/python`을 반환했다. 구현 단계는 실제 Python·torch·transformers 경로를 기록하고 지정 환경과 맞는지 먼저 확인해야 한다. 이번 단계에서는 파일 수정·생성·실험 실행을 하지 않았다.
+
+
+
+## iter_007 CLAUDE REPORT — 2026-09-24 06:05:25
+
+# Work Performed
+
+- **결론**: 계획한 24개 학습·평가를 모두 끝냈고 완료 판정(`eval_complete=true`)을 받았다. MLP의 Z − U(P(Z)) coarse soft-IoU 차이는 **+0.0003**, 95% CI [−0.0010, +0.0016]으로 투자 기준(≥0.03, CI 하한>0)에 미달했다. 이번 설정에서 pooling 가설은 **지지되지 않았다**. 좌표 canvas가 assumed 상태라는 조건이 붙은 결과다.
+- **공식 자료 조회 (1단계)**: 공식 NIH Box의 공개 shared link로 README·FAQ·LOG PDF, `BBox_List_2017.csv`, `Data_Entry_2017_v2020.csv`를 받았다. 인증은 필요 없었고 10.6 MB, 요청 5건이었다(20 MiB·15분 예산 이내).
+  - README·FAQ·LOG 어디에도 bbox 좌표계를 1024 PNG로 지정하는 직접 문장은 없다.
+  - BBox CSV는 공식본과 미러가 **byte 단위로 같다**.
+  - Data_Entry는 header의 열 이름 하나만 다르고(공식 `Patient Sex`, 미러 `Patient Gender`), header 아래 본문은 byte 단위로 같다.
+  - README는 연락처 줄과 `OpenI`/`Openi` 표기만 다르다.
+- **탐색 허용 gate (2단계)**
+  - 13개 필수 검사를 다시 실행해 모두 통과했다.
+  - 판정: canvas=assumed, 새 모순 없음 → `exploratory_probe_allowed=true`. 엄격한 `lesion_probe_ready=false`는 그대로 두었고 iter_005/006 파일은 수정하지 않았다(입력 hash가 실행 전후 같음).
+- **전처리·추출 (3~5단계)**
+  - L 영상은 같은 값을 RGB 세 채널로 복제했다. RGBA 1장(`00001369_000`)은 alpha가 모두 255라서 검정 배경 composite 결과가 RGB와 같다. 비불투명 영상이 0장이라 제외 민감도 분석은 하지 않았다.
+  - 공식 processor(`Gemma3ImageProcessorPil`: 896 bilinear resize, rescale, normalize)만 썼다.
+  - 모델 코드에서 feature 지점을 확인했다: Z = `vision_tower(...).last_hidden_state`(projector 입력), P = projector 안의 `AvgPool2d(4)` 출력. hook으로 둘 다 캡처했다.
+  - backbone은 eval·no_grad·bf16으로 고정했다. RMSNorm·projection은 비교에 넣지 않았다.
+- **head 학습·평가 (6단계)**: linear/MLP × Z/U(P(Z)) × lr{3e-4, 1e-3} × seed{0,1,2}로 24개를 학습했다. validation으로 lr을 고른 뒤(두 head 모두 1e-3), 선택 파일을 먼저 쓰고 그 다음에만 test 점수를 계산했다. 위치 prior·image-swap 대조군과 공유 patient bootstrap(2,000회)을 적용했다.
+- **검증 (8단계)**: 8개 테스트를 CPU에서 모두 통과했다(`all_pass=true`).
+  - 합성 패턴 token 정렬
+  - affine head의 coarse logits·loss·gradient 동등성(float64, 1e-10)과 MLP는 다르다는 확인
+  - unknown 쌍의 gradient 0
+  - ID·patient 교체, feature 변조, feature 행 순서 교체, shape 변경을 cache가 모두 거부
+  - donor가 같은 split·클래스의 다른 patient이고 전단사
+  - seed 평균 후 bootstrap(seed를 patient처럼 쌓으면 거부)
+  - batch 순서와 초기 가중치 공유
+  - metric 집계 일치
+
+# Files Changed
+
+모두 새로 만든 파일이다. 기존 파일은 수정하지 않았다. `git status`는 권한 승인이 필요해 실행하지 못했다.
+- `research/fetch_nih_official_iter007.py`: 공식 Box 공개 조회
+- `research/gate_pooling_probe_iter007.py`, `research/pooling_probe/gate.py`: 공식본↔미러 대조와 탐색 허용 정책
+- `research/pooling_probe/__init__.py`
+- `research/pooling_probe/features.py`: 전처리, 재구현 P, 모델·processor digest, cache 검증
+- `research/pooling_probe/probe.py`: head, coarse loss, 학습·예측
+- `research/pooling_probe/evaluate.py`: seed 평균, swap, paired bootstrap
+- `research/extract_pooling_features_iter007.py`: GPU 추출과 정렬 검사
+- `research/run_pooling_probe_iter007.py`: 24개 학습, LR 선택, test 평가, 판정
+- `research/test_pooling_probe_iter007.py`: 검증 테스트
+- `research/notes/pooling_probe_iter007.md`: 결과 요약
+
+# Commands / Experiments (실제 실행한 명령과 성공/실패)
+
+1. `python research/fetch_nih_official_iter007.py --page .../iter_006/coord_evidence/nih_box_official_page.html --out results/iter_007/official` → **성공** (파일 5개 모두 받음)
+2. `python research/gate_pooling_probe_iter007.py --src results/iter_005 --evidence results/iter_006/coord_evidence --official results/iter_007/official --out results/iter_007` → **성공** (두 번 실행: 1차 결과에서 Data_Entry 전 행이 달라 보여, 원인이 열 이름 변경뿐인지 확인하는 검사를 추가하고 다시 실행)
+3. `python research/extract_pooling_features_iter007.py --gpu 1 --split train --limit 4 --out results/iter_007/pilot` → **성공** (pilot: 영상당 0.39초, peak 9.1 GB)
+4. `python research/run_pooling_probe_iter007.py --gpu 1 --features results/iter_007/pilot --pilot --out results/iter_007/pilot_train` → **성공** (24개 학습 예상 0.58 device-min, 추정치)
+5. `python research/test_pooling_probe_iter007.py --out results/iter_007/tests_iter007.json --pilot results/iter_007/pilot` → **성공** (8/8 통과)
+6. `nvidia-smi` 확인(두 GPU 모두 거의 비어 있음) 후 `python research/extract_pooling_features_iter007.py --gpu 1 --out results/iter_007/features` → **성공** (160장, 57.5초, peak 9.1 GB)
+7. `python research/run_pooling_probe_iter007.py --gpu 1 --features results/iter_007/features --out results/iter_007/probe --extract-device-min 1.3` → **성공** (24개 완료, 34초)
+
+- 총 GPU 사용량은 약 1.9 device-min으로 45 상한보다 훨씬 작다. 작업량이 작아 GPU 1장으로 순차 실행했다. 병렬 실행은 모델 로딩 비용만 늘어서 하지 않았다. OOM은 없었다.
+- 모델 revision은 `91850547d9f0…`, 환경은 medgemma env (python 3.11.16, torch 2.14.0+cu130, transformers 5.17.0)다. torchvision이 설치되어 있지 않아 AutoProcessor가 PIL 백엔드로 로드됐다. 설정값은 `preprocessor_config.json`과 같다.
+
+# Results (수치와 결과 파일 경로)
+
+test 48명 기준이고, 각 수치는 3 seed를 patient 단위로 평균한 coarse soft-IoU(patient macro)다.
+
+| 방법 | coarse soft-IoU | 클래스별 [Atel, Eff, Cardio, Pneu] |
+|---|---|---|
+| MLP Z | **0.2574** | 0.076 / 0.153 / 0.526 / 0.293 |
+| MLP U(P(Z)) | **0.2571** | 0.075 / 0.153 / 0.525 / 0.292 |
+| linear Z = linear U(P(Z)) | 0.1990 | 0.069 / 0.116 / 0.398 / 0.221 |
+| train 위치 prior | 0.1751 | 0.038 / 0.070 / 0.472 / 0.123 |
+| MLP Z image-swap | 0.1583 | |
+
+**투자 기준 판정**
+- MLP Z − U(P(Z)) = **+0.0003**, CI [−0.0010, +0.0016] → 0.03 기준 **미달**, CI 하한>0 **미달**
+- seed별 차이: −0.0005, +0.0004, +0.0010
+- 클래스별 차이: +0.0005, −0.0003, +0.0006, +0.0012 → 양수 3개 클래스(기준 충족이지만 크기는 무의미)
+- Z − prior = +0.082, CI [0.057, 0.107] → 충족
+- Z − image-swap = +0.099, CI [0.070, 0.130] → 충족
+- 해석: head는 영상별 위치 정보를 실제로 읽지만, 그 정보는 pooling 후 feature에서도 똑같이 읽힌다.
+
+**linear 대조군**: 두 조건의 coarse prob 차이는 최대 3.6e-7, macro 차이는 2.3e-10이다. 학습 전에 고정한 허용오차(prob 5e-3, macro 1e-3) 안이라 통과했다.
+
+**fine 부차 분석** (fine 해상도 loss는 쓰지 않았다): MLP Z − U(P(Z)) = −0.019, CI [−0.028, −0.010]로 오히려 Z가 낮다. fine 해상도를 감독하지 않았으므로 subcell 위치 정보의 증거로 해석하지 않는다.
+
+**head 크기**: 파라미터는 linear 4,612개, MLP 148,100개다. 학습 시간은 run당 0.4–2.3초다.
+
+**결과 파일** (`research/results/iter_007/` 아래)
+- `gate_iter007.json`, `official/` (공식 원본, 쪽별 text, `fetch_summary.json`, download ledger)
+- `features/cache_meta.json`, `features/extract_checks.json` (Z_bf16.npy 1.5 GB 포함)
+- `tests_iter007.json`, `pilot/`, `pilot_train/pilot_cost.json`
+- `probe/probe_results.json`, `probe/validation_selection.json`, `probe/status.json` (산출물 28개의 sha256 포함)
+- `probe/predictions/*.npz` (24개), `probe/train_losses.json`, `probe/bootstrap_indices.npy`
+
+# Problems
+
+- 두 head 모두 validation이 lr 후보 중 큰 쪽(1e-3)을 골랐고, 200 update 끝에도 loss가 아직 내려가는 중이었다(MLP 약 0.10). 학습이 덜 된 상태일 수 있다. 다만 결과를 본 뒤 설정을 바꾸지 않는다는 계획에 따라 그대로 판정했다.
+- 좌표 canvas는 공식 문서로도 여전히 assumed다. 공식 원본 영상 파일은 받지 않았으므로 영상 pixel이 원배포와 같은지는 unverified로 남아 있다.
+- `git status`는 권한 승인이 필요해 실행하지 못했다. 변경 파일 목록은 직접 정리한 것이다.
+- 정리 과정에서 발견한 코드 문제 두 가지가 있다. 이번 결과 수치에는 영향이 없다.
+  - `run_pooling_probe_iter007.py`의 `complete` 판정은 테스트 통과·gate·24개 완료·산출물 개수만 본다. 정렬·pooling·linear 대조 검사는 기준 5(`integrity_alignment_linear_complete`)와 `all_criteria_pass`에만 반영된다. 이번에는 모든 검사가 통과해서 결과는 같다.
+  - `extract_pooling_features_iter007.py`는 입력 hash 불일치 시 파일 hash만 확인하고 pixel hash는 확인하지 않는다.
+
+# Recommendation to GPT
+
+- 결론: 16×16 coarse target, 동일 용량 pointwise head 조건에서는 pooling 전후 feature의 위치 readout이 사실상 같다(차이 0.0003). "projector pooling이 병변 위치 정보를 잃는다"는 방향에 경량 adapter를 투자할 근거는 없다. 이 approach는 이번 설정 기준 **가설 불지지**로 닫기를 권한다.
+- 남은 가능성은 16×16보다 세밀한 수준의 위치 정보뿐이다. 이를 보려면 fine(64×64) loss를 사전 등록한 별도 실험이 필요하다. 다만 현재 fine 결과는 오히려 Z가 낮고, bbox target 자체가 거칠어 기대 이득이 작다.
+- 대신 볼 만한 방향: vision feature 수준(Z와 P(Z) 모두)에서 위치 정보가 선형·MLP로 읽힌다(prior보다 +0.08, image-swap보다 +0.10). 그렇다면 grounding 한계는 pooling이 아니라 LLM/decoder가 위치를 출력하는 단계(언어화·좌표 출력)에 있을 가능성을 다음 후보로 검토할 수 있다. 이번 결과는 이를 증명하지 않는다.
+
+SELF_CHECK: PASS
+SUMMARY: 공식 NIH 자료 대조 후 탐색 gate를 통과해 MedGemma 1.5 Z 대 U(P(Z)) probe 24개를 완료했다. MLP coarse soft-IoU 차이는 +0.0003 (CI −0.0010~+0.0016)으로 투자 기준에 미달해, 이번 설정에서 pooling 가설은 지지되지 않았다.
+
+# [orchestrator] 권한 거부된 도구 호출
+- Bash: git -C /SSD1_1TB/home/milab/daniel/08_medgemma/research ls-files
+- Bash: grep -n "class Gemma3MultiModalProjector" -A 45 /home/test/.conda/envs/medgemma/lib/python3.11/site-packages/transformers/models/gemma3/modeling_gemma3.py
+- Bash: grep -n "def get_image_features" -A 30 /home/test/.conda/envs/medgemma/lib/python3.11/site-packages/transformers/models/gemma3/modeling_gemma3.py
+- Bash: git -C /SSD1_1TB/home/milab/daniel/08_medgemma/research status --short
+
+
+
+## iter_007 GPT REVIEW [CONTINUE] — 2026-09-24 06:08:16
+
+# Assessment
+
+계획한 실험은 실제로 실행됐다. 실행 로그에서 160장 feature 추출, 24개 학습, CPU 검사 8건의 통과를 확인했다. 원시 prediction으로 주지표와 paired bootstrap CI를 독립 재계산했고 보고서와 일치했다. 실험 재실행이나 파일 수정은 하지 않았다.
+
+이번 결과는 사전 정의한 coarse pooling 가설을 지지하지 않는다. 이 접근법은 abandon으로 종료하되, 결론은 현재 데이터·head·학습 규약에 한정한다. 연구 최종 목표인 새로운 방법론과 다중 데이터셋 contribution 증명에는 아직 도달하지 않았다.
+
+# Key Findings
+
+- MLP coarse soft-IoU는 Z **0.257395**, U(P(Z)) **0.257092**다. 차이 **+0.000304**, 95% CI **[−0.001012, +0.001611]**로, 최소 차이 0.03과 CI 하한 양수 조건을 모두 충족하지 못했다.
+- Z는 train 위치 prior보다 **+0.082343**, 같은 클래스 image-swap보다 **+0.099087** 높다. 두 조건 모두 영상별 위치 정보를 읽어내지만 pooling 전 feature의 추가 이득은 관찰되지 않았다.
+- linear 대조군의 coarse macro 차이는 **2.31e−10**이다. 동일 초기화·batch 순서·coarse loss, unknown mask 제외, validation 공통 LR 선택, patient별 seed 평균 후 bootstrap 구현은 계획에 부합한다.
+- train/validation/test는 **80/32/48명**, 전체 고유 patient는 **160명**이다. test 클래스별 관측 양성은 **13/13/12/12개**다. 확인한 코드에서 test label을 학습이나 LR 선택에 사용하는 경로는 발견하지 못했다.
+- 저장 산출물 **28개**, Z와 P_model cache, 공식 다운로드 **5개**의 hash를 확인했다. 현재 target 파일도 cache에 기록된 target hash와 일치한다. 추출 검사에는 공간 정렬·token 순서·pooling 일치가 모두 통과로 기록돼 있다.
+- strict readiness는 false, canvas는 assumed로 유지됐다. 탐색 실행은 이번 계획에서 명시적으로 허용한 범위다.
+
+# Problems / Concerns
+
+1. **완료 판정 결함:** `run_pooling_probe_iter007.py:281`의 complete는 정렬·pooling·linear 검사를 모두 요구하지 않는다. 실패한 실험도 eval_complete=true가 될 수 있다. 이번 저장 결과에서는 해당 검사가 모두 통과했으므로 현재 수치를 무효화할 사유는 아니지만, 재사용 전에 반드시 수정해야 한다.
+2. **provenance 검증 누락:** `pooling_probe/features.py:94`의 verify_cache는 ID·patient·Z shape·Z hash만 검사한다. 기록된 targets_sha256, split, 모델·processor digest와 현재 입력의 연결을 강제하지 않고, gate·검사 산출물도 해당 실행 입력과 연결하지 않는다. 동일 ID의 target이나 split이 변경돼도 통과할 수 있다. 이번 target hash는 리뷰에서 별도로 일치함을 확인했다.
+3. **GPU 가시성 덮어쓰기:** 추출·학습 스크립트가 CUDA_VISIBLE_DEVICES를 자체 설정한다. orchestrator가 제한한 GPU 집합과 논리 index를 존중하도록 바꿔야 한다. 이번 실행의 GPU 충돌 증거는 없지만 재사용 시 잘못된 장치를 선택할 수 있다.
+4. **예산 제한이 완전하지 않음:** 추출 코드에 실행 중 상한 검사가 없고, 학습 코드는 추출 비용을 수동 인자로 받으며 run 사이에서만 검사한다. 이번 실행은 기록상 약 1.87 device-min으로 충분히 짧았으나, 45 device-min 상한을 일반적으로 보장하는 구현은 아니다.
+5. **음성 결과의 범위:** 두 head 모두 LR 후보 상단을 선택했고 200 update 후에도 loss가 감소한다. 최적 readout 성능이나 일반적인 pooling 무손실을 입증하지 않는다. 실제 UPZ는 bf16 Z를 float32로 평균한 값이며, 실제 bf16 projector 출력과는 반올림 차이가 있다. 이는 계획한 head float32 비교와 양립하지만 실제 projector 출력 전체와의 동등성 주장은 피해야 한다.
+6. **confound와 평가 한계:** 양성 bbox만 평가하므로 병변 존재 판별이나 false positive 성능은 알 수 없다. image-swap 대비 이득은 영상 의존성을 보여주지만 해부학적 위치·크기·촬영 조건을 이용한 효과를 배제하지 않는다. 좌표 canvas 가정, 미러 영상 원본 동일성 미확인, 사전학습 노출 미확인도 남아 있다.
+7. `changes.patch`는 0바이트라 diff 자체는 검토 근거가 되지 못했다. 대신 신규 소스 파일과 실행 기록을 직접 읽었다.
+
+# Interpretation
+
+현재 coarse target과 제한된 비선형 readout에서는 pooling 이전 표현을 사용해도 의미 있는 추가 이득이 없었다. 따라서 이 결과를 근거로 pooling 보존형 adapter 개발에 진입하지 않는 판단은 타당하다.
+
+fine 차이 **−0.018708**, CI **[−0.027680, −0.010164]** 역시 fine supervision 없는 부차 분석이다. 이를 fine 정보의 부재나 pooling의 우월성으로 해석해서는 안 된다. 마찬가지로 feature probe가 prior를 이겼다는 사실만으로 LLM/decoder가 병목이라고 결론 내릴 수 없다. 이번 실험은 decoder를 직접 비교하지 않았다.
+
+# Recommended Next Experiment
+
+현재 접근법의 test 결과를 본 뒤 학습량이나 loss를 바꾸며 반복 최적화하지 말고, 남은 anatomy→lesion grounding 전이 후보의 최소 반증 실험을 설계한다. 윤곽선·정답 표시 없는 anatomy 입력 확보 가능성과 선행 방법 대비 차별성을 먼저 확인한다.
+
+직접 병변 학습과 anatomy 사전 적응 후 병변 학습을 동일 backbone·head·병변 label budget으로 비교하고, 학습량 차이를 분리할 대조군과 patient 독립 평가를 사전 고정한다. 현재 NIH split은 개발 자료로 취급하며 최종 확인에는 독립 자료가 필요하다. decoder 병목 후보를 선택한다면 실제 decoder grounding 결과와 probe를 공통 target·metric에서 비교하는 별도 실험부터 필요하다.
+
+재사용 전에는 위 완료 판정과 provenance 검증을 수정하고, 실패 입력에서 complete가 남지 않는 검사를 추가한다.
