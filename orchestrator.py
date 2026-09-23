@@ -34,6 +34,8 @@ import subprocess
 import sys
 import threading
 
+from notifier import Human
+
 PROJECT_DIR = Path(__file__).resolve().parent
 AGENT_DIR = PROJECT_DIR / "agent"
 PROMPT_DIR = AGENT_DIR / "prompts"
@@ -46,6 +48,8 @@ LOG_FILE = AGENT_DIR / "RESEARCH_LOG.md"
 TIERS_FILE = AGENT_DIR / "tiers.json"
 # runs/ 도입 전 수동 실행의 마지막 리뷰. 첫 반복 계획의 참고 자료로 쓴다.
 LEGACY_REVIEW_FILE = AGENT_DIR / "GPT_REVIEW.md"
+# Telegram 봇 설정 (TELEGRAM_BOT_TOKEN, TELEGRAM_CHAT_ID). git에 올리지 않는다.
+NOTIFY_ENV_FILE = AGENT_DIR / ".notify.env"
 
 CONDA_ENV = Path("/home/test/.conda/envs/medgemma")
 HF_HOME = PROJECT_DIR / "hf_cache"
@@ -87,12 +91,26 @@ def log(title, text):
         f.write(f"\n\n## {title} — {now()}\n\n{text}\n")
 
 
-def ask(prompt):
-    """사람 입력. stdin이 없으면(nohup 등) None."""
-    try:
-        return input(prompt).strip()
-    except EOFError:
-        return None
+HUMAN = None  # main()에서 만든다
+
+
+def ask(prompt, telegram_text=None):
+    """사람 입력. telegram_text가 있으면 Telegram 답장도 받는다. 받을 방법이 없으면 None."""
+    return HUMAN.ask(prompt, telegram_text)
+
+
+def notify(text):
+    if HUMAN is not None:
+        HUMAN.notify(text)
+
+
+def split_reply(reply):
+    """'f 추가 지시' → ('f', '추가 지시'). ENTER/ok는 ('', '')."""
+    cmd, _, rest = reply.strip().partition(" ")
+    cmd = cmd.lower()
+    if cmd in ("ok", "go", "ㅇㅋ", "계속"):
+        cmd = ""
+    return cmd, rest.strip()
 
 
 def agent_env(gpus):
@@ -424,41 +442,59 @@ def step_checkpoint(args, n):
     if args.auto:
         return True
 
+    plan = json.loads(read(d / "plan.json"))
     while True:
         tier = claude_tier(args, n)
         banner("사용자 확인")
         print(f"계획: {d / 'plan.md'}")
         print(f"Claude 등급: {tier} {tier_spec('claude', tier)}\n")
-        print("ENTER : 그대로 Claude에게 전달")
-        print("f     : 추가 지시 입력")
-        print(f"t     : Claude 등급 바꾸기 ({' / '.join(CLAUDE_TIERS)})")
-        print("a     : 이후 확인 없이 자동 진행")
-        print("q     : 종료 (다시 실행하면 여기서 이어짐)")
+        print("ENTER / ok   : 그대로 Claude에게 전달")
+        print("f [지시]     : 추가 지시 후 전달")
+        print(f"t [등급]     : Claude 등급 바꾸기 ({' / '.join(CLAUDE_TIERS)})")
+        print("a            : 이후 확인 없이 자동 진행")
+        print("q            : 종료 (다시 실행하면 여기서 이어짐)")
 
-        choice = ask("> ")
-        if choice is None:
+        telegram_text = (
+            f"📋 iter_{n:03d} 계획 완료 — 확인 필요\n\n"
+            f"Claude 등급: {tier} — {plan['tier_reason']}\n\n"
+            f"{plan['plan_markdown'][:1500]}\n\n"
+            "답장:\n"
+            "ok → 그대로 진행\n"
+            "f 지시내용 → 추가 지시 후 진행\n"
+            f"t {'|'.join(CLAUDE_TIERS)} → 등급 변경\n"
+            "a → 이후 자동 진행\n"
+            "q → 종료"
+        )
+        reply = ask("> ", telegram_text)
+        if reply is None:
             return False
-        choice = choice.lower()
-        if choice == "q":
+        cmd, rest = split_reply(reply)
+
+        if cmd == "q":
             return False
-        if choice == "t":
+        if cmd == "t":
             if args.claude_tier:
                 print("--claude-tier로 고정되어 있어 바꿀 수 없습니다.")
+                continue
+            picked = (rest or ask(f"등급 입력 ({' / '.join(CLAUDE_TIERS)}): ") or "").lower()
+            if picked in CLAUDE_TIERS:
+                save(d / "claude_tier_override.txt", picked)
             else:
-                picked = (ask(f"등급 입력 ({' / '.join(CLAUDE_TIERS)}): ") or "").lower()
-                if picked in CLAUDE_TIERS:
-                    save(d / "claude_tier_override.txt", picked)
-                else:
-                    print("알 수 없는 등급입니다.")
+                print("알 수 없는 등급입니다.")
             continue
-        if choice == "a":
+        if cmd == "a":
             args.auto = True
-        elif choice == "f":
-            feedback = ask("Claude에게 줄 추가 지시:\n> ") or ""
+            return True
+        if cmd == "f":
+            feedback = rest or ask("Claude에게 줄 추가 지시:\n> ") or ""
             if feedback:
                 save(d / "human_to_claude.md", feedback)
                 log(f"iter_{n:03d} USER FEEDBACK", feedback)
-        return True
+            return True
+        if cmd == "":
+            return True
+        print(f"알 수 없는 입력입니다: {reply}")
+        notify(f"알 수 없는 입력입니다: {reply}")
 
 
 def step_claude(args, goal, n):
@@ -577,19 +613,37 @@ def handle_needs_human(review, n):
     """NEEDS_HUMAN 처리. False면 종료."""
     banner("사람의 결정이 필요합니다")
     print(review["reason"])
-    print("\nENTER : GPT 제안(next_task)대로 계속")
-    print("f     : 다음 계획에 반영할 지시 입력 후 계속")
-    print("q     : 종료")
+    print("\nENTER / ok   : GPT 제안(next_task)대로 계속")
+    print("f [지시]     : 다음 계획에 반영할 지시 입력 후 계속")
+    print("q            : 종료")
 
-    choice = ask("> ")
-    if choice is None or choice.lower() == "q":
-        return False
-    if choice.lower() == "f":
-        note = ask("다음 계획에 반영할 지시:\n> ") or ""
-        if note:
-            save(iter_dir(n + 1) / "human_to_gpt.md", note)
-            log(f"iter_{n + 1:03d} HUMAN NOTE", note)
-    return True
+    telegram_text = (
+        f"🙋 iter_{n:03d} 결정이 필요합니다\n\n"
+        f"{review['reason']}\n\n"
+        f"이번 결과: {review['one_line_summary']}\n"
+        f"GPT 제안: {review['next_task']}\n\n"
+        "답장:\n"
+        "ok → GPT 제안대로 계속\n"
+        "f 지시내용 → 지시 반영해서 계속\n"
+        "q → 종료"
+    )
+    while True:
+        reply = ask("> ", telegram_text)
+        if reply is None:
+            return False
+        cmd, rest = split_reply(reply)
+        if cmd == "q":
+            return False
+        if cmd == "f":
+            note = rest or ask("다음 계획에 반영할 지시:\n> ") or ""
+            if note:
+                save(iter_dir(n + 1) / "human_to_gpt.md", note)
+                log(f"iter_{n + 1:03d} HUMAN NOTE", note)
+            return True
+        if cmd == "":
+            return True
+        print(f"알 수 없는 입력입니다: {reply}")
+        notify(f"알 수 없는 입력입니다: {reply}")
 
 
 # --------------------------------------------------
@@ -608,6 +662,7 @@ def parse_args():
     p.add_argument("--claude-tier", choices=CLAUDE_TIERS, help="Claude 등급 고정 (agent/tiers.json)")
     p.add_argument("--gpt-timeout", type=int, default=30 * 60, help="GPT 단계 제한 시간(초)")
     p.add_argument("--claude-timeout", type=int, default=3 * 60 * 60, help="Claude 단계 제한 시간(초)")
+    p.add_argument("--no-telegram", action="store_true", help="Telegram 알림/답장 끄기")
     return p.parse_args()
 
 
@@ -638,7 +693,11 @@ def load_goal(args):
 
 
 def main():
+    global HUMAN
     args = parse_args()
+    HUMAN = Human(None if args.no_telegram else NOTIFY_ENV_FILE)
+    if HUMAN.telegram:
+        print("Telegram 알림 사용 중 (끄려면 --no-telegram)")
 
     if args.commit:
         _, branch = git("rev-parse", "--abbrev-ref", "HEAD")
@@ -661,6 +720,9 @@ def main():
         if args.auto or (ask("계속할까요? [y/N] ") or "").lower() != "y":
             return
 
+    first_line = goal.splitlines()[0][:200] if goal else ""
+    notify(f"▶ 연구 루프 시작 (iter_{current_iteration():03d}부터, 최대 {args.max_iters}회)\n목표: {first_line}")
+
     for _ in range(args.max_iters):
         n = current_iteration()
         d = iter_dir(n)
@@ -680,10 +742,19 @@ def main():
 
         if review["verdict"] == "DONE":
             banner("연구 목표 완료 (DONE)")
+            notify(f"🎉 iter_{n:03d} 연구 목표 완료 (DONE)\n{review['one_line_summary']}")
             break
+        if review["verdict"] == "CONTINUE":
+            notify(
+                f"✅ iter_{n:03d} 완료 [CONTINUE]\n{review['one_line_summary']}\n"
+                f"다음: {review['next_task']}"
+            )
         if review["verdict"] == "NEEDS_HUMAN" and not handle_needs_human(review, n):
             print("종료합니다. 다시 실행하면 다음 반복부터 진행합니다.")
             return
+
+    else:
+        notify(f"⏸ 최대 반복 수({args.max_iters})에 도달해 멈췄습니다. 다시 실행하면 이어서 진행합니다.")
 
     banner("루프 종료")
     print(f"요약: {INDEX_FILE}")
@@ -695,6 +766,7 @@ if __name__ == "__main__":
         main()
     except AgentError as e:
         print(f"\n[ERROR] {e}")
+        notify(f"❌ 오류로 멈췄습니다\n{e}\n다시 실행하면 이어서 진행합니다.")
         print("다시 실행하면 완료되지 않은 단계부터 이어서 진행합니다.")
         sys.exit(1)
     except KeyboardInterrupt:
