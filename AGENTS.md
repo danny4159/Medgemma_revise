@@ -3,6 +3,8 @@
 이 파일은 Codex(GPT)와 Claude Code가 모두 읽는다 (Claude는 CLAUDE.md에서 import).
 역할별 규칙은 `agent/prompts/`에 있고 orchestrator.py가 프롬프트로 넘긴다.
 
+언어: 모든 서술은 한국어로 작성한다. 기술 용어, metric 이름, 코드, 파일 경로, 명령어는 영어 그대로 써도 된다.
+
 ## 환경
 - Python: conda env `medgemma` (python 3.11). orchestrator가 PATH를 이 env로 맞춰 두므로
   그냥 `python ...`으로 실행하면 된다. `conda activate`, `pip install`은 하지 않는다.
@@ -19,4 +21,4 @@
 - `docs/MEDGEMMA_평가_전체정리.txt` 지금까지의 연구 정리 (맨 앞 "중대 정정" 먼저 읽을 것)
 - `agent/GOAL.md` 현재 연구 목표
 - `agent/INDEX.md` 반복(iteration)별 한 줄 요약
-- `agent/runs/iter_NNN/` 반복별 plan.md, claude_report.md, review.md, review.json, changed_files.txt
+- `agent/runs/iter_NNN/` 반복별 plan.md, plan.json, claude_report.md, review.md, review.json, changed_files.txt

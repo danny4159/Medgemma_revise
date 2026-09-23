@@ -8,6 +8,11 @@
     DONE        → 종료
     NEEDS_HUMAN → 사람 입력을 받고 다음 반복 (또는 종료)
 
+단계별 모델/사고 수준은 agent/tiers.json의 등급으로 정한다.
+    GPT 계획  : 직전 리뷰의 next_plan_tier (deep / normal), 첫 반복은 deep
+    Claude    : 계획의 claude_tier (heavy / light)
+    GPT 리뷰  : Claude가 heavy면 deep, light면 normal
+
 산출물은 agent/runs/iter_NNN/ 에 저장된다. 중간에 끊겨도 다시 실행하면
 완료되지 않은 단계부터 이어서 진행한다.
 
@@ -16,6 +21,7 @@
     python orchestrator.py --auto --max-iters 3
     python orchestrator.py --reset --goal "새 연구 목표"
     python orchestrator.py --gpus 1            # Claude가 GPU 1만 보이게
+    python orchestrator.py --gpt-tier normal --claude-tier light   # 등급 강제
 """
 
 from pathlib import Path
@@ -37,6 +43,7 @@ ARCHIVE_DIR = AGENT_DIR / "archive"
 GOAL_FILE = AGENT_DIR / "GOAL.md"
 INDEX_FILE = AGENT_DIR / "INDEX.md"
 LOG_FILE = AGENT_DIR / "RESEARCH_LOG.md"
+TIERS_FILE = AGENT_DIR / "tiers.json"
 # runs/ 도입 전 수동 실행의 마지막 리뷰. 첫 반복 계획의 참고 자료로 쓴다.
 LEGACY_REVIEW_FILE = AGENT_DIR / "GPT_REVIEW.md"
 
@@ -147,11 +154,18 @@ def run_streaming(cmd, log_path, timeout, env, on_line):
 # 에이전트 호출
 # --------------------------------------------------
 
-def run_codex(args, prompt, out_file, log_path, schema=None):
+def tier_spec(agent, tier):
+    return json.loads(read(TIERS_FILE))[agent][tier]
+
+
+def run_codex(args, prompt, out_file, log_path, tier, schema=None):
+    spec = tier_spec("gpt", tier)
+    print(f"GPT 등급: {tier} ({spec['model']}, effort={spec['effort']})\n", flush=True)
     cmd = [
         "codex", "exec",
         "-s", "read-only",
-        "-c", f'model_reasoning_effort="{args.gpt_effort}"',
+        "-m", spec["model"],
+        "-c", f'model_reasoning_effort="{spec["effort"]}"',
         "-o", str(out_file),
     ]
     if schema:
@@ -179,19 +193,21 @@ def summarize_tool_input(name, tool_input):
     return json.dumps(tool_input, ensure_ascii=False)
 
 
-def run_claude(args, prompt, log_path):
+def run_claude(args, prompt, log_path, tier):
     """Claude를 stream-json으로 실행해 진행 상황을 보여주고 최종 result 이벤트를 반환한다."""
+    spec = tier_spec("claude", tier)
+    print(f"Claude 등급: {tier} ({spec['model']}, effort={spec['effort']})\n", flush=True)
     cmd = [
         "claude", "-p",
         "--permission-mode", "acceptEdits",
         "--output-format", "stream-json", "--verbose",
+        "--model", spec["model"],
+        "--effort", spec["effort"],
         "--append-system-prompt-file", str(PROMPT_DIR / "claude_engineer.md"),
         # 연구 에이전트 전용 권한. .claude/settings.json에 두면 대화형 세션까지 막힌다.
         "--settings", str(AGENT_DIR / "claude_settings.json"),
+        prompt,
     ]
-    if args.claude_model:
-        cmd += ["--model", args.claude_model]
-    cmd.append(prompt)
 
     result = {}
 
@@ -285,6 +301,37 @@ def load_review(n):
     return json.loads(read(path)) if path.exists() else None
 
 
+def tiers_used(n):
+    return json.loads(read(iter_dir(n) / "tiers_used.json", "{}"))
+
+
+def record_tier(n, step, tier):
+    used = tiers_used(n)
+    used[step] = tier
+    save(iter_dir(n) / "tiers_used.json", json.dumps(used, indent=2))
+
+
+def plan_tier(args, n):
+    if args.gpt_tier:
+        return args.gpt_tier
+    prev = load_review(n - 1) if n > 1 else None
+    return prev.get("next_plan_tier", "deep") if prev else "deep"
+
+
+def claude_tier(args, n):
+    if args.claude_tier:
+        return args.claude_tier
+    d = iter_dir(n)
+    override = read(d / "claude_tier_override.txt").strip()
+    return override or json.loads(read(d / "plan.json"))["claude_tier"]
+
+
+def review_tier(args, n):
+    if args.gpt_tier:
+        return args.gpt_tier
+    return "deep" if tiers_used(n).get("claude", "heavy") == "heavy" else "normal"
+
+
 def current_iteration():
     """완료되지 않은 반복이 있으면 그 번호, 없으면 다음 번호."""
     iters = existing_iterations()
@@ -301,7 +348,9 @@ def rebuild_index():
         if review is None:
             lines.append(f"- iter_{n:03d} [진행 중]")
             continue
-        line = f"- iter_{n:03d} [{review['verdict']}] {review['one_line_summary']}"
+        used = tiers_used(n)
+        tiers = "/".join(used.get(k, "?") for k in ("plan", "claude", "review"))
+        line = f"- iter_{n:03d} [{review['verdict']}] ({tiers}) {review['one_line_summary']}"
         if review.get("next_task"):
             line += f" → 다음: {review['next_task']}"
         lines.append(line)
@@ -346,9 +395,21 @@ iter_{n:03d}
 === 사람의 추가 지시 ===
 {read(d / "human_to_gpt.md", "없음")}
 """
-    plan = run_codex(args, prompt, d / "plan.md", d / "plan_codex.log")
-    log(f"iter_{n:03d} GPT PLAN", plan)
-    print("\n" + plan)
+    tier = plan_tier(args, n)
+    raw = run_codex(
+        args, prompt, d / "plan.json", d / "plan_codex.log", tier,
+        schema=PROMPT_DIR / "plan_schema.json",
+    )
+    try:
+        plan = json.loads(raw)
+    except json.JSONDecodeError as e:
+        raise AgentError(f"계획 JSON 파싱 실패: {e}. 파일: {d / 'plan.json'}")
+    record_tier(n, "plan", tier)
+    # plan.md가 있으면 계획 단계는 완료로 본다 (마지막에 저장)
+    save(d / "plan.md", plan["plan_markdown"])
+    log(f"iter_{n:03d} GPT PLAN [claude: {plan['claude_tier']}]", plan["plan_markdown"])
+    print("\n" + plan["plan_markdown"])
+    print(f"\nClaude 등급 제안: {plan['claude_tier']} — {plan['tier_reason']}")
 
 
 def step_checkpoint(args, n):
@@ -357,24 +418,37 @@ def step_checkpoint(args, n):
     if args.auto:
         return True
 
-    banner("사용자 확인")
-    print(f"계획: {d / 'plan.md'}\n")
-    print("ENTER : 그대로 Claude에게 전달")
-    print("f     : 추가 지시 입력")
-    print("a     : 이후 확인 없이 자동 진행")
-    print("q     : 종료 (다시 실행하면 여기서 이어짐)")
+    while True:
+        tier = claude_tier(args, n)
+        banner("사용자 확인")
+        print(f"계획: {d / 'plan.md'}")
+        print(f"Claude 등급: {tier} {tier_spec('claude', tier)}\n")
+        print("ENTER : 그대로 Claude에게 전달")
+        print("f     : 추가 지시 입력")
+        print("t     : Claude 등급 바꾸기 (heavy ↔ light)")
+        print("a     : 이후 확인 없이 자동 진행")
+        print("q     : 종료 (다시 실행하면 여기서 이어짐)")
 
-    choice = ask("> ")
-    if choice is None or choice.lower() == "q":
-        return False
-    if choice.lower() == "a":
-        args.auto = True
-    elif choice.lower() == "f":
-        feedback = ask("Claude에게 줄 추가 지시:\n> ") or ""
-        if feedback:
-            save(d / "human_to_claude.md", feedback)
-            log(f"iter_{n:03d} USER FEEDBACK", feedback)
-    return True
+        choice = ask("> ")
+        if choice is None:
+            return False
+        choice = choice.lower()
+        if choice == "q":
+            return False
+        if choice == "t":
+            if args.claude_tier:
+                print("--claude-tier로 고정되어 있어 바꿀 수 없습니다.")
+            else:
+                save(d / "claude_tier_override.txt", "light" if tier == "heavy" else "heavy")
+            continue
+        if choice == "a":
+            args.auto = True
+        elif choice == "f":
+            feedback = ask("Claude에게 줄 추가 지시:\n> ") or ""
+            if feedback:
+                save(d / "human_to_claude.md", feedback)
+                log(f"iter_{n:03d} USER FEEDBACK", feedback)
+        return True
 
 
 def step_claude(args, goal, n):
@@ -399,7 +473,9 @@ agent/runs/iter_{n:03d}/plan.md 를 먼저 읽고 그 계획을 구현/실행하
 === 사용자 추가 지시 ===
 {read(d / "human_to_claude.md", "없음")}
 """
-    result = run_claude(args, prompt, d / "claude_stream.jsonl")
+    tier = claude_tier(args, n)
+    record_tier(n, "claude", tier)
+    result = run_claude(args, prompt, d / "claude_stream.jsonl", tier)
 
     report = result.get("result", "").strip()
     denials = result.get("permission_denials") or []
@@ -451,10 +527,12 @@ iter_{n:03d}
 === 이번 반복에서 바뀐 파일 (A 추가 / M 수정 / D 삭제) ===
 {changed_text}
 """
+    tier = review_tier(args, n)
     raw = run_codex(
-        args, prompt, d / "review.raw.json", d / "review_codex.log",
+        args, prompt, d / "review.raw.json", d / "review_codex.log", tier,
         schema=PROMPT_DIR / "review_schema.json",
     )
+    record_tier(n, "review", tier)
     try:
         review = json.loads(raw)
     except json.JSONDecodeError as e:
@@ -470,6 +548,7 @@ iter_{n:03d}
     print(f"\nverdict  : {review['verdict']}")
     print(f"summary  : {review['one_line_summary']}")
     print(f"next_task: {review['next_task']}")
+    print(f"다음 계획 등급: {review['next_plan_tier']}")
     return review
 
 
@@ -515,8 +594,8 @@ def parse_args():
     p.add_argument("--reset", action="store_true", help="기존 runs/와 GOAL을 archive로 옮기고 새로 시작")
     p.add_argument("--gpus", help="Claude 실험에 보일 GPU (CUDA_VISIBLE_DEVICES), 예: 1 또는 0,1")
     p.add_argument("--commit", action="store_true", help="반복마다 git commit (main/master에서는 거부)")
-    p.add_argument("--gpt-effort", default="high", help="codex model_reasoning_effort")
-    p.add_argument("--claude-model", help="Claude 모델 (기본: Claude Code 설정값)")
+    p.add_argument("--gpt-tier", choices=["deep", "normal"], help="GPT 계획/리뷰 등급 고정 (agent/tiers.json)")
+    p.add_argument("--claude-tier", choices=["heavy", "light"], help="Claude 등급 고정 (agent/tiers.json)")
     p.add_argument("--gpt-timeout", type=int, default=30 * 60, help="GPT 단계 제한 시간(초)")
     p.add_argument("--claude-timeout", type=int, default=3 * 60 * 60, help="Claude 단계 제한 시간(초)")
     return p.parse_args()
