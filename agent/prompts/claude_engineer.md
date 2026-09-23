@@ -25,3 +25,12 @@
 # Results (수치와 결과 파일 경로)
 # Problems
 # Recommendation to GPT
+
+보고서 맨 끝에는 반드시 다음 두 줄을 그대로의 형식으로 붙인다 (orchestrator가 읽는다):
+
+SELF_CHECK: PASS
+SUMMARY: 이번 작업 결과 한 줄 요약
+
+- SELF_CHECK는 계획의 검증 기준을 실제 실행으로 모두 확인했고 문제가 없으면 PASS,
+  실행 못 한 것·실패한 검증·확신이 없는 결과가 하나라도 있으면 FAIL이다.
+- FAIL이면 GPT가 반드시 리뷰한다. 애매하면 FAIL로 적는다.

@@ -13,6 +13,10 @@
     Claude    : 계획의 claude_tier (creative / heavy / light)
     GPT 리뷰  : Claude 등급을 따라감 (creative→deep, heavy→normal, light→light)
 
+GPT 리뷰는 계획의 review_mode가 full일 때만 한다. skip이어도 Claude의 SELF_CHECK가
+PASS가 아니거나 권한 거부가 있으면 리뷰한다. 리뷰를 건너뛴 반복은 다음 계획 단계에서
+GPT가 Claude 보고서를 직접 읽고 확인한다.
+
 산출물은 agent/runs/iter_NNN/ 에 저장된다. 중간에 끊겨도 다시 실행하면
 완료되지 않은 단계부터 이어서 진행한다.
 
@@ -29,6 +33,7 @@ import argparse
 import datetime
 import json
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -356,6 +361,28 @@ def review_tier(args, n):
     return REVIEW_TIER_FOR_CLAUDE[tiers_used(n).get("claude", "heavy")]
 
 
+def parse_trailer(report, key):
+    """보고서 끝의 'KEY: 값' 줄을 읽는다. 여러 개면 마지막 것."""
+    matches = re.findall(rf"^\s*{key}:\s*(.+?)\s*$", report, re.MULTILINE)
+    return matches[-1] if matches else ""
+
+
+def review_decision(args, n):
+    """(GPT 리뷰 여부, 이유). 계획이 skip이어도 Claude 결과에 문제 신호가 있으면 리뷰한다."""
+    d = iter_dir(n)
+    if args.always_review:
+        return True, "--always-review 지정"
+    override = read(d / "review_mode_override.txt").strip()
+    mode = override or json.loads(read(d / "plan.json")).get("review_mode", "full")
+    if mode == "full":
+        return True, "사람이 full 지정" if override else "계획에서 full 지정"
+    if parse_trailer(read(d / "claude_report.md"), "SELF_CHECK").upper() != "PASS":
+        return True, "skip이었지만 Claude 자체 검증이 PASS가 아님"
+    if json.loads(read(d / "claude_meta.json", "{}")).get("permission_denials"):
+        return True, "skip이었지만 권한 거부된 명령이 있음"
+    return False, ("사람이 skip 지정" if override else "계획에서 skip 지정") + ", Claude 자체 검증 PASS"
+
+
 def current_iteration():
     """완료되지 않은 반복이 있으면 그 번호, 없으면 다음 번호."""
     iters = existing_iterations()
@@ -390,7 +417,14 @@ def step_plan(args, goal, n):
     banner(f"[iter_{n:03d} · 1/3] GPT가 연구 계획을 작성합니다.")
 
     prev = load_review(n - 1) if n > 1 else None
-    if prev:
+    if prev and prev.get("skipped"):
+        prev_text = (
+            f"직전 반복(iter_{n - 1:03d})은 GPT 리뷰를 생략했다 ({prev['reason']}).\n"
+            f"먼저 agent/runs/iter_{n - 1:03d}/claude_report.md 와 changed_files.txt 를 직접 읽고\n"
+            f"결과가 믿을 만한지 확인한 뒤 계획하라.\n"
+            f"Claude 요약: {prev['one_line_summary']}"
+        )
+    elif prev:
         prev_text = (
             f"파일: agent/runs/iter_{n - 1:03d}/review.md (필요하면 직접 열어 읽어라)\n"
             f"verdict: {prev['verdict']}\n"
@@ -413,7 +447,7 @@ iter_{n:03d}
 === 지금까지의 반복 요약 (agent/INDEX.md) ===
 {read(INDEX_FILE, "없음")}
 
-=== 직전 리뷰 ===
+=== 직전 결과 ===
 {prev_text}
 
 === 사람의 추가 지시 ===
@@ -434,6 +468,7 @@ iter_{n:03d}
     log(f"iter_{n:03d} GPT PLAN [claude: {plan['claude_tier']}]", plan["plan_markdown"])
     print("\n" + plan["plan_markdown"])
     print(f"\nClaude 등급 제안: {plan['claude_tier']} — {plan['tier_reason']}")
+    print(f"GPT 리뷰: {plan['review_mode']} — {plan['review_reason']}")
 
 
 def step_checkpoint(args, n):
@@ -445,23 +480,28 @@ def step_checkpoint(args, n):
     plan = json.loads(read(d / "plan.json"))
     while True:
         tier = claude_tier(args, n)
+        review_mode = read(d / "review_mode_override.txt").strip() or plan["review_mode"]
         banner("사용자 확인")
         print(f"계획: {d / 'plan.md'}")
-        print(f"Claude 등급: {tier} {tier_spec('claude', tier)}\n")
+        print(f"Claude 등급: {tier} {tier_spec('claude', tier)}")
+        print(f"GPT 리뷰  : {review_mode}\n")
         print("ENTER / ok   : 그대로 Claude에게 전달")
         print("f [지시]     : 추가 지시 후 전달")
         print(f"t [등급]     : Claude 등급 바꾸기 ({' / '.join(CLAUDE_TIERS)})")
+        print("r full|skip  : Claude 작업 후 GPT 리뷰 여부 바꾸기")
         print("a            : 이후 확인 없이 자동 진행")
         print("q            : 종료 (다시 실행하면 여기서 이어짐)")
 
         telegram_text = (
             f"📋 iter_{n:03d} 계획 완료 — 확인 필요\n\n"
-            f"Claude 등급: {tier} — {plan['tier_reason']}\n\n"
+            f"Claude 등급: {tier} — {plan['tier_reason']}\n"
+            f"GPT 리뷰: {review_mode} — {plan['review_reason']}\n\n"
             f"{plan['plan_markdown'][:1500]}\n\n"
             "답장:\n"
             "ok → 그대로 진행\n"
             "f 지시내용 → 추가 지시 후 진행\n"
             f"t {'|'.join(CLAUDE_TIERS)} → 등급 변경\n"
+            "r full|skip → GPT 리뷰 여부 변경\n"
             "a → 이후 자동 진행\n"
             "q → 종료"
         )
@@ -481,6 +521,13 @@ def step_checkpoint(args, n):
                 save(d / "claude_tier_override.txt", picked)
             else:
                 print("알 수 없는 등급입니다.")
+            continue
+        if cmd == "r":
+            picked = (rest or ask("리뷰 여부 입력 (full / skip): ") or "").lower()
+            if picked in ("full", "skip"):
+                save(d / "review_mode_override.txt", picked)
+            else:
+                print("full 또는 skip만 가능합니다.")
             continue
         if cmd == "a":
             args.auto = True
@@ -538,7 +585,7 @@ agent/runs/iter_{n:03d}/plan.md 를 먼저 읽고 그 계획을 구현/실행하
     save(d / "claude_meta.json", json.dumps({
         key: result.get(key)
         for key in ("session_id", "is_error", "num_turns", "duration_ms", "total_cost_usd")
-    }, indent=2))
+    } | {"permission_denials": len(denials)}, indent=2))
     save(d / "claude_report.md", report)
     log(f"iter_{n:03d} CLAUDE REPORT", report)
     print("\n" + report)
@@ -595,6 +642,33 @@ iter_{n:03d}
     print(f"summary  : {review['one_line_summary']}")
     print(f"next_task: {review['next_task']}")
     print(f"다음 계획 등급: {review['next_plan_tier']}")
+    return review
+
+
+def step_skip_review(n, reason):
+    """GPT 리뷰 없이 반복을 마친다. 확인은 다음 계획 단계의 GPT가 맡는다."""
+    d = iter_dir(n)
+    banner(f"[iter_{n:03d} · 3/3] GPT 리뷰 생략 — {reason}")
+
+    summary = parse_trailer(read(d / "claude_report.md"), "SUMMARY") or "Claude 작업 완료 (요약 없음)"
+    review = {
+        "verdict": "CONTINUE",
+        "one_line_summary": summary,
+        "next_task": "",
+        "next_plan_tier": tiers_used(n).get("plan", "normal"),
+        "reason": reason,
+        "review_markdown": (
+            f"# GPT 리뷰 생략\n\n{reason}.\n"
+            "다음 반복의 계획 단계에서 GPT가 Claude 보고서를 직접 확인한다.\n"
+        ),
+        "skipped": True,
+    }
+    record_tier(n, "review", "skip")
+    save(d / "review.md", review["review_markdown"])
+    save(d / "review.json", json.dumps(review, ensure_ascii=False, indent=2))
+    log(f"iter_{n:03d} GPT REVIEW SKIPPED", reason)
+    rebuild_index()
+    print(f"summary: {summary}")
     return review
 
 
@@ -662,6 +736,7 @@ def parse_args():
     p.add_argument("--claude-tier", choices=CLAUDE_TIERS, help="Claude 등급 고정 (agent/tiers.json)")
     p.add_argument("--gpt-timeout", type=int, default=30 * 60, help="GPT 단계 제한 시간(초)")
     p.add_argument("--claude-timeout", type=int, default=3 * 60 * 60, help="Claude 단계 제한 시간(초)")
+    p.add_argument("--always-review", action="store_true", help="계획과 상관없이 매 반복 GPT 리뷰")
     p.add_argument("--no-telegram", action="store_true", help="Telegram 알림/답장 끄기")
     return p.parse_args()
 
@@ -735,7 +810,12 @@ def main():
                 print("종료합니다.")
                 return
             step_claude(args, goal, n)
-        review = step_review(args, goal, n)
+        needs_review, reason = review_decision(args, n)
+        if needs_review:
+            print(f"\nGPT 리뷰 진행: {reason}")
+            review = step_review(args, goal, n)
+        else:
+            review = step_skip_review(n, reason)
 
         if args.commit:
             step_commit(n, review)
@@ -745,10 +825,13 @@ def main():
             notify(f"🎉 iter_{n:03d} 연구 목표 완료 (DONE)\n{review['one_line_summary']}")
             break
         if review["verdict"] == "CONTINUE":
-            notify(
-                f"✅ iter_{n:03d} 완료 [CONTINUE]\n{review['one_line_summary']}\n"
-                f"다음: {review['next_task']}"
-            )
+            if review.get("skipped"):
+                notify(f"✅ iter_{n:03d} 완료 (GPT 리뷰 생략)\n{review['one_line_summary']}")
+            else:
+                notify(
+                    f"✅ iter_{n:03d} 완료 [CONTINUE]\n{review['one_line_summary']}\n"
+                    f"다음: {review['next_task']}"
+                )
         if review["verdict"] == "NEEDS_HUMAN" and not handle_needs_human(review, n):
             print("종료합니다. 다시 실행하면 다음 반복부터 진행합니다.")
             return
