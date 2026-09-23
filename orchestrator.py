@@ -51,6 +51,8 @@ orchestrator.py를 고친 뒤 다시 실행해도 완료되지 않은 단계부�
     - 반복 완료 표시는 done.json. 리뷰 뒤 처리(논문·커밋·마일스톤)도 각각 한 번만 한다.
     - Claude가 작업 중에 끊기면 같은 세션을 --resume으로 이어서 마무리한다.
     - 에이전트 호출이 실패하면(네트워크 등) 1분·5분·15분 뒤 다시 시도한다.
+    - GPT·Claude 사용 한도에 걸리면 한도가 풀릴 때까지 --limit-poll-minutes마다 다시 시도하며
+      최대 --limit-max-hours 기다렸다가 자동으로 이어간다 (Telegram으로 대기·재개 알림).
     - 예전 반복 파일에 없는 필드는 기본값으로 채워 읽는다.
 연구 목표 변경: --goal "새 목표"는 기록을 지우지 않고 새 챕터를 연다. 반복 번호는 이어지고,
 새 목표의 첫 계획(deep)은 이전 기록에서 가져올 것을 정리한 뒤 새 목표 기준으로 다시 사고한다.
@@ -144,12 +146,33 @@ class RetryableError(AgentError):
         self.output = output
 
 
+class UsageLimitError(RetryableError):
+    """구독 사용 한도 초과. 한도가 풀릴 때까지 기다렸다 다시 시도한다."""
+
+
+# 한도 초과 에러 문구 (실제 문구를 보면 여기에 맞춰 다듬는다)
+USAGE_LIMIT_PATTERN = re.compile(
+    r"usage limit|rate.?limit|limit reached|hit your (usage )?limit|quota|too many requests"
+    r"|\b429\b|resets? (at|in)|try again (at|in)|5-hour|weekly limit|overloaded",
+    re.IGNORECASE,
+)
+# 사용 한도 대기 설정 (--limit-poll-minutes, --limit-max-hours로 덮어씀)
+LIMIT = {"poll": 30 * 60, "max": 8 * 60 * 60}
+
+
+def failure_error(message, output):
+    """실패 출력이 사용 한도 초과처럼 보이면 UsageLimitError, 아니면 RetryableError."""
+    if USAGE_LIMIT_PATTERN.search(output or ""):
+        return UsageLimitError(f"사용 한도 초과로 보임: {message}", output)
+    return RetryableError(message, output)
+
+
 class StopRequested(Exception):
     pass
 
 
 # 지금 무엇을 하고 있는지 (Telegram status, 중단 기록용)
-STATE = {"n": None, "stage": "시작 전", "since": None, "proc": None, "stop_now": False}
+STATE = {"n": None, "stage": "시작 전", "since": None, "proc": None, "stop_now": False, "limit_wait": None}
 
 
 def set_stage(n, stage):
@@ -170,19 +193,54 @@ def sleep_with_stop(seconds):
 
 
 def with_retries(what, fn):
-    """fn()이 RetryableError로 실패하면 RETRY_DELAYS 간격으로 다시 시도한다."""
+    """fn()을 실행한다.
+
+    - 사용 한도 초과(UsageLimitError): 한도가 풀릴 때까지 LIMIT["poll"]마다 다시 시도, 최대 LIMIT["max"].
+    - 그 밖의 일시적 실패(RetryableError): RETRY_DELAYS 간격으로 다시 시도.
+    """
     last = None
-    for attempt, delay in enumerate((0, *RETRY_DELAYS)):
-        if delay:
+    attempt = 0
+    waited = 0
+    limited = False
+    while True:
+        try:
+            result = fn()
+        except UsageLimitError as e:
+            last = e
+            if waited >= LIMIT["max"]:
+                raise AgentError(f"{what}: 사용 한도가 {waited // 3600}시간 동안 풀리지 않음. 마지막 오류: {e}")
+            if not limited:
+                limited = True
+                hours = LIMIT["max"] / 3600
+                print(f"\n[한도] {what}: 사용 한도 도달 → {LIMIT['poll'] // 60}분마다 확인하며 최대 {hours:g}시간 대기")
+                notify(f"⏳ {what}: 사용 한도에 걸렸습니다. {LIMIT['poll'] // 60}분마다 확인하며 "
+                       f"한도가 풀리면 자동으로 이어갑니다 (최대 {hours:g}시간).\n{str(e.output or e)[-300:]}")
+                if STATE["n"] is not None:
+                    record_event(STATE["n"], "limit_wait", what=what)
+                STATE["limit_wait"] = (what, datetime.datetime.now())
+            sleep_with_stop(LIMIT["poll"])
+            waited += LIMIT["poll"]
+            continue
+        except RetryableError as e:
+            last = e
+            if attempt >= len(RETRY_DELAYS):
+                raise AgentError(f"{what}: {len(RETRY_DELAYS)}번 다시 시도했지만 실패. 마지막 오류: {last}")
+            delay = RETRY_DELAYS[attempt]
+            attempt += 1
             minutes = delay // 60
             print(f"\n[재시도] {what} 실패 → {minutes}분 뒤 다시 시도 ({attempt}/{len(RETRY_DELAYS)})")
             notify(f"🔁 {what} 실패, {minutes}분 뒤 다시 시도 ({attempt}/{len(RETRY_DELAYS)})\n{str(last)[:300]}")
             sleep_with_stop(delay)
-        try:
-            return fn()
-        except RetryableError as e:
-            last = e
-    raise AgentError(f"{what}: {len(RETRY_DELAYS)}번 다시 시도했지만 실패. 마지막 오류: {last}")
+            continue
+
+        if limited:
+            minutes = waited // 60
+            print(f"\n[한도] 사용 한도가 풀려 {what}을(를) 이어갑니다 ({minutes}분 대기)")
+            notify(f"▶ 사용 한도가 풀려 {what}을(를) 이어갑니다 ({minutes}분 대기)")
+            if STATE["n"] is not None:
+                record_event(STATE["n"], "limit_resume", what=what, minutes=minutes)
+        STATE["limit_wait"] = None
+        return result
 
 
 # --------------------------------------------------
@@ -301,7 +359,7 @@ def run_streaming(cmd, log_path, timeout, env, on_line, cwd=PROJECT_DIR):
     if timed_out.is_set():
         raise AgentError(f"{cmd[0]} 시간 초과 ({timeout}s). 로그: {log_path}")
     if proc.returncode != 0:
-        raise RetryableError(f"{cmd[0]} 종료 코드 {proc.returncode}. 로그: {log_path}", "".join(tail))
+        raise failure_error(f"{cmd[0]} 종료 코드 {proc.returncode}. 로그: {log_path}", "".join(tail))
 
 
 # --------------------------------------------------
@@ -407,6 +465,10 @@ def run_claude(args, prompt, log_path, tier, session_file=None, resume_id=None):
 
     if not result:
         raise RetryableError(f"Claude result 이벤트 없음. 로그: {log_path}")
+    if result.get("is_error"):
+        # 오류로 끝난 결과를 보고서로 저장하면 다음 실행에서 Claude 단계를 건너뛴다. 재시도한다.
+        text = str(result.get("result", ""))
+        raise failure_error(f"Claude가 오류로 종료: {text[:300]}", text)
     return result
 
 
@@ -860,6 +922,10 @@ def iteration_block(n):
                 lines.append(f"- ↻ 재실행: '{ev['resumed_from']}' 단계부터 이어서 (orchestrator {ev.get('version')})")
             else:
                 lines.append(f"- ▶ 실행 시작 (orchestrator {ev.get('version')})")
+        elif stage == "limit_wait":
+            lines.append(f"- ⏳ 사용 한도 도달 ({ev.get('what')}) → 대기")
+        elif stage == "limit_resume":
+            lines.append(f"- ▶ 사용 한도가 풀려 재개 ({ev.get('what')}, {ev.get('minutes')}분 대기)")
         elif stage == "claude_resume":
             lines.append("- ↻ 끊겼던 Claude 세션을 이어서 진행")
         elif stage == "stopped":
@@ -1311,8 +1377,6 @@ def step_claude(args, goal, n):
                  changed_files=len(changed.splitlines()), permission_denials=len(denials))
     rebuild_index()
 
-    if result.get("is_error"):
-        raise AgentError(f"Claude가 오류로 종료됨. 로그: {d / 'claude_stream.jsonl'}")
 
 
 def step_review(args, goal, n):
@@ -1605,6 +1669,8 @@ def parse_args():
     p.add_argument("--gpt-timeout", type=int, default=30 * 60, help="GPT 단계 제한 시간(초)")
     p.add_argument("--claude-timeout", type=int, default=3 * 60 * 60, help="Claude 단계 제한 시간(초)")
     p.add_argument("--always-review", action="store_true", help="계획과 상관없이 매 반복 GPT 리뷰")
+    p.add_argument("--limit-poll-minutes", type=int, default=30, help="사용 한도 대기 중 다시 시도하는 간격(분)")
+    p.add_argument("--limit-max-hours", type=float, default=8, help="사용 한도가 풀리길 최대 몇 시간 기다릴지")
     p.add_argument("--no-telegram", action="store_true", help="Telegram 알림/답장 끄기")
     args = p.parse_args()
     if args.auto:
@@ -1679,7 +1745,12 @@ def status_text():
     if STATE["n"] is None:
         return "시작 준비 중입니다."
     minutes = int((datetime.datetime.now() - STATE["since"]).total_seconds() // 60)
-    return f"iter_{STATE['n']:03d} · {STATE['stage']} 진행 중 ({minutes}분째)"
+    text = f"iter_{STATE['n']:03d} · {STATE['stage']} 진행 중 ({minutes}분째)"
+    if STATE["limit_wait"]:
+        what, since = STATE["limit_wait"]
+        waited = int((datetime.datetime.now() - since).total_seconds() // 60)
+        text += f"\n⏳ {what}: 사용 한도가 풀리길 기다리는 중 ({waited}분째)"
+    return text
 
 
 def request_stop():
@@ -1713,6 +1784,7 @@ def main():
     global HUMAN, MAX_ATTEMPTS
     args = parse_args()
     MAX_ATTEMPTS = args.max_attempts
+    LIMIT.update(poll=args.limit_poll_minutes * 60, max=int(args.limit_max_hours * 3600))
     HUMAN = Human(None if args.no_telegram else NOTIFY_ENV_FILE)
     HUMAN.add_command(["status", "상태"], status_text)
     HUMAN.add_command(["stop", "정지"], request_stop)
