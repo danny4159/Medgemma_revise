@@ -27,6 +27,12 @@ GPT가 Claude 보고서를 직접 읽고 확인한다.
 success / improve / abandon으로 판정한다. 같은 approach는 --max-attempts번까지만 시도하고
 (마지막 시도는 GPT 리뷰 강제), 넘으면 다음 대안으로 넘어가거나 사람에게 묻는다.
 
+코드 버전 관리: Claude는 별도 git worktree(<프로젝트>_research)에서 작업한다.
+접근법마다 research/<approach_id> 브랜치를 쓰고, 직전 접근법이 success면 그 위에서,
+아니면 그 접근법이 시작한 지점으로 돌아가 새 브랜치를 만든다. 커밋은 GPT 리뷰가
+commit_worthy로 판단한 경우에만 한다. 버리는 접근법의 미커밋 작업은 git stash로 보관한다.
+main 폴더(오케스트레이터, agent/ 기록, 데이터, 결과)는 브랜치와 상관없이 그대로다.
+
 논문 추천: GPT 리뷰는 실제 결과로 가능성이 분명해진 방향에 한해 드물게 논문 1편을 추천한다.
 링크가 열리고 중복이 아니면 agent/PAPERS.md에 쌓고 Telegram으로 알린다.
 
@@ -71,6 +77,14 @@ TIERS_FILE = AGENT_DIR / "tiers.json"
 LEGACY_REVIEW_FILE = AGENT_DIR / "GPT_REVIEW.md"
 # Telegram 봇 설정 (TELEGRAM_BOT_TOKEN, TELEGRAM_CHAT_ID). git에 올리지 않는다.
 NOTIFY_ENV_FILE = AGENT_DIR / ".notify.env"
+
+# Claude가 코드를 고치는 git worktree. 브랜치를 바꿔도 main 폴더(기록·데이터)는 그대로다.
+RESEARCH_DIR = PROJECT_DIR.parent / f"{PROJECT_DIR.name}_research"
+BASE_BRANCH = "research/base"
+# worktree에서 main 폴더를 가리키는 링크 (데이터·결과는 브랜치와 무관하게 공유)
+SHARED_LINKS = ("eval_samples", "hf_cache", "eval_results")
+# 커밋에서 제외할 파일 크기
+MAX_COMMIT_FILE_BYTES = 5 * 1024 * 1024
 
 CONDA_ENV = Path("/home/test/.conda/envs/medgemma")
 HF_HOME = PROJECT_DIR / "hf_cache"
@@ -148,14 +162,14 @@ def agent_env(gpus):
     return env
 
 
-def run_streaming(cmd, log_path, timeout, env, on_line):
+def run_streaming(cmd, log_path, timeout, env, on_line, cwd=PROJECT_DIR):
     """명령을 실행하며 출력을 on_line으로 넘기고 log_path에 그대로 저장한다."""
     timed_out = threading.Event()
 
     with log_path.open("w", encoding="utf-8") as log_f:
         proc = subprocess.Popen(
             cmd,
-            cwd=PROJECT_DIR,
+            cwd=cwd,
             env=env,
             text=True,
             stdin=subprocess.DEVNULL,
@@ -255,6 +269,8 @@ def run_claude(args, prompt, log_path, tier):
         "--append-system-prompt-file", str(PROMPT_DIR / "claude_engineer.md"),
         # 연구 에이전트 전용 권한. .claude/settings.json에 두면 대화형 세션까지 막힌다.
         "--settings", str(AGENT_DIR / "claude_settings.json"),
+        # 작업 디렉터리는 worktree. main 폴더는 결과 저장(eval_results)과 계획 읽기용
+        "--add-dir", str(PROJECT_DIR),
         prompt,
     ]
 
@@ -278,7 +294,7 @@ def run_claude(args, prompt, log_path, tier):
         elif event.get("type") == "result":
             result.update(event)
 
-    run_streaming(cmd, log_path, args.claude_timeout, agent_env(args.gpus), on_line)
+    run_streaming(cmd, log_path, args.claude_timeout, agent_env(args.gpus), on_line, cwd=RESEARCH_DIR)
 
     if not result:
         raise AgentError(f"Claude result 이벤트 없음. 로그: {log_path}")
@@ -290,21 +306,23 @@ def run_claude(args, prompt, log_path, tier):
 # --------------------------------------------------
 
 def snapshot():
+    """Claude가 건드릴 수 있는 곳의 파일 상태: worktree(코드) + main의 eval_results(결과)."""
     files = {}
-    for root, dirs, names in os.walk(PROJECT_DIR):
-        rel_root = Path(root).relative_to(PROJECT_DIR)
-        dirs[:] = [
-            d for d in dirs
-            if d not in SNAPSHOT_SKIP_DIRS
-            and (rel_root / d).as_posix() not in SNAPSHOT_SKIP_PATHS
-        ]
-        for name in names:
-            path = Path(root) / name
-            try:
-                st = path.stat()
-            except OSError:
-                continue
-            files[(rel_root / name).as_posix()] = [st.st_mtime_ns, st.st_size]
+    for base, label in ((RESEARCH_DIR, ""), (PROJECT_DIR / "eval_results", "eval_results")):
+        for root, dirs, names in os.walk(base):
+            rel_root = Path(label) / Path(root).relative_to(base)
+            dirs[:] = [
+                d for d in dirs
+                if d not in SNAPSHOT_SKIP_DIRS
+                and (rel_root / d).as_posix() not in SNAPSHOT_SKIP_PATHS
+            ]
+            for name in names:
+                path = Path(root) / name
+                try:
+                    st = path.stat()
+                except OSError:
+                    continue
+                files[(rel_root / name).as_posix()] = [st.st_mtime_ns, st.st_size]
     return files
 
 
@@ -320,11 +338,57 @@ def diff_snapshots(before, after):
     return "\n".join(lines)
 
 
-def git(*git_args):
-    result = subprocess.run(
-        ["git", *git_args], cwd=PROJECT_DIR, text=True, capture_output=True
-    )
-    return result.returncode, result.stdout
+def git(*git_args, cwd=None):
+    """(종료 코드, 출력). 실패하면 출력 대신 에러 메시지."""
+    result = subprocess.run(["git", *git_args], cwd=cwd or PROJECT_DIR, text=True, capture_output=True)
+    return result.returncode, result.stdout if result.returncode == 0 else result.stderr.strip()
+
+
+def wgit(*git_args):
+    """연구 worktree에서 git 실행."""
+    return git(*git_args, cwd=RESEARCH_DIR)
+
+
+def current_branch():
+    return wgit("rev-parse", "--abbrev-ref", "HEAD")[1].strip()
+
+
+def ensure_worktree():
+    """연구 코드용 worktree(research/base)를 준비한다. 이미 있으면 그대로 둔다.
+
+    main은 scripts/, docs/를 추적하지 않으므로, research/base에서만 추적하도록 바꾸고
+    현재 main 폴더의 scripts/, docs/를 기준 커밋으로 남긴다.
+    """
+    if (RESEARCH_DIR / ".git").exists():
+        return
+    exists = git("show-ref", "--verify", "--quiet", f"refs/heads/{BASE_BRANCH}")[0] == 0
+    add = ["worktree", "add", str(RESEARCH_DIR), BASE_BRANCH] if exists else \
+          ["worktree", "add", "-b", BASE_BRANCH, str(RESEARCH_DIR), "HEAD"]
+    code, out = git(*add)
+    if code:
+        raise AgentError(f"worktree 생성 실패: {out}")
+    print(f"연구 worktree 생성: {RESEARCH_DIR} ({BASE_BRANCH})")
+
+    gitignore = RESEARCH_DIR / ".gitignore"
+    lines = [line for line in read(gitignore).splitlines() if line.strip() not in ("scripts/", "docs/")]
+    lines += ["", "# main 폴더의 데이터·결과를 가리키는 링크 (브랜치와 무관하게 공유)"]
+    lines += [f"/{name}" for name in SHARED_LINKS]
+    save(gitignore, "\n".join(lines) + "\n")
+
+    for name in ("scripts", "docs"):
+        if (PROJECT_DIR / name).exists() and not (RESEARCH_DIR / name).exists():
+            shutil.copytree(PROJECT_DIR / name, RESEARCH_DIR / name,
+                            ignore=shutil.ignore_patterns("__pycache__", "*.pyc"))
+    for name in SHARED_LINKS:
+        link = RESEARCH_DIR / name
+        if not link.exists() and not link.is_symlink():
+            link.symlink_to(PROJECT_DIR / name)
+
+    wgit("add", "-A")
+    if wgit("diff", "--cached", "--quiet")[0] != 0:
+        code, out = wgit("commit", "-m", "Research baseline: track existing scripts and docs")
+        if code:
+            raise AgentError(f"기준 커밋 실패: {out}")
 
 
 # --------------------------------------------------
@@ -392,10 +456,9 @@ def review_decision(args, n):
     d = iter_dir(n)
     if args.always_review:
         return True, "--always-review 지정"
-    approach = (load_plan(n) or {}).get("approach")
-    entry = approach_ledger(upto=n).get(approach) if approach else None
+    entry = approach_ledger(upto=n).get(approach_key(load_plan(n)))
     if entry and entry["attempts"] >= MAX_ATTEMPTS:
-        return True, f"'{approach}' {entry['attempts']}번째 시도라 계속/포기 판단 필요"
+        return True, f"'{entry['name']}' {entry['attempts']}번째 시도라 계속/포기 판단 필요"
     override = read(d / "review_mode_override.txt").strip()
     mode = override or json.loads(read(d / "plan.json")).get("review_mode", "full")
     if mode == "full":
@@ -412,19 +475,44 @@ def load_plan(n):
     return json.loads(read(path)) if path.exists() else None
 
 
+def load_json(path):
+    return json.loads(read(path)) if path.exists() else None
+
+
+def approach_key(plan):
+    """접근법 id (git 브랜치 이름에 쓸 수 있는 형태)."""
+    raw = (plan or {}).get("approach_id") or (plan or {}).get("approach") or ""
+    key = re.sub(r"[^a-z0-9-]+", "-", raw.lower()).strip("-")[:40]
+    return key or "unnamed"
+
+
+def approach_branch(key):
+    return f"research/{key}"
+
+
 def approach_ledger(upto=None):
     """접근법별 시도 기록. 반복 파일에서 매번 다시 계산한다.
 
-    {approach: {"attempts": 시도 횟수, "iters": [반복 번호], "status": 최근 판정}}
+    {approach_id: {"name", "attempts", "iters", "status", "branch", "base", "commits"}}
     """
     ledger = {}
     for n in existing_iterations():
         if upto is not None and n > upto:
             break
         plan = load_plan(n)
-        if not plan or not plan.get("approach"):
+        if not plan:
             continue
-        entry = ledger.setdefault(plan["approach"], {"attempts": 0, "iters": [], "status": "진행 중"})
+        key = approach_key(plan)
+        entry = ledger.setdefault(key, {
+            "name": plan.get("approach", key), "attempts": 0, "iters": [], "status": "진행 중",
+            "branch": approach_branch(key), "base": None, "commits": [],
+        })
+        git_info = load_json(iter_dir(n) / "git.json") or {}
+        if git_info.get("created") and entry["base"] is None:
+            entry["base"] = git_info.get("base")
+        commit = load_json(iter_dir(n) / "commit.json")
+        if commit:
+            entry["commits"].append(commit["sha"])
         entry["attempts"] += 1
         entry["iters"].append(n)
         review = load_review(n)
@@ -453,9 +541,11 @@ def rebuild_index():
         tiers = "/".join(used.get(k, "?") for k in ("plan", "claude", "review"))
         approach = (load_plan(n) or {}).get("approach", "?")
         status = review.get("approach_status") or ("미검토" if review.get("skipped") else "?")
+        commit = load_json(iter_dir(n) / "commit.json")
+        committed = f" 💾{commit['sha']}" if commit else ""
         line = (
             f"- iter_{n:03d} [{review['verdict']}] ({tiers}) "
-            f"<{approach}: {status}> {review['one_line_summary']}"
+            f"<{approach}: {status}>{committed} {review['one_line_summary']}"
         )
         if review.get("next_task"):
             line += f" → 다음: {review['next_task']}"
@@ -464,9 +554,14 @@ def rebuild_index():
     ledger = approach_ledger()
     if ledger:
         lines += ["", f"## 접근법 기록 (같은 접근법 최대 {MAX_ATTEMPTS}회)", ""]
-        for name, entry in ledger.items():
+        for entry in ledger.values():
             iters = ", ".join(f"iter_{i:03d}" for i in entry["iters"])
-            lines.append(f"- {name}: {entry['attempts']}회 ({iters}), 최근 판정: {entry['status']}")
+            commits = ", ".join(entry["commits"]) or "없음"
+            lines.append(
+                f"- {entry['name']} [{entry['branch']}]: {entry['attempts']}회 ({iters}), "
+                f"최근 판정: {entry['status']}, 커밋: {commits}"
+            )
+        lines += ["", f"현재 연구 브랜치: {current_branch()} (코드 위치: {RESEARCH_DIR})"]
         last_plan = load_plan(existing_iterations()[-1]) or {}
         if last_plan.get("alternatives"):
             lines += ["", "### 최근 계획의 대안 순위", ""]
@@ -513,6 +608,10 @@ iter_{n:03d}
 === 지금까지의 반복 요약 (agent/INDEX.md) ===
 {read(INDEX_FILE, "없음")}
 
+=== 코드 위치 ===
+연구 코드는 {RESEARCH_DIR} (git worktree, 현재 브랜치 {current_branch()})에 있다.
+main 폴더의 scripts/는 옛 사본이니 보지 마라. 데이터·결과는 main 폴더의 eval_samples/, eval_results/.
+
 === 직전 결과 ===
 {prev_text}
 
@@ -549,12 +648,11 @@ def plan_concerns(n, plan):
     concerns = []
     if plan.get("decision") == "ask_human":
         concerns.append(plan.get("decision_reason", ""))
-    approach = plan.get("approach")
-    before = approach_ledger(upto=n - 1).get(approach) if approach else None
+    before = approach_ledger(upto=n - 1).get(approach_key(plan))
     if before and before["status"] == "abandon":
-        concerns.append(f"이미 포기(abandon) 판정된 접근법 '{approach}'을 다시 고름")
+        concerns.append(f"이미 포기(abandon) 판정된 접근법 '{before['name']}'을 다시 고름")
     elif before and before["attempts"] >= MAX_ATTEMPTS and before["status"] != "success":
-        concerns.append(f"'{approach}'을 이미 {before['attempts']}번 시도함 (최대 {MAX_ATTEMPTS})")
+        concerns.append(f"'{before['name']}'을 이미 {before['attempts']}번 시도함 (최대 {MAX_ATTEMPTS})")
     return concerns
 
 
@@ -564,7 +662,7 @@ def step_checkpoint(args, n):
     plan = load_plan(n)
     concerns = plan_concerns(n, plan)
     approach = plan.get("approach", "?")
-    attempt = approach_ledger(upto=n).get(approach, {}).get("attempts", 1)
+    attempt = approach_ledger(upto=n).get(approach_key(plan), {}).get("attempts", 1)
 
     if args.autonomy == "full" or (args.autonomy == "smart" and not concerns):
         print(f"\n자동 진행 ({args.autonomy}): {approach} {attempt}번째 시도")
@@ -668,16 +766,73 @@ def step_checkpoint(args, n):
         notify(f"알 수 없는 입력입니다: {reply}")
 
 
+def base_for_new_branch(cur):
+    """새 접근법 브랜치의 출발점.
+
+    직전 접근법이 success면 그 위에서 이어가고, 아니면 그 접근법이 시작했던 지점으로 돌아간다.
+    """
+    if cur == BASE_BRANCH or not cur.startswith("research/"):
+        return cur
+    entry = approach_ledger().get(cur[len("research/"):])
+    if entry and entry["status"] == "success":
+        return cur
+    return (entry or {}).get("base") or BASE_BRANCH
+
+
+def ensure_branch(n):
+    """이번 반복 접근법의 브랜치로 worktree를 맞춘다. 결과는 git.json에 기록."""
+    d = iter_dir(n)
+    info = load_json(d / "git.json")
+    if info:
+        # 재실행: 이미 준비된 브랜치에 있는지만 확인
+        if current_branch() != info["branch"]:
+            code, out = wgit("checkout", info["branch"])
+            if code:
+                raise AgentError(f"브랜치 {info['branch']} 복귀 실패: {out}")
+        return info
+
+    target = approach_branch(approach_key(load_plan(n)))
+    cur = current_branch()
+    info = {"branch": target, "from_branch": cur}
+    if cur != target:
+        if wgit("status", "--porcelain")[1].strip():
+            message = f"iter_{n:03d}: {cur}의 미커밋 작업 (접근법 전환 전 보관)"
+            code, out = wgit("stash", "push", "-u", "-m", message)
+            if code:
+                raise AgentError(f"git stash 실패: {out}")
+            info["stashed"] = message
+            print(f"미커밋 작업을 stash로 보관: {message}")
+        if wgit("show-ref", "--verify", "--quiet", f"refs/heads/{target}")[0] == 0:
+            code, out = wgit("checkout", target)
+        else:
+            base_ref = base_for_new_branch(cur)
+            info["base_ref"] = base_ref
+            info["base"] = wgit("rev-parse", "--short", base_ref)[1].strip()
+            info["created"] = True
+            code, out = wgit("checkout", "-b", target, base_ref)
+        if code:
+            raise AgentError(f"브랜치 전환 실패 ({target}): {out}")
+    info["head_before"] = wgit("rev-parse", "--short", "HEAD")[1].strip()
+    save(d / "git.json", json.dumps(info, ensure_ascii=False, indent=2))
+
+    if info.get("created"):
+        print(f"새 브랜치 {target} ← {info['base_ref']} ({info['base']})")
+    elif cur != target:
+        print(f"브랜치 전환: {cur} → {target}")
+    else:
+        print(f"브랜치 유지: {target}")
+    return info
+
+
 def step_claude(args, goal, n):
     d = iter_dir(n)
     banner(f"[iter_{n:03d} · 2/3] Claude가 구현/실험합니다.")
 
+    branch = ensure_branch(n)["branch"]
     # 중단 후 재실행해도 첫 시도 이전 상태와 비교하도록 스냅샷은 한 번만 찍는다.
     snap_file = d / "snapshot_before.json"
     if not snap_file.exists():
         save(snap_file, json.dumps(snapshot()))
-    _, head = git("rev-parse", "HEAD")
-    save(d / "base_commit.txt", head.strip())
 
     prompt = f"""이번 반복: iter_{n:03d}
 
@@ -685,7 +840,13 @@ def step_claude(args, goal, n):
 {goal}
 
 === GPT 계획 ===
-agent/runs/iter_{n:03d}/plan.md 를 먼저 읽고 그 계획을 구현/실행하라.
+{d / "plan.md"} 를 먼저 읽고 그 계획을 구현/실행하라.
+
+=== 작업 위치 ===
+현재 디렉터리는 연구용 git worktree다 (브랜치 {branch}). 코드는 여기서만 만들고 고친다.
+eval_samples/, eval_results/, hf_cache/는 main 폴더({PROJECT_DIR})로 연결된 링크다.
+기존 스크립트 안의 main 절대경로(데이터·결과)는 그대로 써도 된다.
+git 커밋과 브랜치 관리는 orchestrator가 한다.
 
 === 사용자 추가 지시 ===
 {read(d / "human_to_claude.md", "없음")}
@@ -704,8 +865,7 @@ agent/runs/iter_{n:03d}/plan.md 를 먼저 읽고 그 계획을 구현/실행하
 
     changed = diff_snapshots(json.loads(read(snap_file)), snapshot())
     save(d / "changed_files.txt", changed + "\n")
-    _, patch = git("diff", "--", ".", ":!agent")
-    save(d / "changes.patch", patch)
+    save(d / "changes.patch", wgit("diff", "HEAD")[1])
     save(d / "claude_meta.json", json.dumps({
         key: result.get(key)
         for key in ("session_id", "is_error", "num_turns", "duration_ms", "total_cost_usd")
@@ -736,7 +896,8 @@ iter_{n:03d}
 {goal}
 
 === 이번 접근법 ===
-{(load_plan(n) or {}).get("approach", "?")} — {approach_ledger(upto=n).get((load_plan(n) or {}).get("approach"), {}).get("attempts", 1)}번째 시도 (최대 {MAX_ATTEMPTS})
+{(load_plan(n) or {}).get("approach", "?")} — {approach_ledger(upto=n).get(approach_key(load_plan(n)), {}).get("attempts", 1)}번째 시도 (최대 {MAX_ATTEMPTS})
+브랜치: {current_branch()} (코드 위치: {RESEARCH_DIR})
 
 === 지금까지의 반복 요약과 접근법 기록 (agent/INDEX.md) ===
 {read(INDEX_FILE, "없음")}
@@ -748,7 +909,8 @@ iter_{n:03d}
 - 계획: agent/runs/iter_{n:03d}/plan.md
 - Claude 보고서: agent/runs/iter_{n:03d}/claude_report.md
 - Claude 도구 호출 전체 기록: agent/runs/iter_{n:03d}/claude_stream.jsonl
-- git 추적 파일 diff: agent/runs/iter_{n:03d}/changes.patch
+- 코드 변경 diff (마지막 커밋 대비): agent/runs/iter_{n:03d}/changes.patch
+- 코드 자체는 {RESEARCH_DIR} 에 있다. main 폴더의 scripts/는 옛 사본이니 보지 마라.
 
 === 이번 반복에서 바뀐 파일 (A 추가 / M 수정 / D 삭제) ===
 {changed_text}
@@ -860,14 +1022,46 @@ def step_skip_review(n, reason):
 
 
 def step_commit(n, review):
-    git("add", "-A")
-    code, _ = git("diff", "--cached", "--quiet")
-    if code == 0:
-        print("커밋할 변경 없음.")
+    """GPT 리뷰가 commit_worthy로 판단했을 때만 연구 브랜치에 커밋한다."""
+    if review.get("skipped") or not review.get("commit_worthy") or review.get("approach_status") == "abandon":
         return
-    message = f"research iter_{n:03d} [{review['verdict']}]: {review['one_line_summary']}"
-    code, out = git("commit", "-m", message)
-    print(out if code == 0 else f"[WARN] git commit 실패 (종료 코드 {code})")
+    d = iter_dir(n)
+    wgit("add", "-A")
+    skipped_large = []
+    for path in wgit("diff", "--cached", "--name-only")[1].splitlines():
+        full = RESEARCH_DIR / path
+        if full.is_file() and full.stat().st_size > MAX_COMMIT_FILE_BYTES:
+            wgit("reset", "-q", "--", path)
+            skipped_large.append(path)
+    if wgit("diff", "--cached", "--quiet")[0] == 0:
+        print("커밋할 코드 변경 없음.")
+        return
+
+    plan = load_plan(n)
+    title = review.get("commit_message") or review["one_line_summary"]
+    message = (
+        f"[{approach_key(plan)}] {title}\n\n"
+        f"iter_{n:03d}, 접근법: {plan.get('approach', '')}\n"
+        f"GPT 리뷰({tiers_used(n).get('review', '?')}) 검증: {review.get('approach_status', '')}"
+    )
+    code, out = wgit("commit", "-m", message)
+    if code:
+        print(f"[WARN] git commit 실패: {out}")
+        notify(f"⚠ iter_{n:03d} git commit 실패: {out[:300]}")
+        return
+
+    sha = wgit("rev-parse", "--short", "HEAD")[1].strip()
+    branch = current_branch()
+    save(d / "commit.json", json.dumps(
+        {"sha": sha, "branch": branch, "message": title, "skipped_large_files": skipped_large},
+        ensure_ascii=False, indent=2,
+    ))
+    rebuild_index()
+    log(f"iter_{n:03d} GIT COMMIT", f"{sha} ({branch}) {title}")
+    print(f"\n💾 커밋 {sha} ({branch}): {title}")
+    if skipped_large:
+        print(f"   5MB 넘는 파일은 제외: {', '.join(skipped_large)}")
+    notify(f"💾 커밋 {sha} ({branch})\n{title}")
 
 
 def handle_needs_human(review, n):
@@ -921,7 +1115,6 @@ def parse_args():
     p.add_argument("--goal", help="연구 목표 지정 (기존 반복이 있으면 --reset 필요)")
     p.add_argument("--reset", action="store_true", help="기존 runs/와 GOAL을 archive로 옮기고 새로 시작")
     p.add_argument("--gpus", help="Claude 실험에 보일 GPU (CUDA_VISIBLE_DEVICES), 예: 1 또는 0,1")
-    p.add_argument("--commit", action="store_true", help="반복마다 git commit (main/master에서는 거부)")
     p.add_argument("--gpt-tier", choices=GPT_TIERS, help="GPT 계획/리뷰 등급 고정 (agent/tiers.json)")
     p.add_argument("--claude-tier", choices=CLAUDE_TIERS, help="Claude 등급 고정 (agent/tiers.json)")
     p.add_argument("--gpt-timeout", type=int, default=30 * 60, help="GPT 단계 제한 시간(초)")
@@ -968,12 +1161,9 @@ def main():
     if HUMAN.telegram:
         print("Telegram 알림 사용 중 (끄려면 --no-telegram)")
 
-    if args.commit:
-        _, branch = git("rev-parse", "--abbrev-ref", "HEAD")
-        if branch.strip() in ("main", "master"):
-            sys.exit(f"--commit은 {branch.strip()} 브랜치에서 쓸 수 없습니다. 연구용 브랜치를 만드세요.")
     if not (CONDA_ENV / "bin" / "python").exists():
         sys.exit(f"conda env를 찾을 수 없습니다: {CONDA_ENV}")
+    ensure_worktree()
 
     if args.reset:
         reset()
@@ -1018,8 +1208,7 @@ def main():
             review = step_skip_review(n, reason)
         completed += 1
 
-        if args.commit:
-            step_commit(n, review)
+        step_commit(n, review)
 
         if review["verdict"] == "DONE":
             banner("연구 목표 완료 (DONE)")

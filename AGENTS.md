@@ -13,6 +13,13 @@
 - GPU: RTX 3090 24GB x2 (0, 1). 공용 서버이므로 실행 전 `nvidia-smi`로 확인한다.
   GPU 선택은 명령 앞에 환경변수를 붙이지 말고 orchestrator의 `--gpus` 설정을 따른다.
 
+## 코드 위치 (중요)
+- 연구 코드의 정본은 git worktree `/SSD1_1TB/home/milab/daniel/08_medgemma_research`에 있다.
+  접근법마다 `research/<approach_id>` 브랜치를 쓰고, 브랜치·커밋은 orchestrator가 관리한다.
+- main 폴더(`08_medgemma`)의 `scripts/`, `docs/`는 worktree를 만들 때 복사한 옛 사본이다.
+- 데이터(`eval_samples/`), 결과(`eval_results/`), 모델 캐시(`hf_cache/`)는 main 폴더에 하나만 있고
+  worktree에서는 링크로 연결된다. 브랜치와 상관없이 공유된다.
+
 ## 디렉터리
 - `scripts/01_data` 데이터 수집, `02_eval` 평가, `03_diagnosis` 진단,
   `04_official_format` 공식 형식 재검증, `05_remedy` 해법 검증
