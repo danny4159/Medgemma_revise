@@ -42,13 +42,18 @@ orchestrator.py를 고친 뒤 다시 실행해도 완료되지 않은 단계부�
     - Claude가 작업 중에 끊기면 같은 세션을 --resume으로 이어서 마무리한다.
     - 에이전트 호출이 실패하면(네트워크 등) 1분·5분·15분 뒤 다시 시도한다.
     - 예전 반복 파일에 없는 필드는 기본값으로 채워 읽는다.
+연구 목표 변경: --goal "새 목표"는 기록을 지우지 않고 새 챕터를 연다. 반복 번호는 이어지고,
+새 목표의 첫 계획(deep)은 이전 기록에서 가져올 것을 정리한 뒤 새 목표 기준으로 다시 사고한다.
+접근법 시도 횟수는 목표별로 센다. 목표 이력은 agent/GOALS.json. --reset은 완전히 새로 시작할 때만.
+
 정지: 터미널 Ctrl+C, `touch agent/STOP`(현재 단계 후), Telegram `stop` / `stop now` / `status`.
 
 사용 예:
     python orchestrator.py                     # smart: 애매할 때만 확인
     python orchestrator.py --autonomy manual   # 매 반복 계획을 확인
     python orchestrator.py --auto --max-iters 5
-    python orchestrator.py --reset --goal "새 연구 목표"
+    python orchestrator.py --goal "새 연구 목표"     # 이전 기록을 이어받아 목표 변경
+    python orchestrator.py --reset --goal "..."     # 기록을 archive로 옮기고 완전히 새로 시작
     python orchestrator.py --gpus 1            # Claude가 GPU 1만 보이게
     python orchestrator.py --gpt-tier normal --claude-tier light   # 등급 강제
 """
@@ -74,6 +79,8 @@ RUNS_DIR = AGENT_DIR / "runs"
 ARCHIVE_DIR = AGENT_DIR / "archive"
 
 GOAL_FILE = AGENT_DIR / "GOAL.md"
+# 목표 변경 이력: [{"goal", "start_iter", "time"}]. GOAL.md는 현재 목표 사본
+GOALS_FILE = AGENT_DIR / "GOALS.json"
 INDEX_FILE = AGENT_DIR / "INDEX.md"
 PAPERS_FILE = AGENT_DIR / "PAPERS.md"
 # 사람이 읽는 기록: JOURNEY(마일스톤 흐름) → DECISIONS(반복별 결정) → runs/(원본)
@@ -513,6 +520,8 @@ def record_tier(n, step, tier):
 def plan_tier(args, n):
     if args.gpt_tier:
         return args.gpt_tier
+    if goal_start(n) == n:
+        return "deep"  # 새 목표의 첫 계획은 이전 기록을 다시 읽고 깊게 사고한다
     prev = load_review(n - 1) if n > 1 else None
     return prev.get("next_plan_tier", "deep") if prev else "deep"
 
@@ -576,15 +585,20 @@ def approach_branch(key):
     return f"{BRANCH_PREFIX}{key}"
 
 
-def approach_ledger(upto=None):
+def approach_ledger(upto=None, since=None):
     """접근법별 시도 기록. 반복 파일에서 매번 다시 계산한다.
 
     {approach_id: {"name", "attempts", "iters", "status", "branch", "base", "commits"}}
+    upto를 주면 그 반복이 속한 연구 목표 안에서만 센다 (목표가 바뀌면 시도 횟수를 새로 센다).
     """
+    if upto is not None and since is None:
+        since = goal_start(upto)
     ledger = {}
     for n in existing_iterations():
         if upto is not None and n > upto:
             break
+        if since is not None and n < since:
+            continue
         plan = load_plan(n)
         if not plan:
             continue
@@ -605,6 +619,31 @@ def approach_ledger(upto=None):
         if review:
             entry["status"] = review.get("approach_status") or "미검토"
     return ledger
+
+
+def load_goals():
+    goals = load_json(GOALS_FILE)
+    if goals:
+        return goals
+    if GOAL_FILE.exists():
+        # GOALS.json 도입 전: GOAL.md 하나가 처음부터의 목표
+        return [{"goal": read(GOAL_FILE).strip(), "start_iter": 1, "time": ""}]
+    return []
+
+
+def goal_entry(n):
+    """반복 n에 적용되는 목표 (그 반복 이전에 시작된 마지막 목표)."""
+    goals = load_goals()
+    current = [g for g in goals if g["start_iter"] <= n]
+    return current[-1] if current else (goals[0] if goals else {"goal": "", "start_iter": 1})
+
+
+def goal_for(n):
+    return goal_entry(n)["goal"]
+
+
+def goal_start(n):
+    return goal_entry(n)["start_iter"]
 
 
 def current_iteration():
@@ -652,7 +691,11 @@ def code_version():
 
 def rebuild_index():
     lines = ["# Research Index", ""]
+    goal_starts = {g["start_iter"]: (i, g["goal"]) for i, g in enumerate(load_goals(), 1)}
     for n in existing_iterations():
+        if n in goal_starts:
+            k, text = goal_starts[n]
+            lines += ["", f"### 연구 목표 {k} (iter_{n:03d}부터): {text.splitlines()[0][:200] if text else ''}", ""]
         review = load_review(n)
         if review is None:
             lines.append(f"- iter_{n:03d} [진행 중]")
@@ -671,9 +714,17 @@ def rebuild_index():
             line += f" → 다음: {review['next_task']}"
         lines.append(line)
 
-    ledger = approach_ledger()
+    iters_all = existing_iterations()
+    latest = iters_all[-1] if iters_all else 1
+    ledger = approach_ledger(upto=latest)
+    earlier = approach_ledger(upto=goal_start(latest) - 1, since=1) if goal_start(latest) > 1 else {}
+    if earlier:
+        lines += ["", "## 이전 목표들의 접근법 (참고용, 시도 횟수 제한에는 안 들어감)", ""]
+        for entry in earlier.values():
+            lines.append(f"- {entry['name']} [{entry['branch']}]: {entry['attempts']}회, 최근 판정: {entry['status']}, "
+                         f"커밋: {', '.join(entry['commits']) or '없음'}")
     if ledger:
-        lines += ["", f"## 접근법 기록 (같은 접근법 최대 {MAX_ATTEMPTS}회)", ""]
+        lines += ["", f"## 접근법 기록 — 현재 목표 (같은 접근법 최대 {MAX_ATTEMPTS}회)", ""]
         for entry in ledger.values():
             iters = ", ".join(f"iter_{i:03d}" for i in entry["iters"])
             commits = ", ".join(entry["commits"]) or "없음"
@@ -754,6 +805,12 @@ def iteration_block(n):
             lines.append(f"- 📚 논문 추천: {ev.get('title')} — PAPERS.md")
         elif stage == "milestone":
             lines.append(f"- 🏁 **마일스톤**: {ev.get('title')} — JOURNEY.md")
+        elif stage == "goal":
+            if ev.get("previous"):
+                lines.append(f"- 🎯 **연구 목표 변경**: {ev.get('goal')}")
+                lines.append(f"  - 이전 목표: {ev.get('previous')}")
+            else:
+                lines.append(f"- 🎯 **연구 목표**: {ev.get('goal')}")
         elif stage == "session":
             if ev.get("resumed_from"):
                 lines.append(f"- ↻ 재실행: '{ev['resumed_from']}' 단계부터 이어서 (orchestrator {ev.get('version')})")
@@ -810,8 +867,22 @@ def step_plan(args, goal, n):
     else:
         prev_text = "없음 (첫 반복)"
 
-    prompt = f"""{read(PROMPT_DIR / "gpt_plan.md")}
+    goal_change = ""
+    if goal_start(n) == n and n > 1:
+        previous = goal_for(n - 1)
+        goal_change = f"""
+=== 연구 목표 변경 (중요) ===
+이번 반복부터 연구 목표가 바뀌었다.
+이전 목표: {previous}
+새 목표: {goal}
 
+계획하기 전에 이전 기록을 먼저 읽어라: agent/JOURNEY.md(마일스톤), agent/INDEX.md, agent/DECISIONS.md,
+agent/PAPERS.md, research/의 브랜치와 커밋(git -C research log --all --oneline).
+새 목표에 쓸 수 있는 발견, 재사용할 코드, 실패에서 얻은 교훈을 정리한 뒤, 새 목표 기준으로 처음부터 다시 사고하라.
+이전 목표의 접근법을 그대로 이어갈 필요는 없다. plan_markdown 맨 앞에 "# 이전 기록에서 가져올 것" 섹션을 넣어라.
+"""
+    prompt = f"""{read(PROMPT_DIR / "gpt_plan.md")}
+{goal_change}
 === 이번 반복 ===
 iter_{n:03d}
 
@@ -1423,8 +1494,8 @@ def parse_args():
                    help="계획 확인: manual=매번, smart=애매할 때만(기본), full=안 함")
     p.add_argument("--auto", action="store_true", help="--autonomy full과 같음")
     p.add_argument("--max-attempts", type=int, default=MAX_ATTEMPTS, help="같은 접근법 최대 시도 횟수")
-    p.add_argument("--goal", help="연구 목표 지정 (기존 반복이 있으면 --reset 필요)")
-    p.add_argument("--reset", action="store_true", help="기존 runs/와 GOAL을 archive로 옮기고 새로 시작")
+    p.add_argument("--goal", help="새 연구 목표. 이전 기록을 이어받아 새 목표로 다시 계획한다")
+    p.add_argument("--reset", action="store_true", help="모든 기록을 archive로 옮기고 완전히 새로 시작")
     p.add_argument("--gpus", help="Claude 실험에 보일 GPU (CUDA_VISIBLE_DEVICES), 예: 1 또는 0,1")
     p.add_argument("--gpt-tier", choices=GPT_TIERS, help="GPT 계획/리뷰 등급 고정 (agent/tiers.json)")
     p.add_argument("--claude-tier", choices=CLAUDE_TIERS, help="Claude 등급 고정 (agent/tiers.json)")
@@ -1445,23 +1516,60 @@ def reset():
     dest.mkdir(parents=True)
     if RUNS_DIR.exists():
         shutil.move(str(RUNS_DIR), str(dest / "runs"))
-    for path in (GOAL_FILE, INDEX_FILE):
+    for path in (GOAL_FILE, GOALS_FILE, INDEX_FILE, DECISIONS_FILE, JOURNEY_FILE, PAPERS_FILE):
         if path.exists():
             shutil.move(str(path), str(dest / path.name))
     print(f"이전 연구를 {dest} 로 옮겼습니다.")
 
 
+def change_goal(text):
+    """새 연구 목표를 연다. 기록은 그대로 두고 반복 번호를 이어간다."""
+    goals = load_goals()
+    n = current_iteration()
+    d = iter_dir(n)
+    if goals and (d / "claude_report.md").exists() and not is_done(n):
+        start = n + 1  # Claude 작업까지 끝난 반복은 이전 목표로 마무리한다
+    else:
+        start = n
+        if goals and (d / "plan.md").exists():
+            # Claude 시작 전인 계획은 버리고 새 목표로 다시 계획한다
+            stamp = now().replace(" ", "_").replace(":", "")
+            for name in ("plan.json", "plan.md", "git.json"):
+                if (d / name).exists():
+                    (d / name).rename(d / f"rejected_{stamp}_{name}")
+    previous = goals[-1]["goal"] if goals else None
+    goals = [g for g in goals if g["start_iter"] < start]
+    goals.append({"goal": text, "start_iter": start, "time": now()})
+    save(GOALS_FILE, json.dumps(goals, ensure_ascii=False, indent=2))
+    save(GOAL_FILE, text)
+    record_event(start, "goal", goal=text, previous=previous)
+
+    if previous:
+        if not JOURNEY_FILE.exists():
+            save(JOURNEY_FILE, "# 연구 흐름 (JOURNEY)\n")
+        with JOURNEY_FILE.open("a", encoding="utf-8") as f:
+            f.write(f"\n## 🎯 연구 목표 변경 (iter_{start:03d}부터, {now()[:16]})\n\n"
+                    f"- 이전: {previous}\n- 새 목표: {text}\n")
+        print(f"연구 목표를 바꿨습니다. iter_{start:03d}부터 새 목표로 계획합니다 (이전 기록 참고).")
+        notify(f"🎯 연구 목표 변경 (iter_{start:03d}부터)\n이전: {previous[:300]}\n새 목표: {text[:500]}")
+    rebuild_index()
+
+
 def load_goal(args):
-    if args.goal:
-        if existing_iterations() and not args.reset:
-            sys.exit("기존 반복이 있습니다. 목표를 바꾸려면 --reset을 함께 쓰세요.")
-        save(GOAL_FILE, args.goal)
-    if not GOAL_FILE.exists():
+    """현재 목표를 돌려준다. --goal이 기존 목표와 다르면 새 목표를 연다. (목표, 바뀌었는지)"""
+    goals = load_goals()
+    if args.goal and (not goals or goals[-1]["goal"] != args.goal.strip()):
+        change_goal(args.goal.strip())
+        return args.goal.strip(), True
+    if not goals:
         goal = ask("\n=== 연구 목표 입력 ===\n이번 연구에서 무엇을 할지 입력하세요:\n> ")
         if not goal:
             sys.exit("연구 목표가 비어 있습니다.")
-        save(GOAL_FILE, goal)
-    return read(GOAL_FILE).strip()
+        change_goal(goal)
+        return goal, True
+    if not GOALS_FILE.exists():
+        save(GOALS_FILE, json.dumps(goals, ensure_ascii=False, indent=2))
+    return goals[-1]["goal"], False
 
 
 def status_text():
@@ -1515,15 +1623,15 @@ def main():
 
     if args.reset:
         reset()
-    goal = load_goal(args)
+    goal, goal_changed = load_goal(args)
     RUNS_DIR.mkdir(parents=True, exist_ok=True)
 
     banner("RESEARCH GOAL")
     print(goal)
 
     n = current_iteration()
-    if n > 1 and load_review(n - 1) and load_review(n - 1)["verdict"] == "DONE":
-        print("\n직전 반복에서 DONE 판정이 났습니다. 이어가려면 목표를 바꾸거나(--reset --goal) 계속하세요.")
+    if not goal_changed and n > 1 and load_review(n - 1) and load_review(n - 1)["verdict"] == "DONE":
+        print("\n직전 반복에서 DONE 판정이 났습니다. 새 목표로 이어가려면 --goal \"새 목표\"로 실행하세요.")
         if args.autonomy == "full" or (ask("계속할까요? [y/N] ") or "").lower() != "y":
             return
 
@@ -1548,7 +1656,7 @@ def main():
         check_stop()
         if not (d / "plan.md").exists():
             set_stage(n, "GPT 계획")
-            step_plan(args, goal, n)
+            step_plan(args, goal_for(n), n)
         if not (d / "claude_report.md").exists():
             check_stop()
             set_stage(n, "계획 확인")
@@ -1560,14 +1668,14 @@ def main():
                 continue
             check_stop()
             set_stage(n, "Claude 구현/실험")
-            step_claude(args, goal, n)
+            step_claude(args, goal_for(n), n)
         if not (d / "review.json").exists():
             check_stop()
             needs_review, reason = review_decision(args, n)
             if needs_review:
                 print(f"\nGPT 리뷰 진행: {reason}")
                 set_stage(n, "GPT 리뷰")
-                step_review(args, goal, n)
+                step_review(args, goal_for(n), n)
             else:
                 step_skip_review(n, reason)
 

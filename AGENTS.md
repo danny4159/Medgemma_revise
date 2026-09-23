@@ -15,7 +15,7 @@
 
 ## 폴더 구조
 - `orchestrator.py`, `notifier.py`, `agent/`: 연구 루프 오케스트레이터와 기록 (main 브랜치)
-  - `agent/GOAL.md` 현재 연구 목표
+  - `agent/GOAL.md` 현재 연구 목표, `agent/GOALS.json` 목표 변경 이력 (반복 번호별)
   - `agent/JOURNEY.md` 연구 흐름: 목표에 의미 있는 진전(마일스톤)만, 고민→시도→개발→결과→의미
   - `agent/DECISIONS.md` 반복별 계획→결정(자동/사람)→개발→검증→커밋 기록
   - `agent/INDEX.md` 반복(iteration)별 한 줄 요약과 접근법 기록
