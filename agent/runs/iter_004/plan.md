@@ -1,0 +1,120 @@
+# Current Understanding
+
+iter_003의 `context-evidence-stability`는 abandon이며 reference나 계수를 다시 조정하지 않는다. concat BA 0.964, paired BA 0.917, unique-slice mean BA 0.988은 기존 3-case 개발 pilot의 결과다. 이 수치를 새 CXR 평가 성능으로 옮겨 쓰지 않는다.
+
+질문 조건부 영역 선택, perturbation 기반 grounding, class 간 공유 attribution 억제는 이미 선행 연구에 있다. 이번 반복은 새 알고리즘의 contribution을 입증하는 단계가 아니라, 알려진 contrastive 원리를 MedGemma 1.5에 적용했을 때 후속 연구를 정당화할 신호가 있는지 판단하는 단계다. [SECOND](https://arxiv.org/html/2506.08391v1), [CSGR](https://arxiv.org/html/2609.13228v1), [CASE](https://arxiv.org/html/2506.07327v4)
+
+로컬 VinDr는 10영상이고 patient ID와 명시적 질환별 음성 label이 없다. 고정 질문 6개에 대해 bbox가 있는 양성 조합은 20개/9영상이다. 공간적으로 구별 가능한 질문 쌍은 아래 고정 기준에서 13쌍/6영상이다. 기존 legacy 평가에 사용된 자료이므로 전부 개발 자료로 취급한다. 이번에는 환자 일반화·specificity·진단 개선을 주장하지 않는다.
+
+# Hypothesis
+
+고정 영역에 대한 제거 반응에는 질문별 병변 근거 외에 영상 변형에 대한 공통 반응이 섞인다. 다른 질문들의 반응을 빼면, 공간적으로 구별되는 소견에서 단순 제거 점수나 crop confidence보다 annotation에 맞는 영역을 선택할 수 있다는 가설을 검증한다.
+
+단, 영역 지도가 질문마다 달라지는 것만으로 가설을 지지하지 않는다. 실제 bbox와의 일치가 좋아지고, 같은 질문의 다른 영상에서 가져온 선택 및 위치 prior보다 나아야 한다. 공유 근거나 점수 척도 차이 때문에 성능이 악화되면 가설의 반증으로 기록한다.
+
+고정 수식은 다음과 같다.
+
+- `m(I,q) = log P(Yes|I,q) − log P(No|I,q)`.
+- `D(q,R,t) = m(I,q) − m(T_t(I,R),q)`.
+- `C(q,R,t) = D(q,R,t) − mean_{q'≠q} D(q',R,t)`.
+- 주방법은 blur의 `argmax_R C(q,R,blur)`이며, 동점은 row-major tile ID가 작은 것을 선택한다. mean-fill에서도 같은 규칙을 독립 적용한다.
+
+C는 contrastive score의 occlusion attribution이다. 계수·질문 bank·정규화·선택 threshold를 이번 결과에 맞춰 조정하지 않는다. `sum_q C=0`이 강제하는 경쟁 때문에 co-occurring finding의 공유 근거가 사라질 수 있다는 실패 예측도 함께 검토한다.
+
+# Proposed Experiment
+
+## 데이터와 입력
+
+1. 로컬 VinDr PNG 10개를 모두 사용한다. 질문 bank는 `Cardiomegaly`, `Calcification`, `Pleural effusion`, `Pulmonary fibrosis`, `Pleural thickening`, `Atelectasis`로 고정한다. 선택 이유는 각 소견이 최소 3개 영상에서 주석돼 교환 대조군을 구성할 수 있기 때문이다.
+2. 각 질문은 `Is there evidence of {finding} in this chest X-ray? Answer Yes or No.`로 고정한다. 전체 영상에 같은 6개 질문을 적용하고, 영상별 GT에 따라 질문을 추가·삭제하지 않는다.
+3. 원본 좌표를 3×3으로 분할한 비중첩 tile 9개를 후보로 사용한다. 경계 반올림 규칙을 고정하고 실제 면적을 기록한다. GT bbox는 후보 생성·추론·선택에 전달하지 않는다.
+4. 원본, 각 tile crop, 각 tile의 blur, 각 tile의 mean-fill을 만든다. blur는 전체 원본에 Gaussian blur를 적용한 결과의 해당 tile만 합성하며 radius는 `0.05×min(W,H)`로 고정한다. mean-fill은 원본 전체의 channel별 평균값으로 해당 tile만 채운다. 모든 pixel 변환은 processor 적용 전에 수행한다. crop은 별도 image로 전달하고 수동 확대하지 않는다.
+5. 동일 소견의 여러 bbox는 평가에서 union으로 처리한다. 미주석 조합은 unknown으로 유지한다. 07.png에는 질문 bank의 양성 annotation이 없지만 동일 추론 및 영상 교환용 자료에 포함한다.
+
+## 요청과 예산
+
+- 본 scoring은 `10×6×(1+9+9+9)=1,680` 요청이다. C 계산, 질문 교환, 영상 교환에는 추가 GPU 요청이 없다.
+- 별도 검증은 반복 scoring 12회, 12개 입력의 Yes/No teacher-forced 대조 24 forward, 최대 8 token greedy 생성 12회다. 검증 입력은 원본·crop·두 변형 및 질문을 포함하도록 모델 결과 확인 전에 고정한다.
+- 첫 24개 본 요청은 입력 종류를 균형 있게 포함하고 완료 결과를 본실행에 재사용한다. 로딩·검증 비용을 포함한 예상 총 사용량이 40 device-minutes 이하일 때 전체 실행을 계속한다. 초과 예상이면 calibration에서 멈추고 미완료로 보고한다. 평가 결과를 보고 영상이나 질문을 축소하지 않는다.
+- 누적 상한은 45 device-minutes이며 재시작·실패·검증 비용도 합산한다. 다음 요청의 예상 시간이 남은 예산을 넘으면 시작하지 않는다. generation 내부 forward와 실제 시간도 별도 기록한다.
+- 실행 직전 `nvidia-smi`로 허용된 GPU의 여유 메모리를 확인한다. 한 GPU·한 프로세스로 시작하며 모델 필요량에 2GB 이상 여유를 확보한다. orchestrator의 GPU 가시성 설정을 존중한다.
+
+## 비교와 대조군
+
+- **Raw occlusion:** 같은 perturbation에서 `argmax D`.
+- **Crop confidence:** 9개 crop의 `argmax m(crop,q)`.
+- **Uniform selection:** 9개 tile을 균등 선택했을 때 평가 지표의 정확한 기댓값. 난수 시행으로 오차를 추가하지 않는다.
+- **위치 prior:** 평가 대상 영상을 제외한 동일 소견의 annotation들에서 평균 normalized IoU가 가장 높은 tile을 선택한다. GT로 만든 강한 개발용 비교군이며 제안 selector와 분리한다. 환자 독립 학습 baseline으로 표현하지 않는다.
+- **질문 교환:** 같은 영상에서 다른 양성 소견 질문으로 선택된 tile을 현재 소견 bbox에 평가한다.
+- **영상 교환:** 동일 질문으로 다른 9개 영상에서 선택한 tile 좌표를 현재 영상에 옮겨 평가하고 평균한다. donor의 label을 필터링하지 않는다. annotation 기반 위치 prior와 함께 제시해 이미지별 근거가 필요한지 점검한다.
+- 원본 margin, unique-crop mean 및 max도 보조 출력으로 보존한다. 이번 입력은 단일 2D 영상이므로 원본 concat과 unique-slice mean은 동일한 원본 점수로 퇴화한다. 이를 명시하고 unique-crop mean과 혼동하지 않는다. 새 BA나 진단 개선을 만들기 위해 crop에 원본 양성 label을 복사하지 않는다.
+
+# Implementation Tasks for Claude
+
+1. 재사용 runner의 예산 축소를 명시적인 queue/filter로 고치고, 반복 중 목록 재할당에 의존하지 않도록 한다. GPU 초기화 등 import-time 부작용을 실행 진입점으로 이동해 CPU 검증이 가능하게 한다. 필요한 범위만 수정한다.
+2. 실제 RGB pixel hash, 원본 byte hash, 요청 내용, prompt, 변환 설정, model/processor revision 및 scorer version을 검증한다. 재개와 집계에서 동일 규칙을 사용한다. ID만 같은 결과나 충돌하는 중복 결과는 조용히 채택하지 않는다.
+3. 매 요청 완료 시 사용량을 checkpoint하고 정상·예외·중단 경로를 처리한다. 강제 종료 시 정확한 기록이 불가능한 진행 중 요청은 미계상 구간으로 표시하고 재개 예산에 보수적으로 반영한다. 요청 누락·오류는 `incomplete`로 판정한다.
+4. 새 manifest/scorer/selector/evaluator를 기존 검증된 scoring 코드에 연결한다. selector는 label 경로를 받지 않도록 분리한다. GT 접근 없이 모든 질문의 선택 결과를 먼저 저장·고정한 뒤 evaluator가 annotation을 읽는다.
+5. CPU 검증에는 실제 이미지 변경·config 변경·요청 변경 시 캐시 거부, conflicting duplicate, 누락 결과 판정, 강제 예산 축소가 실제 실행 queue를 바꾸는지, GT 변경이 후보와 선택에 영향을 주지 않는지, bbox union 및 교환 지표의 수작업 예제를 포함한다.
+6. 새 CXR prompt에서 Yes/No tokenization과 teacher-forced scoring을 검증한다. greedy 생성이 제한된 Yes/No scoring과 다르면 원문과 불일치를 기록하고 이를 숨기지 않는다. token 잘림과 processor 해상도·이미지 token 수를 확인한다.
+7. 결과에는 고정 config, 전체 request manifest, raw predictions, 선택 결과, 평가 table, 실패 사례, 예산·완료 상태 및 overlay를 남긴다. overlay는 추론 종료 후 평가용으로 만든다. 기존 iter_003 산출물은 덮어쓰지 않는다.
+8. 관련 연구 노트에 C의 대수적 동치, CASE와의 차이, CSGR의 gold answer 의존성을 기록한다. 단순 baseline을 SECOND·CSGR·CASE의 완전 재현으로 표기하지 않는다. git 브랜치·커밋 관리는 orchestrator에 맡긴다.
+
+# Evaluation (성공/실패 기준 포함)
+
+## 지표와 평가 단위
+
+`G_iq`는 해당 소견의 bbox union이다. `J(R,G)=IoU(R,G)`, `U(R,G)=J(R,G)/max_{r∈grid}J(r,G)`로 정의한다. U의 분모는 후보 grid의 표현 한계를 보정하는 평가용 oracle이며 selector에 전달하지 않는다. raw IoU, oracle IoU, bbox coverage도 함께 보고해 작은 분모가 개선을 과장하는지 확인한다.
+
+주평가는 20개 양성 조합에서 영상 내부 평균을 낸 뒤 9영상 macro-average로 집계한다. 20개 조합이나 1,680개 요청을 독립 표본으로 취급하지 않는다. 모든 양성 조합을 포함하며 원본 Yes 예측 여부로 걸러내지 않는다.
+
+질문 교환 평가 층은 모델 실행 전에 다음 기준으로 고정한다: 소견 union IoU≤0.1, 최적 tile이 다름, 서로의 최적 tile을 사용할 때 U 손실이 양방향 모두≥0.25. 현재 metadata에서는 13쌍/6영상이다. 쌍별 점수는 `S=[U_a(R_a)−U_a(R_b)+U_b(R_b)−U_b(R_a)]/2`이며 영상 내부 평균 후 6영상 macro-average를 사용한다. 나머지 쌍과 공유 bbox가 있는 쌍도 별도로 보고하고 삭제하지 않는다.
+
+## 실행 유효성
+
+- 본 요청 1,680개 및 지정 검증 요청이 모두 완료되고 hash·config·token 검사를 통과해야 전체 가설을 판정한다.
+- teacher-forced와 fast scoring의 margin 차이는 모든 검증 입력에서 1e-3 이하를 요구한다. 반복 scoring 차이도 보고하며 선택 순위를 바꿀 수준이면 측정 실패로 처리한다.
+- incomplete, OOM, 형식·hash 오류는 방법 실패와 구분한다. 결측 조합을 제외해 성공 기준을 계산하지 않는다.
+
+## 다음 투자 진행 기준
+
+아래는 작은 개발 pilot의 실용적 기준이며 통계적 유의성이나 논문 성공 기준이 아니다. 모두 충족할 때만 독립 데이터 검증으로 진행한다.
+
+1. 주방법 blur-C의 영상 macro U가 raw blur-D, crop confidence, uniform, 위치 prior 중 가장 높은 평균보다 0.05 이상 높다. raw IoU도 raw-D와 crop confidence 중 높은 평균보다 낮아지지 않는다.
+2. raw-D 대비 U 차이가 9영상 중 최소 6영상에서 양수다. 자기 영상 선택의 macro U가 동일 질문 영상 교환 대조군보다 0.05 이상 높다.
+3. 공간적으로 구별되는 질문 쌍에서 S가 양수이며 raw-D와 crop confidence 중 높은 S보다 0.10 이상 높다. 지도 차이만으로 성공 처리하지 않는다.
+4. mean-fill에서도 C의 macro U가 같은 방식의 raw-D 및 crop confidence보다 낮아지지 않는다. blur에서만 이득이면 변형 의존성으로 보고 추가 투자 기준 미달로 처리한다.
+
+조건을 통과하면 `improve` 근거로 삼고 CheXlocalize 등의 독립 환자·명시적 음성 평가와 선행 방법 재현을 다음 과제로 제안한다. 유효하게 완료됐으나 기준을 통과하지 못하면 이번 contrastive 선택 후보의 조정을 중단하고 다음 대안을 검토한다. 이를 모든 질문 조건부 grounding의 불가능성으로 확대하지 않는다.
+
+# Risks / Checks
+
+- 질문 간 공통 반응 제거는 유효한 공유 근거도 지울 수 있다. 각 선택 영역의 D·C 부호, 질문별 D 분포, 공유 bbox 사례를 공개한다. 다른 질문을 하나씩 제외한 민감도는 저장 점수로 기술적으로 확인할 수 있지만, 그중 좋은 설정으로 주결과를 교체하지 않는다.
+- 위치 prior와 영상 교환은 해부학적 confound에 대한 부분 통제다. 동일 환자·동일 해부학적 상태를 맞춘 비교가 아니며 임상적으로 완전한 통제로 표현하지 않는다.
+- blur·mean-fill은 정상 counterfactual이 아니다. 변형 후 정답을 No로 바꾸지 않는다. crop에는 해부학적 문맥이 부족할 수 있다.
+- bbox overlap은 annotation 일치도다. 모델의 causal faithfulness나 완전한 병변 범위를 입증하지 않는다. 특히 Cardiomegaly 같은 전역 소견과 작은 Calcification은 고정 tile의 한계가 다르다.
+- CheXlocalize의 공식 취득 절차는 계정·등록·약관 동의를 포함한다. 이번에는 다운로드나 약관 동의를 진행하지 않는다. 다음 단계에서 실제 조건·크기·label–mask join·patient 중복을 확인한다. [공식 안내](https://raw.githubusercontent.com/rajpurkarlab/cheXlocalize/master/download_instructions.md)
+
+## 대규모 GPU 필요 후보
+
+질문별 병변 근거와 다중 소견의 공유 근거를 함께 보존하는 region–text contrastive pretraining, 병변 grounding supervision을 포함한 vision encoder 재학습, 다기관 CXR·CT·MRI에서 검증된 intervention 자료를 이용한 전체 VLM 정렬을 기록한다. 대규모 annotation과 다중 모델·encoder 학습 비용이 필요하므로 현재 pilot에서 실증적 한계가 확인된 뒤 우선순위를 재평가한다.
+
+# 계획의 근거 (GPT 조사 노트)
+
+### 질문 1: 질문 간 선택성의 차별성
+- SECOND는 attention 기반 patch 선택과 contrastive decoding을 결합하며, CSGR는 gold answer confidence의 perturbation 반응으로 영역을 선택한다. 질문별 영역 선택이나 제거 민감도 자체는 신규성이 아니다. [SECOND](https://arxiv.org/html/2506.08391v1), [CSGR §3](https://arxiv.org/html/2609.13228v1)
+- 추가로 확인한 CASE v4는 다른 class들의 평균 gradient 방향을 제거해 class-specific attribution을 만든다. 공통 반응 억제라는 발상도 선행 연구와 겹친다. 다만 gradient projection과 우리가 검토하는 질문별 finite difference는 같은 알고리즘은 아니다. [CASE v4 §3](https://arxiv.org/html/2506.07327v4)
+- 수학적으로 C(q,R,t)=D(q,R,t)−mean_{q'≠q}D(q',R,t)는 contrastive score F_q(I)=m(I,q)−mean_{q'≠q}m(I,q')의 occlusion attribution과 정확히 같다. 또한 각 영역에서 sum_q C(q,R,t)=0이므로 실제로 공유되는 병변 근거까지 억제할 수 있다. 따라서 새로운 방법으로 주장하지 않고, 독립 annotation으로 가치부터 검증할 baseline 후보로 채택한다.
+
+### 질문 2: CheXlocalize 취득 가능성
+- 공식 다운로드 안내는 StanfordAIMI 계정, 등록 양식, 약관 동의, 발급된 SAS URL을 통한 Azure Blob 접근을 요구한다. 공개 안내에서 전체 크기·약관 본문·소규모 부분 다운로드 가능성은 확인하지 못했다. 이번 pilot의 의존성에서 제외한다. [공식 다운로드 안내](https://raw.githubusercontent.com/rajpurkarlab/cheXlocalize/master/download_instructions.md)
+- 공식 README에는 영상별 label CSV, segmentation JSON과 patient/study/view를 포함한 annotation key가 명시돼 있어 후속 환자 분할 검증 후보로 유지한다. 실제 파일 간 join과 환자 중복은 취득 후 검증해야 한다. [공식 저장소](https://github.com/rajpurkarlab/cheXlocalize)
+
+### 질문 3: 로컬에서 가능한 최소 평가
+- `legacy/eval_samples/not_in_training/vindr_cxr/meta.json`과 PNG 크기를 읽어 확인했다. PNG 크기는 metadata의 원본 크기와 모두 일치한다.
+- 3개 이상 영상에서 주석된 소견 6개를 고정하면 Cardiomegaly 4, Pulmonary fibrosis 4, Calcification 3, Pleural effusion 3, Pleural thickening 3, Atelectasis 3으로 총 20개 양성 image–finding 조합, 9개 영상이다. 모든 10개 영상에 동일 질문 bank를 적용하며 나머지 조합은 음성이 아닌 unknown이다.
+- 동일 소견의 bbox union을 사용해 geometry만 집계했다. 고정 3×3 grid에서 두 소견의 union IoU≤0.1, 최적 tile이 다르고 양방향 교차 선택의 normalized IoU 손실≥0.25인 쌍은 6개 영상의 13쌍이다. 예: 00.png의 Cardiomegaly/Calcification, 06.png의 Pleural effusion/Pulmonary fibrosis. 이는 모델 결과를 보지 않은 개발용 평가 층화이며 독립 test 구성은 아니다.
+- `agent/GOAL.md`, `agent/INDEX.md`, 직전 리뷰와 runner를 확인했다. 기존 접근법은 abandon을 유지한다. 재사용 전 예산 축소 iterator 오류, 중단 시 사용량 기록, 실제 이미지·요청·config hash 검사, 누락 결과 판정을 보완해야 한다.
+- 이번 라운드는 웹 확인과 기존 파일·metadata 읽기만 수행했다. 파일 생성·수정·모델 추론은 하지 않았다.
+
+이전 사고 라운드 노트: agent/runs/iter_004/think/

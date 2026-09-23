@@ -1,0 +1,1156 @@
+diff --git a/README.md b/README.md
+index 3c7a95b..8e0f3d0 100644
+--- a/README.md
++++ b/README.md
+@@ -6,3 +6,9 @@
+   실행: `python research/summarize_scores.py --output research/results/scores_summary.md`
+   점수는 초기 평가 시점의 조건(bbox는 비공식 xyxy 0-1 형식, n=10 소표본)의 값이며 현재 공식 사용법의 최종 성능이 아니다.
+ - 입력 데이터와 이전 수동 분석 기록은 `../legacy/`
++- iter_003 context pilot (BraTS 3 case, T1CE/T2, 결과 `results/iter_003/`):
++  1. `python research/build_context_manifest.py --out research/results/iter_003` (CPU, manifest·slice PNG·요청·label)
++  2. `python research/test_context_pilot.py --out research/results/iter_003` (CPU 검증)
++  3. `python research/run_context_pilot.py --out research/results/iter_003` (GPU 1장, 약 5분, `--max-requests 8`로 예비 실행)
++  4. `python research/analyze_context_pilot.py --out research/results/iter_003` (metrics.json)
++  - 코드: `context_pilot/data.py`, 선행 연구 메모: `notes/related_work_iter003.md`
+diff --git a/analyze_context_pilot.py b/analyze_context_pilot.py
+new file mode 100644
+index 0000000..430b344
+--- /dev/null
++++ b/analyze_context_pilot.py
+@@ -0,0 +1,325 @@
++"""iter_003 context pilot 집계: 방법별 drift·balanced accuracy·worst-context·flip·margin·기권·비용.
++
++독립 단위는 case(3개)다. case-sequence 안에서 먼저 계산하고, case 안에서 sequence 평균, 그 다음 case 평균.
++paired 보정과 oracle packet-only는 GT 기반 oracle이다 (표에 oracle 열로 표시).
++실행: python research/analyze_context_pilot.py --out research/results/iter_003
++"""
++import argparse
++import json
++from pathlib import Path
++from statistics import mean
++
++from context_pilot.data import build_sequence
++
++CONDS = ["P0", "P1", "P2", "P3", "P4", "P5", "P6"]
++CTX = CONDS[1:]
++SCORER_VERSION = 2
++METHODS = {  # 이름: (oracle 여부, 설명)
++    "concat": (False, "원본 concatenation 점수"),
++    "paired": (True, "m(S,C)-m(R,C)+m(R) (GT로 만든 R 사용, 계수 1 고정)"),
++    "single_mean": (False, "입력 slice 독립 점수 평균 (multiplicity 반영)"),
++    "single_mean_unique": (False, "입력 slice 독립 점수 평균 (unique slice)"),
++    "single_max": (False, "입력 slice 독립 점수 max"),
++    "iaf": (False, "MedPruner IAF(gamma=0.05)만 적용한 입력의 점수"),
++    "packet_only": (True, "context 제거 (P0 점수를 모든 조건에 사용)"),
++}
++
++
++def load(out):
++    labels = json.loads((out / "labels.json").read_text())
++    manifest = json.loads((out / "manifest.json").read_text())
++    preds = {}
++    for line in open(out / "predictions.jsonl"):
++        r = json.loads(line)
++        if r.get("scorer_version") == SCORER_VERSION and r.get("status") == "ok":
++            preds[r["id"]] = r  # 같은 id가 여러 번이면 마지막 기록
++    return labels, manifest, preds
++
++
++def correct(v, packet):
++    return (v > 0) if packet == "E" else (v <= 0)
++
++
++def method_scores(cs, P):
++    """cs: manifest case-sequence, P: id->pred. 반환 {method: {S: {cond: value}}} 와 누락 목록."""
++    case, seq = cs["case"], cs["sequence"]
++    missing = []
++
++    def g(kind, packet, cond):
++        rid = f"{case}|{seq}|{kind}|{packet}|{cond}"
++        if rid not in P:
++            missing.append(rid)
++            return None
++        return P[rid]["m"]
++
++    single = {sid: g("single", sv["role"], sid) for sid, sv in cs["slices"].items()}
++    packets = cs["packets"]
++    res ={m: {} for m in METHODS}
++    for S in ["E", "N"]:
++        for m in METHODS:
++            res[m][S] = {}
++        for c in CONDS:
++            sids = build_sequence(c, packets, S)
++            ms, mr, mr0 = g("concat", S, c), g("concat", "R", c), g("concat", "R", "P0")
++            m0 = g("concat", S, "P0")
++            res["concat"][S][c] = ms
++            res["paired"][S][c] = None if None in (ms, mr, mr0) else ms - mr + mr0
++            sv = [single[s] for s in sids]
++            us = [single[s] for s in dict.fromkeys(sids)]
++            ok = None not in sv
++            res["single_mean"][S][c] = mean(sv) if ok else None
++            res["single_mean_unique"][S][c] = mean(us) if ok else None
++            res["single_max"][S][c] = max(sv) if ok else None
++            iaf_rid = f"{case}|{seq}|iaf|{S}|{c}"
++            if iaf_rid in P:
++                res["iaf"][S][c] = P[iaf_rid]["m"]
++            else:
++                rec = next(x for x in cs["iaf"] if x["packet"] == S and x["cond"] == c)
++                res["iaf"][S][c] = m0 if rec["identical_to_concat"] else g("iaf", S, c)
++            res["packet_only"][S][c] = m0
++    return res, missing
++
++
++def cs_metrics(sc, ref, conds=CONDS, ctx=CTX):
++    """sc: {S:{cond:v}} 한 방법, ref: concat {S:{cond:v}}. case-sequence 단위 지표."""
++    out = {}
++    d_own, d_pk = {}, {}
++    for S in ["E", "N"]:
++        d_own[S] = mean(abs(sc[S][c] - sc[S][conds[0]]) for c in ctx)
++        d_pk[S] = mean(abs(sc[S][c] - ref[S]["P0"]) for c in ctx)
++    out["drift_own"] = (d_own["E"] + d_own["N"]) / 2
++    out["drift_own_E"], out["drift_own_N"] = d_own["E"], d_own["N"]
++    out["drift_vs_packet"] = (d_pk["E"] + d_pk["N"]) / 2
++    bas = [(correct(sc["E"][c], "E") + correct(sc["N"][c], "N")) / 2 for c in conds]
++    out["ba_mean"] = mean(bas)
++    out["ba_by_cond"] = dict(zip(conds, bas))
++    out["worst_ctx_acc"] = mean(all(correct(sc[S][c], S) for c in conds) for S in ["E", "N"])
++    out["flips_vs_packet"] = sum((sc[S][c] > 0) != (ref[S]["P0"] > 0) for S in ["E", "N"] for c in ctx)
++    out["n_flip_slots"] = 2 * len(ctx)
++    out["fn_E"] = sum(not correct(sc["E"][c], "E") for c in conds)
++    out["fp_N"] = sum(not correct(sc["N"][c], "N") for c in conds)
++    margins = [sc["E"][c] - sc["N"][c] for c in conds]
++    out["margin_mean"] = mean(margins)
++    out["margin_pos"] = sum(x > 0 for x in margins)
++    out["n_conds"] = len(conds)
++    return out
++
++
++NUMERIC = ["drift_own", "drift_own_E", "drift_own_N", "drift_vs_packet", "ba_mean", "worst_ctx_acc",
++           "flips_vs_packet", "fn_E", "fp_N", "margin_mean", "margin_pos"]
++
++
++def case_aggregate(per_cs, keys=NUMERIC):
++    """per_cs: {(case,seq): metrics}. case 안 sequence 평균 → case 평균. 원시 값도 반환."""
++    cases = sorted({c for c, _ in per_cs})
++    per_case = {c: {k: mean(v[k] for (cc, _), v in per_cs.items() if cc == c) for k in keys} for c in cases}
++    return {"case_mean": {k: mean(per_case[c][k] for c in cases) for k in keys},
++            "per_case": per_case, "n_cases": len(cases), "n_case_sequences": len(per_cs)}
++
++
++def abstain_p13(concat):
++    """P1/P3 결정이 같을 때만 답. 반환: 각 S에 대한 (answered, correct)."""
++    res = {}
++    for S in ["E", "N"]:
++        a, b = concat[S]["P1"] > 0, concat[S]["P3"] > 0
++        ans = a == b
++        res[S] = {"answered": ans, "correct": ans and correct(concat[S]["P1"], S)}
++    return res
++
++
++def summarize_abstain(per_cs):
++    cases = sorted({c for c, _ in per_cs})
++
++    def agg(items):
++        n = len(items)
++        ans = sum(i["answered"] for i in items)
++        cor = sum(i["correct"] for i in items)
++        return {"n": n, "answered": ans, "coverage": ans / n, "selective_error": (ans - cor) / ans if ans else None,
++                "correct_over_all": cor / n}
++    per_case = {c: agg([v[S] for (cc, _), v in per_cs.items() if cc == c for S in v]) for c in cases}
++    covs = [per_case[c]["coverage"] for c in cases]
++    alls = [per_case[c]["correct_over_all"] for c in cases]
++    return {"per_case": per_case, "pooled": agg([v[S] for v in per_cs.values() for S in v]),
++            "case_mean_coverage": mean(covs), "case_mean_correct_over_all": mean(alls)}
++
++
++def main():
++    ap = argparse.ArgumentParser()
++    ap.add_argument("--out", type=Path, required=True)
++    a = ap.parse_args()
++    out = a.out
++    labels, manifest, P = load(out)
++    all_missing = []
++    per_method = {m: {} for m in METHODS}
++    raw = {}
++    p13 = {"ensemble": {}, "concat": {}, "paired": {}}
++    abst = {}
++    for cs in manifest["case_sequences"]:
++        key = (cs["case"], cs["sequence"])
++        res, missing = method_scores(cs, P)
++        all_missing += missing
++        if missing:
++            continue
++        raw["|".join(key)] = {m: res[m] for m in METHODS}
++        for m in METHODS:
++            per_method[m][key] = cs_metrics(res[m], res["concat"])
++        ens = {S: {"P13": (res["concat"][S]["P1"] + res["concat"][S]["P3"]) / 2} for S in ["E", "N"]}
++        # 2-order ensemble: 단일 pseudo-condition. drift는 packet-only 대비
++        p13["ensemble"][key] = {
++            "drift_vs_packet": mean(abs(ens[S]["P13"] - res["concat"][S]["P0"]) for S in ["E", "N"]),
++            "ba_mean": (correct(ens["E"]["P13"], "E") + correct(ens["N"]["P13"], "N")) / 2,
++            "worst_ctx_acc": mean(correct(ens[S]["P13"], S) for S in ["E", "N"])}
++        for m in ["concat", "paired"]:
++            p13[m][key] = {
++                "drift_vs_packet": mean(abs(res[m][S][c] - res["concat"][S]["P0"]) for S in ["E", "N"] for c in ["P1", "P3"]),
++                "ba_mean": mean((correct(res[m]["E"][c], "E") + correct(res[m]["N"][c], "N")) / 2 for c in ["P1", "P3"]),
++                "worst_ctx_acc": mean(all(correct(res[m][S][c], S) for c in ["P1", "P3"]) for S in ["E", "N"])}
++        abst[key] = abstain_p13(res["concat"])
++
++    metrics = {"n_predictions_ok": len(P), "missing_ids": all_missing, "oracle": {m: METHODS[m][0] for m in METHODS},
++               "method_desc": {m: METHODS[m][1] for m in METHODS}}
++    if all_missing:
++        print("누락 요청:", len(all_missing), all_missing[:5])
++    agg = {m: case_aggregate(per_method[m]) for m in METHODS}
++    metrics["methods"] = {m: {"aggregate": agg[m], "per_case_sequence": {"|".join(k): v for k, v in per_method[m].items()}}
++                          for m in METHODS}
++    metrics["p1_p3"] = {m: case_aggregate(p13[m], ["drift_vs_packet", "ba_mean", "worst_ctx_acc"]) for m in p13}
++    metrics["abstain_p1_p3"] = summarize_abstain(abst)
++    metrics["abstain_p1_p3"]["per_case_sequence"] = {"|".join(k): v for k, v in abst.items()}
++
++    # ---- 반복 오차
++    reps = []
++    for rid, r in P.items():
++        if r["kind"] == "repeat":
++            base = rid.replace("|repeat|", "|concat|")
++            if base in P:
++                reps.append({"id": rid, "abs_diff": abs(r["m"] - P[base]["m"]),
++                             "same_input_hash": r["input_sha256"] == P[base]["input_sha256"]})
++    # 입력 hash가 같은 서로 다른 요청(IAF 결과가 다른 입력과 같아진 경우 등)도 반복 측정으로 사용
++    by_hash = {}
++    for rid, r in P.items():
++        by_hash.setdefault(r["input_sha256"], []).append(r["m"])
++    hash_dups = [max(v) - min(v) for v in by_hash.values() if len(v) > 1]
++    rep_max = max([x["abs_diff"] for x in reps] + hash_dups) if (reps or hash_dups) else None
++    metrics["repeatability"] = {"n_repeat_pairs": len(reps), "max_abs_diff": max((x["abs_diff"] for x in reps), default=None),
++                                "n_identical_hash_groups": len(hash_dups), "max_abs_diff_identical_hash": max(hash_dups, default=None),
++                                "rep_err_max": rep_max, "pairs": reps}
++
++    # ---- 사전 진행 기준
++    c1_rows = []
++    for key, raw_m in raw.items():
++        c = raw_m["concat"]
++        c1_rows.append({"cs": key, "margin_P0": c["E"]["P0"] - c["N"]["P0"],
++                        "ba_P0": (correct(c["E"]["P0"], "E") + correct(c["N"]["P0"], "N")) / 2})
++    ba_p0_case = {}
++    for r in c1_rows:
++        ba_p0_case.setdefault(r["cs"].split("|")[0], []).append(r["ba_P0"])
++    ba_p0 = mean(mean(v) for v in ba_p0_case.values())
++    n_margin = sum(r["margin_P0"] > 0 for r in c1_rows)
++    crit1 = {"rows": c1_rows, "n_margin_positive": n_margin, "n_case_sequences": len(c1_rows),
++             "ba_P0_case_mean": ba_p0, "pass": n_margin >= 4 and ba_p0 >= 0.67}
++
++    thr = max(0.5, rep_max or 0.0)
++    c2_cases = {}
++    c2_rows = []
++    for key, raw_m in raw.items():
++        c = raw_m["concat"]
++        case = key.split("|")[0]
++        for S in ["E", "N"]:
++            for c2 in ["P2", "P3"]:
++                d = c[S][c2] - c[S]["P1"]
++                flip = (c[S][c2] > 0) != (c[S]["P1"] > 0)
++                hit = (flip and abs(d) > (rep_max or 0.0)) or abs(d) >= thr
++                c2_rows.append({"cs": key, "S": S, "pair": f"P1-{c2}", "diff": d, "flip": flip, "hit": hit})
++                c2_cases[case] = c2_cases.get(case, False) or hit
++    crit2 = {"rows": c2_rows, "threshold_abs": thr, "rep_err_max": rep_max,
++             "cases_hit": [k for k, v in c2_cases.items() if v], "pass": sum(c2_cases.values()) >= 2}
++
++    ca, pa = agg["concat"], agg["paired"]
++    red = 1 - pa["case_mean"]["drift_own"] / ca["case_mean"]["drift_own"] if ca["case_mean"]["drift_own"] else None
++    same_dir = [c for c in ca["per_case"] if pa["per_case"][c]["drift_own"] < ca["per_case"][c]["drift_own"]]
++    crit3 = {"drift_concat": ca["case_mean"]["drift_own"], "drift_paired": pa["case_mean"]["drift_own"],
++             "reduction": red, "cases_reduced": same_dir,
++             "reduction_E": 1 - pa["case_mean"]["drift_own_E"] / ca["case_mean"]["drift_own_E"],
++             "reduction_N": 1 - pa["case_mean"]["drift_own_N"] / ca["case_mean"]["drift_own_N"],
++             "ba_concat": ca["case_mean"]["ba_mean"], "ba_paired": pa["case_mean"]["ba_mean"],
++             "worst_concat": ca["case_mean"]["worst_ctx_acc"], "worst_paired": pa["case_mean"]["worst_ctx_acc"]}
++    crit3["pass"] = bool(red is not None and red >= 0.25 and len(same_dir) >= 2
++                         and crit3["ba_paired"] >= crit3["ba_concat"] and crit3["worst_paired"] >= crit3["worst_concat"])
++    metrics["criteria"] = {"1_measurability": crit1, "2_instability": crit2, "3_paired_promise": crit3}
++
++    # ---- 비용 (P1-P6, E/N 결정당)
++    cost = {}
++    def tok(kind, S, c, case, seq):
++        r = P.get(f"{case}|{seq}|{kind}|{S}|{c}")
++        return (r["n_image_tokens"], r["latency_s"]) if r else (None, None)
++    rows = {m: {"fwd": [], "img_tok": [], "lat": []} for m in ["concat", "paired", "single", "iaf", "ensemble_p13"]}
++    for cs in manifest["case_sequences"]:
++        case, seq = cs["case"], cs["sequence"]
++        sl = {sid: P.get(f"{case}|{seq}|single|{sv['role']}|{sid}") for sid, sv in cs["slices"].items()}
++        for S in ["E", "N"]:
++            for c in CTX:
++                t, l = tok("concat", S, c, case, seq)
++                tr, lr = tok("concat", "R", c, case, seq)
++                if t is None or tr is None:
++                    continue
++                rows["concat"]["fwd"].append(1); rows["concat"]["img_tok"].append(t); rows["concat"]["lat"].append(l)
++                rows["paired"]["fwd"].append(2); rows["paired"]["img_tok"].append(t + tr); rows["paired"]["lat"].append(l + lr)
++                u =list(dict.fromkeys(build_sequence(c, cs["packets"], S)))
++                if all(sl[s] for s in u):
++                    rows["single"]["fwd"].append(len(u)); rows["single"]["img_tok"].append(256 * len(u))
++                    rows["single"]["lat"].append(sum(sl[s]["latency_s"] for s in u))
++                ti, li = tok("iaf", S, c, case, seq)
++                if ti is not None:
++                    rows["iaf"]["fwd"].append(1); rows["iaf"]["img_tok"].append(ti); rows["iaf"]["lat"].append(li)
++            t1, l1 = tok("concat", S, "P1", case, seq)
++            t3, l3 = tok("concat", S, "P3", case, seq)
++            if t1 is not None and t3 is not None:
++                rows["ensemble_p13"]["fwd"].append(2); rows["ensemble_p13"]["img_tok"].append(t1 + t3)
++                rows["ensemble_p13"]["lat"].append(l1 + l3)
++    for m, v in rows.items():
++        cost[m] = {k: (mean(x) if x else None) for k, x in v.items()} | {"n": len(v["fwd"])}
++    cost["_note"] = ("결정 1개(E/N packet × P1-P6)당 평균. paired의 m(R) P0 1회는 case-sequence당 공유라 제외. "
++                     "single은 unique slice 단독 forward 수(같은 volume 안에서 캐시 재사용 가능). ensemble_p13은 P1/P3 결정당.")
++    metrics["cost"] = cost
++
++    # ---- IAF 근거 보존
++    iaf_rows = [dict(r, cs=f"{cs['case']}|{cs['sequence']}") for cs in manifest["case_sequences"] for r in cs["iaf"]]
++    e_rows = [r for r in iaf_rows if r["packet"] == "E" and r["cond"] != "P0"]
++    metrics["iaf_retention"] = {
++        "E_evidence_slices_kept_frac_P1_P6": sum(r["evidence_kept"] for r in e_rows) / sum(r["evidence_in"] for r in e_rows),
++        "E_inputs_with_zero_evidence_P1_P6": sum(r["evidence_kept"] == 0 for r in e_rows), "n_E_inputs_P1_P6": len(e_rows),
++        "mean_slices_kept_frac": mean(r["n_kept"] / r["n_in"] for r in iaf_rows), "rows": iaf_rows}
++
++    # ---- scoring 검증, 생성 확인
++    ver = [r for r in P.values() if "verify" in r]
++    gen = [r for r in P.values() if "generation" in r]
++    metrics["scoring_verification"] = {
++        "n": len(ver), "max_abs_diff_teacher_forced_vs_lastlogit": max((r["verify"]["abs_diff_m_vs_lastlogit"] for r in ver), default=None),
++        "sign_agree_with_nl_eot_continuation": sum((r["verify"]["m_with_nl_eot"] > 0) == (r["m"] > 0) for r in ver),
++        "min_p_yes_plus_no": min(r["p_yes_plus_no"] for r in P.values()),
++        "mean_p_yes_plus_no": mean(r["p_yes_plus_no"] for r in P.values()),
++        "rows": [{"id": r["id"], "m": r["m"], **r["verify"]} for r in ver]}
++    metrics["generation_check"] = {
++        "n": len(gen), "n_parsed": sum(r["generation"]["gen_parsed"] != "unparsed" for r in gen),
++        "n_agree": sum(r["generation"]["gen_agrees_with_score"] for r in gen),
++        "n_hit_max": sum(r["generation"]["gen_hit_max"] for r in gen),
++        "rows": [{"id": r["id"], "m": r["m"], "text": r["generation"]["gen_text_raw"],
++                  "parsed": r["generation"]["gen_parsed"], "agree": r["generation"]["gen_agrees_with_score"]} for r in gen]}
++    metrics["runtime"] = {"peak_mem_gb_max": max(r["peak_mem_gb"] for r in P.values()),
++                          "latency_s_total": sum(r["latency_s"] for r in P.values()),
++                          "kinds": {k: sum(r["kind"] == k for r in P.values()) for k in ["concat", "single", "iaf", "repeat"]}}
++    budget = json.loads((out / "budget.json").read_text())
++    metrics["budget"] = {"device_minutes_total": sum(r["device_minutes"] for r in budget["runs"]), "runs": budget["runs"]}
++    metrics["raw_scores"] = raw
++    (out / "metrics.json").write_text(json.dumps(metrics, indent=1, ensure_ascii=False))
++    print(json.dumps({k: metrics["criteria"][k]["pass"] for k in metrics["criteria"]}, ensure_ascii=False))
++    for m in METHODS:
++        cm = agg[m]["case_mean"]
++        print(f"{m:20s} oracle={METHODS[m][0]!s:5s} drift_own={cm['drift_own']:.3f} (E {cm['drift_own_E']:.3f} N {cm['drift_own_N']:.3f}) "
++              f"drift_vs_pk={cm['drift_vs_packet']:.3f} BA={cm['ba_mean']:.3f} worst={cm['worst_ctx_acc']:.3f} "
++              f"flips={cm['flips_vs_packet']:.2f}/12 margin={cm['margin_mean']:.2f}")
++
++
++if __name__ == "__main__":
++    main()
+diff --git a/build_context_manifest.py b/build_context_manifest.py
+new file mode 100644
+index 0000000..7424331
+--- /dev/null
++++ b/build_context_manifest.py
+@@ -0,0 +1,176 @@
++"""iter_003 context pilot: 추론 전 manifest·config·slice PNG·요청 목록·평가 label을 만든다 (CPU).
++
++모델 입력(requests.jsonl: slice 순서와 sequence만)과 평가 label(labels.json)을 분리해 저장한다.
++실행: python research/build_context_manifest.py --out research/results/iter_003
++"""
++import argparse
++import json
++from pathlib import Path
++
++import numpy as np
++from PIL import Image
++
++from context_pilot import data as D
++
++SEED = 0  # 선택 규칙은 결정적이며 랜덤을 쓰지 않는다. 기록용.
++
++
++def overlay(rgb, mask):
++    o = rgb.astype(np.float32).copy()
++    m = mask > 0
++    o[m] = 0.55 * o[m] + 0.45 * np.array([255, 0, 0], np.float32)
++    return o.astype(np.uint8)
++
++
++def save_montage(path, tiles, labels):
++    from PIL import ImageDraw
++    h, w = tiles[0].shape[:2]
++    cols = 5
++    rows = (len(tiles) + cols - 1) // cols
++    canvas = Image.new("RGB", (cols * w, rows * (h + 14)), (0, 0, 0))
++    dr = ImageDraw.Draw(canvas)
++    for i, (t, lab) in enumerate(zip(tiles, labels)):
++        r, c = divmod(i, cols)
++        canvas.paste(Image.fromarray(t), (c * w, r * (h + 14) + 14))
++        dr.text((c * w + 2, r * (h + 14) + 1), lab, fill=(255, 255, 0))
++    canvas.save(path)
++
++
++def main():
++    ap = argparse.ArgumentParser()
++    ap.add_argument("--out", type=Path, required=True)
++    a = ap.parse_args()
++    out = a.out
++    (out / "slices").mkdir(parents=True, exist_ok=True)
++    (out / "montage").mkdir(parents=True, exist_ok=True)
++
++    config = {
++        "iteration": "iter_003", "seed": SEED, "cases": D.CASES, "sequences": D.SEQS,
++        "seq_text": D.SEQ_TEXT, "prompt_intro": D.PROMPT_INTRO, "prompt_question": D.PROMPT_QUESTION,
++        "candidates": D.CANDIDATES, "conditions": D.CONDITIONS,
++        "selection_rule": {
++            "E": "seg>0 면적 상위 2 slice (동률 z 오름차순). 전체 종양 annotation 합집합(NCR/ED/ET)",
++            "empty_eligibility": f"z <= zmin-{D.EMPTY_MIN_GAP} 또는 z >= zmax+{D.EMPTY_MIN_GAP}, "
++                                 f"비영점 영상 면적 >= {D.EMPTY_MIN_AREA_FRAC} x volume 최대",
++            "empty_ranking": "|slice 영상 면적 - E 두 slice 평균 영상 면적| 오름차순, 동률 z 오름차순",
++            "empty_assignment": "순위 1..8을 N,R,A,B,N,R,A,B로 round-robin 배정",
++            "insufficient": "적격 8개 미만이면 case-sequence 제외 (기준 완화 없음)",
++        },
++        "orientation": "nib.as_closest_canonical(RAS) 후 axial slice.T[::-1, ::-1] (radiological, anterior 위)",
++        "intensity": "case-sequence별 비영점 voxel 1/99 percentile window -> uint8, RGB 복제",
++        "image_size_to_model": "240x240 PNG, processor가 896x896로 resize (resample=2 bilinear, pan-and-scan 없음)",
++        "iaf": {"gamma": D.IAF_GAMMA, "space": "[0,1] RGB, 240x240 native", "rule": "현재 anchor와 mean L1 > gamma이면 유지 후 anchor 갱신"},
++        "model_id": "google/medgemma-1.5-4b-it", "dtype": "bfloat16",
++        "budget_device_minutes": 55,
++        "budget_reduction_rule": "예비 속도로 추정한 총 비용이 예산 초과면 전체를 T1CE만 실행, 그것도 초과면 미완료 기록 후 중단",
++        "decision_rule": "m = logP(Yes) - logP(No) > 0 이면 Yes",
++    }
++
++    manifest = {"case_sequences": [], "excluded_case_sequences": []}
++    requests, labels = [], {}
++    for case in D.CASES:
++        for seq in D.SEQS:
++            vol, seg, info = D.load_canonical(case, seq)
++            lo, hi = D.window_params(vol)
++            sel, records, meta = D.select_slices(vol, seg)
++            cs = {"case": case, "sequence": seq,
++                  "source": {k: {"path": str(D.src_path(case, k)), "sha256": D.sha256_file(D.src_path(case, k))}
++                             for k in (seq, "seg")},
++                  "orientation": info, "window_lo_hi": [lo, hi], **meta, "z_records": records}
++            if sel is None:
++                cs["excluded_reason"] = f"적격 empty slice {meta['n_eligible_empty']}개 < 8"
++                manifest["excluded_case_sequences"].append(cs)
++                continue
++            slices = {}
++            packets = {}
++            for role, zs in sel.items():
++                packets[role] = []
++                for z in zs:
++                    sid = f"{case}_{seq}_z{z:03d}"
++                    rgb = D.to_rgb_uint8(D.display_2d(vol, z), lo, hi)
++                    msk = D.display_2d(seg, z)
++                    p = out / "slices" / f"{sid}.png"
++                    Image.fromarray(rgb).save(p)
++                    slices[sid] = {"z": z, "role": role, "png": str(p), "pixel_sha256": D.sha256_array(rgb),
++                                   "seg_area": int((msk > 0).sum()), "img_area_nonzero": int((D.display_2d(vol, z) > 0).sum()),
++                                   "_rgb": rgb, "_mask": msk}
++                    packets[role].append(sid)
++            order = [s for r in ["E", "N", "R", "A", "B"] for s in packets[r]]
++            save_montage(out / "montage" / f"{case}_{seq}.png",
++                         [overlay(slices[s]["_rgb"], slices[s]["_mask"]) for s in order],
++                         [f"{slices[s]['role']} z{slices[s]['z']} seg{slices[s]['seg_area']}" for s in order])
++
++            def add(kind, packet, cond, sids, extra=None):
++                rid = f"{case}|{seq}|{kind}|{packet}|{cond}"
++                h = D.sha256_array(np.frombuffer(json.dumps(
++                    [D.PROMPT_INTRO.format(seq_text=D.SEQ_TEXT[seq]), D.PROMPT_QUESTION]
++                    + [slices[s]["pixel_sha256"] for s in sids]).encode(), np.uint8))
++                r = {"id": rid, "case": case, "sequence": seq, "kind": kind, "cond": cond,
++                     "packet": packet, "slice_ids": sids, "slice_png": [slices[s]["png"] for s in sids],
++                     "n_images": len(sids), "input_sha256": h}
++                if extra:
++                    r.update(extra)
++                requests.append(r)
++                # 평가 label은 모델 입력과 분리 (E=Yes, N=No, R=reference·No)
++                labels[rid] = {"packet_role": packet, "gold": "Yes" if packet == "E" else "No"}
++
++            for s_role in ["E", "N", "R"]:
++                for cond in D.CONDITIONS:
++                    add("concat", s_role, cond, D.build_sequence(cond, packets, s_role))
++            for sid, sv in slices.items():
++                add("single", sv["role"], sid, [sid])
++            iaf_rec = []
++            for s_role in ["E", "N"]:
++                for cond in D.CONDITIONS:
++                    sids = D.build_sequence(cond, packets, s_role)
++                    keep = D.iaf_keep([slices[s]["_rgb"].astype(np.float32) / 255.0 for s in sids])
++                    kept = [sids[i] for i in keep]
++                    rec = {"packet": s_role, "cond": cond, "n_in": len(sids), "n_kept": len(kept),
++                           "kept": kept, "evidence_kept": sum(s in packets[s_role] for s in kept),
++                           "evidence_in": len(packets[s_role]), "identical_to_concat": kept == sids}
++                    iaf_rec.append(rec)
++                    if cond == "P0" and kept == sids:
++                        continue  # P0에서 제거가 없으면 concat P0 점수를 그대로 사용 (추가 GPU 없음)
++                    add("iaf", s_role, cond, kept, {"iaf_n_in": len(sids)})
++            for s_role in ["E", "N"]:  # 동일 입력 반복 오차 측정용
++                for cond in ["P1", "P3"]:
++                    add("repeat", s_role, cond, D.build_sequence(cond, packets, s_role))
++            # 인접 slice mean L1 (IAF 해석용)
++            l1 = {}
++            for r1 in packets:
++                for r2 in packets:
++                    for s1 in packets[r1]:
++                        for s2 in packets[r2]:
++                            if s1 < s2:
++                                l1[f"{s1}~{s2}"] = float(np.abs(slices[s1]["_rgb"].astype(np.float32)
++                                                                 - slices[s2]["_rgb"].astype(np.float32)).mean() / 255.0)
++            for sv in slices.values():
++                sv.pop("_rgb")
++                sv.pop("_mask")
++            cs.update({"packets": packets, "slices": slices, "iaf": iaf_rec, "pairwise_mean_l1": l1})
++            manifest["case_sequences"].append(cs)
++
++    included_cases = {c["case"] for c in manifest["case_sequences"]}
++    manifest["gpu_go"] = all(c in included_cases for c in D.CASES)
++    (out / "config.json").write_text(json.dumps(config, indent=1, ensure_ascii=False))
++    (out / "manifest.json").write_text(json.dumps(manifest, indent=1, ensure_ascii=False))
++    (out / "labels.json").write_text(json.dumps(labels, indent=1, ensure_ascii=False))
++    with open(out / "requests.jsonl", "w") as f:
++        for r in requests:
++            f.write(json.dumps(r, ensure_ascii=False) + "\n")
++    kinds = {}
++    for r in requests:
++        kinds[r["kind"]] = kinds.get(r["kind"], 0) + 1
++    print("case-seq 포함", len(manifest["case_sequences"]), "제외", len(manifest["excluded_case_sequences"]),
++          "gpu_go", manifest["gpu_go"])
++    print("requests", len(requests), kinds, "images total", sum(r["n_images"] for r in requests))
++    for c in manifest["case_sequences"]:
++        print(c["case"], c["sequence"], "annot", c["annot_z_range"], "eligible", c["n_eligible_empty"],
++              {k: [c["slices"][s]["z"] for s in v] for k, v in c["packets"].items()},
++              "IAF evidence kept", [(r["packet"], r["cond"], r["evidence_kept"], r["n_kept"], r["n_in"]) for r in c["iaf"]])
++    for c in manifest["excluded_case_sequences"]:
++        print("EXCLUDED", c["case"], c["sequence"], c["excluded_reason"])
++
++
++if __name__ == "__main__":
++    main()
+diff --git a/context_pilot/__init__.py b/context_pilot/__init__.py
+new file mode 100644
+index 0000000..b49d674
+--- /dev/null
++++ b/context_pilot/__init__.py
+@@ -0,0 +1 @@
++"""iter_003 3D 근거 보존 context 안정화 pilot (BraTS 3 case, T1CE/T2)."""
+diff --git a/context_pilot/data.py b/context_pilot/data.py
+new file mode 100644
+index 0000000..61fcd1e
+--- /dev/null
++++ b/context_pilot/data.py
+@@ -0,0 +1,153 @@
++"""BraTS volume 로딩, slice 선택, packet/조건 구성, IAF. GPU·모델 없음.
++
++- 영상과 seg를 같은 방식(nib.as_closest_canonical, 보간 없는 축 뒤집기/전치)으로 RAS로 바꾼다.
++- 표시 방향은 radiological(환자 오른쪽이 영상 왼쪽, anterior가 위)로 고정한다.
++- intensity는 case-sequence별 비영점 voxel 1/99 percentile을 한 번 정해 모든 slice에 쓴다.
++"""
++import hashlib
++from pathlib import Path
++
++import nibabel as nib
++import numpy as np
++
++BRATS_ROOT = Path("/SSD1_1TB/home/milab/daniel/08_medgemma/hf_cache/hub/datasets--obi77--brats23-first-10-examples/"
++                  "snapshots/26e33d5e9644e735f043bd4e0c7759e9dae494ac/ASNR-MICCAI-BraTS2023-GLI-Challenge-TrainingData")
++CASES = ["BraTS-GLI-00000-000", "BraTS-GLI-00002-000", "BraTS-GLI-00005-000"]
++SEQS = ["t1c", "t2w"]
++SEQ_TEXT = {"t1c": "post-contrast T1-weighted (T1CE)", "t2w": "T2-weighted (T2)"}
++EMPTY_MIN_GAP = 5          # annotation z 범위에서 최소 거리
++EMPTY_MIN_AREA_FRAC = 0.25  # volume 최대 비영점 면적 대비
++EMPTY_ROLES = ["N", "R", "A", "B"]
++IAF_GAMMA = 0.05
++# 모든 입력에 같은 문장을 쓴다 (packet 역할·파일명·GT·case는 넣지 않음, contiguous라고 하지 않음)
++PROMPT_INTRO = ("The following images are axial slices from a {seq_text} brain MRI of one patient. "
++                "The slices are not necessarily contiguous, and the same slice may appear more than once.")
++PROMPT_QUESTION = ("Is there a tumor-associated abnormality visible in these images? "
++                   "Answer with only Yes or No.")
++CANDIDATES = {"Yes": "Yes", "No": "No"}
++CONDITIONS = {  # 조건 -> packet 순서 (S는 근거 packet 자리)
++    "P0": ["S"],
++    "P1": ["A", "S"],
++    "P2": ["B", "S"],
++    "P3": ["S", "A"],
++    "P4": ["A", "A", "S"],
++    "P5": ["A", "B", "S"],
++    "P6": ["A", "B", "A", "B", "S"],
++}
++
++
++def sha256_file(p):
++    h = hashlib.sha256()
++    with open(p, "rb") as f:
++        for chunk in iter(lambda: f.read(1 << 20), b""):
++            h.update(chunk)
++    return h.hexdigest()
++
++
++def sha256_array(a):
++    return hashlib.sha256(np.ascontiguousarray(a).tobytes()).hexdigest()
++
++
++def src_path(case, kind):
++    return BRATS_ROOT / case / f"{case}-{kind}.nii.gz"
++
++
++def load_canonical(case, seq):
++    """영상·seg를 같은 canonical 변환으로 읽고 정렬을 검증한다."""
++    im = nib.load(str(src_path(case, seq)))
++    sg = nib.load(str(src_path(case, "seg")))
++    info = {"orig_shape_img": list(im.shape), "orig_shape_seg": list(sg.shape),
++            "orig_axcodes_img": list(nib.aff2axcodes(im.affine)),
++            "orig_axcodes_seg": list(nib.aff2axcodes(sg.affine)),
++            "orig_affine_equal": bool(np.allclose(im.affine, sg.affine, atol=1e-4))}
++    if im.shape != sg.shape or not info["orig_affine_equal"]:
++        raise ValueError(f"{case}/{seq}: 영상-seg shape/affine 불일치 {info}")
++    imc, sgc = nib.as_closest_canonical(im), nib.as_closest_canonical(sg)
++    info.update({"canon_axcodes": list(nib.aff2axcodes(imc.affine)),
++                 "canon_affine_equal": bool(np.allclose(imc.affine, sgc.affine, atol=1e-4)),
++                 "canon_shape": list(imc.shape)})
++    assert info["canon_affine_equal"] and info["canon_axcodes"] == ["R", "A", "S"]
++    vol = np.asarray(imc.dataobj).astype(np.float32)
++    seg = np.asarray(sgc.dataobj).astype(np.float32)
++    return vol, seg, info
++
++
++def display_2d(a3d, z):
++    """RAS 배열 [x,y,z]의 axial slice -> (row=anterior 위, col=환자 오른쪽이 왼쪽) radiological."""
++    return a3d[:, :, z].T[::-1, ::-1]
++
++
++def window_params(vol):
++    nz = vol[vol > 0]
++    lo, hi = float(np.percentile(nz, 1)), float(np.percentile(nz, 99))
++    if hi <= lo:
++        hi = lo + 1.0
++    return lo, hi
++
++
++def to_rgb_uint8(sl, lo, hi):
++    v = (np.clip(sl, lo, hi) - lo) / (hi - lo) * 255.0
++    g = np.round(v).astype(np.uint8)
++    return np.stack([g] * 3, axis=-1)
++
++
++def select_slices(vol, seg):
++    """E: seg>0 면적 상위 2 slice (동률은 z). 빈 slice: 규칙 적용 후 E 영상 면적과 가까운 순 8개.
++
++    반환: (selection dict, per-z 제외 기록). 부족하면 selection=None.
++    """
++    seg_area = (seg > 0).sum(axis=(0, 1)).astype(int)
++    img_area = (vol > 0).sum(axis=(0, 1)).astype(int)
++    zs = np.nonzero(seg_area)[0]
++    zmin, zmax = int(zs.min()), int(zs.max())
++    order = sorted(range(len(seg_area)), key=lambda z: (-seg_area[z], z))
++    e = sorted(order[:2])
++    target = float(np.mean([img_area[z] for z in e]))
++    max_area = int(img_area.max())
++    records, cands = [], []
++    for z in range(vol.shape[2]):
++        reasons = []
++        if seg_area[z] > 0:
++            reasons.append("annotated")
++        elif zmin - EMPTY_MIN_GAP < z < zmax + EMPTY_MIN_GAP:
++            reasons.append(f"within_{EMPTY_MIN_GAP}_of_annotation_range")
++        if img_area[z] < EMPTY_MIN_AREA_FRAC * max_area:
++            reasons.append("image_area_below_25pct_max")
++        records.append({"z": z, "seg_area": int(seg_area[z]), "img_area": int(img_area[z]),
++                        "eligible_empty": not reasons, "exclusion_reasons": reasons})
++        if not reasons:
++            cands.append(z)
++    ranked = sorted(cands, key=lambda z: (abs(img_area[z] - target), z))
++    meta = {"annot_z_range": [zmin, zmax], "img_area_max": max_area, "E_target_img_area": target,
++            "n_eligible_empty": len(cands), "ranked_empty_candidates": ranked}
++    if len(ranked) < 2 * len(EMPTY_ROLES):
++        return None, records, meta
++    sel = {"E": e}
++    # 순위 1..8을 N,R,A,B,N,R,A,B로 round-robin 배정 (한 역할에 가장 유사한 후보가 몰리지 않도록)
++    for i, role in enumerate(EMPTY_ROLES):
++        sel[role] = sorted([ranked[i], ranked[i + len(EMPTY_ROLES)]])
++    return sel, records, meta
++
++
++def build_sequence(cond, packets, s_role):
++    """조건과 packet 정의로 slice id 순서 목록을 만든다."""
++    out = []
++    for p in CONDITIONS[cond]:
++        out += packets[s_role if p == "S" else p]
++    return out
++
++
++def iaf_keep(images, gamma=IAF_GAMMA):
++    """MedPruner 본문의 inter-slice anchor filtering만 구현.
++
++    images: [0,1] RGB float 배열 목록. 첫 slice를 anchor로 유지하고, 이후 slice는 현재 anchor와의
++    mean L1이 gamma를 초과하면 유지하며 새 anchor가 된다. 유지 index 목록을 반환.
++    """
++    if not images:
++        return []
++    keep, anchor = [0], images[0]
++    for i in range(1, len(images)):
++        if float(np.abs(images[i] - anchor).mean()) > gamma:
++            keep.append(i)
++            anchor = images[i]
++    return keep
+diff --git a/notes/related_work_iter003.md b/notes/related_work_iter003.md
+new file mode 100644
+index 0000000..1b15111
+--- /dev/null
++++ b/notes/related_work_iter003.md
+@@ -0,0 +1,31 @@
++# iter_003 선행 연구 노트 (context 안정화 방향)
++
++출처: `agent/runs/iter_003/think/round_01~04`와 `plan.md`. GPT 사고 라운드에서 확인한 범위를 옮겨 적은 것이며,
++이번 반복에서 Claude가 원문을 다시 열어 검증하지는 않았다 (shell HTTP 확인은 이전 라운드에서 DNS 오류).
++`agent/PAPERS.md`는 존재하지 않는다 (2026-09-24 확인).
++
++## 가장 가까운 선행 연구
++- **Stable Evidence, Unstable Decisions** (Findings of ACL 2026): 병변 근거를 유지한 presentation(FullVolume/ROISlices/ROICrops)
++  변화에서 MedGemma-1.5-4B-IT의 decision flip 보고 (T1CE 35.8%/61.0%, T2 14.1%/75.0%; UNSURE 전환 포함). 해결 방법은 없음.
++  → 불안정성 자체는 신규 발견이 아님. https://aclanthology.org/2026.findings-acl.1303/
++- **MedPruner v2** (2026 preprint, 저자 코드 공개): anchor와 pixel L1 차이 기반 slice filtering(IAF, `gamma=0.05`),
++  attention 기반 token 선택(`tau=0.9`), 잔여 token 집계. MedGemma-1.5-4B 평가 포함.
++  v1 당시 판단(코드 미공개)을 갱신: 저장소 https://github.com/CUHK-AIM-Group/MedPruner ,
++  설정 https://raw.githubusercontent.com/CUHK-AIM-Group/MedPruner/main/config/config.json , 본문 https://arxiv.org/html/2603.11625v2 .
++  내부 구현 전체는 미검증. 이번 반복은 본문 IAF만 구현했다 (`research/context_pilot/data.py:iaf_keep`).
++- **Evaluating the Diagnostic Robustness…** (2026-08 preprint): reverse/shuffle, ROI 위치, lesion-slice 제거 평가. 모델은 MedGemma-27B라 1.5-4B와 섞지 않음. https://arxiv.org/html/2608.04885v1
++- ICCV 2025 workshop (PMBB): energy·K-center slice selection 비교. 단순 slice 선택은 차별성이 부족.
++
++## 인접 방향 (2D 근거·학습)
++- CORAL (2026-07 preprint): blank/shuffle/hard-negative 교체 평가 + answer invariance 억제 LoRA(GRPO, 4×H100). https://arxiv.org/abs/2607.03647
++- Attention Without Grounding (iMIMIC 2026): occlusion·ROI-delete·무작위 영역 대조군 공개 코드. 기준 모델은 `google/medgemma-4b-it`(1.5 아님).
++- SECOND (ICML 2025): multi-scale patch 선택 + contrastive decoding (LLaVA 기반).
++- MMedPO (ICML 2025): 병변 영역 noising + clinical relevance 가중 DPO. 공개 curation 코드는 논문 수식과 차이 있음.
++- MedGround v2: expert mask 기반 referring grounding 데이터·SFT, 코드·데이터 공개 예정 표기.
++- MedGemma 1.5 Technical Report: https://arxiv.org/abs/2604.05081
++
++## MRI-GBM-MET (확장 후보)
++- 확인: HF root에 `.gitattributes`, `README.md`, 302 MB ZIP. README에 90 subject(GBM 45/MET 45), T1CE/T2, subject별 4 presentation, slice filename으로 대응 설명.
++  https://huggingface.co/datasets/universitytehran/MRI-GBM-MET/tree/main
++- 미확인: ZIP 내부 subject ID·진단 label·mask 대응, license(README metadata에 없음), 공식 split(viewer `train`은 검증된 split 아님).
++- 사용 시 subject 단위로 분리하고 개발 subject를 최종 평가에서 제외해야 한다.
+diff --git a/run_context_pilot.py b/run_context_pilot.py
+new file mode 100644
+index 0000000..be98316
+--- /dev/null
++++ b/run_context_pilot.py
+@@ -0,0 +1,283 @@
++"""iter_003 context pilot 추론: Yes/No 제한 답변 likelihood scoring + 짧은 greedy 생성 확인.
++
++- 입력은 build_context_manifest.py가 만든 requests.jsonl (labels.json은 읽지 않는다).
++- m(X) = log P("Yes"|X,q) - log P("No"|X,q). "Yes"/"No"는 각각 단일 token임을 실행 시 검증하고,
++  단일 token이면 마지막 위치 logits 한 번의 forward가 전체 continuation의 정확한 log-prob이다.
++- 일부 입력은 prompt+candidate를 이어 붙인 독립 teacher-forced forward로 같은 값을 다시 계산해 대조하고,
++  '<end_of_turn>'까지 포함한 2-token continuation 점수도 보조로 기록한다.
++- 한 GPU·한 프로세스. CUDA_VISIBLE_DEVICES가 이미 지정돼 있으면 그대로 쓰고, 없을 때만 여유 메모리가
++  가장 큰 GPU 하나를 스크립트 안에서 지정한다.
++- 누적 device-minutes(로딩 포함)를 budget.json에 기록하고 55분에서 중단한다. 재실행 시 같은 config와
++  input_sha256의 완료 결과만 재사용한다.
++
++실행 예: python research/run_context_pilot.py --out research/results/iter_003 --max-requests 8
++"""
++import argparse
++import hashlib
++import json
++import os
++import subprocess
++import sys
++import time
++from pathlib import Path
++
++T0 = time.time()
++
++
++def pick_gpu():
++    if os.environ.get("CUDA_VISIBLE_DEVICES"):
++        return os.environ["CUDA_VISIBLE_DEVICES"], "preset"
++    q = subprocess.run(["nvidia-smi", "--query-gpu=index,memory.free", "--format=csv,noheader,nounits"],
++                       capture_output=True, text=True, check=True).stdout
++    free = [tuple(int(x) for x in line.split(",")) for line in q.strip().splitlines()]
++    idx = max(free, key=lambda t: t[1])[0]
++    os.environ["CUDA_VISIBLE_DEVICES"] = str(idx)
++    return str(idx), f"auto(free MiB={dict(free)})"
++
++
++GPU, GPU_HOW = pick_gpu()
++os.environ.setdefault("HF_HOME", "/SSD1_1TB/home/milab/daniel/08_medgemma/hf_cache")
++os.environ["HF_HUB_OFFLINE"] = "1"
++
++import torch  # noqa: E402
++import transformers  # noqa: E402
++from PIL import Image  # noqa: E402
++
++sys.path.insert(0, str(Path(__file__).resolve().parent))
++from context_pilot import data as D  # noqa: E402
++
++MODEL_ID = "google/medgemma-1.5-4b-it"
++SCORER_VERSION = 2  # 1: 예비 실행(보조 continuation = 답+<end_of_turn>), 2: 답+\n+<end_of_turn>
++GEN_PREFIX = [105, 4368, 107]  # "<start_of_turn>model\n"
++
++
++def sha(s):
++    return hashlib.sha256(s.encode()).hexdigest()
++
++
++class Scorer:
++    def __init__(self):
++        torch.manual_seed(0)
++        self.proc = transformers.AutoProcessor.from_pretrained(MODEL_ID)
++        self.model = transformers.AutoModelForImageTextToText.from_pretrained(
++            MODEL_ID, dtype=torch.bfloat16, device_map="cuda:0")
++        self.model.eval()
++        tok = self.proc.tokenizer
++        self.cand = {}
++        for name, text in D.CANDIDATES.items():
++            ids = tok.encode(text, add_special_tokens=False)
++            self.cand[name] = ids
++        assert self.cand["Yes"] != self.cand["No"]
++        self.single = all(len(v) == 1 for v in self.cand.values())
++        self.eot = tok.convert_tokens_to_ids("<end_of_turn>")
++        self.nl = tok.encode("\n", add_special_tokens=False)
++        assert len(self.nl) == 1
++        self.nl = self.nl[0]
++        self.image_token_id = self.model.config.image_token_id
++        self._images = {}
++
++    def env(self):
++        ip = self.proc.image_processor
++        return {"model_id": MODEL_ID, "commit_hash": getattr(self.model.config, "_commit_hash", None),
++                "name_or_path": self.model.config._name_or_path, "transformers": transformers.__version__,
++                "torch": torch.__version__, "gpu_visible": GPU, "gpu_select": GPU_HOW,
++                "gpu_name": torch.cuda.get_device_name(0), "dtype": str(self.model.dtype),
++                "processor_class": type(self.proc).__name__, "image_processor_class": type(ip).__name__,
++                "image_processor": {k: (v if isinstance(v, (int, float, str, bool, list, dict, type(None))) else str(v))
++                                    for k, v in ip.to_dict().items()},
++                "image_seq_length": getattr(self.proc, "image_seq_length", None),
++                "candidate_token_ids": self.cand, "single_token_candidates": self.single,
++                "eot_id": self.eot, "image_token_id": self.image_token_id}
++
++    def image(self, p):
++        if p not in self._images:
++            self._images[p] = Image.open(p).convert("RGB")
++        return self._images[p]
++
++    def inputs(self, req):
++        content = [{"type": "text", "text": D.PROMPT_INTRO.format(seq_text=D.SEQ_TEXT[req["sequence"]])}]
++        content += [{"type": "image", "image": self.image(p)} for p in req["slice_png"]]
++        content.append({"type": "text", "text": D.PROMPT_QUESTION})
++        inp = self.proc.apply_chat_template([{"role": "user", "content": content}], add_generation_prompt=True,
++                                            tokenize=True, return_dict=True, return_tensors="pt")
++        ids = inp["input_ids"][0].tolist()
++        assert ids[-3:] == GEN_PREFIX, "assistant prefix 경계 불일치"
++        return {k: (v.to("cuda", dtype=torch.bfloat16) if k == "pixel_values" else v.to("cuda"))
++                for k, v in inp.items()}
++
++    @torch.inference_mode()
++    def score(self, inp):
++        if not self.single:
++            raise NotImplementedError("다중 token 후보는 teacher_forced 경로를 사용해야 함")
++        out = self.model(**inp, logits_to_keep=1)
++        lp = torch.log_softmax(out.logits[0, -1].float(), -1)
++        ly, ln = lp[self.cand["Yes"][0]].item(), lp[self.cand["No"][0]].item()
++        top = torch.topk(lp, 5)
++        tok = self.proc.tokenizer
++        return {"lp_yes": ly, "lp_no": ln, "m": ly - ln, "p_yes_plus_no": float(torch.exp(lp[self.cand["Yes"][0]])
++                                                                                 + torch.exp(lp[self.cand["No"][0]])),
++                "top5": [[int(i), tok.decode([int(i)]), float(v)] for v, i in zip(top.values, top.indices)]}
++
++    @torch.inference_mode()
++    def teacher_forced(self, inp, cont):
++        """prompt + cont 전체를 한 번에 forward하고 cont token들의 log-prob 합을 계산 (독립 경로)."""
++        ids = inp["input_ids"]
++        add = torch.tensor([cont], device=ids.device, dtype=ids.dtype)
++        full = dict(inp)
++        full["input_ids"] = torch.cat([ids, add], 1)
++        full["attention_mask"] = torch.cat([inp["attention_mask"], torch.ones_like(add)], 1)
++        if "token_type_ids" in inp:
++            full["token_type_ids"] = torch.cat([inp["token_type_ids"], torch.zeros_like(add)], 1)
++        logits = self.model(**full).logits[0].float()
++        L = ids.shape[1]
++        total = 0.0
++        for j, t in enumerate(cont):
++            total += torch.log_softmax(logits[L - 1 + j], -1)[t].item()
++        return total
++
++    @torch.inference_mode()
++    def generate(self, inp, n=8):
++        seq = self.model.generate(**inp, do_sample=False, max_new_tokens=n)
++        new = seq[0, inp["input_ids"].shape[1]:].tolist()
++        tok = self.proc.tokenizer
++        return {"gen_ids": new, "gen_text_raw": tok.decode(new, skip_special_tokens=False),
++                "gen_text": tok.decode(new, skip_special_tokens=True).strip(),
++                "gen_hit_max": len(new) >= n and self.eot not in new}
++
++
++def parse_gen(t):
++    w = t.strip().strip(".,!:;*\"' ").lower()
++    first = w.split()[0].strip(".,!:;*\"'") if w else ""
++    return {"yes": "Yes", "no": "No"}.get(first, "unparsed")
++
++
++def load_budget(path):
++    return json.loads(path.read_text()) if path.exists() else {"limit_device_minutes": 55, "runs": []}
++
++
++def main():
++    ap = argparse.ArgumentParser()
++    ap.add_argument("--out", type=Path, required=True)
++    ap.add_argument("--max-requests", type=int, default=None, help="예비 실행용 요청 수 상한")
++    ap.add_argument("--budget-min", type=float, default=55.0)
++    ap.add_argument("--note", default="")
++    a = ap.parse_args()
++    out = a.out
++    cfg_sha = hashlib.sha256((out / "config.json").read_bytes()).hexdigest()
++    reqs = [json.loads(l) for l in open(out / "requests.jsonl")]
++    pred_path = out / "predictions.jsonl"
++    done = {}
++    if pred_path.exists():
++        for l in open(pred_path):
++            r = json.loads(l)
++            if (r.get("status") == "ok" and r.get("config_sha256") == cfg_sha
++                    and r.get("scorer_version") == SCORER_VERSION):
++                done[(r["id"], r["input_sha256"])] = r
++    budget_path = out / "budget.json"
++    budget = load_budget(budget_path)
++    used_before = sum(r["device_minutes"] for r in budget["runs"])
++    if used_before >= a.budget_min:
++        print(f"예산 소진: {used_before:.2f} device-min", flush=True)
++        return
++
++    # 요청 순서: T1CE 먼저 (예산 축소 규칙이 T1CE만 실행이므로), 예비 실행은 다양한 image 수를 포함
++    def key(r):
++        return (r["sequence"] != "t1c", r["case"], r["kind"] != "concat", r["id"])
++    reqs.sort(key=key)
++    if a.max_requests:
++        pilot_ids = []
++        by_n = {}
++        for r in reqs:
++            by_n.setdefault(r["n_images"], []).append(r)
++        for n in sorted(by_n):
++            pilot_ids += by_n[n][:2]
++        reqs = pilot_ids[:a.max_requests]
++    todo = [r for r in reqs if (r["id"], r["input_sha256"]) not in done]
++
++    sc = Scorer()
++    env = sc.env()
++    (out / f"env_{int(T0)}.json").write_text(json.dumps(env, indent=1, ensure_ascii=False))
++    t_load = time.time() - T0
++    print(f"GPU {GPU} ({GPU_HOW}) loaded in {t_load:.1f}s; todo {len(todo)} / {len(reqs)}; "
++          f"budget used before {used_before:.2f} min", flush=True)
++
++    verify_ids = {r["id"] for r in reqs if r["kind"] == "concat" and r["packet"] in ("E", "N") and r["cond"] in ("P0", "P6")}
++    gen_ids = {r["id"] for r in reqs if r["kind"] == "concat" and r["packet"] in ("E", "N") and r["cond"] == "P0"}
++    timings = []
++    reduced = False
++    stopped = None
++    fout = open(pred_path, "a")
++    for i, r in enumerate(todo):
++        elapsed = (time.time() - T0) / 60
++        if used_before + elapsed >= a.budget_min:
++            stopped = f"budget reached at {used_before + elapsed:.2f} device-min"
++            break
++        if i == 10 and not a.max_requests and not reduced:
++            # 결과를 보지 않고 속도만으로 남은 비용 추정 (image 수에 선형)
++            per_img = sum(t for t, _ in timings) / max(1, sum(n for _, n in timings))
++            rest = sum(x["n_images"] for x in todo[10:]) * per_img / 60
++            extra = (len(gen_ids) + len(verify_ids) * 3) * 0.5 / 60
++            proj = used_before + elapsed + rest + extra
++            print(f"projected total {proj:.2f} device-min (per image {per_img:.3f}s)", flush=True)
++            if proj > a.budget_min:
++                todo = todo[:10] + [x for x in todo[10:] if x["sequence"] == "t1c"]
++                reduced = True
++                print("예산 축소 규칙 적용: T1CE만 실행", flush=True)
++        rec = {k: r[k] for k in ("id", "case", "sequence", "kind", "cond", "packet", "slice_ids", "n_images",
++                                  "input_sha256")}
++        rec["config_sha256"] = cfg_sha
++        rec["scorer_version"] = SCORER_VERSION
++        try:
++            torch.cuda.reset_peak_memory_stats()
++            torch.cuda.synchronize()
++            t = time.time()
++            inp = sc.inputs(r)
++            s = sc.score(inp)
++            torch.cuda.synchronize()
++            dt = time.time() - t
++            rec.update(s)
++            rec.update({"status": "ok", "latency_s": dt, "peak_mem_gb": torch.cuda.max_memory_allocated() / 2**30,
++                        "n_input_tokens": int(inp["input_ids"].shape[1]),
++                        "n_image_tokens": int((inp["input_ids"] == sc.image_token_id).sum()),
++                        "pixel_values_shape": list(inp["pixel_values"].shape),
++                        "pred": "Yes" if s["m"] > 0 else "No"})
++            timings.append((dt, r["n_images"]))
++            if r["id"] in verify_ids:
++                ty = sc.teacher_forced(inp, sc.cand["Yes"])
++                tn = sc.teacher_forced(inp, sc.cand["No"])
++                # 보조: 예비 생성에서 관찰된 종결 형태 "<답>\n<end_of_turn>"까지 포함한 continuation
++                ty2 = sc.teacher_forced(inp, sc.cand["Yes"] + [sc.nl, sc.eot])
++                tn2 = sc.teacher_forced(inp, sc.cand["No"] + [sc.nl, sc.eot])
++                rec["verify"] = {"tf_lp_yes": ty, "tf_lp_no": tn, "tf_m": ty - tn,
++                                 "abs_diff_m_vs_lastlogit": abs((ty - tn) - s["m"]),
++                                 "lp_yes_nl_eot": ty2, "lp_no_nl_eot": tn2, "m_with_nl_eot": ty2 - tn2}
++            if r["id"] in gen_ids:
++                g = sc.generate(inp, 8)
++                g["gen_parsed"] = parse_gen(g["gen_text"])
++                g["gen_agrees_with_score"] = g["gen_parsed"] == rec["pred"]
++                rec["generation"] = g
++        except torch.cuda.OutOfMemoryError as e:
++            rec.update({"status": "oom", "error": str(e)[:300]})
++            torch.cuda.empty_cache()
++        except Exception as e:  # noqa: BLE001
++            rec.update({"status": "error", "error": repr(e)[:300]})
++        fout.write(json.dumps(rec, ensure_ascii=False) + "\n")
++        fout.flush()
++        if i % 20 == 0 or rec["status"] != "ok":
++            print(f"[{i + 1}/{len(todo)}] {r['id']} n_img={r['n_images']} {rec['status']} "
++                  f"{rec.get('latency_s', 0):.2f}s mem={rec.get('peak_mem_gb', 0):.1f}GB", flush=True)
++    fout.close()
++    dm = (time.time() - T0) / 60
++    budget["runs"].append({"start": T0, "device_minutes": dm, "n_attempted": i + 1 if todo else 0,
++                           "n_todo": len(todo), "load_s": t_load, "reduced_t1ce_only": reduced,
++                           "stopped": stopped, "max_requests": a.max_requests, "note": a.note, "gpu": GPU})
++    budget_path.write_text(json.dumps(budget, indent=1))
++    if timings:
++        print(f"mean latency {sum(t for t, _ in timings) / len(timings):.3f}s, per image "
++              f"{sum(t for t, _ in timings) / sum(n for _, n in timings):.3f}s, max peak mem "
++              f"{torch.cuda.max_memory_allocated() / 2**30:.2f}GB", flush=True)
++    print(f"run device-minutes {dm:.2f}, total {used_before + dm:.2f}; stopped={stopped}; reduced={reduced}", flush=True)
++
++
++if __name__ == "__main__":
++    main()
+diff --git a/test_context_pilot.py b/test_context_pilot.py
+new file mode 100644
+index 0000000..77abf8e
+--- /dev/null
++++ b/test_context_pilot.py
+@@ -0,0 +1,131 @@
++"""iter_003 context pilot CPU 검증 (GPU·모델 없음).
++
++manifest 기반: 영상-mask 정렬, 근거 픽셀 불변, packet 비중복, 조건별 영상 수, 순서 변경 multiset 보존,
++반복 slice multiplicity, IAF 수동 예제, case 단위 집계·기권 분모.
++실행: python research/test_context_pilot.py --out research/results/iter_003
++"""
++import argparse
++import json
++from collections import Counter
++from pathlib import Path
++
++import numpy as np
++from PIL import Image
++
++import analyze_context_pilot as A
++from context_pilot import data as D
++
++EXPECTED_N = {"P0": 2, "P1": 4, "P2": 4, "P3": 4, "P4": 6, "P5": 6, "P6": 10}
++
++
++def test_alignment(man):
++    for cs in man["case_sequences"]:
++        o = cs["orientation"]
++        assert o["orig_affine_equal"] and o["canon_affine_equal"] and o["canon_axcodes"] == ["R", "A", "S"]
++        vol, seg, _ = D.load_canonical(cs["case"], cs["sequence"])
++        for sid, sv in cs["slices"].items():
++            z = sv["z"]
++            m2 = D.display_2d(seg, z)
++            # 표시 변환 전후 annotation 면적 동일 (보간 없음)
++            assert int((m2 > 0).sum()) == int((seg[:, :, z] > 0).sum()) == sv["seg_area"]
++            if sv["role"] == "E":
++                assert sv["seg_area"] > 0
++                img = D.display_2d(vol, z)
++                inside = (img[m2 > 0] > 0).mean()
++                assert inside > 0.95, f"{sid}: mask 영역의 {inside:.3f}만 비영점 영상 위"
++            else:
++                assert sv["seg_area"] == 0
++                zmin, zmax = cs["annot_z_range"]
++                assert z <= zmin - D.EMPTY_MIN_GAP or z >= zmax + D.EMPTY_MIN_GAP
++                assert sv["img_area_nonzero"] >= D.EMPTY_MIN_AREA_FRAC * cs["img_area_max"]
++            # 저장된 PNG가 manifest hash와 같다
++            arr = np.array(Image.open(sv["png"]).convert("RGB"))
++            assert D.sha256_array(arr) == sv["pixel_sha256"], sid
++        # 원본 LPS 배열과 canonical 배열의 관계: x,y 뒤집기만 (보간 없음)
++        import nibabel as nib
++        raw = np.asarray(nib.load(str(D.src_path(cs["case"], "seg"))).dataobj)
++        assert np.array_equal(raw[::-1, ::-1, :], seg.astype(raw.dtype))
++    return "alignment"
++
++
++def test_packets(man):
++    for cs in man["case_sequences"]:
++        allz = [cs["slices"][s]["z"] for r in cs["packets"] for s in cs["packets"][r]]
++        assert len(allz) == len(set(allz)) == 10, "packet 사이 source slice 중복"
++        assert all(len(v) == 2 for v in cs["packets"].values())
++    return "packets"
++
++
++def test_requests(man, reqs):
++    by = {r["id"]: r for r in reqs}
++    for cs in man["case_sequences"]:
++        c, s = cs["case"], cs["sequence"]
++        P = cs["packets"]
++        for S in ["E", "N", "R"]:
++            for cond, n in EXPECTED_N.items():
++                r = by[f"{c}|{s}|concat|{S}|{cond}"]
++                assert r["n_images"] == n == len(r["slice_ids"])
++                # 근거 packet 픽셀 불변: S slice가 정해진 위치에 같은 파일/hash로 들어간다
++                assert r["slice_ids"][-2:] == P[S] if cond != "P3" else r["slice_ids"][:2] == P[S]
++                assert Counter(r["slice_ids"])[P[S][0]] == 1
++            p1, p3 = by[f"{c}|{s}|concat|{S}|P1"], by[f"{c}|{s}|concat|{S}|P3"]
++            assert Counter(p1["slice_ids"]) == Counter(p3["slice_ids"]) and p1["slice_ids"] != p3["slice_ids"]
++            p4 = by[f"{c}|{s}|concat|{S}|P4"]
++            assert all(Counter(p4["slice_ids"])[a] == 2 for a in P["A"])
++            p6 = by[f"{c}|{s}|concat|{S}|P6"]
++            assert all(Counter(p6["slice_ids"])[a] == 2 for a in P["A"] + P["B"])
++            # 조건마다 S 자리만 바뀌고 context는 같다 (E/N/R 교체 시 context 동일)
++            for cond in EXPECTED_N:
++                rE = by[f"{c}|{s}|concat|E|{cond}"]["slice_ids"]
++                rS = by[f"{c}|{s}|concat|{S}|{cond}"]["slice_ids"]
++                assert [x for x in rE if x not in P["E"]] == [x for x in rS if x not in P[S]]
++        # 모델 입력에 label/role 문자열이 들어가지 않는다 (요청에는 slice 경로와 sequence만 사용)
++        assert "E" not in D.PROMPT_INTRO.split() and "contiguous block" not in D.PROMPT_INTRO
++    assert len({r["id"] for r in reqs}) == len(reqs)
++    return "requests"
++
++
++def test_iaf_manual():
++    a = np.zeros((4, 4, 3), np.float32)
++    b = a + 0.04       # anchor(a)와 L1 0.04 -> 제거
++    c = a + 0.10       # anchor(a)와 0.10 -> 유지, 새 anchor
++    d = c + 0.03       # anchor(c)와 0.03 -> 제거 (a와는 0.13이지만 현재 anchor와만 비교)
++    e = a.copy()       # anchor(c)와 0.10 -> 유지 (비인접 중복은 제거하지 않음)
++    assert D.iaf_keep([a, b, c, d, e]) == [0, 2, 4]
++    assert D.iaf_keep([]) == [] and D.iaf_keep([a]) == [0]
++    return "iaf_manual"
++
++
++def test_aggregation():
++    # case 단위 집계: case A는 두 sequence, case B는 한 sequence -> sequence 평균 후 case 평균
++    per = {("A", "t1c"): {"x": 1.0}, ("A", "t2w"): {"x": 3.0}, ("B", "t1c"): {"x": 10.0}}
++    g = A.case_aggregate(per, ["x"])
++    assert g["per_case"]["A"]["x"] == 2.0 and g["case_mean"]["x"] == 6.0 and g["n_cases"] == 2
++    # 기권 분모: 전체 분모 기준 정답 비율과 선택적 오류를 함께
++    conc = {"E": {"P1": 1.0, "P3": -1.0}, "N": {"P1": -2.0, "P3": -0.5}}
++    ab = A.abstain_p13(conc)
++    assert ab["E"] == {"answered": False, "correct": False} and ab["N"] == {"answered": True, "correct": True}
++    s = A.summarize_abstain({("A", "t1c"): ab})
++    assert s["pooled"]["coverage"] == 0.5 and s["pooled"]["selective_error"] == 0.0
++    assert s["pooled"]["correct_over_all"] == 0.5
++    # paired 보정과 지표 계산의 작은 수동 예제
++    sc = {"E": {c: 2.0 for c in A.CONDS}, "N": {c: -1.0 for c in A.CONDS}}
++    sc["E"]["P1"] = -0.5  # flip 1개
++    m = A.cs_metrics(sc, sc)
++    assert m["flips_vs_packet"] == 1 and m["fn_E"] == 1 and abs(m["drift_own_E"] - 2.5 / 6) < 1e-9
++    assert m["worst_ctx_acc"] == 0.5 and abs(m["ba_mean"] - (6 * 1 + 0.5) / 7) < 1e-9
++    return "aggregation"
++
++
++def main():
++    ap = argparse.ArgumentParser()
++    ap.add_argument("--out", type=Path, required=True)
++    a = ap.parse_args()
++    man = json.loads((a.out / "manifest.json").read_text())
++    reqs = [json.loads(l) for l in open(a.out / "requests.jsonl")]
++    done = [test_alignment(man), test_packets(man), test_requests(man, reqs), test_iaf_manual(), test_aggregation()]
++    print("CPU checks PASS:", done)
++
++
++if __name__ == "__main__":
++    main()

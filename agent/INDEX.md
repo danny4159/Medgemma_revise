@@ -9,6 +9,7 @@
 ### 연구 목표 2 (iter_003부터): [최종 목표]
 
 - iter_003 [CONTINUE] (deep/creative/deep) <3D 근거 보존 context 안정화: abandon> 294개 본실행 결과를 확인했으며, context 민감성은 관찰됐지만 paired 보정은 정확도와 안정성을 모두 악화시켰다. → 다음: 재사용할 파이프라인의 예산 축소·hash 검증 결함을 수정하고, 다음 후보인 질문 조건부 2D 근거 선택을 검토한다. unique-slice mean을 필수 baseline으로 두고 GT 없는 선택 규칙, 해부학적 confound 대조군, 독립 subject 평가 및 선행 방법과의 차별성을 갖춘 소규모 실험을 설계한다.
+- iter_004 [CONTINUE] (deep/heavy/normal) <질문 조건부 2D 근거 선택: abandon> 1,680건 실험 완료를 확인했지만 contrastive 선택의 개선은 작고 위치 prior보다 낮았으며, 재사용 파이프라인의 검증 결함도 남아 있다. → 다음: 해부구조→병변 grounding 전이의 선행 방법·데이터·경량 학습 가능성을 비교하고 최소 반증 실험을 설계한다. 재사용할 코드에는 실제 입력 hash 재검증, verification 완료 강제, selection digest 연결 검증을 먼저 보완한다.
 
 ## 이전 목표들의 접근법 (참고용, 시도 횟수 제한에는 안 들어감)
 
@@ -17,11 +18,11 @@
 ## 접근법 기록 — 현재 목표 (같은 접근법 최대 3회)
 
 - 3D 근거 보존 context 안정화 [approach/context-evidence-stability]: 1회 (iter_003), 최근 판정: abandon, 커밋: 없음
+- 질문 조건부 2D 근거 선택 [approach/question-evidence-selection]: 1회 (iter_004), 최근 판정: abandon, 커밋: 없음
 
-현재 연구 브랜치: approach/context-evidence-stability (코드 위치: /SSD1_1TB/home/milab/daniel/08_medgemma/research)
+현재 연구 브랜치: approach/question-evidence-selection (코드 위치: /SSD1_1TB/home/milab/daniel/08_medgemma/research)
 
 ### 최근 계획의 대안 순위
 
-1. 3D 근거 보존 context 안정화: 로컬 volume으로 context 효과의 분리 가능성과 paired 보정의 개선 여지를 먼저 검증한다.
-2. 질문 조건부 2D 근거 선택: 병변 근거와 해부학적 context를 구분하되 MMedPO·SECOND 등과의 차별성과 적절한 음성 label 확보가 필요하다.
-3. 해부구조에서 병변으로 grounding 전이: localization adapter나 LoRA를 검토하되 정답 정의·데이터 확장·기존 grounding 방법 재현 부담이 더 크다.
+1. 질문 조건부 2D 근거 선택: 고정 질문·영역 후보에서 contrastive occlusion 선택을 재현하고 독립 bbox 및 질문·영상 교환 대조군으로 추가 투자 가치를 검증한다.
+2. 해부구조에서 병변으로 grounding 전이: 첫 후보가 투자 기준을 통과하지 못하면 annotation을 활용한 adapter·LoRA와 기존 grounding 학습법 비교로 전환한다.

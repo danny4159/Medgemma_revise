@@ -92,3 +92,22 @@ MedGemma 1.5로 연구하는 것 자체가 큰 제약이라고 판단되면, 근
 - 🏁 **마일스톤**: 첫 기전 pilot에서 GT reference 가산 보정의 투자 기준 실패 확인 — JOURNEY.md
 - 📁 원본: `agent/runs/iter_003/`
 
+## iter_004 — 질문 조건부 2D 근거 선택 (1번째 시도) · 2026-09-24 04:14
+
+- 🔎 **사고 라운드 1** (GPT deep): 질문 조건부 2D 근거 선택은 검토할 가치가 있지만, 독립 평가자료와 음성 label이 부족하고 선행 선택 방법과 겹쳐 평가 설계와 방법 차이를 한 라운드 더 좁힌다.
+  - 스스로 던진 질문: 추가 다운로드 없이 가능한 2D 자료 중 동일 영상에 서로 다른 질문과 신뢰할 수 있는 양성·음성 label을 연결할 수 있는 것은 무엇인가? VinDr 원본 annotation과 subject 정보를 확인하고, 미주석 소견을 음성으로 간주하지 않는 평가 단위를 정할 수 있는가? · GT 없이 후보 영역을 만들고 근거의 충분성·제거 민감도로 선택하는 규칙은 SECOND 및 기존 counterfactual visual grounding·선택 방법과 정확히 어디서 다른가? 단순 confidence 선택과 구별되는 최소 수식과 반증 가능한 예측을 정할 수 있는가? · 같은 해부학적 위치·면적의 대조군과 질문 교환 대조군을 구성할 수 있는가? crop 또는 삭제의 분포 변화와 동일 점수로 선택·평가하는 순환성을 어떻게 분리할 것인가? · 독립 subject 확보와 음성 label 검증이 이번 범위에서 어렵다면, 로컬 자료로 수행할 타당한 기전 pilot의 범위는 어디까지인가? 필요한 최소 추가 데이터의 출처·사용 조건·크기와 GPU 요청 수를 확인해 구현 여부를 결정할 수 있는가?
+- 🔎 **사고 라운드 2** (GPT deep): 로컬 자료는 양성 grounding 개발 검사로 범위를 제한하고, 새로 확인한 CSGR와의 차별성 및 환자 단위 평가 데이터 확보 가능성을 확인한 뒤 구현 여부를 결정한다.
+  - 스스로 던진 질문: CSGR의 관련 연구와 SECOND의 선택식을 기준으로, 질문 간 공통 제거 반응을 제거하는 C(q,R,t)가 기존 contrastive attribution과 어떻게 다른가? 공유 근거·co-occurrence 때문에 실패하는 경우까지 포함해 검증할 가설 하나를 고정할 수 있는가? · CheXlocalize 공식 다운로드 안내에서 데이터 사용 조건, 파일 크기, patient별 영상·명시적 label·mask 연결을 확인할 수 있는가? 소규모 환자 분할을 확보할 수 없다면 로컬 양성 grounding pilot만으로 다음 투자 여부를 판단할 가치가 있는가? · 로컬 VinDr의 어떤 소견 쌍이 공간적으로 구별되며, 고정 후보 grid가 이들을 분리할 수 있는가? 질문 교환·동일 질문의 영상 교환·단순 crop confidence 대조군을 포함한 최소 요청 목록과 사전 성공 기준을 확정할 수 있는가?
+- 🧭 **계획** (GPT deep): 재사용 파이프라인의 검증 결함을 고친 뒤 VinDr 10영상에서 질문 간 contrastive 영역 선택이 단순 제거·crop confidence·위치 prior를 넘는지 제한된 개발 pilot으로 판정한다.
+  - 대안: 1) 질문 조건부 2D 근거 선택: 고정 질문·영역 후보에서 contrastive occlusion 선택을 재현하고 독립 bbox 및 질문·영상 교환 대조군으로 추가 투자 가치를 검증한다. · 2) 해부구조에서 병변으로 grounding 전이: 첫 후보가 투자 기준을 통과하지 못하면 annotation을 활용한 adapter·LoRA와 기존 grounding 학습법 비교로 전환한다.
+  - 1순위 선택 근거: 선행 방법과의 중복을 인정한 기전 pilot으로 범위를 좁혔고, 로컬 자료에 평가 가능한 질문 쌍이 확인됐다. 추가 데이터 취득 없이 누적 45 device-minutes 이내에서 중단할 수 있어 사람의 가치 판단이나 대규모 실행 승인이 필요하지 않다.
+- ▶ **결정**: 자동 진행 (smart) — 1순위로 진행
+- 🔧 **Claude** (heavy): VinDr 10영상 1,680요청(11.3 device-min)을 끝까지 실행했고 scoring 검증(teacher-forced 차이 7e-7, 반복 0)도 통과했지만, contrastive 선택 C_blur(U 0.511)는 raw-D(0.499)와 선택이 17/20 같고 GT 위치 prior(0.615)보다 낮아 사전 기준 1–3이 FAIL이다. 또한 greedy 생성이 8/12에서 Yes/No가 아닌 설명문으로 시작해 margin의 타당성에 우려가 있다. [자체 검증 FAIL, 파일 54개 변경]
+  - 새 브랜치 `approach/question-evidence-selection` ← f213214 (f213214); 이전 브랜치 미커밋 작업은 stash와 `stashed.patch`로 보관
+  - ⚠ 권한 거부 1건
+- 🔍 **리뷰** (GPT normal): [CONTINUE / abandon] 1,680건 실험 완료를 확인했지만 contrastive 선택의 개선은 작고 위치 prior보다 낮았으며, 재사용 파이프라인의 검증 결함도 남아 있다.
+  - 접근법 판단: 고정 contrastive occlusion 후보는 사전 기준 1–3을 실패했다. 계수·질문 bank 조정을 중단하고 해부구조→병변 grounding 전이 후보로 넘어간다.
+  - 다음: 해부구조→병변 grounding 전이의 선행 방법·데이터·경량 학습 가능성을 비교하고 최소 반증 실험을 설계한다. 재사용할 코드에는 실제 입력 hash 재검증, verification 완료 강제, selection digest 연결 검증을 먼저 보완한다.
+- 🏁 **마일스톤**: 2D contrastive occlusion의 투자 기준 실패를 확인하고 grounding 전이 후보로 전환 — JOURNEY.md
+- 📁 원본: `agent/runs/iter_004/`
+

@@ -65,3 +65,18 @@ MedGemma 1.5로 연구하는 것 자체가 큰 제약이라고 판단되면, 근
 - 접근법: 3D 근거 보존 context 안정화 (`approach/context-evidence-stability`), 시도: iter_003
 - 커밋: 없음
 - 자세히: DECISIONS.md의 iter_003, `agent/runs/iter_003/review.md`
+
+## 🏁 2D contrastive occlusion의 투자 기준 실패를 확인하고 grounding 전이 후보로 전환
+*iter_004 · 2026-09-24 04:47 · 판정: CONTINUE / abandon*
+
+**고민:** 의료 VLM의 근거 활용을 개선할 방법을 찾는 과정에서 iter_003의 3D 가산 보정은 정확도와 안정성을 악화시켰다.
+**시도:** 다음 후보로 질문 간 공통 제거 반응을 빼는 2D contrastive 선택을 고정하고, raw occlusion·crop·위치 prior와 비교했다.
+**개발:** GT를 읽지 않는 selector와 bbox union 평가, 질문·영상 교환 대조군을 구현했다.
+**결과:** VinDr 개발 영상 10개에서 1,680요청을 11.28 device-min에 완료했다.
+**결과:** C_blur U는 0.511로 raw-D 0.499보다 소폭 높지만 위치 prior 0.615보다 낮았고, 개선 영상은 1/9이었다.
+**판단:** 사전 기준 1–3 실패는 fp32-head 분석에서도 유지돼 고정 contrastive 후보의 추가 조정을 중단한다.
+**의미:** 모든 grounding의 한계로 일반화하지 않고, 다음 후보인 해부구조→병변 grounding 전이와 독립 평가 설계로 이동한다.
+
+- 접근법: 질문 조건부 2D 근거 선택 (`approach/question-evidence-selection`), 시도: iter_004
+- 커밋: 없음
+- 자세히: DECISIONS.md의 iter_004, `agent/runs/iter_004/review.md`

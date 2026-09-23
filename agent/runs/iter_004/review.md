@@ -1,0 +1,37 @@
+# Assessment
+
+**CONTINUE / abandon.** 계획, 코드, 원시 predictions·verification, 결과 JSON 및 Claude 실행 로그를 직접 확인했다. 실험은 실제 실행됐으며 본 요청 1,680개가 모두 고유 ID의 `ok` 결과로 존재한다. 이번에 고정한 질문 간 평균 제거 방식의 추가 투자 기준은 충족하지 못했다. 모든 질문 조건부 grounding을 포기한다는 의미는 아니다.
+
+# Key Findings
+
+- 본실행 1,680/1,680건, 사전 지정 verification 12/12건을 확인했다. 요청과 prediction의 request/config/input hash 필드가 일치한다. 로그와 ledger의 누적 사용량은 11.278 device-min이다.
+- teacher-forced margin 차이 최대 7.28e-7, 반복 scoring 차이 0이다. CPU 테스트 42/42 통과 기록도 존재한다. 리뷰에서는 테스트나 추론을 재실행하지 않았다.
+- `selection.py`의 D·C 수식, row-major 동점 처리, `evaluation.py`의 bbox union, 영상 내부 평균 후 영상 macro-average, 질문·영상 교환 계산은 계획과 부합한다. selector의 GT 직접 접근은 확인되지 않았다.
+- 주방법 C_blur의 macro U는 **0.5106**, D_blur 0.4987, crop 0.5021, uniform 0.1969, GT 위치 prior 0.6147이다. C_blur의 raw IoU 0.08358은 D_blur 0.08519보다 낮다.
+- C_blur와 D_blur는 양성 20조합 중 17개에서 같은 tile을 선택했고, 영상별 U 개선은 1/9이다. self−image-swap U는 +0.1226으로 이 조건은 통과했다.
+- distinct 13쌍/6영상의 S는 C_blur 0.20076, D_blur 0.10404로 개선 폭 0.09672가 사전 요구 0.10에 못 미친다. mean-fill 조건만 통과했다. fp32-head 민감도 분석에서도 기준 1–3 실패는 유지된다.
+
+# Problems / Concerns
+
+1. **캐시 검증이 실제 파일까지 일관되게 연결되지 않는다.** `run_qes.py`의 `InputCache.get()`은 실행할 요청에만 실제 pixel/file hash를 확인한다. 이미 완료된 요청은 이 검사를 건너뛴다. `select_qes.py`와 `evaluate_qes.py`는 저장된 hash 문자열을 비교할 뿐 현재 이미지나 request 본문의 hash를 재계산하지 않는다. 이미지 변경 테스트는 manifest를 다시 만든 경로를 검증하므로, 오래된 manifest를 그대로 재사용하는 실제 진입점의 결함을 잡지 못한다.
+2. **평가 완료 판정이 verification 성공을 강제하지 않는다.** `evaluate_qes.py`는 verification이 없거나 부족해도, teacher-forced 검사가 실패해도 `completion: complete`와 투자 기준을 출력할 수 있다. verification의 지정 ID·중복·hash도 검증하지 않는다. 이번 파일은 직접 확인한 결과 지정된 12건과 수치 기준을 충족하지만 재사용 전 수정해야 한다.
+3. **선택 결과와 현재 predictions의 연결 검증이 빠져 있다.** evaluator는 저장된 `predictions_digest` 및 selection의 config hash를 확인하지 않는다. 오래된 selection과 새 predictions가 섞여도 평가될 수 있다. duplicate 검사도 `m`만 비교하므로 `m_fp32head` 등 다른 결과 필드의 충돌을 놓친다.
+4. **생성 불일치의 의미를 좁혀야 한다.** verification 12개 모두 8-token 상한에서 잘렸고, 그중 8개는 설명문 서두여서 Yes/No 판정이 불가능했다. 확인된 것은 답변 시작 형식과 제한 후보 scoring의 차이이며, 최종 진단 답변과 margin의 불일치는 아니다. 낮은 P(Yes)+P(No)만으로 log-ratio 측정 자체가 무효라고 결론낼 수도 없다.
+5. **기록과 예산 관리에 잔여 결함이 있다.** 저장된 `n_image_tokens=1`은 boi 개수이며 soft token 개수가 아니다. 코드 수정 후에도 scorer version은 그대로다. ledger의 `cap_minutes`는 null이고, 강제 종료 시 고정 2분 추가는 실행 시간 상한 없이 보수적 계상이라고 보장할 수 없다. 이번 실행에서는 정상 종료와 예산 이내 사용이 확인됐다.
+6. **표본과 해석 한계가 크다.** legacy 개발 자료 10영상이며 양성 평가 단위는 9영상이다. patient ID와 명시적 음성이 없어 환자 일반화·specificity·진단 개선을 검증하지 못한다. 위치 prior는 다른 영상의 GT를 사용하는 개발용 비교군이다. 직접적인 selector leakage와는 구분해야 한다. oracle IoU 0.146은 고정 grid의 표현 한계를 보여주며, bbox 일치도가 causal faithfulness를 뜻하지 않는다.
+
+# Interpretation
+
+고정 prompt·질문 bank·3×3 grid·제거 변형 아래에서는 공통 반응 제거의 추가 이득이 작다는 결론이 타당하다. 기준 3의 미달 폭만으로 결론내린 것이 아니라, 위치 prior 대비 열세와 1/9 영상의 개선이라는 더 분명한 실패 근거가 함께 있다.
+
+영상 교환보다 자기 영상 선택이 좋다는 결과는 영상별 정보가 일부 사용됨을 시사한다. 그러나 병변 근거를 해부학적 위치 효과와 완전히 분리했다는 증거는 아니다. 공유 근거 제거가 실패의 원인이라는 설명 역시 직접 검증되지 않았다.
+
+최종 연구 목표에 비춰 이번 성과는 저비용 후보 배제다. 새로운 방법론의 contribution이나 다중 데이터셋 일반화는 아직 입증되지 않았다. abandon 판정과 재사용 코드의 검증 결함 때문에 이번 변경은 커밋 대상으로 권하지 않는다.
+
+# Recommended Next Experiment
+
+다음 후보인 **해부구조→병변 grounding 전이**를 검토한다. 기존 grounding 학습법과의 차이를 한 문장으로 정의하고, patient 분할과 병변 annotation을 확보할 수 있는 데이터·경량 학습 예산을 먼저 확인한다.
+
+최소 비교는 frozen 모델, 동일 병변 supervision·학습 예산의 직접 adapter/LoRA, 해부구조 supervision을 추가한 전이 방법으로 구성한다. 개선이 추가 데이터량이나 위치 prior 때문인지 구분할 대조군과 held-out 병변 평가를 설계한다. 현재 10영상은 개발용으로만 유지한다.
+
+재사용 파이프라인의 입력·verification·selection 연결 검증을 먼저 보완한다. Yes/No scoring을 계속 쓴다면 완결된 생성 답변과의 일치 여부를 별도 소규모 측정 검증으로 확인하되, answer-mass가 높은 표본만 사후 선택하거나 기존 C의 질문 bank를 튜닝해 주결과를 교체하지 않는다.
