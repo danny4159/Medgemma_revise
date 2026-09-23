@@ -266,11 +266,12 @@ def run_claude(args, prompt, log_path, tier):
         "--output-format", "stream-json", "--verbose",
         "--model", spec["model"],
         "--effort", spec["effort"],
+        # 작업 디렉터리는 worktree. main 폴더는 결과 저장(eval_results)과 계획 읽기용.
+        # --add-dir는 값을 여러 개 받으므로 프롬프트 바로 앞에 두면 프롬프트까지 경로로 읽는다.
+        "--add-dir", str(PROJECT_DIR),
         "--append-system-prompt-file", str(PROMPT_DIR / "claude_engineer.md"),
         # 연구 에이전트 전용 권한. .claude/settings.json에 두면 대화형 세션까지 막힌다.
         "--settings", str(AGENT_DIR / "claude_settings.json"),
-        # 작업 디렉터리는 worktree. main 폴더는 결과 저장(eval_results)과 계획 읽기용
-        "--add-dir", str(PROJECT_DIR),
         prompt,
     ]
 
