@@ -17,10 +17,10 @@
 ```bash
 conda activate medgemma
 export HF_HOME=/SSD1_1TB/home/milab/daniel/08_medgemma/hf_cache
-python run_medgemma.py
+python legacy/run_medgemma.py
 ```
 
-`run_medgemma.py`는 예시 흉부 X-ray 이미지를 다운받아 모델에게 설명을 요청하는
+`legacy/run_medgemma.py`는 예시 흉부 X-ray 이미지를 다운받아 모델에게 설명을 요청하는
 간단한 스모크 테스트입니다. 실제 사용 시 `pipeline(...)` 호출 부분을 필요한
 이미지/프롬프트로 바꿔 쓰면 됩니다.
 
