@@ -111,3 +111,23 @@ MedGemma 1.5로 연구하는 것 자체가 큰 제약이라고 판단되면, 근
 - 🏁 **마일스톤**: 2D contrastive occlusion의 투자 기준 실패를 확인하고 grounding 전이 후보로 전환 — JOURNEY.md
 - 📁 원본: `agent/runs/iter_004/`
 
+## iter_005 — Grounding 데이터·측정 기반 구축 (1번째 시도) · 2026-09-24 04:50
+
+- 🔎 **사고 라운드 1** (GPT deep): 해부구조→병변 grounding 전이는 선행 연구와 중복이 크고 평가 형식·독립 데이터가 미확정이므로, 최소 반증 실험을 정하기 전에 이를 한 라운드 더 확인한다.
+  - 스스로 던진 질문: MedGemma 1.5의 기술보고서·공식 localization 예제·로컬 checkpoint는 각각 어떤 prompt와 좌표 규약을 사용하는가? legacy의 해부구조–병변 격차에서 출력 형식과 대리 annotation의 영향을 어떻게 분리할 것인가? · 현재 접근 가능한 공식 데이터 중 해부구조 annotation, 병변 annotation, patient 단위 분할을 확보할 수 있는 조합은 무엇인가? Chest ImaGenome 접근 없이 가능한 대체 조합과 그 한계는 무엇인가? · AnatomiX·CURE·F-LMM·AG-KD 및 VGMED의 상세 설정과 비교했을 때, anatomy supervision의 효과를 추가 데이터량·위치 prior·출력 decoder 적응과 구분하는 최소 실험과 잠재적 contribution은 무엇인가? · 설치된 라이브러리와 모델 구조에서 frozen feature/head, attention decoder, LoRA 중 어떤 경로가 RTX 3090 24GB에서 가능한가? 다음 구현 반복을 1시간 미만 GPU 예산으로 제한할 때 확보 가능한 비교군과 평가 표본은 무엇인가?
+- 🔎 **사고 라운드 2** (GPT deep): frozen feature 기반 검증의 실행 가능성을 확인했으며, 새로 발견한 EasyLens와의 중복 및 독립 annotation 확보 경로를 더 확인해 전이 실험의 범위를 확정한다.
+  - 스스로 던진 질문: EasyLens v3의 MedGemma1.5 적용 위치, prototype 구축 supervision, patient split, 데이터와 공개 코드 수준은 무엇인가? anatomy transfer 후보에 기존 방법과 구분되는 검증 가능한 차이가 남는가? · JSRT/SCR의 영상·수동 anatomy mask·nodule metadata 또는 NIH bbox·patient metadata·CheXmask를 실제로 연결할 수 있는 공식 파일 경로와 schema는 무엇인가? 작은 다운로드만으로 충분한 독립 평가 집단을 구성할 수 있는가? · pooling 전·후 동일 head 비교에서 정보 손실, 출력 해상도, probe 용량 효과를 어떻게 분리할 것인가? anatomy 보조 학습까지 넣는 것보다 이 반증 실험을 먼저 수행해야 하는가? · 좌표 규약이 명시된 MedGemma 1.5 공식 예제를 확보할 수 있는가? 확보하지 못하면 두 고정 prompt와 독립 anatomy calibration으로 parser를 고정하는 절차 및 45 device-min 이내 요청 수를 어떻게 정할 것인가?
+- 🔎 **사고 라운드 3** (GPT deep): EasyLens와의 중복 및 선형 pooling 비교의 한계를 확인했으며, 마지막 라운드에서 데이터 접근과 fine/coarse probe의 평가 조건을 확정한다.
+  - 스스로 던진 질문: NIH bbox·patient CSV와 개별 PNG를 결제 설정·대용량 전체 다운로드 없이 확보할 수 있는 경로가 있는가? 원본 provenance를 추적할 수 있는 미러에서 실제 header와 영상 ID 대응까지 확인할 수 있는가? · NIH 경로가 불가능하면 SCR archive의 실제 해상도·파일명과 JSRT nodule metadata를 확인할 수 있는가? 병변 annotation이 연결되지 않으면 이번 반복을 GPU 없는 데이터 준비·검증 구현으로 제한할 것인가? · 확인된 annotation이 bbox인지 mask인지에 맞춰, pooling probe의 fine/coarse target·표본 수·patient split·효과크기 기준을 어떻게 고정할 것인가? 선형 교환법칙과 비선형 readout 차이를 구분하는 최소 비교를 45 device-min 안에 구성할 수 있는가?
+- 🧭 **계획** (GPT deep): GPU 없이 NIH/SCR의 annotation·영상·subject 연결과 평가 무결성을 검증해, grounding 전이 및 pooling 가설을 독립 데이터에서 시험할 기반을 만든다.
+  - 대안: 1) Grounding 데이터·측정 기반 구축: 소량 데이터 확보·분할·좌표·캐시 검증을 먼저 완료해 후속 표현 분석의 실행 가능성을 확정한다. · 2) Pooling 전후 frozen feature probe: 병변 데이터 요건 충족 후 동일 readout과 fine/coarse 평가로 공간 정보 접근성 차이를 검증한다. · 3) 해부구조에서 병변으로 grounding 전이: 표현 분석과 데이터 확보 이후 동일 supervision·학습 예산의 직접 병변 학습과 anatomy 보조 학습을 비교한다.
+  - 1순위 선택 근거: 현재 가장 큰 병목은 독립 평가 데이터와 검증 가능한 측정 체계의 부재다. CPU 작업과 제한된 다운로드로 해결할 수 있으며, 성공 여부와 관계없이 후속 연구의 실행 조건을 명확히 할 수 있어 사람의 가치 판단이나 대규모 GPU 승인이 필요하지 않다.
+- ▶ **결정**: 자동 진행 (smart) — 1순위로 진행
+- 🔧 **Claude** (heavy): QES 검증 결함 3개를 고쳐 진입점 테스트 25/25를 통과했고, NIH bbox 160명 patient-disjoint split을 `lesion_probe_ready`로 확보했습니다(118 MiB, GPU 0). 공개 SCR은 영상에 정답 윤곽선이 그려져 있고 mask 정의가 문서에 없어 `anatomy_only_ready=false`이며, 미러 원본 동일성은 미검증이라 GPT 리뷰가 필요합니다. [자체 검증 FAIL, 파일 507개 변경]
+  - 새 브랜치 `approach/grounding-data-audit` ← f213214 (f213214); 이전 브랜치 미커밋 작업은 stash와 `stashed.patch`로 보관
+  - ⚠ 권한 거부 4건
+- 🔍 **리뷰** (GPT normal): [CONTINUE / improve] NIH 160명 확보와 SCR 정답 노출 차단은 확인했지만, 준비 완료 판정과 QES 검증에 결함이 남아 있다.
+  - 접근법 판단: 데이터 확보는 확인됐으나 NIH 좌표 근거와 readiness 조건, QES 고정 verification 집합 검증을 보완해야 한다.
+  - 다음: NIH bbox 좌표 기준의 명시적 근거를 확보하고 readiness를 보강한다. QES verification 집합을 결정적으로 재생성해 대조하고 실패 시 이전 완료 산출물을 무효화한다. 이후 클래스별 target 정의를 확정해 pooling probe로 진행한다.
+- 📁 원본: `agent/runs/iter_005/`
+

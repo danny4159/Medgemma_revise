@@ -1,0 +1,41 @@
+# Assessment
+
+부분 성공이며 `improve`로 판정한다. 계획·보고서·diff·코드·실행 로그와 저장 결과를 직접 확인했다. 데이터 준비와 CPU 검사는 실제 실행됐다. NIH manifest의 160명, train/validation/test 80/32/48명과 현재 영상 160개의 file SHA-256 일치를 별도로 확인했다. 실험이나 테스트를 대신 실행하지 않았다.
+
+Pooling feature probe와 학습 실험은 **미실행**이다. 이는 실행 실패가 아니라 이번 계획의 GPU 0 제한에 따른 것이며, pooling 정보 손실 가설은 아직 검증되지 않았다.
+
+# Key Findings
+
+- 저장 결과는 QES 진입점 검사 25/25, 회귀 검사 42/42, geometry·pooling 검사 21/21 통과를 보여주며 실행 명령도 로그에 존재한다. 고정 affine head의 교환 오차는 8.9e-16이다.
+- NIH는 984 bbox, 880영상, 726명에서 160명을 선택했다. 네 클래스가 계획한 최소 표본 수를 충족한다. split 간 patient·file·pixel 중복은 감사 결과상 0이다.
+- 모든 bbox 영상이 공식 test 소속임을 명시하고 별도 supervised development split으로 정의한 것은 적절하다.
+- SCR 247장의 윤곽선 노출 판정은 저장된 원영상 확인용 이미지에서도 육안으로 확인된다. 자동 검사 중앙값 0.972, 이동 대조 0.072와도 일관된다. `anatomy_only_ready=false`는 타당하다.
+- iter_004 재감사는 1,680 prediction과 verification 12건을 통과시키고, 구형 selection 때문에 incomplete로 판정했다. 과거 결과를 임의로 보완하지 않은 처리는 적절하다.
+
+# Problems / Concerns
+
+1. **NIH 좌표 검증을 과도하게 완료 처리했다.** `prepare_grounding_data.py:560`은 영상 크기 1024, README의 1024 문자열, 좌표 범위만으로 `canvas_verified_1024=true`를 만든다. README 근거는 영상 로딩 예시이며 bbox 좌표 규약의 명시적 근거가 아니다. 열어 본 train overlay는 합리적으로 보이지만, 계획에서 요구한 좌표 기준 검증을 대체하지 못한다. 원출처의 좌표 설명을 확보하거나 현재 상태를 잠정 가정으로 내려야 한다.
+
+2. **고정 verification 집합을 재검증하지 않는다.** `qes/preflight.py:82`는 저장된 subsets의 ID 존재와 중복만 검사하고 `fixed_subsets(reqs)`와 대조하지 않는다. verification 목록과 해당 기록을 함께 줄이거나 모두 비우면 검사 자체가 통과할 수 있다. 이는 코드에서 확인한 경로이며 이번 리뷰에서 재실행하지 않았다. 기존 25개 테스트는 verification 기록 변형을 검사하지만 지정 집합 자체의 변형은 다루지 않는다.
+
+3. **평가 실패 후 과거 완료 결과가 남는다.** `evaluate_qes.py`는 gate 실패 시 새로운 incomplete 기록을 쓰고 종료하지만 기존 `metrics.json`과 평가 표를 무효화하지 않는다. 성공 후 입력 변경·검증 실패가 발생한 디렉터리에는 오래된 complete/투자 판정이 남을 수 있다. 실패한 재평가를 포함한 상태 전이 검사가 필요하다.
+
+4. **NIH readiness가 일부 감사 오류와 연결되지 않는다.** bbox header 불일치, metadata 중복 ID, finding 연결 불일치는 보고되지만 필수 실패 조건으로 모두 반영되지 않는다. metadata 다운로드의 git blob 불일치도 기록만 한다. 현재 자료에서 해당 오류가 발생했다는 뜻은 아니지만, 재사용 가능한 검증 코드로는 보완이 필요하다.
+
+5. **후속 target의 의미를 확정해야 한다.** 현재 NPZ는 영상 내 모든 클래스 bbox를 하나로 합친다(`prepare_grounding_data.py:280`). 이 target의 클래스별 하위집단 평가는 클래스 조건부 grounding과 다르다. 후속 비교를 전체 병변 union으로 할지, image–class별 bbox union으로 할지 명시하고 위치 prior와 image-swap도 같은 정의에 맞춰야 한다.
+
+6. 다운로드 ledger의 시간 제한은 요청 전 검사에 그치며 재시도·stream 도중의 누적 시간 상한을 강제하지 않는다. HF metadata 조회도 ledger 밖이다. 저장된 118.15 MiB·266초는 ledger 집계치이며 모든 네트워크 작업을 완전히 계상한 수치로 표현하면 안 된다.
+
+# Interpretation
+
+소량 자료로 patient 분할과 annotation 연결이 가능한 것은 확인됐다. SCR 공개 영상의 정답 노출을 발견해 제외한 것도 유효한 데이터 감사 성과다. 다만 `lesion_probe_ready=true`를 엄격한 의미의 검증 완료로 승인하기에는 좌표 근거와 검증 조건이 부족하다.
+
+현재 클래스 구성은 작은 국소 병변만을 대표하지 않으며, 특히 Nodule이 없는 집단에서 미세 병변 전반의 pooling 한계를 주장할 수 없다. 미러 원본 동일성과 MedGemma 사전학습 노출도 미확인이다. 독립 patient split은 probe 학습 leakage를 줄이지만 사전학습 중복을 해결하지 않는다.
+
+Affine 교환법칙 검증은 구현 대조군이다. 향후 MLP 차이가 나더라도 제한된 readout의 공간 정보 접근성에 대한 증거이며, 차이가 없다고 병목을 LLM/decoder로 확정할 수 없다. 이번 반복은 연구 기반 구축 단계이고 새로운 방법론의 contribution이나 성능 개선을 입증하지 않았다.
+
+# Recommended Next Experiment
+
+먼저 CPU에서 좌표 근거와 readiness 조건을 보완하고, verification 집합 축소·공집합·교체 및 성공 후 실패 재평가를 검사한다. 확보한 160명 split은 유지한다.
+
+그다음 target·클래스 집계·soft-IoU 수식을 고정하고 train 영상으로 feature 추출 비용을 실측한다. 검증을 통과하고 45 device-min 예산에 들어가면 계획된 Z 대 U(P(Z))의 linear/MLP 비교, 위치 prior·동일 클래스 image-swap, 3 seed와 patient bootstrap 평가를 진행한다. SCR 원본 확보는 이 NIH probe의 선행 조건으로 두지 않는다.

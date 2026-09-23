@@ -1,0 +1,1642 @@
+diff --git a/README.md b/README.md
+index 3c7a95b..2895275 100644
+--- a/README.md
++++ b/README.md
+@@ -6,3 +6,10 @@
+   실행: `python research/summarize_scores.py --output research/results/scores_summary.md`
+   점수는 초기 평가 시점의 조건(bbox는 비공식 xyxy 0-1 형식, n=10 소표본)의 값이며 현재 공식 사용법의 최종 성능이 아니다.
+ - 입력 데이터와 이전 수동 분석 기록은 `../legacy/`
++- iter_004 질문 조건부 근거 선택 pilot (`qes/`, VinDr 10영상, 3×3 tile, 개발용):
++  1. `python research/build_qes_manifest.py --out research/results/iter_004` (CPU, label-free manifest)
++  2. `python research/test_qes.py --out research/results/iter_004` (CPU 검증)
++  3. `python research/run_qes.py --out research/results/iter_004 --phase calib|full|verify` (GPU 1장)
++  4. `python research/select_qes.py --out research/results/iter_004` (label-free 선택 고정)
++  5. `python research/evaluate_qes.py --out research/results/iter_004` (annotation 평가, overlay)
++  관련 연구 정리는 `notes/related_work_iter004.md`.
+diff --git a/build_qes_manifest.py b/build_qes_manifest.py
+new file mode 100644
+index 0000000..3839c71
+--- /dev/null
++++ b/build_qes_manifest.py
+@@ -0,0 +1,41 @@
++"""iter_004 request manifest (CPU, label-free).
++
++실행: python research/build_qes_manifest.py --out research/results/iter_004
++"""
++import argparse
++import json
++import os
++import sys
++
++sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
++from qes.data import build_config, build_requests, config_hash, fixed_subsets  # noqa: E402
++from qes.store import write_json_atomic  # noqa: E402
++
++
++def main():
++    ap = argparse.ArgumentParser()
++    ap.add_argument("--out", required=True)
++    args = ap.parse_args()
++    os.makedirs(args.out, exist_ok=True)
++    cfg = build_config()
++    reqs, info = build_requests(cfg=cfg)
++    subsets = fixed_subsets(reqs)
++    req_path = os.path.join(args.out, "requests.jsonl")
++    body = "".join(json.dumps(r, ensure_ascii=False) + "\n" for r in reqs)
++    if os.path.exists(req_path) and open(req_path).read() != body:
++        raise SystemExit(f"{req_path} exists with different content; refusing to overwrite")
++    with open(req_path, "w") as f:
++        f.write(body)
++    write_json_atomic(os.path.join(args.out, "config.json"), {**cfg, "config_sha256": config_hash(cfg)})
++    write_json_atomic(os.path.join(args.out, "image_info.json"), info)
++    write_json_atomic(os.path.join(args.out, "subsets.json"), subsets)
++    kinds = {}
++    for r in reqs:
++        kinds[r["kind"]] = kinds.get(r["kind"], 0) + 1
++    print(f"requests={len(reqs)} images={len(info)} kinds={kinds} config={config_hash(cfg)[:12]}")
++    print("calibration:", subsets["calibration"])
++    print("verification:", subsets["verification"])
++
++
++if __name__ == "__main__":
++    main()
+diff --git a/evaluate_qes.py b/evaluate_qes.py
+new file mode 100644
+index 0000000..228d5a4
+--- /dev/null
++++ b/evaluate_qes.py
+@@ -0,0 +1,184 @@
++"""Evaluation after selections are frozen (reads annotations).
++
++실행: python research/evaluate_qes.py --out research/results/iter_004
++"""
++import argparse
++import json
++import os
++import sys
++
++import numpy as np
++from PIL import Image, ImageDraw
++
++sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
++from qes.data import DATA_DIR, FINDINGS, SCORER_VERSION, build_config, config_hash  # noqa: E402
++from qes.evaluation import (build_geometry, classify_pairs, criteria, evaluate, load_annotations,  # noqa: E402
++                            pair_scores, positive_combos)
++from qes.selection import MAIN_METHODS  # noqa: E402
++from qes.store import read_jsonl, validate_predictions, write_json_atomic  # noqa: E402
++
++
++def scoring_checks(reqs, valid, ver):
++    recs = list(valid.values())
++    chk = {
++        "n_image_tokens": sorted({r["n_image_tokens"] for r in recs}),
++        "pixel_values_shapes": sorted({str(r["pixel_values_shape"]) for r in recs}),
++        "prompt_intact_all": all(r["prompt_intact"] for r in recs),
++        "p_yes_plus_no_min": min(r["p_yes_plus_no"] for r in recs),
++        "top1_tokens": {},
++        "fp32head_abs_diff_max": max(abs(r["m"] - r["m_fp32head"]) for r in recs),
++        "seconds_per_request_median": float(np.median([r["seconds"] for r in recs])),
++    }
++    for r in recs:
++        chk["top1_tokens"][r["top1_token"]] = chk["top1_tokens"].get(r["top1_token"], 0) + 1
++    if ver:
++        chk["verification"] = {
++            "n": len(ver),
++            "tf_abs_diff_max": max(x["tf_abs_diff"] for x in ver),
++            "tf_pass_1e-3": all(x["tf_abs_diff"] <= 1e-3 for x in ver),
++            "repeat_abs_diff_max": max(x["repeat_abs_diff"] for x in ver),
++            "gen_parsed": sum(x["gen_parsed"] is not None for x in ver),
++            "gen_agrees": sum(bool(x["gen_agrees"]) for x in ver),
++            "gen_truncated": sum(bool(x["gen_truncated"]) for x in ver),
++            "gen_forward_total": sum(x["gen_n_forward"] for x in ver),
++            "sec_gen_total": sum(x["sec_gen"] for x in ver),
++            "disagreements": [{"id": x["id"], "gen_text": x["gen_text"], "m_main": x["m_main"]}
++                              for x in ver if not x["gen_agrees"]],
++        }
++    return chk
++
++
++def overlays(sel, geo, ann, out_dir):
++    os.makedirs(out_dir, exist_ok=True)
++    colors = {"C_blur": (255, 0, 0), "D_blur": (0, 128, 255), "crop_conf": (255, 200, 0)}
++    for img, q in positive_combos(geo):
++        with Image.open(os.path.join(DATA_DIR, img)) as im:
++            base = im.convert("RGB")
++        s = 600 / base.size[0]
++        base = base.resize((600, int(round(base.size[1] * s))))
++        d = ImageDraw.Draw(base)
++        for t in geo[img].tiles:
++            d.rectangle([c * s for c in t], outline=(128, 128, 128), width=1)
++        for b in ann[img]["boxes"][q]:
++            d.rectangle([c * s for c in b], outline=(0, 255, 0), width=3)
++        for k, (meth, col) in enumerate(colors.items()):
++            t = geo[img].tiles[sel[img][q][meth]]
++            inset = 4 + 5 * k
++            d.rectangle([t[0] * s + inset, t[1] * s + inset, t[2] * s - inset, t[3] * s - inset],
++                        outline=col, width=3)
++        d.text((5, 5), f"{img} {q}  GT=green C_blur=red D_blur=blue crop=yellow", fill=(255, 255, 255))
++        base.save(os.path.join(out_dir, f"{img[:-4]}_{q.replace(' ', '_')}.png"))
++
++
++def main():
++    ap = argparse.ArgumentParser()
++    ap.add_argument("--out", required=True)
++    args = ap.parse_args()
++    sel_all = json.load(open(os.path.join(args.out, "selections.json")))
++    reqs = read_jsonl(os.path.join(args.out, "requests.jsonl"))
++    chash = config_hash(build_config())
++    v = validate_predictions(reqs, read_jsonl(os.path.join(args.out, "predictions.jsonl")), chash, SCORER_VERSION)
++    if v["status"] != "complete":
++        raise SystemExit("incomplete predictions")
++    ver = read_jsonl(os.path.join(args.out, "verification.jsonl"))
++    ann = load_annotations()
++    geo = build_geometry(ann)
++    sel = sel_all["main"]["selection"]
++    scores = sel_all["main"]["scores"]
++    pairs = classify_pairs(geo)
++
++    ev = evaluate(sel, geo, MAIN_METHODS)
++    ps = pair_scores(sel, geo, pairs, MAIN_METHODS)
++    crit = criteria(ev, ps)
++
++    # 민감도 (주결과 대체 금지)
++    sel32 = sel_all["sensitivity_fp32head"]["selection"]
++    ev32 = evaluate(sel32, geo, MAIN_METHODS)
++    ps32 = pair_scores(sel32, geo, pairs, MAIN_METHODS)
++    loqo = {}
++    for drop in FINDINGS:
++        s2 = {img: {q: {"C_blur": sel[img][q]["C_blur_loqo"].get(drop, sel[img][q]["C_blur"])}
++                    for q in FINDINGS} for img in sel}
++        e2 = evaluate(s2, geo, ["C_blur"])
++        loqo[drop] = {"U_macro": e2["methods"]["C_blur"]["U"]["macro"],
++                      "S_distinct": pair_scores(s2, geo, pairs, ["C_blur"])["C_blur"]["distinct"]["macro_S"]}
++
++    # 선택 영역의 D·C 부호, 질문별 D 분포, 실패 사례
++    combos = positive_combos(geo)
++    sign_rows, fails = [], []
++    for row in ev["per_combo"]:
++        img, q = row["image"], row["finding"]
++        sc = scores[img][q]
++        tc, td = sel[img][q]["C_blur"], sel[img][q]["D_blur"]
++        sign_rows.append({"image": img, "finding": q, "m_orig": sc["m_orig"],
++                          "C_blur_tile": tc, "C_at_sel": sc["C_blur"][tc], "D_at_Csel": sc["D_blur"][tc],
++                          "D_blur_tile": td, "D_at_Dsel": sc["D_blur"][td],
++                          "U_C": row["C_blur"]["U"], "U_D": row["D_blur"]["U"], "U_crop": row["crop_conf"]["U"],
++                          "best_tile": row["best_tile"]})
++        if row["C_blur"]["U"] < row["D_blur"]["U"]:
++            fails.append(sign_rows[-1])
++    d_dist = {}
++    for q in FINDINGS:
++        allD = np.array([scores[img][q]["D_blur"] for img in scores]).ravel()
++        allDm = np.array([scores[img][q]["D_mean"] for img in scores]).ravel()
++        d_dist[q] = {"D_blur_mean": float(allD.mean()), "D_blur_std": float(allD.std()),
++                     "D_blur_min": float(allD.min()), "D_blur_max": float(allD.max()),
++                     "D_mean_mean": float(allDm.mean()), "D_mean_std": float(allDm.std())}
++    orig_m = {img: {q: scores[img][q]["m_orig"] for q in FINDINGS} for img in scores}
++    aux = {img: {q: {"m_orig": scores[img][q]["m_orig"], "crop_mean": scores[img][q]["crop_mean"],
++                     "crop_max": scores[img][q]["crop_max"]} for q in FINDINGS} for img in scores}
++    # 공유 bbox 쌍 (distinct가 아닌 쌍) 사례
++    shared = [p for p in ps["C_blur"]["pairs"] if not p["distinct"]]
++
++    metrics = {
++        "completion": "complete",
++        "scoring_checks": scoring_checks(reqs, v["valid"], ver),
++        "n_combos": ev["n_combos"], "n_images": ev["n_images"],
++        "methods_macro": {m: {k: ev["methods"][m][k]["macro"] for k in ("U", "iou", "cov")}
++                          for m in MAIN_METHODS + ["uniform", "location_prior"]},
++        "oracle_iou_macro": ev["methods"]["oracle_iou"]["macro"],
++        "image_swap_macro": {m: {k: ev["methods"][m]["image_swap"][k]["macro"] for k in ("U", "iou")}
++                             for m in MAIN_METHODS},
++        "question_swap_macro": {m: {k: ev["methods"][m]["question_swap"][k]["macro"] for k in ("U", "iou")}
++                                for m in MAIN_METHODS},
++        "question_swap_n": ev["methods"]["C_blur"]["question_swap"]["U"]["n_combos"],
++        "per_image_U": {m: ev["methods"][m]["U"]["per_image"] for m in MAIN_METHODS + ["uniform", "location_prior"]},
++        "pair_S": {m: {s: {k: ps[m][s][k] for k in ("n_pairs", "n_images", "macro_S", "frac_same_tile")}
++                       for s in ("distinct", "other")} for m in MAIN_METHODS},
++        "criteria": crit,
++        "sensitivity_fp32head": {"methods_macro_U": {m: ev32["methods"][m]["U"]["macro"] for m in MAIN_METHODS},
++                                 "S_distinct": {m: ps32[m]["distinct"]["macro_S"] for m in MAIN_METHODS},
++                                 "criteria": criteria(ev32, ps32)},
++        "sensitivity_leave_one_question_out_C_blur": loqo,
++        "ties_main": sel_all["main"]["ties"],
++        "selected_sign": sign_rows,
++        "failure_cases_C_lt_D": fails,
++        "D_distribution_by_question": d_dist,
++        "orig_margin": orig_m,
++        "aux_orig_crop_mean_max": aux,
++        "shared_pairs_C_blur": shared,
++        "pair_details": {m: ps[m]["pairs"] for m in MAIN_METHODS},
++        "per_combo": ev["per_combo"],
++    }
++    write_json_atomic(os.path.join(args.out, "metrics.json"), metrics)
++    overlays(sel, geo, ann, os.path.join(args.out, "overlays"))
++
++    M = metrics["methods_macro"]
++    lines = ["| method | macro U | macro IoU | macro coverage | image-swap U | question-swap U | S distinct | S other |",
++             "|---|---:|---:|---:|---:|---:|---:|---:|"]
++    for m in MAIN_METHODS:
++        lines.append(f"| {m} | {M[m]['U']:.3f} | {M[m]['iou']:.3f} | {M[m]['cov']:.3f} | "
++                     f"{metrics['image_swap_macro'][m]['U']:.3f} | {metrics['question_swap_macro'][m]['U']:.3f} | "
++                     f"{ps[m]['distinct']['macro_S']:.3f} | {ps[m]['other']['macro_S']:.3f} |")
++    for m in ("uniform", "location_prior"):
++        lines.append(f"| {m} | {M[m]['U']:.3f} | {M[m]['iou']:.3f} | {M[m]['cov']:.3f} | | | | |")
++    lines.append(f"\noracle IoU macro = {metrics['oracle_iou_macro']:.3f}")
++    with open(os.path.join(args.out, "eval_table.md"), "w") as f:
++        f.write("\n".join(lines) + "\n")
++    print("\n".join(lines))
++    print(json.dumps(crit, indent=1))
++    print(json.dumps(metrics["scoring_checks"], indent=1, default=str))
++
++
++if __name__ == "__main__":
++    main()
+diff --git a/notes/related_work_iter004.md b/notes/related_work_iter004.md
+new file mode 100644
+index 0000000..c06aa25
+--- /dev/null
++++ b/notes/related_work_iter004.md
+@@ -0,0 +1,26 @@
++# iter_004 관련 연구 노트 (question-conditioned evidence selection)
++
++이 노트는 GPT 계획(`agent/runs/iter_004/plan.md`)의 조사 내용을 옮긴 것이다. 이번 실행에서 원문을 다시 열어 검증하지는 않았다.
++
++## 이번 pilot의 C 점수와 대수적 동치
++
++- `m(I,q) = log P(Yes|I,q) − log P(No|I,q)`
++- `D(q,R,t) = m(I,q) − m(T_t(I,R),q)` (영역 R을 변형 t로 제거했을 때 margin 감소)
++- `C(q,R,t) = D(q,R,t) − mean_{q'≠q} D(q',R,t)`
++
++contrastive score `F_q(I) = m(I,q) − mean_{q'≠q} m(I,q')`를 정의하면
++`F_q(I) − F_q(T_t(I,R)) = C(q,R,t)`이다. 즉 C는 "질문 q 대 나머지 질문 평균" contrastive score의 occlusion
++attribution과 정확히 같다 (`test_qes.py`에서 수치로 확인). 또한 각 R에서 `sum_q C(q,R,t) = 0`이므로,
++여러 질문이 실제로 같은 영역을 근거로 쓰면 그 공유 근거는 억제될 수 있다.
++
++## 선행 연구와의 관계 (새 방법으로 주장하지 않음)
++
++- **SECOND** ([arXiv 2506.08391](https://arxiv.org/html/2506.08391v1)): attention 기반 patch 선택과 contrastive decoding을 결합한다. 질문별 영역 선택 자체는 새롭지 않다.
++- **CSGR** ([arXiv 2609.13228](https://arxiv.org/html/2609.13228v1)): perturbation에 대한 **gold answer** confidence 반응으로 영역을 선택한다. gold answer를 알아야 하므로 추론 시 label-free가 아니다. 이번 selector는 정답과 무관하게 항상 "Yes" 대 "No" margin을 쓰며 annotation·정답을 받지 않는다.
++- **CASE** ([arXiv 2506.07327 v4](https://arxiv.org/html/2506.07327v4)): 다른 class들의 평균 gradient 방향을 제거해 class-specific attribution을 만든다. "다른 class 공통 성분 제거"라는 발상은 C와 같다. 차이는 CASE가 gradient 공간의 projection을 쓰고, C는 질문별 finite-difference(occlusion) 차의 평균을 뺀다는 점이다. 이 차이를 contribution으로 주장하지 않는다.
++
++## 이번 구현의 범위
++
++- raw occlusion(`argmax D`), crop confidence(`argmax m(crop)`), uniform, 위치 prior는 단순 baseline이다. SECOND·CSGR·CASE의 완전 재현이 아니다.
++- 로컬 VinDr 10영상은 legacy 평가에 이미 사용된 개발 자료다. 환자 일반화, specificity, 진단 개선은 주장하지 않는다.
++- CheXlocalize는 계정 등록·약관 동의가 필요해 이번에는 취득하지 않았다 ([다운로드 안내](https://raw.githubusercontent.com/rajpurkarlab/cheXlocalize/master/download_instructions.md)).
+diff --git a/qes/__init__.py b/qes/__init__.py
+new file mode 100644
+index 0000000..b119e5e
+--- /dev/null
++++ b/qes/__init__.py
+@@ -0,0 +1 @@
++"""iter_004: question-conditioned evidence selection pilot on local VinDr-CXR (dev only)."""
+diff --git a/qes/data.py b/qes/data.py
+new file mode 100644
+index 0000000..2f428e2
+--- /dev/null
++++ b/qes/data.py
+@@ -0,0 +1,215 @@
++"""Inputs, grid, pixel transforms, config and request manifest (label-free).
++
++이 모듈은 annotation 파일을 읽지 않는다. 이미지 목록은 디렉터리의 PNG로만 만든다.
++"""
++import glob
++import hashlib
++import json
++import os
++import random
++
++import numpy as np
++from PIL import Image, ImageFilter
++
++DATA_DIR = "/SSD1_1TB/home/milab/daniel/08_medgemma/legacy/eval_samples/not_in_training/vindr_cxr"
++MODEL_ID = "google/medgemma-1.5-4b-it"
++MODEL_REVISION = "91850547d9f0b2fdd21aa7c5f4f3d1a8a52c243b"
++SCORER_VERSION = "qes-scorer-1"
++SEED = 0
++
++FINDINGS = [
++    "Cardiomegaly",
++    "Calcification",
++    "Pleural effusion",
++    "Pulmonary fibrosis",
++    "Pleural thickening",
++    "Atelectasis",
++]
++PROMPT_TEMPLATE = "Is there evidence of {finding} in this chest X-ray? Answer Yes or No."
++GRID = 3
++BLUR_RADIUS_FRAC = 0.05
++KINDS = ["orig", "crop", "blur", "mean"]
++
++
++def build_config():
++    return {
++        "iteration": "iter_004",
++        "seed": SEED,
++        "data_dir": DATA_DIR,
++        "model_id": MODEL_ID,
++        "model_revision": MODEL_REVISION,
++        "processor_revision": MODEL_REVISION,
++        "dtype": "bfloat16",
++        "scorer_version": SCORER_VERSION,
++        "findings": FINDINGS,
++        "prompt_template": PROMPT_TEMPLATE,
++        "candidates": {"Yes": "Yes", "No": "No"},
++        "margin": "m = log P(Yes|I,q) - log P(No|I,q), last-position logits, log_softmax over full vocab",
++        "grid": GRID,
++        "tile_bounds": "x_k = floor(k*W/3 + 0.5), y_k = floor(k*H/3 + 0.5), k=0..3; tile id row-major r*3+c",
++        "blur": {"type": "PIL.ImageFilter.GaussianBlur on full RGB original, tile pasted back",
++                 "radius_frac_of_min_side": BLUR_RADIUS_FRAC},
++        "mean_fill": "per-channel mean of full original RGB (round half up to uint8), tile filled",
++        "crop": "tile crop passed as separate image, no manual upscaling (processor resizes)",
++        "transform_order": "all pixel transforms on original resolution before processor",
++        "tie_rule": "argmax ties -> smallest row-major tile id",
++    }
++
++
++def config_hash(cfg):
++    return sha256_json(cfg)
++
++
++def sha256_json(obj):
++    return hashlib.sha256(json.dumps(obj, sort_keys=True, ensure_ascii=False).encode()).hexdigest()
++
++
++def file_sha256(path):
++    h = hashlib.sha256()
++    with open(path, "rb") as f:
++        for chunk in iter(lambda: f.read(1 << 20), b""):
++            h.update(chunk)
++    return h.hexdigest()
++
++
++def pixel_hash(img):
++    """sha256 over mode, size and actual RGB bytes."""
++    img = img.convert("RGB") if img.mode != "RGB" else img
++    h = hashlib.sha256()
++    h.update(f"{img.mode}|{img.size[0]}x{img.size[1]}|".encode())
++    h.update(img.tobytes())
++    return h.hexdigest()
++
++
++def list_images(data_dir=DATA_DIR):
++    return sorted(os.path.basename(p) for p in glob.glob(os.path.join(data_dir, "*.png")))
++
++
++def load_rgb(path):
++    with Image.open(path) as im:
++        return im.convert("RGB")
++
++
++def tile_boxes(W, H, n=GRID):
++    xs = [int(np.floor(k * W / n + 0.5)) for k in range(n + 1)]
++    ys = [int(np.floor(k * H / n + 0.5)) for k in range(n + 1)]
++    return [(xs[c], ys[r], xs[c + 1], ys[r + 1]) for r in range(n) for c in range(n)]
++
++
++def blur_full(orig):
++    W, H = orig.size
++    return orig.filter(ImageFilter.GaussianBlur(radius=BLUR_RADIUS_FRAC * min(W, H)))
++
++
++def channel_means(orig):
++    a = np.asarray(orig, dtype=np.float64)
++    return tuple(int(np.floor(a[..., c].mean() + 0.5)) for c in range(3))
++
++
++class ImageInputs:
++    """원본에서 모든 입력 변형을 결정적으로 만든다 (blur는 이미지당 한 번 계산)."""
++
++    def __init__(self, path):
++        self.path = path
++        self.orig = load_rgb(path)
++        self.W, self.H = self.orig.size
++        self.tiles = tile_boxes(self.W, self.H)
++        self._blur = None
++        self._means = None
++
++    @property
++    def blurred(self):
++        if self._blur is None:
++            self._blur = blur_full(self.orig)
++        return self._blur
++
++    @property
++    def means(self):
++        if self._means is None:
++            self._means = channel_means(self.orig)
++        return self._means
++
++    def make(self, kind, tile):
++        if kind == "orig":
++            return self.orig
++        box = self.tiles[tile]
++        if kind == "crop":
++            return self.orig.crop(box)
++        out = self.orig.copy()
++        if kind == "blur":
++            out.paste(self.blurred.crop(box), box[:2])
++        elif kind == "mean":
++            out.paste(Image.new("RGB", (box[2] - box[0], box[3] - box[1]), self.means), box[:2])
++        else:
++            raise ValueError(kind)
++        return out
++
++
++def request_id(image, finding, kind, tile):
++    return f"{image}|{finding}|{kind}|{'-' if tile is None else tile}"
++
++
++def build_requests(data_dir=DATA_DIR, images=None, cfg=None):
++    cfg = cfg or build_config()
++    chash = config_hash(cfg)
++    images = images if images is not None else list_images(data_dir)
++    reqs, image_info = [], {}
++    for name in images:
++        path = os.path.join(data_dir, name)
++        ii = ImageInputs(path)
++        info = {
++            "file": name,
++            "width": ii.W,
++            "height": ii.H,
++            "source_file_sha256": file_sha256(path),
++            "source_pixel_sha256": pixel_hash(ii.orig),
++            "tiles": [list(t) for t in ii.tiles],
++            "tile_areas": [(t[2] - t[0]) * (t[3] - t[1]) for t in ii.tiles],
++            "channel_means": list(ii.means),
++            "blur_radius": BLUR_RADIUS_FRAC * min(ii.W, ii.H),
++            "input_pixel_sha256": {},
++        }
++        inputs = [("orig", None)] + [(k, t) for k in ("crop", "blur", "mean") for t in range(GRID * GRID)]
++        for kind, tile in inputs:
++            info["input_pixel_sha256"][f"{kind}|{'-' if tile is None else tile}"] = pixel_hash(ii.make(kind, tile))
++        image_info[name] = info
++        for q in FINDINGS:
++            for kind, tile in inputs:
++                r = {
++                    "id": request_id(name, q, kind, tile),
++                    "image": name,
++                    "finding": q,
++                    "kind": kind,
++                    "tile": tile,
++                    "prompt": PROMPT_TEMPLATE.format(finding=q),
++                    "source_file_sha256": info["source_file_sha256"],
++                    "source_pixel_sha256": info["source_pixel_sha256"],
++                    "input_pixel_sha256": info["input_pixel_sha256"][f"{kind}|{'-' if tile is None else tile}"],
++                    "config_sha256": chash,
++                }
++                r["request_sha256"] = sha256_json(r)
++                reqs.append(r)
++    return reqs, image_info
++
++
++def fixed_subsets(reqs):
++    """모델 결과를 보기 전에 calibration(24)과 verification(12) 입력을 고정한다."""
++    by = {(r["image"], r["finding"], r["kind"], r["tile"]): r["id"] for r in reqs}
++    images = sorted({r["image"] for r in reqs})
++
++    def pick(seed, n_per_kind):
++        rng = random.Random(seed)
++        ids = []
++        for i in range(n_per_kind):
++            for kind in KINDS:
++                while True:
++                    img = rng.choice(images)
++                    q = FINDINGS[(i * len(KINDS) + KINDS.index(kind)) % len(FINDINGS)]
++                    tile = None if kind == "orig" else rng.randrange(GRID * GRID)
++                    rid = by[(img, q, kind, tile)]
++                    if rid not in ids:
++                        ids.append(rid)
++                        break
++        return ids
++
++    return {"calibration": pick(SEED + 1, 6), "verification": pick(SEED + 2, 3)}
+diff --git a/qes/evaluation.py b/qes/evaluation.py
+new file mode 100644
+index 0000000..e932bd3
+--- /dev/null
++++ b/qes/evaluation.py
+@@ -0,0 +1,208 @@
++"""Annotation-based evaluation. selector 출력이 고정된 뒤에만 호출한다."""
++import itertools
++import json
++import os
++
++import numpy as np
++
++from .data import DATA_DIR, FINDINGS, GRID, tile_boxes
++from .selection import argmax_tie_low
++
++NT = GRID * GRID
++PAIR_IOU_MAX = 0.1
++PAIR_U_LOSS_MIN = 0.25
++
++
++def load_annotations(data_dir=DATA_DIR, findings=FINDINGS):
++    """file -> {'W','H','boxes': {finding: [xyxy,...]}} (질문 bank의 소견만)."""
++    meta = json.load(open(os.path.join(data_dir, "meta.json")))
++    out = {}
++    for m in meta:
++        boxes = {}
++        for b in m["bounding_boxes_pixel_xyxy"]:
++            if b["class_name"] in findings:
++                boxes.setdefault(b["class_name"], []).append(
++                    (b["x_min"], b["y_min"], b["x_max"], b["y_max"]))
++        out[m["file"]] = {"W": m["orig_width"], "H": m["orig_height"], "boxes": boxes}
++    return out
++
++
++def _span(a0, a1, n):
++    """pixel center 규칙: 좌표 [a0,a1)에 center(k+0.5)가 들어가는 pixel k 범위."""
++    lo = int(np.ceil(a0 - 0.5))
++    hi = int(np.ceil(a1 - 0.5))
++    return max(lo, 0), min(max(hi, 0), n)
++
++
++def union_mask(boxes, W, H):
++    m = np.zeros((H, W), dtype=bool)
++    for x0, y0, x1, y1 in boxes:
++        c0, c1 = _span(x0, x1, W)
++        r0, r1 = _span(y0, y1, H)
++        m[r0:r1, c0:c1] = True
++    return m
++
++
++class GeomImage:
++    def __init__(self, W, H, boxes_by_finding):
++        self.W, self.H = W, H
++        self.tiles = tile_boxes(W, H)
++        self.G = {q: union_mask(bx, W, H) for q, bx in boxes_by_finding.items()}
++        self.stats = {q: self._tile_stats(g) for q, g in self.G.items()}
++
++    def _tile_stats(self, g):
++        area_g = int(g.sum())
++        iou, cov = [], []
++        for x0, y0, x1, y1 in self.tiles:
++            inter = int(g[y0:y1, x0:x1].sum())
++            area_r = (x1 - x0) * (y1 - y0)
++            iou.append(inter / (area_r + area_g - inter))
++            cov.append(inter / area_g)
++        iou = np.array(iou)
++        best = float(iou.max())
++        return {"iou": iou, "cov": np.array(cov), "U": iou / best, "oracle_iou": best,
++                "best_tile": argmax_tie_low(iou)[0], "area_g": area_g}
++
++    def region_iou(self, a, b):
++        ga, gb = self.G[a], self.G[b]
++        return float((ga & gb).sum() / (ga | gb).sum())
++
++
++def build_geometry(ann):
++    return {f: GeomImage(a["W"], a["H"], a["boxes"]) for f, a in ann.items()}
++
++
++def positive_combos(geo):
++    return [(img, q) for img in sorted(geo) for q in FINDINGS if q in geo[img].G]
++
++
++def classify_pairs(geo):
++    pairs = []
++    for img in sorted(geo):
++        pos = [q for q in FINDINGS if q in geo[img].G]
++        for a, b in itertools.combinations(pos, 2):
++            sa, sb = geo[img].stats[a], geo[img].stats[b]
++            riou = geo[img].region_iou(a, b)
++            loss_a = 1.0 - sa["U"][sb["best_tile"]]
++            loss_b = 1.0 - sb["U"][sa["best_tile"]]
++            distinct = (riou <= PAIR_IOU_MAX and sa["best_tile"] != sb["best_tile"]
++                        and loss_a >= PAIR_U_LOSS_MIN and loss_b >= PAIR_U_LOSS_MIN)
++            pairs.append({"image": img, "a": a, "b": b, "region_iou": riou,
++                          "best_a": sa["best_tile"], "best_b": sb["best_tile"],
++                          "U_loss_a": float(loss_a), "U_loss_b": float(loss_b), "distinct": bool(distinct)})
++    return pairs
++
++
++def macro(values_by_combo):
++    """(img,q)->value 를 영상 내부 평균 후 영상 macro-average."""
++    per_img = {}
++    for (img, q), v in values_by_combo.items():
++        per_img.setdefault(img, []).append(v)
++    img_means = {img: float(np.mean(v)) for img, v in per_img.items()}
++    return float(np.mean(list(img_means.values()))), img_means
++
++
++def location_prior_tiles(geo):
++    """평가 영상을 제외한 동일 소견 annotation들의 평균 U가 최고인 tile (GT 기반 개발용 비교군)."""
++    out = {}
++    for img, q in positive_combos(geo):
++        others = [o for o in geo if o != img and q in geo[o].G]
++        mean_u = np.mean([geo[o].stats[q]["U"] for o in others], axis=0)
++        out[(img, q)] = argmax_tie_low(mean_u)[0]
++    return out
++
++
++def evaluate(selection, geo, methods):
++    combos = positive_combos(geo)
++    prior = location_prior_tiles(geo)
++    metric_names = ["U", "iou", "cov"]
++    res = {"n_combos": len(combos), "n_images": len({c[0] for c in combos}), "methods": {}, "per_combo": []}
++
++    def tile_metrics(img, q, t):
++        s = geo[img].stats[q]
++        return {k: float(s[k][t]) for k in metric_names}
++
++    rows = {}
++    for img, q in combos:
++        s = geo[img].stats[q]
++        row = {"image": img, "finding": q, "oracle_iou": s["oracle_iou"], "best_tile": s["best_tile"],
++               "area_frac": s["area_g"] / (geo[img].W * geo[img].H)}
++        for meth in methods:
++            t = selection[img][q][meth]
++            row[meth] = {"tile": t, **tile_metrics(img, q, t)}
++            donors = [j for j in selection if j != img]
++            row[meth]["image_swap"] = {k: float(np.mean([geo[img].stats[q][k][selection[j][q][meth]]
++                                                         for j in donors])) for k in metric_names}
++            others = [o for o in FINDINGS if o != q and o in geo[img].G]
++            if others:
++                row[meth]["question_swap"] = {k: float(np.mean([geo[img].stats[q][k][selection[img][o][meth]]
++                                                               for o in others])) for k in metric_names}
++        row["uniform"] = {k: float(np.mean(s[k])) for k in metric_names}
++        row["location_prior"] = {"tile": prior[(img, q)], **tile_metrics(img, q, prior[(img, q)])}
++        rows[(img, q)] = row
++        res["per_combo"].append(row)
++
++    def agg(getter):
++        vals = {c: getter(rows[c]) for c in combos}
++        vals = {c: v for c, v in vals.items() if v is not None}
++        m, per_img = macro(vals)
++        return {"macro": m, "per_image": per_img, "n_combos": len(vals)}
++
++    for meth in methods + ["uniform", "location_prior"]:
++        res["methods"][meth] = {k: agg(lambda r, k=k, meth=meth: r[meth][k]) for k in metric_names}
++    for meth in methods:
++        res["methods"][meth]["image_swap"] = {k: agg(lambda r, k=k, meth=meth: r[meth]["image_swap"][k])
++                                              for k in metric_names}
++        res["methods"][meth]["question_swap"] = {
++            k: agg(lambda r, k=k, meth=meth: r[meth].get("question_swap", {}).get(k)) for k in metric_names}
++    res["methods"]["oracle_iou"] = agg(lambda r: r["oracle_iou"])
++    return res
++
++
++def pair_scores(selection, geo, pairs, methods):
++    out = {}
++    for meth in methods:
++        per = []
++        for p in pairs:
++            img, a, b = p["image"], p["a"], p["b"]
++            Ua, Ub = geo[img].stats[a]["U"], geo[img].stats[b]["U"]
++            Ra, Rb = selection[img][a][meth], selection[img][b][meth]
++            S = ((Ua[Ra] - Ua[Rb]) + (Ub[Rb] - Ub[Ra])) / 2.0
++            per.append({**p, "S": float(S), "tile_a": Ra, "tile_b": Rb, "same_tile": Ra == Rb})
++        strata = {}
++        for name, flt in (("distinct", True), ("other", False)):
++            sub = [x for x in per if x["distinct"] == flt]
++            by_img = {}
++            for x in sub:
++                by_img.setdefault(x["image"], []).append(x["S"])
++            img_means = {k: float(np.mean(v)) for k, v in by_img.items()}
++            strata[name] = {"n_pairs": len(sub), "n_images": len(by_img),
++                            "macro_S": float(np.mean(list(img_means.values()))) if img_means else None,
++                            "per_image": img_means,
++                            "frac_same_tile": float(np.mean([x["same_tile"] for x in sub])) if sub else None}
++        out[meth] = {"pairs": per, **strata}
++    return out
++
++
++def criteria(ev, ps, prefix_ok=True):
++    M = ev["methods"]
++    U = lambda m: M[m]["U"]["macro"]
++    I = lambda m: M[m]["iou"]["macro"]
++    c = {}
++    best_base = max(U("D_blur"), U("crop_conf"), U("uniform"), U("location_prior"))
++    c1a = U("C_blur") >= best_base + 0.05
++    c1b = I("C_blur") >= max(I("D_blur"), I("crop_conf"))
++    c["1"] = {"pass": bool(c1a and c1b), "U_C_blur": U("C_blur"), "best_baseline_U": best_base,
++              "iou_C_blur": I("C_blur"), "best_iou_Dblur_crop": max(I("D_blur"), I("crop_conf"))}
++    pi_c, pi_d = M["C_blur"]["U"]["per_image"], M["D_blur"]["U"]["per_image"]
++    n_pos = sum(1 for k in pi_c if pi_c[k] - pi_d[k] > 0)
++    swap = M["C_blur"]["image_swap"]["U"]["macro"]
++    c["2"] = {"pass": bool(n_pos >= 6 and U("C_blur") >= swap + 0.05), "n_images_C_gt_D": n_pos,
++              "n_images": len(pi_c), "U_C_blur": U("C_blur"), "U_image_swap": swap}
++    s_c = ps["C_blur"]["distinct"]["macro_S"]
++    s_base = max(ps["D_blur"]["distinct"]["macro_S"], ps["crop_conf"]["distinct"]["macro_S"])
++    c["3"] = {"pass": bool(s_c > 0 and s_c >= s_base + 0.10), "S_C_blur": s_c, "best_S_Dblur_crop": s_base}
++    c["4"] = {"pass": bool(U("C_mean") >= max(U("D_mean"), U("crop_conf"))), "U_C_mean": U("C_mean"),
++              "U_D_mean": U("D_mean"), "U_crop_conf": U("crop_conf")}
++    c["all_pass"] = all(c[k]["pass"] for k in ("1", "2", "3", "4"))
++    return c
+diff --git a/qes/scorer.py b/qes/scorer.py
+new file mode 100644
+index 0000000..1773e0f
+--- /dev/null
++++ b/qes/scorer.py
+@@ -0,0 +1,134 @@
++"""MedGemma 1.5 Yes/No margin scorer. torch/transformers는 load() 안에서만 import한다 (import-time GPU 부작용 없음)."""
++import os
++
++from .data import MODEL_ID, MODEL_REVISION, SCORER_VERSION
++
++HF_HOME = "/SSD1_1TB/home/milab/daniel/08_medgemma/hf_cache"
++
++
++class Scorer:
++    def __init__(self):
++        self.model = None
++
++    def load(self):
++        os.environ.setdefault("HF_HOME", HF_HOME)
++        os.environ.setdefault("HF_HUB_OFFLINE", "1")
++        import torch
++        import transformers
++
++        self.torch = torch
++        torch.manual_seed(0)
++        self.proc = transformers.AutoProcessor.from_pretrained(MODEL_ID, revision=MODEL_REVISION)
++        self.model = transformers.AutoModelForImageTextToText.from_pretrained(
++            MODEL_ID, revision=MODEL_REVISION, dtype=torch.bfloat16, device_map="cuda")
++        self.model.eval()
++        tok = self.proc.tokenizer
++        self.tok = tok
++        self.cand_ids = {k: tok.encode(k, add_special_tokens=False) for k in ("Yes", "No")}
++        if any(len(v) != 1 for v in self.cand_ids.values()):
++            raise RuntimeError(f"Yes/No not single tokens: {self.cand_ids}")
++        self.yes_id = self.cand_ids["Yes"][0]
++        self.no_id = self.cand_ids["No"][0]
++        # proc.image_token_id는 <start_of_image>(boi)를 가리키므로 soft token id를 직접 쓴다.
++        self.image_token_id = tok.convert_tokens_to_ids("<image_soft_token>")
++        self.eot_id = tok.convert_tokens_to_ids("<end_of_turn>")
++        self.eos_ids = {self.eot_id, tok.eos_token_id}
++        cfg = self.model.config
++        text_cfg = getattr(cfg, "text_config", cfg)
++        self.softcap = getattr(text_cfg, "final_logit_softcapping", None)
++        return self.env_info()
++
++    def env_info(self):
++        import transformers
++        ip = self.proc.image_processor
++        return {
++            "model_id": MODEL_ID,
++            "model_revision_requested": MODEL_REVISION,
++            "model_commit_hash": getattr(self.model.config, "_commit_hash", None),
++            "name_or_path": self.model.config._name_or_path,
++            "transformers": transformers.__version__,
++            "torch": self.torch.__version__,
++            "cuda_visible_devices": os.environ.get("CUDA_VISIBLE_DEVICES"),
++            "gpu_name": self.torch.cuda.get_device_name(0),
++            "dtype": str(self.model.dtype),
++            "processor_class": type(self.proc).__name__,
++            "image_processor_class": type(ip).__name__,
++            "image_processor_size": str(getattr(ip, "size", None)),
++            "image_seq_length": getattr(self.proc, "image_seq_length", None),
++            "do_pan_and_scan": str(getattr(ip, "do_pan_and_scan", None)),
++            "candidate_token_ids": self.cand_ids,
++            "image_token_id": self.image_token_id,
++            "eot_id": self.eot_id,
++            "final_logit_softcapping": self.softcap,
++            "scorer_version": SCORER_VERSION,
++        }
++
++    def _inputs(self, img, prompt):
++        msgs = [{"role": "user", "content": [{"type": "image", "image": img},
++                                             {"type": "text", "text": prompt}]}]
++        inp = self.proc.apply_chat_template(msgs, add_generation_prompt=True, tokenize=True,
++                                            return_dict=True, return_tensors="pt")
++        torch = self.torch
++        return {k: (v.to("cuda", dtype=torch.bfloat16) if k == "pixel_values" else v.to("cuda"))
++                for k, v in inp.items()}
++
++    def _fp32_head(self, h):
++        torch = self.torch
++        W = self.model.get_output_embeddings().weight
++        lg = h.float() @ W.float().T
++        if self.softcap:
++            lg = torch.tanh(lg / self.softcap) * self.softcap
++        return torch.log_softmax(lg, -1)
++
++    def score(self, img, prompt):
++        torch = self.torch
++        inp = self._inputs(img, prompt)
++        with torch.no_grad():
++            out = self.model(**inp, output_hidden_states=True)
++            lp = torch.log_softmax(out.logits[0, -1].float(), -1)
++            lp32 = self._fp32_head(out.hidden_states[-1][0, -1])
++        ids = inp["input_ids"][0]
++        text = self.tok.decode(ids, skip_special_tokens=False)
++        top = int(torch.argmax(lp))
++        return {
++            "lp_yes": float(lp[self.yes_id]),
++            "lp_no": float(lp[self.no_id]),
++            "m": float(lp[self.yes_id] - lp[self.no_id]),
++            "m_fp32head": float(lp32[self.yes_id] - lp32[self.no_id]),
++            "p_yes_plus_no": float(lp[self.yes_id].exp() + lp[self.no_id].exp()),
++            "top1_token": self.tok.decode([top]),
++            "n_tokens": int(ids.shape[0]),
++            "n_image_tokens": int((ids == self.image_token_id).sum()),
++            "pixel_values_shape": list(inp["pixel_values"].shape),
++            "prompt_intact": prompt in text,
++        }
++
++    def teacher_forced(self, img, prompt):
++        """후보 token을 붙여 teacher-forced로 log P(cand)를 구한다 (후보마다 forward 1회)."""
++        torch = self.torch
++        inp = self._inputs(img, prompt)
++        res = {}
++        for name, cid in (("Yes", self.yes_id), ("No", self.no_id)):
++            x = dict(inp)
++            add = torch.tensor([[cid]], device="cuda", dtype=inp["input_ids"].dtype)
++            x["input_ids"] = torch.cat([inp["input_ids"], add], 1)
++            x["attention_mask"] = torch.cat([inp["attention_mask"], torch.ones_like(add)], 1)
++            if "token_type_ids" in inp:
++                x["token_type_ids"] = torch.cat([inp["token_type_ids"], torch.zeros_like(add)], 1)
++            with torch.no_grad():
++                lg = self.model(**x).logits[0, -2].float()
++            res[name] = float(torch.log_softmax(lg, -1)[cid])
++        return {"tf_lp_yes": res["Yes"], "tf_lp_no": res["No"], "m_tf": res["Yes"] - res["No"]}
++
++    def generate(self, img, prompt, max_new_tokens=8):
++        torch = self.torch
++        inp = self._inputs(img, prompt)
++        n0 = inp["input_ids"].shape[1]
++        with torch.no_grad():
++            out = self.model.generate(**inp, max_new_tokens=max_new_tokens, do_sample=False)
++        new = out[0, n0:].tolist()
++        text = self.tok.decode(new, skip_special_tokens=True).strip()
++        first = text.split()[0].strip(".,!:;").lower() if text else ""
++        parsed = "Yes" if first == "yes" else ("No" if first == "no" else None)
++        return {"gen_text": text, "gen_token_ids": new, "gen_n_forward": len(new),
++                "gen_truncated": not any(t in self.eos_ids for t in new), "gen_parsed": parsed}
+diff --git a/qes/selection.py b/qes/selection.py
+new file mode 100644
+index 0000000..ba3c868
+--- /dev/null
++++ b/qes/selection.py
+@@ -0,0 +1,74 @@
++"""Label-free tile selectors. 이 모듈은 annotation 경로를 받지 않는다."""
++import numpy as np
++
++from .data import FINDINGS, GRID
++
++NT = GRID * GRID
++MAIN_METHODS = ["C_blur", "D_blur", "C_mean", "D_mean", "crop_conf"]
++
++
++def argmax_tie_low(v):
++    v = np.asarray(v, dtype=np.float64)
++    mx = v.max()
++    idx = np.flatnonzero(v == mx)
++    return int(idx[0]), int(len(idx))
++
++
++def margin_table(requests, valid, field="m"):
++    """(image, finding) -> {'orig': float, 'crop'|'blur'|'mean': [9]}"""
++    tab = {}
++    for r in requests:
++        rec = valid[r["id"]]
++        d = tab.setdefault(r["image"], {}).setdefault(r["finding"], {
++            "crop": [None] * NT, "blur": [None] * NT, "mean": [None] * NT})
++        if r["kind"] == "orig":
++            d["orig"] = rec[field]
++        else:
++            d[r["kind"]][r["tile"]] = rec[field]
++    return tab
++
++
++def removal_scores(tab_img, kind, findings=FINDINGS):
++    """D[q] = m(I,q) - m(T(I,R),q), C[q] = D[q] - mean_{q'!=q} D[q'] (각 tile별)."""
++    D = {q: np.array([tab_img[q]["orig"] - x for x in tab_img[q][kind]]) for q in findings}
++    C = {}
++    for q in findings:
++        others = [D[o] for o in findings if o != q]
++        C[q] = D[q] - np.mean(others, axis=0)
++    return D, C
++
++
++def select_all(requests, valid, field="m", findings=FINDINGS):
++    tab = margin_table(requests, valid, field)
++    sel, scores, ties = {}, {}, []
++    for img in sorted(tab):
++        Db, Cb = removal_scores(tab[img], "blur", findings)
++        Dm, Cm = removal_scores(tab[img], "mean", findings)
++        sel[img], scores[img] = {}, {}
++        for q in findings:
++            crop = np.array(tab[img][q]["crop"])
++            maps = {"C_blur": Cb[q], "D_blur": Db[q], "C_mean": Cm[q], "D_mean": Dm[q], "crop_conf": crop}
++            sel[img][q] = {}
++            for meth, v in maps.items():
++                t, n = argmax_tie_low(v)
++                sel[img][q][meth] = t
++                if n > 1:
++                    ties.append({"image": img, "finding": q, "method": meth, "n_tied": n})
++            # 다른 질문 하나를 뺀 C_blur (민감도 전용, 주결과 대체 금지)
++            loqo = {}
++            for drop in findings:
++                if drop == q:
++                    continue
++                sub = [f for f in findings if f != drop]
++                _, Csub = removal_scores(tab[img], "blur", sub)
++                loqo[drop] = argmax_tie_low(Csub[q])[0]
++            sel[img][q]["C_blur_loqo"] = loqo
++            scores[img][q] = {
++                "m_orig": tab[img][q]["orig"],
++                "m_crop": crop.tolist(),
++                "crop_mean": float(crop.mean()),
++                "crop_max": float(crop.max()),
++                "D_blur": Db[q].tolist(), "C_blur": Cb[q].tolist(),
++                "D_mean": Dm[q].tolist(), "C_mean": Cm[q].tolist(),
++            }
++    return {"selection": sel, "scores": scores, "ties": ties}
+diff --git a/qes/store.py b/qes/store.py
+new file mode 100644
+index 0000000..f01cec1
+--- /dev/null
++++ b/qes/store.py
+@@ -0,0 +1,155 @@
++"""Prediction cache validation, explicit run queue and device-minute ledger.
++
++재개(runner)와 집계(selector)가 같은 `validate_predictions`를 쓴다.
++"""
++import json
++import os
++import time
++
++# 같은 입력의 반복 결과가 이 값보다 다르면 conflicting duplicate로 본다.
++DUP_TOL = 0.0
++
++UNCOUNTED_SESSION_PENALTY_MIN = 2.0  # 비정상 종료 세션의 미계상 구간에 보수적으로 부과
++
++
++def read_jsonl(path):
++    if not os.path.exists(path):
++        return []
++    out = []
++    with open(path) as f:
++        for line in f:
++            line = line.strip()
++            if line:
++                out.append(json.loads(line))
++    return out
++
++
++def append_jsonl(path, rec):
++    with open(path, "a") as f:
++        f.write(json.dumps(rec, ensure_ascii=False) + "\n")
++        f.flush()
++        os.fsync(f.fileno())
++
++
++def write_json_atomic(path, obj):
++    tmp = path + ".tmp"
++    with open(tmp, "w") as f:
++        json.dump(obj, f, indent=1, ensure_ascii=False)
++        f.flush()
++        os.fsync(f.fileno())
++    os.replace(tmp, path)
++
++
++def validate_predictions(requests, records, config_sha256, scorer_version):
++    """요청별로 유효한 결과를 하나 고른다.
++
++    유효 조건: status ok, id가 manifest에 있고 request/config/input hash와 scorer version이 모두 일치.
++    같은 id의 유효 결과가 여러 개인데 margin이 다르면 conflict로 두고 채택하지 않는다.
++    """
++    req_by_id = {r["id"]: r for r in requests}
++    valid, rejected, conflicts, dup_ok = {}, [], [], 0
++    for rec in records:
++        rid = rec.get("id")
++        r = req_by_id.get(rid)
++        reason = None
++        if r is None:
++            reason = "unknown_id"
++        elif rec.get("status") != "ok":
++            reason = f"status_{rec.get('status')}"
++        elif rec.get("request_sha256") != r["request_sha256"]:
++            reason = "request_hash_mismatch"
++        elif rec.get("config_sha256") != config_sha256 or r["config_sha256"] != config_sha256:
++            reason = "config_hash_mismatch"
++        elif rec.get("input_pixel_sha256") != r["input_pixel_sha256"]:
++            reason = "input_hash_mismatch"
++        elif rec.get("scorer_version") != scorer_version:
++            reason = "scorer_version_mismatch"
++        if reason:
++            rejected.append({"id": rid, "reason": reason})
++            continue
++        if rid in valid:
++            if abs(valid[rid]["m"] - rec["m"]) > DUP_TOL:
++                conflicts.append({"id": rid, "m": [valid[rid]["m"], rec["m"]]})
++            else:
++                dup_ok += 1
++            continue
++        valid[rid] = rec
++    conflict_ids = {c["id"] for c in conflicts}
++    for rid in conflict_ids:
++        valid.pop(rid, None)
++    missing = [r["id"] for r in requests if r["id"] not in valid]
++    return {
++        "valid": valid,
++        "rejected": rejected,
++        "conflicts": conflicts,
++        "duplicates_consistent": dup_ok,
++        "missing": missing,
++        "status": "complete" if not missing and not conflicts else "incomplete",
++    }
++
++
++def plan_queue(requests, done_ids, allowed_ids=None, limit=None):
++    """실행할 요청 목록을 한 번에 명시적으로 만든다 (반복 중 재할당하지 않는다)."""
++    q = [r for r in requests if r["id"] not in done_ids]
++    if allowed_ids is not None:
++        allowed = set(allowed_ids)
++        q = [r for r in q if r["id"] in allowed]
++    if limit is not None:
++        q = q[:limit]
++    return q
++
++
++class Ledger:
++    """device-minute 사용량 checkpoint. 매 요청 완료 시 저장한다.
++
++    세션 시작 시 open=True로 기록하고 정상/예외 종료 시 close한다. 다음 실행에서 open 상태로 남은
++    세션이 발견되면 마지막 checkpoint 이후 구간을 알 수 없으므로 penalty를 추가 계상한다.
++    """
++
++    def __init__(self, path, n_devices=1):
++        self.path = path
++        self.n_devices = n_devices
++        self.data = {"sessions": [], "cap_minutes": None}
++        if os.path.exists(path):
++            with open(path) as f:
++                self.data = json.load(f)
++        for s in self.data["sessions"]:
++            if s.get("open"):
++                s["open"] = False
++                s["closed_by"] = "recovered_unclosed"
++                s["uncounted_penalty_min"] = UNCOUNTED_SESSION_PENALTY_MIN
++        self.cur = None
++
++    def total_minutes(self):
++        tot = 0.0
++        for s in self.data["sessions"]:
++            tot += s.get("device_minutes", 0.0) + s.get("uncounted_penalty_min", 0.0)
++        return tot
++
++    def start(self, note):
++        self.t0 = time.time()
++        self.cur = {"note": note, "start": self.t0, "last_checkpoint": self.t0, "open": True,
++                    "device_minutes": 0.0, "n_requests": 0, "inflight": None, "n_devices": self.n_devices}
++        self.data["sessions"].append(self.cur)
++        self.save()
++
++    def mark_inflight(self, what):
++        self.cur["inflight"] = what
++        self.checkpoint()
++
++    def checkpoint(self, n_done_delta=0, **extra):
++        now = time.time()
++        self.cur["last_checkpoint"] = now
++        self.cur["device_minutes"] = (now - self.t0) / 60.0 * self.n_devices
++        self.cur["n_requests"] += n_done_delta
++        self.cur.update(extra)
++        self.save()
++
++    def close(self, how):
++        self.cur["inflight"] = None
++        self.cur["open"] = False
++        self.cur["closed_by"] = how
++        self.checkpoint()
++
++    def save(self):
++        write_json_atomic(self.path, self.data)
+diff --git a/run_qes.py b/run_qes.py
+new file mode 100644
+index 0000000..056a8f8
+--- /dev/null
++++ b/run_qes.py
+@@ -0,0 +1,227 @@
++"""iter_004 GPU runner: calibration / full scoring / verification (1 GPU, 1 process).
++
++실행:
++  python research/run_qes.py --out research/results/iter_004 --phase calib
++  python research/run_qes.py --out research/results/iter_004 --phase full
++  python research/run_qes.py --out research/results/iter_004 --phase verify
++"""
++import argparse
++import json
++import os
++import statistics
++import subprocess
++import sys
++import time
++
++sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
++from qes.data import (DATA_DIR, SCORER_VERSION, ImageInputs, build_config, config_hash,  # noqa: E402
++                      file_sha256, pixel_hash, sha256_json)
++from qes.store import (Ledger, append_jsonl, plan_queue, read_jsonl, validate_predictions,  # noqa: E402
++                       write_json_atomic)
++
++DEFAULT_REQ_MIN = 0.5  # 관측 전 1요청 추정 (보수적)
++VERIFY_FORWARDS_PER_GEN = 8
++
++
++def load_manifest(out):
++    cfg = build_config()
++    chash = config_hash(cfg)
++    stored = json.load(open(os.path.join(out, "config.json")))
++    if stored.get("config_sha256") != chash:
++        raise SystemExit("config.json hash differs from current code config -> rebuild manifest in a new dir")
++    reqs = read_jsonl(os.path.join(out, "requests.jsonl"))
++    for r in reqs:
++        body = {k: v for k, v in r.items() if k != "request_sha256"}
++        if sha256_json(body) != r["request_sha256"] or r["config_sha256"] != chash:
++            raise SystemExit(f"request hash/config mismatch: {r['id']}")
++    info = json.load(open(os.path.join(out, "image_info.json")))
++    subsets = json.load(open(os.path.join(out, "subsets.json")))
++    return cfg, chash, reqs, info, subsets
++
++
++class InputCache:
++    """실제 파일에서 입력을 다시 만들고 manifest hash와 대조한다."""
++
++    def __init__(self, info, data_dir=DATA_DIR):
++        self.info = info
++        self.data_dir = data_dir
++        self.cur_name, self.cur = None, None
++
++    def get(self, r):
++        if r["image"] != self.cur_name:
++            path = os.path.join(self.data_dir, r["image"])
++            inf = self.info[r["image"]]
++            if file_sha256(path) != inf["source_file_sha256"]:
++                raise RuntimeError(f"source file hash changed: {path}")
++            ii = ImageInputs(path)
++            if pixel_hash(ii.orig) != inf["source_pixel_sha256"]:
++                raise RuntimeError(f"source pixel hash changed: {path}")
++            self.cur_name, self.cur = r["image"], ii
++        img = self.cur.make(r["kind"], r["tile"])
++        h = pixel_hash(img)
++        if h != r["input_pixel_sha256"]:
++            raise RuntimeError(f"input pixel hash mismatch: {r['id']}")
++        return img, h
++
++
++def pick_gpu():
++    if os.environ.get("CUDA_VISIBLE_DEVICES"):
++        return os.environ["CUDA_VISIBLE_DEVICES"], "preset"
++    q = subprocess.run(["nvidia-smi", "--query-gpu=index,memory.free", "--format=csv,noheader,nounits"],
++                       capture_output=True, text=True, check=True).stdout
++    free = {int(a): int(b) for a, b in (ln.split(",") for ln in q.strip().splitlines())}
++    best = max(free, key=lambda k: (free[k], -k))
++    if free[best] < 12000:
++        raise SystemExit(f"not enough free GPU memory: {free}")
++    os.environ["CUDA_VISIBLE_DEVICES"] = str(best)
++    return str(best), f"auto(free MiB={free})"
++
++
++def main():
++    ap = argparse.ArgumentParser()
++    ap.add_argument("--out", required=True)
++    ap.add_argument("--phase", choices=["calib", "full", "verify"], required=True)
++    ap.add_argument("--cap", type=float, default=45.0, help="누적 device-minute 상한")
++    ap.add_argument("--target", type=float, default=40.0, help="calibration 예상 총량 허용치")
++    args = ap.parse_args()
++
++    cfg, chash, reqs, info, subsets = load_manifest(args.out)
++    pred_path = os.path.join(args.out, "predictions.jsonl")
++    ledger = Ledger(os.path.join(args.out, "budget.json"))
++    used0 = ledger.total_minutes()
++    print(f"[budget] used so far {used0:.3f} device-min (cap {args.cap})", flush=True)
++    if used0 >= args.cap:
++        raise SystemExit("budget cap reached; not starting")
++
++    v = validate_predictions(reqs, read_jsonl(pred_path), chash, SCORER_VERSION)
++    print(f"[cache] valid={len(v['valid'])} rejected={len(v['rejected'])} conflicts={len(v['conflicts'])} "
++          f"missing={len(v['missing'])}", flush=True)
++    if v["conflicts"]:
++        raise SystemExit(f"conflicting duplicate results: {v['conflicts'][:3]}")
++
++    if args.phase == "calib":
++        queue = plan_queue(reqs, set(v["valid"]), allowed_ids=subsets["calibration"])
++    elif args.phase == "full":
++        cal = json.load(open(os.path.join(args.out, "calibration.json")))
++        if cal["projected_total_device_min"] > args.target:
++            raise SystemExit(f"calibration projection {cal['projected_total_device_min']:.1f} > {args.target}")
++        queue = plan_queue(reqs, set(v["valid"]))
++    else:
++        missing_ver = [i for i in subsets["verification"] if i not in v["valid"]]
++        if missing_ver:
++            raise SystemExit(f"verification inputs lack main results: {missing_ver}")
++        queue = [r for r in reqs if r["id"] in set(subsets["verification"])]
++    print(f"[queue] phase={args.phase} n={len(queue)}", flush=True)
++    if not queue:
++        print("[queue] nothing to do", flush=True)
++        return
++
++    gpu, how = pick_gpu()
++    ledger.start(f"{args.phase} gpu={gpu}")
++    how_closed = "exception"
++    times, n_err = [], 0
++    stopped_reason = None
++    try:
++        t_load = time.time()
++        from qes.scorer import Scorer
++        sc = Scorer()
++        env = sc.load()
++        env["gpu_select"] = how
++        env["load_seconds"] = time.time() - t_load
++        write_json_atomic(os.path.join(args.out, f"env_{args.phase}_{int(time.time())}.json"), env)
++        ledger.checkpoint(load_seconds=env["load_seconds"])
++        print(f"[load] {env['load_seconds']:.1f}s  gpu={gpu}", flush=True)
++        inputs = InputCache(info)
++        import torch
++
++        if args.phase in ("calib", "full"):
++            for i, r in enumerate(queue):
++                est = max(times) / 60.0 if times else DEFAULT_REQ_MIN
++                if ledger.total_minutes() + est > args.cap:
++                    stopped_reason = f"budget: next request est {est:.3f} min exceeds remaining"
++                    break
++                ledger.mark_inflight(r["id"])
++                t0 = time.time()
++                try:
++                    img, h = inputs.get(r)
++                    out = sc.score(img, r["prompt"])
++                    rec = {"id": r["id"], "status": "ok", **out}
++                except torch.cuda.OutOfMemoryError as e:
++                    rec = {"id": r["id"], "status": "oom", "error": str(e)[:300]}
++                    stopped_reason = "oom"
++                except Exception as e:  # 형식·hash 오류 등은 error로 기록
++                    rec = {"id": r["id"], "status": "error", "error": repr(e)[:300]}
++                    n_err += 1
++                dt = time.time() - t0
++                rec.update({"request_sha256": r["request_sha256"], "config_sha256": chash,
++                            "input_pixel_sha256": r["input_pixel_sha256"], "scorer_version": SCORER_VERSION,
++                            "phase": args.phase, "seconds": dt, "ts": time.time()})
++                append_jsonl(pred_path, rec)
++                if rec["status"] == "ok":
++                    times.append(dt)
++                ledger.cur["inflight"] = None
++                ledger.checkpoint(n_done_delta=1)
++                if (i + 1) % 100 == 0 or i < 3:
++                    print(f"[score] {i + 1}/{len(queue)} {r['id']} m={rec.get('m')} {dt:.2f}s "
++                          f"used={ledger.total_minutes():.2f}", flush=True)
++                if stopped_reason == "oom" or n_err > 5:
++                    stopped_reason = stopped_reason or "too many errors"
++                    break
++        else:
++            valid = v["valid"]
++            ver_path = os.path.join(args.out, "verification.jsonl")
++            session = int(time.time())
++            for r in queue:
++                if ledger.total_minutes() + 1.0 > args.cap:
++                    stopped_reason = "budget"
++                    break
++                ledger.mark_inflight("verify:" + r["id"])
++                img, h = inputs.get(r)
++                t0 = time.time()
++                rep = sc.score(img, r["prompt"])
++                t1 = time.time()
++                tf = sc.teacher_forced(img, r["prompt"])
++                t2 = time.time()
++                gen = sc.generate(img, r["prompt"], max_new_tokens=8)
++                t3 = time.time()
++                main_m = valid[r["id"]]["m"]
++                rec = {"id": r["id"], "session": session, "m_main": main_m, "m_repeat": rep["m"],
++                       "repeat_abs_diff": abs(rep["m"] - main_m), **tf, "tf_abs_diff": abs(tf["m_tf"] - main_m),
++                       **gen, "score_decision": "Yes" if main_m > 0 else "No",
++                       "gen_agrees": gen["gen_parsed"] == ("Yes" if main_m > 0 else "No"),
++                       "sec_repeat": t1 - t0, "sec_tf": t2 - t1, "sec_gen": t3 - t2,
++                       "request_sha256": r["request_sha256"], "config_sha256": chash}
++                append_jsonl(ver_path, rec)
++                ledger.cur["inflight"] = None
++                ledger.checkpoint(n_done_delta=1)
++                print(f"[verify] {r['id']} main={main_m:.4f} rep={rep['m']:.4f} tf={tf['m_tf']:.4f} "
++                      f"gen={gen['gen_text']!r}", flush=True)
++        how_closed = "normal" if stopped_reason is None else f"stopped:{stopped_reason}"
++    except KeyboardInterrupt:
++        how_closed = "interrupted"
++        raise
++    finally:
++        ledger.close(how_closed)
++        print(f"[budget] session closed ({how_closed}); total {ledger.total_minutes():.3f} device-min", flush=True)
++
++    if args.phase == "calib":
++        v2 = validate_predictions(reqs, read_jsonl(pred_path), chash, SCORER_VERSION)
++        per_req_min = statistics.median(times) / 60.0 if times else DEFAULT_REQ_MIN
++        load_min = env["load_seconds"] / 60.0
++        remaining = len(v2["missing"])
++        verify_min = 12 * per_req_min * (1 + 2 + VERIFY_FORWARDS_PER_GEN)
++        projected = ledger.total_minutes() + 2 * load_min + remaining * per_req_min * 1.2 + verify_min
++        cal = {"n_calibration_done": len(times), "median_sec_per_request": per_req_min * 60,
++               "max_sec_per_request": max(times) if times else None, "load_min": load_min,
++               "used_device_min": ledger.total_minutes(), "remaining_requests": remaining,
++               "verify_est_min": verify_min, "projected_total_device_min": projected,
++               "target": args.target, "proceed": projected <= args.target,
++               "formula": "used + 2*load + remaining*median*1.2 + 12*median*(1+2+8)"}
++        write_json_atomic(os.path.join(args.out, "calibration.json"), cal)
++        print(json.dumps(cal, indent=1), flush=True)
++    if stopped_reason:
++        print(f"[status] incomplete: {stopped_reason}", flush=True)
++
++
++if __name__ == "__main__":
++    main()
+diff --git a/select_qes.py b/select_qes.py
+new file mode 100644
+index 0000000..fd16e4a
+--- /dev/null
++++ b/select_qes.py
+@@ -0,0 +1,50 @@
++"""Label-free selection. 모든 질문의 선택을 annotation 접근 없이 먼저 저장·고정한다.
++
++실행: python research/select_qes.py --out research/results/iter_004
++"""
++import argparse
++import hashlib
++import json
++import os
++import sys
++
++sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
++from qes.data import SCORER_VERSION, build_config, config_hash  # noqa: E402
++from qes.selection import select_all  # noqa: E402
++from qes.store import read_jsonl, validate_predictions, write_json_atomic  # noqa: E402
++
++
++def main():
++    ap = argparse.ArgumentParser()
++    ap.add_argument("--out", required=True)
++    args = ap.parse_args()
++    chash = config_hash(build_config())
++    reqs = read_jsonl(os.path.join(args.out, "requests.jsonl"))
++    pred_path = os.path.join(args.out, "predictions.jsonl")
++    v = validate_predictions(reqs, read_jsonl(pred_path), chash, SCORER_VERSION)
++    status = {"status": v["status"], "n_requests": len(reqs), "n_valid": len(v["valid"]),
++              "n_missing": len(v["missing"]), "n_conflicts": len(v["conflicts"]),
++              "n_rejected": len(v["rejected"]), "rejected_reasons": {}}
++    for x in v["rejected"]:
++        status["rejected_reasons"][x["reason"]] = status["rejected_reasons"].get(x["reason"], 0) + 1
++    write_json_atomic(os.path.join(args.out, "completion.json"), status)
++    print(json.dumps(status), flush=True)
++    if v["status"] != "complete":
++        raise SystemExit("incomplete: selection not computed (결측 조합을 제외하고 계산하지 않는다)")
++    main_sel = select_all(reqs, v["valid"], field="m")
++    fp32_sel = select_all(reqs, v["valid"], field="m_fp32head")
++    pred_digest = hashlib.sha256(
++        json.dumps({k: v["valid"][k]["m"] for k in sorted(v["valid"])}).encode()).hexdigest()
++    out = {"predictions_digest": pred_digest, "config_sha256": chash, "label_free": True,
++           "main": main_sel, "sensitivity_fp32head": fp32_sel}
++    path = os.path.join(args.out, "selections.json")
++    if os.path.exists(path):
++        old = json.load(open(path))
++        if old["predictions_digest"] != pred_digest:
++            raise SystemExit("selections.json exists for different predictions; refusing to overwrite")
++    write_json_atomic(path, out)
++    print(f"selections saved: {path}; ties(main)={len(main_sel['ties'])} ties(fp32)={len(fp32_sel['ties'])}")
++
++
++if __name__ == "__main__":
++    main()
+diff --git a/test_qes.py b/test_qes.py
+new file mode 100644
+index 0000000..08581b2
+--- /dev/null
++++ b/test_qes.py
+@@ -0,0 +1,240 @@
++"""CPU checks for iter_004 (no GPU, no model).
++
++실행: python research/test_qes.py --out research/results/iter_004
++합성 이미지는 --out/cpu_test/ 아래에 만든다.
++"""
++import argparse
++import copy
++import inspect
++import json
++import os
++import sys
++
++import numpy as np
++from PIL import Image
++
++sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
++import run_qes  # noqa: E402  (import-time GPU 부작용이 없어야 한다)
++from qes import data as D  # noqa: E402
++from qes import evaluation as E  # noqa: E402
++from qes import selection as S  # noqa: E402
++from qes import store as ST  # noqa: E402
++
++RESULTS = []
++
++
++def check(name, cond, detail=""):
++    RESULTS.append({"test": name, "pass": bool(cond), "detail": str(detail)})
++    print(f"[{'PASS' if cond else 'FAIL'}] {name} {detail}", flush=True)
++
++
++def fake_preds(reqs, chash, seed=0):
++    rng = np.random.default_rng(seed)
++    return [{"id": r["id"], "status": "ok", "m": float(rng.normal()), "m_fp32head": 0.0,
++             "request_sha256": r["request_sha256"], "config_sha256": chash,
++             "input_pixel_sha256": r["input_pixel_sha256"], "scorer_version": D.SCORER_VERSION} for r in reqs]
++
++
++def make_synth(dirpath, n=2, seed=0):
++    os.makedirs(dirpath, exist_ok=True)
++    rng = np.random.default_rng(seed)
++    for i in range(n):
++        a = rng.integers(0, 256, size=(61 + i, 47 + i), dtype=np.uint8)
++        Image.fromarray(a, mode="L").save(os.path.join(dirpath, f"s{i}.png"))
++
++
++def main():
++    ap = argparse.ArgumentParser()
++    ap.add_argument("--out", required=True)
++    args = ap.parse_args()
++    tdir = os.path.join(args.out, "cpu_test")
++    sdir = os.path.join(tdir, "synth")
++    make_synth(sdir)
++
++    check("no torch import at module import", "torch" not in sys.modules, sorted(k for k in sys.modules if k.startswith("torch"))[:3])
++
++    cfg = D.build_config()
++    chash = D.config_hash(cfg)
++    reqs, info = D.build_requests(data_dir=sdir, cfg=cfg)
++    check("request count synth", len(reqs) == 2 * 6 * 28, len(reqs))
++    preds = fake_preds(reqs, chash)
++    v = ST.validate_predictions(reqs, preds, chash, D.SCORER_VERSION)
++    check("valid cache accepted", v["status"] == "complete" and len(v["valid"]) == len(reqs))
++
++    # 1) 실제 이미지 변경 -> manifest 재생성 시 해당 이미지 결과 거부, runner input check도 실패
++    p = os.path.join(sdir, "s1.png")
++    a = np.array(Image.open(p))
++    a2 = a.copy()
++    a2[0, 0] = (int(a2[0, 0]) + 1) % 256
++    Image.fromarray(a2, mode="L").save(p)
++    reqs_mod, info_mod = D.build_requests(data_dir=sdir, cfg=cfg)
++    v = ST.validate_predictions(reqs_mod, preds, chash, D.SCORER_VERSION)
++    n_rej = sum(1 for x in v["rejected"] if x["reason"] == "request_hash_mismatch")
++    check("image change -> cache rejected", n_rej == 6 * 28 and v["status"] == "incomplete", n_rej)
++    cache = run_qes.InputCache(info, data_dir=sdir)
++    r1 = [r for r in reqs if r["image"] == "s1.png"][0]
++    try:
++        cache.get(r1)
++        ok = False
++    except RuntimeError as e:
++        ok = "hash changed" in str(e)
++    check("runner detects changed source file", ok)
++    Image.fromarray(a, mode="L").save(p)
++    reqs_back, _ = D.build_requests(data_dir=sdir, cfg=cfg)
++    check("restored image -> same requests", [r["request_sha256"] for r in reqs_back] == [r["request_sha256"] for r in reqs])
++    img, h = run_qes.InputCache(info, data_dir=sdir).get(r1)
++    check("runner input hash matches manifest", h == r1["input_pixel_sha256"])
++
++    # 2) config 변경
++    cfg2 = copy.deepcopy(cfg)
++    cfg2["blur"]["radius_frac_of_min_side"] = 0.06
++    reqs_c, _ = D.build_requests(data_dir=sdir, cfg=cfg2)
++    v = ST.validate_predictions(reqs_c, preds, D.config_hash(cfg2), D.SCORER_VERSION)
++    check("config change -> all rejected", len(v["valid"]) == 0 and len(v["missing"]) == len(reqs_c))
++
++    # 3) 요청 변경 (prompt)
++    reqs_p = copy.deepcopy(reqs)
++    reqs_p[0]["prompt"] = reqs_p[0]["prompt"] + " "
++    reqs_p[0]["request_sha256"] = D.sha256_json({k: v_ for k, v_ in reqs_p[0].items() if k != "request_sha256"})
++    v = ST.validate_predictions(reqs_p, preds, chash, D.SCORER_VERSION)
++    check("request change -> that result rejected", v["missing"] == [reqs_p[0]["id"]])
++
++    # scorer version 변경
++    v = ST.validate_predictions(reqs, preds, chash, "other")
++    check("scorer version change -> rejected", len(v["valid"]) == 0)
++
++    # 4) conflicting duplicate / consistent duplicate
++    dup = dict(preds[3])
++    dup["m"] += 0.5
++    v = ST.validate_predictions(reqs, preds + [dup], chash, D.SCORER_VERSION)
++    check("conflicting duplicate -> not adopted, incomplete",
++          v["status"] == "incomplete" and preds[3]["id"] not in v["valid"] and len(v["conflicts"]) == 1)
++    v = ST.validate_predictions(reqs, preds + [dict(preds[3])], chash, D.SCORER_VERSION)
++    check("consistent duplicate -> ok", v["status"] == "complete" and v["duplicates_consistent"] == 1)
++
++    # 5) 누락/오류 결과
++    err = dict(preds[5])
++    err["status"] = "error"
++    v = ST.validate_predictions(reqs, preds[:5] + [err] + preds[6:], chash, D.SCORER_VERSION)
++    check("missing/error -> incomplete", v["status"] == "incomplete" and v["missing"] == [preds[5]["id"]])
++
++    # 6) queue 축소가 실제 실행 목록을 바꾸는지
++    done = {preds[0]["id"]}
++    allowed = [r["id"] for r in reqs[:10]]
++    q = ST.plan_queue(reqs, done, allowed_ids=allowed, limit=4)
++    executed = []
++    for r in q:  # runner와 같은 순회 방식
++        executed.append(r["id"])
++    check("explicit queue filter respected", executed == allowed[1:5], executed)
++    q_full = ST.plan_queue(reqs, done)
++    check("unfiltered queue", len(q_full) == len(reqs) - 1)
++
++    # 7) Ledger: 비정상 종료 세션 보수 계상
++    lp = os.path.join(tdir, "budget_test.json")
++    L = ST.Ledger(lp)
++    L.start("t")
++    L.mark_inflight("x")  # close하지 않고 버림 (강제 종료 모사)
++    L2 = ST.Ledger(lp)
++    check("unclosed session penalized",
++          L2.data["sessions"][-1]["closed_by"] == "recovered_unclosed" and L2.total_minutes() >= ST.UNCOUNTED_SESSION_PENALTY_MIN)
++    L2.start("t2")
++    L2.close("normal")
++    L3 = ST.Ledger(lp)
++    check("closed session not penalized again", sum(s.get("uncounted_penalty_min", 0) for s in L3.data["sessions"]) == ST.UNCOUNTED_SESSION_PENALTY_MIN)
++    ST.write_json_atomic(lp, {"sessions": [], "cap_minutes": None})
++
++    # 8) GT 변경이 후보·선택에 영향 없음
++    src_ok = all("meta.json" not in inspect.getsource(m) and "bounding" not in inspect.getsource(m)
++                 for m in (D, S))
++    check("data/selection modules never read annotations", src_ok)
++    with open(os.path.join(sdir, "meta.json"), "w") as f:
++        json.dump([{"file": "s0.png", "bounding_boxes_pixel_xyxy": [{"class_name": "Cardiomegaly", "x_min": 0, "y_min": 0, "x_max": 5, "y_max": 5}]}], f)
++    ra, _ = D.build_requests(data_dir=sdir, cfg=cfg)
++    sel_a = S.select_all(ra, {p_["id"]: p_ for p_ in fake_preds(ra, chash)})
++    with open(os.path.join(sdir, "meta.json"), "w") as f:
++        json.dump([{"file": "s1.png", "bounding_boxes_pixel_xyxy": [{"class_name": "Atelectasis", "x_min": 9, "y_min": 9, "x_max": 30, "y_max": 30}]}], f)
++    rb, _ = D.build_requests(data_dir=sdir, cfg=cfg)
++    sel_b = S.select_all(rb, {p_["id"]: p_ for p_ in fake_preds(rb, chash)})
++    check("GT change -> identical requests and selections",
++          [r["request_sha256"] for r in ra] == [r["request_sha256"] for r in rb] and sel_a == sel_b)
++
++    # 9) 입력 변형 정확성: blur/mean은 tile 밖 pixel 불변, crop 크기 = tile
++    ii = D.ImageInputs(os.path.join(sdir, "s0.png"))
++    t = 4
++    x0, y0, x1, y1 = ii.tiles[t]
++    o = np.asarray(ii.orig)
++    for kind in ("blur", "mean"):
++        z = np.asarray(ii.make(kind, t))
++        mask = np.ones(o.shape[:2], bool)
++        mask[y0:y1, x0:x1] = False
++        check(f"{kind}: outside tile unchanged", np.array_equal(z[mask], o[mask]))
++    check("mean fill value", np.all(np.asarray(ii.make("mean", t))[y0:y1, x0:x1] == np.array(ii.means)))
++    check("crop size", ii.make("crop", t).size == (x1 - x0, y1 - y0))
++    tb = D.tile_boxes(10, 10)
++    check("tile bounds rule", [b[0] for b in tb[:3]] == [0, 3, 7] and tb[8] == (7, 7, 10, 10), tb[:3])
++    check("tiles partition image", sum((b[2] - b[0]) * (b[3] - b[1]) for b in D.tile_boxes(2144, 2561)) == 2144 * 2561)
++
++    # 10) C 대수: C(q) = attribution of F_q = m_q - mean_{q'!=q} m_q', sum_q C = 0, tie rule
++    rng = np.random.default_rng(1)
++    tab = {q: {"orig": float(rng.normal()), "blur": list(rng.normal(size=9))} for q in D.FINDINGS}
++    Dd, Cc = S.removal_scores(tab, "blur")
++    q0 = D.FINDINGS[0]
++    F = lambda get: get(q0) - np.mean([get(q) for q in D.FINDINGS if q != q0], axis=0)
++    attr = F(lambda q: tab[q]["orig"]) - F(lambda q: np.array(tab[q]["blur"]))
++    check("C equals contrastive-score occlusion attribution", np.allclose(attr, Cc[q0]))
++    check("sum_q C = 0", np.allclose(sum(Cc[q] for q in D.FINDINGS), 0))
++    check("tie -> smallest tile id", S.argmax_tie_low([1, 3, 3, 0]) == (1, 2))
++
++    # 11) bbox union / metric 수작업 예제 (9x9 영상, tile 3x3 pixel)
++    g = E.GeomImage(9, 9, {"A": [(0, 0, 3, 3), (3, 0, 6, 3)], "B": [(0, 0, 3, 3), (1, 1, 3, 3)],
++                           "C": [(6, 6, 9, 9)]})
++    sa = g.stats["A"]
++    check("union of disjoint boxes", sa["area_g"] == 18 and abs(sa["iou"][0] - 0.5) < 1e-12 and abs(sa["U"][1] - 1) < 1e-12
++          and abs(sa["cov"][0] - 0.5) < 1e-12 and sa["best_tile"] == 0, (sa["area_g"], sa["iou"][:2]))
++    check("union of overlapping boxes", g.stats["B"]["area_g"] == 9 and g.stats["B"]["iou"][0] == 1.0)
++    check("region IoU", abs(g.region_iou("A", "B") - 0.5) < 1e-12 and g.region_iou("A", "C") == 0)
++    geo = {"i1.png": g}
++    sel_good = {"i1.png": {q: {"X": 0 if q != "C" else 8} for q in ("A", "B", "C")}}
++    ps = E.pair_scores(sel_good, geo, [{"image": "i1.png", "a": "A", "b": "C", "distinct": True}], ["X"])
++    check("pair S correct = 1", abs(ps["X"]["distinct"]["macro_S"] - 1.0) < 1e-12)
++    sel_bad = {"i1.png": {q: {"X": 8 if q != "C" else 0} for q in ("A", "B", "C")}}
++    ps = E.pair_scores(sel_bad, geo, [{"image": "i1.png", "a": "A", "b": "C", "distinct": True}], ["X"])
++    check("pair S swapped = -1", abs(ps["X"]["distinct"]["macro_S"] + 1.0) < 1e-12)
++    sel_same = {"i1.png": {q: {"X": 0} for q in ("A", "B", "C")}}
++    ps = E.pair_scores(sel_same, geo, [{"image": "i1.png", "a": "A", "b": "C", "distinct": True}], ["X"])
++    check("pair S same tile = 0", ps["X"]["distinct"]["macro_S"] == 0)
++
++    # image swap / question swap / uniform / macro 예제 (FINDINGS 이름 사용)
++    f1, f2 = D.FINDINGS[0], D.FINDINGS[1]
++    gA = E.GeomImage(9, 9, {f1: [(0, 0, 3, 3)], f2: [(6, 6, 9, 9)]})
++    gB = E.GeomImage(9, 9, {f1: [(0, 0, 3, 3)], f2: [(6, 6, 9, 9)]})
++    geo2 = {"a.png": gA, "b.png": gB}
++    sel2 = {"a.png": {q: {"X": 0 if q == f1 else 8} for q in D.FINDINGS},
++            "b.png": {q: {"X": 4} for q in D.FINDINGS}}
++    ev = E.evaluate(sel2, geo2, ["X"])
++    rows = {(r["image"], r["finding"]): r for r in ev["per_combo"]}
++    check("self U", rows[("a.png", f1)]["X"]["U"] == 1 and rows[("b.png", f1)]["X"]["U"] == 0)
++    check("image swap U", rows[("a.png", f1)]["X"]["image_swap"]["U"] == 0 and rows[("b.png", f1)]["X"]["image_swap"]["U"] == 1)
++    check("question swap U", rows[("a.png", f1)]["X"]["question_swap"]["U"] == 0 and rows[("a.png", f2)]["X"]["question_swap"]["U"] == 0)
++    check("uniform expectation", abs(rows[("a.png", f1)]["uniform"]["U"] - 1 / 9) < 1e-12)
++    check("macro within image then images", abs(ev["methods"]["X"]["U"]["macro"] - (1.0 + 0.0) / 2) < 1e-12)
++    check("location prior leaves image out", rows[("a.png", f1)]["location_prior"]["tile"] == 0
++          and rows[("a.png", f1)]["location_prior"]["U"] == 1)
++
++    # 12) 실제 VinDr geometry: 사전 등록 층 (20 조합/9 영상, distinct 13쌍/6 영상)
++    geo_real = E.build_geometry(E.load_annotations())
++    combos = E.positive_combos(geo_real)
++    pairs = E.classify_pairs(geo_real)
++    dist = [p_ for p_ in pairs if p_["distinct"]]
++    check("VinDr positives 20/9", len(combos) == 20 and len({c[0] for c in combos}) == 9)
++    check("VinDr distinct pairs 13/6", len(dist) == 13 and len({p_["image"] for p_ in dist}) == 6)
++
++    n_fail = sum(not r["pass"] for r in RESULTS)
++    ST.write_json_atomic(os.path.join(args.out, "cpu_tests.json"), {"n": len(RESULTS), "n_fail": n_fail, "results": RESULTS})
++    print(f"CPU tests: {len(RESULTS) - n_fail}/{len(RESULTS)} pass")
++    if n_fail:
++        sys.exit(1)
++
++
++if __name__ == "__main__":
++    main()
