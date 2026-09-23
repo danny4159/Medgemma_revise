@@ -3,6 +3,10 @@
 반복(iteration) 한 번:
     GPT 계획 (codex, read-only) → [사람 확인] → Claude 구현/실험 → GPT 리뷰 (codex, read-only, JSON)
 
+GPT 계획은 여러 사고 라운드로 이어질 수 있다. 방향이 아직 불분명하면 GPT가 조사·검색하고
+스스로 다음 질문을 남긴 뒤(think_more) 다시 사고하고, 무엇을 시도할지 판단이 서면(implement)
+Claude로 넘어간다. 라운드별 노트는 runs/iter_NNN/think/, 최대 --max-think-rounds번.
+
 리뷰의 verdict로 다음 행동을 정한다.
     CONTINUE    → 다음 반복
     DONE        → 종료
@@ -757,6 +761,11 @@ def iteration_block(n):
     plan_question = None
     for ev in events:
         stage = ev["stage"]
+        if stage == "think":
+            lines.append(f"- 🔎 **사고 라운드 {ev.get('round')}** (GPT {ev.get('tier')}): {ev.get('summary')}")
+            if ev.get("questions"):
+                lines.append(f"  - 스스로 던진 질문: {' · '.join(ev['questions'])}")
+            continue
         if stage == "plan":
             plan_question = ev.get("decision_reason") if ev.get("decision") == "ask_human" else None
             lines.append(f"- 🧭 **계획** (GPT {ev.get('tier')}): {ev.get('plan_summary') or ev.get('approach')}")
@@ -910,29 +919,82 @@ iter_{n:03d}
 같은 접근법 최대 시도 횟수: {MAX_ATTEMPTS}
 """
     tier = plan_tier(args, n)
-    raw = with_retries("GPT 계획", lambda: run_codex(
-        args, prompt, d / "plan.json", d / "plan_codex.log", tier,
-        schema=PROMPT_DIR / "plan_schema.json",
-    ))
-    try:
-        plan = json.loads(raw)
-    except json.JSONDecodeError as e:
-        raise AgentError(f"계획 JSON 파싱 실패: {e}. 파일: {d / 'plan.json'}")
+    think_dir = d / "think"
+    think_dir.mkdir(exist_ok=True)
+    while True:
+        # 끝난 사고 라운드(think_more)는 round_NN.json으로 남아 있다. 끊겨도 다음 라운드부터 이어간다.
+        done_rounds = sorted(think_dir.glob("round_[0-9][0-9].json"))
+        r = len(done_rounds) + 1
+        final = r >= args.max_think_rounds
+        set_stage(n, f"GPT 사고 라운드 {r}")
+        round_prompt = prompt + think_section(done_rounds, r, args.max_think_rounds, final)
+        raw = with_retries(f"GPT 사고 라운드 {r}", lambda: run_codex(
+            args, round_prompt, think_dir / f"round_{r:02d}.raw.json", d / "plan_codex.log", tier,
+            schema=PROMPT_DIR / "plan_schema.json",
+        ))
+        try:
+            plan = {**PLAN_DEFAULTS, **json.loads(raw)}
+        except json.JSONDecodeError as e:
+            raise AgentError(f"계획 JSON 파싱 실패: {e}. 파일: {think_dir / f'round_{r:02d}.raw.json'}")
+
+        if plan["next_action"] == "think_more" and not final:
+            save(think_dir / f"round_{r:02d}.json", json.dumps(plan, ensure_ascii=False, indent=2))
+            questions = "\n".join(f"- {q}" for q in plan["open_questions"])
+            save(think_dir / f"round_{r:02d}.md",
+                 f"# 사고 라운드 {r}\n\n{plan['research_notes']}\n\n## 다음에 파고들 질문\n{questions}\n")
+            print(f"\n🔎 사고 라운드 {r}: {plan['plan_summary']}\n다음 질문:\n{questions}")
+            record_event(n, "think", round=r, tier=tier, summary=plan["plan_summary"],
+                         questions=plan["open_questions"])
+            rebuild_index()
+            check_stop()
+            continue
+
+        if plan["next_action"] == "think_more":
+            # 라운드를 다 썼는데도 방향을 못 정했다: 사람에게 묻는다
+            plan["decision"] = "ask_human"
+            plan["decision_reason"] = (
+                f"사고 라운드 {r}번을 다 썼지만 GPT가 아직 구현 방향을 확신하지 못했습니다. "
+                f"남은 질문: {' / '.join(plan['open_questions'])}"
+            )
+        break
+
+    save(d / "plan.json", json.dumps(plan, ensure_ascii=False, indent=2))
     record_tier(n, "plan", tier)
+    plan_md = plan["plan_markdown"]
+    if plan["research_notes"].strip():
+        plan_md += f"\n\n# 계획의 근거 (GPT 조사 노트)\n\n{plan['research_notes']}\n"
+    if done_rounds:
+        plan_md += f"\n이전 사고 라운드 노트: agent/runs/iter_{n:03d}/think/\n"
     # plan.md가 있으면 계획 단계는 완료로 본다 (마지막에 저장)
-    save(d / "plan.md", plan["plan_markdown"])
-    log(f"iter_{n:03d} GPT PLAN [{plan['approach']} / {plan['decision']}]", plan["plan_markdown"])
-    print("\n" + plan["plan_markdown"])
+    save(d / "plan.md", plan_md)
+    log(f"iter_{n:03d} GPT PLAN [{plan['approach']} / {plan['decision']}]", plan_md)
+    print("\n" + plan_md)
     print("\n대안 순위:")
     for i, alt in enumerate(plan["alternatives"], 1):
         print(f"  {i}. {alt}")
     print(f"결정: {plan['decision']} — {plan['decision_reason']}")
     print(f"\nClaude 등급 제안: {plan['claude_tier']} — {plan['tier_reason']}")
     print(f"GPT 리뷰: {plan['review_mode']} — {plan['review_reason']}")
-    record_event(n, "plan", tier=tier, **{k: plan.get(k) for k in (
+    record_event(n, "plan", tier=tier, think_rounds=len(done_rounds) + 1, **{k: plan.get(k) for k in (
         "plan_summary", "approach", "alternatives", "decision", "decision_reason",
         "claude_tier", "review_mode")})
     rebuild_index()
+
+
+def think_section(done_rounds, r, max_rounds, final):
+    """사고 라운드 안내와 이전 라운드들의 노트·질문."""
+    text = f"\n=== 사고 라운드 {r}/{max_rounds} ===\n"
+    for path in done_rounds:
+        prev = json.loads(read(path))
+        questions = "\n".join(f"- {q}" for q in prev.get("open_questions", []))
+        text += (f"\n--- 라운드 {path.stem[-2:]}에서 알게 된 것 ---\n{prev.get('research_notes', '')[:4000]}\n"
+                 f"라운드 {path.stem[-2:]}가 남긴 질문:\n{questions}\n")
+    if done_rounds:
+        text += "\n이번 라운드에서는 위 질문들에 먼저 답하라 (웹 검색, 논문, 코드·결과 파일 확인).\n"
+    if final:
+        text += ("\n이번이 마지막 사고 라운드다. next_action=implement로 전체 계획을 내라. "
+                 "그래도 방향을 확신할 수 없으면 decision=ask_human으로 사람에게 구체적으로 물어라.\n")
+    return text
 
 
 def plan_concerns(n, plan):
@@ -1494,6 +1556,7 @@ def parse_args():
                    help="계획 확인: manual=매번, smart=애매할 때만(기본), full=안 함")
     p.add_argument("--auto", action="store_true", help="--autonomy full과 같음")
     p.add_argument("--max-attempts", type=int, default=MAX_ATTEMPTS, help="같은 접근법 최대 시도 횟수")
+    p.add_argument("--max-think-rounds", type=int, default=4, help="반복당 GPT 사고 라운드 최대 횟수")
     p.add_argument("--goal", help="새 연구 목표. 이전 기록을 이어받아 새 목표로 다시 계획한다")
     p.add_argument("--reset", action="store_true", help="모든 기록을 archive로 옮기고 완전히 새로 시작")
     p.add_argument("--gpus", help="Claude 실험에 보일 GPU (CUDA_VISIBLE_DEVICES), 예: 1 또는 0,1")
@@ -1534,7 +1597,7 @@ def change_goal(text):
         if goals and (d / "plan.md").exists():
             # Claude 시작 전인 계획은 버리고 새 목표로 다시 계획한다
             stamp = now().replace(" ", "_").replace(":", "")
-            for name in ("plan.json", "plan.md", "git.json"):
+            for name in ("plan.json", "plan.md", "git.json", "think"):
                 if (d / name).exists():
                     (d / name).rename(d / f"rejected_{stamp}_{name}")
     previous = goals[-1]["goal"] if goals else None
@@ -1639,7 +1702,9 @@ def main():
     notify(f"▶ 연구 루프 시작 (iter_{current_iteration():03d}부터, 최대 {args.max_iters}회)\n목표: {first_line}")
 
     first = current_iteration()
-    resumed = (iter_dir(first) / "events.jsonl").exists()
+    events_file = iter_dir(first) / "events.jsonl"
+    resumed = any(json.loads(line)["stage"] not in ("goal", "session")
+                  for line in read(events_file).splitlines() if line.strip())
     version = code_version()
     record_event(first, "session", version=version,
                  resumed_from=stage_of(first) if resumed else None)
