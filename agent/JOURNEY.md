@@ -50,3 +50,18 @@ MedGemma 1.5로 연구하는 것 자체가 큰 제약이라고 판단되면, 근
 대규모 GPU가 있어야 가능한 해결책(모델 재학습 등 근본적 수정)도 버리지 말고,
 계획 노트에 "대규모 GPU 필요 후보" 섹션으로 후보와 이유를 기록해 둔다.
 지금은 제한된 GPU로 가능한 연구를 우선한다.
+
+## 🏁 첫 기전 pilot에서 GT reference 가산 보정의 투자 기준 실패 확인
+*iter_003 · 2026-09-24 04:11 · 판정: CONTINUE / abandon*
+
+**고민**: iter_001–002의 기존 점수 정리를 마친 뒤, 의료 VLM의 한계를 실제로 개선할 논문 방향을 찾기 시작했다.
+**시도**: 후보 중 3D context 안정화를 우선해, 같은 context가 만드는 공통 점수 변화를 별도 reference로 상쇄하는 가설을 골랐다.
+**개발**: BraTS 3 case의 T1CE/T2에서 근거 packet을 고정하고 7개 presentation, 단순 baseline, oracle paired 보정을 비교하는 파이프라인을 구현했다.
+**검증**: 본실행 294개 요청과 예비 실행을 합쳐 5.75 device-minutes를 사용했으며, 원시 결과·입력 hash·실행 로그를 확인했다.
+**결과**: 측정 가능성과 context 민감성 기준은 통과했지만, 보정 후 drift는 4.491→4.620, BA는 0.964→0.917, worst-context 정확도는 0.833→0.667로 악화됐다.
+**교훈**: 이번 공통 가산 보정은 3/3 case에서 drift를 줄이지 못했으며, 동일 reference를 빼는 구조로는 E–N margin도 복원할 수 없다.
+**의미**: 이 보정 가설에 대한 추가 조정을 중단하고 근거 선택 대안으로 전환한다. unique-slice mean의 BA 0.988을 후속 baseline으로 삼되, 해부학적 confound와 독립 subject 검증은 남아 있다.
+
+- 접근법: 3D 근거 보존 context 안정화 (`approach/context-evidence-stability`), 시도: iter_003
+- 커밋: 없음
+- 자세히: DECISIONS.md의 iter_003, `agent/runs/iter_003/review.md`

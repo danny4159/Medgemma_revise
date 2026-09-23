@@ -34,7 +34,7 @@
 - 🏁 **마일스톤**: 기존 평가 점수의 재사용 가능한 요약과 근거 기반 해석 완성 — JOURNEY.md
 - 📁 원본: `agent/runs/iter_002/`
 
-## iter_003 — ? (1번째 시도) · 2026-09-24 02:07
+## iter_003 — 3D 근거 보존 context 안정화 (1번째 시도) · 2026-09-24 02:07
 
 - 🎯 **연구 목표 변경**: [최종 목표]
 CVPR·ICML 같은 top-tier 학회 논문을 목표로, 의료 Vision-Language Model(VLM)의 중요한 한계를 찾아 이를 해결하는 새로운 방법론을 개발하고, 기존 방법 대비 분명한 contribution을 실험으로 증명한다.
@@ -70,5 +70,25 @@ MedGemma 1.5로 연구하는 것 자체가 큰 제약이라고 판단되면, 근
   - 스스로 던진 질문: CORAL, Attention Without Grounding, SECOND, MedGround의 본문과 공개 코드는 어떤 개입·학습 목적·대조군을 이미 다루는가? 근거 제거에 대한 민감성과 근거 보존 변화에 대한 불변성을 함께 개선하는 방향에 실제 공백이 있는가? · VinDr, BraTS 및 공개 추가 후보에서 환자 식별자·병변 annotation·양성/음성·split·접근 조건이 확인되는 데이터 조합은 무엇인가? 정상 표본 부족과 미주석 병변을 고려해 어떤 질의를 정직하게 평가할 수 있는가? · MedGemma 1.5 공식 모델 카드·노트북과 legacy 구현을 대조하면 prompt, 좌표, resizing/cropping, MRI orientation, yes/no scoring 중 무엇을 먼저 바로잡아야 하는가? · 시각 근거 선택성, 3D 근거 선택, 해부구조→병변 전이 중 어느 방향이 선행 방법 대비 명확한 차이와 검증 가능한 신호를 동시에 갖는가? 이를 판별할 1시간 이내 소규모 실험의 조건·분모·중단 기준은 무엇인가?
 - ⏳ 사용 한도 도달 (GPT 사고 라운드 2) → 대기
 - ⏹ 중단: 정지 요청 (GPT 사고 라운드 2 중)
+- ↻ 재실행: '계획' 단계부터 이어서 (orchestrator 6ab5ccf)
+- 🔎 **사고 라운드 2** (GPT deep): 제거·보존 진단의 선행 연구 중복과 데이터 분모 제약을 확인했으므로, 질문 조건부 근거 학습과 3D context 민감성의 차별성을 한 라운드 더 비교한다.
+  - 스스로 던진 질문: MMedPO 본문·코드와 causal sufficiency/necessity 학습은 질문 조건부 정답이 검증된 개입, 근거 보존 대조군, 해부학적 context를 어디까지 다루는가? 그대로 재현할 baseline과 남는 방법론 차이를 각각 한 문장으로 정의할 수 있는가? · 3D slice-selection 선행 연구와 MedGemma 1.5 평가에서, 동일 병변 근거를 유지한 채 자연 context·중복·순서만 바꾸는 실패를 이미 다뤘는가? 이를 고치는 경량 방법이 단순 top-k selection을 넘을 여지가 있는가? · 공식 anatomy·CT notebook 본문과 로컬 processor 구현을 읽어 prompt·좌표·crop·orientation 규약을 확정할 수 있는가? CheXlocalize 또는 대체 데이터에서 추가 확보 없이 시작할 표본과 향후 환자 단위 확장 경로는 무엇인가? · 앞의 비교를 바탕으로 2D 근거 선택과 3D context 민감성 중 하나를 선택하고, 기존 baseline·주효과·분모·중단 기준이 고정된 60 device-minutes 이내 진단 계획을 완성할 수 있는가?
+- 🔎 **사고 라운드 3** (GPT deep): MedGemma 1.5의 근거 보존 context 불안정성은 이미 보고됐으므로, 마지막 조사에서 이를 해결할 방법의 차별성과 공개 데이터 사용 가능성을 확인한다.
+  - 스스로 던진 질문: MRI-GBM-MET의 실제 파일 구조·license·subject ID·label·ROI 대응·split을 확인할 수 있는가? 공개 평가자료를 학습자료로 오용하지 않고 pilot과 최종 평가를 분리할 수 있는 최소 단위는 무엇인가? · 3D context 안정화를 위한 질문 조건부 근거 집계는 MedPruner, 독립 slice 점수 평균·max, permutation ensemble, consistency 기반 기권과 어떻게 다른가? 가장 가까운 방법의 수식·코드와 비교해 검증할 차이 하나를 명시할 수 있는가? · 고정된 병변 근거에서 context의 내용·중복·길이·위치를 분리하는 최소 비교는 무엇이며, 정확도와 안정성을 동시에 평가해 상수 예측·과도한 기권을 배제할 주효과와 중단 기준을 어떻게 고정할 것인가? · 확장 데이터의 사용 가능 여부에 따라 공개 데이터 소규모 재현 또는 로컬 BraTS 3 case 기전 pilot 중 무엇을 택할 것인가? 공식 입력 규약과 scoring을 확인하고, 60 device-minutes 안의 실행량·baseline·분모를 확정할 수 있는가?
+- 🧭 **계획** (GPT deep): 로컬 BraTS 3개 case에서 근거를 고정한 context 변화와 paired 점수 보정을 비교하여, 3D 안정화 방법 개발에 필요한 기전과 개선 여지가 있는지 검증한다.
+  - 대안: 1) 3D 근거 보존 context 안정화: 로컬 volume으로 context 효과의 분리 가능성과 paired 보정의 개선 여지를 먼저 검증한다. · 2) 질문 조건부 2D 근거 선택: 병변 근거와 해부학적 context를 구분하되 MMedPO·SECOND 등과의 차별성과 적절한 음성 label 확보가 필요하다. · 3) 해부구조에서 병변으로 grounding 전이: localization adapter나 LoRA를 검토하되 정답 정의·데이터 확장·기존 grounding 방법 재현 부담이 더 크다.
+  - 1순위 선택 근거: MedGemma 1.5의 관련 실패가 선행 연구에서 확인됐고, 로컬 데이터만으로 55 device-minutes 이내의 반증 가능한 pilot을 실행할 수 있다. 이번 결정은 논문 주제 확정이 아니라 방법 개발에 투자할 근거를 얻는 저비용 검증이다.
+- ▶ **결정**: 자동 진행 (smart) — 1순위로 진행
+- ⏳ 사용 한도 도달 (Claude 구현/실험) → 대기
+- ↻ 끊겼던 Claude 세션을 이어서 진행
+- ↻ 끊겼던 Claude 세션을 이어서 진행
+- ▶ 사용 한도가 풀려 재개 (Claude 구현/실험, 60분 대기)
+- 🔧 **Claude** (creative): BraTS 3 case pilot을 끝까지 실행(294 요청, 5.75 device-min)해 측정 가능성·불안정성 기준은 통과했지만, GT reference paired 보정은 drift를 줄이지 못해(−2.9%, BA·worst 하락) 가설을 기각했고, context가 양성 근거를 선택적으로 희석한다는 사후 신호와 IAF(γ=0.05)의 병변 slice 제거 문제를 발견했다. [자체 검증 FAIL, 파일 84개 변경]
+  - 새 브랜치 `approach/context-evidence-stability` ← approach/scores-summary (f213214)
+  - ⚠ 권한 거부 1건
+- 🔍 **리뷰** (GPT deep): [CONTINUE / abandon] 294개 본실행 결과를 확인했으며, context 민감성은 관찰됐지만 paired 보정은 정확도와 안정성을 모두 악화시켰다.
+  - 접근법 판단: 이번 접근법의 핵심인 GT reference 가산 보정은 사전 진행 기준을 실패했고 3개 case 모두 drift가 증가했다. 계수·reference의 사후 조정을 중단하고 남은 근거 선택 대안으로 전환한다.
+  - 다음: 재사용할 파이프라인의 예산 축소·hash 검증 결함을 수정하고, 다음 후보인 질문 조건부 2D 근거 선택을 검토한다. unique-slice mean을 필수 baseline으로 두고 GT 없는 선택 규칙, 해부학적 confound 대조군, 독립 subject 평가 및 선행 방법과의 차별성을 갖춘 소규모 실험을 설계한다.
+- 🏁 **마일스톤**: 첫 기전 pilot에서 GT reference 가산 보정의 투자 기준 실패 확인 — JOURNEY.md
 - 📁 원본: `agent/runs/iter_003/`
 

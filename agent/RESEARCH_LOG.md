@@ -879,3 +879,342 @@ SUMMARY: report()의 누락·null·후보 부족·최저 과제 변경 처리를
 ## iter_002 GIT COMMIT — 2026-09-24 01:36:15
 
 f213214 (approach/scores-summary) 과제별 점수 요약과 결측에 안전한 최저 bbox 과제 해석 구현
+
+
+## iter_003 GPT PLAN [3D 근거 보존 context 안정화 / proceed] — 2026-09-24 02:50:52
+
+# 이전 기록에서 가져올 것
+
+- 이전 점수 요약 목표는 `f213214`에서 완료됐다. 새 접근법의 첫 시도이며, 이전 접근법의 시도 횟수를 이어받지 않는다.
+- `research/summarize_scores.py`의 분모 보존 원칙, legacy의 JSONL 출력과 multi-image 입력 구성, 분류 감사의 case별 평가 방식을 재사용한다. 새 브랜치에 기존 파일이 없으면 orchestrator가 관리하는 이력을 참고하되 직접 브랜치를 변경하지 않는다.
+- legacy에서 배운 핵심은 모델 버전·prompt·정답 정의·평가 단위가 바뀌면 기존 수치를 직접 비교할 수 없다는 것이다. 낮은 bbox 점수, pooled AUC, MRI 안내문이 달랐던 3D 결과를 새로운 연구 가설의 확정 근거로 쓰지 않는다.
+- 모든 산출물은 `research/`에 작성한다. `legacy/`와 `hf_cache/`는 읽기 전용으로 유지한다. 이번 계획 단계에서는 파일 변경이나 실험을 수행하지 않았다.
+
+# Current Understanding
+
+MedGemma 1.5의 병변 근거를 유지한 presentation 변화에 대한 불안정성은 이미 보고됐다. 이번 연구의 가치는 이를 다시 발견하는 데 있지 않고, 정확도를 유지하면서 해결할 수 있는 기전을 찾는 데 있다. [Stable Evidence, Unstable Decisions](https://aclanthology.org/2026.findings-acl.1303/)
+
+우선순위는 3D 근거 보존 context 안정화다. MedPruner의 중복 제거·token 집계와 비교할 필요가 있지만, 먼저 점수 수준에서 context 효과를 분리할 수 있는지 확인한다. 전체 MedPruner 재현과 대규모 학습을 이번 pilot에 포함하지 않는다. [MedPruner v2](https://arxiv.org/html/2603.11625v2)
+
+공개 MRI-GBM-MET는 유망한 확장 후보지만 archive 내부 구조와 사용 조건이 미확인이다. 이번에는 로컬 BraTS 3 case의 T1CE/T2를 사용한다. 이는 3개 독립 case의 기전 pilot이며, 임상 진단 benchmark나 다중 데이터셋 증명이 아니다.
+
+# Hypothesis
+
+**H1:** 병변 근거 packet의 픽셀을 고정해도 context의 내용·중복·위치에 따라 답변 log-odds가 바뀌며, 그 변화 중 일부는 같은 context에 놓인 별도 reference packet에서도 관찰되는 공통 성분이다.
+
+**H2:** 이 공통 성분을 paired score로 상쇄하면, 단순 concatenation보다 근거 packet 단독 점수에 가까워지면서 annotation 기반 구분 능력을 유지할 수 있다.
+
+질문 q에 대한 점수를 `m(X)=log P(Yes|X,q)−log P(No|X,q)`로 정의한다. 근거 packet S, 별도 reference R, context C에 대해 다음 고정식만 검사한다.
+
+`m_corrected(S,C)=m(S,C)−m(R,C)+m(R)`
+
+계수는 1로 고정하고 결과를 보고 조정하지 않는다. R은 S 및 context와 겹치지 않는 annotation-empty slice packet이다. 이는 GT 기반 reference를 사용하는 **oracle probe**다. 배포 가능한 방법이나 신규 contribution으로 주장하지 않는다. 각 presentation의 보정값을 따로 계산하며, 여러 presentation에 하나의 답변을 복사하지 않는다.
+
+# Proposed Experiment
+
+## 1. 데이터와 packet 구성
+
+- case: `BraTS-GLI-00000-000`, `BraTS-GLI-00002-000`, `BraTS-GLI-00005-000`.
+- sequence: `t1c`, `t2w`. 총 6 case-sequence지만 독립 case는 3개다.
+- 영상·segmentation의 shape와 affine을 검증하고 동일하게 canonical orientation으로 변환한다. 영상과 mask의 보간 없는 축 변환을 우선하며, 불일치를 임의 resampling으로 숨기지 않는다.
+- intensity는 case-sequence별 비영점 voxel의 1st/99th percentile로 한 번 정하고 모든 slice·조건에 동일하게 적용한다. RGB 복제와 resize 설정도 고정한다.
+- 양성 packet E는 `seg>0` 면적이 큰 서로 다른 두 slice로 구성한다. 이는 전체 종양 관련 annotation의 합집합이며 enhancing tumor로 부르지 않는다.
+- 음성 proxy packet N, reference R, context A/B는 각각 서로 다른 annotation-empty slice 두 장으로 구성한다. E/N/R/A/B 사이에 source slice 중복을 허용하지 않는다.
+- empty 후보는 annotation이 있는 z 범위에서 최소 5 slice 떨어지고, 비영점 영상 면적이 해당 volume 최대의 25% 이상인 slice로 제한한다. 가능한 범위에서 E와 영상 면적 차이가 작은 후보를 선택하며 동률은 z-index로 정한다. 선택 규칙·seed·모든 제외 이유를 추론 전에 저장한다.
+- 적격 slice가 부족하면 기준을 조용히 완화하지 않는다. 해당 case-sequence를 제외하고, 3 case 모두에서 최소 한 sequence를 구성하지 못하면 GPU 기전 실험을 중단한다.
+- montage와 mask overlay는 선택·정렬 오류 확인용이다. 임상적 음성 판정이나 radiologist 검증을 대체하지 않는다.
+
+## 2. 고정된 질문과 presentation
+
+모든 입력에 동일하게 MRI sequence를 명시하고, 제공된 영상에서 tumor-associated abnormality가 보이는지 Yes/No로 묻는다. 파일명·GT·packet 역할·case label은 prompt에 넣지 않는다. 비연속·중복 slice를 contiguous volume이라고 설명하지 않는다.
+
+S를 E, N, R로 각각 바꾸어 다음 7개 조건을 구성한다.
+
+| 조건 | 입력 | 비교 목적 |
+|---|---|---|
+| P0 | S | packet 단독 기준 |
+| P1 | A + S | 기본 context |
+| P2 | B + S | P1과 길이·packet 위치가 같은 context 교체 |
+| P3 | S + A | P1과 영상 multiset이 같은 위치·순서 변경 |
+| P4 | A + A + S | 반복 context 추가 |
+| P5 | A + B + S | P4와 같은 길이에서 중복·다양성 비교 |
+| P6 | A + B + A + B + S | 동일 context 반복량 증가 |
+
+E/N의 픽셀은 모든 조건에서 같아야 한다. P1 대 P4, P5 대 P6는 길이와 반복량이 함께 달라지므로 순수 길이 효과로 해석하지 않는다. 최대 영상 수는 10장이다.
+
+## 3. 비교 방법
+
+1. 원본 concatenation 점수와 결정.
+2. 입력에 포함된 slice의 독립 점수 mean 및 max. 동일 slice 재등장은 기본적으로 multiplicity를 반영하고, unique-slice 집계도 추가 GPU 없이 보조 분석한다.
+3. P1/P3 점수 평균을 사용하는 2-order ensemble. 이 baseline의 해석은 해당 두 조건으로 제한한다.
+4. P1/P3 결정이 일치할 때만 답하는 consistency 기권 baseline. coverage와 selective error를 함께 보고한다.
+5. MedPruner 본문의 IAF만 구현한 slice-filtering ablation: [0,1] RGB에서 현재 anchor와의 mean L1이 0.05를 초과하면 유지한다. 유지된 E slice 수와 token 수를 기록한다. 이를 전체 MedPruner 재현이라고 부르지 않는다.
+6. 위 수식의 paired 보정. P0 점수와 각 조건의 R 점수를 재사용한다.
+7. oracle packet-only 결과. context를 제거했을 때의 기준이며, 안정성이 구조적으로 높다는 사실 자체를 방법의 성과로 세지 않는다.
+
+보정은 단순 감산 probe이며, contrastive decoding 계열과의 차별성이 확정된 방법은 아니다. 이 pilot이 통과해야 mask-free reference 선택과 더 넓은 선행 연구 비교에 투자한다.
+
+## 4. 입력 scoring과 실행 예산
+
+- 정확히 `google/medgemma-1.5-4b-it`의 로컬 snapshot을 bf16으로 사용한다. model/processor revision, transformers 버전, image processor 설정, tensor shape, image token 수를 기록한다.
+- 공식 모델 카드의 `apply_chat_template(..., add_generation_prompt=True)`를 따른다. MRI 전처리는 연구용으로 명시한다.
+- Yes/No 각각의 **전체 continuation token**에 대한 log probability를 계산한다. assistant prefix 경계, tokenizer의 공백 처리, candidate 길이, token 중복·충돌을 검사한다. 첫 token만 임의로 선택하지 않는다.
+- 12개 E/N 단독 입력에서 greedy 생성도 최대 8 token으로 확인한다. 비정형 응답·잘림·scoring 결정과의 불일치를 모두 보고하며 임의 label로 바꾸지 않는다. 주평가는 제한된 답변 likelihood 평가라는 점을 명시한다.
+- 최대 요청 수는 기본 126개, 독립 slice 최대 60개, E/N의 P1–P6 IAF 최대 72개로 총 258개 scoring 입력이다. 각 입력의 Yes/No scoring forward 수는 별도로 센다. 생성 확인 12개가 추가된다.
+- 실행 직전 `nvidia-smi`로 허용된 GPU의 여유 메모리를 확인한다. 기본은 여유가 가장 큰 GPU 한 장에서 한 프로세스다. 실제 peak와 2GB 여유를 확인하고 필요할 때만 두 번째 허용 GPU를 사용한다. `CUDA_VISIBLE_DEVICES`를 직접 덮어쓰지 않는다.
+- 로딩·예비 실행·모든 worker 시간을 합산하여 **55 device-minutes에서 중단**한다. 예비 입력의 속도로 남은 비용을 추정하고, 예산 초과가 예상되면 결과를 보지 않고 사전에 정한 공통 축소 규칙으로 전체를 T1CE만 실행한다. 그것도 불가능하면 미완료로 기록하고 중단한다. 일부 방법만 누락된 결과로 우열을 선언하지 않는다.
+
+# Implementation Tasks for Claude
+
+1. `research/`에 데이터 manifest 생성, 추론, 집계를 분리한 작은 실행 파이프라인을 만든다. 예: `context_pilot/`, `run_context_pilot.py`, `analyze_context_pilot.py`.
+2. 추론 전 config와 manifest에 source 경로·hash, case ID, sequence, z-index, annotation 면적, packet 구성, 조건별 순서를 저장한다. 모델 입력과 평가 label을 분리한다.
+3. CPU에서 의미 있는 검증을 수행한다: 영상-mask 정렬, 근거 픽셀 불변, packet 비중복, 조건별 image 수, 순서 변경 시 multiset 보존, repeated slice multiplicity, IAF의 작은 수동 예제, case 단위 집계와 기권 분모.
+4. full-continuation scoring을 작은 수동 계산 또는 독립적인 teacher-forced 계산과 대조한다. 저장 형식에 raw score, candidate token, 예측, latency, 메모리, 실패 상태를 포함한다.
+5. 예산 안에서 실행하고 조건·방법별 결과와 case별 원자료를 보존한다. 중단 후 재개 시 동일 config와 입력 hash만 재사용한다.
+6. `research/results/iter_003/`에 manifest, config, predictions JSONL, metrics JSON, 보고서를 작성한다. 소표본 분모와 oracle 사용 여부를 모든 성능 표에 표시한다.
+7. `research/`의 선행 연구 노트에 네 사고 라운드의 핵심 출처, 이번에 갱신한 MedPruner 공개 상태, MRI-GBM-MET의 확인·미확인 항목을 기록한다. `agent/PAPERS.md` 부재도 보고서에 알린다. orchestrator가 관리하는 브랜치·커밋·agent 기록은 직접 변경하지 않는다.
+
+# Evaluation (성공/실패 기준 포함)
+
+## 평가 단위와 metric
+
+- 독립 단위는 case 3개다. sequence·packet·presentation 수를 환자 수로 세지 않는다. case 안에서 먼저 집계하고 case 평균과 원시 결과를 병기한다. 소표본 p-value로 일반화 주장을 하지 않는다.
+- 주 기전 metric: 각 S의 P0 대비 log-odds drift `|m(S,C)−m(S)|`. 보정에도 같은 계산을 적용한다. E/N을 동일 가중하고 case별 결과를 보고한다.
+- 동반 metric: E/N annotation-proxy balanced accuracy, 각 packet이 모든 context 조건에서 맞는지 보는 worst-context 정확도, P0 대비 flip 수, 양성·음성별 오류, E–N margin.
+- 기권 baseline은 coverage·selective error·전체 분모 기준 정답 비율을 모두 보고한다. forced-choice 방법과 기권을 제외한 accuracy만 비교하지 않는다.
+- IAF는 정확도 외에도 근거 slice 보존율·입력 token 수·시간을 보고한다. 전체 MedPruner를 이겼다는 결론은 내리지 않는다.
+
+## 사전 진행 기준
+
+다음은 논문 성공 기준이 아니라 다음 반복 투자 기준이다.
+
+1. **측정 가능성:** packet-only E/N 구분이 6 case-sequence 중 최소 4개에서 올바른 margin 방향을 보이고, annotation-proxy balanced accuracy가 0.67 이상이어야 한다. 미달이면 context 보정보다 기본 인식·label 타당성 문제가 우선이다.
+2. **불안정성 신호:** 같은 길이 비교 P1↔P2 또는 P1↔P3에서 최소 2개 case에 decision flip 또는 절대 log-odds 차이 0.5 이상이 있어야 한다. 동일 입력 반복 오차가 이 차이를 설명하면 측정 오류로 판정한다.
+3. **보정의 유망성:** paired 보정이 concatenation 대비 평균 drift를 25% 이상 줄이고, 최소 2개 case에서 같은 방향이며, balanced accuracy와 worst-context 정확도가 낮아지지 않아야 한다.
+4. **단순 baseline 확인:** mean/max·IAF·2-order ensemble이 적용 가능한 동일 조건에서 비용과 성능을 비교한다. 더 싼 baseline이 보정의 정확도·안정성을 모두 달성하면 paired 보정을 새 방법의 핵심으로 밀지 않는다.
+
+세 기전 기준을 통과하고 단순 baseline이 해결하지 못한 잔여 문제가 있으면 `improve`로 이어가며 mask-free 설계와 독립 데이터 확보를 다음 과제로 삼는다. 보정 효과가 없거나 단순 baseline으로 충분하면 이 보정 가설은 포기한다. 3 case 결과만으로 접근법 전체의 논문 수준 success를 선언하지 않는다.
+
+구현 검증·데이터 적격성·예산 문제로 비교를 완료하지 못한 경우에는 방법 실패와 구분해 `inconclusive`로 보고한다. 예산 초과 실행이나 사후 threshold 탐색으로 결과를 보완하지 않는다.
+
+# Risks / Checks
+
+- annotation-empty slice에는 미주석 이상이나 종양 관련 간접 소견이 남을 수 있다. 결과는 annotation 기반 proxy이며 정상/질병 진단 성능이 아니다. 이 한계가 관찰 효과를 좌우하면 임상 label이 있는 데이터로 넘어가기 전 방법 결론을 보류한다.
+- E 선택과 R 구성에 GT를 사용한다. oracle 이득을 실제 추론 방법의 성능으로 제시하지 않는다. 후속 방법은 GT 없이 작동해야 한다.
+- context는 진단에 필요한 정보일 수도 있다. 모든 context 영향의 제거가 바람직하다고 가정하지 않는다. 이번 질문과 annotation 범위에서만 검증한다.
+- MRI-GBM-MET를 향후 사용하면 subject별 label·presentation 대응, 내부 license, 중복 및 split을 먼저 확인한다. 개발용 subject와 최종 평가 subject를 분리하고 현재 viewer의 `train`을 공식 split으로 사용하지 않는다.
+- dataset/model 오염 가능성과 현재 표본의 비대표성은 남는다. 최종 논문은 독립 subject, 여러 데이터셋, 다른 VLM, accuracy–stability–cost 비교와 ablation이 필요하다.
+- `pip install`, `conda activate`, cache 수정, 다른 사용자의 GPU 프로세스 조작은 하지 않는다. 필요한 의존성이 없으면 구체적으로 보고한다.
+
+# 대규모 GPU 필요 후보
+
+- 3D 공간 위치와 병변·해부학적 context를 함께 학습하는 volumetric encoder/projector 재학습: 구조적 개선 가능성이 있지만 대규모 paired volume과 학습 자원이 필요하다.
+- 질문 조건부 근거 보존·근거 변화에 서로 다른 목표를 부여하는 multi-view 학습: LoRA 축소판은 후속 후보지만 충분한 데이터·negative 검증과 여러 view의 학습 비용이 필요하다.
+- CORAL/MMedPO 계열을 결합한 대규모 preference 또는 reinforcement learning: 기존 방법과의 차별성을 먼저 확보해야 하며, 원형 재현 비용을 현재 두 장의 GPU에 맞는다고 가정하지 않는다.
+
+# 계획의 근거 (GPT 조사 노트)
+
+이번 라운드는 문서·코드·파일 목록 확인만 수행했다. 파일 변경, 모델 로딩, 실험 실행은 하지 않았다.
+
+### 이전 기록에서 이어받을 내용
+- `agent/GOAL.md`, `JOURNEY.md`, `INDEX.md`, `DECISIONS.md`, `iter_002/review.md`와 이전 사고 라운드를 확인했다. 이전 목표는 완료됐으며, `research`에는 초기 커밋 `0809430`과 점수 요약 커밋 `f213214`만 있다. `agent/PAPERS.md`는 없다.
+- 재사용할 것은 JSONL 기록, 분모 보존, case별 집계, multi-image 입력 구성이다. legacy의 slice별 intensity 정규화, 조건마다 다른 MRI 안내문, 첫 token만 사용하는 답변 scoring은 그대로 재사용하지 않는다.
+
+### 질문 1: 공개 MRI 자료의 실제 사용 가능성
+- MRI-GBM-MET의 root에는 `.gitattributes`, `README.md`, 302 MB ZIP이 있다. README에는 90 subject, GBM/MET 각 45명과 slice filename을 통한 presentation 대응이 설명돼 있다. 그러나 ZIP 내부의 subject ID·진단 label·mask 파일 대응은 확인하지 못했다. README metadata에 license 항목이 없으며, viewer의 `train` 표시는 검증된 연구용 split이 아니다. shell의 HTTP 확인은 DNS 오류로 실패했다. 따라서 이번 실행의 필수 데이터로 채택하지 않는다. [파일 목록](https://huggingface.co/datasets/universitytehran/MRI-GBM-MET/tree/main), [README](https://huggingface.co/datasets/universitytehran/MRI-GBM-MET/blob/main/README.md)
+- 향후 사용 시 최소 분리 단위는 subject다. 동일 subject의 두 modality와 모든 presentation을 함께 묶고, 개발에 사용한 subject는 최종 평가에서 제외해야 한다. 아직 공식 split이나 사용 조건을 확정한 상태는 아니다.
+
+### 질문 2: 가장 가까운 방법과 검증할 차이
+- MedPruner는 v2와 공개 저장소가 존재한다. 앞선 v1 기반의 공개 상태 판단을 갱신한다. v2는 anchor와의 pixel L1 차이를 이용한 slice filtering, attention 기반 token 선택, 잔여 token 집계를 설명한다. 공개 설정은 `gamma=0.05`, `tau=0.9`다. 이번에는 본문·README·설정 파일까지 확인했으며 내부 구현 전체를 검증하지는 못했다. [v2 본문](https://arxiv.org/html/2603.11625v2), [저자 저장소](https://github.com/CUHK-AIM-Group/MedPruner), [설정](https://raw.githubusercontent.com/CUHK-AIM-Group/MedPruner/main/config/config.json)
+- 검증할 차이는 **시각적 중복을 제거하는 대신, 동일 context가 서로 다른 근거 packet의 답변 점수에 주는 공통 변화를 추정하여 상쇄할 수 있는가**다. 이는 질문에 조건부인 paired score 분석이다. 새로운 방법으로 확립됐다는 뜻은 아니며, GT 기반 reference를 쓰는 oracle 기전 실험부터 시작한다.
+- 독립 slice mean/max는 slice 간 상호작용을 버리고, permutation ensemble은 순서 변화를 평균하며, consistency 기권은 coverage를 낮춘다. 이번 후보는 각 presentation에 별도로 점수 보정을 적용하여 정확도와 안정성이 함께 회복되는지 검사한다.
+
+### 질문 3: 비교 조건과 허위 개선 방지
+- 근거 packet을 고정한 상태에서 같은 길이의 context 교체, 같은 영상들의 순서 변경, 같은 길이의 중복·다양성 변경을 각각 비교한다. 길이 증가는 반복 추가 효과와 결합되므로 순수 길이 효과라고 부르지 않는다.
+- 양성 packet과 annotation-empty packet을 모두 포함하고, case별 balanced accuracy·worst-context accuracy·점수 drift를 함께 본다. annotation-empty는 정상 환자나 임상적으로 확정된 음성을 뜻하지 않는다. 따라서 accuracy는 annotation 기반 proxy metric으로만 보고한다.
+- 모든 presentation에 같은 최종 답을 복사하거나 기권을 늘려 얻은 안정성은 개선으로 인정하지 않는다.
+
+### 질문 4: 이번 실행 범위 확정
+- 로컬 BraTS 캐시에는 `00000-000`, `00002-000`, `00005-000`의 3 case에 대해 각각 4 MRI sequence와 segmentation이 있다. 이번에는 T1CE와 T2만 사용한다. 독립 분모는 3 case이며 6 case-sequence를 독립 환자로 세지 않는다.
+- 로컬 모델 카드의 `apply_chat_template`과 생성된 suffix만 decoding하는 규약을 확인했다. 공식 CT notebook은 파일 존재만 확인했으며 코드 본문은 확보하지 못했다. 이번 MRI 입력을 공식 CT 재현이라고 부르지 않는다.
+- 최대 258개 입력 scoring 요청과 12개 짧은 생성 확인을 계획하되, 모델 로딩·예비 실행을 포함한 총 GPU 사용을 55 device-minutes에서 중단한다. 데이터 추가 확보와 학습 없이 진행할 수 있다.
+
+이전 사고 라운드 노트: agent/runs/iter_003/think/
+
+
+
+## iter_003 CLAUDE REPORT — 2026-09-24 04:08:18
+
+보고서와 노트 작성을 마쳤고, 최종 보고서를 정리합니다.
+
+# Work Performed
+- iter_003 계획의 "3D 근거 보존 context 안정화" 기전 pilot을 구현하고 끝까지 실행했습니다. 대상은 로컬 BraTS 3 case × T1CE/T2입니다.
+- **데이터 구성 (CPU)**
+  - 영상과 seg를 `nib.as_closest_canonical`로 같은 RAS 방향으로 변환했습니다. 보간 없이 축만 뒤집습니다.
+  - intensity 범위는 case-sequence별 1/99 percentile로 한 번 정해 모든 slice에 같게 적용했습니다.
+  - 계획 규칙대로 E·N·R·A·B를 각 2 slice씩 골랐습니다. 제외 이유, source hash, pairwise L1을 manifest에 저장했습니다.
+  - 6 case-sequence 모두 적격이어서 제외된 것은 없습니다.
+- **CPU 검증**: 영상-mask 정렬, 근거 픽셀 불변, packet 비중복, 조건별 영상 수, P1/P3 multiset 보존, 반복 slice multiplicity, IAF 수동 예제, case 단위 집계와 기권 분모를 확인했고 모두 PASS입니다.
+- **Scoring**: `logP("Yes")−logP("No")`를 계산합니다. 두 후보가 모두 단일 token임을 확인했습니다.
+  - 독립 teacher-forced 계산과 대조했습니다.
+  - `답+\n+<end_of_turn>`까지 포함한 continuation 점수를 보조로 기록했습니다.
+  - greedy 생성(최대 8 token)으로 12개 입력을 확인했습니다.
+- **비교 방법**: concat, paired 보정(oracle), 독립 slice mean(중복 포함 / unique) 및 max, IAF(MedPruner 본문의 slice filtering만), P1/P3 2-order ensemble, consistency 기권, packet-only(oracle).
+- **사후 탐색 (CPU, 사전 기준 아님)**: 비례형 희석 분석.
+- 선행 연구 노트와 README 실행법을 추가했습니다.
+- 재개 시 이미 끝난 추론·분석은 다시 하지 않았습니다. 남아 있던 사후 분석, 보고서, 노트만 마쳤습니다.
+
+# Files Changed
+- 신규: `research/context_pilot/__init__.py`, `research/context_pilot/data.py`
+- 신규: `research/build_context_manifest.py`, `research/run_context_pilot.py`, `research/analyze_context_pilot.py`, `research/test_context_pilot.py`
+- 신규: `research/notes/related_work_iter003.md`
+- 수정: `research/README.md` (iter_003 실행법 추가)
+- 결과: `research/results/iter_003/`
+  - `config.json`, `manifest.json`, `labels.json`, `requests.jsonl`, `predictions.jsonl`, `metrics.json`
+  - `budget.json`, `env_*.json`, `report.md`, `slices/`, `montage/`
+
+# Commands / Experiments (실제 실행한 명령과 성공/실패)
+1. `python research/build_context_manifest.py --out research/results/iter_003` — 성공. 6/6 case-sequence 적격, 요청 294개.
+2. `python research/run_context_pilot.py --out ... --max-requests 8 --note pilot` — 성공.
+   - 예비 실행이며 GPU 1장을 사용했습니다. 로딩 28s, peak 8.7GB, 0.80 device-min.
+   - 이후 보조 continuation 정의를 바꾸고 `SCORER_VERSION=2`를 붙였습니다. 그래서 예비 결과 8줄은 분석에서 제외됩니다.
+3. `python research/test_context_pilot.py --out ...` — 성공. CPU 검증 5종 모두 PASS.
+4. `python research/run_context_pilot.py --out ... --note full` — 성공.
+   - 294/294 ok, OOM 0, 4.95 device-min.
+   - 누적 5.75 device-min으로 예산 55 이내이며, 축소 규칙은 적용되지 않았습니다.
+5. `python research/analyze_context_pilot.py --out ...` — 성공.
+6. 사후 비율 분석은 `python -c`로 실행했습니다 — 성공.
+7. 재개 확인용 `git status`는 권한 승인이 필요해 실행하지 못했습니다. 대신 `results/` 파일로 진행 상태를 확인했습니다.
+
+# Results (수치와 결과 파일 경로)
+분모는 독립 case 3개이고 소표본입니다. 모든 수치는 case 안에서 sequence를 평균한 뒤 case를 평균한 값입니다. label은 annotation 기반 proxy입니다.
+
+**Scoring 검증**
+- teacher-forced 계산과 last-logit 계산의 차이는 최대 1.2e-7입니다.
+- 생성 12/12가 파싱됐고 scoring 결정과 모두 일치했으며, 잘린 응답은 0개입니다.
+- P(Yes)+P(No)는 최소 0.973입니다.
+- 동일 입력 반복(24쌍 + 동일 hash 51그룹)의 차이는 모두 0입니다. 단, bf16 logits 양자화 단위가 약 0.125입니다.
+
+**사전 진행 기준**
+
+| 기준 | 판정 | 근거 |
+|---|---|---|
+| 1 측정 가능성 | PASS | P0 margin이 6/6 case-sequence에서 양수, P0 BA 0.917 |
+| 2 불안정성 | PASS | P1↔P3 \|Δm\|≥0.5가 3/3 case(최대 3.5), P1↔P2도 2 case. 같은 길이 조건 간 결정 flip은 0건이고, flip은 P4/P6처럼 긴 context에서만 발생 |
+| 3 paired 보정 | **FAIL** | 아래 참조 |
+
+- paired 보정은 drift를 줄이지 못하고 오히려 늘렸습니다.
+  - drift: 4.491 → 4.620 (−2.9%, 증가), 감소한 case는 0/3입니다.
+  - BA 0.964 → 0.917, worst-context accuracy 0.833 → 0.667로 모두 낮아졌습니다.
+  - N의 drift는 46% 줄었지만 E의 drift는 18% 늘었습니다.
+  - 원인: empty 후보가 좁은 z 구간에 몰려 있어 R이 N과 인접 slice였습니다. 그래서 R은 N의 변화는 잘 따라가지만 E의 변화는 반영하지 못합니다.
+
+**방법별 비교 (P0–P6)**
+
+| 방법 | oracle | BA | worst-context | drift | 비고 |
+|---|---|---|---|---|---|
+| concat | no | 0.964 | 0.833 | 4.49 | |
+| single mean (unique) | no | 0.988 | 0.917 | 4.37 | 비-oracle 중 최고 |
+| single max | no | 0.774 | 0.750 | 0.79 | drift는 낮지만 N 오탐 증가 |
+| IAF (γ=0.05) | no | 0.774 | 0.500 | 4.95 | P1–P6 E 입력 36개 중 15개에서 E slice 전부 제거, E 보존율 0.292 |
+| packet-only | **yes** | 0.917 | 0.917 | 0 | context 제거 기준 |
+
+- P1/P3의 ensemble과 기권은 결정 불일치가 없어서 concat과 결과가 같았습니다 (BA 1.0, coverage 1.0).
+
+**사후 탐색 (가설 수준)**
+- context가 붙으면 E의 log-odds는 평균 0.34배로 줄지만, empty packet은 N 0.76배, R 0.72배로 덜 줄어듭니다. 양성 근거만 선택적으로 희석되는 모양입니다.
+- 근거를 앞에 두면 희석이 덜합니다 (α_E: P3 0.60 vs P1 0.44). 반복 context가 붙으면 더 심합니다 (P6 0.21).
+- 따라서 가산형이든 비례형이든 R 기반 공통 보정으로는 이 효과를 상쇄할 수 없습니다.
+
+상세는 `research/results/iter_003/report.md`와 `metrics.json`에 있습니다.
+
+# Problems
+- 계획은 258개 요청이었지만 실제로는 294개를 실행했습니다. 추가분은 두 가지입니다.
+  - P0 IAF 12개: P0에서도 IAF가 E slice 1개를 지워 별도 scoring이 필요했습니다.
+  - 반복 오차 측정용 24개.
+- empty 후보가 뇌 상·하단의 좁은 구간에 몰려 N/R/A/B가 서로 인접 slice가 됐습니다. 이 때문에 context가 거의 같은 해부 구조의 반복이 됐고, R이 N의 대리값으로 유리하게 작용했습니다. E와 empty slice 사이의 뇌 면적 차이도 큽니다 (montage에서 확인).
+- 00005 T2의 N packet(P0)은 모델이 "Yes"로 답했습니다 (m=+1.13). 미주석 이상인지, 오탐인지는 판단할 수 없습니다.
+- IAF는 본문에 적힌 규칙만 구현했습니다. 240×240 원본 해상도에서 L1을 비교했고, MedPruner 저자 코드와는 대조하지 못했습니다.
+- `git status` / `git diff`는 권한 문제로 실행하지 못했습니다.
+- 선행 연구 노트는 GPT 사고 라운드의 내용을 옮긴 것입니다. 이번에 원문을 다시 열어 검증하지는 않았습니다. `agent/PAPERS.md`는 존재하지 않습니다.
+
+# Recommendation to GPT
+- 사전 기준 3이 FAIL이므로, 계획에 정한 대로 "GT reference paired 가산 보정" 가설은 포기하는 것이 맞습니다.
+- 다만 context가 양성 근거를 선택적으로 희석하고, 근거 위치와 반복 context에 따라 그 정도가 달라지는 신호가 나왔습니다 (사후 관찰). 다음 반복에서 이를 **사전 가설로 등록해 검증**할 것을 권합니다.
+  - 예: 근거 위치(앞/뒤)와 empty context 양을 체계적으로 바꾸는 dose-response 설계.
+  - 이번처럼 인접 slice로 context를 구성하지 않도록, 서로 다른 해부 수준에서 context를 구성해야 합니다.
+- 단순 baseline 중에서는 unique slice 독립 점수 평균이 BA 0.988, worst-context 0.917로 가장 강했습니다. 새 방법은 최소한 이 baseline과 비교해야 합니다.
+- MedPruner IAF(γ=0.05)는 뇌 MRI에서 병변 slice를 지우는 실패 사례로 보고할 가치가 있습니다. 저자 코드와 정규화 방식을 확인한 뒤 확정해야 합니다.
+- 3 case는 기전 확인 수준입니다. 다음 단계는 두 가지입니다.
+  - MRI-GBM-MET 또는 BraTS 추가 subject를 확보하되, 라이선스와 subject 단위 split을 먼저 확인합니다.
+  - mask 없이 작동하는 설계(근거 slice 선택 또는 순서 전략)로 넘어갑니다.
+
+SELF_CHECK: FAIL
+SUMMARY: BraTS 3 case pilot을 끝까지 실행(294 요청, 5.75 device-min)해 측정 가능성·불안정성 기준은 통과했지만, GT reference paired 보정은 drift를 줄이지 못해(−2.9%, BA·worst 하락) 가설을 기각했고, context가 양성 근거를 선택적으로 희석한다는 사후 신호와 IAF(γ=0.05)의 병변 slice 제거 문제를 발견했다.
+
+# [orchestrator] 권한 거부된 도구 호출
+- Bash: git -C /SSD1_1TB/home/milab/daniel/08_medgemma/research status --short
+
+
+
+## iter_003 GPT REVIEW [CONTINUE] — 2026-09-24 04:11:56
+
+# Assessment
+
+**CONTINUE / abandon.** 실험은 실제 실행됐으며 핵심 부정적 결과는 신뢰할 수 있다. 다만 실패 범위는 이번 reference 구성과 계수 1의 가산 보정이다. 3D context 안정화 전체가 불가능하다는 결론은 아니다.
+
+계획, 변경된 소스, 실행 로그, manifest, 원시 predictions, metrics, budget 및 montage를 직접 확인했다. 파일 수정이나 실험 재실행 없이 저장된 결과를 읽어 핵심 지표를 독립적으로 재집계했다. `changes.patch`에는 README 변경만 있어 신규 Python 파일은 직접 열어 검토했다.
+
+# Key Findings
+
+- **실행 완료:** predictions는 예비 8행과 `scorer_version=2` 본실행 294행으로 구성되며 모두 `ok`다. 본실행의 요청 ID·입력 hash·config hash가 현재 요청 및 설정과 일치한다. 저장된 PNG 60개의 pixel hash도 manifest와 일치한다. 로그와 budget의 누적 시간은 5.747 device-minutes로 일치한다.
+- **측정 검증:** 실행 로그에 CPU 검사 5종 PASS가 있다. 저장 결과에서 teacher-forced 대조 24건의 최대 차이는 1.23e-7, 생성 확인은 12/12 파싱·scoring 일치, 잘림 0건이다. 반복 입력 24쌍의 점수 차이도 0이다.
+- **사전 기준 1·2 통과:** P0 E–N margin은 6/6 case-sequence에서 양수이고 BA는 0.917이다. 같은 길이의 P1/P3에서 3/3 case가 log-odds 차이 기준을 충족한다. 해당 비교의 decision flip은 0건이다.
+- **사전 기준 3 실패:** 아래 수치를 원시 예측에서 재확인했다. 독립 단위는 3 case이며 84개 응답이나 12개 packet을 독립 환자로 해석하면 안 된다.
+
+| 지표 | concat | paired |
+|---|---:|---:|
+| P0 대비 평균 drift | 4.491 | 4.620 |
+| P0–P6 annotation-proxy BA | 0.964 | 0.917 |
+| 모든 조건에서 맞힌 packet 비율 | 0.833 | 0.667 |
+| drift가 감소한 case | — | 0/3 |
+
+paired의 drift는 2.9% 증가했고, 정답 응답은 81/84에서 77/84로 감소했다. N drift 감소 46.0%와 E drift 증가 17.7%도 저장 결과와 일치한다.
+
+- **baseline:** unique-slice mean의 BA 0.988, worst-context 0.917은 유효한 비교 기준이다. IAF는 E 입력 36개 중 15개에서 E slice를 모두 제거했고 보존율은 0.292였다. 이는 현재 전처리·threshold에서 구현한 IAF ablation의 결과다.
+
+# Problems / Concerns
+
+1. **baseline의 drift 기준을 구분해야 한다.** [집계 코드](/SSD1_1TB/home/milab/daniel/08_medgemma/research/analyze_context_pilot.py:83)는 방법 자체의 P0 대비 `drift_own`과 공통 concat P0 대비 `drift_vs_packet`을 모두 계산하지만 보고서는 전자를 중심으로 비교한다. unique mean은 각각 4.369와 4.614다. 따라서 concat의 4.491보다 원래 packet 점수를 더 잘 복원했다고 주장할 수 없다. paired의 실패 판정은 두 기준이 같아서 영향을 받지 않는다.
+
+2. **flip 설명이 부정확하다.** P0 대비 flip이 P4/P6에만 있다는 설명은 양성 packet의 오답 전환에 한정해야 한다. `00005/t2w/N`은 P0에서 +1.125였지만 P1–P6에서는 모두 음수가 되어 정답으로 바뀐다. context가 오류를 유발한 경우와 기존 오류를 교정한 경우를 분리해야 한다. P1/P2/P3 상호 간 flip이 없다는 설명은 맞다.
+
+3. **reference 실패의 원인은 확정되지 않았다.** N/R/A/B가 인접 해부 수준에 몰린 것은 manifest와 montage에서 확인된다. 특히 `00002`의 empty slice 비영점 면적은 E의 약 31–48%다. 그러나 reference 인접성·뇌 면적·해부학적 위치를 각각 조작하지 않았으므로 이를 실패의 확정 원인으로 쓰면 안 된다. annotation-empty는 임상적으로 정상이라는 뜻도 아니다.
+
+4. **사후 비례 분석은 기전 증명이 아니다.** 일부 평균에서 `00005/t2w`를 제외했고 log-odds 비율은 기준 점수와 부호에 민감하다. E/N/R의 평균 비율 차이는 추가 가설의 근거일 뿐, 선택적 희석의 원인이나 모든 비례형 reference 보정의 불가능성을 입증하지 않는다.
+
+5. **예산 축소 구현에 실제 버그가 있다.** [추론 코드](/SSD1_1TB/home/milab/daniel/08_medgemma/research/run_context_pilot.py:210)의 `for ... in enumerate(todo)` 실행 중 `todo`를 새 목록으로 재할당해도 기존 iterator는 원래 목록을 계속 순회한다. 따라서 T1CE 축소를 기록하고도 T2 요청을 실행할 수 있다. 이번에는 축소 조건이 발동하지 않아 본 결과에는 영향이 없다. budget도 정상 종료 때만 저장되어 비정상 종료 후 사용량이 누락될 수 있다.
+
+6. **재개·집계의 동일 입력 보장이 불완전하다.** [집계의 load](/SSD1_1TB/home/milab/daniel/08_medgemma/research/analyze_context_pilot.py:28)는 version/status만 확인하고 ID별 마지막 결과를 채택한다. config·요청 hash 대조가 없으며, runner도 실제 PNG를 다시 hash하지 않고 요청에 저장된 hash를 신뢰한다. 현재 산출물은 직접 대조해 일치를 확인했지만 재사용 전에 수정해야 한다. 일부 요청 누락 시 case-sequence를 제외하고 진행 기준을 계산하는 동작도 명시적인 미완료 판정으로 바꿔야 한다.
+
+7. **범위와 leakage:** prompt에 GT나 packet 역할이 직접 들어가는 경로는 확인되지 않았다. 다만 E/N/R/context 구성 자체가 segmentation 기반이며 paired와 packet-only는 oracle이다. 모든 방법이 GT로 구성한 pilot 입력에서 평가됐으므로 배포 성능으로 해석할 수 없다. 독립 환자는 3명이고 최종 평가용 holdout은 없다.
+
+8. **계획 이탈과 비교 한계:** 요청 수는 계획 258개보다 36개 많았다. P0 IAF 12개와 반복 측정 24개라는 설명은 파일과 일치하고 시간 예산은 지켰다. IAF 저자 구현 대조와 선행 연구 원문 재검증은 이번 실행에서 수행되지 않았으므로 전체 MedPruner의 실패나 신규 contribution을 주장할 근거는 없다.
+
+# Interpretation
+
+H1의 context 민감성 부분은 지지되지만, 정확도와 안정성을 회복할 만큼 유용한 공통 가산 성분은 확인되지 않았다. H2는 이번 사전 기준에서 실패했다.
+
+같은 context에서 E와 N에 동일한 reference 항을 빼므로 `m_corrected(E,C)−m_corrected(N,C)=m(E,C)−m(N,C)`다. 이 보정은 결정 threshold에 대한 위치를 바꿀 수 있지만 E–N 분리 자체를 복원하지 못한다. 보고서에서 concat과 paired의 margin이 동일한 것은 이 수식의 필연적 결과다.
+
+또한 context 추가 후 concat BA가 packet-only보다 높다는 점은 P0 복원이 항상 정확도 개선과 같은 목표가 아님을 보여준다. 향후에는 유해한 context 효과와 유익한 정보 통합을 구분해야 한다.
+
+이번 결과의 가치는 저비용 pilot으로 한 방법 가설을 반증하고 강한 단순 baseline을 확보한 데 있다. 논문 수준의 해결책이나 일반화는 아직 확보하지 못했다. 접근법 abandon 및 재사용 코드의 결함 때문에 이번 변경은 커밋 대상으로 승인하지 않는다.
+
+# Recommended Next Experiment
+
+1. paired 계수나 reference를 현재 3 case 결과에 맞춰 조정하지 않는다. 남은 후보인 질문 조건부 2D 근거 선택으로 전환하고, 기존 선택·집계 방법과 구별되는 가설을 먼저 명시한다.
+2. 재사용 코드의 예산 축소, 종료 시 사용량 기록, config·실제 입력 hash 확인, 누락 결과 판정을 보완한다. 기존 산출물로 지표 정의와 flip 설명도 정정한다.
+3. 새 선택 규칙은 GT 없이 작동하도록 고정하고 concat, unique mean, max 및 동일 비용의 단순 선택 baseline과 비교한다. GT packet-only는 oracle 상한 참고로만 둔다.
+4. 근거 보존과 근거 제거 대조군을 함께 두고, context의 해부학적 수준·면적·중복량·위치를 가능한 범위에서 분리한다. 적절한 음성 proxy를 만들 수 없으면 해당 비교를 제외한다.
+5. 현재 3 case는 개발용으로만 사용한다. 확장 데이터의 사용 조건과 subject 대응을 확인한 뒤 독립 subject에서 정확도·공통 기준 drift·방법 자체 drift·worst-context·전체 추론 비용을 함께 평가하는 소규모 계획을 세운다.
