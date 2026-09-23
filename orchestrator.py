@@ -36,8 +36,13 @@ commit_worthy로 판단한 경우에만 한다. 버리는 접근법의 미커밋
 논문 추천: GPT 리뷰는 실제 결과로 가능성이 분명해진 방향에 한해 드물게 논문 1편을 추천한다.
 링크가 열리고 중복이 아니면 agent/PAPERS.md에 쌓고 Telegram으로 알린다.
 
-산출물은 agent/runs/iter_NNN/ 에 저장된다. 중간에 끊겨도 다시 실행하면
-완료되지 않은 단계부터 이어서 진행한다.
+산출물은 agent/runs/iter_NNN/ 에 저장된다. 상태는 모두 파일에 있으므로, 중간에 끊기거나
+orchestrator.py를 고친 뒤 다시 실행해도 완료되지 않은 단계부터 이어서 진행한다.
+    - 반복 완료 표시는 done.json. 리뷰 뒤 처리(논문·커밋·마일스톤)도 각각 한 번만 한다.
+    - Claude가 작업 중에 끊기면 같은 세션을 --resume으로 이어서 마무리한다.
+    - 에이전트 호출이 실패하면(네트워크 등) 1분·5분·15분 뒤 다시 시도한다.
+    - 예전 반복 파일에 없는 필드는 기본값으로 채워 읽는다.
+정지: 터미널 Ctrl+C, `touch agent/STOP`(현재 단계 후), Telegram `stop` / `stop now` / `status`.
 
 사용 예:
     python orchestrator.py                     # smart: 애매할 때만 확인
@@ -74,6 +79,10 @@ PAPERS_FILE = AGENT_DIR / "PAPERS.md"
 # 사람이 읽는 기록: JOURNEY(마일스톤 흐름) → DECISIONS(반복별 결정) → runs/(원본)
 JOURNEY_FILE = AGENT_DIR / "JOURNEY.md"
 DECISIONS_FILE = AGENT_DIR / "DECISIONS.md"
+# 이 파일이 생기면 현재 단계를 마친 뒤 멈춘다 (Telegram stop도 이 파일을 만든다)
+STOP_FILE = AGENT_DIR / "STOP"
+# 에이전트 호출 실패 시 재시도 간격(초)
+RETRY_DELAYS = (60, 300, 900)
 LOG_FILE = AGENT_DIR / "RESEARCH_LOG.md"
 TIERS_FILE = AGENT_DIR / "tiers.json"
 # runs/ 도입 전 수동 실행의 마지막 리뷰. 첫 반복 계획의 참고 자료로 쓴다.
@@ -100,6 +109,55 @@ SNAPSHOT_SKIP_PATHS = {"agent/runs", "agent/archive"}
 
 class AgentError(Exception):
     pass
+
+
+class RetryableError(AgentError):
+    """네트워크 끊김 등 다시 시도해 볼 만한 실패. output은 마지막 출력 몇 줄."""
+
+    def __init__(self, message, output=""):
+        super().__init__(message)
+        self.output = output
+
+
+class StopRequested(Exception):
+    pass
+
+
+# 지금 무엇을 하고 있는지 (Telegram status, 중단 기록용)
+STATE = {"n": None, "stage": "시작 전", "since": None, "proc": None, "stop_now": False}
+
+
+def set_stage(n, stage):
+    STATE.update(n=n, stage=stage, since=datetime.datetime.now())
+
+
+def check_stop():
+    if STOP_FILE.exists():
+        STOP_FILE.unlink(missing_ok=True)
+        raise StopRequested("정지 요청")
+
+
+def sleep_with_stop(seconds):
+    end = datetime.datetime.now() + datetime.timedelta(seconds=seconds)
+    while datetime.datetime.now() < end:
+        check_stop()
+        threading.Event().wait(5)
+
+
+def with_retries(what, fn):
+    """fn()이 RetryableError로 실패하면 RETRY_DELAYS 간격으로 다시 시도한다."""
+    last = None
+    for attempt, delay in enumerate((0, *RETRY_DELAYS)):
+        if delay:
+            minutes = delay // 60
+            print(f"\n[재시도] {what} 실패 → {minutes}분 뒤 다시 시도 ({attempt}/{len(RETRY_DELAYS)})")
+            notify(f"🔁 {what} 실패, {minutes}분 뒤 다시 시도 ({attempt}/{len(RETRY_DELAYS)})\n{str(last)[:300]}")
+            sleep_with_stop(delay)
+        try:
+            return fn()
+        except RetryableError as e:
+            last = e
+    raise AgentError(f"{what}: {len(RETRY_DELAYS)}번 다시 시도했지만 실패. 마지막 오류: {last}")
 
 
 # --------------------------------------------------
@@ -177,8 +235,9 @@ def agent_env(gpus):
 def run_streaming(cmd, log_path, timeout, env, on_line, cwd=PROJECT_DIR):
     """명령을 실행하며 출력을 on_line으로 넘기고 log_path에 그대로 저장한다."""
     timed_out = threading.Event()
+    tail = []
 
-    with log_path.open("w", encoding="utf-8") as log_f:
+    with log_path.open("a", encoding="utf-8") as log_f:
         proc = subprocess.Popen(
             cmd,
             cwd=cwd,
@@ -189,6 +248,7 @@ def run_streaming(cmd, log_path, timeout, env, on_line, cwd=PROJECT_DIR):
             stderr=subprocess.STDOUT,
             bufsize=1,
         )
+        STATE["proc"] = proc
 
         def kill():
             timed_out.set()
@@ -200,6 +260,7 @@ def run_streaming(cmd, log_path, timeout, env, on_line, cwd=PROJECT_DIR):
             for line in proc.stdout:
                 log_f.write(line)
                 log_f.flush()
+                tail = (tail + [line])[-20:]
                 on_line(line)
             proc.wait()
         except KeyboardInterrupt:
@@ -208,11 +269,14 @@ def run_streaming(cmd, log_path, timeout, env, on_line, cwd=PROJECT_DIR):
             raise
         finally:
             timer.cancel()
+            STATE["proc"] = None
 
+    if STATE["stop_now"]:
+        raise StopRequested("즉시 정지 요청")
     if timed_out.is_set():
         raise AgentError(f"{cmd[0]} 시간 초과 ({timeout}s). 로그: {log_path}")
     if proc.returncode != 0:
-        raise AgentError(f"{cmd[0]} 종료 코드 {proc.returncode}. 로그: {log_path}")
+        raise RetryableError(f"{cmd[0]} 종료 코드 {proc.returncode}. 로그: {log_path}", "".join(tail))
 
 
 # --------------------------------------------------
@@ -255,7 +319,7 @@ def run_codex(args, prompt, out_file, log_path, tier, schema=None):
 
     text = read(out_file).strip()
     if not text:
-        raise AgentError(f"Codex 출력이 비어 있음. 로그: {log_path}")
+        raise RetryableError(f"Codex 출력이 비어 있음. 로그: {log_path}")
     return text
 
 
@@ -268,8 +332,11 @@ def summarize_tool_input(name, tool_input):
     return json.dumps(tool_input, ensure_ascii=False)
 
 
-def run_claude(args, prompt, log_path, tier):
-    """Claude를 stream-json으로 실행해 진행 상황을 보여주고 최종 result 이벤트를 반환한다."""
+def run_claude(args, prompt, log_path, tier, session_file=None, resume_id=None):
+    """Claude를 stream-json으로 실행해 진행 상황을 보여주고 최종 result 이벤트를 반환한다.
+
+    세션 id는 시작하자마자 session_file에 저장해 두고, 끊기면 resume_id로 같은 세션을 잇는다.
+    """
     spec = tier_spec("claude", tier)
     print(f"Claude 등급: {tier} ({spec['model']}, effort={spec['effort']})\n", flush=True)
     cmd = [
@@ -284,8 +351,10 @@ def run_claude(args, prompt, log_path, tier):
         "--append-system-prompt-file", str(PROMPT_DIR / "claude_engineer.md"),
         # 연구 에이전트 전용 권한. .claude/settings.json에 두면 대화형 세션까지 막힌다.
         "--settings", str(AGENT_DIR / "claude_settings.json"),
-        prompt,
     ]
+    if resume_id:
+        cmd += ["--resume", resume_id]
+    cmd.append(prompt)
 
     result = {}
 
@@ -296,6 +365,8 @@ def run_claude(args, prompt, log_path, tier):
             print(f"  [claude] {line}", end="", flush=True)
             return
 
+        if session_file and event.get("session_id") and not read(session_file).strip():
+            save(session_file, event["session_id"])
         if event.get("type") == "assistant":
             for block in event.get("message", {}).get("content", []):
                 if block.get("type") == "text" and block.get("text", "").strip():
@@ -310,7 +381,7 @@ def run_claude(args, prompt, log_path, tier):
     run_streaming(cmd, log_path, args.claude_timeout, agent_env(args.gpus), on_line, cwd=RESEARCH_DIR)
 
     if not result:
-        raise AgentError(f"Claude result 이벤트 없음. 로그: {log_path}")
+        raise RetryableError(f"Claude result 이벤트 없음. 로그: {log_path}")
     return result
 
 
@@ -411,9 +482,22 @@ def existing_iterations():
     )
 
 
+# orchestrator를 고쳐 필드가 늘어나도 예전 반복 파일을 그대로 읽을 수 있게 기본값을 채운다
+PLAN_DEFAULTS = {
+    "plan_summary": "", "approach": "?", "approach_id": "", "alternatives": [],
+    "decision": "proceed", "decision_reason": "", "claude_tier": "heavy", "tier_reason": "",
+    "review_mode": "full", "review_reason": "", "plan_markdown": "",
+}
+REVIEW_DEFAULTS = {
+    "verdict": "CONTINUE", "approach_status": "", "approach_note": "", "commit_worthy": False,
+    "commit_message": "", "one_line_summary": "", "next_task": "", "next_plan_tier": "normal",
+    "reason": "", "review_markdown": "", "paper_recommendation": {}, "milestone": {},
+}
+
+
 def load_review(n):
     path = iter_dir(n) / "review.json"
-    return json.loads(read(path)) if path.exists() else None
+    return {**REVIEW_DEFAULTS, **json.loads(read(path))} if path.exists() else None
 
 
 def tiers_used(n):
@@ -438,7 +522,7 @@ def claude_tier(args, n):
         return args.claude_tier
     d = iter_dir(n)
     override = read(d / "claude_tier_override.txt").strip()
-    return override or json.loads(read(d / "plan.json"))["claude_tier"]
+    return override or load_plan(n)["claude_tier"]
 
 
 def review_tier(args, n):
@@ -462,7 +546,7 @@ def review_decision(args, n):
     if entry and entry["attempts"] >= MAX_ATTEMPTS:
         return True, f"'{entry['name']}' {entry['attempts']}번째 시도라 계속/포기 판단 필요"
     override = read(d / "review_mode_override.txt").strip()
-    mode = override or json.loads(read(d / "plan.json")).get("review_mode", "full")
+    mode = override or load_plan(n)["review_mode"]
     if mode == "full":
         return True, "사람이 full 지정" if override else "계획에서 full 지정"
     if parse_trailer(read(d / "claude_report.md"), "SELF_CHECK").upper() != "PASS":
@@ -474,7 +558,7 @@ def review_decision(args, n):
 
 def load_plan(n):
     path = iter_dir(n) / "plan.json"
-    return json.loads(read(path)) if path.exists() else None
+    return {**PLAN_DEFAULTS, **json.loads(read(path))} if path.exists() else None
 
 
 def load_json(path):
@@ -529,7 +613,41 @@ def current_iteration():
     if not iters:
         return 1
     last = iters[-1]
-    return last if load_review(last) is None else last + 1
+    return last + 1 if is_done(last) else last
+
+
+def is_done(n):
+    return (iter_dir(n) / "done.json").exists()
+
+
+def post_flags(n):
+    """리뷰 뒤 처리(논문·커밋·마일스톤·알림) 중 이미 한 것. 재실행 시 중복을 막는다."""
+    return load_json(iter_dir(n) / "post.json") or {}
+
+
+def set_post_flag(n, key):
+    flags = post_flags(n)
+    flags[key] = now()
+    save(iter_dir(n) / "post.json", json.dumps(flags, indent=2))
+
+
+def stage_of(n):
+    d = iter_dir(n)
+    if not (d / "plan.md").exists():
+        return "계획"
+    if not (d / "claude_report.md").exists():
+        return "Claude 구현" if (d / "git.json").exists() else "계획 확인"
+    if not (d / "review.json").exists():
+        return "리뷰"
+    return "리뷰 후 처리"
+
+
+def code_version():
+    """지금 돌고 있는 orchestrator 버전 (main 커밋 + 커밋 안 된 수정 여부)."""
+    sha = git("rev-parse", "--short", "HEAD")[1].strip()
+    dirty = git("status", "--porcelain", "--", "orchestrator.py", "notifier.py", "agent/prompts",
+                "agent/tiers.json", "agent/claude_settings.json")[1].strip()
+    return f"{sha}+수정" if dirty else sha
 
 
 def rebuild_index():
@@ -636,6 +754,15 @@ def iteration_block(n):
             lines.append(f"- 📚 논문 추천: {ev.get('title')} — PAPERS.md")
         elif stage == "milestone":
             lines.append(f"- 🏁 **마일스톤**: {ev.get('title')} — JOURNEY.md")
+        elif stage == "session":
+            if ev.get("resumed_from"):
+                lines.append(f"- ↻ 재실행: '{ev['resumed_from']}' 단계부터 이어서 (orchestrator {ev.get('version')})")
+            else:
+                lines.append(f"- ▶ 실행 시작 (orchestrator {ev.get('version')})")
+        elif stage == "claude_resume":
+            lines.append("- ↻ 끊겼던 Claude 세션을 이어서 진행")
+        elif stage == "stopped":
+            lines.append(f"- ⏹ 중단: {ev.get('reason')} ({ev.get('during')} 중)")
         elif stage == "needs_human":
             lines.append(f"- 🙋 **사람 결정 요청**: {ev.get('question')}")
             lines.append(f"  - 답: \"{ev.get('reply')}\" → {ev.get('result')}")
@@ -694,6 +821,10 @@ iter_{n:03d}
 === 지금까지의 반복 요약 (agent/INDEX.md) ===
 {read(INDEX_FILE, "없음")}
 
+=== 연구 흐름의 마일스톤 (agent/JOURNEY.md, 최근 부분) ===
+{read(JOURNEY_FILE, "없음")[-6000:]}
+(반복별 결정 과정이 더 필요하면 agent/DECISIONS.md를 직접 열어 읽어라.)
+
 === 코드 위치 ===
 연구 코드: research/ (자체 git 저장소, 현재 브랜치 {current_branch()}), 결과: research/results/
 이전 수동 분석 기록과 입력 데이터: legacy/ (scripts, docs, eval_samples, eval_results)
@@ -708,10 +839,10 @@ iter_{n:03d}
 같은 접근법 최대 시도 횟수: {MAX_ATTEMPTS}
 """
     tier = plan_tier(args, n)
-    raw = run_codex(
+    raw = with_retries("GPT 계획", lambda: run_codex(
         args, prompt, d / "plan.json", d / "plan_codex.log", tier,
         schema=PROMPT_DIR / "plan_schema.json",
-    )
+    ))
     try:
         plan = json.loads(raw)
     except json.JSONDecodeError as e:
@@ -923,6 +1054,18 @@ def ensure_branch(n):
     return info
 
 
+CLAUDE_RESUME_PROMPT = """이전 실행이 중간에 끊겼다 (서버·네트워크 문제 또는 사용자 정지).
+지금까지 한 작업을 git status, git diff, results/ 파일로 확인하고, 계획의 남은 부분을 마친 뒤
+최종 보고서를 지정된 형식으로 작성하라 (맨 끝의 SELF_CHECK, SUMMARY 줄 포함).
+끊기기 전에 이미 끝낸 작업은 다시 하지 않는다."""
+
+CLAUDE_RESTART_NOTE = """
+=== 주의: 이전 시도가 중단됨 ===
+이전 Claude 실행이 중간에 끊겼다. research/ 작업 트리와 results/에 부분적으로 만든 파일이
+있을 수 있다. 먼저 git status, git diff로 확인하고, 쓸 수 있는 것은 이어서 쓴다.
+"""
+
+
 def step_claude(args, goal, n):
     d = iter_dir(n)
     banner(f"[iter_{n:03d} · 2/3] Claude가 구현/실험합니다.")
@@ -952,7 +1095,27 @@ def step_claude(args, goal, n):
 """
     tier = claude_tier(args, n)
     record_tier(n, "claude", tier)
-    result = run_claude(args, prompt, d / "claude_stream.jsonl", tier)
+    session_file = d / "claude_session.txt"
+    stream_log = d / "claude_stream.jsonl"
+
+    def attempt():
+        session = read(session_file).strip()
+        if session:
+            # 이전 실행이 끊겼다: 같은 세션을 이어서 마무리하게 한다
+            print(f"이전 Claude 세션을 이어서 진행합니다 ({session[:8]}…)")
+            record_event(n, "claude_resume", session=session)
+            try:
+                return run_claude(args, CLAUDE_RESUME_PROMPT, stream_log, tier, session_file, resume_id=session)
+            except RetryableError as e:
+                if "No conversation found" not in e.output:
+                    raise
+                print("이전 세션을 찾을 수 없어 새로 시작합니다.")
+                session_file.unlink(missing_ok=True)
+        restarted = stream_log.exists() and stream_log.stat().st_size > 0
+        return run_claude(args, prompt + (CLAUDE_RESTART_NOTE if restarted else ""),
+                          stream_log, tier, session_file)
+
+    result = with_retries("Claude 구현/실험", attempt)
 
     report = result.get("result", "").strip()
     denials = result.get("permission_denials") or []
@@ -1020,10 +1183,10 @@ iter_{n:03d}
 {changed_text}
 """
     tier = review_tier(args, n)
-    raw = run_codex(
+    raw = with_retries("GPT 리뷰", lambda: run_codex(
         args, prompt, d / "review.raw.json", d / "review_codex.log", tier,
         schema=PROMPT_DIR / "review_schema.json",
-    )
+    ))
     record_tier(n, "review", tier)
     try:
         review = json.loads(raw)
@@ -1161,7 +1324,7 @@ def step_skip_review(n, reason):
 
 def step_commit(n, review):
     """GPT 리뷰가 commit_worthy로 판단했을 때만 연구 브랜치에 커밋한다."""
-    if review.get("skipped") or not review.get("commit_worthy") or review.get("approach_status") == "abandon":
+    if (iter_dir(n) / "commit.json").exists() or review.get("skipped") or not review.get("commit_worthy") or review.get("approach_status") == "abandon":
         return
     d = iter_dir(n)
     wgit("add", "-A")
@@ -1301,13 +1464,50 @@ def load_goal(args):
     return read(GOAL_FILE).strip()
 
 
+def status_text():
+    if STATE["n"] is None:
+        return "시작 준비 중입니다."
+    minutes = int((datetime.datetime.now() - STATE["since"]).total_seconds() // 60)
+    return f"iter_{STATE['n']:03d} · {STATE['stage']} 진행 중 ({minutes}분째)"
+
+
+def request_stop():
+    STOP_FILE.touch()
+    HUMAN.interrupt()
+    return f"현재 단계({STATE['stage']})를 마치면 멈춥니다. 다시 실행하면 이어서 진행합니다."
+
+
+def request_stop_now():
+    STOP_FILE.touch()
+    STATE["stop_now"] = True
+    if STATE["proc"] is not None:
+        STATE["proc"].kill()
+    HUMAN.interrupt()
+    return f"진행 중인 작업({STATE['stage']})을 중단하고 멈춥니다. 다시 실행하면 이어서 진행합니다."
+
+
+def record_stop(reason):
+    """중단 사실을 반복 기록에 남긴다."""
+    if STATE["n"] is None:
+        return
+    try:
+        record_event(STATE["n"], "stopped", reason=reason, during=STATE["stage"])
+        rebuild_index()
+    except Exception as e:
+        print(f"[WARN] 중단 기록 실패: {e}")
+
+
 def main():
     global HUMAN, MAX_ATTEMPTS
     args = parse_args()
     MAX_ATTEMPTS = args.max_attempts
     HUMAN = Human(None if args.no_telegram else NOTIFY_ENV_FILE)
+    HUMAN.add_command(["status", "상태"], status_text)
+    HUMAN.add_command(["stop", "정지"], request_stop)
+    HUMAN.add_command(["stop now", "즉시정지", "즉시 정지"], request_stop_now)
     if HUMAN.telegram:
-        print("Telegram 알림 사용 중 (끄려면 --no-telegram)")
+        print("Telegram 알림 사용 중 (끄려면 --no-telegram). 폰 명령: status / stop / stop now")
+    STOP_FILE.unlink(missing_ok=True)
 
     if not (CONDA_ENV / "bin" / "python").exists():
         sys.exit(f"conda env를 찾을 수 없습니다: {CONDA_ENV}")
@@ -1330,6 +1530,14 @@ def main():
     first_line = goal.splitlines()[0][:200] if goal else ""
     notify(f"▶ 연구 루프 시작 (iter_{current_iteration():03d}부터, 최대 {args.max_iters}회)\n목표: {first_line}")
 
+    first = current_iteration()
+    resumed = (iter_dir(first) / "events.jsonl").exists()
+    version = code_version()
+    record_event(first, "session", version=version,
+                 resumed_from=stage_of(first) if resumed else None)
+    if resumed:
+        print(f"iter_{first:03d}의 '{stage_of(first)}' 단계부터 이어서 진행합니다 (orchestrator {version}).")
+
     completed = 0
     finished = False
     while completed < args.max_iters:
@@ -1337,46 +1545,72 @@ def main():
         d = iter_dir(n)
         d.mkdir(parents=True, exist_ok=True)
 
+        check_stop()
         if not (d / "plan.md").exists():
+            set_stage(n, "GPT 계획")
             step_plan(args, goal, n)
         if not (d / "claude_report.md").exists():
+            check_stop()
+            set_stage(n, "계획 확인")
             action = step_checkpoint(args, n)
             if action == "quit":
-                print("종료합니다.")
+                print("종료합니다. 다시 실행하면 여기서 이어집니다.")
                 return
             if action == "replan":
                 continue
+            check_stop()
+            set_stage(n, "Claude 구현/실험")
             step_claude(args, goal, n)
-        needs_review, reason = review_decision(args, n)
-        if needs_review:
-            print(f"\nGPT 리뷰 진행: {reason}")
-            review = step_review(args, goal, n)
-            handle_paper(n, review)
-        else:
-            review = step_skip_review(n, reason)
-        completed += 1
-
-        step_commit(n, review)
-        handle_milestone(n, review)
-
-        if review["verdict"] == "DONE":
-            banner("연구 목표 완료 (DONE)")
-            notify(f"🎉 iter_{n:03d} 연구 목표 완료 (DONE)\n{review['one_line_summary']}")
-            finished = True
-            break
-        if review["verdict"] == "CONTINUE":
-            if review.get("skipped"):
-                notify(f"✅ iter_{n:03d} 완료 (GPT 리뷰 생략)\n{review['one_line_summary']}")
+        if not (d / "review.json").exists():
+            check_stop()
+            needs_review, reason = review_decision(args, n)
+            if needs_review:
+                print(f"\nGPT 리뷰 진행: {reason}")
+                set_stage(n, "GPT 리뷰")
+                step_review(args, goal, n)
             else:
+                step_skip_review(n, reason)
+
+        # 리뷰 뒤 처리: 끊겼다가 다시 실행해도 각각 한 번만 한다
+        set_stage(n, "리뷰 후 처리")
+        review = load_review(n)
+        flags = post_flags(n)
+        if "paper" not in flags:
+            if not review.get("skipped"):
+                handle_paper(n, review)
+            set_post_flag(n, "paper")
+        if "commit" not in flags:
+            step_commit(n, review)
+            set_post_flag(n, "commit")
+        if "milestone" not in flags:
+            handle_milestone(n, review)
+            set_post_flag(n, "milestone")
+        if "notified" not in flags:
+            if review["verdict"] == "CONTINUE" and review.get("skipped"):
+                notify(f"✅ iter_{n:03d} 완료 (GPT 리뷰 생략)\n{review['one_line_summary']}")
+            elif review["verdict"] == "CONTINUE":
                 notify(
-                    f"✅ iter_{n:03d} 완료 [{review.get('approach_status', '')}]\n"
+                    f"✅ iter_{n:03d} 완료 [{review['approach_status']}]\n"
                     f"{review['one_line_summary']}\n"
-                    f"접근법: {review.get('approach_note', '')}\n"
+                    f"접근법: {review['approach_note']}\n"
                     f"다음: {review['next_task']}"
                 )
-        if review["verdict"] == "NEEDS_HUMAN" and not handle_needs_human(review, n):
-            print("종료합니다. 다시 실행하면 다음 반복부터 진행합니다.")
-            return
+            elif review["verdict"] == "DONE":
+                notify(f"🎉 iter_{n:03d} 연구 목표 완료 (DONE)\n{review['one_line_summary']}")
+            set_post_flag(n, "notified")
+
+        if review["verdict"] == "NEEDS_HUMAN":
+            set_stage(n, "사람 결정 대기")
+            if not handle_needs_human(review, n):
+                print("종료합니다. 다시 실행하면 이 질문부터 다시 묻습니다.")
+                return
+
+        save(d / "done.json", json.dumps({"verdict": review["verdict"], "time": now()}, indent=2))
+        completed += 1
+        if review["verdict"] == "DONE":
+            banner("연구 목표 완료 (DONE)")
+            finished = True
+            break
 
     if not finished:
         notify(f"⏸ 최대 반복 수({args.max_iters})에 도달해 멈췄습니다. 다시 실행하면 이어서 진행합니다.")
@@ -1389,11 +1623,18 @@ def main():
 if __name__ == "__main__":
     try:
         main()
+    except StopRequested as e:
+        record_stop(str(e))
+        print(f"\n멈췄습니다 ({e}). 다시 실행하면 완료되지 않은 단계부터 이어서 진행합니다.")
+        notify(f"⏹ 멈췄습니다 ({e}, {STATE['stage']} 중). 다시 실행하면 이어서 진행합니다.")
+        sys.exit(0)
     except AgentError as e:
+        record_stop(f"오류: {e}")
         print(f"\n[ERROR] {e}")
         notify(f"❌ 오류로 멈췄습니다\n{e}\n다시 실행하면 이어서 진행합니다.")
         print("다시 실행하면 완료되지 않은 단계부터 이어서 진행합니다.")
         sys.exit(1)
     except KeyboardInterrupt:
+        record_stop("Ctrl+C")
         print("\n중단됨. 다시 실행하면 완료되지 않은 단계부터 이어서 진행합니다.")
         sys.exit(130)

@@ -2,6 +2,7 @@
 
 - notify(text): Telegram으로 알림만 보낸다.
 - ask(question, telegram_text): 터미널 입력과 Telegram 답장 중 먼저 온 것을 돌려준다.
+- add_command(names, handler): 질문과 상관없이 언제든 받는 Telegram 명령 (예: status, stop).
 
 agent/.notify.env 에 TELEGRAM_BOT_TOKEN, TELEGRAM_CHAT_ID가 있으면 Telegram을 쓰고,
 없으면 터미널만 쓴다. 설정된 chat 외의 메시지는 무시한다.
@@ -46,6 +47,7 @@ class Human:
         # 남은 스레드가 다음 터미널 입력을 가로챈다.
         self.inbox = queue.Queue()
         self.waiting = threading.Event()
+        self.commands = {}
         self.stdin_open = True
         threading.Thread(target=self._read_stdin, daemon=True).start()
 
@@ -81,10 +83,22 @@ class Human:
                 text = (message.get("text") or "").strip()
                 if not text or text.startswith("/"):
                     continue
-                if self.waiting.is_set():
+                handler = self.commands.get(text.lower())
+                if handler:
+                    self.notify(handler())
+                elif self.waiting.is_set():
                     self.inbox.put(("telegram", text))
                 else:
-                    self.notify("지금은 답을 기다리는 질문이 없습니다. 연구가 진행 중입니다.")
+                    self.notify("지금은 답을 기다리는 질문이 없습니다. 명령: status(상태), stop(현재 단계 후 정지), stop now(즉시 정지)")
+
+    def add_command(self, names, handler):
+        """Telegram에서 언제든 받는 명령. handler()의 반환 문자열을 답장으로 보낸다."""
+        for name in names:
+            self.commands[name.lower()] = handler
+
+    def interrupt(self):
+        """기다리는 ask()를 None으로 끝낸다 (정지 요청용)."""
+        self.inbox.put(("stop", None))
 
     # ---------------- telegram ----------------
 
@@ -153,6 +167,8 @@ class Human:
         try:
             while True:
                 source, text = self.inbox.get()
+                if source == "stop":
+                    return None
                 if source == "terminal":
                     if text is None:
                         self.stdin_open = False
