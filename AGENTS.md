@@ -10,8 +10,12 @@
   그냥 `python ...`으로 실행하면 된다. `conda activate`, `pip install`은 하지 않는다.
 - `HF_HOME=/SSD1_1TB/home/milab/daniel/08_medgemma/hf_cache` (모델 캐시, 수정 금지)
 - 모델: `google/medgemma-1.5-4b-it` (bf16 약 8~10GB VRAM)
-- GPU: RTX 3090 24GB x2 (0, 1). 공용 서버이므로 실행 전 `nvidia-smi`로 확인한다.
-  GPU 선택은 명령 앞에 환경변수를 붙이지 말고 orchestrator의 `--gpus` 설정을 따른다.
+- GPU: RTX 3090 24GB x2 (0, 1). 두 장 모두 마음껏 써도 된다 (사용자 허락).
+  - 실행 직전에 `nvidia-smi`로 각 GPU의 남은 메모리를 확인하고, 남은 메모리가 많은 GPU부터 쓴다.
+  - MedGemma 4B bf16은 프로세스당 약 8~10GB. 남은 메모리가 (필요량 + 2GB 여유) 이상이면
+    같은 GPU에 프로세스를 더 올려도 된다 (24GB 한 장에 보통 2개). OOM이 나지 않는 선을 지킨다.
+  - 다른 사용자의 GPU 프로세스는 절대 종료하거나 건드리지 않는다.
+  - orchestrator를 `--gpus`로 실행하면 그 GPU만 보인다 (CUDA_VISIBLE_DEVICES). 명령 앞에 직접 붙이지 않는다.
 
 ## 폴더 구조
 - `orchestrator.py`, `notifier.py`, `agent/`: 연구 루프 오케스트레이터와 기록 (main 브랜치)
