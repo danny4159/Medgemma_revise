@@ -9,9 +9,9 @@
     NEEDS_HUMAN → 사람 입력을 받고 다음 반복 (또는 종료)
 
 단계별 모델/사고 수준은 agent/tiers.json의 등급으로 정한다.
-    GPT 계획  : 직전 리뷰의 next_plan_tier (deep / normal), 첫 반복은 deep
-    Claude    : 계획의 claude_tier (heavy / light)
-    GPT 리뷰  : Claude가 heavy면 deep, light면 normal
+    GPT 계획  : 직전 리뷰의 next_plan_tier (deep / normal / light), 첫 반복은 deep
+    Claude    : 계획의 claude_tier (creative / heavy / light)
+    GPT 리뷰  : Claude 등급을 따라감 (creative→deep, heavy→normal, light→light)
 
 산출물은 agent/runs/iter_NNN/ 에 저장된다. 중간에 끊겨도 다시 실행하면
 완료되지 않은 단계부터 이어서 진행한다.
@@ -153,6 +153,12 @@ def run_streaming(cmd, log_path, timeout, env, on_line):
 # --------------------------------------------------
 # 에이전트 호출
 # --------------------------------------------------
+
+GPT_TIERS = ["deep", "normal", "light"]
+CLAUDE_TIERS = ["creative", "heavy", "light"]
+# Claude 작업 등급 → 그 결과를 검토할 GPT 리뷰 등급
+REVIEW_TIER_FOR_CLAUDE = {"creative": "deep", "heavy": "normal", "light": "light"}
+
 
 def tier_spec(agent, tier):
     return json.loads(read(TIERS_FILE))[agent][tier]
@@ -329,7 +335,7 @@ def claude_tier(args, n):
 def review_tier(args, n):
     if args.gpt_tier:
         return args.gpt_tier
-    return "deep" if tiers_used(n).get("claude", "heavy") == "heavy" else "normal"
+    return REVIEW_TIER_FOR_CLAUDE[tiers_used(n).get("claude", "heavy")]
 
 
 def current_iteration():
@@ -425,7 +431,7 @@ def step_checkpoint(args, n):
         print(f"Claude 등급: {tier} {tier_spec('claude', tier)}\n")
         print("ENTER : 그대로 Claude에게 전달")
         print("f     : 추가 지시 입력")
-        print("t     : Claude 등급 바꾸기 (heavy ↔ light)")
+        print(f"t     : Claude 등급 바꾸기 ({' / '.join(CLAUDE_TIERS)})")
         print("a     : 이후 확인 없이 자동 진행")
         print("q     : 종료 (다시 실행하면 여기서 이어짐)")
 
@@ -439,7 +445,11 @@ def step_checkpoint(args, n):
             if args.claude_tier:
                 print("--claude-tier로 고정되어 있어 바꿀 수 없습니다.")
             else:
-                save(d / "claude_tier_override.txt", "light" if tier == "heavy" else "heavy")
+                picked = (ask(f"등급 입력 ({' / '.join(CLAUDE_TIERS)}): ") or "").lower()
+                if picked in CLAUDE_TIERS:
+                    save(d / "claude_tier_override.txt", picked)
+                else:
+                    print("알 수 없는 등급입니다.")
             continue
         if choice == "a":
             args.auto = True
@@ -594,8 +604,8 @@ def parse_args():
     p.add_argument("--reset", action="store_true", help="기존 runs/와 GOAL을 archive로 옮기고 새로 시작")
     p.add_argument("--gpus", help="Claude 실험에 보일 GPU (CUDA_VISIBLE_DEVICES), 예: 1 또는 0,1")
     p.add_argument("--commit", action="store_true", help="반복마다 git commit (main/master에서는 거부)")
-    p.add_argument("--gpt-tier", choices=["deep", "normal"], help="GPT 계획/리뷰 등급 고정 (agent/tiers.json)")
-    p.add_argument("--claude-tier", choices=["heavy", "light"], help="Claude 등급 고정 (agent/tiers.json)")
+    p.add_argument("--gpt-tier", choices=GPT_TIERS, help="GPT 계획/리뷰 등급 고정 (agent/tiers.json)")
+    p.add_argument("--claude-tier", choices=CLAUDE_TIERS, help="Claude 등급 고정 (agent/tiers.json)")
     p.add_argument("--gpt-timeout", type=int, default=30 * 60, help="GPT 단계 제한 시간(초)")
     p.add_argument("--claude-timeout", type=int, default=3 * 60 * 60, help="Claude 단계 제한 시간(초)")
     return p.parse_args()
