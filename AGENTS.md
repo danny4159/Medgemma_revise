@@ -20,5 +20,6 @@
 - `eval_results/` 실험 출력 (새 파일 추가는 가능, 기존 파일 덮어쓰기 금지)
 - `docs/MEDGEMMA_평가_전체정리.txt` 지금까지의 연구 정리 (맨 앞 "중대 정정" 먼저 읽을 것)
 - `agent/GOAL.md` 현재 연구 목표
-- `agent/INDEX.md` 반복(iteration)별 한 줄 요약
+- `agent/INDEX.md` 반복(iteration)별 한 줄 요약과 접근법 기록
+- `agent/PAPERS.md` 사용자에게 추천한 논문 목록
 - `agent/runs/iter_NNN/` 반복별 plan.md, plan.json, claude_report.md, review.md, review.json, changed_files.txt

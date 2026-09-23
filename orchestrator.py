@@ -27,6 +27,9 @@ GPT가 Claude 보고서를 직접 읽고 확인한다.
 success / improve / abandon으로 판정한다. 같은 approach는 --max-attempts번까지만 시도하고
 (마지막 시도는 GPT 리뷰 강제), 넘으면 다음 대안으로 넘어가거나 사람에게 묻는다.
 
+논문 추천: GPT 리뷰는 실제 결과로 가능성이 분명해진 방향에 한해 드물게 논문 1편을 추천한다.
+링크가 열리고 중복이 아니면 agent/PAPERS.md에 쌓고 Telegram으로 알린다.
+
 산출물은 agent/runs/iter_NNN/ 에 저장된다. 중간에 끊겨도 다시 실행하면
 완료되지 않은 단계부터 이어서 진행한다.
 
@@ -49,6 +52,7 @@ import shutil
 import subprocess
 import sys
 import threading
+import urllib.request
 
 from notifier import Human
 
@@ -60,6 +64,7 @@ ARCHIVE_DIR = AGENT_DIR / "archive"
 
 GOAL_FILE = AGENT_DIR / "GOAL.md"
 INDEX_FILE = AGENT_DIR / "INDEX.md"
+PAPERS_FILE = AGENT_DIR / "PAPERS.md"
 LOG_FILE = AGENT_DIR / "RESEARCH_LOG.md"
 TIERS_FILE = AGENT_DIR / "tiers.json"
 # runs/ 도입 전 수동 실행의 마지막 리뷰. 첫 반복 계획의 참고 자료로 쓴다.
@@ -208,6 +213,8 @@ def run_codex(args, prompt, out_file, log_path, tier, schema=None):
         "-s", "read-only",
         "-m", spec["model"],
         "-c", f'model_reasoning_effort="{spec["effort"]}"',
+        # 선행 연구 확인과 논문 추천을 위한 웹 검색
+        "-c", 'web_search="live"',
         "-o", str(out_file),
     ]
     if schema:
@@ -734,6 +741,9 @@ iter_{n:03d}
 === 지금까지의 반복 요약과 접근법 기록 (agent/INDEX.md) ===
 {read(INDEX_FILE, "없음")}
 
+=== 이미 추천한 논문 (agent/PAPERS.md) ===
+{read(PAPERS_FILE, "없음")}
+
 === 검토 자료 (직접 열어 확인하라) ===
 - 계획: agent/runs/iter_{n:03d}/plan.md
 - Claude 보고서: agent/runs/iter_{n:03d}/claude_report.md
@@ -766,6 +776,60 @@ iter_{n:03d}
     print(f"next_task: {review['next_task']}")
     print(f"다음 계획 등급: {review['next_plan_tier']}")
     return review
+
+
+def url_opens(url):
+    try:
+        req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0"})
+        with urllib.request.urlopen(req, timeout=15) as resp:
+            return resp.status < 400
+    except Exception:
+        return False
+
+
+def handle_paper(n, review):
+    """리뷰의 논문 추천을 검증해 PAPERS.md에 추가하고 알린다."""
+    paper = review.get("paper_recommendation") or {}
+    if not paper.get("recommend"):
+        return
+    d = iter_dir(n)
+    url = paper.get("url", "").strip()
+
+    problem = None
+    if review.get("approach_status") == "abandon":
+        problem = "접근법이 abandon인데 추천함"
+    elif not paper.get("title") or not url:
+        problem = "제목이나 링크가 없음"
+    elif url in read(PAPERS_FILE):
+        problem = "이미 추천한 논문"
+    elif not url_opens(url):
+        problem = "링크가 열리지 않음"
+    if problem:
+        save(d / "paper_rejected.json", json.dumps({"reason": problem, **paper}, ensure_ascii=False, indent=2))
+        print(f"\n논문 추천 무시: {problem} — {paper.get('title', '')}")
+        return
+
+    if not PAPERS_FILE.exists():
+        save(PAPERS_FILE, "# 읽어볼 논문\n\n읽은 논문은 [ ]를 [x]로 바꿔 두세요.\n")
+    entry = (
+        f"\n## [ ] {paper['title']} ({paper['authors_year']})\n"
+        f"- 링크: {url}\n"
+        f"- 추천: iter_{n:03d}, {now()[:10]}\n"
+        f"- 지금 하고 있는 것: {paper['current_work']}\n"
+        f"- 추천 이유: {paper['why']}\n"
+        f"- 읽어볼 부분: {paper['what_to_read']}\n"
+    )
+    with PAPERS_FILE.open("a", encoding="utf-8") as f:
+        f.write(entry)
+    log(f"iter_{n:03d} PAPER RECOMMENDATION", entry)
+    print(f"\n📚 논문 추천: {paper['title']}")
+    notify(
+        f"📚 읽어볼 논문 (iter_{n:03d})\n\n"
+        f"{paper['title']} ({paper['authors_year']})\n{url}\n\n"
+        f"지금 하고 있는 것:\n{paper['current_work']}\n\n"
+        f"추천 이유:\n{paper['why']}\n\n"
+        f"읽어볼 부분:\n{paper['what_to_read']}"
+    )
 
 
 def step_skip_review(n, reason):
@@ -949,6 +1013,7 @@ def main():
         if needs_review:
             print(f"\nGPT 리뷰 진행: {reason}")
             review = step_review(args, goal, n)
+            handle_paper(n, review)
         else:
             review = step_skip_review(n, reason)
         completed += 1
