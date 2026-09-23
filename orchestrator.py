@@ -36,6 +36,12 @@ success / improve / abandon으로 판정한다. 같은 approach는 --max-attempt
 아니면 그 접근법이 시작한 지점으로 돌아가 새 브랜치를 만든다. 커밋은 GPT 리뷰가
 commit_worthy로 판단한 경우에만 한다. 버리는 접근법의 미커밋 작업은 git stash로 보관한다.
 브랜치는 research/ 안에서만 바뀌므로 오케스트레이터, agent/ 기록, legacy/는 그대로다.
+연구 커밋에는 iter_NNN 태그를 붙여 브랜치를 지워도 기록이 가리키는 커밋이 남게 하고,
+stash한 작업은 반복 폴더에 patch로도 저장한다.
+
+기록 보존: agent/의 요약·판단 파일은 반복이 끝날 때와 멈출 때 main 저장소의 main 브랜치에
+자동 커밋한다 (기록 파일만 골라서 커밋하므로 작업 중인 코드 수정은 섞이지 않는다).
+원본 로그(claude_stream.jsonl, *_codex.log 등)는 서버에만 둔다.
 
 논문 추천: GPT 리뷰는 실제 결과로 가능성이 분명해진 방향에 한해 드물게 논문 1편을 추천한다.
 링크가 열리고 중복이 아니면 agent/PAPERS.md에 쌓고 Telegram으로 알린다.
@@ -90,6 +96,14 @@ PAPERS_FILE = AGENT_DIR / "PAPERS.md"
 # 사람이 읽는 기록: JOURNEY(마일스톤 흐름) → DECISIONS(반복별 결정) → runs/(원본)
 JOURNEY_FILE = AGENT_DIR / "JOURNEY.md"
 DECISIONS_FILE = AGENT_DIR / "DECISIONS.md"
+# main 저장소에 자동 커밋하는 연구 기록 (원본 로그는 .gitignore로 제외)
+RECORD_PATHS = (
+    "agent/GOAL.md", "agent/GOALS.json", "agent/INDEX.md", "agent/DECISIONS.md",
+    "agent/JOURNEY.md", "agent/PAPERS.md", "agent/RESEARCH_LOG.md", "agent/runs", "agent/archive",
+    # 오케스트레이터 도입 전 수동 실행 기록
+    "agent/GPT_PLAN.md", "agent/CLAUDE_REPORT.md", "agent/GPT_REVIEW.md",
+)
+RECORD_BRANCHES = ("main", "master")
 # 이 파일이 생기면 현재 단계를 마친 뒤 멈춘다 (Telegram stop도 이 파일을 만든다)
 STOP_FILE = AGENT_DIR / "STOP"
 # 에이전트 호출 실패 시 재시도 간격(초)
@@ -437,6 +451,27 @@ def git(*git_args, cwd=None):
     """(종료 코드, 출력). 실패하면 출력 대신 에러 메시지."""
     result = subprocess.run(["git", *git_args], cwd=cwd or PROJECT_DIR, text=True, capture_output=True)
     return result.returncode, result.stdout if result.returncode == 0 else result.stderr.strip()
+
+
+def commit_records(message):
+    """agent/ 기록 파일만 main 저장소에 커밋한다. 기록은 사라질 수 있는 브랜치에 두지 않는다."""
+    branch = git("rev-parse", "--abbrev-ref", "HEAD")[1].strip()
+    if branch not in RECORD_BRANCHES:
+        print(f"[WARN] main 저장소가 '{branch}' 브랜치라 연구 기록을 커밋하지 않았습니다. "
+              f"main으로 돌아간 뒤 다시 실행하면 함께 커밋됩니다.")
+        return
+    paths = [p for p in RECORD_PATHS if (PROJECT_DIR / p).exists()]
+    if not paths:
+        return
+    git("add", "--", *paths)
+    if git("diff", "--cached", "--quiet", "--", *paths)[0] == 0:
+        return
+    # 경로를 지정해 커밋하면 다른 staged 변경(작업 중인 코드 등)은 섞이지 않는다
+    code, out = git("commit", "-q", "-m", message, "--", *paths)
+    if code:
+        print(f"[WARN] 연구 기록 커밋 실패: {out}")
+    else:
+        print(f"기록 커밋: {git('rev-parse', '--short', 'HEAD')[1].strip()} {message}")
 
 
 def wgit(*git_args):
@@ -793,7 +828,7 @@ def iteration_block(n):
             else:
                 branch_text = f"브랜치 `{ev.get('branch')}`에서 계속"
             if git_info.get("stashed"):
-                branch_text += f"; 이전 브랜치 미커밋 작업은 stash로 보관"
+                branch_text += f"; 이전 브랜치 미커밋 작업은 stash와 `stashed.patch`로 보관"
             lines.append(f"  - {branch_text}")
             if ev.get("permission_denials"):
                 lines.append(f"  - ⚠ 권한 거부 {ev['permission_denials']}건")
@@ -1164,7 +1199,9 @@ def ensure_branch(n):
             if code:
                 raise AgentError(f"git stash 실패: {out}")
             info["stashed"] = message
-            print(f"미커밋 작업을 stash로 보관: {message}")
+            # stash는 오래되면 정리될 수 있으므로 내용을 patch로도 남긴다 (main 기록에 커밋됨)
+            save(d / "stashed.patch", wgit("stash", "show", "-p", "--include-untracked", "stash@{0}")[1])
+            print(f"미커밋 작업을 stash로 보관 (patch: {d / 'stashed.patch'}): {message}")
         if wgit("show-ref", "--verify", "--quiet", f"refs/heads/{target}")[0] == 0:
             code, out = wgit("checkout", target)
         else:
@@ -1486,8 +1523,11 @@ def step_commit(n, review):
 
     sha = wgit("rev-parse", "--short", "HEAD")[1].strip()
     branch = current_branch()
+    # 태그가 있으면 나중에 브랜치를 지워도 이 커밋은 남는다
+    tag = f"iter_{n:03d}"
+    wgit("tag", "-f", tag)
     save(d / "commit.json", json.dumps(
-        {"sha": sha, "branch": branch, "message": title, "skipped_large_files": skipped_large},
+        {"sha": sha, "branch": branch, "tag": tag, "message": title, "skipped_large_files": skipped_large},
         ensure_ascii=False, indent=2,
     ))
     rebuild_index()
@@ -1664,6 +1704,7 @@ def record_stop(reason):
     try:
         record_event(STATE["n"], "stopped", reason=reason, during=STATE["stage"])
         rebuild_index()
+        commit_records(f"research records: iter_{STATE['n']:03d} stopped ({reason[:60]})")
     except Exception as e:
         print(f"[WARN] 중단 기록 실패: {e}")
 
@@ -1727,6 +1768,7 @@ def main():
             set_stage(n, "계획 확인")
             action = step_checkpoint(args, n)
             if action == "quit":
+                commit_records(f"research records: iter_{n:03d} paused at plan check")
                 print("종료합니다. 다시 실행하면 여기서 이어집니다.")
                 return
             if action == "replan":
@@ -1775,10 +1817,12 @@ def main():
         if review["verdict"] == "NEEDS_HUMAN":
             set_stage(n, "사람 결정 대기")
             if not handle_needs_human(review, n):
+                commit_records(f"research records: iter_{n:03d} waiting for human decision")
                 print("종료합니다. 다시 실행하면 이 질문부터 다시 묻습니다.")
                 return
 
         save(d / "done.json", json.dumps({"verdict": review["verdict"], "time": now()}, indent=2))
+        commit_records(f"research records: iter_{n:03d} [{review['verdict']}] {review['one_line_summary'][:80]}")
         completed += 1
         if review["verdict"] == "DONE":
             banner("연구 목표 완료 (DONE)")
