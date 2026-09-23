@@ -2244,3 +2244,134 @@ fine 차이 **−0.018708**, CI **[−0.027680, −0.010164]** 역시 fine super
 직접 병변 학습과 anatomy 사전 적응 후 병변 학습을 동일 backbone·head·병변 label budget으로 비교하고, 학습량 차이를 분리할 대조군과 patient 독립 평가를 사전 고정한다. 현재 NIH split은 개발 자료로 취급하며 최종 확인에는 독립 자료가 필요하다. decoder 병목 후보를 선택한다면 실제 decoder grounding 결과와 probe를 공통 target·metric에서 비교하는 별도 실험부터 필요하다.
 
 재사용 전에는 위 완료 판정과 provenance 검증을 수정하고, 실패 입력에서 complete가 남지 않는 검사를 추가한다.
+
+
+## iter_008 GPT PLAN [해부구조에서 병변으로 grounding 전이 / proceed] — 2026-09-24 06:18:18
+
+# Current Understanding
+
+iter_007의 pooling 접근법은 abandon으로 종료한다. MLP 차이 +0.000304는 해당 coarse readout에서의 음성 결과이며 decoder 병목을 입증하지 않는다. 이번에는 남아 있는 anatomy→lesion 전이 가설을 검증한다.
+
+Montgomery 공식 배포는 영상과 좌·우 수동 lung mask 138쌍을 약 618.5 MB에 제공한다. 세 파일명 집합은 일치한다. 실제 pixel 형식과 mask 정합성은 구현 단계의 진입 검사로 남긴다. SCR의 윤곽선 포함 영상은 사용하지 않는다. CheXmask는 NIH domain과 맞지만 2.0 GB CSV 및 외부 segmentation teacher가 필요하므로 이번 최소 실험에서는 제외한다.
+
+기존 NIH 160명은 모두 개발 자료다. 공식 CSV 기준으로 이들을 제외한 네 클래스의 patient 합집합은 339명이다. 새 확인 집단 80명을 patient 단위로 분리할 수 있다. NIH canvas는 여전히 assumed이며 strict readiness를 true로 바꾸지 않는다. 이번 실행도 해당 가정을 명시한 탐색 실행이다.
+
+CURE·AnatomiX·EasyLens와의 비교상 anatomy supervision 자체는 contribution이 아니다. 이번 반복의 산출물은 제한된 비용으로 다음 방법론 개발의 투자 여부를 판단하는 기전 실험이다.
+
+# Hypothesis
+
+고정된 MedGemma 1.5 공간 feature 위의 작은 shared trunk가 영상별 lung 구조를 먼저 학습하면, 적은 병변 bbox로 학습할 때 직접 병변 학습보다 높은 grounding 성능을 얻는다. 이 이득은 추가 update, 외부 CXR 노출, 평균적인 장기 위치만으로 설명되지 않아야 한다.
+
+반증 가능한 범위는 Montgomery의 lung supervision에서 NIH 네 클래스의 coarse bbox grounding으로 가는 특정 전이다. 전체 anatomy transfer나 의료 VLM의 일반적 능력에 대한 가설로 확대하지 않는다.
+
+# Proposed Experiment
+
+## 1. 데이터와 실행 규약 고정
+
+- Montgomery 138 case를 train/validation/holdout=80/20/38로 고정한다. filename의 정상/TB 표지를 층화에만 사용하고 입력 prompt나 feature에 넣지 않는다. 숫자 ID 기준 분리와 file/pixel 중복 검사를 수행한다. 문서로 확인하지 못한 patient 독립성은 주장하지 않는다.
+- 기존 NIH train 80명에서 stratum별 5명을 고정 선택한 20명 budget과 전체 80명 budget을 비교한다. 작은 집합은 큰 집합의 부분집합이다. 선택 seed는 20260928로 고정하고 학습 seed와 분리한다. 실제 관측 image–class 쌍 수를 함께 보고한다.
+- 기존 NIH validation 32명은 LR 선택에, 기존 test 48명은 개발용 진행 판단에 사용한다. 48명 결과를 새로운 독립 test 결과로 표현하지 않는다.
+- 기존 160명의 모든 patient를 제외하고 신규 80명을 stratum별 20명씩 서로 겹치지 않게 배정한다. metadata와 고정 seed만으로 선택하며 patient당 해당 stratum bbox가 있는 영상 한 장을 고른다. 여러 클래스의 bbox가 있으면 모두 평가한다. 신규 집단의 ID·선택 규칙을 학습 전에 고정하되 영상 확보와 성능 평가는 개발 기준 통과 후 수행해도 된다.
+- 기존 160명을 학습 160명으로 합치지 않는다. 신규 확인 집단은 anatomy 학습, normalization 추정, LR 선택, early stopping에 사용하지 않는다.
+
+## 2. 입력 및 feature
+
+Montgomery의 source PNG, 좌·우 mask의 크기·dtype·범위·binary 여부·방향을 확인한다. train에서 정한 사례의 원본과 별도 overlay를 눈으로 확인하고 정답 표시가 입력에 섞이지 않도록 경로를 분리한다. 영상과 mask가 같은 canvas임을 확인한 뒤 모델 전처리의 resize/crop/padding 변환을 동일하게 적용한다. 비정사각형 영상에 NIH의 등방 축소 가정을 재사용하지 않는다.
+
+8-bit L 영상은 값을 유지한다. 실제로 12-bit 값이 16-bit container에 들어 있다면 범위와 문서가 일치할 때 고정 0–4095 선형 mapping으로 uint8 변환한다. 다른 형식이면 추측해서 PIL convert로 포화시키지 말고 data gate 실패로 보고한다. CLAHE나 label 의존 windowing은 추가하지 않는다.
+
+feature는 MedGemma 1.5의 검증된 Z를 float32로 4×4 평균한 16×16×1152 표현으로 고정한다. 기존 NIH Z cache는 현재 입력과 연결을 재검증한 후 재사용한다. 신규 영상에서는 같은 연산을 적용한다. 이는 이번 head의 계산량을 줄이는 선택이며 pooling 가설을 재실험하는 것이 아니다.
+
+## 3. 동일 용량의 다섯 조건
+
+shared trunk는 pointwise Linear(1152,128)+GELU다. anatomy 출력층은 2채널, lesion 출력층은 4채널이다. backbone은 frozen, head는 float32다. 좌·우 anatomy target은 coarse occupancy이며 lesion은 기존 클래스별 bbox union occupancy와 unknown mask 규약을 사용한다.
+
+| 조건 | 사전 단계 | 병변 단계 | 목적 |
+|---|---|---|---|
+| D500 | 없음 | 500 update | 동일 병변 학습량 baseline |
+| D1000 | 없음 | 1000 update | 동일 총 update의 강한 baseline |
+| A | 실제 image–lung mask 500 update | 500 update | anatomy 전이 |
+| S | 같은 영상에 다른 train case의 mask 500 update | 500 update | 영상 노출·학습량 대조 |
+| M | 같은 영상에 train 평균 mask 500 update | 500 update | 평균 위치 supervision 대조 |
+
+A/S/M의 anatomy 단계는 동일 초기 trunk·출력층·batch 순서·optimizer를 사용한다. S는 정상/TB 층 안에서 다른 case로 고정 derangement하여 mask 분포를 보존한다. 평균 mask는 train에서만 계산한다. A/S/M은 anatomy 출력층을 버리고 동일 seed의 새 lesion 출력층과 새 optimizer로 병변 학습을 시작한다. mask로 lesion 예측을 자르거나 폐 안으로 강제하지 않는다.
+
+학습 seed는 0/1/2, batch=8, AdamW weight_decay=0이다. anatomy LR은 1e-3으로 고정한다. lesion LR 후보는 3e-4/1e-3/3e-3이며 조건·budget별 validation patient macro의 3-seed 평균으로 선택하고 동률이면 작은 LR을 쓴다. 각 조건에 같은 탐색 기회를 준다. 마지막 update를 평가하며 D500은 동일 D1000 run의 500-update checkpoint를 재사용할 수 있다. anatomy pretraining은 budget과 lesion LR 사이에서 재사용한다.
+
+총 lesion 학습은 재사용 전 상한 90개 조합이다. 공간 token이 256개인 작은 head만 학습한다. loss는 공간 평균 BCE 후 anatomy 채널 평균 또는 관측 lesion 쌍 평균이다. 학습 중간 loss와 validation 추이를 저장하되 신규 확인 결과에 따른 재학습은 하지 않는다.
+
+## 4. 단계별 실행
+
+1. 코드 무결성 수정과 CPU 검사, 데이터 확보·입력 gate를 완료한다.
+2. train 영상 4장과 head 20 update로 추출·학습 비용만 측정한다. 이 비용도 총예산에 포함한다.
+3. anatomy 학습과 별도 holdout 평가로 실제 영상별 lung 정보를 학습했는지 확인한다.
+4. 두 lesion budget의 개발 실험을 실행하고 사전 진행 기준을 판정한다.
+5. 기준을 통과한 경우에만 고정된 신규 NIH 80명을 확보하고 선택된 checkpoint들의 성능을 한 번 평가한다. 평가 이후 hyperparameter를 변경하지 않는다.
+
+# Implementation Tasks for Claude
+
+1. `pooling_probe/features.py`와 재사용 entry point의 검증을 보완한다. 현재 image bytes/processor 입력, ID·patient·split, target·class 순서, model revision·processor digest, feature hash 및 추출 검사를 실행 manifest에 연결한다. 기존 cache의 provenance를 확인 없이 새 값으로 덮어써서 통과시키지 않는다.
+2. 기존 pooling runner의 완료 조건에 필수 정렬·pooling·linear 검사를 포함한다. 새 runner는 자체 필수 검사와 연결된 산출물이 모두 유효할 때만 stage_complete를 기록한다. 연구 기준 실패와 실행 실패를 구분하고, 재검증 실패 시 이전 complete가 유효하게 남지 않도록 한다.
+3. `CUDA_VISIBLE_DEVICES` 덮어쓰기를 제거한다. 실행 직전 `nvidia-smi`와 보이는 CUDA 장치의 UUID/index를 대조하고 허용된 집합 중 여유 메모리가 큰 GPU의 논리 index를 사용한다. 다른 프로세스는 건드리지 않는다.
+4. Montgomery downloader·manifest·dtype 처리·mask target 및 신규 NIH patient 선택을 구현한다. 다운로드는 누적 1 GiB, 네트워크 작업 20분, 파일별 최대 2회 시도로 제한한다. NIH archive는 기존 부분 조회를 사용하고 전체 archive 다운로드로 전환하지 않는다.
+5. shared trunk 전이 학습과 다섯 조건, 두 budget, validation 선택, anatomy gate 및 독립 확인 단계를 구현한다. split과 선택 digest를 prediction·checkpoint에 연결한다.
+6. target/split/processor 변경, missing check, feature 손상, unknown gradient, train 외 mask 사용, derangement 고정점, 비정사각형 좌표 변환, dtype 포화, stale completion을 검사하는 의미 있는 CPU 테스트를 추가한다. 신규 patient와 기존 160명의 교집합은 0이어야 한다.
+7. `research/results/iter_008/`에 계획·입력 manifest, 다운로드 ledger, 입력 검사, 학습 curve, LR 선택, 원시 prediction, bootstrap index, 단계별 상태와 결과를 저장한다. `research/notes/`에 선행 연구 차이와 판정 범위를 정리한다. branch와 commit 관리는 orchestrator에 맡긴다.
+
+# Evaluation (성공/실패 기준 포함)
+
+## 실행 유효성
+
+필수 provenance·입력 정합성·split 검사를 모두 통과해야 해석한다. GPU 비용은 추출·pilot·학습·평가를 합쳐 최대 45 device-min이다. batch/update 경계에서 실제 누적 비용을 검사하고 여유를 두고 중단한다. 예산 부족이나 접근 실패는 partial/inconclusive이며 가설 실패로 기록하지 않는다.
+
+## Anatomy 학습 확인
+
+Montgomery holdout 38 case에서 좌·우 평균 Dice를 계산한다. coarse 확률을 원래 mask canvas로 보간하고 threshold=0.5를 고정한다. 동일 처리의 train 평균 mask와 다른 case의 예측을 사용한 image-swap을 비교한다.
+
+A의 3-seed 평균 Dice≥0.80이고 평균 mask와 image-swap 각각보다 평균 Dice가 0.03 이상 높아야 anatomy gate를 통과한다. case 단위 paired bootstrap CI와 normal/TB별 값을 함께 보고한다. 실패하면 anatomy 학습 미확인으로 처리하며 lesion 전이 부재를 주장하지 않는다.
+
+## 병변 주지표와 개발 진행 기준
+
+주지표는 기존과 같은 coarse soft-IoU다. 관측 클래스 평균→patient 평균 순으로 집계한다. NIH bbox가 없는 클래스는 unknown이며 loss·metric에서 제외한다. 각 budget의 train 위치 prior와 같은 클래스의 patient image-swap도 계산한다.
+
+20명 budget을 사전 주분석으로 정한다. 기존 개발용 48명에서 A−D500 및 A−D1000이 각각 0.03 이상, A−S 및 A−M이 각각 0.01 이상이고 네 클래스 중 최소 두 클래스의 A−D1000이 양수일 때 신규 확인으로 진행한다. 80명 budget의 A−D1000은 −0.02보다 나쁘지 않아야 한다. 이는 신규 확인 집단을 열기 위한 투자 기준이며 독립적인 유의성 증거가 아니다.
+
+## 신규 확인 성공 기준
+
+고정된 80명에서 20명 budget의 A−D500 및 A−D1000이 각각 0.03 이상이고 두 paired 95% CI 하한이 모두 0보다 커야 한다. A−S 및 A−M은 각각 0.01 이상이고 CI 하한도 양수여야 한다. 네 클래스 중 최소 두 클래스에서 A−D1000의 방향이 양수여야 하며, 80명 budget에서는 평균 차이≥−0.02를 요구한다. 이 기준들은 모두 충족해야 다음 방법론 개발에 진입한다.
+
+seed별 patient 점수를 먼저 평균하고 patient 단위로 5,000회 paired bootstrap한다. seed나 patch를 독립 표본으로 세지 않는다. 같은 bootstrap index를 모든 조건에 적용한다. CI는 고정된 작은 training subset과 세 초기화에 조건부이며 training-set 변동 전체를 포괄하지 않는다.
+
+## 실패와 불확정의 구분
+
+유효한 anatomy 학습과 정상 baseline 실행 이후에도 개발 또는 신규 확인 기준에 미달하면 이 고정 전이 설계에 대한 추가 투자를 중단한다. CI가 넓으면 효과 부재가 아니라 투자 근거 부족으로 표현한다. anatomy gate 실패, 입력 실패, 심각한 baseline 최적화 이상은 inconclusive다. LR 상단 선택과 마지막 구간의 큰 loss 감소·validation 개선이 함께 나타나면 이를 명시하고 충분히 학습된 baseline을 이겼다고 주장하지 않는다. 확인 집단을 본 뒤 학습량을 늘려 결과를 구제하지 않는다.
+
+# Risks / Checks
+
+- Montgomery의 lung mask는 심장 뒤와 횡격막 뒤 일부를 제외하는 annotation이다. 병변 mask가 아니며 Effusion·Cardiomegaly를 폐 내부로 제한하지 않는다.
+- Montgomery case ID의 patient 의미는 미확인이다. 중복 검사는 수행하되 source anatomy holdout을 엄밀한 patient 독립 검증이라고 부르지 않는다.
+- 외부 domain의 수동 anatomy 전이는 teacher pseudo-label confound를 피하지만 domain shift는 남는다. 음성 결과로 같은 NIH domain의 anatomy 전이까지 배제하지 않는다.
+- 신규 NIH 80명은 같은 데이터셋 안의 확인 집단이다. 다중 데이터셋 증명이나 MedGemma 사전학습 자료로부터의 독립성을 주장하지 않는다.
+- NIH canvas assumed, 미러 원본 동일성 미확인, 양성 bbox만의 평가 한계를 보고서에 유지한다. 존재 판별·false positive·진단 성능 개선으로 표현하지 않는다.
+- 현재 실행 환경의 shell 네트워크 조회는 DNS 오류였고 웹 조회는 가능했다. Claude 단계에서도 접근하지 못하면 bounded retry 후 partial로 종료한다.
+- frozen head의 양성 결과는 실제 VLM 출력 개선을 보장하지 않는다. 통과 후 다음 반복에서 anatomy-conditioned adapter 또는 제한된 LoRA를 검토하고, 직접 lesion 적응 baseline과 생성 grounding 출력으로 다시 검증한다. 이번 head 자체를 새로운 방법으로 주장하지 않는다.
+
+## 대규모 GPU 필요 후보
+
+- Anatomy object token·region–text alignment와 LLM을 함께 적응하는 AnatomiX 규모의 방법: 논문은 80 GB H100 네 장의 학습을 보고하므로 현재 pilot과 별도 후보로 기록한다.
+- Anatomy·lesion·report를 함께 학습하는 CURE 규모의 curriculum과 vision encoder/projector 공동 적응: frozen feature에서 전이가 확인되더라도 추가 비교와 실제 출력 검증이 필요하다.
+- 다기관 고해상도 grounding의 end-to-end 학습: 경량 접근이 실제 표현 적응의 필요성을 보여줄 때 검토하며, 종료한 pooling pilot의 결과만으로 필요성을 주장하지 않는다.
+
+# 계획의 근거 (GPT 조사 노트)
+
+이번 라운드는 문헌·파일 조회와 기존 CSV의 메모리 내 집계만 수행했다. 파일 생성·수정·모델 실험은 하지 않았다.
+
+1. **데이터 경로: Montgomery를 우선한다.** NLM 공식 목록을 집계하면 CXR 138개는 614,034,765 bytes, leftMask는 2,291,244 bytes, rightMask는 2,134,144 bytes다. 세 목록의 파일명 집합은 정확히 일치하며 합계는 618,460,153 bytes다. 개별 PNG로 확보할 수 있다. 원저자 문서는 12-bit grayscale 영상, 동일 이름의 좌·우 binary lung mask를 설명한다. 실제 배포 파일의 dtype·값 범위·크기·정합성은 아직 확인하지 못했다. 문서의 숫자 ID는 영상 식별자이므로 patient ID라고 단정하지 않는다. [영상 목록](https://data.lhncbc.nlm.nih.gov/public/Tuberculosis-Chest-X-ray-Datasets/Montgomery-County-CXR-Set/MontgomerySet/CXR_png/index.html), [leftMask](https://data.lhncbc.nlm.nih.gov/public/Tuberculosis-Chest-X-ray-Datasets/Montgomery-County-CXR-Set/MontgomerySet/ManualMask/leftMask/index.html), [rightMask](https://data.lhncbc.nlm.nih.gov/public/Tuberculosis-Chest-X-ray-Datasets/Montgomery-County-CXR-Set/MontgomerySet/ManualMask/rightMask/index.html), [원저자 문서](https://lhncbc.nlm.nih.gov/LHC-publications/PDF/pub9356.pdf)
+2. **CheXmask는 후순위다.** NIH에 해당하는 ChestX-Ray8.csv만 2.0 GB다. image ID, RCA 점수, 좌·우 lung 및 heart RLE, Height/Width를 제공하며 NIH mask는 1024×1024다. 공식 권고는 Dice RCA (Mean)≥0.7이다. 같은 NIH 영상에 연결할 수 있지만 외부 HybridGNet의 pseudo-label이며, 선택한 행만 바로 받는 공식 인덱스는 이번 조사에서 확인하지 못했다. Montgomery는 외부 domain이라는 단점이 있으나 수동 supervision과 작은 확보 비용이 장점이다. [CheXmask 공식 schema·파일 목록](https://physionet.org/content/chexmask-cxr-segmentation-data/1.0.0/OriginalResolution/)
+3. **신규 NIH 확인 집단 확보 여유가 있다.** `research/results/iter_007/official/BBox_List_2017.csv`와 `Data_Entry_2017_v2020.csv`를 연결하고 `research/results/iter_005/nih_manifest.json`의 160명 전체를 제외했다. 미사용 patient/영상은 Atelectasis 121/133, Effusion 95/103, Cardiomegaly 84/95, Pneumonia 74/76이다. 네 클래스 patient 합집합은 339명이며 클래스 간 중복이 있다. 기존 train 80명은 stratum별 정확히 20명이다. 기존 160명은 개발 자료로 유지하고 신규 patient 80명을 별도 확인 집단으로 고정할 수 있다. 이것은 외부 데이터셋 검증이 아니다.
+4. **최소 대조군을 정했다.** 병변 직접 학습, 동일 총 update의 장시간 직접 학습, 정상 anatomy 사전학습, 같은 Montgomery 영상에 다른 case의 mask를 배정한 사전학습, train 평균 mask 사전학습을 비교한다. 마지막 세 조건은 영상 노출·update·구조를 공유한다. 학습되는 anatomy는 별도 case holdout의 lung Dice와 평균 mask·image-swap 대비 차이로 확인한다. 이런 대조도 domain shift를 완전히 제거하지는 못하므로 음성 결과는 Montgomery→NIH 전이에 한정한다.
+5. **기전 질문과 novelty를 구분한다.** CURE는 anatomy 과제와 curriculum, AnatomiX는 anatomy object 표현과 LLM 연결, EasyLens는 병변 mask로 구축한 reference bank를 이미 사용한다. 따라서 단순 anatomy pretraining은 새 방법으로 주장하지 않는다. 이번 질문은 '고정된 MedGemma 1.5 feature에서 영상별 anatomy 정합성이 추가 update·평균 위치 supervision을 넘어 적은 병변 label의 readout 학습에 도움이 되는가'다. 양성이면 실제 VLM 출력과 연결하는 경량 adapter/LoRA 연구의 진입 근거가 되지만, frozen head 결과 자체가 VLM 개선이나 decoder 병목의 증거는 아니다. [CURE](https://arxiv.org/html/2601.15408v1), [AnatomiX](https://arxiv.org/html/2601.03191v3), [EasyLens](https://arxiv.org/html/2606.06379v3)
+6. **직전 리뷰의 재사용 결함은 선행 수정한다.** `agent/runs/iter_007/review.md`, `research/pooling_probe/features.py`, `research/run_pooling_probe_iter007.py`, `research/extract_pooling_features_iter007.py`에서 완료 조건, cache와 현재 입력의 provenance 연결, CUDA_VISIBLE_DEVICES 덮어쓰기 문제를 확인했다. Pooling 접근법의 abandon은 유지한다.
+
+이전 사고 라운드 노트: agent/runs/iter_008/think/
+

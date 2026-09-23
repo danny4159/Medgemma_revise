@@ -1,0 +1,1465 @@
+diff --git a/extract_pooling_features_iter007.py b/extract_pooling_features_iter007.py
+new file mode 100644
+index 0000000..01d675b
+--- /dev/null
++++ b/extract_pooling_features_iter007.py
+@@ -0,0 +1,207 @@
++"""iter_007: MedGemma 1.5 vision feature Z(pooling 전) 추출 + 정렬·pooling 검증 (GPU 1장).
++
++실행 (pilot: train 4장):
++  python research/extract_pooling_features_iter007.py --gpu 1 --split train --limit 4 --out research/results/iter_007/pilot
++실행 (전체 160장):
++  python research/extract_pooling_features_iter007.py --gpu 1 --out research/results/iter_007/features
++
++- backbone은 eval·no_grad·bf16. 공식 processor(resize 896 bilinear, rescale, normalize)만 쓰고 crop·flip·augmentation 없음.
++- Z는 multi_modal_projector 입력(= vision_tower last_hidden_state)을 forward pre-hook으로 잡는다.
++  projector 안의 AvgPool2d 출력도 hook으로 잡아 재구현 P(Z)와 비교한다.
++- 산출물: Z_bf16.npy(uint16 view, N×64×64×1152), P_model_bf16.npy(N×16×16×1152), cache_meta.json, extract_checks.json.
++- gate_iter007.json의 exploratory_probe_allowed가 true가 아니면 시작하지 않는다.
++"""
++import argparse
++import json
++import os
++import sys
++import time
++
++ap = argparse.ArgumentParser()
++ap.add_argument("--gpu", default="1")
++ap.add_argument("--split", default=None)
++ap.add_argument("--limit", type=int, default=None)
++ap.add_argument("--batch", type=int, default=4)
++ap.add_argument("--out", required=True)
++ap.add_argument("--gate", default=os.path.join(os.path.dirname(os.path.abspath(__file__)), "results/iter_007/gate_iter007.json"))
++ap.add_argument("--targets", default=os.path.join(os.path.dirname(os.path.abspath(__file__)),
++                                                  "results/iter_006/nih_class_targets.npz"))
++ap.add_argument("--src", default=os.path.join(os.path.dirname(os.path.abspath(__file__)), "results/iter_005"))
++args = ap.parse_args()
++os.environ["CUDA_VISIBLE_DEVICES"] = args.gpu
++os.environ["HF_HUB_OFFLINE"] = "1"
++
++import numpy as np  # noqa: E402
++import torch  # noqa: E402
++import transformers  # noqa: E402
++from PIL import Image  # noqa: E402
++
++sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
++from pooling_probe import features as F  # noqa: E402
++
++
++def spatial_transform_check(proc):
++    """1024 합성 영상의 직사각형이 896 출력에서 0.875배 위치에 있는지 (crop·padding 탐지)."""
++    a = np.zeros((1024, 1024), np.uint8)
++    x0, x1, y0, y1 = 256, 512, 640, 768
++    a[y0:y1, x0:x1] = 255
++    pv = proc(images=Image.fromarray(a).convert("RGB"), return_tensors="np")["pixel_values"][0]
++    m = pv[0] > 0.0
++    ys, xs = np.where(m)
++    got = [int(xs.min()), int(xs.max()) + 1, int(ys.min()), int(ys.max()) + 1]
++    want = [x0 * 0.875, x1 * 0.875, y0 * 0.875, y1 * 0.875]
++    err = max(abs(g - w) for g, w in zip(got, want))
++    return {"shape": list(pv.shape), "rect_1024_xxyy": [x0, x1, y0, y1], "rect_896_expected": want, "rect_896_got": got,
++            "max_edge_err_px": float(err), "pass": bool(list(pv.shape) == [3, 896, 896] and err <= 1.0),
++            "transform": "isotropic scale 896/1024=0.875, no crop, no padding"}
++
++
++def token_order_check(vt, device):
++    """patch (r,c)만 다른 두 입력 → embeddings 출력에서 token r*64+c만 달라야 한다 (row-major)."""
++    emb = vt.vision_model.embeddings if hasattr(vt, "vision_model") else vt.embeddings
++    res = []
++    for r, c in [(0, 0), (5, 37), (63, 1), (40, 63)]:
++        x = torch.zeros(2, 3, 896, 896, device=device, dtype=torch.bfloat16)
++        x[1, :, r * 14:(r + 1) * 14, c * 14:(c + 1) * 14] = 1.0
++        with torch.no_grad():
++            e = emb(x).float()
++        d = (e[1] - e[0]).abs().amax(dim=-1)
++        idx = torch.nonzero(d > 0).flatten().tolist()
++        res.append({"patch": [r, c], "changed_tokens": idx, "expected": [r * 64 + c], "pass": idx == [r * 64 + c]})
++    return {"cases": res, "pass": all(x["pass"] for x in res)}
++
++
++def projector_synthetic_check(proj, device):
++    """합성 token 패턴(token t 채널0=row, 채널1=col)을 실제 projector에 넣고 AvgPool 출력 위치를 확인."""
++    got = {}
++    h = proj.avg_pool.register_forward_hook(lambda m, i, o: got.__setitem__("p", o.detach().float()))
++    z = torch.zeros(1, 4096, F.C, device=device, dtype=torch.float32)
++    t = torch.arange(4096, device=device)
++    z[0, :, 0] = (t // 64).float()
++    z[0, :, 1] = (t % 64).float()
++    z[0, :, 2] = torch.randn(4096, generator=torch.Generator().manual_seed(0)).to(device)
++    with torch.no_grad():
++        proj(z.to(proj.mm_input_projection_weight.dtype))
++    h.remove()
++    p = got["p"][0]  # (C,16,16)
++    i = torch.arange(16, device=device).float()
++    exp_row = (4 * i + 1.5)[:, None].expand(16, 16)
++    exp_col = (4 * i + 1.5)[None, :].expand(16, 16)
++    re = F.pool_tokens(z[0].to(proj.mm_input_projection_weight.dtype).float())  # 재구현 (16,16,C)
++    return {"row_err": float((p[0] - exp_row).abs().max()), "col_err": float((p[1] - exp_col).abs().max()),
++            "reimpl_vs_model_max_abs": float((re.permute(2, 0, 1)[:3] - p[:3]).abs().max()),
++            "pass": bool((p[0] - exp_row).abs().max() < 0.02 and (p[1] - exp_col).abs().max() < 0.02)}
++
++
++def main():
++    t_start = time.time()
++    os.makedirs(args.out, exist_ok=True)
++    gate = json.load(open(args.gate))
++    if gate.get("exploratory_probe_allowed") is not True:
++        raise SystemExit(f"gate blocks GPU entry: {gate.get('blocking_reasons')}")
++    tg = np.load(args.targets)
++    manifest = {r["image"]: r for r in json.load(open(os.path.join(args.src, "nih_manifest.json")))}
++    sel = np.arange(len(tg["image_id"]))
++    if args.split:
++        sel = sel[tg["split"] == args.split]
++    if args.limit:
++        sel = sel[:args.limit]
++    img_dir = os.path.join(args.src, "data/nih/images")
++
++    device = "cuda"
++    proc = transformers.AutoProcessor.from_pretrained(F.MODEL_DIR).image_processor
++    t0 = time.time()
++    model = transformers.Gemma3ForConditionalGeneration.from_pretrained(F.MODEL_DIR, dtype=torch.bfloat16).to(device)
++    model.eval()
++    t_load = time.time() - t0
++    core = model.model
++    vt, proj = core.vision_tower, core.multi_modal_projector
++    checks = {"env": {"python": sys.version, "executable": sys.executable, "torch": torch.__version__,
++                      "cuda": torch.version.cuda, "transformers": transformers.__version__,
++                      "transformers_path": transformers.__file__, "device_name": torch.cuda.get_device_name(0),
++                      "CUDA_VISIBLE_DEVICES": args.gpu},
++              "model_digest": F.model_digest(), "processor_class": type(proc).__name__,
++              "processor_config": proc.to_dict(),
++              "feature_point": "Gemma3Model.get_image_features: vision_tower(...).last_hidden_state → multi_modal_projector "
++                               "(pre-hook input = Z); AvgPool2d(kernel=stride=4) 출력 = P(Z). RMSNorm·projection 제외.",
++              "projector_kernel_size": proj.kernel_size, "patches_per_image": proj.patches_per_image,
++              "tokens_per_side": proj.tokens_per_side, "model_load_seconds": t_load}
++    checks["spatial_transform"] = spatial_transform_check(proc)
++    checks["token_order"] = token_order_check(vt, device)
++    checks["projector_synthetic"] = projector_synthetic_check(proj, device)
++    if not (checks["spatial_transform"]["pass"] and checks["token_order"]["pass"] and checks["projector_synthetic"]["pass"]):
++        F.dump(os.path.join(args.out, "extract_checks.json"), checks)
++        raise SystemExit("alignment check failed: extraction stopped")
++
++    cap = {}
++    h1 = proj.register_forward_pre_hook(lambda m, a: cap.__setitem__("z", a[0].detach()))
++    h2 = proj.avg_pool.register_forward_hook(lambda m, i, o: cap.__setitem__("p", o.detach()))
++    N = len(sel)
++    Z = np.zeros((N, 64, 64, F.C), np.uint16)
++    Pm = np.zeros((N, 16, 16, F.C), np.uint16)
++    rows, pool_exact, pool_f32 = [], [], []
++    ref_diff = []
++    t_ext = time.time()
++    for b0 in range(0, N, args.batch):
++        idx = sel[b0:b0 + args.batch]
++        ims = []
++        for i in idx:
++            img = str(tg["image_id"][i])
++            path = os.path.join(img_dir, img)
++            fsha = F.sha256_file(path)
++            if fsha != manifest[img]["file_sha256"]:
++                raise SystemExit(f"input hash mismatch {img}")
++            rgb, info = F.load_rgb(path)
++            ims.append(rgb)
++            rows.append({"image_id": img, "patient_id": str(tg["patient_id"][i]), "split": str(tg["split"][i]),
++                         "file_sha256": fsha, "input": info})
++        pv = proc(images=ims, return_tensors="pt")["pixel_values"]
++        for j, rgb in enumerate(ims):
++            ref_diff.append(float(np.abs(pv[j].numpy() - F.reference_pixel_values(rgb)).max()))
++            rows[b0 + j]["pixel_values_sha256"] = F.tensor_sha256(pv[j].numpy().astype(np.float32).view(np.uint32))
++        with torch.no_grad():
++            core.get_image_features(pixel_values=pv.to(device, torch.bfloat16))
++        z, p = cap["z"], cap["p"]  # (B,4096,C) bf16, (B,C,16,16) bf16
++        assert z.shape[1:] == (4096, F.C) and z.dtype == torch.bfloat16, z.shape
++        B = z.shape[0]
++        # 실제 P와 재구현 비교: (a) 같은 reshape에 F.avg_pool2d(bf16) → bit 일치 기대, (b) float32 재구현
++        zz = z.transpose(1, 2).reshape(B, F.C, 64, 64)
++        pa = torch.nn.functional.avg_pool2d(zz, 4)
++        pool_exact.append(float((pa.float() - p.float()).abs().max()))
++        pr = F.pool_tokens(z.float()).permute(0, 3, 1, 2)
++        pool_f32.append(float((pr - p.float()).abs().max() / p.float().abs().max()))
++        Z[b0:b0 + B] = z.reshape(B, 64, 64, F.C).view(torch.int16).cpu().numpy().view(np.uint16)
++        Pm[b0:b0 + B] = p.permute(0, 2, 3, 1).contiguous().view(torch.int16).cpu().numpy().view(np.uint16)
++    h1.remove()
++    h2.remove()
++    torch.cuda.synchronize()
++    t_ext = time.time() - t_ext
++    checks["pool_model_vs_avgpool2d_same_reshape_max_abs"] = max(pool_exact)
++    checks["pool_model_vs_f32_reimpl_max_rel"] = max(pool_f32)
++    checks["processor_vs_pil_reference_max_abs"] = max(ref_diff)
++    checks["processor_vs_pil_reference_note"] = "resize 구현 차이 허용; 공간 정렬은 spatial_transform으로 판정"
++    checks["pool_pass"] = bool(max(pool_exact) == 0.0 and max(pool_f32) < 1e-2)
++    checks["rgba_images"] = [r for r in rows if r["input"]["mode"] == "RGBA"]
++    checks["n_nonopaque"] = sum(1 for r in rows if r["input"]["mode"] == "RGBA" and not r["input"]["alpha_all_opaque"])
++    checks["peak_gpu_mem_gb"] = torch.cuda.max_memory_allocated() / 1e9
++    checks["extract_seconds"] = t_ext
++    checks["seconds_per_image"] = t_ext / N
++    checks["wall_seconds"] = time.time() - t_start
++    np.save(os.path.join(args.out, "Z_bf16.npy"), Z)
++    np.save(os.path.join(args.out, "P_model_bf16.npy"), Pm)
++    meta = {"images": rows, "shape": list(Z.shape), "dtype": "bfloat16", "storage": "uint16 view of bf16",
++            "feature_sha256": F.tensor_sha256(Z), "P_model_sha256": F.tensor_sha256(Pm),
++            "model_digest": checks["model_digest"], "processor_digest": F.processor_digest(),
++            "targets_sha256": F.sha256_file(args.targets), "selection": {"split": args.split, "limit": args.limit}}
++    F.dump(os.path.join(args.out, "cache_meta.json"), meta)
++    F.dump(os.path.join(args.out, "extract_checks.json"), checks)
++    print(json.dumps({k: checks[k] for k in ("pool_model_vs_avgpool2d_same_reshape_max_abs", "pool_model_vs_f32_reimpl_max_rel",
++                                             "processor_vs_pil_reference_max_abs", "pool_pass", "n_nonopaque",
++                                             "peak_gpu_mem_gb", "extract_seconds", "seconds_per_image",
++                                             "model_load_seconds", "wall_seconds")}, indent=1))
++    print("spatial", checks["spatial_transform"]["pass"], "token", checks["token_order"]["pass"],
++          "proj", checks["projector_synthetic"])
++
++
++if __name__ == "__main__":
++    main()
+diff --git a/fetch_nih_official_iter007.py b/fetch_nih_official_iter007.py
+new file mode 100644
+index 0000000..3a6a830
+--- /dev/null
++++ b/fetch_nih_official_iter007.py
+@@ -0,0 +1,111 @@
++"""iter_007: NIH 공식 Box 배포본(README·FAQ·LOG·BBox CSV·Data_Entry) 공개 조회 (CPU, 네트워크 소량).
++
++실행: python research/fetch_nih_official_iter007.py --page research/results/iter_006/coord_evidence/nih_box_official_page.html \
++          --out research/results/iter_007/official
++
++- 예산: 누적 20 MiB, ledger 계상 15분 (grounding_data/net.DownloadLedger). 인증·대용량이 필요하면 받지 않고 기록만 한다.
++- 파일 ID는 iter_006이 저장한 공식 Box 폴더 목록(공개 shared link 페이지)에서 읽는다. 공개 shared-file 다운로드 URL만 쓴다.
++- 받은 각 파일의 URL·HTTP 상태·bytes·sha256·Box 목록 크기(itemSize)·갱신 시각을 기록한다. PDF는 쪽별 text를 저장한다.
++- 응답이 로그인/HTML 페이지이거나 크기가 목록과 다르면 실패로 기록한다(자료로 쓰지 않음).
++"""
++import argparse
++import datetime
++import json
++import os
++import re
++import subprocess
++import sys
++import time
++
++sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
++from grounding_data import net  # noqa: E402
++
++BUDGET_BYTES = 20 * 1024 * 1024
++BUDGET_SECONDS = 15 * 60
++WANT = ["README_CHESTXRAY.pdf", "FAQ_CHESTXRAY.pdf", "LOG_CHESTXRAY.pdf", "BBox_List_2017.csv",
++        "Data_Entry_2017_v2020.csv"]
++BOX_HOST = "https://nihcc.app.box.com"
++
++
++def listing(page_path):
++    t = open(page_path, encoding="utf-8", errors="replace").read()
++    shared = re.search(r'"sharedName":"(\w+)"', t).group(1)
++    items = {}
++    for m in re.finditer(r'"typedID":"(f_\d+)","type":"file".{0,200}?"name":"([^"]+)","itemSize":(\d+),.{0,200}?'
++                         r'"contentUpdated":(\d+)', t):
++        items[m.group(2)] = {"typed_id": m.group(1), "itemSize": int(m.group(3)),
++                             "contentUpdated_utc": datetime.datetime.fromtimestamp(
++                                 int(m.group(4)), datetime.timezone.utc).strftime("%Y-%m-%d %H:%M:%S")}
++    return shared, items
++
++
++def pdf_pages(path):
++    info = subprocess.run(["pdfinfo", path], capture_output=True, text=True).stdout
++    n = next((int(ln.split()[1]) for ln in info.splitlines() if ln.startswith("Pages:")), 0)
++    out = []
++    for p in range(1, n + 1):
++        out.append(subprocess.run(["pdftotext", "-f", str(p), "-l", str(p), path, "-"],
++                                  capture_output=True, text=True).stdout)
++    return info, out
++
++
++def main():
++    ap = argparse.ArgumentParser()
++    ap.add_argument("--page", required=True)
++    ap.add_argument("--out", required=True)
++    args = ap.parse_args()
++    os.makedirs(args.out, exist_ok=True)
++    ledger = net.DownloadLedger(os.path.join(args.out, "download_ledger.json"), budget_bytes=BUDGET_BYTES,
++                                budget_seconds=BUDGET_SECONDS)
++    t0 = time.time()
++    shared, items = listing(args.page)
++    recs = {}
++    for name in WANT:
++        it = items.get(name)
++        rec = {"name": name, "listing": it, "fetched_at": time.strftime("%Y-%m-%d %H:%M:%S")}
++        if it is None:
++            recs[name] = {**rec, "ok": False, "error": "not_in_listing"}
++            continue
++        url = f"{BOX_HOST}/index.php?rm=box_download_shared_file&shared_name={shared}&file_id={it['typed_id']}"
++        rec["url"] = url
++        local = os.path.join(args.out, name)
++        try:
++            if os.path.exists(local) and os.path.getsize(local) == it["itemSize"]:
++                body, rec["fetch"] = open(local, "rb").read(), "cached"
++            else:
++                if time.time() - t0 > BUDGET_SECONDS:
++                    raise net.BudgetExceeded("wall budget")
++                body = ledger.get(url, name, expect_bytes=it["itemSize"])
++                rec["fetch"] = "downloaded"
++            head = body[:64]
++            if body[:15].lower().startswith(b"<!doctype html") or body[:6].lower() == b"<html>":
++                rec.update({"ok": False, "error": "html_response (login/interstitial?)", "bytes": len(body)})
++            elif len(body) != it["itemSize"]:
++                rec.update({"ok": False, "error": "size_differs_from_listing", "bytes": len(body)})
++            else:
++                with open(local, "wb") as f:
++                    f.write(body)
++                rec.update({"ok": True, "bytes": len(body), "sha256": net.sha256_bytes(body),
++                            "git_blob_sha1": net.git_blob_sha1(body), "local": local, "head": repr(head[:20])})
++                if name.endswith(".pdf"):
++                    info, pages = pdf_pages(local)
++                    rec["pdfinfo"] = info
++                    rec["n_pages"] = len(pages)
++                    for i, txt in enumerate(pages, start=1):
++                        with open(os.path.join(args.out, f"{name[:-4]}_p{i:02d}.txt"), "w") as f:
++                            f.write(txt)
++        except Exception as e:  # 접근 실패는 기록만 한다
++            rec.update({"ok": False, "error": repr(e)[:300]})
++        recs[name] = rec
++        print(name, rec.get("ok"), rec.get("bytes"), rec.get("n_pages"), rec.get("error"))
++    summary = {"shared_name": shared, "files": recs, "ledger_bytes_total": ledger.data["bytes_total"],
++               "ledger_network_seconds": ledger.data["seconds_total"], "ledger_n_requests": ledger.data["n_requests"],
++               "wall_seconds": time.time() - t0, "budget_bytes": BUDGET_BYTES, "budget_seconds": BUDGET_SECONDS,
++               "access": "공개 shared link만 사용 (인증 없음)",
++               "network_accounting_note": "ledger는 이 스크립트의 GET 본문만 계상한다. DNS·TLS·header 제외."}
++    with open(os.path.join(args.out, "fetch_summary.json"), "w") as f:
++        json.dump(summary, f, indent=1, ensure_ascii=False)
++
++
++if __name__ == "__main__":
++    main()
+diff --git a/gate_pooling_probe_iter007.py b/gate_pooling_probe_iter007.py
+new file mode 100644
+index 0000000..73935d5
+--- /dev/null
++++ b/gate_pooling_probe_iter007.py
+@@ -0,0 +1,119 @@
++"""iter_007 GPU 진입 gate: 13개 무결성 재검사 + 공식 배포본 대조 + 탐색 허용 정책 (CPU, 네트워크 없음).
++
++실행: python research/gate_pooling_probe_iter007.py --src research/results/iter_005 \
++          --evidence research/results/iter_006/coord_evidence --official research/results/iter_007/official \
++          --out research/results/iter_007
++
++- iter_005/006 산출물은 읽기 전용. 엄격한 lesion_probe_ready는 재계산만 하고 덮어쓰지 않는다.
++- 결과: results/iter_007/gate_iter007.json (exploratory_probe_allowed, 가정·근거 digest).
++"""
++import argparse
++import json
++import os
++import subprocess
++import sys
++import time
++
++sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
++from audit_grounding_iter006 import tree_digest  # noqa: E402
++from grounding_data import coord_evidence, nih_audit  # noqa: E402
++from pooling_probe import gate as G  # noqa: E402
++
++
++def pdf_pages_plain(path):
++    info = subprocess.run(["pdfinfo", path], capture_output=True, text=True).stdout
++    n = next((int(ln.split()[1]) for ln in info.splitlines() if ln.startswith("Pages:")), 0)
++    return [subprocess.run(["pdftotext", "-f", str(p), "-l", str(p), path, "-"], capture_output=True,
++                           text=True).stdout for p in range(1, n + 1)], info
++
++
++def main():
++    ap = argparse.ArgumentParser()
++    ap.add_argument("--src", required=True)
++    ap.add_argument("--evidence", required=True)
++    ap.add_argument("--official", required=True)
++    ap.add_argument("--out", required=True)
++    args = ap.parse_args()
++    t0 = time.time()
++    before = tree_digest(args.src)
++    inp = nih_audit.load_inputs(args.src)
++    selected = [r["image"] for r in inp["manifest"]]
++    fs = json.load(open(os.path.join(args.official, "fetch_summary.json")))
++    got = {k: v.get("ok") for k, v in fs["files"].items()}
++
++    checks, warnings, _ = nih_audit.run_checks(inp)
++    ev = coord_evidence.judge(args.evidence)
++    canvas = ev["coordinate_canvas_status"]
++
++    off_pages = {s: G.read_pages(args.official, s) for s in ("README_CHESTXRAY", "FAQ_CHESTXRAY", "LOG_CHESTXRAY")}
++    mirror_pages, mirror_info = pdf_pages_plain(os.path.join(args.evidence, "author_readme_mirror_pdf.pdf"))
++    readme_diff = G.pdf_text_diff(off_pages["README_CHESTXRAY"], mirror_pages)
++    hints = G.direct_canvas_hints(off_pages)
++    # iter_006에서 인용한 README 문장이 공식본에도 그대로 있는지
++    readme_claims = []
++    for key, src, page, quote, tag in coord_evidence.CLAIMS:
++        if src != "author_readme_mirror_pdf":
++            continue
++        txt = off_pages["README_CHESTXRAY"][page - 1] if page <= len(off_pages["README_CHESTXRAY"]) else ""
++        readme_claims.append({"key": key, "page": page, "tag": tag,
++                              "found_in_official": G._norm(quote) in G._norm(txt)})
++
++    rd = lambda p: open(p, encoding="utf-8").read()  # noqa: E731
++    bbox = G.bbox_compare(rd(os.path.join(args.official, "BBox_List_2017.csv")),
++                          inp["meta"]["data/BBox_List_2017.csv"].decode("utf-8"), selected)
++    entry = G.entry_compare(rd(os.path.join(args.official, "Data_Entry_2017_v2020.csv")),
++                            inp["meta"]["data/Data_Entry_2017_v2020.csv"].decode("utf-8"), selected)
++
++    contradictions = []
++    if not all(got.get(k) for k in ("README_CHESTXRAY.pdf", "BBox_List_2017.csv", "Data_Entry_2017_v2020.csv")):
++        contradictions.append({"what": "official_fetch_incomplete", "fetch": got})
++    if bbox["selected_image_box_differences"]:
++        contradictions.append({"what": "selected_bbox_differs_official", "n": len(bbox["selected_image_box_differences"])})
++    if bbox["official_out_of_assumed_canvas_lines"]:
++        contradictions.append({"what": "official_bbox_out_of_canvas", "lines": bbox["official_out_of_assumed_canvas_lines"][:10]})
++    if entry["selected_critical_changes"]:
++        contradictions.append({"what": "selected_data_entry_patient_or_finding_differs",
++                               "n": len(entry["selected_critical_changes"])})
++    if not all(c["found_in_official"] for c in readme_claims):
++        contradictions.append({"what": "readme_quote_missing_in_official", "claims": readme_claims})
++    if hints:
++        contradictions.append({"what": "possible_direct_canvas_statement_needs_manual_review", "hints": hints})
++
++    pol = G.exploratory_policy(checks, canvas, contradictions)
++    after = tree_digest(args.src)
++    evidence = {"official_files": {k: {"sha256": v.get("sha256"), "bytes": v.get("bytes"), "url": v.get("url"),
++                                       "n_pages": v.get("n_pages"), "listing": v.get("listing")}
++                                   for k, v in fs["files"].items()},
++                "coord_judgement_status": canvas, "direct_canvas_statement_found": ev["direct_canvas_statement_found"],
++                "iter006_claims": [{k: c[k] for k in ("key", "source", "sha256", "page", "quote_found_in_page")}
++                                   for c in ev["claims"]]}
++    out = {
++        "iteration": "iter_007", "gpu_device_minutes": 0.0,
++        "required_checks_pass": {k: checks[k]["pass"] for k in nih_audit.REQUIRED_CHECKS},
++        **pol,
++        "strict_readiness_note": "lesion_probe_ready(엄격)는 false 유지. 이번 파일은 iter_006 readiness를 덮어쓰지 않는다.",
++        "assumptions": ["BBox_List_2017.csv의 x,y,w,h는 배포 1024×1024 PNG pixel 좌표 (assumed; 직접 문장 없음)",
++                        "HF 미러 영상 pixel = 원배포 영상 pixel (unverified; 영상 원본은 이번에 받지 않음)"],
++        "official_vs_mirror": {"readme_text": readme_diff, "readme_official_pdfinfo": fs["files"]["README_CHESTXRAY.pdf"].get("pdfinfo"),
++                               "readme_mirror_pdfinfo": mirror_info, "readme_claims_in_official": readme_claims,
++                               "direct_canvas_hints": hints, "bbox_csv": bbox, "data_entry": entry},
++        "evidence": evidence, "evidence_digest_sha256": G.digest(evidence),
++        "fetch": {k: fs[k] for k in ("ledger_bytes_total", "ledger_network_seconds", "ledger_n_requests", "wall_seconds",
++                                     "budget_bytes", "budget_seconds", "access")},
++        "warnings": warnings,
++        "inputs_unchanged": before == after, "input_digest_sha256": G.digest(before),
++        "wall_seconds": time.time() - t0,
++    }
++    with open(os.path.join(args.out, "gate_iter007.json"), "w") as f:
++        json.dump(out, f, indent=1, ensure_ascii=False, default=str)
++    print(json.dumps({k: out[k] for k in ("integrity_gate_pass", "coordinate_canvas_status", "lesion_probe_ready",
++                                          "exploratory_probe_allowed", "blocking_reasons", "inputs_unchanged")},
++                     indent=1, ensure_ascii=False))
++    print("bbox identical", bbox["bytes_identical"], "entry identical", entry["bytes_identical"],
++          "entry body identical", entry["body_after_header_bytes_identical"], entry["renamed_columns_official_vs_mirror"],
++          "entry rows changed", entry["n_rows_changed"], "selected changed", len(entry["selected_rows_changed"]),
++          "readme text identical", readme_diff["normalized_text_identical"], readme_diff["pages_text_differ"])
++
++
++if __name__ == "__main__":
++    main()
+diff --git a/notes/pooling_probe_iter007.md b/notes/pooling_probe_iter007.md
+new file mode 100644
+index 0000000..9fe83cf
+--- /dev/null
++++ b/notes/pooling_probe_iter007.md
+@@ -0,0 +1,32 @@
++# iter_007 pooling-feature-probe: Z 대 U(P(Z)) 결과 요약
++
++## Gate (`results/iter_007/gate_iter007.json`)
++- 공식 NIH Box에서 공개 shared link로 README·FAQ·LOG·BBox CSV·Data_Entry를 받았다 (10.6 MB, 인증 없음).
++- `BBox_List_2017.csv`: 공식본과 미러가 byte 단위로 같다.
++- `Data_Entry_2017_v2020.csv`: header 한 열 이름만 다르다(공식 `Patient Sex`, 미러 `Patient Gender`). header 아래 본문은 byte 단위로 같다.
++- README: 쪽 1·2의 연락처 줄과 `OpenI`/`Openi` 표기만 다르다. bbox 좌표계를 1024 PNG로 지정하는 직접 문장은 공식 README·FAQ·LOG 어디에도 없다.
++- 판정: `coordinate_canvas_status=assumed`, `lesion_probe_ready=false`(유지), `exploratory_probe_allowed=true`.
++
++## 추출 (`results/iter_007/features/extract_checks.json`)
++- Z = `vision_tower(...).last_hidden_state`(projector 입력, 64×64×1152, bf16)이고, P = projector 안의 `AvgPool2d(4)` 출력이다.
++- 같은 reshape에 `avg_pool2d`를 적용한 결과가 실제 P와 bit 단위로 같다(max abs 0). float32 재구현과의 상대 오차는 최대 2.3e-3(bf16 반올림)이다.
++- 합성 직사각형으로 공간 변환을 확인했다: 896/1024 등방 축소이고 crop·padding은 없다.
++- patch 교란 시험에서 token 순서가 row-major(r*64+c)임을 확인했다. processor 출력은 PIL 재현값과 완전히 같다.
++- RGBA 1장(00001369_000)은 alpha가 모두 255이고 composite 결과가 RGB와 같다. 비불투명 영상은 0장이다.
++
++## 결과 (`results/iter_007/probe/probe_results.json`, test 48명, 3 seed 평균, lr=1e-3 두 head 모두 validation 선택)
++| coarse soft-IoU | patient macro |
++|---|---|
++| MLP Z | 0.2574 |
++| MLP U(P(Z)) | 0.2571 |
++| linear Z = U(P(Z)) | 0.1990 |
++| train 위치 prior | 0.1751 |
++| MLP Z image-swap | 0.1583 |
++
++- MLP Z − U(P(Z)) = +0.0003, 95% CI [−0.0010, +0.0016]. 투자 기준(≥0.03, CI 하한>0)에 **미달**한다.
++- Z는 prior보다 +0.082, image-swap보다 +0.099 높다. 따라서 head는 image-specific 위치 정보를 읽는다. 다만 이 정보는 pooling 후 feature에서도 똑같이 읽힌다.
++- linear 대조군: 두 조건의 coarse prob 차이는 최대 3.6e-7이고 macro 차이는 2e-10이다(허용오차 5e-3 / 1e-3 이내).
++- fine(부차 분석, coarse loss만 사용): Z가 오히려 낮다(MLP −0.019). fine 해상도를 감독하지 않았으므로 subcell 위치 접근성의 증거로 해석하지 않는다.
++
++## 판정
++유효한 완료 실험(`status.json` eval_complete=true)이다. 이번 설정(coarse 16×16 target, 동일 용량 pointwise head, 200 update)에서는 pooling 가설이 **지지되지 않았다**. assumed canvas 조건이 붙은 결과다.
+diff --git a/pooling_probe/__init__.py b/pooling_probe/__init__.py
+new file mode 100644
+index 0000000..bd1ff25
+--- /dev/null
++++ b/pooling_probe/__init__.py
+@@ -0,0 +1 @@
++"""iter_007 pooling-feature-probe: pooling 전 vision feature Z 대 U(P(Z))의 병변 위치 readout 비교."""
+diff --git a/pooling_probe/evaluate.py b/pooling_probe/evaluate.py
+new file mode 100644
+index 0000000..321c8d1
+--- /dev/null
++++ b/pooling_probe/evaluate.py
+@@ -0,0 +1,49 @@
++"""평가 집계 (iter_007): seed별 patient 점수 → 같은 patient의 seed 평균 → 공유 patient bootstrap.
++
++seed를 독립 patient처럼 쌓지 않는다: bootstrap은 항상 길이 n_patients 벡터에 적용한다.
++"""
++import numpy as np
++
++from grounding_data import class_targets as CT
++
++
++def run_scores(pred, target, observed, patient_id, sel):
++    """한 run(seed)의 split sel 점수. 반환: per_patient 벡터(정렬된 patient 순), 쌍 점수 행렬, patients."""
++    S = CT.score_matrix(pred[sel], target[sel], observed[sel])
++    ag = CT.aggregate(S, observed[sel], patient_id[sel])
++    return {"per_patient": ag["per_patient"], "patients": ag["patients"], "pair_scores": S,
++            "patient_macro": ag["patient_macro"], "per_class": ag["per_class"]}
++
++
++def swap_pred(pred, donor):
++    """image-swap 예측: out[i,k] = pred[donor[i,k], k] (donor -1이면 NaN으로 두어 평가 제외 확인)."""
++    out = np.full_like(pred, np.nan, dtype=np.float64)
++    N, K = donor.shape
++    for i in range(N):
++        for k in range(K):
++            if donor[i, k] >= 0:
++                out[i, k] = pred[donor[i, k], k]
++    return out
++
++
++def seed_average(runs):
++    """runs: seed별 run_scores 결과 리스트 → patient별 seed 평균(길이 n_patients)과 쌍별 seed 평균."""
++    pats = runs[0]["patients"]
++    for r in runs:
++        if r["patients"] != pats:
++            raise ValueError("patient order differs across seeds")
++    pp = np.mean([r["per_patient"] for r in runs], axis=0)
++    pair = np.mean([r["pair_scores"] for r in runs], axis=0)  # NaN(unknown) 위치는 seed 간 동일
++    return {"per_patient": pp, "patients": pats, "pair_scores": pair, "patient_macro": float(pp.mean()),
++            "per_seed_macro": [float(r["patient_macro"]) for r in runs]}
++
++
++def per_class_means(pair_scores, observed_sel):
++    K = observed_sel.shape[1]
++    return [float(pair_scores[observed_sel[:, k], k].mean()) for k in range(K)]
++
++
++def paired(a, b, idx):
++    if len(a) != idx.shape[1] or len(b) != idx.shape[1]:
++        raise ValueError("bootstrap index length must equal number of patients")
++    return CT.paired_bootstrap_ci(a, b, idx)
+diff --git a/pooling_probe/features.py b/pooling_probe/features.py
+new file mode 100644
+index 0000000..9fc778c
+--- /dev/null
++++ b/pooling_probe/features.py
+@@ -0,0 +1,113 @@
++"""입력 전처리·feature 추출 지점·pooling 재구현·cache 무결성 (iter_007).
++
++Feature 지점 (transformers Gemma3Model.get_image_features 확인):
++  Z = vision_tower(pixel_values).last_hidden_state  (B, 4096, 1152), token t ↔ (row t//64, col t%64)
++  projector: Z.transpose(1,2).reshape(B,1152,64,64) → AvgPool2d(4) → RMSNorm → projection
++  → 비교는 AvgPool2d 출력(P)까지만 쓴다. RMSNorm·projection은 섞지 않는다.
++"""
++import hashlib
++import json
++import os
++
++import numpy as np
++from PIL import Image
++
++GRID = 64
++POOL = 4
++C = 1152
++MODEL_DIR = ("/SSD1_1TB/home/milab/daniel/08_medgemma/hf_cache/hub/models--google--medgemma-1.5-4b-it/"
++             "snapshots/91850547d9f0b2fdd21aa7c5f4f3d1a8a52c243b")
++MODEL_REVISION = "91850547d9f0b2fdd21aa7c5f4f3d1a8a52c243b"
++
++
++def sha256_file(p):
++    h = hashlib.sha256()
++    with open(p, "rb") as f:
++        for c in iter(lambda: f.read(1 << 20), b""):
++            h.update(c)
++    return h.hexdigest()
++
++
++def load_rgb(path):
++    """L → 같은 값을 RGB 3채널로 복제. RGBA → 검정 배경 alpha composite. 그 외 mode는 거부.
++
++    반환: (RGB PIL, 기록용 dict). RGBA가 모두 opaque면 RGB 채널 drop과 같은지 확인한다.
++    """
++    im = Image.open(path)
++    im.load()
++    info = {"mode": im.mode, "size": list(im.size)}
++    if im.mode == "L":
++        a = np.asarray(im)
++        rgb = np.repeat(a[..., None], 3, axis=2)
++    elif im.mode == "RGBA":
++        a = np.asarray(im).astype(np.float64)
++        alpha = a[..., 3] / 255.0
++        comp = np.round(a[..., :3] * alpha[..., None]).astype(np.uint8)  # 검정(0) 배경
++        info.update({"alpha_min": int(a[..., 3].min()), "alpha_max": int(a[..., 3].max()),
++                     "alpha_all_opaque": bool((a[..., 3] == 255).all()),
++                     "rgb_channels_equal": bool((a[..., 0] == a[..., 1]).all() and (a[..., 1] == a[..., 2]).all()),
++                     "channel_mean": [float(a[..., i].mean()) for i in range(4)]})
++        info["composite_equals_rgb_drop"] = bool((comp == a[..., :3].astype(np.uint8)).all())
++        rgb = comp
++    else:
++        raise ValueError(f"unsupported mode {im.mode}")
++    return Image.fromarray(np.ascontiguousarray(rgb), "RGB"), info
++
++
++def reference_pixel_values(rgb, size=896):
++    """processor 설정(resize bilinear 896, /255, (x-0.5)/0.5)을 PIL로 직접 재현한 비교 기준 (C,H,W)."""
++    r = rgb.resize((size, size), resample=Image.BILINEAR)
++    x = np.asarray(r).astype(np.float32) / 255.0
++    return ((x - 0.5) / 0.5).transpose(2, 0, 1)
++
++
++def pool_tokens(z, pool=POOL, grid=GRID):
++    """재구현 P: token (…, 4096, C) → (…, 16, 16, C) 4×4 평균 (row-major token 순서)."""
++    s = z.shape
++    x = z.reshape(s[:-2] + (grid // pool, pool, grid // pool, pool, s[-1]))
++    return x.mean(axis=(-4, -2)) if isinstance(x, np.ndarray) else x.mean(dim=(-4, -2))
++
++
++def model_digest(model_dir=MODEL_DIR):
++    files = ["config.json", "model.safetensors.index.json", "preprocessor_config.json", "processor_config.json"]
++    d = {f: sha256_file(os.path.join(model_dir, f)) for f in files}
++    # LFS blob 이름 = 가중치 파일 sha256 (symlink 대상)
++    for f in ("model-00001-of-00002.safetensors", "model-00002-of-00002.safetensors"):
++        d[f + "_blob"] = os.path.basename(os.path.realpath(os.path.join(model_dir, f)))
++    d["revision"] = MODEL_REVISION
++    return d
++
++
++def processor_digest(model_dir=MODEL_DIR):
++    return {f: sha256_file(os.path.join(model_dir, f)) for f in ("preprocessor_config.json", "processor_config.json")}
++
++
++def tensor_sha256(arr_u16):
++    """bf16 텐서를 uint16 view(np)로 받아 byte hash."""
++    return hashlib.sha256(np.ascontiguousarray(arr_u16).tobytes()).hexdigest()
++
++
++class CacheError(RuntimeError):
++    pass
++
++
++def verify_cache(meta, Z_u16, target_ids, target_patients):
++    """cache를 쓰기 전 검사: ID·patient 순서 일치, shape·dtype, feature hash. 하나라도 틀리면 CacheError."""
++    ids = [r["image_id"] for r in meta["images"]]
++    pats = [r["patient_id"] for r in meta["images"]]
++    if ids != list(target_ids):
++        raise CacheError("image_id order/content differs from targets")
++    if pats != list(target_patients):
++        raise CacheError("patient_id differs from targets")
++    if list(Z_u16.shape) != meta["shape"] or str(Z_u16.dtype) != "uint16" or meta["dtype"] != "bfloat16":
++        raise CacheError(f"shape/dtype mismatch {Z_u16.shape} {Z_u16.dtype} vs {meta['shape']} {meta['dtype']}")
++    if tensor_sha256(Z_u16) != meta["feature_sha256"]:
++        raise CacheError("feature tensor hash mismatch (tampered?)")
++    return True
++
++
++def dump(path, obj):
++    tmp = path + ".tmp"
++    with open(tmp, "w") as f:
++        json.dump(obj, f, indent=1, ensure_ascii=False, default=str)
++    os.replace(tmp, path)
+diff --git a/pooling_probe/gate.py b/pooling_probe/gate.py
+new file mode 100644
+index 0000000..5f3f921
+--- /dev/null
++++ b/pooling_probe/gate.py
+@@ -0,0 +1,131 @@
++"""공식 배포본 대조와 탐색 probe 허용 정책 (iter_007, CPU).
++
++- 엄격한 `lesion_probe_ready`(integrity AND documented_direct)는 그대로 두고 덮어쓰지 않는다.
++- `exploratory_probe_allowed` = 13개 필수 검사 통과 AND canvas status == "assumed" AND 새 모순 없음.
++  새 모순: 공식본 README/FAQ에서 좌표 규약과 충돌하는 문장, 선택 160장의 annotation·patient·finding 차이,
++  공식 BBox CSV의 좌표가 가정 canvas를 벗어남. 하나라도 있으면 GPU 진입을 막는다.
++- canvas status가 undocumented이거나 integrity 실패면 막는다. documented_direct면 엄격 gate를 재평가한다.
++"""
++import hashlib
++import json
++import os
++import re
++
++from grounding_data import nih, nih_audit
++
++# 공식 문서에서 직접 canvas 문장 후보를 찾는 패턴 (찾으면 원문 확인 전까지 판정을 바꾸지 않고 보고만 한다)
++DIRECT_HINT = re.compile(r"(bbox|bounding box|b-box)[^.]{0,120}(pixel|1024|coordinate system|image coordinate)", re.I)
++
++
++def _norm(s):
++    return " ".join(s.replace(" ", " ").split())
++
++
++def pdf_text_diff(official_pages, mirror_pages):
++    """쪽별 정규화 text 비교. 반환: 같은 쪽 수 여부, 다른 쪽 번호, 공식본에만 있는 줄(최대 40개)."""
++    o = [_norm(t) for t in official_pages]
++    m = [_norm(t) for t in mirror_pages]
++    diff_pages = [i + 1 for i in range(max(len(o), len(m))) if (o[i] if i < len(o) else None) != (m[i] if i < len(m) else None)]
++    ol = {ln.strip() for t in official_pages for ln in t.splitlines() if ln.strip()}
++    ml = {ln.strip() for t in mirror_pages for ln in t.splitlines() if ln.strip()}
++    return {"n_pages_official": len(o), "n_pages_mirror": len(m), "pages_text_differ": diff_pages,
++            "lines_only_in_official": sorted(ol - ml)[:40], "lines_only_in_mirror": sorted(ml - ol)[:40],
++            "normalized_text_identical": o == m}
++
++
++def direct_canvas_hints(pages_by_doc):
++    out = []
++    for doc, pages in pages_by_doc.items():
++        for i, t in enumerate(pages, start=1):
++            for m in DIRECT_HINT.finditer(_norm(t)):
++                out.append({"doc": doc, "page": i, "text": m.group(0)[:300]})
++    return out
++
++
++def bbox_compare(official_text, mirror_text, selected_images):
++    ob, orep = nih.parse_bbox_csv(official_text)
++    mb, mrep = nih.parse_bbox_csv(mirror_text)
++    key = lambda b: (b["image"], b["label"], tuple(b["xywh"]))  # noqa: E731
++    oset, mset = [key(b) for b in ob], [key(b) for b in mb]
++    sel = set(selected_images)
++    diff = sorted(set(oset) ^ set(mset))
++    sel_diff = [d for d in diff if d[0] in sel]
++    oob = [b["line"] for b in ob if b["xyxy"][2] > nih_audit.CANVAS[0] or b["xyxy"][3] > nih_audit.CANVAS[1]]
++    return {"bytes_identical": official_text == mirror_text, "n_boxes_official": len(ob), "n_boxes_mirror": len(mb),
++            "n_box_set_differences": len(diff), "selected_image_box_differences": [list(map(str, d)) for d in sel_diff],
++            "official_header": orep["raw_header"], "official_out_of_assumed_canvas_lines": oob}
++
++
++def entry_compare(official_text, mirror_text, selected_images):
++    oe, orep = nih.parse_data_entry(official_text)
++    me, mrep = nih.parse_data_entry(mirror_text)
++    ohead = [h.strip() for h in orep["raw_header"]]
++    mhead = [h.strip() for h in mrep["raw_header"]]
++    common = set(oe) & set(me)
++    changed_all = [i for i in common if oe[i] != me[i]]
++    sel = sorted(selected_images)
++    sel_changed = {}
++    for i in sel:
++        if i not in oe or i not in me:
++            sel_changed[i] = {"missing_in": "official" if i not in oe else "mirror"}
++            continue
++        d = {c: [oe[i].get(c), me[i].get(c)] for c in set(oe[i]) | set(me[i]) if oe[i].get(c) != me[i].get(c)}
++        if d:
++            sel_changed[i] = d
++    critical = {i: d for i, d in sel_changed.items()
++                if "missing_in" in d or "Patient ID" in d or "Finding Labels" in d}
++    # 전체 파일에서 바뀐 column 분포 (구조화된 차이 요약)
++    col_counts = {}
++    for i in changed_all:
++        for c in set(oe[i]) | set(me[i]):
++            if oe[i].get(c) != me[i].get(c):
++                col_counts[c] = col_counts.get(c, 0) + 1
++    raw_o, raw_m = official_text.encode(), mirror_text.encode()
++    # header 이름을 빼고 위치 기준으로 모든 행의 값을 비교 (column 이름 변경만 있는지 확인)
++    body_o = official_text.split("\n", 1)[1]
++    body_m = mirror_text.split("\n", 1)[1]
++    renamed = [[a, b] for a, b in zip(ohead, mhead) if a != b]
++    return {"bytes_identical": raw_o == raw_m, "body_after_header_bytes_identical": body_o == body_m,
++            "renamed_columns_official_vs_mirror": renamed, "bytes_official": len(raw_o), "bytes_mirror": len(raw_m),
++            "header_official": ohead, "header_mirror": mhead, "header_equal": ohead == mhead,
++            "n_rows_official": orep["n_rows"], "n_rows_mirror": mrep["n_rows"],
++            "only_in_official": len(set(oe) - set(me)), "only_in_mirror": len(set(me) - set(oe)),
++            "n_rows_changed": len(changed_all), "changed_columns_count": col_counts,
++            "changed_rows_examples": {i: {c: [oe[i].get(c), me[i].get(c)] for c in set(oe[i]) | set(me[i])
++                                          if oe[i].get(c) != me[i].get(c)} for i in sorted(changed_all)[:5]},
++            "line_ending_official_crlf": b"\r\n" in raw_o[:2000], "line_ending_mirror_crlf": b"\r\n" in raw_m[:2000],
++            "trailing_newline_official": raw_o.endswith(b"\n"), "trailing_newline_mirror": raw_m.endswith(b"\n"),
++            "selected_rows_changed": sel_changed, "selected_critical_changes": critical}
++
++
++def exploratory_policy(checks, canvas_status, contradictions):
++    rd = nih_audit.readiness(checks, canvas_status)
++    reasons = []
++    if not rd["integrity_gate_pass"]:
++        reasons.append({"what": "integrity_failed", "failed": rd["failed_required_checks"]})
++    if canvas_status == "undocumented":
++        reasons.append({"what": "canvas_undocumented"})
++    if contradictions:
++        reasons.append({"what": "new_contradictions", "items": contradictions})
++    if canvas_status == "documented_direct":
++        allowed = rd["lesion_probe_ready"] and not contradictions
++        mode = "strict"
++    else:
++        allowed = bool(rd["integrity_gate_pass"] and canvas_status == "assumed" and not contradictions)
++        mode = "exploratory_assumed"
++    return {**rd, "exploratory_probe_allowed": allowed, "gate_mode": mode, "blocking_reasons": reasons,
++            "exploratory_definition": "integrity_gate_pass AND canvas_status == assumed AND no new contradiction "
++                                      "(좌표 모순·선택 자료 annotation/patient/finding 차이·official 좌표 canvas 초과)",
++            "interpretation": "assumed 상태 통과는 조건부 탐색 신호이며 확증 결과가 아니다"}
++
++
++def digest(obj):
++    return hashlib.sha256(json.dumps(obj, sort_keys=True, ensure_ascii=False, default=str).encode()).hexdigest()
++
++
++def read_pages(dirname, stem):
++    pages, i = [], 1
++    while os.path.exists(os.path.join(dirname, f"{stem}_p{i:02d}.txt")):
++        pages.append(open(os.path.join(dirname, f"{stem}_p{i:02d}.txt"), encoding="utf-8", errors="replace").read())
++        i += 1
++    return pages
+diff --git a/pooling_probe/probe.py b/pooling_probe/probe.py
+new file mode 100644
+index 0000000..6b591e9
+--- /dev/null
++++ b/pooling_probe/probe.py
+@@ -0,0 +1,114 @@
++"""Pointwise head 학습과 coarse loss (iter_007, torch).
++
++- 조건: "Z" = pooling 전 feature (B,64,64,C), "UPZ" = U(P(Z)) (4×4 평균 후 nearest upsampling).
++- head: linear C→4, MLP C→128→4 (GELU, dropout 없음). 두 조건에서 같은 seed → 같은 초기 가중치.
++- 주분석 loss: BCEWithLogits(P(head(feature)), coarse_target). 관측 image–class 쌍마다 공간 평균 → 쌍 평균.
++  unknown(observed=False) 쌍은 제외 (gradient 0).
++- 예측: fine = sigmoid(head(feature)), coarse = sigmoid(P(head(feature))).
++"""
++import numpy as np
++import torch
++import torch.nn as nn
++import torch.nn.functional as TF
++
++K = 4
++HIDDEN = 128
++
++
++def make_head(kind, C, seed, dtype=torch.float32):
++    g = torch.Generator().manual_seed(int(seed))
++    if kind == "linear":
++        m = nn.Linear(C, K)
++        layers = [m]
++    elif kind == "mlp":
++        layers = [nn.Linear(C, HIDDEN), nn.GELU(), nn.Linear(HIDDEN, K)]
++        m = nn.Sequential(*layers)
++    else:
++        raise ValueError(kind)
++    # nn.Linear 기본 초기화(kaiming_uniform a=√5, bias uniform)와 같은 분포를 전용 generator로 재현
++    for l in layers:
++        if isinstance(l, nn.Linear):
++            bound = 1.0 / np.sqrt(l.in_features)
++            with torch.no_grad():
++                l.weight.uniform_(-bound, bound, generator=g)
++                l.bias.uniform_(-bound, bound, generator=g)
++    return m.to(dtype)
++
++
++def n_params(m):
++    return int(sum(p.numel() for p in m.parameters()))
++
++
++def pool_grid(x, pool=4):
++    """x (B,h,w,C) → (B,h/pool,w/pool,C) 평균."""
++    B, h, w, C = x.shape
++    return x.reshape(B, h // pool, pool, w // pool, pool, C).mean(dim=(2, 4))
++
++
++def upsample_grid(x, pool=4):
++    return x.repeat_interleave(pool, dim=1).repeat_interleave(pool, dim=2)
++
++
++def condition_input(feat, cond, pool=4):
++    """feat (B,64,64,C) float → 조건 입력. UPZ는 같은 feature에서 P 후 U."""
++    if cond == "Z":
++        return feat
++    if cond == "UPZ":
++        return upsample_grid(pool_grid(feat, pool), pool)
++    raise ValueError(cond)
++
++
++def forward_logits(head, x, pool=4):
++    """x (B,h,w,C) → fine logits (B,K,h,w), coarse logits (B,K,h/pool,w/pool) = P(fine logits)."""
++    fine = head(x).permute(0, 3, 1, 2)
++    coarse = TF.avg_pool2d(fine, pool)
++    return fine, coarse
++
++
++def masked_pair_bce(coarse_logits, target, observed):
++    """(B,K,h,w) logits/target, observed (B,K) bool → 관측 쌍별 공간 평균 BCE의 평균."""
++    per = TF.binary_cross_entropy_with_logits(coarse_logits, target, reduction="none").mean(dim=(2, 3))
++    m = observed.bool()
++    if not m.any():
++        raise ValueError("no observed pair in batch")
++    return per[m].mean()
++
++
++def batch_schedule(n_train, n_updates, batch, seed):
++    """epoch별 permutation을 이어 붙인 고정 batch 순서 (n_updates, batch). 두 조건이 공유한다."""
++    rng = np.random.default_rng(int(seed))
++    need = n_updates * batch
++    order = []
++    while len(order) < need:
++        order.extend(rng.permutation(n_train).tolist())
++    return np.array(order[:need]).reshape(n_updates, batch)
++
++
++def train_head(kind, cond, feats, targets, observed, schedule, lr, seed, device, pool=4, C=None, log_every=1):
++    """feats: callable(idx)->(B,64,64,C) float32 on device. 반환 (head, losses list)."""
++    C = C or feats(np.array([0])).shape[-1]
++    head = make_head(kind, C, seed).to(device)
++    opt = torch.optim.AdamW(head.parameters(), lr=lr, weight_decay=0.0)
++    losses = []
++    for u, idx in enumerate(schedule):
++        x = condition_input(feats(idx), cond, pool)
++        _, co = forward_logits(head, x, pool)
++        loss = masked_pair_bce(co, targets[idx], observed[idx])
++        opt.zero_grad(set_to_none=True)
++        loss.backward()
++        opt.step()
++        if u % log_every == 0 or u == len(schedule) - 1:
++            losses.append(float(loss.detach()))
++    return head, losses
++
++
++@torch.no_grad()
++def predict(head, cond, feats, n, device, pool=4, bs=8):
++    """모든 영상 예측: coarse prob (N,K,16,16) float32, fine prob (N,K,64,64) float16."""
++    co_all, fi_all = [], []
++    for b in range(0, n, bs):
++        idx = np.arange(b, min(n, b + bs))
++        fine, co = forward_logits(head, condition_input(feats(idx), cond, pool), pool)
++        co_all.append(torch.sigmoid(co).float().cpu())
++        fi_all.append(torch.sigmoid(fine).half().cpu())
++    return torch.cat(co_all).numpy(), torch.cat(fi_all).numpy()
+diff --git a/run_pooling_probe_iter007.py b/run_pooling_probe_iter007.py
+new file mode 100644
+index 0000000..7ee52d5
+--- /dev/null
++++ b/run_pooling_probe_iter007.py
+@@ -0,0 +1,294 @@
++"""iter_007: Z 대 U(P(Z)) pointwise head probe — 학습 24개, validation LR 선택, test 평가, 대조군, bootstrap.
++
++실행 (pilot, 추출 pilot 4장으로 비용 실측):
++  python research/run_pooling_probe_iter007.py --gpu 1 --features research/results/iter_007/pilot --pilot \
++      --out research/results/iter_007/pilot_train
++실행 (본 실험):
++  python research/run_pooling_probe_iter007.py --gpu 1 --features research/results/iter_007/features \
++      --out research/results/iter_007/probe
++
++고정 설정 (계획 iter_007, 결과를 보고 바꾸지 않음)
++- head: linear 1152→4, MLP 1152→128→4 GELU. AdamW wd=0, batch 8, 200 updates, lr ∈ {1e-3, 3e-4}, seed ∈ {0,1,2}.
++- loss: BCEWithLogits(P(head(feature)), coarse_target), 관측 쌍별 공간 평균 → 쌍 평균.
++- LR 선택: head 종류별로 두 조건 × 3 seed의 validation coarse soft-IoU(patient macro) 평균 최대, 동률이면 작은 lr.
++  마지막 update를 평가. selection 파일을 먼저 쓰고 그 뒤에만 test 점수를 계산한다.
++- linear 대조군 허용오차(test 전 고정): LIN_TOL_PROB, LIN_TOL_MACRO.
++- 예산: 추출 포함 45 device-min. 초과 예상이면 시작하지 않고, 도달하면 partial로 중단한다.
++"""
++import argparse
++import hashlib
++import json
++import os
++import sys
++import time
++
++ap = argparse.ArgumentParser()
++ap.add_argument("--gpu", default="1")
++ap.add_argument("--features", required=True)
++ap.add_argument("--out", required=True)
++ap.add_argument("--pilot", action="store_true")
++ap.add_argument("--extract-device-min", type=float, default=None, help="추출에 쓴 device-min (예산 합산)")
++_here = os.path.dirname(os.path.abspath(__file__))
++ap.add_argument("--gate", default=os.path.join(_here, "results/iter_007/gate_iter007.json"))
++ap.add_argument("--tests", default=os.path.join(_here, "results/iter_007/tests_iter007.json"))
++ap.add_argument("--targets", default=os.path.join(_here, "results/iter_006/nih_class_targets.npz"))
++args = ap.parse_args()
++os.environ["CUDA_VISIBLE_DEVICES"] = args.gpu
++
++import numpy as np  # noqa: E402
++import torch  # noqa: E402
++
++sys.path.insert(0, _here)
++from grounding_data import class_targets as CT  # noqa: E402
++from pooling_probe import evaluate as E  # noqa: E402
++from pooling_probe import features as F  # noqa: E402
++from pooling_probe import probe as PR  # noqa: E402
++
++KINDS = ["linear", "mlp"]
++CONDS = ["Z", "UPZ"]
++LRS = [3e-4, 1e-3]  # 오름차순 (동률이면 작은 lr)
++SEEDS = [0, 1, 2]
++N_UPDATES = 200
++BATCH = 8
++BUDGET_DEVICE_MIN = 45.0
++LIN_TOL_PROB = 5e-3   # linear: 두 조건의 coarse prob 최대 절대 차이
++LIN_TOL_MACRO = 1e-3  # linear: 두 조건의 patient macro soft-IoU 차이
++MARGIN = 0.03
++B_BOOT = 2000
++
++
++def sha(path):
++    return F.sha256_file(path)
++
++
++def dump(path, obj):
++    F.dump(path, obj)
++
++
++def main():
++    t_start = time.time()
++    os.makedirs(args.out, exist_ok=True)
++    status_path = os.path.join(args.out, "status.json")
++    status = {"state": "running", "eval_complete": False, "started": time.strftime("%Y-%m-%d %H:%M:%S")}
++    dump(status_path, status)
++
++    gate = json.load(open(args.gate))
++    if gate.get("exploratory_probe_allowed") is not True:
++        raise SystemExit("gate blocks")
++    tests = json.load(open(args.tests)) if os.path.exists(args.tests) else None
++    if not args.pilot and not (tests and tests.get("all_pass") is True):
++        raise SystemExit("verification tests not passed; run test_pooling_probe_iter007.py first")
++
++    tg = np.load(args.targets)
++    meta = json.load(open(os.path.join(args.features, "cache_meta.json")))
++    ids = [r["image_id"] for r in meta["images"]]
++    tidx = {str(x): i for i, x in enumerate(tg["image_id"])}
++    rows = np.array([tidx[i] for i in ids])  # cache 순서 → target index
++    if not args.pilot:
++        if len(rows) != len(tg["image_id"]) or not (rows == np.arange(len(rows))).all():
++            raise SystemExit("full cache must cover all targets in order")
++    Zu = np.load(os.path.join(args.features, "Z_bf16.npy"))
++    F.verify_cache(meta, Zu, [str(x) for x in tg["image_id"][rows]], [str(x) for x in tg["patient_id"][rows]])
++    coarse = tg["coarse"][rows]
++    fine = tg["fine"][rows]
++    obs = tg["observed"][rows]
++    split = tg["split"][rows]
++    pid = tg["patient_id"][rows]
++    N = len(rows)
++
++    device = "cuda"
++    Zg = torch.from_numpy(Zu.view(np.int16)).view(torch.bfloat16).to(device)
++    del Zu
++    tgt_c = torch.from_numpy(coarse).float().to(device)
++    obs_t = torch.from_numpy(obs).to(device)
++    feats = lambda idx: Zg[torch.as_tensor(idx, device=device)].float()  # noqa: E731
++    train_idx = np.where(split == "train")[0]
++    feats_train = lambda j: feats(train_idx[j])  # noqa: E731
++    tgt_train, obs_train = tgt_c[train_idx], obs_t[train_idx]
++
++    prior_min = args.extract_device_min or 0.0
++    runs, times = {}, {}
++    plan = [(k, lr, s, c) for k in KINDS for lr in LRS for s in SEEDS for c in CONDS]
++    if args.pilot:
++        plan = [(k, 1e-3, 0, c) for k in KINDS for c in CONDS]
++    pred_dir = os.path.join(args.out, "predictions")
++    os.makedirs(pred_dir, exist_ok=True)
++    partial = None
++    for (k, lr, s, c) in plan:
++        used = prior_min + (time.time() - t_start) / 60
++        if used > BUDGET_DEVICE_MIN:
++            partial = f"budget reached at {used:.1f} device-min before {k}/{c}/lr{lr}/s{s}"
++            break
++        sched = PR.batch_schedule(len(train_idx), N_UPDATES, BATCH, s)
++        torch.cuda.synchronize()
++        t0 = time.time()
++        head, losses = PR.train_head(k, c, feats_train, tgt_train, obs_train, sched, lr, s, device, C=F.C)
++        torch.cuda.synchronize()
++        t_tr = time.time() - t0
++        cp, fp = PR.predict(head, c, feats, N, device)
++        t_all = time.time() - t0
++        key = f"{k}|{c}|{lr:g}|{s}"
++        name = f"{k}_{c}_lr{lr:g}_s{s}"
++        np.savez_compressed(os.path.join(pred_dir, name + ".npz"), coarse_prob=cp, fine_prob=fp,
++                            image_id=np.array(ids), losses=np.array(losses))
++        runs[key] = {"coarse": cp, "fine": fp.astype(np.float32), "losses": losses, "n_params": PR.n_params(head),
++                     "file": name + ".npz"}
++        times[key] = {"train_s": t_tr, "train_plus_predict_s": t_all}
++        print(key, f"loss {losses[0]:.4f}->{losses[-1]:.4f}", f"{t_tr:.1f}s", flush=True)
++    device_min = prior_min + (time.time() - t_start) / 60
++    peak = torch.cuda.max_memory_allocated() / 1e9
++
++    if args.pilot:
++        per = {k: np.mean([times[f"{k}|{c}|0.001|0"]["train_plus_predict_s"] for c in CONDS]) for k in KINDS}
++        est = sum(per[k] * len(LRS) * len(SEEDS) * len(CONDS) for k in KINDS) / 60
++        out = {"pilot": True, "n_images": N, "times": times, "peak_gpu_mem_gb": peak,
++               "est_24_runs_device_min": est,
++               "note": "학습 비용은 update 수·batch에 비례(영상 수와 무관); predict는 160장으로 늘어 증가(추정치)",
++               "params": {k: runs[f"{k}|Z|0.001|0"]["n_params"] for k in KINDS}}
++        dump(os.path.join(args.out, "pilot_cost.json"), out)
++        print(json.dumps(out, indent=1))
++        return
++
++    losses_all = {k: v["losses"] for k, v in runs.items()}
++    dump(os.path.join(args.out, "train_losses.json"), losses_all)
++    if partial:
++        status.update({"state": "partial", "reason": partial, "n_runs_done": len(runs), "device_min": device_min})
++        dump(status_path, status)
++        raise SystemExit(partial)
++
++    # ---------------- validation 선택 (test 점수 계산 전)
++    val = split == "validation"
++    val_scores, sel_tab = {}, {}
++    for key, r in runs.items():
++        val_scores[key] = E.run_scores(r["coarse"], coarse, obs, pid, val)["patient_macro"]
++    selection = {}
++    for k in KINDS:
++        tab = {f"{lr:g}": float(np.mean([val_scores[f"{k}|{c}|{lr:g}|{s}"] for c in CONDS for s in SEEDS])) for lr in LRS}
++        best = max(tab.values())
++        chosen = min(lr for lr in LRS if tab[f"{lr:g}"] == best)  # 동률이면 작은 lr
++        selection[k] = {"val_mean_by_lr": tab, "chosen_lr": chosen}
++        sel_tab[k] = {key: v for key, v in val_scores.items() if key.startswith(k + "|")}
++    # linear 대조군 (train·validation에서 먼저 확인)
++    lin = {}
++    for lr in LRS:
++        for s in SEEDS:
++            a, b = runs[f"linear|Z|{lr:g}|{s}"], runs[f"linear|UPZ|{lr:g}|{s}"]
++            nt = ~(split == "test")
++            lin[f"{lr:g}|{s}"] = {
++                "max_abs_coarse_prob_diff_trainval": float(np.abs(a["coarse"][nt] - b["coarse"][nt]).max()),
++                "max_abs_loss_diff": float(np.abs(np.array(a["losses"]) - np.array(b["losses"])).max()),
++                "val_macro_diff": float(val_scores[f"linear|Z|{lr:g}|{s}"] - val_scores[f"linear|UPZ|{lr:g}|{s}"])}
++    lin_pass_pre = all(v["max_abs_coarse_prob_diff_trainval"] <= LIN_TOL_PROB and abs(v["val_macro_diff"]) <= LIN_TOL_MACRO
++                       for v in lin.values())
++    selection_doc = {"selection": selection, "val_scores": sel_tab, "rule": "두 조건×3 seed 평균 최대, 동률이면 작은 lr, 마지막 update",
++                     "linear_control_pre_test": lin, "linear_tol": {"prob": LIN_TOL_PROB, "macro": LIN_TOL_MACRO},
++                     "linear_control_pre_test_pass": lin_pass_pre, "written_before_test_scoring": True,
++                     "time": time.strftime("%Y-%m-%d %H:%M:%S")}
++    sel_path = os.path.join(args.out, "validation_selection.json")
++    dump(sel_path, selection_doc)
++    sel_hash = sha(sel_path)
++
++    # ---------------- test 평가 (선택된 lr만)
++    test = split == "test"
++    obs_te = obs[test]
++    donor = CT.image_swap_derangement(pid, split, obs)
++    prior = CT.location_prior(coarse, obs, split)
++    prior_f = CT.location_prior(fine, obs, split)
++    idx = CT.bootstrap_indices(int(test.sum()), B_BOOT)
++    np.save(os.path.join(args.out, "bootstrap_indices.npy"), idx)
++    res = {"selection_sha256": sel_hash, "methods": {}, "per_seed": {}}
++    seedavg = {}
++    for k in KINDS:
++        lr = selection[k]["chosen_lr"]
++        for c in CONDS:
++            for res_name, tgt, pkey in (("coarse", coarse, "coarse"), ("fine", fine, "fine")):
++                rs = [E.run_scores(runs[f"{k}|{c}|{lr:g}|{s}"][pkey], tgt, obs, pid, test) for s in SEEDS]
++                sa = E.seed_average(rs)
++                seedavg[(k, c, res_name)] = sa
++                sw = [E.run_scores(E.swap_pred(runs[f"{k}|{c}|{lr:g}|{s}"][pkey], donor), tgt, obs, pid, test) for s in SEEDS]
++                seedavg[(k, c, res_name, "swap")] = E.seed_average(sw)
++    patients = seedavg[("mlp", "Z", "coarse")]["patients"]
++    for res_name, tgt, pr in (("coarse", coarse, prior), ("fine", fine, prior_f)):
++        pp = np.broadcast_to(pr, tgt.shape)
++        r0 = E.run_scores(pp, tgt, obs, pid, test)
++        if r0["patients"] != patients:
++            raise SystemExit("patient order mismatch")
++        seedavg[("prior", res_name)] = {"per_patient": r0["per_patient"], "pair_scores": r0["pair_scores"],
++                                        "patient_macro": r0["patient_macro"], "patients": r0["patients"]}
++
++    def summ(sa):
++        return {"patient_macro": sa["patient_macro"], "per_seed_macro": sa.get("per_seed_macro"),
++                "per_class": E.per_class_means(sa["pair_scores"], obs_te),
++                "per_patient": [float(x) for x in sa["per_patient"]]}
++
++    for key, sa in seedavg.items():
++        res["methods"]["/".join(key)] = summ(sa)
++    comps = {}
++    for res_name in ("coarse", "fine"):
++        for k in KINDS:
++            z, u = seedavg[(k, "Z", res_name)], seedavg[(k, "UPZ", res_name)]
++            comps[f"{res_name}/{k}: Z - UPZ"] = E.paired(z["per_patient"], u["per_patient"], idx)
++            comps[f"{res_name}/{k}: Z - prior"] = E.paired(z["per_patient"], seedavg[("prior", res_name)]["per_patient"], idx)
++            comps[f"{res_name}/{k}: Z - swap(Z)"] = E.paired(z["per_patient"], seedavg[(k, "Z", res_name, "swap")]["per_patient"], idx)
++            comps[f"{res_name}/{k}: UPZ - prior"] = E.paired(u["per_patient"], seedavg[("prior", res_name)]["per_patient"], idx)
++            comps[f"{res_name}/{k}: UPZ - swap(UPZ)"] = E.paired(u["per_patient"], seedavg[(k, "UPZ", res_name, "swap")]["per_patient"], idx)
++            comps[f"{res_name}/{k}: Z - UPZ per-seed macro diff"] = [a - b for a, b in zip(z["per_seed_macro"], u["per_seed_macro"])]
++            comps[f"{res_name}/{k}: Z - UPZ per-class"] = [a - b for a, b in zip(E.per_class_means(z["pair_scores"], obs_te),
++                                                                                 E.per_class_means(u["pair_scores"], obs_te))]
++    res["comparisons"] = comps
++
++    # linear 대조군 test 확인 (허용오차는 위에서 고정)
++    lr_l = selection["linear"]["chosen_lr"]
++    lin_test = {s: float(np.abs(runs[f"linear|Z|{lr_l:g}|{s}"]["coarse"][test] - runs[f"linear|UPZ|{lr_l:g}|{s}"]["coarse"][test]).max())
++                for s in SEEDS}
++    lin_macro = comps["coarse/linear: Z - UPZ"]["mean_diff"]
++    lin_pass = bool(lin_pass_pre and max(lin_test.values()) <= LIN_TOL_PROB and abs(lin_macro) <= LIN_TOL_MACRO)
++
++    m = comps["coarse/mlp: Z - UPZ"]
++    crit = {
++        "mlp_Z_minus_UPZ_ge_0.03": m["mean_diff"] >= MARGIN,
++        "mlp_Z_minus_UPZ_ci_low_gt_0": m["ci_low"] > 0,
++        "mlp_Z_minus_prior_ge_0.03": comps["coarse/mlp: Z - prior"]["mean_diff"] >= MARGIN,
++        "mlp_Z_minus_swap_ge_0.03": comps["coarse/mlp: Z - swap(Z)"]["mean_diff"] >= MARGIN,
++        "mlp_Z_minus_UPZ_positive_in_ge2_classes": sum(d > 0 for d in comps["coarse/mlp: Z - UPZ per-class"]) >= 2,
++        "integrity_alignment_linear_complete": None,  # 아래에서 채움
++    }
++    ext = json.load(open(os.path.join(args.features, "extract_checks.json")))
++    integ = {"gate_exploratory_allowed": gate["exploratory_probe_allowed"] is True,
++             "tests_all_pass": tests["all_pass"] is True,
++             "spatial_transform": ext["spatial_transform"]["pass"], "token_order": ext["token_order"]["pass"],
++             "projector_synthetic": ext["projector_synthetic"]["pass"], "pool_pass": ext["pool_pass"],
++             "linear_control": lin_pass, "all_24_runs": len(runs) == len(plan)}
++    crit["integrity_alignment_linear_complete"] = all(integ.values())
++    res.update({"criteria": crit, "all_criteria_pass": all(crit.values()), "integrity": integ,
++                "linear_control_test": {"max_abs_coarse_prob_diff": lin_test, "macro_diff": lin_macro,
++                                        "tol": {"prob": LIN_TOL_PROB, "macro": LIN_TOL_MACRO}, "pass": lin_pass},
++                "selection": selection, "n_test_patients": int(test.sum()),
++                "test_observed_per_class": obs_te.sum(axis=0).tolist(), "classes": CT.MAIN_CLASSES,
++                "params": {k: runs[f"{k}|Z|{LRS[0]:g}|0"]["n_params"] for k in KINDS},
++                "times": times, "device_min_train_eval": (time.time() - t_start) / 60,
++                "device_min_total_incl_extract": prior_min + (time.time() - t_start) / 60, "peak_gpu_mem_gb": peak,
++                "swap_donor": donor.tolist(), "patients": patients,
++                "interpretation_limits": ["assumed canvas: 조건부 탐색 신호이며 확증 아님",
++                                          "공식 test를 재분할한 개발 split, 공식 benchmark 아님",
++                                          "bbox occupancy는 segmentation GT 아님; 4클래스 한정",
++                                          "양성이어도 정보의 완전 소실이나 LLM 인과 병목을 증명하지 않음"]})
++    res_path = os.path.join(args.out, "probe_results.json")
++    dump(res_path, res)
++    hashes = {f: sha(os.path.join(pred_dir, f)) for f in sorted(os.listdir(pred_dir))}
++    for f in ("probe_results.json", "validation_selection.json", "train_losses.json", "bootstrap_indices.npy"):
++        hashes[f] = sha(os.path.join(args.out, f))
++    complete = bool(len(runs) == len(plan) and integ["tests_all_pass"] and integ["gate_exploratory_allowed"]
++                    and len(hashes) == len(plan) + 4)
++    status.update({"state": "complete" if complete else "incomplete", "eval_complete": complete,
++                   "all_criteria_pass": res["all_criteria_pass"], "output_sha256": hashes,
++                   "device_min_total_incl_extract": res["device_min_total_incl_extract"],
++                   "finished": time.strftime("%Y-%m-%d %H:%M:%S")})
++    dump(status_path, status)
++    print(json.dumps({"selection": selection, "criteria": crit, "integrity": integ,
++                      "mlp": {k: comps[f"coarse/mlp: {k}"] for k in ("Z - UPZ", "Z - prior", "Z - swap(Z)")},
++                      "linear Z-UPZ": comps["coarse/linear: Z - UPZ"]}, indent=1, default=str))
++
++
++if __name__ == "__main__":
++    main()
+diff --git a/test_pooling_probe_iter007.py b/test_pooling_probe_iter007.py
+new file mode 100644
+index 0000000..fcb9705
+--- /dev/null
++++ b/test_pooling_probe_iter007.py
+@@ -0,0 +1,228 @@
++"""iter_007 pooling probe 검증 (CPU, float64 fixture + 실제 target·pilot cache).
++
++실행: python research/test_pooling_probe_iter007.py --out research/results/iter_007/tests_iter007.json \
++          --pilot research/results/iter_007/pilot
++
++검사
++- token 정렬: 합성 공간 패턴에서 재구현 P와 명시적 loop 평균 일치, torch avg_pool2d(실제 projector 연산) 일치
++- affine head: Z와 U(P(Z))의 coarse logits·loss·gradient 동등 (float64, 1e-10). MLP는 일반적으로 다름.
++- unknown mask: 관측 안 된 쌍의 logits gradient = 0, target을 바꿔도 loss 불변
++- torch masked_pair_bce = class_targets.masked_bce (numpy)
++- cache: ID 교체·patient 교체·feature 변조·shape 변경을 모두 거부
++- image-swap donor: 같은 split·클래스, 다른 patient, 전단사
++- seed 평균 후 paired bootstrap: 길이 n_patients 벡터만 허용, 동일 입력이면 CI=0
++- batch schedule: 같은 seed → 같은 순서, 각 epoch가 permutation
++- 같은 seed → 두 조건의 초기 가중치 동일
++"""
++import argparse
++import json
++import os
++import sys
++
++import numpy as np
++import torch
++
++sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
++from grounding_data import class_targets as CT  # noqa: E402
++from pooling_probe import evaluate as E  # noqa: E402
++from pooling_probe import features as F  # noqa: E402
++from pooling_probe import probe as PR  # noqa: E402
++
++TOL = 1e-10
++
++
++def t_token_alignment():
++    rng = np.random.default_rng(0)
++    z = rng.normal(size=(2, 4096, 5))
++    t = np.arange(4096)
++    z[:, :, 0] = t // 64
++    z[:, :, 1] = t % 64
++    p = F.pool_tokens(z)
++    loop = np.zeros((2, 16, 16, 5))
++    for i in range(16):
++        for j in range(16):
++            toks = [(4 * i + a) * 64 + 4 * j + b for a in range(4) for b in range(4)]
++            loop[:, i, j] = z[:, toks].mean(axis=1)
++    zt = torch.from_numpy(z)
++    ap = torch.nn.functional.avg_pool2d(zt.transpose(1, 2).reshape(2, 5, 64, 64), 4).permute(0, 2, 3, 1).numpy()
++    ok_rows = np.allclose(p[0, :, :, 0], (4 * np.arange(16) + 1.5)[:, None])
++    ok_cols = np.allclose(p[0, :, :, 1], (4 * np.arange(16) + 1.5)[None, :])
++    e1, e2 = float(np.abs(p - loop).max()), float(np.abs(p - ap).max())
++    # probe.pool_grid (B,h,w,C) 도 같은 연산인지
++    e3 = float(np.abs(PR.pool_grid(zt.reshape(2, 64, 64, 5)).numpy() - p).max())
++    return {"pass": bool(ok_rows and ok_cols and e1 < TOL and e2 < TOL and e3 < TOL), "loop_err": e1,
++            "avgpool2d_err": e2, "pool_grid_err": e3}
++
++
++def _fixture(C=6, B=3, seed=0):
++    g = torch.Generator().manual_seed(seed)
++    x = torch.randn(B, 64, 64, C, generator=g, dtype=torch.float64)
++    tgt = torch.rand(B, 4, 16, 16, generator=g, dtype=torch.float64)
++    obs = torch.tensor([[1, 0, 1, 0], [0, 1, 0, 0], [1, 1, 1, 1]], dtype=torch.bool)
++    return x, tgt, obs
++
++
++def t_affine_equivalence():
++    x, tgt, obs = _fixture()
++    out = {}
++    for kind in ("linear", "mlp"):
++        res = {}
++        for cond in ("Z", "UPZ"):
++            h = PR.make_head(kind, 6, seed=3, dtype=torch.float64)
++            _, co = PR.forward_logits(h, PR.condition_input(x, cond))
++            loss = PR.masked_pair_bce(co, tgt, obs)
++            loss.backward()
++            res[cond] = (co.detach(), float(loss), [p.grad.clone() for p in h.parameters()])
++        d_log = float((res["Z"][0] - res["UPZ"][0]).abs().max())
++        d_loss = abs(res["Z"][1] - res["UPZ"][1])
++        d_grad = max(float((a - b).abs().max()) for a, b in zip(res["Z"][2], res["UPZ"][2]))
++        out[kind] = {"logit_diff": d_log, "loss_diff": d_loss, "grad_diff": d_grad}
++    lin_ok = max(out["linear"].values()) < TOL
++    mlp_differs = out["mlp"]["logit_diff"] > 1e-6
++    return {"pass": bool(lin_ok and mlp_differs), **out}
++
++
++def t_unknown_mask():
++    x, tgt, obs = _fixture()
++    h = PR.make_head("mlp", 6, seed=1, dtype=torch.float64)
++    _, co = PR.forward_logits(h, x)
++    co.retain_grad()
++    loss = PR.masked_pair_bce(co, tgt, obs)
++    loss.backward()
++    g_unobs = float(co.grad[~obs].abs().max())
++    g_obs = float(co.grad[obs].abs().max())
++    tgt2 = tgt.clone()
++    tgt2[~obs] = 1.0 - tgt2[~obs]
++    loss2 = PR.masked_pair_bce(co.detach(), tgt2, obs)
++    # numpy 기준과 일치
++    ref = CT.masked_bce(co.detach().numpy(), tgt.numpy(), obs.numpy())
++    return {"pass": bool(g_unobs == 0.0 and g_obs > 0 and abs(float(loss2) - float(loss)) < TOL
++                         and abs(ref - float(loss)) < TOL),
++            "grad_unobserved_max": g_unobs, "grad_observed_max": g_obs, "loss_change_when_unknown_target_changed":
++            abs(float(loss2) - float(loss)), "numpy_ref_diff": abs(ref - float(loss))}
++
++
++def t_cache(pilot, tg):
++    meta = json.load(open(os.path.join(pilot, "cache_meta.json")))
++    Z = np.load(os.path.join(pilot, "Z_bf16.npy"))
++    tidx = {str(x): i for i, x in enumerate(tg["image_id"])}
++    rows = [tidx[r["image_id"]] for r in meta["images"]]
++    ids = [str(tg["image_id"][i]) for i in rows]
++    pats = [str(tg["patient_id"][i]) for i in rows]
++    res = {"clean_ok": F.verify_cache(meta, Z, ids, pats)}
++
++    def rejects(fn):
++        try:
++            fn()
++        except F.CacheError:
++            return True
++        return False
++    res["id_swap_rejected"] = rejects(lambda: F.verify_cache(meta, Z, ids[::-1], pats))
++    res["patient_swap_rejected"] = rejects(lambda: F.verify_cache(meta, Z, ids, pats[1:] + pats[:1]))
++    Zt = Z.copy()
++    Zt[0, 0, 0, 0] ^= 1
++    res["tamper_rejected"] = rejects(lambda: F.verify_cache(meta, Zt, ids, pats))
++    res["shape_rejected"] = rejects(lambda: F.verify_cache(meta, Z[:-1], ids, pats))
++    Zr = Z.copy()
++    Zr[[0, 1]] = Zr[[1, 0]]  # 영상 두 장의 feature 순서 교체
++    res["feature_row_swap_rejected"] = rejects(lambda: F.verify_cache(meta, Zr, ids, pats))
++    res["pass"] = all(res.values())
++    return res
++
++
++def t_donor(tg):
++    donor = CT.image_swap_derangement(tg["patient_id"], tg["split"], tg["observed"])
++    N, K = donor.shape
++    bad = []
++    for k in range(K):
++        for s in ("train", "validation", "test"):
++            idx = [i for i in range(N) if tg["split"][i] == s and tg["observed"][i, k]]
++            ds = [donor[i, k] for i in idx]
++            if sorted(ds) != sorted(idx):
++                bad.append((k, s, "not_bijection"))
++            for i in idx:
++                d = donor[i, k]
++                if d < 0 or tg["patient_id"][d] == tg["patient_id"][i] or tg["split"][d] != s or not tg["observed"][d, k]:
++                    bad.append((k, s, i))
++    unobs_neg = bool((donor[~tg["observed"]] == -1).all())
++    again = CT.image_swap_derangement(tg["patient_id"], tg["split"], tg["observed"])
++    return {"pass": bool(not bad and unobs_neg and (again == donor).all()), "violations": bad[:10],
++            "deterministic": bool((again == donor).all())}
++
++
++def t_seed_bootstrap():
++    rng = np.random.default_rng(1)
++    n = 7
++    pats = [str(i) for i in range(n)]
++    runs = [{"per_patient": rng.random(n), "patients": pats, "pair_scores": rng.random((n, 4)), "patient_macro": 0.0}
++            for _ in range(3)]
++    sa = E.seed_average(runs)
++    ok_mean = np.allclose(sa["per_patient"], np.mean([r["per_patient"] for r in runs], axis=0))
++    idx = CT.bootstrap_indices(n, 50, seed=5)
++    same = E.paired(sa["per_patient"], sa["per_patient"], idx)
++    try:
++        E.paired(np.concatenate([r["per_patient"] for r in runs]), np.zeros(3 * n), idx)  # seed를 patient처럼 쌓음
++        stacked_rejected = False
++    except ValueError:
++        stacked_rejected = True
++    runs_bad = [dict(runs[0]), dict(runs[1], patients=pats[::-1])]
++    try:
++        E.seed_average(runs_bad)
++        order_rejected = False
++    except ValueError:
++        order_rejected = True
++    return {"pass": bool(ok_mean and same["ci_low"] == 0 and same["ci_high"] == 0 and stacked_rejected and order_rejected),
++            "stacked_seeds_rejected": stacked_rejected, "patient_order_mismatch_rejected": order_rejected}
++
++
++def t_schedule_init():
++    a = PR.batch_schedule(80, 200, 8, 1)
++    b = PR.batch_schedule(80, 200, 8, 1)
++    c = PR.batch_schedule(80, 200, 8, 2)
++    flat = a.reshape(-1)
++    perms = all(sorted(flat[e * 80:(e + 1) * 80].tolist()) == list(range(80)) for e in range(20))
++    h1 = PR.make_head("mlp", 1152, 2)
++    h2 = PR.make_head("mlp", 1152, 2)
++    h3 = PR.make_head("mlp", 1152, 3)
++    same_init = all(torch.equal(p, q) for p, q in zip(h1.parameters(), h2.parameters()))
++    diff_init = not all(torch.equal(p, q) for p, q in zip(h1.parameters(), h3.parameters()))
++    return {"pass": bool((a == b).all() and not (a == c).all() and perms and same_init and diff_init),
++            "epochs_are_permutations": perms, "same_seed_same_init": same_init}
++
++
++def t_metric_consistency(tg):
++    """E.run_scores가 class_targets 집계와 같고, target 자기 일치 점수가 1이 아님을 기록 (상한 아님)."""
++    test = tg["split"] == "test"
++    r = E.run_scores(tg["coarse"], tg["coarse"], tg["observed"], tg["patient_id"], test)
++    S = CT.score_matrix(tg["coarse"][test], tg["coarse"][test], tg["observed"][test])
++    ag = CT.aggregate(S, tg["observed"][test], tg["patient_id"][test])
++    return {"pass": bool(abs(r["patient_macro"] - ag["patient_macro"]) < TOL and r["per_patient"].shape == (48,)),
++            "target_self_soft_iou_macro_test": r["patient_macro"],
++            "note": "fractional target의 자기 일치 점수는 1이 아니며 최적 상한도 아님"}
++
++
++def main():
++    ap = argparse.ArgumentParser()
++    ap.add_argument("--out", required=True)
++    ap.add_argument("--pilot", required=True)
++    ap.add_argument("--targets", default=os.path.join(os.path.dirname(os.path.abspath(__file__)),
++                                                      "results/iter_006/nih_class_targets.npz"))
++    args = ap.parse_args()
++    tg = dict(np.load(args.targets))
++    res = {}
++    for name, fn in [("token_alignment", t_token_alignment), ("affine_equivalence", t_affine_equivalence),
++                     ("unknown_mask", t_unknown_mask), ("cache", lambda: t_cache(args.pilot, tg)),
++                     ("donor", lambda: t_donor(tg)), ("seed_bootstrap", t_seed_bootstrap),
++                     ("schedule_init", t_schedule_init), ("metric_consistency", lambda: t_metric_consistency(tg))]:
++        try:
++            res[name] = fn()
++        except Exception as e:
++            res[name] = {"pass": False, "exception": repr(e)[:300]}
++        print(name, res[name]["pass"])
++    out = {"tests": res, "all_pass": all(r["pass"] is True for r in res.values()), "n_tests": len(res)}
++    F.dump(args.out, out)
++    print("all_pass", out["all_pass"])
++
++
++if __name__ == "__main__":
++    main()

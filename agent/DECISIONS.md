@@ -161,3 +161,17 @@ MedGemma 1.5로 연구하는 것 자체가 큰 제약이라고 판단되면, 근
 - 🏁 **마일스톤**: Coarse grounding에서 pooling 이전 feature의 추가 이득이 관찰되지 않음 — JOURNEY.md
 - 📁 원본: `agent/runs/iter_007/`
 
+## iter_008 — 해부구조에서 병변으로 grounding 전이 (1번째 시도) · 2026-09-24 06:11
+
+- 🔎 **사고 라운드 1** (GPT deep): SCR의 정답 노출과 선행 방법 중복을 확인했으며, Montgomery·CheXmask의 데이터 경로와 대조군을 더 검토해 anatomy→lesion 전이의 최소 반증 실험을 확정한다.
+  - 스스로 던진 질문: Montgomery 수동 lung mask와 CheXmask NIH pseudo-label 중 어느 경로가 입력 정합성·접근 비용·domain confound를 고려할 때 최소 전이 실험에 적합한가? 공식 schema와 파일 목록으로 다운로드량, 전처리, subject 식별 규칙을 확정할 수 있는가? · 기존 NIH 160명을 제외하고 현재 네 클래스에서 확보 가능한 patient 수는 각각 얼마인가? 개발용 label-budget 비교와 한 번만 평가할 신규 확인 집단을 분리할 수 있는가? · 동일 병변 label·공유 head 용량에서 anatomy pretraining 효과를 추가 update, 외부 영상 노출, 공간 prior와 분리하는 최소 대조군은 무엇인가? Anatomy 학습 자체의 성공을 어떤 독립 지표로 확인할 것인가? · CURE·AnatomiX·EasyLens와 비교했을 때 저예산 anatomy 전이에서 아직 검증할 가치가 있는 기전 질문은 무엇인가? 그 질문을 frozen head로 검증한 뒤 실제 VLM 출력 개선으로 연결할 경로가 있는가?
+- 🧭 **계획** (GPT deep): Montgomery anatomy 사전학습의 저표본 병변 grounding 전이를 학습량·영상 노출·평균 위치 대조군과 비교하고, 개발 기준 통과 시 신규 NIH patient에서 한 번 확인한다.
+  - 대안: 1) 해부구조에서 병변으로 grounding 전이: 수동 lung supervision의 저표본 전이 이득을 추가 update·영상 노출·위치 prior와 분리하는 최소 실험을 수행한다. · 2) Decoder grounding 출력의 직접 진단: 생성 좌표와 supervised readout을 공통 target·metric으로 비교하고 supervision 차이를 명시한다. · 3) 독립 grounding 데이터에서 재검증: 좌표와 평가 단위가 명확한 외부 자료에서 현재 관찰의 일반성을 확인한다.
+  - 1순위 선택 근거: 공식 수동 anatomy 자료의 개별 다운로드 경로와 신규 NIH patient 수를 확인했다. 기존 feature와 평가 코드를 재사용하면서 45 device-min 이내에 핵심 전이 가설을 검증할 수 있어 우선순위가 분명하다.
+- ▶ **결정**: 자동 진행 (smart) — 1순위로 진행
+- ⏳ 사용 한도 도달 (Claude 구현/실험) → 대기
+- ↻ 끊겼던 Claude 세션을 이어서 진행
+- ↻ 끊겼던 Claude 세션을 이어서 진행
+- ⏹ 중단: 정지 요청 (Claude 구현/실험 중)
+- 📁 원본: `agent/runs/iter_008/`
+
