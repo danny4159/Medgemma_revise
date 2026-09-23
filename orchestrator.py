@@ -71,6 +71,9 @@ ARCHIVE_DIR = AGENT_DIR / "archive"
 GOAL_FILE = AGENT_DIR / "GOAL.md"
 INDEX_FILE = AGENT_DIR / "INDEX.md"
 PAPERS_FILE = AGENT_DIR / "PAPERS.md"
+# 사람이 읽는 기록: JOURNEY(마일스톤 흐름) → DECISIONS(반복별 결정) → runs/(원본)
+JOURNEY_FILE = AGENT_DIR / "JOURNEY.md"
+DECISIONS_FILE = AGENT_DIR / "DECISIONS.md"
 LOG_FILE = AGENT_DIR / "RESEARCH_LOG.md"
 TIERS_FILE = AGENT_DIR / "tiers.json"
 # runs/ 도입 전 수동 실행의 마지막 리뷰. 첫 반복 계획의 참고 자료로 쓴다.
@@ -125,6 +128,14 @@ def save(path, text):
 def log(title, text):
     with LOG_FILE.open("a", encoding="utf-8") as f:
         f.write(f"\n\n## {title} — {now()}\n\n{text}\n")
+
+
+def record_event(n, stage, **data):
+    """반복의 결정/단계 기록 (DECISIONS.md를 만드는 원본). runs/iter_NNN/events.jsonl"""
+    path = RUNS_DIR / f"iter_{n:03d}" / "events.jsonl"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with path.open("a", encoding="utf-8") as f:
+        f.write(json.dumps({"time": now(), "stage": stage, **data}, ensure_ascii=False) + "\n")
 
 
 HUMAN = None  # main()에서 만든다
@@ -558,6 +569,90 @@ def rebuild_index():
             lines += ["", "### 최근 계획의 대안 순위", ""]
             lines += [f"{i}. {alt}" for i, alt in enumerate(last_plan["alternatives"], 1)]
     save(INDEX_FILE, "\n".join(lines) + "\n")
+    rebuild_decisions()
+
+
+def iteration_block(n):
+    """DECISIONS.md의 반복 하나: 계획 → 결정 → 개발 → 검증 → 커밋 순서."""
+    d = iter_dir(n)
+    events = [json.loads(line) for line in read(d / "events.jsonl").splitlines() if line.strip()]
+    if not events:
+        return []
+    plan = load_plan(n) or {}
+    review = load_review(n) or {}
+    git_info = load_json(d / "git.json") or {}
+    iters = approach_ledger(upto=n).get(approach_key(plan), {}).get("iters", [n])
+    attempt = iters.index(n) + 1 if n in iters else 1
+
+    lines = [f"## iter_{n:03d} — {plan.get('approach', '?')} ({attempt}번째 시도) · {events[0]['time'][:16]}", ""]
+    plan_question = None
+    for ev in events:
+        stage = ev["stage"]
+        if stage == "plan":
+            plan_question = ev.get("decision_reason") if ev.get("decision") == "ask_human" else None
+            lines.append(f"- 🧭 **계획** (GPT {ev.get('tier')}): {ev.get('plan_summary') or ev.get('approach')}")
+            alts = " · ".join(f"{i}) {a}" for i, a in enumerate(ev.get("alternatives") or [], 1))
+            if alts:
+                lines.append(f"  - 대안: {alts}")
+            label = "사람에게 묻기로 함" if ev.get("decision") == "ask_human" else "1순위 선택 근거"
+            lines.append(f"  - {label}: {ev.get('decision_reason', '')}")
+        elif stage == "decision" and ev.get("by") == "auto":
+            lines.append(f"- ▶ **결정**: 자동 진행 ({ev.get('mode')}) — {ev.get('result')}")
+        elif stage == "decision":
+            lines.append(f"- 🙋 **결정 (사람)**: \"{ev.get('reply')}\" → {ev.get('result')}")
+            for concern in ev.get("concerns") or []:
+                if concern != plan_question:
+                    lines.append(f"  - 확인 이유: {concern}")
+        elif stage == "override":
+            lines.append(f"- ✏️ 사람이 {ev.get('what')}을 {ev.get('value')}(으)로 변경")
+        elif stage == "claude":
+            lines.append(
+                f"- 🔧 **Claude** ({ev.get('tier')}): {ev.get('summary') or '(요약 없음)'} "
+                f"[자체 검증 {ev.get('self_check')}, 파일 {ev.get('changed_files')}개 변경]"
+            )
+            if git_info.get("created"):
+                branch_text = f"새 브랜치 `{git_info['branch']}` ← {git_info.get('base_ref')} ({git_info.get('base')})"
+            else:
+                branch_text = f"브랜치 `{ev.get('branch')}`에서 계속"
+            if git_info.get("stashed"):
+                branch_text += f"; 이전 브랜치 미커밋 작업은 stash로 보관"
+            lines.append(f"  - {branch_text}")
+            if ev.get("permission_denials"):
+                lines.append(f"  - ⚠ 권한 거부 {ev['permission_denials']}건")
+        elif stage == "review":
+            lines.append(
+                f"- 🔍 **리뷰** (GPT {ev.get('tier')}): [{review.get('verdict')} / {review.get('approach_status')}] "
+                f"{review.get('one_line_summary', '')}"
+            )
+            if review.get("approach_note"):
+                lines.append(f"  - 접근법 판단: {review['approach_note']}")
+            if review.get("next_task"):
+                lines.append(f"  - 다음: {review['next_task']}")
+        elif stage == "review_skipped":
+            lines.append(f"- ⏭ 리뷰 생략: {ev.get('reason')}")
+        elif stage == "commit":
+            lines.append(f"- 💾 **커밋** `{ev.get('sha')}` ({ev.get('branch')}): {ev.get('message')}")
+        elif stage == "paper":
+            lines.append(f"- 📚 논문 추천: {ev.get('title')} — PAPERS.md")
+        elif stage == "milestone":
+            lines.append(f"- 🏁 **마일스톤**: {ev.get('title')} — JOURNEY.md")
+        elif stage == "needs_human":
+            lines.append(f"- 🙋 **사람 결정 요청**: {ev.get('question')}")
+            lines.append(f"  - 답: \"{ev.get('reply')}\" → {ev.get('result')}")
+    lines += [f"- 📁 원본: `agent/runs/iter_{n:03d}/`", ""]
+    return lines
+
+
+def rebuild_decisions():
+    lines = [
+        "# 결정 기록 (DECISIONS)",
+        "",
+        "반복마다 계획 → 결정 → 개발 → 검증 흐름. 큰 흐름은 JOURNEY.md, 원본은 agent/runs/.",
+        "",
+    ]
+    for n in existing_iterations():
+        lines += iteration_block(n)
+    save(DECISIONS_FILE, "\n".join(lines) + "\n")
 
 
 # --------------------------------------------------
@@ -632,6 +727,10 @@ iter_{n:03d}
     print(f"결정: {plan['decision']} — {plan['decision_reason']}")
     print(f"\nClaude 등급 제안: {plan['claude_tier']} — {plan['tier_reason']}")
     print(f"GPT 리뷰: {plan['review_mode']} — {plan['review_reason']}")
+    record_event(n, "plan", tier=tier, **{k: plan.get(k) for k in (
+        "plan_summary", "approach", "alternatives", "decision", "decision_reason",
+        "claude_tier", "review_mode")})
+    rebuild_index()
 
 
 def plan_concerns(n, plan):
@@ -662,7 +761,14 @@ def step_checkpoint(args, n):
             f"근거: {plan.get('decision_reason', '')}\n"
             f"Claude {claude_tier(args, n)} / 리뷰 {plan.get('review_mode', 'full')}"
         )
+        record_event(n, "decision", by="auto", mode=args.autonomy, result="1순위로 진행")
         return "go"
+
+    def decided(action, result, reply):
+        record_event(n, "decision", by="human", mode=args.autonomy, concerns=concerns,
+                     reply=reply, result=result)
+        rebuild_index()
+        return action
 
     alternatives = plan.get("alternatives", [])
     alt_text = "\n".join(f"{i}. {alt}" for i, alt in enumerate(alternatives, 1))
@@ -708,11 +814,11 @@ def step_checkpoint(args, n):
         cmd, rest = split_reply(reply)
 
         if cmd == "q":
-            return "quit"
+            return decided("quit", "종료", reply)
         if cmd.isdigit() and 1 <= int(cmd) <= max(len(alternatives), 1):
             k = int(cmd)
             if k == 1:
-                return "go"
+                return decided("go", "1순위로 진행", reply)
             choice = alternatives[k - 1]
             note = f"사용자가 대안 {k}번을 선택했다: {choice}\n이 대안을 approach로 계획을 다시 세워라."
             if rest:
@@ -724,7 +830,7 @@ def step_checkpoint(args, n):
             for name in ("plan.json", "plan.md"):
                 if (d / name).exists():
                     (d / name).rename(d / f"rejected_{now().replace(' ', '_').replace(':', '')}_{name}")
-            return "replan"
+            return decided("replan", f"대안 {k}번으로 재계획: {choice}", reply)
         if cmd == "t":
             if args.claude_tier:
                 print("--claude-tier로 고정되어 있어 바꿀 수 없습니다.")
@@ -732,6 +838,7 @@ def step_checkpoint(args, n):
             picked = (rest or ask(f"등급 입력 ({' / '.join(CLAUDE_TIERS)}): ") or "").lower()
             if picked in CLAUDE_TIERS:
                 save(d / "claude_tier_override.txt", picked)
+                record_event(n, "override", by="human", what="Claude 등급", value=picked)
             else:
                 print("알 수 없는 등급입니다.")
             continue
@@ -739,20 +846,21 @@ def step_checkpoint(args, n):
             picked = (rest or ask("리뷰 여부 입력 (full / skip): ") or "").lower()
             if picked in ("full", "skip"):
                 save(d / "review_mode_override.txt", picked)
+                record_event(n, "override", by="human", what="GPT 리뷰", value=picked)
             else:
                 print("full 또는 skip만 가능합니다.")
             continue
         if cmd == "a":
             args.autonomy = "full"
-            return "go"
+            return decided("go", "1순위로 진행, 이후 자동 진행으로 전환", reply)
         if cmd == "f":
             feedback = rest or ask("Claude에게 줄 추가 지시:\n> ") or ""
             if feedback:
                 save(d / "human_to_claude.md", feedback)
                 log(f"iter_{n:03d} USER FEEDBACK", feedback)
-            return "go"
+            return decided("go", f"추가 지시 후 진행: {feedback}", reply)
         if cmd == "":
-            return "go"
+            return decided("go", "1순위로 진행", reply or "ENTER")
         print(f"알 수 없는 입력입니다: {reply}")
         notify(f"알 수 없는 입력입니다: {reply}")
 
@@ -864,6 +972,11 @@ def step_claude(args, goal, n):
     save(d / "claude_report.md", report)
     log(f"iter_{n:03d} CLAUDE REPORT", report)
     print("\n" + report)
+    record_event(n, "claude", tier=tier, branch=branch,
+                 summary=parse_trailer(report, "SUMMARY"),
+                 self_check=parse_trailer(report, "SELF_CHECK") or "없음",
+                 changed_files=len(changed.splitlines()), permission_denials=len(denials))
+    rebuild_index()
 
     if result.get("is_error"):
         raise AgentError(f"Claude가 오류로 종료됨. 로그: {d / 'claude_stream.jsonl'}")
@@ -921,6 +1034,7 @@ iter_{n:03d}
     # review.json이 있으면 이 반복은 완료로 본다 (마지막에 저장)
     save(d / "review.json", json.dumps(review, ensure_ascii=False, indent=2))
     log(f"iter_{n:03d} GPT REVIEW [{review['verdict']}]", review["review_markdown"])
+    record_event(n, "review", tier=tier)
     rebuild_index()
 
     print("\n" + review["review_markdown"])
@@ -975,6 +1089,7 @@ def handle_paper(n, review):
     with PAPERS_FILE.open("a", encoding="utf-8") as f:
         f.write(entry)
     log(f"iter_{n:03d} PAPER RECOMMENDATION", entry)
+    record_event(n, "paper", title=paper["title"], url=url)
     print(f"\n📚 논문 추천: {paper['title']}")
     notify(
         f"📚 읽어볼 논문 (iter_{n:03d})\n\n"
@@ -983,6 +1098,37 @@ def handle_paper(n, review):
         f"추천 이유:\n{paper['why']}\n\n"
         f"읽어볼 부분:\n{paper['what_to_read']}"
     )
+
+
+def handle_milestone(n, review):
+    """리뷰가 마일스톤으로 판단하면 JOURNEY.md에 흐름을 남기고 알린다."""
+    milestone = review.get("milestone") or {}
+    if not milestone.get("is_milestone") or not milestone.get("title"):
+        return
+    plan = load_plan(n) or {}
+    entry = approach_ledger(upto=n).get(approach_key(plan), {})
+    commits = ", ".join(entry.get("commits", [])) or "없음"
+    iters = ", ".join(f"iter_{i:03d}" for i in entry.get("iters", [n]))
+
+    if not JOURNEY_FILE.exists():
+        save(JOURNEY_FILE, (
+            "# 연구 흐름 (JOURNEY)\n\n"
+            "연구 목표에 의미 있는 진전이 있을 때만 기록한다. 반복별 결정은 DECISIONS.md, 원본은 runs/.\n"
+        ))
+    text = (
+        f"\n## 🏁 {milestone['title']}\n"
+        f"*iter_{n:03d} · {now()[:16]} · 판정: {review['verdict']} / {review.get('approach_status', '')}*\n\n"
+        f"{milestone['story'].strip()}\n\n"
+        f"- 접근법: {plan.get('approach', '?')} (`{entry.get('branch', '')}`), 시도: {iters}\n"
+        f"- 커밋: {commits}\n"
+        f"- 자세히: DECISIONS.md의 iter_{n:03d}, `agent/runs/iter_{n:03d}/review.md`\n"
+    )
+    with JOURNEY_FILE.open("a", encoding="utf-8") as f:
+        f.write(text)
+    record_event(n, "milestone", title=milestone["title"])
+    rebuild_index()
+    print(f"\n🏁 마일스톤: {milestone['title']}")
+    notify(f"🏁 마일스톤 (iter_{n:03d})\n{milestone['title']}\n\n{milestone['story'][:1500]}")
 
 
 def step_skip_review(n, reason):
@@ -1007,6 +1153,7 @@ def step_skip_review(n, reason):
     save(d / "review.md", review["review_markdown"])
     save(d / "review.json", json.dumps(review, ensure_ascii=False, indent=2))
     log(f"iter_{n:03d} GPT REVIEW SKIPPED", reason)
+    record_event(n, "review_skipped", reason=reason)
     rebuild_index()
     print(f"summary: {summary}")
     return review
@@ -1049,6 +1196,8 @@ def step_commit(n, review):
     ))
     rebuild_index()
     log(f"iter_{n:03d} GIT COMMIT", f"{sha} ({branch}) {title}")
+    record_event(n, "commit", sha=sha, branch=branch, message=title)
+    rebuild_index()
     print(f"\n💾 커밋 {sha} ({branch}): {title}")
     if skipped_large:
         print(f"   5MB 넘는 파일은 제외: {', '.join(skipped_large)}")
@@ -1079,14 +1228,22 @@ def handle_needs_human(review, n):
             return False
         cmd, rest = split_reply(reply)
         if cmd == "q":
+            record_event(n, "needs_human", question=review["reason"], reply=reply, result="종료")
+            rebuild_index()
             return False
         if cmd == "f":
             note = rest or ask("다음 계획에 반영할 지시:\n> ") or ""
             if note:
                 save(iter_dir(n + 1) / "human_to_gpt.md", note)
                 log(f"iter_{n + 1:03d} HUMAN NOTE", note)
+            record_event(n, "needs_human", question=review["reason"], reply=reply,
+                         result=f"지시 반영해 계속: {note}")
+            rebuild_index()
             return True
         if cmd == "":
+            record_event(n, "needs_human", question=review["reason"], reply=reply or "ENTER",
+                         result="GPT 제안대로 계속")
+            rebuild_index()
             return True
         print(f"알 수 없는 입력입니다: {reply}")
         notify(f"알 수 없는 입력입니다: {reply}")
@@ -1200,6 +1357,7 @@ def main():
         completed += 1
 
         step_commit(n, review)
+        handle_milestone(n, review)
 
         if review["verdict"] == "DONE":
             banner("연구 목표 완료 (DONE)")

@@ -49,6 +49,8 @@ review_mode (Claude 작업 후 GPT 리뷰를 할지) 선택 기준:
 claude_report.md와 changed_files.txt를 직접 읽고 결과가 믿을 만한지 먼저 확인하라.
 문제가 보이면 그 수정부터 이번 계획에 넣는다.
 
+plan_summary에는 이번 계획을 한 줄로 적는다 (무엇을 왜). 연구 흐름 기록(agent/DECISIONS.md)에 쓰인다.
+
 출력은 지정된 JSON 스키마를 따른다. plan_markdown에는 다음 섹션을 넣는다:
 
 # Current Understanding
