@@ -1836,7 +1836,9 @@ def main():
     print(goal)
 
     n = current_iteration()
-    if not goal_changed and n > 1 and load_review(n - 1) and load_review(n - 1)["verdict"] == "DONE":
+    # 직전 반복이 DONE이어도, 그 뒤에 새 목표가 시작됐으면 묻지 않는다 (DONE은 이전 목표의 완료)
+    if (not goal_changed and n > 1 and goal_start(n) < n
+            and load_review(n - 1) and load_review(n - 1)["verdict"] == "DONE"):
         print("\n직전 반복에서 DONE 판정이 났습니다. 새 목표로 이어가려면 --goal \"새 목표\"로 실행하세요.")
         if args.autonomy == "full" or (ask("계속할까요? [y/N] ") or "").lower() != "y":
             return
