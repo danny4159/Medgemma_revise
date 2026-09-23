@@ -17,12 +17,23 @@ GPT 리뷰는 계획의 review_mode가 full일 때만 한다. skip이어도 Clau
 PASS가 아니거나 권한 거부가 있으면 리뷰한다. 리뷰를 건너뛴 반복은 다음 계획 단계에서
 GPT가 Claude 보고서를 직접 읽고 확인한다.
 
+자동화 정도 (--autonomy):
+    manual : 매 반복 계획을 사람이 확인
+    smart  : (기본) 계획이 ask_human이거나 규칙 위반일 때만 확인, 나머지는 1순위 대안으로 진행
+    full   : 계획 확인 없이 진행 (--auto와 같음)
+    어떤 모드든 리뷰가 NEEDS_HUMAN이면 사람에게 묻는다.
+
+접근법 관리: 계획은 대안 순위(alternatives)와 이번 approach를 내고, 리뷰는 approach를
+success / improve / abandon으로 판정한다. 같은 approach는 --max-attempts번까지만 시도하고
+(마지막 시도는 GPT 리뷰 강제), 넘으면 다음 대안으로 넘어가거나 사람에게 묻는다.
+
 산출물은 agent/runs/iter_NNN/ 에 저장된다. 중간에 끊겨도 다시 실행하면
 완료되지 않은 단계부터 이어서 진행한다.
 
 사용 예:
-    python orchestrator.py                     # 매 반복 계획을 확인하며 진행
-    python orchestrator.py --auto --max-iters 3
+    python orchestrator.py                     # smart: 애매할 때만 확인
+    python orchestrator.py --autonomy manual   # 매 반복 계획을 확인
+    python orchestrator.py --auto --max-iters 5
     python orchestrator.py --reset --goal "새 연구 목표"
     python orchestrator.py --gpus 1            # Claude가 GPU 1만 보이게
     python orchestrator.py --gpt-tier normal --claude-tier light   # 등급 강제
@@ -179,6 +190,8 @@ def run_streaming(cmd, log_path, timeout, env, on_line):
 
 GPT_TIERS = ["deep", "normal", "light"]
 CLAUDE_TIERS = ["creative", "heavy", "light"]
+# 같은 접근법 최대 시도 횟수 (--max-attempts로 덮어씀)
+MAX_ATTEMPTS = 3
 # Claude 작업 등급 → 그 결과를 검토할 GPT 리뷰 등급
 REVIEW_TIER_FOR_CLAUDE = {"creative": "deep", "heavy": "normal", "light": "light"}
 
@@ -372,6 +385,10 @@ def review_decision(args, n):
     d = iter_dir(n)
     if args.always_review:
         return True, "--always-review 지정"
+    approach = (load_plan(n) or {}).get("approach")
+    entry = approach_ledger(upto=n).get(approach) if approach else None
+    if entry and entry["attempts"] >= MAX_ATTEMPTS:
+        return True, f"'{approach}' {entry['attempts']}번째 시도라 계속/포기 판단 필요"
     override = read(d / "review_mode_override.txt").strip()
     mode = override or json.loads(read(d / "plan.json")).get("review_mode", "full")
     if mode == "full":
@@ -381,6 +398,32 @@ def review_decision(args, n):
     if json.loads(read(d / "claude_meta.json", "{}")).get("permission_denials"):
         return True, "skip이었지만 권한 거부된 명령이 있음"
     return False, ("사람이 skip 지정" if override else "계획에서 skip 지정") + ", Claude 자체 검증 PASS"
+
+
+def load_plan(n):
+    path = iter_dir(n) / "plan.json"
+    return json.loads(read(path)) if path.exists() else None
+
+
+def approach_ledger(upto=None):
+    """접근법별 시도 기록. 반복 파일에서 매번 다시 계산한다.
+
+    {approach: {"attempts": 시도 횟수, "iters": [반복 번호], "status": 최근 판정}}
+    """
+    ledger = {}
+    for n in existing_iterations():
+        if upto is not None and n > upto:
+            break
+        plan = load_plan(n)
+        if not plan or not plan.get("approach"):
+            continue
+        entry = ledger.setdefault(plan["approach"], {"attempts": 0, "iters": [], "status": "진행 중"})
+        entry["attempts"] += 1
+        entry["iters"].append(n)
+        review = load_review(n)
+        if review:
+            entry["status"] = review.get("approach_status") or "미검토"
+    return ledger
 
 
 def current_iteration():
@@ -401,10 +444,26 @@ def rebuild_index():
             continue
         used = tiers_used(n)
         tiers = "/".join(used.get(k, "?") for k in ("plan", "claude", "review"))
-        line = f"- iter_{n:03d} [{review['verdict']}] ({tiers}) {review['one_line_summary']}"
+        approach = (load_plan(n) or {}).get("approach", "?")
+        status = review.get("approach_status") or ("미검토" if review.get("skipped") else "?")
+        line = (
+            f"- iter_{n:03d} [{review['verdict']}] ({tiers}) "
+            f"<{approach}: {status}> {review['one_line_summary']}"
+        )
         if review.get("next_task"):
             line += f" → 다음: {review['next_task']}"
         lines.append(line)
+
+    ledger = approach_ledger()
+    if ledger:
+        lines += ["", f"## 접근법 기록 (같은 접근법 최대 {MAX_ATTEMPTS}회)", ""]
+        for name, entry in ledger.items():
+            iters = ", ".join(f"iter_{i:03d}" for i in entry["iters"])
+            lines.append(f"- {name}: {entry['attempts']}회 ({iters}), 최근 판정: {entry['status']}")
+        last_plan = load_plan(existing_iterations()[-1]) or {}
+        if last_plan.get("alternatives"):
+            lines += ["", "### 최근 계획의 대안 순위", ""]
+            lines += [f"{i}. {alt}" for i, alt in enumerate(last_plan["alternatives"], 1)]
     save(INDEX_FILE, "\n".join(lines) + "\n")
 
 
@@ -452,6 +511,9 @@ iter_{n:03d}
 
 === 사람의 추가 지시 ===
 {read(d / "human_to_gpt.md", "없음")}
+
+=== 규칙 ===
+같은 접근법 최대 시도 횟수: {MAX_ATTEMPTS}
 """
     tier = plan_tier(args, n)
     raw = run_codex(
@@ -465,53 +527,108 @@ iter_{n:03d}
     record_tier(n, "plan", tier)
     # plan.md가 있으면 계획 단계는 완료로 본다 (마지막에 저장)
     save(d / "plan.md", plan["plan_markdown"])
-    log(f"iter_{n:03d} GPT PLAN [claude: {plan['claude_tier']}]", plan["plan_markdown"])
+    log(f"iter_{n:03d} GPT PLAN [{plan['approach']} / {plan['decision']}]", plan["plan_markdown"])
     print("\n" + plan["plan_markdown"])
+    print("\n대안 순위:")
+    for i, alt in enumerate(plan["alternatives"], 1):
+        print(f"  {i}. {alt}")
+    print(f"결정: {plan['decision']} — {plan['decision_reason']}")
     print(f"\nClaude 등급 제안: {plan['claude_tier']} — {plan['tier_reason']}")
     print(f"GPT 리뷰: {plan['review_mode']} — {plan['review_reason']}")
 
 
-def step_checkpoint(args, n):
-    """계획을 Claude에 넘기기 전 사람 확인. False면 종료."""
-    d = iter_dir(n)
-    if args.auto:
-        return True
+def plan_concerns(n, plan):
+    """계획이 스스로 묻겠다고 했거나 접근법 규칙을 어긴 경우의 이유 목록."""
+    concerns = []
+    if plan.get("decision") == "ask_human":
+        concerns.append(plan.get("decision_reason", ""))
+    approach = plan.get("approach")
+    before = approach_ledger(upto=n - 1).get(approach) if approach else None
+    if before and before["status"] == "abandon":
+        concerns.append(f"이미 포기(abandon) 판정된 접근법 '{approach}'을 다시 고름")
+    elif before and before["attempts"] >= MAX_ATTEMPTS and before["status"] != "success":
+        concerns.append(f"'{approach}'을 이미 {before['attempts']}번 시도함 (최대 {MAX_ATTEMPTS})")
+    return concerns
 
-    plan = json.loads(read(d / "plan.json"))
+
+def step_checkpoint(args, n):
+    """계획을 Claude에 넘기기 전 확인. 'go' / 'replan' / 'quit'."""
+    d = iter_dir(n)
+    plan = load_plan(n)
+    concerns = plan_concerns(n, plan)
+    approach = plan.get("approach", "?")
+    attempt = approach_ledger(upto=n).get(approach, {}).get("attempts", 1)
+
+    if args.autonomy == "full" or (args.autonomy == "smart" and not concerns):
+        print(f"\n자동 진행 ({args.autonomy}): {approach} {attempt}번째 시도")
+        notify(
+            f"▶ iter_{n:03d} 자동 진행: {approach} ({attempt}번째 시도)\n"
+            f"근거: {plan.get('decision_reason', '')}\n"
+            f"Claude {claude_tier(args, n)} / 리뷰 {plan.get('review_mode', 'full')}"
+        )
+        return "go"
+
+    alternatives = plan.get("alternatives", [])
+    alt_text = "\n".join(f"{i}. {alt}" for i, alt in enumerate(alternatives, 1))
     while True:
         tier = claude_tier(args, n)
         review_mode = read(d / "review_mode_override.txt").strip() or plan["review_mode"]
         banner("사용자 확인")
         print(f"계획: {d / 'plan.md'}")
+        if concerns:
+            print("확인이 필요한 이유:")
+            for c in concerns:
+                print(f"  - {c}")
+        print(f"\n대안 순위 (1번이 현재 계획):\n{alt_text}\n")
         print(f"Claude 등급: {tier} {tier_spec('claude', tier)}")
         print(f"GPT 리뷰  : {review_mode}\n")
-        print("ENTER / ok   : 그대로 Claude에게 전달")
-        print("f [지시]     : 추가 지시 후 전달")
-        print(f"t [등급]     : Claude 등급 바꾸기 ({' / '.join(CLAUDE_TIERS)})")
-        print("r full|skip  : Claude 작업 후 GPT 리뷰 여부 바꾸기")
-        print("a            : 이후 확인 없이 자동 진행")
-        print("q            : 종료 (다시 실행하면 여기서 이어짐)")
+        print("ENTER / ok / 1 : 현재 계획(1순위)대로 Claude에게 전달")
+        print("2, 3, ...      : 해당 대안으로 계획 다시 세우기")
+        print("f [지시]       : 추가 지시 후 전달")
+        print(f"t [등급]       : Claude 등급 바꾸기 ({' / '.join(CLAUDE_TIERS)})")
+        print("r full|skip    : Claude 작업 후 GPT 리뷰 여부 바꾸기")
+        print("a              : 이후 확인 없이 자동 진행")
+        print("q              : 종료 (다시 실행하면 여기서 이어짐)")
 
+        reasons = "\n".join(f"• {c}" for c in concerns) or "(수동 확인 모드)"
         telegram_text = (
-            f"📋 iter_{n:03d} 계획 완료 — 확인 필요\n\n"
-            f"Claude 등급: {tier} — {plan['tier_reason']}\n"
-            f"GPT 리뷰: {review_mode} — {plan['review_reason']}\n\n"
-            f"{plan['plan_markdown'][:1500]}\n\n"
+            f"🙋 iter_{n:03d} 계획 확인 필요\n\n"
+            f"{reasons}\n\n"
+            f"대안 순위 (1번이 현재 계획):\n{alt_text}\n\n"
+            f"Claude {tier} / 리뷰 {review_mode}\n\n"
+            f"{plan['plan_markdown'][:1200]}\n\n"
             "답장:\n"
-            "ok → 그대로 진행\n"
+            "ok 또는 1 → 1순위로 진행\n"
+            "2, 3… → 그 대안으로 계획 다시\n"
             "f 지시내용 → 추가 지시 후 진행\n"
-            f"t {'|'.join(CLAUDE_TIERS)} → 등급 변경\n"
+            f"t {'|'.join(CLAUDE_TIERS)} → Claude 등급 변경\n"
             "r full|skip → GPT 리뷰 여부 변경\n"
             "a → 이후 자동 진행\n"
             "q → 종료"
         )
         reply = ask("> ", telegram_text)
         if reply is None:
-            return False
+            return "quit"
         cmd, rest = split_reply(reply)
 
         if cmd == "q":
-            return False
+            return "quit"
+        if cmd.isdigit() and 1 <= int(cmd) <= max(len(alternatives), 1):
+            k = int(cmd)
+            if k == 1:
+                return "go"
+            choice = alternatives[k - 1]
+            note = f"사용자가 대안 {k}번을 선택했다: {choice}\n이 대안을 approach로 계획을 다시 세워라."
+            if rest:
+                note += f"\n추가 지시: {rest}"
+            earlier = read(d / "human_to_gpt.md").strip()
+            save(d / "human_to_gpt.md", f"{earlier}\n\n{note}".strip())
+            log(f"iter_{n:03d} USER CHOSE ALTERNATIVE", note)
+            # 기존 계획은 기록으로 남기고 다시 계획한다
+            for name in ("plan.json", "plan.md"):
+                if (d / name).exists():
+                    (d / name).rename(d / f"rejected_{now().replace(' ', '_').replace(':', '')}_{name}")
+            return "replan"
         if cmd == "t":
             if args.claude_tier:
                 print("--claude-tier로 고정되어 있어 바꿀 수 없습니다.")
@@ -530,16 +647,16 @@ def step_checkpoint(args, n):
                 print("full 또는 skip만 가능합니다.")
             continue
         if cmd == "a":
-            args.auto = True
-            return True
+            args.autonomy = "full"
+            return "go"
         if cmd == "f":
             feedback = rest or ask("Claude에게 줄 추가 지시:\n> ") or ""
             if feedback:
                 save(d / "human_to_claude.md", feedback)
                 log(f"iter_{n:03d} USER FEEDBACK", feedback)
-            return True
+            return "go"
         if cmd == "":
-            return True
+            return "go"
         print(f"알 수 없는 입력입니다: {reply}")
         notify(f"알 수 없는 입력입니다: {reply}")
 
@@ -610,6 +727,12 @@ iter_{n:03d}
 
 === 연구 목표 ===
 {goal}
+
+=== 이번 접근법 ===
+{(load_plan(n) or {}).get("approach", "?")} — {approach_ledger(upto=n).get((load_plan(n) or {}).get("approach"), {}).get("attempts", 1)}번째 시도 (최대 {MAX_ATTEMPTS})
+
+=== 지금까지의 반복 요약과 접근법 기록 (agent/INDEX.md) ===
+{read(INDEX_FILE, "없음")}
 
 === 검토 자료 (직접 열어 확인하라) ===
 - 계획: agent/runs/iter_{n:03d}/plan.md
@@ -727,7 +850,10 @@ def handle_needs_human(review, n):
 def parse_args():
     p = argparse.ArgumentParser(description="GPT(Codex) ↔ Claude Code 자동 연구 루프")
     p.add_argument("--max-iters", type=int, default=3, help="이번 실행에서 진행할 최대 반복 수")
-    p.add_argument("--auto", action="store_true", help="계획 확인 없이 진행 (NEEDS_HUMAN이면 멈춤)")
+    p.add_argument("--autonomy", choices=["manual", "smart", "full"], default="smart",
+                   help="계획 확인: manual=매번, smart=애매할 때만(기본), full=안 함")
+    p.add_argument("--auto", action="store_true", help="--autonomy full과 같음")
+    p.add_argument("--max-attempts", type=int, default=MAX_ATTEMPTS, help="같은 접근법 최대 시도 횟수")
     p.add_argument("--goal", help="연구 목표 지정 (기존 반복이 있으면 --reset 필요)")
     p.add_argument("--reset", action="store_true", help="기존 runs/와 GOAL을 archive로 옮기고 새로 시작")
     p.add_argument("--gpus", help="Claude 실험에 보일 GPU (CUDA_VISIBLE_DEVICES), 예: 1 또는 0,1")
@@ -738,7 +864,10 @@ def parse_args():
     p.add_argument("--claude-timeout", type=int, default=3 * 60 * 60, help="Claude 단계 제한 시간(초)")
     p.add_argument("--always-review", action="store_true", help="계획과 상관없이 매 반복 GPT 리뷰")
     p.add_argument("--no-telegram", action="store_true", help="Telegram 알림/답장 끄기")
-    return p.parse_args()
+    args = p.parse_args()
+    if args.auto:
+        args.autonomy = "full"
+    return args
 
 
 def reset():
@@ -768,8 +897,9 @@ def load_goal(args):
 
 
 def main():
-    global HUMAN
+    global HUMAN, MAX_ATTEMPTS
     args = parse_args()
+    MAX_ATTEMPTS = args.max_attempts
     HUMAN = Human(None if args.no_telegram else NOTIFY_ENV_FILE)
     if HUMAN.telegram:
         print("Telegram 알림 사용 중 (끄려면 --no-telegram)")
@@ -792,13 +922,15 @@ def main():
     n = current_iteration()
     if n > 1 and load_review(n - 1) and load_review(n - 1)["verdict"] == "DONE":
         print("\n직전 반복에서 DONE 판정이 났습니다. 이어가려면 목표를 바꾸거나(--reset --goal) 계속하세요.")
-        if args.auto or (ask("계속할까요? [y/N] ") or "").lower() != "y":
+        if args.autonomy == "full" or (ask("계속할까요? [y/N] ") or "").lower() != "y":
             return
 
     first_line = goal.splitlines()[0][:200] if goal else ""
     notify(f"▶ 연구 루프 시작 (iter_{current_iteration():03d}부터, 최대 {args.max_iters}회)\n목표: {first_line}")
 
-    for _ in range(args.max_iters):
+    completed = 0
+    finished = False
+    while completed < args.max_iters:
         n = current_iteration()
         d = iter_dir(n)
         d.mkdir(parents=True, exist_ok=True)
@@ -806,9 +938,12 @@ def main():
         if not (d / "plan.md").exists():
             step_plan(args, goal, n)
         if not (d / "claude_report.md").exists():
-            if not step_checkpoint(args, n):
+            action = step_checkpoint(args, n)
+            if action == "quit":
                 print("종료합니다.")
                 return
+            if action == "replan":
+                continue
             step_claude(args, goal, n)
         needs_review, reason = review_decision(args, n)
         if needs_review:
@@ -816,6 +951,7 @@ def main():
             review = step_review(args, goal, n)
         else:
             review = step_skip_review(n, reason)
+        completed += 1
 
         if args.commit:
             step_commit(n, review)
@@ -823,20 +959,23 @@ def main():
         if review["verdict"] == "DONE":
             banner("연구 목표 완료 (DONE)")
             notify(f"🎉 iter_{n:03d} 연구 목표 완료 (DONE)\n{review['one_line_summary']}")
+            finished = True
             break
         if review["verdict"] == "CONTINUE":
             if review.get("skipped"):
                 notify(f"✅ iter_{n:03d} 완료 (GPT 리뷰 생략)\n{review['one_line_summary']}")
             else:
                 notify(
-                    f"✅ iter_{n:03d} 완료 [CONTINUE]\n{review['one_line_summary']}\n"
+                    f"✅ iter_{n:03d} 완료 [{review.get('approach_status', '')}]\n"
+                    f"{review['one_line_summary']}\n"
+                    f"접근법: {review.get('approach_note', '')}\n"
                     f"다음: {review['next_task']}"
                 )
         if review["verdict"] == "NEEDS_HUMAN" and not handle_needs_human(review, n):
             print("종료합니다. 다시 실행하면 다음 반복부터 진행합니다.")
             return
 
-    else:
+    if not finished:
         notify(f"⏸ 최대 반복 수({args.max_iters})에 도달해 멈췄습니다. 다시 실행하면 이어서 진행합니다.")
 
     banner("루프 종료")
