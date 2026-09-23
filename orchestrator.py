@@ -27,11 +27,11 @@ GPT가 Claude 보고서를 직접 읽고 확인한다.
 success / improve / abandon으로 판정한다. 같은 approach는 --max-attempts번까지만 시도하고
 (마지막 시도는 GPT 리뷰 강제), 넘으면 다음 대안으로 넘어가거나 사람에게 묻는다.
 
-코드 버전 관리: Claude는 별도 git worktree(<프로젝트>_research)에서 작업한다.
-접근법마다 research/<approach_id> 브랜치를 쓰고, 직전 접근법이 success면 그 위에서,
+코드 버전 관리: Claude는 research/ 폴더(자체 git 저장소)에서 작업한다.
+접근법마다 approach/<approach_id> 브랜치를 쓰고, 직전 접근법이 success면 그 위에서,
 아니면 그 접근법이 시작한 지점으로 돌아가 새 브랜치를 만든다. 커밋은 GPT 리뷰가
 commit_worthy로 판단한 경우에만 한다. 버리는 접근법의 미커밋 작업은 git stash로 보관한다.
-main 폴더(오케스트레이터, agent/ 기록, 데이터, 결과)는 브랜치와 상관없이 그대로다.
+브랜치는 research/ 안에서만 바뀌므로 오케스트레이터, agent/ 기록, legacy/는 그대로다.
 
 논문 추천: GPT 리뷰는 실제 결과로 가능성이 분명해진 방향에 한해 드물게 논문 1편을 추천한다.
 링크가 열리고 중복이 아니면 agent/PAPERS.md에 쌓고 Telegram으로 알린다.
@@ -78,11 +78,12 @@ LEGACY_REVIEW_FILE = AGENT_DIR / "GPT_REVIEW.md"
 # Telegram 봇 설정 (TELEGRAM_BOT_TOKEN, TELEGRAM_CHAT_ID). git에 올리지 않는다.
 NOTIFY_ENV_FILE = AGENT_DIR / ".notify.env"
 
-# Claude가 코드를 고치는 git worktree. 브랜치를 바꿔도 main 폴더(기록·데이터)는 그대로다.
-RESEARCH_DIR = PROJECT_DIR.parent / f"{PROJECT_DIR.name}_research"
-BASE_BRANCH = "research/base"
-# worktree에서 main 폴더를 가리키는 링크 (데이터·결과는 브랜치와 무관하게 공유)
-SHARED_LINKS = ("eval_samples", "hf_cache", "eval_results")
+# Claude가 코드를 고치는 곳. 자체 git 저장소라 브랜치를 바꿔도 이 폴더 밖은 그대로다.
+RESEARCH_DIR = PROJECT_DIR / "research"
+BASE_BRANCH = "base"
+BRANCH_PREFIX = "approach/"
+# 이전 수동 연구 기록 (읽기 전용 참고 자료, 입력 데이터 포함)
+LEGACY_DIR = PROJECT_DIR / "legacy"
 # 커밋에서 제외할 파일 크기
 MAX_COMMIT_FILE_BYTES = 5 * 1024 * 1024
 
@@ -266,7 +267,7 @@ def run_claude(args, prompt, log_path, tier):
         "--output-format", "stream-json", "--verbose",
         "--model", spec["model"],
         "--effort", spec["effort"],
-        # 작업 디렉터리는 worktree. main 폴더는 결과 저장(eval_results)과 계획 읽기용.
+        # 작업 디렉터리는 research/. 프로젝트 폴더는 계획과 legacy/ 데이터를 읽는 용도.
         # --add-dir는 값을 여러 개 받으므로 프롬프트 바로 앞에 두면 프롬프트까지 경로로 읽는다.
         "--add-dir", str(PROJECT_DIR),
         "--append-system-prompt-file", str(PROMPT_DIR / "claude_engineer.md"),
@@ -307,11 +308,11 @@ def run_claude(args, prompt, log_path, tier):
 # --------------------------------------------------
 
 def snapshot():
-    """Claude가 건드릴 수 있는 곳의 파일 상태: worktree(코드) + main의 eval_results(결과)."""
+    """Claude가 건드릴 수 있는 research/의 파일 상태 (경로는 프로젝트 기준)."""
     files = {}
-    for base, label in ((RESEARCH_DIR, ""), (PROJECT_DIR / "eval_results", "eval_results")):
+    for base in (RESEARCH_DIR,):
         for root, dirs, names in os.walk(base):
-            rel_root = Path(label) / Path(root).relative_to(base)
+            rel_root = Path(root).relative_to(PROJECT_DIR)
             dirs[:] = [
                 d for d in dirs
                 if d not in SNAPSHOT_SKIP_DIRS
@@ -346,7 +347,7 @@ def git(*git_args, cwd=None):
 
 
 def wgit(*git_args):
-    """연구 worktree에서 git 실행."""
+    """research/ 저장소에서 git 실행."""
     return git(*git_args, cwd=RESEARCH_DIR)
 
 
@@ -354,42 +355,31 @@ def current_branch():
     return wgit("rev-parse", "--abbrev-ref", "HEAD")[1].strip()
 
 
-def ensure_worktree():
-    """연구 코드용 worktree(research/base)를 준비한다. 이미 있으면 그대로 둔다.
-
-    main은 scripts/, docs/를 추적하지 않으므로, research/base에서만 추적하도록 바꾸고
-    현재 main 폴더의 scripts/, docs/를 기준 커밋으로 남긴다.
-    """
+def ensure_research_repo():
+    """research/를 자체 git 저장소로 준비한다. 이미 있으면 그대로 둔다."""
     if (RESEARCH_DIR / ".git").exists():
         return
-    exists = git("show-ref", "--verify", "--quiet", f"refs/heads/{BASE_BRANCH}")[0] == 0
-    add = ["worktree", "add", str(RESEARCH_DIR), BASE_BRANCH] if exists else \
-          ["worktree", "add", "-b", BASE_BRANCH, str(RESEARCH_DIR), "HEAD"]
-    code, out = git(*add)
+    RESEARCH_DIR.mkdir(exist_ok=True)
+    code, out = wgit("init", "-q", "-b", BASE_BRANCH)
     if code:
-        raise AgentError(f"worktree 생성 실패: {out}")
-    print(f"연구 worktree 생성: {RESEARCH_DIR} ({BASE_BRANCH})")
-
-    gitignore = RESEARCH_DIR / ".gitignore"
-    lines = [line for line in read(gitignore).splitlines() if line.strip() not in ("scripts/", "docs/")]
-    lines += ["", "# main 폴더의 데이터·결과를 가리키는 링크 (브랜치와 무관하게 공유)"]
-    lines += [f"/{name}" for name in SHARED_LINKS]
-    save(gitignore, "\n".join(lines) + "\n")
-
-    for name in ("scripts", "docs"):
-        if (PROJECT_DIR / name).exists() and not (RESEARCH_DIR / name).exists():
-            shutil.copytree(PROJECT_DIR / name, RESEARCH_DIR / name,
-                            ignore=shutil.ignore_patterns("__pycache__", "*.pyc"))
-    for name in SHARED_LINKS:
-        link = RESEARCH_DIR / name
-        if not link.exists() and not link.is_symlink():
-            link.symlink_to(PROJECT_DIR / name)
-
+        raise AgentError(f"research 저장소 생성 실패: {out}")
+    # 커밋 작성자는 바깥 저장소 설정을 따른다
+    for key in ("user.name", "user.email"):
+        value = git("config", key)[1].strip()
+        if value:
+            wgit("config", key, value)
+    save(RESEARCH_DIR / ".gitignore", "results/\n__pycache__/\n*.pyc\n")
+    save(RESEARCH_DIR / "README.md", (
+        "# research\n\n"
+        "오케스트레이터가 진행하는 연구 코드. 접근법마다 `approach/<id>` 브랜치를 쓴다.\n"
+        "- `results/`: 실험 결과 (git 제외, 브랜치와 상관없이 유지)\n"
+        "- 입력 데이터와 이전 수동 분석 기록은 `../legacy/`\n"
+    ))
     wgit("add", "-A")
-    if wgit("diff", "--cached", "--quiet")[0] != 0:
-        code, out = wgit("commit", "-m", "Research baseline: track existing scripts and docs")
-        if code:
-            raise AgentError(f"기준 커밋 실패: {out}")
+    code, out = wgit("commit", "-q", "-m", "Initialize research repository")
+    if code:
+        raise AgentError(f"research 저장소 첫 커밋 실패: {out}")
+    print(f"연구 저장소 생성: {RESEARCH_DIR} ({BASE_BRANCH})")
 
 
 # --------------------------------------------------
@@ -488,7 +478,7 @@ def approach_key(plan):
 
 
 def approach_branch(key):
-    return f"research/{key}"
+    return f"{BRANCH_PREFIX}{key}"
 
 
 def approach_ledger(upto=None):
@@ -610,8 +600,8 @@ iter_{n:03d}
 {read(INDEX_FILE, "없음")}
 
 === 코드 위치 ===
-연구 코드는 {RESEARCH_DIR} (git worktree, 현재 브랜치 {current_branch()})에 있다.
-main 폴더의 scripts/는 옛 사본이니 보지 마라. 데이터·결과는 main 폴더의 eval_samples/, eval_results/.
+연구 코드: research/ (자체 git 저장소, 현재 브랜치 {current_branch()}), 결과: research/results/
+이전 수동 분석 기록과 입력 데이터: legacy/ (scripts, docs, eval_samples, eval_results)
 
 === 직전 결과 ===
 {prev_text}
@@ -772,16 +762,16 @@ def base_for_new_branch(cur):
 
     직전 접근법이 success면 그 위에서 이어가고, 아니면 그 접근법이 시작했던 지점으로 돌아간다.
     """
-    if cur == BASE_BRANCH or not cur.startswith("research/"):
+    if cur == BASE_BRANCH or not cur.startswith(BRANCH_PREFIX):
         return cur
-    entry = approach_ledger().get(cur[len("research/"):])
+    entry = approach_ledger().get(cur[len(BRANCH_PREFIX):])
     if entry and entry["status"] == "success":
         return cur
     return (entry or {}).get("base") or BASE_BRANCH
 
 
 def ensure_branch(n):
-    """이번 반복 접근법의 브랜치로 worktree를 맞춘다. 결과는 git.json에 기록."""
+    """이번 반복 접근법의 브랜치로 research/를 맞춘다. 결과는 git.json에 기록."""
     d = iter_dir(n)
     info = load_json(d / "git.json")
     if info:
@@ -844,10 +834,10 @@ def step_claude(args, goal, n):
 {d / "plan.md"} 를 먼저 읽고 그 계획을 구현/실행하라.
 
 === 작업 위치 ===
-현재 디렉터리는 연구용 git worktree다 (브랜치 {branch}). 코드는 여기서만 만들고 고친다.
-eval_samples/, eval_results/, hf_cache/는 main 폴더({PROJECT_DIR})로 연결된 링크다.
-기존 스크립트 안의 main 절대경로(데이터·결과)는 그대로 써도 된다.
-git 커밋과 브랜치 관리는 orchestrator가 한다.
+현재 디렉터리는 {RESEARCH_DIR} (연구 코드 git 저장소, 브랜치 {branch})다.
+코드는 여기서만 만들고 고치고, 결과는 results/에 저장한다.
+입력 데이터는 {LEGACY_DIR}/eval_samples/, 이전 수동 분석 코드·결과는 {LEGACY_DIR}/ 에 있다 (읽기 전용).
+이전 코드를 쓰려면 research/로 복사해서 고친다. git 커밋과 브랜치 관리는 orchestrator가 한다.
 
 === 사용자 추가 지시 ===
 {read(d / "human_to_claude.md", "없음")}
@@ -911,7 +901,7 @@ iter_{n:03d}
 - Claude 보고서: agent/runs/iter_{n:03d}/claude_report.md
 - Claude 도구 호출 전체 기록: agent/runs/iter_{n:03d}/claude_stream.jsonl
 - 코드 변경 diff (마지막 커밋 대비): agent/runs/iter_{n:03d}/changes.patch
-- 코드 자체는 {RESEARCH_DIR} 에 있다. main 폴더의 scripts/는 옛 사본이니 보지 마라.
+- 코드는 research/, 결과는 research/results/ 에 있다.
 
 === 이번 반복에서 바뀐 파일 (A 추가 / M 수정 / D 삭제) ===
 {changed_text}
@@ -1164,7 +1154,7 @@ def main():
 
     if not (CONDA_ENV / "bin" / "python").exists():
         sys.exit(f"conda env를 찾을 수 없습니다: {CONDA_ENV}")
-    ensure_worktree()
+    ensure_research_repo()
 
     if args.reset:
         reset()

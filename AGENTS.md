@@ -13,20 +13,16 @@
 - GPU: RTX 3090 24GB x2 (0, 1). 공용 서버이므로 실행 전 `nvidia-smi`로 확인한다.
   GPU 선택은 명령 앞에 환경변수를 붙이지 말고 orchestrator의 `--gpus` 설정을 따른다.
 
-## 코드 위치 (중요)
-- 연구 코드의 정본은 git worktree `/SSD1_1TB/home/milab/daniel/08_medgemma_research`에 있다.
-  접근법마다 `research/<approach_id>` 브랜치를 쓰고, 브랜치·커밋은 orchestrator가 관리한다.
-- main 폴더(`08_medgemma`)의 `scripts/`, `docs/`는 worktree를 만들 때 복사한 옛 사본이다.
-- 데이터(`eval_samples/`), 결과(`eval_results/`), 모델 캐시(`hf_cache/`)는 main 폴더에 하나만 있고
-  worktree에서는 링크로 연결된다. 브랜치와 상관없이 공유된다.
-
-## 디렉터리
-- `scripts/01_data` 데이터 수집, `02_eval` 평가, `03_diagnosis` 진단,
-  `04_official_format` 공식 형식 재검증, `05_remedy` 해법 검증
-- `eval_samples/` 입력 데이터 (읽기 전용)
-- `eval_results/` 실험 출력 (새 파일 추가는 가능, 기존 파일 덮어쓰기 금지)
-- `docs/MEDGEMMA_평가_전체정리.txt` 지금까지의 연구 정리 (맨 앞 "중대 정정" 먼저 읽을 것)
-- `agent/GOAL.md` 현재 연구 목표
-- `agent/INDEX.md` 반복(iteration)별 한 줄 요약과 접근법 기록
-- `agent/PAPERS.md` 사용자에게 추천한 논문 목록
-- `agent/runs/iter_NNN/` 반복별 plan.md, plan.json, claude_report.md, review.md, review.json, changed_files.txt
+## 폴더 구조
+- `orchestrator.py`, `notifier.py`, `agent/`: 연구 루프 오케스트레이터와 기록 (main 브랜치)
+  - `agent/GOAL.md` 현재 연구 목표
+  - `agent/INDEX.md` 반복(iteration)별 한 줄 요약과 접근법 기록
+  - `agent/PAPERS.md` 사용자에게 추천한 논문 목록
+  - `agent/runs/iter_NNN/` 반복별 plan.md, plan.json, claude_report.md, review.md, review.json, changed_files.txt
+- `research/`: 오케스트레이터 연구 코드. 자체 git 저장소이고 접근법마다 `approach/<id>` 브랜치를 쓴다.
+  브랜치·커밋은 orchestrator가 관리한다. 결과는 `research/results/` (git 제외).
+- `legacy/`: 오케스트레이터 이전에 Claude와 대화하며 진행한 MedGemma 한계 분석 기록 (읽기 전용)
+  - `legacy/scripts/` 데이터 수집(01)·평가(02)·진단(03)·공식 형식 재검증(04)·해법 검증(05)
+  - `legacy/docs/MEDGEMMA_평가_전체정리.txt` 지금까지의 연구 정리 (맨 앞 "중대 정정" 먼저 읽을 것)
+  - `legacy/eval_samples/` 입력 데이터, `legacy/eval_results/` 이전 실험 결과
+- `hf_cache/`: 모델 캐시 (수정 금지)
