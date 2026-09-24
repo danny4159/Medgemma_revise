@@ -94,3 +94,19 @@ MedGemma 1.5로 연구하는 것 자체가 큰 제약이라고 판단되면, 근
 - 접근법: Pooling 전후 frozen feature probe (`approach/pooling-feature-probe`), 시도: iter_007
 - 커밋: 없음
 - 자세히: DECISIONS.md의 iter_007, `agent/runs/iter_007/review.md`
+
+## 🏁 정상 사용 조건에서도 남는 RSNA opacity grounding 오류를 실제 출력으로 검증
+
+*iter_009 · 2026-09-24 22:29 · 판정: CONTINUE / success*
+
+정상 사용을 통제한 실제 생성 출력에서 반복적 위치 불일치를 확인해 방법 개발의 근거를 확보했다.
+**고민:** 과거 grounding 저점수에는 좌표·출력 길이·사용법 문제가 섞여 있었다.
+**시도:** context·pooling 접근의 제한된 근거를 전체 능력으로 일반화하지 않고, 사용자 보완으로 anatomy 전이 계획을 보존한 채 진단으로 전환했다.
+**개발:** 공식 사용법 sanity, RSNA 환자 분할, 세 prompt 생성, 엄격 parser와 bbox 평가를 연결했다.
+**결과:** 평가 양성 200명 중 두 정상 prompt의 공통 위치 불일치는 134명, 67.0%(95% CI 60.2–73.1%)였다.
+**비교:** 공식 prompt F1@0.3 0.147은 단일 box prior 0.269보다 낮았다.
+**의미:** 특정 RSNA 조건의 한계는 validated로 갱신한다. 내부 원인과 해결책은 미확인으로 남기고, 다음에는 강한 baseline을 갖춘 방법 개발을 진행한다.
+
+- 접근법: 정상 사용 조건의 병변 grounding 검증 (`approach/grounding-usage-diagnostic`), 시도: iter_009
+- 커밋: 39aa49a6fa5943ca0d3e0327a7874e68a2c878cb
+- 자세히: DECISIONS.md의 iter_009, `agent/runs/iter_009/review.md`

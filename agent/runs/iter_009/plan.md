@@ -1,0 +1,247 @@
+# 요약
+
+- **이번에 할 일:** 공식 사용법을 검증하고 RSNA development 80명과 독립 평가 300명에서 세 prompt의 실제 bbox 출력을 평가한다.
+- **필요한 이유:** 기존 점수에는 출력 잘림·parser·좌표·주석 범위 문제가 섞여 있어 정상 사용 조건의 모델 한계로 확정할 수 없다.
+- **확인할 기준:** 데이터·사용법 gate를 통과한 뒤 두 정상 prompt에서도 함께 남는 위치 오류의 빈도와 CI, 단순 baseline 대비 bbox 일치도를 확인한다.
+- **주의·다음:** RSNA는 NIH 기반의 특정 opacity 과제다. 실행 완료와 한계 검증을 구분하고, anatomy 전이는 자동 선택하지 않는다.
+
+# Current Understanding
+
+현재 `lesion-grounding-generalization`은 observed다. validated 주장은 없으므로 이번 역할은 diagnostic이다. legacy의 좌표 출력 능력 부재 주장은 rejected이며, pooling head 결과는 실제 생성 출력이나 decoder 원인의 증거가 아니다.
+
+사용자 보완 `20260924_104125_9b1acb6f`에 따라 iter_008의 anatomy→lesion 계획·세션·부분 코드·결과는 보존한다. 해당 학습은 실행하지 않는다. 기존 NIH 160명과 이전에 열어 본 자료는 개발 자료로 유지한다. 기존 결과·완료 표시·한계 기록을 소급 수정하지 않는다.
+
+이번에는 NIH 신규 200명 후보를 RSNA 독립 환자 평가로 변경한다. 이유는 RSNA가 명시적 opacity target, 정상·비정상 음성 구분, 공식 annotation 및 NIH mapping을 제공하기 때문이다. 원본 JSON과 DICOM은 계획 환경의 DNS 오류로 아직 읽지 못했으므로 입력 연결 검증이 선행 조건이다.
+
+# Hypothesis
+
+**주가설:** 정상 사용을 통제해도 RSNA 양성 환자의 상당수에서 공식 긴 prompt와 간결한 명시형 prompt 모두 명백한 위치 불일치를 보인다.
+
+명백한 위치 불일치는 완결되고 문법·좌표가 유효한 비어 있지 않은 예측에서 모든 예측–GT IoU가 0.3 미만인 경우로 사전 정의한다. 환자별로 두 정상 prompt 모두 이 조건이면 공통 위치 오류로 센다. 빈 목록, 잘림, parser 실패는 이 분자에 넣지 않고 별도 보고한다.
+
+**대안:** 합리적 prompt나 올바른 전처리·출력 처리로 오류가 대부분 해소된다. 이 경우 기존 광범위한 한계 해석을 정정한다. 위치 오류보다 미검출·형식 오류가 우세하면 그 현상으로 질문을 좁히고 내부 원인이나 anatomy 전이 필요성을 단정하지 않는다.
+
+# Limitation Evidence / Correct Usage Checks
+
+## 근거와 범위
+
+`agent/LIMITATIONS.md`, `LIMITATIONS.json`, iter_003·004·006·007 리뷰, iter_008 계획·복구 기록, iter_009 조사 노트와 legacy 중대 정정을 출발점으로 한다. 과거 저점수는 후보 근거이며 새 조건의 성능 수치로 재사용하지 않는다.
+
+공식 anatomy notebook은 사용법 sanity check로 재현한다. 단일 예제의 성공을 병변 성능이나 공식 benchmark 재현으로 해석하지 않는다. anatomy 대리 GT와 RSNA 병변 GT의 점수를 능력 차이로 비교하지 않는다.
+
+## 버전·입력
+
+모델은 `google/medgemma-1.5-4b-it`, 로컬 snapshot `91850547d9f0b2fdd21aa7c5f4f3d1a8a52c243b`를 사용한다. 실제 로드 경로와 config·processor·chat template digest, torch/transformers/PIL 및 관련 패키지 버전을 기록한다. `HF_HOME`은 수정하지 않는다.
+
+공식 notebook 원문과 예제 영상을 이번 결과 경로에 보존하고 URL·조회 시각·SHA256을 기록한다. commit SHA를 확인할 수 있으면 추가하되 확인하지 못한 값을 만들지 않는다. 설치 cell은 실행하지 않으며 `pip install`을 하지 않는다.
+
+image 뒤에 text를 둔 user message와 공식 chat template을 사용한다. 실제 tokenized prompt, image token 관련 설정, processor의 유효 `do_pan_and_scan`, resize·정규화 값을 기록한다. 모델 입력에 annotation, overlay, 정답을 암시하는 파일명·metadata를 넣지 않는다.
+
+## 전처리
+
+공식 예제 원본 경로와 안전하게 일반화한 경로를 구분한다. notebook의 `img_as_ubyte` 이후 공통 `*255` 처리가 L/RGB/RGBA에서 어떤 값을 만드는지 fixture로 확인한다. 원본 예제 image mode를 실제 파일에서 확인하고 원문 실행과 값 보존 경로의 입력 차이·출력 차이를 기록한다. 원문과 다르게 처리했다면 충실한 원문 재현이라고 표현하지 않는다.
+
+본평가의 uint8 L/RGB는 밝기 값을 보존하고 grayscale은 채널 복제한다. RGBA는 흰 배경 alpha 합성 규약과 반올림 방식을 고정한다. 중앙의 검은 square padding은 왼쪽·위에 floor, 오른쪽·아래에 나머지를 둔다. 원본 크기와 padding affine을 저장한다.
+
+RSNA DICOM은 실제 Rows/Columns, BitsStored, PixelRepresentation, PhotometricInterpretation, slope/intercept, VOI 관련 태그를 확인한다. 일반적인 8-bit MONOCHROME2·항등 rescale이면 pixel array를 보존한다. 다른 값은 임의 min–max 정규화나 점수 기반 window 선택으로 처리하지 말고 공식 표시 규약을 확인해 development에서 고정한다. 그 의미가 해결되지 않으면 해당 입력 gate는 실패다.
+
+출력 `[y0,x0,y1,x1]`의 0–1000 좌표는 padding된 전체 영상 기준이다. GT도 동일 canvas로 옮겨 채점하며, 원본 좌표 역변환은 overlay와 보고에 사용한다. 잘못된 범위를 clipping하거나 끝점을 정렬해 주평가를 구제하지 않는다.
+
+# Contribution Path / Baselines / Reuse
+
+## 목표와 연결
+
+이번 산출물은 방법론이 아니라 실제 출력 오류의 재현 가능한 진단이다. validated 판정 이후에만 오류 분포를 근거로 training-free 재질의·증거 선택, 직접 병변 LoRA/adapter, anatomy supervision 후보를 비교한다. frozen head 점수만으로 생성 성능 개선을 주장하지 않는다. 새로운 방법의 contribution 및 다중 데이터셋 증명은 이후 과제다.
+
+## 재사용
+
+새 브랜치 기반으로 iter_006 승인 커밋 `68117cfd08429ffc3cb9b77e14fb1db3221d86ab`를 지정한다. 현재 기반에 다음 파일이 있으므로 `reuse_assets`는 비운다.
+
+- `grounding_data/nih.py`: NIH metadata parser·환자 연결·`ZipIndex`를 재사용한다. 기존 160명 split 생성과 readiness를 새 RSNA 집단에 적용하지 않는다.
+- `grounding_data/net.py`: 다운로드 ledger, HTTP Range, hash 함수를 재사용한다.
+- `grounding_data/__init__.py`: package 의존 파일이다.
+
+필수 보완은 이번 경로에 한정한다. ZIP basename 충돌을 검출하고 full member path 및 UID를 보존한다. URL/객체 식별과 연결되지 않은 디스크 range cache는 이번 실행에서 끈다. 재개한 개별 파일은 현재 bytes의 SHA256, source URL·객체 metadata, CRC와 연결한다. 다운로드 ledger의 과거 byte/time 기본값 대신 실제 archive·member 크기에 근거한 실행 설정을 명시하며 저장값과 현재 설정 불일치를 거부한다.
+
+QES scorer·pooling feature·head runner는 사용하지 않는다. 해당 경로의 미해결 결함 수정은 이번 선행 과제로 확대하지 않는다. untracked 복구 파일과 archive ref는 삭제하거나 덮어쓰지 않는다. 브랜치·커밋은 orchestrator가 관리한다.
+
+## 비교군
+
+1. 공식 긴 prompt: 보존한 notebook의 prompt source에서 `object_name`만 `pulmonary opacity suspicious for pneumonia`로 치환한다.
+2. 간결한 명시형: 아래 원문을 고정한다.
+
+`Localize all pulmonary opacities suspicious for pneumonia in this chest radiograph. Return only a JSON list. Each entry must contain "box_2d": [y_min, x_min, y_max, x_max] and a nonempty "label" string. Coordinates must be between 0 and 1000 relative to the entire square-padded image, with y before x. Return [] if no such opacity is visible.`
+
+3. legacy: `legacy/scripts/04_official_format/rerun_localization_official.py`의 `DETECT` 문자열을 그대로 추출하고 동일 target으로 치환한다. 기존 parser는 가져오지 않는다.
+4. 위치 prior: RSNA development 양성 40명의 정규화 GT box들 중 전체 development GT에 대한 평균 best IoU가 가장 큰 실제 box 하나를 medoid로 고른다. 동률은 고정 ID 순서로 결정한다. 모든 영상에 그 한 box를 출력하는 영상 비의존 baseline이다.
+5. image-swap: prompt별 독립 평가 환자를 고정 seed로 derangement하여 다른 환자의 전체 예측을 옮긴다. 양성 위치 비교는 양성 안에서, 전체 존재·추가 예측 비교는 전체 집단에서 따로 수행한다. GT로 좋은 donor를 고르지 않는다.
+
+세 prompt는 동일 입력·정밀도·생성 길이 규칙을 사용한다. 공식·간결형을 정상 사용 조건으로 사전 지정하며 test 점수로 하나를 선택하지 않는다.
+
+# Proposed Experiment
+
+## 1. 공식 RSNA 원본 확보와 annotation gate
+
+공식 페이지에 연결된 adjudicated ZIP·annotation JSON·mapping JSON을 사용한다. 파일 URL은 research_notes에 기록한 S3 경로를 기준으로 실제 링크를 다시 대조한다. 원문·hash·download ledger와 이용 조건을 보존한다. original/unadjudicated 판본과 혼합하지 않는다.
+
+원본 JSON에서 label ID→의미, bbox 단위, annotation mode, image/study/series/SOP UID와 mapping 구조를 확인한다. MD.ai 현재 문서와 다른 필드를 추측으로 채우지 않는다. 주석 누락을 음성으로 만들지 않고 명시적 Normal 또는 No Opacity/Not Normal label만 음성으로 쓴다. bbox와 전역 label이 모순되거나 mapping이 모호한 항목은 모델 출력을 보기 전에 제외 사유를 기록한다.
+
+ZIP central directory와 Range 지원을 확인하고 필요한 member만 우선 확보한다. Range 미지원이면 전체 응답을 잘못된 부분 파일로 저장하지 않는다. 공식 archive의 실제 크기·디스크 여유를 확인해 전체 다운로드가 합리적이면 그 변경을 실행 전에 기록하고 진행할 수 있다. 접근 제한·DNS 오류에는 제한된 재시도 후 오류를 보존하며 비공식 미러로 자동 대체하지 않는다.
+
+각 선택 영상의 annotation UID→DICOM UID→RSNA mapping→NIH Image Index→NIH Patient ID 연결은 유일해야 한다. bbox의 x/y/width/height를 원본 image canvas와 연결하고, 범위·양의 면적·영상 dimension을 검사한다. development 영상 최소 12개에 좌표축·테두리·GT overlay를 만들어 수동 검토한다. 이는 좌표 연결 검사이며 GT의 임상적 정확성을 재판독한 것으로 세지 않는다.
+
+## 2. 환자 분할
+
+기존 NIH 160명 및 다른 이전 실행에서 사용한 NIH/RSNA 환자를 exclusion manifest로 만든다. 이후 metadata와 정답 category만 사용해 seed `20260924`로 다음 집단을 결정한다.
+
+- development 80명: 양성 40명, Normal 20명, No Opacity/Not Normal 20명.
+- 독립 평가 300명: 양성 200명, Normal 50명, No Opacity/Not Normal 50명.
+
+한 환자는 전체에서 한 영상만 사용한다. 여러 category의 영상을 가진 환자는 사전 고정한 순서 양성→Normal→No Opacity/Not Normal와 seed 기반 ID 순서로 배정하고, 선택 편향을 기록한다. 환자 내 영상 선택도 같은 고정 순서로 한다. 모든 집단 간 NIH Patient ID 교집합은 0이어야 한다. 이미지 bytes·decoded pixel 중복도 검사한다.
+
+각 층의 eligible 수와 제외 사유를 먼저 보고한다. 목표 수가 부족하면 작은 표본을 본실험 완료로 처리하지 말고 모델 결과를 보기 전에 설계 변경이 필요한 상태로 남긴다. 학습 데이터 독립성이나 외부 기관 일반화는 주장하지 않는다.
+
+## 3. 사용법 sanity와 개발 pilot
+
+공식 예제의 원문 경로와 값 보존 경로를 실행해 입력·token·완결된 응답·bbox overlay를 보존한다. notebook 저장 bbox와 동일한 숫자를 얻는 것을 통과 조건으로 삼지 않는다. 핵심은 입력·template·좌표 해석의 재현성과 실제 출력의 확인이다.
+
+development 중 고정한 12명에서 세 prompt, 총 36요청으로 메모리·처리량·종료 양상을 측정한다. 이 요청은 설정이 바뀌지 않으면 development 240요청에 포함한다. 공식 pipeline 경로와 실제 runner의 processed input 및 생성 suffix 연결을 development 예제로 대조한다.
+
+parser·전처리·UID 연결과 자원 gate를 통과하면 development 80명 전체를 마치고, 입력·prompt·parser·평가기·baseline·분할 digest를 잠근 뒤 독립 평가 300명으로 진행한다. 모델의 낮은 점수나 높은 점수를 본실험 진입 조건으로 삼지 않는다.
+
+## 4. 생성 규약과 저장
+
+bf16, `do_sample=False`, batch=1부터 시작한다. `max_new_tokens=1000`에서 EOS 없이 상한에 도달한 요청만 동일 입력으로 2000, 이후 4000까지 연장 재실행한다. prefix·길이·종료 차이와 각 실행 비용을 저장한다. 4000에서도 끝나지 않으면 truncated로 남기며 내용상 위치 오류와 구분한다. EOS ID는 로드한 generation config에서 확인한다.
+
+전체 입력 식별자, token ID, 생성 suffix의 원문, 입력/출력 token 수, 종료 사유, runtime, GPU peak memory, 모델·processor·prompt·입력 digest를 요청마다 저장한다. 일부 문자만 잘라 저장하지 않는다. GT는 추론 worker 입력에서 분리한다.
+
+기본 실행량은 380명×3 prompt=1,140요청과 공식 예제 sanity다. cap 연장 요청은 추가된다.
+
+## 5. Parser와 metric
+
+생성 suffix만 파싱한다. 알려진 thinking 구간을 분리하고 `Final Answer` 영역을 우선한다. marker가 없으면 reasoning 밖의 유일한 완결 JSON 목록만 허용하고 marker 누락을 별도 표시한다. 복수 후보 중 GT와 맞는 목록을 고르지 않는다. empty list는 유효한 미검출 응답이다.
+
+문법 실패, 모호한 최종 답, schema 오류, 빈 label, 비유한 좌표, 범위 이탈, 뒤집힌 끝점, 미검출, 잘림을 별도 flag로 보존한다. label의 의미 불일치도 보고하되 문자열 동의어 때문에 유효한 좌표를 몰래 제외하지 않는다. 기하 평가에는 반환된 전체 box를 사용하고 label별 해석은 보조 분석으로 둔다. scale 추정·끝점 정렬·GT 기반 box 선택은 금지한다.
+
+GT와 예측은 IoU threshold 0.3에서 최대 cardinality의 one-to-one matching을 수행하고 동률은 총 IoU, 이후 고정 index 순서로 푼다. threshold 0.5 결과를 민감도 분석으로 함께 낸다. 양성 환자별 precision, recall, F1, unmatched GT/예측 수, bbox union IoU를 계산한다. 중복 예측을 자동 제거하지 않는다. union은 겹친 면적을 중복 합산하지 않는다.
+
+형식 실패·잘림은 end-to-end 양성 F1에서 0으로 포함하고 별도 비율을 보고한다. 유효 출력에 조건부인 지표도 분모와 함께 병기한다. 음성은 유효 빈 목록 비율과 유효 비어 있지 않은 예측 비율, 형식 실패율을 따로 보고한다. balanced 표본의 전체 비율을 실제 유병률 성능으로 해석하지 않는다.
+
+# Implementation Tasks for Claude
+
+1. 실행 환경과 기존 소스·사용자 변경을 확인한다. 이번에 필요한 재사용 모듈과 위 필수 수정만 다루며 과거 결과를 보존한다.
+2. 공식 source 저장, RSNA annotation/mapping adapter, UID·patient·좌표 감사, 결정적 split과 exclusion manifest를 구현한다.
+3. 전처리와 실제 생성 runner, 전체 출력 저장, 요청별 재개 및 두 GPU shard 실행을 구현한다.
+4. 엄격한 final-answer parser와 one-to-one bbox 평가, prior·swap baseline, patient 단위 통계를 구현한다.
+5. 중요한 fixture를 실행한다: uint8 밝기 보존·RGBA 합성, 비정사각형/홀수 padding의 좌표 왕복, UID 누락·중복·patient 겹침, ZIP basename 충돌, reasoning 안의 가짜 JSON·복수 final 답·빈 목록·잘림, 역좌표·NaN·중복 box, matching과 union 면적의 손계산 예제, 현재 입력 변경과 stale completion.
+6. 공식 예제 sanity→development pilot→development 전체→잠긴 독립 평가 순서로 실제 GPU 실행한다. checkpoint가 존재한다는 이유만으로 검증을 건너뛰지 않는다.
+7. `research/results/iter_009/` 아래 source, data audit, manifests, locked protocol, raw generations, metrics, bootstrap index, overlays, resource log, completion 상태를 저장한다. `notes/`와 보고서에 유지·보류·변경 및 사용자 보완 충족 근거를 기록한다.
+
+# Evaluation (성공/실패 기준 포함)
+
+## 실행 유효성
+
+공식 source·모델·실제 입력 provenance, annotation/UID/patient 연결, 좌표·전처리 검사, 고정 split, parser·평가 fixture, 계획된 요청의 결과 연결이 모두 충족돼야 본실험을 해석한다. 누락·실패 요청은 누락 없이 집계한다. 사용법 sanity와 준비 검사만 끝났으면 `valid_experiment=false`다.
+
+## 주가설 판정
+
+독립 양성 200명 중 두 정상 prompt에서 모두 명백한 위치 불일치가 발생한 환자 비율을 주지표로 한다. 분모는 유효 출력만이 아니라 전체 양성 200명이다. 두 prompt 각각 완결·문법·좌표 유효 출력률이 95% 이상이고, 공통 위치 오류율의 95% Wilson CI 하한이 20%를 넘으면 이 특정 RSNA 조건의 반복적 위치 오류를 지지한다. 이는 연구 투자 기준이며 임상적 허용 오차 기준이 아니다.
+
+이 조건과 입력 무결성을 만족하면 review에서 `lesion-grounding-generalization`을 RSNA opacity·현재 모델 revision·두 prompt 조건으로 좁혀 validated로 갱신하는 것을 검토한다. 광범위한 병변 일반화 실패나 내부 원인으로 확대하지 않는다. 빈 응답만 많거나 형식 실패가 많다면 해당 현상을 별도 보고하고 위 위치 오류 가설을 자동 지지하지 않는다.
+
+공통 오류율 CI가 20%를 가로지르면 inconclusive다. 상한이 20% 이하이면 사전 정의한 빈번한 공통 위치 오류 가설은 지지되지 않는다. 좋은 prompt가 문제를 해소한 경우 사용 조건에 대한 기존 해석을 정정한다. 이 결과만으로 다른 modality·질환의 한계를 모두 rejected로 바꾸지 않는다.
+
+## 비교와 불확실성
+
+양성 환자의 F1@0.3을 주요 성능 비교값으로, F1@0.5·recall·union IoU와 음성 두 층의 추가 예측률을 보조 지표로 보고한다. 공식−간결형, 정상 prompt−legacy, 정상 prompt−prior/swap 차이는 같은 환자의 paired bootstrap 10,000회로 CI를 계산한다. seed는 고정하고 재표집 index를 저장한다. prompt·box·연장 요청을 독립 표본으로 세지 않는다.
+
+baseline을 이겼다는 사실은 한계 부재나 새 방법의 contribution을 뜻하지 않는다. 이기지 못했다는 사실도 사용·평가 gate를 대신하지 않는다. 주가설 판정과 exploratory subgroup 분석을 분리한다.
+
+공통 위치 오류와 성공 사례를 각각 최대 20명씩 고정 ID 순서로 골라 원본·GT·전체 응답·예측을 검토한다. 데이터/좌표 오류, label 불일치, 넓은 opacity 경계의 모호성 등을 기록한다. 전문가 재판독 없이 GT를 고치거나 애매한 사례를 주분석에서 삭제하지 않는다. 평가 구현 결함이 발견되면 기존 출력을 보존하고 수정 근거와 영향 범위를 보고하며, test에 맞춘 prompt 변경은 하지 않는다.
+
+## 판정 구분
+
+- diagnostic 실행 완료와 한계 재현 여부를 별도로 기록한다.
+- gate 실패·접근 실패·데이터 연결 실패는 execution_failed이며 모델 가설 기각이 아니다.
+- 정밀도 부족·상한 잘림·불명확한 annotation 문제는 해당 범위의 inconclusive다.
+- 정상 사용에서 오류가 재현돼도 method 성공이나 최종 목표 달성으로 표시하지 않는다.
+
+# Risks / Checks
+
+## GPU 배치·시간·재개
+
+실행 직전 `nvidia-smi`와 CUDA UUID를 대조해 상속된 `CUDA_VISIBLE_DEVICES=0,1` 안의 논리/물리 대응과 여유 메모리를 확인한다. 여유가 큰 장치부터 GPU당 모델 한 개를 배치하고 독립 patient shard를 두 GPU에 나눈다. 다른 사용자의 프로세스는 변경하지 않는다.
+
+초기 예상 메모리는 GPU당 약 10–16GB지만 미측정 추정이다. 1000/2000/4000-token 길이에 따른 peak를 development에서 측정하고 최소 2GB 여유를 둔다. 본계획은 GPU당 한 프로세스를 기본으로 하며 불필요한 동시 모델 복제를 하지 않는다.
+
+요청당 10–60초라는 미측정 가정에서 1,140요청은 두 GPU로 약 1.6–9.5시간이다. 다운로드·로딩·sanity·cap 연장은 별도다. pilot의 prompt별 처리량과 cap 도달 비율로 예상 wall-clock을 갱신한다. 시간만으로 재승인을 요구하거나 과거 45/55 device-minute 상한을 적용하지 않는다.
+
+요청 단위 append 기록과 완료 index를 남기고 재개 전에 현재 입력·모델·prompt·parser digest를 재검증한다. GPU별 진행량·최근 처리 시간·메모리·오류를 주기적으로 기록한다. OOM은 batch·길이별 메모리 원인을 확인하고 해당 요청을 재개하며, 표본을 몰래 줄이지 않는다. 멈춘 요청·비정상 출력·디스크 부족은 원인을 기록하고 안전하게 중단한다. 완료 상태는 필수 검사와 결과 집합에 연결하며 stale complete를 성공으로 읽지 않는다.
+
+## 해석 한계와 다음 행동
+
+RSNA의 음성은 모든 이상 소견의 부재가 아니다. 추가 bbox는 annotation 대비 불일치이며 임상적 오탐과 같지 않다. 원천 환자 중복을 제거해도 모델 사전학습 노출은 알 수 없다. 이번 평가는 독립 환자 확인이며 여러 데이터셋의 증명은 아니다.
+
+원본 schema·좌표·mapping을 확보하지 못하면 NIH의 assumed gate를 완화해 대신 validated 판정을 만들지 않는다. 확보한 코드·sanity·실행 오류를 보존하고 구체적 blocker를 보고한다. 접근성 문제가 새로운 방법 설계의 실패는 아니다.
+
+정상 사용으로 오류가 줄면 과거 주장을 정정하고 다른 중요한 후보를 검토한다. 위치 오류가 남으면 크기·좌우·다중 opacity·형식·미검출 분포와 단순 baseline을 근거로 다음 해결책을 고른다. anatomy 전이는 해당 오류와의 연결 근거가 있을 때만 재검토한다.
+
+## 대규모 GPU 필요 후보
+
+고해상도 region–text alignment의 vision encoder/projector/decoder 공동 적응과 anatomy·lesion·report 공동 학습을 유지한다. 현재 두 GPU에서 가능한 training-free 및 경량 적응과 별개 후보로 기록하며, 이번 diagnostic 이전에 대규모 학습의 필요성을 확정하지 않는다.
+
+# 계획의 근거 (GPT 조사 노트)
+
+## 새로 확인한 것
+
+이번 라운드에서는 문서·코드·기존 기록을 읽고 웹 자료를 조회했다. 파일 수정·생성, 테스트, 모델 추론은 하지 않았다.
+
+### 1. RSNA는 공식 공개 경로와 NIH mapping을 제공한다
+
+RSNA 공식 페이지에는 challenge 영상 ZIP, adjudicated annotation JSON, NIH 원본 mapping JSON이 연결돼 있다. 공식 이용 조건은 연구 목적의 이용을 허용하며 출처 표시 조건을 명시한다. 따라서 Kaggle 계정이나 비공식 미러를 확보해야만 접근할 수 있다는 가정은 해소됐다. [RSNA 공식 배포](https://www.rsna.org/artificial-intelligence/ai-image-challenge/rsna-pneumonia-detection-challenge-2018), [이용 조건](https://www.rsna.org/-/media/files/rsna/education/ai-resources-and-training/ai-image-challenge/pneumonia-detection-challenge-terms-of-use-and-attribution.pdf)
+
+공식 링크의 파일명은 다음과 같다.
+
+- `pneumonia-challenge-dataset-adjudicated-kaggle_2018.zip`
+- `pneumonia-challenge-annotations-adjudicated-kaggle_2018.json`
+- `pneumonia-challenge-dataset-mappings_2018.json`
+
+공통 경로는 `https://s3.amazonaws.com/east1.public.rsna.org/AI/2018/`다. 웹 도구는 ZIP과 JSON의 content type을 처리하지 못했다. shell의 메모리 내 HEAD/GET 조회는 DNS 오류로 실패했다. 따라서 원본 JSON schema, 실제 DICOM 크기·태그, Range 지원, 확보 가능한 환자 수를 이번에 직접 확인했다고 주장하지 않는다. 구현 첫 단계에서 확인할 실행 gate로 남긴다.
+
+### 2. RSNA ID를 환자 ID로 쓰면 안 된다
+
+원저자 논문은 검사별 무작위 ID를 만들었으며 동일 환자의 여러 검사가 포함된다고 설명한다. 공개 mapping을 NIH metadata의 Patient ID까지 연결해야 patient 독립성을 검사할 수 있다. RSNA는 NIH에서 유래하므로 외부 기관·외부 데이터셋 일반화 또는 사전학습 미노출 평가로 부르지 않는다. [원저자 논문](https://pubs.rsna.org/doi/10.1148/ryai.2019180041)
+
+### 3. 주평가 target은 폐렴이 의심되는 opacity다
+
+RSNA는 모든 병변이나 임상적 폐렴 확진의 정답이 아니다. adjudicated 판본에는 low-probability box 제거와 판독 조정이 포함되며, 모든 영상이 다중 판독된 것도 아니다. 추가 box는 해당 benchmark annotation과의 불일치로 평가할 수 있지만 임상적 오진으로 단정할 수 없다. [원저자 논문](https://pubs.rsna.org/doi/10.1148/ryai.2019180041)
+
+MD.ai 공식 문서는 bbox를 좌상단 x/y와 width/height로 표현하고 DICOM UID를 통해 annotation을 연결하는 규약을 제공한다. 다만 현재 문서가 2018 export의 필드 구조와 완전히 같다고 가정하지 않는다. 원본 JSON에서 label 정의와 UID 연결을 확인한 뒤 adapter를 작성해야 한다. [JSON 규약](https://docs.md.ai/annotator/data/json/), [좌표 변환 예제](https://docs.md.ai/annotator/python/guides/convert-json/)
+
+### 4. 이전 질문에 대한 결정
+
+NIH 신규 200명 계획 대신 RSNA development 80명과 독립 평가 300명을 목표로 한다. NIH는 기존 개발 기록과 보조 확인 자료로 유지한다. NIH 공개 CSV의 추가 box 벌점을 주지표로 삼지 않으며, 좌표 canvas의 기존 assumed 상태도 바꾸지 않는다.
+
+RSNA 평가 300명은 양성 200명, Normal 50명, No Opacity/Not Normal 50명으로 사전 층화한다. development 80명은 각각 40/20/20명이다. 모든 집단은 NIH Patient ID 기준으로 분리하고 기존 개발 환자를 제외한다. 이 수는 확보 완료 수가 아니라 실행 목표다. 부족하면 결과를 보기 전에 표본 설계를 다시 기록하며 자동 축소하지 않는다.
+
+양성 200명의 비율 추정은 최악조건의 단순 근사에서 95% CI 반폭 약 6.9%p다. 음성 각 층 50명은 약 13.9%p이므로 세부 차이에 대한 검정력은 제한된다. 주분석은 두 정상 prompt에서 함께 남는 명백한 위치 불일치율이며, 전체 bbox 일치도와 미검출·추가 예측은 별도로 보고한다.
+
+### 5. 사용법과 재사용 코드 확인
+
+공식 notebook의 square padding과 dtype 처리 쟁점을 해당 코드 구간에서 다시 확인했다. 앞 라운드와 모순되는 변경은 확인되지 않았다. 원문 예제 실행과 uint8 입력의 값 보존 경로를 구분하고, 전처리는 모델 점수가 아닌 수치 검증으로 결정한다. [공식 notebook](https://raw.githubusercontent.com/Google-Health/medgemma/main/notebooks/cxr_anatomy_localization_with_hugging_face.ipynb)
+
+`research/` HEAD는 `68117cfd08429ffc3cb9b77e14fb1db3221d86ab`이며 tracked diff는 없다. 복구된 iter_007 코드는 untracked로 보존돼 있다. `grounding_data/nih.py`, `grounding_data/net.py`, `grounding_data/__init__.py`를 현재 승인 기반에서 재사용한다. 별도 체크포인트 반입은 필요 없다.
+
+새로 확인한 재사용 주의점은 `ZipIndex`가 archive member를 basename으로 사전화한다는 것이다. DICOM UID 경로에 적용할 때 basename 중복을 검사해야 한다. `HTTPRangeFile`의 디스크 cache는 크기만 검사하므로 이번 다운로드에는 이를 끄고, 저장된 개별 영상은 현재 SHA256과 provenance를 검증한다. 과거 256MiB·20분 기본값은 새 표본 규모의 근거가 아니므로 그대로 사용하지 않는다.
+
+### 유지·보류·변경
+
+- 유지: 연구 목표, 기존 결과와 음성 근거, NIH 개발 자료, 승인 코드, iter_008 계획·세션·보관본.
+- 보류: anatomy→lesion 학습, pooling 재실험, decoder 병목 해석.
+- 변경: 공식 공개 RSNA를 실제 출력의 주평가 자료로 채택한다. 공식 anatomy 예제는 사용법 sanity check로만 쓴다.
+
+### 대규모 GPU 필요 후보
+
+고해상도 region–text alignment와 vision encoder/projector/decoder 공동 적응, anatomy·lesion·report 공동 학습을 후보로 유지한다. 이번 diagnostic은 이러한 학습의 필요성이나 우월성을 입증하지 않는다.
+
+이전 사고 라운드 노트: agent/runs/iter_009/think/

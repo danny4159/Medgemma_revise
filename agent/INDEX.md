@@ -13,24 +13,27 @@
 - iter_005 [CONTINUE] (deep/heavy/normal) <Grounding 데이터·측정 기반 구축: improve> NIH 160명 확보와 SCR 정답 노출 차단은 확인했지만, 준비 완료 판정과 QES 검증에 결함이 남아 있다. → 다음: NIH bbox 좌표 기준의 명시적 근거를 확보하고 readiness를 보강한다. QES verification 집합을 결정적으로 재생성해 대조하고 실패 시 이전 완료 산출물을 무효화한다. 이후 클래스별 target 정의를 확정해 pooling probe로 진행한다.
 - iter_006 [CONTINUE] (normal/heavy/normal) <Grounding 데이터·측정 기반 구축: success> 💾68117cf CPU 검사 184건 통과와 NIH 160명 자료 보존을 확인했으며, 측정 기반은 보완됐지만 좌표 canvas 근거 부족으로 GPU probe는 아직 진입 불가다. → 다음: 공식 NIH README·FAQ·bbox 파일을 제한된 소량 조회로 확인해 canvas 및 미러 차이를 정리한다. 이어 RGBA 전처리와 probe 학습·평가 규약을 확정하고, 좌표 gate가 해결되면 train 소표본으로 추출 비용을 측정한 뒤 pooling 전후 frozen feature probe를 수행한다.
 - iter_007 [CONTINUE] (normal/heavy/normal) <Pooling 전후 frozen feature probe: abandon> 24개 학습의 실제 실행과 원시 결과를 확인했으며, pooling 전후 MLP 차이 +0.000304는 사전 투자 기준을 충족하지 못했다. → 다음: 재사용 코드의 완료 판정·provenance 검증·GPU 가시성 처리를 보완하고, 남은 anatomy→lesion grounding 전이를 우선 검토한다. 직접 병변 학습 대비 전이 이득을 반증할 최소 실험과 독립 평가 자료를 설계하며, decoder 병목은 별도 미검증 후보로 비교한다.
-- iter_008 [진행 중]
+- iter_008 [사용자 보완으로 전환 → iter_009] 기존 기록 보존, 성공·실패 판정 아님 (Claude 구현)
+- iter_009 [CONTINUE] (deep/standard/normal) <정상 사용 조건의 병변 grounding 검증: success> 💾39aa49a6fa5943ca0d3e0327a7874e68a2c878cb 독립 평가 양성 200명 중 공통 위치 불일치 134명(67.0%)을 재확인해 RSNA 조건의 한계를 validated로 갱신한다. 실행기 재사용 결함과 방법론 효과 검증은 후속 과제로 남는다. → 다음: 검증된 lesion-grounding-generalization에 연결되는 방법 후보를 선행 방법·오류 분포·두 GPU 실행 가능성으로 비교해 하나를 선택한다. 직접 병변 LoRA/adapter와 강한 단순 baseline을 포함하고, 현재 평가 300명은 개발 자료로 전환한다. 새 환자 분할 및 추가 데이터셋의 확인 계획을 고정한 뒤, 필요한 재사용 결함만 보완하고 development에서 batch 확대 또는 GPU당 복수 worker의 처리량·peak VRAM·출력 정합성을 측정해 본실험으로 진행한다. anatomy 전이를 자동 선택하지 않는다.
 
-## 이전 목표들의 접근법 (참고용, 시도 횟수 제한에는 안 들어감)
+## 이전 목표들의 접근법 (참고용, 현재 목표의 재평가 횟수에는 안 들어감)
 
 - 기존 점수 집계와 근거 기반 해석 [approach/scores-summary]: 2회, 최근 판정: success, 커밋: f213214
 
-## 접근법 기록 — 현재 목표 (같은 접근법 최대 3회)
+## 접근법 기록 — 현재 목표 (유효한 실험 3회부터 방향 재평가)
 
-- 3D 근거 보존 context 안정화 [approach/context-evidence-stability]: 1회 (iter_003), 최근 판정: abandon, 커밋: 없음
-- 질문 조건부 2D 근거 선택 [approach/question-evidence-selection]: 1회 (iter_004), 최근 판정: abandon, 커밋: 없음
-- Grounding 데이터·측정 기반 구축 [approach/grounding-data-audit]: 2회 (iter_005, iter_006), 최근 판정: success, 커밋: 68117cf
-- Pooling 전후 frozen feature probe [approach/pooling-feature-probe]: 1회 (iter_007), 최근 판정: abandon, 커밋: 없음
-- 해부구조에서 병변으로 grounding 전이 [approach/anatomy-lesion-transfer]: 1회 (iter_008), 최근 판정: 진행 중, 커밋: 없음
+- 3D 근거 보존 context 안정화 [approach/context-evidence-stability]: 1회 (iter_003), 유효한 실험 0회, 미분류 1회, 최근 판정: abandon, 커밋: 없음
+- 질문 조건부 2D 근거 선택 [approach/question-evidence-selection]: 1회 (iter_004), 유효한 실험 0회, 미분류 1회, 최근 판정: abandon, 커밋: 없음
+- Grounding 데이터·측정 기반 구축 [approach/grounding-data-audit]: 2회 (iter_005, iter_006), 유효한 실험 0회, 미분류 2회, 최근 판정: success, 커밋: 68117cf
+- Pooling 전후 frozen feature probe [approach/pooling-feature-probe]: 1회 (iter_007), 유효한 실험 0회, 미분류 1회, 최근 판정: abandon, 커밋: 없음
+- 해부구조에서 병변으로 grounding 전이 [approach/anatomy-lesion-transfer]: 1회 (iter_008), 유효한 실험 0회, 미분류 0회, 최근 판정: 사용자 보완으로 전환 (검증 미완료), 커밋: 없음
+- 정상 사용 조건의 병변 grounding 검증 [approach/grounding-usage-diagnostic]: 1회 (iter_009), 유효한 실험 1회, 미분류 0회, 최근 판정: success, 커밋: 39aa49a6fa5943ca0d3e0327a7874e68a2c878cb
 
-현재 연구 브랜치: approach/anatomy-lesion-transfer (코드 위치: /SSD1_1TB/home/milab/daniel/08_medgemma/research)
+현재 연구 브랜치: approach/grounding-usage-diagnostic (코드 위치: /SSD1_1TB/home/milab/daniel/08_medgemma/research)
 
 ### 최근 계획의 대안 순위
 
-1. 해부구조에서 병변으로 grounding 전이: 수동 lung supervision의 저표본 전이 이득을 추가 update·영상 노출·위치 prior와 분리하는 최소 실험을 수행한다.
-2. Decoder grounding 출력의 직접 진단: 생성 좌표와 supervised readout을 공통 target·metric으로 비교하고 supervision 차이를 명시한다.
-3. 독립 grounding 데이터에서 재검증: 좌표와 평가 단위가 명확한 외부 자료에서 현재 관찰의 일반성을 확인한다.
+1. 정상 사용 조건의 병변 grounding 검증: 공식 RSNA 자료와 NIH mapping을 이용해 독립 환자의 실제 출력 오류를 확인한다.
+2. NIH 주석 일치의 제한적 진단: 기존 개발 자료에서 사용법과 parser를 확인하되 주석 범위가 불명확한 추가 box를 임상적 오탐으로 해석하지 않는다.
+3. 정답 보존 context 변화의 실제 답변 검증: 정상 grounding 사용으로 문제가 해소되면 다른 observed 후보를 검토한다.
+4. 해부구조에서 병변으로 grounding 전이: 관련 실제 출력 한계가 validated가 되고 직접 적응 대비 해결책 연결이 생긴 뒤 재검토한다.
