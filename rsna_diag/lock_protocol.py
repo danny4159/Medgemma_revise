@@ -16,7 +16,7 @@ CODE = ["rsna_diag/generate.py", "rsna_diag/parse.py", "rsna_diag/metrics.py", "
         "rsna_diag/prompts.py", "rsna_diag/rsna_data.py", "rsna_diag/dicom_min.py", "rsna_diag/run_shards.py",
         "rsna_diag/queue_lock.py", "rsna_diag/lock_protocol.py", "rsna_diag/lora.py", "rsna_diag/sft_data.py", "rsna_diag/train.py",
         "rsna_diag/baselines.py", "rsna_diag/launch.py", "rsna_diag/select.py", "rsna_diag/final_eval.py", "rsna_diag/sft_eval.py",
-        "rsna_diag/data_gate.py", "rsna_diag/build_data.py"]
+        "rsna_diag/data_gate.py", "rsna_diag/build_data.py", "rsna_diag/inputs.py", "rsna_diag/eval_gate.py", "rsna_diag/migrate.py"]
 DATA = ["results/iter_010/manifests/infer_manifest.jsonl", "results/iter_010/manifests/gt_manifest.json",
         "results/iter_010/manifests/exclusion_previous_patients.json", "results/iter_010/manifests/reserve_patients.json",
         "results/iter_009/source/official/cxr_anatomy_localization_with_hugging_face.ipynb"]
@@ -28,6 +28,15 @@ def sha(path):
 
 def locked_digest(locked):
     return hashlib.sha256(json.dumps(locked, sort_keys=True, default=str).encode()).hexdigest()
+
+
+def digest_of(path):
+    """코드 상태를 검증하지 않고 protocol 파일의 digest만 계산한다 (부모 실행의 원본 protocol 식별용)."""
+    return locked_digest(json.load(open(path))["locked"])
+
+
+def locked_config_digest(path):
+    return json.load(open(path))["locked"]["generation_config_digest"]
 
 
 def current(extra=()):

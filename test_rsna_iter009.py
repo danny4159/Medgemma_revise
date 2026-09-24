@@ -248,8 +248,9 @@ check("evaluate_negative_extra_prediction_rate", res["prompts"]["concise"]["neg_
 check("evaluate_prior_baseline_hand_calc", abs(res["baselines"]["prior_f1@0.3"] - 2 / 6 * 0 - res["baselines"]["prior_f1@0.3"]) < 1e-12 and abs(res["baselines"]["prior_f1@0.3"] - 1.0) < 1e-12)
 check("evaluate_missing_requests_reported", len(EV.evaluate({k: v for k, v in _recs.items() if k != ("p0", "concise")}, _gt, "s", None, 50)[0]["missing_requests"]) == 1)
 
-os.makedirs("results/iter_010/tests", exist_ok=True)
-json.dump(R, open("results/iter_010/tests/fixtures_reused_iter009.json", "w"), indent=1)
+OUT = sys.argv[1] if len(sys.argv) > 1 else "results/iter_010/tests"
+os.makedirs(OUT, exist_ok=True)
+json.dump(R, open(os.path.join(OUT, "fixtures_reused_iter009.json"), "w"), indent=1)
 n_fail = sum(1 for v in R.values() if not v["pass"])
 print(f"{len(R) - n_fail}/{len(R)} pass")
 sys.exit(1 if n_fail else 0)

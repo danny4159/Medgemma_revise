@@ -33,13 +33,23 @@ def main():
                                       stdout=open(j["log"], "a"), stderr=subprocess.STDOUT))
     t0 = time.time()
     rl = open(os.path.join(a.log_dir, "resource_log.jsonl"), "a")
-    while any(p.poll() is None for p in procs):
-        rows, apps = gpu_snapshot(set(allowed))
-        rl.write(json.dumps({"t": time.time() - t0, "gpus": rows, "compute_apps": apps}) + "\n")
-        rl.flush()
-        time.sleep(30)
-    res = [{"gpu": j["gpu"], "module": j["module"], "returncode": p.returncode, "log": j["log"]} for j, p in zip(jobs, procs)]
-    json.dump({"jobs": res, "wall_s": time.time() - t0}, open(os.path.join(a.log_dir, "launch_result.json"), "w"), indent=1)
+    rows0, _ = gpu_snapshot(set(allowed))
+    # 논리(CUDA_VISIBLE_DEVICES) index와 물리 장치 uuid의 대응을 기록한다 (허용 집합 안의 index만 사용)
+    gpu_map = {r["index"]: r["uuid"] for r in rows0}
+    started = [{"gpu": j["gpu"], "gpu_uuid": gpu_map.get(int(j["gpu"])), "pid": p.pid, "module": j["module"], "log": j["log"]}
+               for j, p in zip(jobs, procs)]
+    json.dump({"allowed": allowed, "gpu_uuid_map": gpu_map, "children": started, "host": os.uname().nodename, "t_start": t0},
+              open(os.path.join(a.log_dir, "launch_children.json"), "w"), indent=1)
+    try:
+        while any(p.poll() is None for p in procs):
+            rows, apps = gpu_snapshot(set(allowed))
+            rl.write(json.dumps({"t": time.time() - t0, "gpus": rows, "compute_apps": apps}) + "\n")
+            rl.flush()
+            time.sleep(30)
+    finally:  # 중단(예: SIGINT)되어도 소유 child의 현재 상태를 기록한다. child는 종료시키지 않는다.
+        res = [{"gpu": j["gpu"], "module": j["module"], "pid": p.pid, "returncode": p.poll(), "log": j["log"]} for j, p in zip(jobs, procs)]
+        json.dump({"jobs": res, "wall_s": time.time() - t0, "all_finished": all(p.poll() is not None for p in procs)},
+                  open(os.path.join(a.log_dir, "launch_result.json"), "w"), indent=1)
     print(json.dumps(res))
     sys.exit(0 if all(p.returncode == 0 for p in procs) else 1)
 

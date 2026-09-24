@@ -10,9 +10,13 @@ from . import metrics as M, parse as PA
 NEG = (("normal", "Normal"), ("not_normal_no_opacity", "NoOpacity/NotNormal"))
 
 
-def parse_records(recs, ids, prompt):
-    """recs: {(id, prompt): record}. 누락은 status='missing'."""
+def parse_records(recs, ids, prompt, strict=True):
+    """recs: {(id, prompt): record}. strict(기본): 누락 요청은 예외 (미완료 실행을 점수화하지 않는다). strict=False는 진단 전용 status='missing'."""
     out = {}
+    if strict:
+        miss = [i for i in ids if (i, prompt) not in recs]
+        if miss:
+            raise ValueError(f"{len(miss)} requested (id, {prompt}) records missing, e.g. {miss[:3]}")
     for i in ids:
         r = recs.get((i, prompt))
         out[i] = ({"status": "missing", "boxes": []} if r is None

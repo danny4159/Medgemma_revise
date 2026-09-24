@@ -192,12 +192,15 @@ def read_records(path):
     return out
 
 
-def validate_existing(files_records, items, pnames, prompts_used, cdig, adapter_digest, protocol_digest, image_pixel_sha):
+def validate_existing(files_records, items, pnames, prompts_used, cdig, adapter_digest, protocol_digest, image_pixel_sha,
+                      accept_protocols=()):
     """기존 모든 worker 출력 record를 현재 입력·model/adapter·prompt·config·protocol과 대조한다 (완료 요청 포함).
 
     files_records: {파일명: [record...]}. items: 이번 manifest의 항목 list. image_pixel_sha(path)->현재 입력 pixel sha.
     누락은 허용(재개 대상)하나 중복·충돌·기대 집합 밖 record는 RunError. returns {(id, prompt): record}.
+    accept_protocols: 검증된 부모 실행(migration manifest로 연결)의 protocol digest. 생성 config digest가 같을 때만 허용한다.
     """
+    ok_protocols = {protocol_digest, *accept_protocols}
     by_item = {i["id"]: i for i in items}
     seen, done = {}, {}
     pdig = {p: P.digest(prompts_used[p]) for p in pnames}
@@ -213,10 +216,11 @@ def validate_existing(files_records, items, pnames, prompts_used, cdig, adapter_
             if r["request_id"] in seen:
                 raise RunError(f"duplicate request {key}: {seen[r['request_id']]} and {fn}")
             seen[r["request_id"]] = fn
-            for f_, want in (("config_digest", cdig), ("adapter_digest", adapter_digest), ("protocol_digest", protocol_digest),
-                             ("prompt_sha256", pdig[key[1]])):
+            for f_, want in (("config_digest", cdig), ("adapter_digest", adapter_digest), ("prompt_sha256", pdig[key[1]])):
                 if r.get(f_) != want:
                     raise RunError(f"{f_} mismatch for {key} in {fn}: {r.get(f_)} != {want}")
+            if r.get("protocol_digest") not in ok_protocols:
+                raise RunError(f"protocol_digest mismatch for {key} in {fn}: {r.get('protocol_digest')}")
             if r["input_pixel_sha256"] != image_pixel_sha(it["image"]):
                 raise RunError(f"input image changed since completion for {key}; refusing to reuse stale record")
             if it.get("file_sha256") and r.get("image_file_sha256") != it["file_sha256"]:
@@ -251,7 +255,11 @@ def main():
     ap.add_argument("--adapter", default=None, help="LoRA adapter 디렉터리 (없으면 base)")
     ap.add_argument("--time-limit", type=float, default=None)
     ap.add_argument("--max-requests", type=int, default=None)
+    ap.add_argument("--parent-dir", default=None, help="검증 후 재사용할 부모 gen_worker*.jsonl 디렉터리 (읽기 전용; 새 요청은 out-dir에만 쓴다)")
+    ap.add_argument("--parent-protocol", default=None, help="부모 실행의 protocol 파일 (config digest가 현재와 같아야 함)")
     a = ap.parse_args()
+    if bool(a.parent_dir) != bool(a.parent_protocol):
+        sys.exit("--parent-dir and --parent-protocol must be given together")
     pdig_protocol = lock_protocol.verify(a.protocol)
     items = [json.loads(ln) for ln in open(a.manifest) if ln.strip()]
     if a.ids:
@@ -295,7 +303,17 @@ def run_worker(a, items, pnames, prompts_used, pdig_protocol, info):
         json.dump({"env": env, "config": core, "config_digest": cdig, "adapter_digest": adapter_digest,
                    "protocol_digest": pdig_protocol, "worker": a.worker}, open(env_path, "w"), indent=1, default=str)
     import glob
-    files = {f: read_records(f) for f in sorted(glob.glob(os.path.join(a.out_dir, "gen_worker*.jsonl")))}
+    parent_files, accept = [], ()
+    if a.parent_dir:
+        pdg_parent = lock_protocol.digest_of(a.parent_protocol)
+        if lock_protocol.locked_config_digest(a.parent_protocol) != full_cdig:
+            sys.exit("parent protocol generation config digest differs from current protocol")
+        parent_files = sorted(glob.glob(os.path.join(a.parent_dir, "gen_worker*.jsonl")))
+        accept = (pdg_parent,)
+
+    def read_all():
+        return {f: read_records(f) for f in parent_files + sorted(glob.glob(os.path.join(a.out_dir, "gen_worker*.jsonl")))}
+    files = read_all()
     cache = {}
 
     def px(path):
@@ -303,7 +321,7 @@ def run_worker(a, items, pnames, prompts_used, pdig_protocol, info):
             cache[path] = load_image(path)[2]
         return cache[path]
 
-    done = validate_existing(files, items, pnames, prompts_used, cdig, adapter_digest, pdig_protocol, px)
+    done = validate_existing(files, items, pnames, prompts_used, cdig, adapter_digest, pdig_protocol, px, accept)
     out = os.path.join(a.out_dir, f"gen_worker{a.worker}.jsonl")
     claim_dir = os.path.join(a.out_dir, "claims")
     os.makedirs(claim_dir, exist_ok=True)
@@ -323,8 +341,7 @@ def run_worker(a, items, pnames, prompts_used, pdig_protocol, info):
             if reclaimed:
                 log.write(json.dumps({"event": "claim_reclaimed_from_dead_owner", "id": it["id"], "prev_owner": prev}) + "\n")
             # 다른 worker가 방금 끝냈을 수 있다: claim 뒤 재검증 (완료 요청 포함)
-            files = {f: read_records(f) for f in sorted(glob.glob(os.path.join(a.out_dir, "gen_worker*.jsonl")))}
-            done = validate_existing(files, items, pnames, prompts_used, cdig, adapter_digest, pdig_protocol, px)
+            done = validate_existing(read_all(), items, pnames, prompts_used, cdig, adapter_digest, pdig_protocol, px, accept)
             for pn in pnames:
                 if (it["id"], pn) in done:
                     continue

@@ -2,17 +2,22 @@
 
   comparator: validation(400)의 base 생성·보정·prior 중 양성 F1@0.3 최대인 단순 비교군 1개를 주 비교군으로 고정 (확인 결과를 보기 전에).
   confirm:    고정된 주 비교군과 SFT 3개 seed를 확인 800명에서 같은 metric으로 비교 (paired bootstrap 10,000회, seed 20260925).
-사용: python -m rsna_diag.final_eval comparator --val-base DIR --out FILE
-      python -m rsna_diag.final_eval confirm --comparator FILE --conf-base DIR --sft seed=DIR ... --out FILE
+iter_011: 모든 입력 생성 결과는 eval_gate.verify_gen(예상 ID x prompt x adapter 집합, protocol/config/입력/completion)을 통과해야 하며,
+  seed 집합은 정확히 {17, 29, 43} (중복은 dict 생성 전에 거부), 각 seed의 adapter는 select 기록의 adapter digest와 일치해야 한다.
+사용: python -m rsna_diag.final_eval comparator --val-base DIR [--parent-dir D --parent-protocol P0] --protocol P --out FILE
+      python -m rsna_diag.final_eval confirm --comparator FILE --conf-base DIR --protocol P --sft SEED:SELECTION.json:GEN_DIR ... --out FILE
 """
 import argparse
+import hashlib
 import json
 import os
 
 import numpy as np
 
-from . import baselines as B, evaluate as EV, metrics as M, parse as PA, sft_eval
+from . import baselines as B, eval_gate, inputs, lock_protocol, metrics as M, parse as PA, sft_eval
 
+MANIFEST = "results/iter_010/manifests/infer_manifest.jsonl"
+SPLIT_IDS = "results/iter_010/manifests/{}_ids.json"
 GT = "results/iter_010/manifests/gt_manifest.json"
 BASE_JSON = "results/iter_010/baselines/baselines.json"
 BOOT_SEED, BOOT_B = 20260925, 10000
@@ -45,37 +50,52 @@ def all_simple(recs, ids, bl):
 
 
 def cmd_comparator(a):
-    gt = json.load(open(GT))
+    items, gt = inputs.load_items(MANIFEST, GT, SPLIT_IDS.format("validation"), "validation")
     bl = json.load(open(BASE_JSON))
-    ids = split_ids(gt, "validation")
-    recs = EV.load_gen(os.path.join(a.val_base, "gen_worker*.jsonl"))
+    ids = [i["id"] for i in items]
+    recs = eval_gate.verify_gen(a.val_base, items, ["official_long", "concise"], None, a.protocol, a.parent_dir, a.parent_protocol)
     tr = [i for i in gt if gt[i]["split"] == "train"]
     edges = sft_eval.area_edges(gt, tr)
     preds = all_simple(recs, ids, bl)
     summ = {k: sft_eval.summarize(v, gt, ids, edges) for k, v in preds.items()}
     best = max(summ, key=lambda k: (round(summ[k]["f1@0.3"], 12), k))
     json.dump({"comparator": best, "selection": "validation positive mean F1@0.3 (end-to-end)", "n_val": len(ids),
+               "protocol_digest": lock_protocol.verify(a.protocol), "baselines_json_sha256": hashlib.sha256(open(BASE_JSON, "rb").read()).hexdigest(),
+               "val_inputs_digest": inputs.inputs_digest(items, gt),
                "val_f1@0.3": {k: v["f1@0.3"] for k, v in summ.items()}, "val_summaries": summ}, open(a.out, "w"), indent=1)
     print("comparator", best, {k: round(v["f1@0.3"], 4) for k, v in summ.items()})
 
 
 def cmd_confirm(a):
+    seeds_in = eval_gate.check_seeds([kv.split(":")[0] for kv in a.sft])  # 가장 먼저: 중복/누락/잉여 seed 거부 (dict 생성 이전)
     comp = json.load(open(a.comparator))
-    gt = json.load(open(GT))
+    items, gt = inputs.load_items(MANIFEST, GT, SPLIT_IDS.format("confirm"), "confirm")
     bl = json.load(open(BASE_JSON))
-    ids = split_ids(gt, "confirm")
+    pdig = lock_protocol.verify(a.protocol)
+    if comp.get("protocol_digest") != pdig or comp["baselines_json_sha256"] != hashlib.sha256(open(BASE_JSON, "rb").read()).hexdigest():
+        raise eval_gate.GateError("comparator file was not locked under the current protocol/baselines")
+    ids = [i["id"] for i in items]
     pos = [i for i in ids if gt[i]["category"] == "opacity"]
     tr = [i for i in gt if gt[i]["split"] == "train"]
     edges = sft_eval.area_edges(gt, tr)
-    recs = EV.load_gen(os.path.join(a.conf_base, "gen_worker*.jsonl"))
+    recs = eval_gate.verify_gen(a.conf_base, items, ["official_long", "concise"], None, a.protocol)
     preds = all_simple(recs, ids, bl)
-    sft = {}
+    sft, sel_meta = {}, {}
     for kv in a.sft:
-        seed, d = kv.split("=")
-        r = EV.load_gen(os.path.join(d, "gen_worker*.jsonl"))
+        seed, selp, d = kv.split(":")
+        sel = json.load(open(selp))
+        run = sel["runs"][sel["selected_run"]]
+        if run["seed"] != int(seed):
+            raise eval_gate.GateError(f"selection {selp} is for seed {run['seed']}, not {seed}")
+        r = eval_gate.verify_gen(d, items, ["concise"], run["adapter_dir"], a.protocol)
+        if {x["adapter_digest"] for x in r.values()} != {run["adapter_digest"]}:
+            raise eval_gate.GateError(f"seed {seed}: generation adapter digest != selected adapter digest")
         sft[f"sft_seed{seed}"] = sft_eval.parse_records(r, ids, "concise")
-        adg = {x["adapter_digest"] for x in r.values()}
-        assert len(adg) == 1, f"seed {seed}: multiple adapter digests {adg}"
+        sel_meta[int(seed)] = {"selection": selp, "lr": run["lr"], "best_epoch": run["best_epoch"], "n_epochs_validated": run["n_epochs_validated"],
+                               "adapter_digest": run["adapter_digest"]}
+    if len({(m["lr"], m["n_epochs_validated"]) for m in sel_meta.values()}) != 1:
+        raise eval_gate.GateError(f"seeds used different lr/epoch plans: {sel_meta}")
+    assert tuple(sorted(sel_meta)) == seeds_in
     preds.update(sft)
     summ = {k: sft_eval.summarize(v, gt, ids, edges) for k, v in preds.items()}
     per = {k: sft_eval.per_patient(v, gt, ids)[1]["f1@0.3"] for k, v in preds.items()}
@@ -100,7 +120,7 @@ def cmd_confirm(a):
             "valid_output_rate_all_ge_95pct_each_seed": all(summ[s]["valid_rate_all"]["rate"] >= 0.95 for s in seeds),
             "negative_valid_empty_not_worse_than_5pp_vs_base_concise": all(all(v.values()) for v in neg_ok.values())}
     verdict = "success" if all(crit.values()) else ("partial_improvement" if m > 0 else "no_improvement")
-    res = {"comparator": cname, "n_confirm_positive": len(pos), "primary": {"mean_sft_minus_comparator_f1@0.3": m, "ci95": [lo, hi],
+    res = {"comparator": cname, "seed_selection": sel_meta, "protocol_digest": pdig, "n_confirm_positive": len(pos), "primary": {"mean_sft_minus_comparator_f1@0.3": m, "ci95": [lo, hi],
            "bootstrap": {"B": BOOT_B, "seed": BOOT_SEED, "unit": "positive patient", "note": "학습 seed 불확실성을 충분히 추정하지 않는다"},
            "per_seed_diff": diffs, "per_seed_f1@0.3": {s: float(per[s].mean()) for s in seeds},
            "seed_range_f1@0.3": [min(per[s].mean() for s in seeds), max(per[s].mean() for s in seeds)]},
@@ -115,13 +135,19 @@ def main():
     sp = ap.add_subparsers(dest="cmd", required=True)
     c = sp.add_parser("comparator")
     c.add_argument("--val-base", required=True)
+    c.add_argument("--protocol", required=True)
+    c.add_argument("--parent-dir", default=None)
+    c.add_argument("--parent-protocol", default=None)
     c.add_argument("--out", required=True)
     f = sp.add_parser("confirm")
     f.add_argument("--comparator", required=True)
     f.add_argument("--conf-base", required=True)
-    f.add_argument("--sft", nargs="+", required=True)
+    f.add_argument("--protocol", required=True)
+    f.add_argument("--sft", nargs="+", required=True, help="SEED:SELECTION.json:GEN_DIR (정확히 17, 29, 43)")
     f.add_argument("--out", required=True)
     a = ap.parse_args()
+    if os.path.exists(a.out):
+        raise SystemExit(f"{a.out} exists (not overwritten)")
     {"comparator": cmd_comparator, "confirm": cmd_confirm}[a.cmd](a)
 
 

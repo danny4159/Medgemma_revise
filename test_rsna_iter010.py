@@ -313,8 +313,9 @@ pred_["n"] = {"status": "truncated", "boxes": []}
 sm = sft_eval.summarize(pred_, gt_, ["p", "n", "x"])
 check("format_failure_not_counted_as_empty_success", sm["neg_Normal"]["valid_empty"]["k"] == 0 and sm["neg_Normal"]["format_fail"]["k"] == 1)
 
-os.makedirs("results/iter_010/tests", exist_ok=True)
-json.dump(R, open("results/iter_010/tests/fixtures_iter010.json", "w"), indent=1)
+OUT = sys.argv[1] if len(sys.argv) > 1 else "results/iter_010/tests"
+os.makedirs(OUT, exist_ok=True)
+json.dump(R, open(os.path.join(OUT, "fixtures_iter010.json"), "w"), indent=1)
 n_fail = sum(1 for v in R.values() if not v["pass"])
 print(f"{len(R) - n_fail}/{len(R)} pass")
 sys.exit(1 if n_fail else 0)

@@ -15,7 +15,7 @@ import subprocess
 import sys
 import time
 
-from . import generate, lock_protocol, prompts as P, queue_lock
+from . import eval_gate, generate, lock_protocol, prompts as P, queue_lock
 
 
 def gpu_snapshot(idx_list):
@@ -31,9 +31,12 @@ def gpu_snapshot(idx_list):
     return rows, procs
 
 
-def finalize(out_dir, items, pnames, prompts_used, adapter_digest, protocol_digest):
-    """예상 요청 집합과 실제 집합을 대조한다. returns (complete, report)."""
-    files = {f: generate.read_records(f) for f in sorted(glob.glob(os.path.join(out_dir, "gen_worker*.jsonl")))}
+def finalize(out_dir, items, pnames, prompts_used, adapter_digest, protocol_digest, parent_dir=None):
+    """예상 요청 집합과 실제 집합을 대조한다 (parent_dir의 검증된 부모 record 포함). returns (complete, report)."""
+    paths = sorted(glob.glob(os.path.join(out_dir, "gen_worker*.jsonl")))
+    if parent_dir:
+        paths = sorted(glob.glob(os.path.join(parent_dir, "gen_worker*.jsonl"))) + paths
+    files = {f: generate.read_records(f) for f in paths}
     expected = {(i["id"], p) for i in items for p in pnames}
     got, dup, extra = {}, [], []
     for fn, recs in files.items():
@@ -63,7 +66,11 @@ def main():
     ap.add_argument("--adapter", default=None)
     ap.add_argument("--time-limit", type=float, default=None)
     ap.add_argument("--max-requests", type=int, default=None, help="worker별 (pilot/test용)")
+    ap.add_argument("--parent-dir", default=None)
+    ap.add_argument("--parent-protocol", default=None)
     a = ap.parse_args()
+    if bool(a.parent_dir) != bool(a.parent_protocol):
+        sys.exit("--parent-dir and --parent-protocol must be given together")
     pdig = lock_protocol.verify(a.protocol)
     allowed = [int(x) for x in os.environ.get("CUDA_VISIBLE_DEVICES", "0,1").split(",")]
     gpus = [int(x) for x in a.gpus.split(",")] if a.gpus else allowed
@@ -85,6 +92,8 @@ def main():
                 cmd += ["--ids", a.ids]
             if a.adapter:
                 cmd += ["--adapter", a.adapter]
+            if a.parent_dir:
+                cmd += ["--parent-dir", a.parent_dir, "--parent-protocol", a.parent_protocol]
             if a.time_limit:
                 cmd += ["--time-limit", str(a.time_limit)]
             if a.max_requests is not None:
@@ -104,7 +113,16 @@ def main():
             keep = set(json.load(open(a.ids)))
             items = [i for i in items if i["id"] in keep]
         pnames = a.prompts.split(",")
-        complete, rep = finalize(a.out_dir, items, pnames, {p: P.all_prompts()[p] for p in pnames}, a.adapter, pdig)
+        adg = eval_gate.adapter_digest(a.adapter) if a.adapter else None
+        complete, rep = finalize(a.out_dir, items, pnames, {p: P.all_prompts()[p] for p in pnames}, adg, pdig, a.parent_dir)
+        rep["adapter_dir"] = a.adapter
+        rep["parent_dir"] = a.parent_dir
+        if complete:  # 원시 record 전체를 현재 입력·config·protocol·adapter와 다시 대조한 뒤에만 완료로 인정한다
+            try:
+                eval_gate.verify_gen(a.out_dir, items, pnames, a.adapter, a.protocol, a.parent_dir, a.parent_protocol, require_completion=False)
+            except eval_gate.GateError as e:
+                complete = False
+                rep["gate_error"] = str(e)[:500]
         rep.update({"returncodes": codes, "wall_s": time.time() - t0, "allowed_gpus": allowed, "gpus_used": gpus,
                     "n_workers": a.workers, "worker_gpu": [gpus[k % len(gpus)] for k in range(a.workers)]})
         json.dump(rep, open(f"{a.out_dir}/last_run.json", "w"), indent=1)
