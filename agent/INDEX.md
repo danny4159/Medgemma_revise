@@ -15,6 +15,7 @@
 - iter_007 [CONTINUE] (normal/heavy/normal) <Pooling 전후 frozen feature probe: abandon> 24개 학습의 실제 실행과 원시 결과를 확인했으며, pooling 전후 MLP 차이 +0.000304는 사전 투자 기준을 충족하지 못했다. → 다음: 재사용 코드의 완료 판정·provenance 검증·GPU 가시성 처리를 보완하고, 남은 anatomy→lesion grounding 전이를 우선 검토한다. 직접 병변 학습 대비 전이 이득을 반증할 최소 실험과 독립 평가 자료를 설계하며, decoder 병목은 별도 미검증 후보로 비교한다.
 - iter_008 [사용자 보완으로 전환 → iter_009] 기존 기록 보존, 성공·실패 판정 아님 (Claude 구현)
 - iter_009 [CONTINUE] (deep/standard/normal) <정상 사용 조건의 병변 grounding 검증: success> 💾39aa49a6fa5943ca0d3e0327a7874e68a2c878cb 독립 평가 양성 200명 중 공통 위치 불일치 134명(67.0%)을 재확인해 RSNA 조건의 한계를 validated로 갱신한다. 실행기 재사용 결함과 방법론 효과 검증은 후속 과제로 남는다. → 다음: 검증된 lesion-grounding-generalization에 연결되는 방법 후보를 선행 방법·오류 분포·두 GPU 실행 가능성으로 비교해 하나를 선택한다. 직접 병변 LoRA/adapter와 강한 단순 baseline을 포함하고, 현재 평가 300명은 개발 자료로 전환한다. 새 환자 분할 및 추가 데이터셋의 확인 계획을 고정한 뒤, 필요한 재사용 결함만 보완하고 development에서 batch 확대 또는 GPU당 복수 worker의 처리량·peak VRAM·출력 정합성을 측정해 본실험으로 진행한다. anatomy 전이를 자동 선택하지 않는다.
+- iter_010 [CONTINUE] (deep/standard/normal) <영상 조건부 집합 grounding: execution_failed> 💾5581ed255a350e42a0ad422065edf13c56a33bf6 LoRA 학습 경로와 4 worker 처리량 개선은 확인했지만 본학습·독립 평가는 미완료이며, 실행 복구와 평가 검증 보완 후 원 계획을 이어가야 한다. → 다음: 먼저 실행 호스트에서 기존 학습·추론·대기 프로세스와 소유 lock, checkpoint, 종료 코드를 확인한다. 살아 있는 작업은 중복 실행하지 않는다. 원본 결과를 보존하면서 epoch validation 복구, 학습 run lock, 입력·선택 ID provenance, 최종 평가의 완전성·seed 검사를 보완하고 필요한 중단·재개 검사를 수행한다. protocol 변경과 기존 결과의 호환 범위를 명시적으로 연결한다. 안전한 GPU 배치에서 iter_010의 기존 학습량·매 epoch validation·확장 규칙·3개 seed·확인 800명 계획을 유지해 완료하고 실제 비교 결과를 보고한다. iter_011 이후 규모 기준을 이 미완료 실험의 축소 근거로 소급 적용하지 않는다.
 
 ## 이전 목표들의 접근법 (참고용, 현재 목표의 재평가 횟수에는 안 들어감)
 
@@ -28,12 +29,13 @@
 - Pooling 전후 frozen feature probe [approach/pooling-feature-probe]: 1회 (iter_007), 유효한 실험 0회, 미분류 1회, 최근 판정: abandon, 커밋: 없음
 - 해부구조에서 병변으로 grounding 전이 [approach/anatomy-lesion-transfer]: 1회 (iter_008), 유효한 실험 0회, 미분류 0회, 최근 판정: 사용자 보완으로 전환 (검증 미완료), 커밋: 없음
 - 정상 사용 조건의 병변 grounding 검증 [approach/grounding-usage-diagnostic]: 1회 (iter_009), 유효한 실험 1회, 미분류 0회, 최근 판정: success, 커밋: 39aa49a6fa5943ca0d3e0327a7874e68a2c878cb
+- 영상 조건부 집합 grounding [approach/conditional-set-grounding]: 1회 (iter_010), 유효한 실험 0회, 미분류 0회, 최근 판정: execution_failed, 커밋: 5581ed255a350e42a0ad422065edf13c56a33bf6
 
-현재 연구 브랜치: approach/grounding-usage-diagnostic (코드 위치: /SSD1_1TB/home/milab/daniel/08_medgemma/research)
+현재 연구 브랜치: approach/conditional-set-grounding (코드 위치: /SSD1_1TB/home/milab/daniel/08_medgemma/research)
 
 ### 최근 계획의 대안 순위
 
-1. 정상 사용 조건의 병변 grounding 검증: 공식 RSNA 자료와 NIH mapping을 이용해 독립 환자의 실제 출력 오류를 확인한다.
-2. NIH 주석 일치의 제한적 진단: 기존 개발 자료에서 사용법과 parser를 확인하되 주석 범위가 불명확한 추가 box를 임상적 오탐으로 해석하지 않는다.
-3. 정답 보존 context 변화의 실제 답변 검증: 정상 grounding 사용으로 문제가 해소되면 다른 observed 후보를 검토한다.
-4. 해부구조에서 병변으로 grounding 전이: 관련 실제 출력 한계가 validated가 되고 직접 적응 대비 해결책 연결이 생긴 뒤 재검토한다.
+1. 영상 조건부 집합 grounding: 먼저 직접 병변 SFT와 강한 단순 baseline으로 실제 생성의 잔여 위치·크기·개수 오류를 확인한다.
+2. 공간 선호 학습: SFT 잔여 오류가 확인되고 SPR·CORAL·CoMedPO와 구체적인 차별성이 정리되면 검토한다.
+3. 별도 box decoder와 공간 토큰: uMedGround·GETok 대비 이점과 MedGemma 생성 경로 연결을 입증할 수 있을 때 검토한다.
+4. 해부구조에서 병변으로 grounding 전이: iter_008을 보존하되 직접 적응보다 유리할 근거가 생긴 뒤 재검토한다.

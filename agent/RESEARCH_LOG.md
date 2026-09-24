@@ -2921,3 +2921,328 @@ print('concise: both hard',a,'asis hard only',b,'swap hard only',c2,'neither',d)
 validated limitation을 명시하고, 오류와 연결되는 방법 후보를 가까운 선행 방법 및 직접 병변 경량 적응과 비교해 선택한다. anatomy 전이는 별도 근거가 있을 때만 포함한다. 생성 bbox의 동일 지표에서 공식 prompt·prior·강한 학습 baseline과 비교하고, 실제 방법 contribution과 단순 fine-tuning 효과를 구분해야 한다.
 
 현재 평가 300명은 이후 개발 자료로 표시한다. 새 환자 분할과 추가 데이터셋의 확인 조건을 결과를 보기 전에 고정한다. 다음 본실험 전 development 입력으로 batch 확대 또는 GPU당 복수 worker 중 유망한 구성을 비교하고 처리량·전체 peak VRAM·긴 출력 지연·정합성을 기록한다. CPU 보완만으로 반복을 끝내지 말고, 입력·실행 gate를 통과하면 사전 정의한 GPU 본실험으로 이어간다.
+
+
+## iter_010 GPT PLAN [영상 조건부 집합 grounding / proceed] — 2026-09-24 22:45:48
+
+# 요약
+
+- **이번에 할 일:** 새로운 RSNA 환자에서 직접 병변 LoRA SFT와 공식·간결 prompt, 좌표 보정, box 집합 prior를 비교한다.
+- **필요한 이유:** 정상 사용에서도 grounding 오류가 재현됐다. 새 목적함수의 필요성을 판단하려면 직접 적응이 해결하는 범위부터 알아야 한다.
+- **확인할 기준:** 실제 생성의 양성 환자별 F1@0.3 개선, 음성의 유효 빈 응답, 출력 유효성, 3개 seed 결과와 위치·크기·개수 잔여 오류를 확인한다.
+- **주의·다음:** SFT 자체를 새 방법으로 주장하지 않는다. 성공하면 잔여 오류에 맞는 방법을 설계하고, 실패하면 이번 학습 범위에 한정해 해석한다. 별도 reserve와 추가 데이터셋 확인이 최종 논문 증명에 필요하다.
+
+# Current Understanding
+
+iter_009는 정상 사용 조건의 RSNA opacity grounding 한계를 검증했다. 독립 양성 200명 중 공통 위치 불일치가 134명(67.0%)이었다. 공식 prompt F1@0.3은 0.147로 단일 box prior 0.269보다 낮았다. 이 수치는 이전 실험의 결과이며 이번 새 분할의 비교 점수로 대체 사용하지 않는다.
+
+이번 조사에서는 기존 development 40명의 위치·크기·개수 오류가 함께 남는 것을 확인했다. 단일 GT에서도 공식 prompt의 20/21명이 모든 IoU 0.3 미만이었다. 다중 병변만의 문제로 좁힐 수 없다.
+
+유지: 기준 모델·목표·validated 주장·기존 결과·정상 사용 검증. 변경: 기존 평가 300명을 개발 자료로 전환하고 새 환자 분할을 만든다. 보류: anatomy 전이, 새로운 preference objective, 별도 box decoder. 사용자 보완의 일회성 공식 사용 진단은 완료됐으며 반복하지 않는다. 새 학습·재개 경로의 검증은 수행한다.
+
+# Hypothesis
+
+**주가설:** assistant-only 직접 병변 LoRA SFT는 같은 concise prompt를 쓰는 미적응 모델과 영상 비의존 보정을 넘어, 새 RSNA 양성 환자의 bbox 집합 생성 F1@0.3을 개선한다.
+
+**후속 의사결정 질문:** 충분히 학습한 뒤에도 단일·복수 GT의 위치, 크기, 개수, 빈 응답 및 형식 실패 중 어떤 오류가 남는가? 이 반복은 새로운 loss의 효과나 내부 병목을 검증하지 않는다.
+
+# Limitation Evidence / Correct Usage Checks
+
+대상은 `lesion-grounding-generalization`이며 현재 목표에서 validated다. 적용 범위는 RSNA adjudicated opacity, 고정 MedGemma 1.5 revision, 검증된 전처리·좌표·prompt 조건이다.
+
+다음을 유지한다.
+
+- 모델: `google/medgemma-1.5-4b-it`, revision `91850547d9f0b2fdd21aa7c5f4f3d1a8a52c243b`.
+- 값 보존 uint8 RGB 변환, square padding, 공식 processor와 chat template, yxyx 0–1000 좌표.
+- 기존 strict parser. 잘림·형식 실패·유효 빈 목록·내용상 위치 불일치를 구분한다.
+- greedy 생성과 1000→2000→4000 cap 규칙. 학습 후 답이 짧아져도 평가 cap을 임의로 줄이지 않는다.
+- GT 전체 box를 평가하고 one-to-one matching을 사용한다. 최대 IoU만으로 방법 성공을 판정하지 않는다.
+
+새 학습 collator는 같은 영상·prompt의 생성용 prefix와 학습용 prefix를 token 단위로 대조한다. processor의 image/token_type/attention 정보를 보존한다. 기존 공식 sanity 전체를 반복하는 대신 새 경로의 연결과 무학습 adapter의 출력 동일성을 검사한다.
+
+# Contribution Path / Baselines / Reuse
+
+이번은 방법 개발의 baseline 단계다. 직접 적응의 잔여 오류가 확인돼야 추가 공간 학습의 가치를 판단할 수 있다. LoRA 적용, 의료 데이터 SFT, IoU 선호 학습 자체는 새 contribution이 아니다.
+
+가까운 선행 방법은 [SPR](https://arxiv.org/html/2510.14374v1)의 위치 선호 DPO와 [CORAL](https://arxiv.org/html/2607.03647v1)의 hard-negative 답변 변화 보상이다. CoMedPO 목적함수는 원문 미확보 상태로 남긴다. 이전 라운드의 CURE·GETok·uMedGround 비교도 유지한다.
+
+비교군:
+
+1. **미적응 공식 prompt / 기존 concise prompt:** 새 validation·확인 집단에서 동일 모델로 생성한다. SFT의 직접 전후 비교는 concise prompt를 사용한다.
+2. **고정 좌표 보정:** 기존 개발 380명만 사용해 prompt별 변환을 선택한다. 축 순서 원본/교환, 중심 이동 dy·dx 각각 {-150,-75,0,75,150}, 높이·너비 배율 각각 {0.4,0.6,0.8,1.0}의 800개 고정 후보를 비교한다. 유효 출력 전체 box에 같은 변환을 적용하고 canvas 교집합 및 소멸 box 처리를 기록한다. 실패 출력은 구제하지 않는다. 개발 양성 F1@0.3 최대, 동률은 identity에 가까운 변환으로 고정한다. 평가 parser나 GT 좌표를 바꾸지 않는다.
+3. **box 집합 prior:** train 양성의 실제 전체 GT box 집합 중 train 양성 평균 F1@0.3이 최대인 하나를 선택한다. 단일 box prior도 함께 보고한다. 확인 환자의 영상·GT·병변 개수는 선택에 쓰지 않는다. 모든 환자에 같은 집합을 내므로 음성 성능도 그대로 공개한다.
+4. **직접 병변 SFT:** 같은 concise prompt에서 모든 GT box 또는 []를 생성하도록 학습한다. 학습 target의 box 순서는 중심 x, 중심 y, 좌표 순으로 결정적으로 고정한다. 좌표는 동일 정규화 규약의 정수이며 반올림 때문에 유효성이 깨지는 표본은 조용히 수정하지 않고 gate에서 확인한다.
+
+재사용 기반은 iter_006 `68117cfd08429ffc3cb9b77e14fb1db3221d86ab`다. JSON reuse_assets의 15개 파일을 iter_009에서 반입한다. geometry/parse/metrics 승인 범위를 유지하고 실행·평가·데이터 gate의 needs_fix를 먼저 해결한다. `download.py`는 사용하지 않는다. 기존 full ZIP·annotation·mapping을 검증해 읽으며 부분 다운로드의 결함은 이번 경로에서 발생하지 않는다.
+
+# Proposed Experiment
+
+## 1. 데이터와 분할
+
+결정적 seed `20260925`와 환자 ID 정렬을 사용한다. 과거 167명 exclusion, iter_009의 380명, 확인 가능한 legacy 환자를 제외한다. 기존 patient_choice의 category 우선순위를 명시하며 이 층화 표본을 자연 prevalence로 해석하지 않는다.
+
+예정 분할은 다음과 같다.
+
+| 분할 | opacity | Normal | NoOpacity/NotNormal | 합계 |
+|---|---:|---:|---:|---:|
+| train | 1200 | 600 | 600 | 2400 |
+| validation | 200 | 100 | 100 | 400 |
+| 이번 독립 확인 | 400 | 200 | 200 | 800 |
+
+나머지 적격 환자는 후속 방법의 reserve로 남긴다. 기존 집계 기준으로 양성 약 496명이 남지만 신규 gate 이후 실제 수를 기록한다. reserve의 생성·성능 분석은 하지 않는다. 이번 800명의 결과를 본 뒤 다음 방법을 설계하면 그 800명은 이후 개발 자료이며 독립 확인 표본으로 다시 주장하지 않는다.
+
+환자 ID, SOP, decoded pixel hash 중복을 전체 split과 기존 자료 사이에서 검사한다. legacy 익명 NIH 영상은 비교 가능한 표시 변환 아래 exact/near-duplicate 후보를 조사하고 의심 환자는 제외한다. 완전한 환자 대응이 불가능한 범위와 사전학습 노출 미확인은 남긴다. 영상·GT overlay를 train/validation에서 검사하며 확인 집단의 어려움에 따라 표본을 바꾸지 않는다.
+
+pool 부족이나 새로운 DICOM 조건으로 예정 수를 채울 수 없으면 모델 결과를 보기 전에 부족 원인과 변경 규모를 별도 기록한다. 부족을 이유로 과거 환자나 중복 영상을 채워 넣지 않는다.
+
+## 2. 직접 LoRA 학습
+
+설치된 torch·transformers만 사용한다. `pip install`·conda 변경은 하지 않는다. 학습 전 실제 import·버전·모델 module 경로를 확인한다.
+
+- base weights: bf16, frozen. vision encoder·projector·embedding·lm_head는 frozen.
+- 대상: `model.language_model.layers.*` 아래 q_proj, k_proj, v_proj, o_proj, gate_proj, up_proj, down_proj. 실제 존재 목록과 trainable parameter 수를 저장한다.
+- 표준 LoRA: rank 16, alpha 32, dropout 0.05, A는 표준 초기화, B는 0. 기존 base weight를 재초기화하지 않는다. 별도 decoder나 공간 토큰은 추가하지 않는다.
+- 학습: assistant JSON와 end-of-turn만 cross-entropy에 포함한다. system/user/image/padding은 -100이다. 유효한 assistant token이 없는 batch는 실패다. 영상 교환·좌표 jitter·anatomy 추가 loss는 이번에 넣지 않는다.
+- AdamW: learning rate {1e-4, 2e-4}, weight_decay 0.01, betas (0.9,0.999), eps 1e-8, grad clip 1.0, 5% warmup 뒤 cosine schedule.
+- microbatch 1부터 시작하고 gradient accumulation으로 effective batch 16을 맞춘다. use_cache=False, non-reentrant gradient checkpointing을 사용한다. 입력·target 절단은 금지하며 최대 token 길이는 train/validation 길이 감사로 정한다.
+- seed 17에서 두 learning rate를 각각 5 epochs 학습한다. 매 epoch validation 전체 400명의 실제 생성과 assistant loss를 평가한다.
+- 두 후보 중 하나라도 마지막 두 epoch에서 validation utility가 0.01 이상 증가하고 validation loss도 1% 이상 감소하면 두 후보 모두 최대 8 epochs까지 연장한다. 학습 schedule 연장 규칙을 실행 전 설정에 기록한다. 8 epochs에도 계속 개선 중이면 미수렴으로 표시하며 학습 가능성의 실패를 주장하지 않는다.
+- validation utility는 `0.5×양성 평균 F1@0.3 + 0.25×Normal valid_empty율 + 0.25×NoOpacity/NotNormal valid_empty율`로 고정한다. 형식 실패는 empty 성공이 아니다. utility 동률은 양성 F1@0.5, 다음은 이른 checkpoint로 결정한다.
+- seed 17에서 learning rate와 총 epoch 수를 정한 후 seed 29·43을 동일 설정으로 학습한다. 각 seed의 checkpoint는 같은 validation 규칙으로 선택한다. 최종 3개 seed를 모두 보고하고 확인 결과로 seed를 고르지 않는다.
+
+최대 4개 학습 trajectory이며 기본 48,000 image presentations, 8 epochs까지 연장하면 최대 76,800이다. epoch별 실제 표본 노출·optimizer step·loss·gradient norm·validation 생성 지표를 저장한다.
+
+## 3. Pilot에서 본실험으로의 진입
+
+train 16명에 양성 단일·복수 box와 두 음성 층을 포함한다. 초기 adapter의 logits·생성이 base와 일치하고, LoRA gradient가 유한하며 base parameter가 변하지 않는지 확인한다. 작은 집합의 loss 감소와 유효 JSON 학습을 확인한다. pilot weight는 본학습에 이월하지 않는다.
+
+메모리·처리량 pilot에는 긴 실제 train target도 포함한다. 학습 경로·입력·gradient·메모리 gate를 통과하면 위 본실험으로 진행한다. pilot 완료를 연구 완료로 보고하지 않는다. 단순 overfit 실패는 먼저 masking·gradient·target 경로를 점검한다.
+
+## 4. GPU 배치·처리량·예상 시간
+
+실행 직전에 nvidia-smi로 상속된 허용 GPU 0,1의 실제 여유와 UUID 대응을 확인한다. 여유가 큰 GPU부터 배정하며 다른 사용자의 프로세스는 건드리지 않는다.
+
+학습 메모리는 아직 미측정이다. bf16 base 외에 gradient·optimizer·activation이 필요하므로 추론 8–10GB를 학습 근거로 사용하지 않는다. 일단 GPU별 독립 학습 1개로 두 learning rate를 병렬 배정하고 microbatch 1과 2의 처리량·peak를 train에서 비교한다. 모든 조건에서 최소 2GB 여유를 확보한다. 독립 학습 2개를 한 GPU에 넣는 것은 실측 peak 합계와 worker별 여유가 허용될 때만 후보로 삼는다.
+
+추론은 기존 개발 입력 중 짧은 출력과 과거 긴 출력을 포함한 고정 24명으로 2 GPU×1 worker와 2 GPU×2 worker를 우선 비교한다. 후자가 메모리상 불가하면 1 worker/GPU의 batch 확대를 비교한다. 전체 요청/분, GPU별 전체 점유·allocated/reserved peak, 긴 출력 지연, CPU/RAM/I/O 경합, 오류·OOM을 기록한다. 동일 입력의 suffix·parser 결과·box 정합성이 유지되는 구성만 채택한다. 결과가 달라지면 성능이 유리한 쪽을 고르지 않고 원인을 확인한 뒤 일관된 구성을 고정한다.
+
+학습 1개/GPU를 유지하면 그 이유를 실측 메모리나 처리량으로 남긴다. 서로 다른 seed·학습 조건·생성 shard는 두 GPU에 병렬 배정한다.
+
+초기 시간 추정은 기본 48,000 presentations, GPU별 1–4초/example라는 미검증 가정에서 순수 학습 wall 약 6.7–26.7시간이다. validation·확인 생성까지 포함한 임시 예상은 약 10–40시간이며 실측값이 아니다. pilot의 실제 처리량과 예정 요청 수로 본실험 전 다시 계산한다. 임의 GPU-minute 상한은 두지 않는다. 8-epoch 연장 및 긴 출력 발생에 따른 증가를 별도 보고한다.
+
+## 5. 독립 확인과 추가 데이터셋
+
+설정·checkpoint·baseline 선택을 완료하고 protocol을 잠근 뒤 확인 800명에서 공식·concise base와 SFT 3개 seed를 생성한다. 고정 보정은 base 출력에서 계산하고 prior는 추론 없이 계산한다. validation에서 가장 높은 양성 F1@0.3인 단순 비교군 하나를 주 비교군으로 미리 고정하며 모든 비교군의 결과도 공개한다.
+
+Kvasir-SEG는 다음 다중 데이터셋 실험의 후보로 고정한다. 이번에는 공식 배포 및 버전, 이미지/mask/bbox 대응, 기존 Kvasir 자료와 중복, patient/video 정보 존재를 확인하는 범위로 제한한다. 확보되면 후속 계획은 patient/video group을 우선하고, 없으면 exact/near-duplicate cluster 단위 80/10/10 분할을 잠근 뒤 같은 recipe를 별도 학습하는 것이다. patient 독립성을 입증하지 못하면 그 제한을 명시한다. 다운로드 실패를 우회하거나 비공식 미러를 동등 출처로 간주하지 않는다. 외부 자료 확보 실패는 이번 RSNA 결과를 무효화하지 않지만 다중 데이터셋 증명은 미완료다.
+
+# Implementation Tasks for Claude
+
+1. 승인 기반과 reuse_manifest를 확인하고 요청한 소스·의존 파일을 검증한다. 누락을 새 구현으로 대체하지 않는다. 기존 결과와 source ZIP은 보존한다.
+2. 데이터 gate를 보강한다. mapping 중복·ZIP basename 충돌을 거부하고 RescaleSlope/Intercept, WindowCenter/Width, photometric·bit depth·frame·VOI 조건을 점검한다. 지원하지 않는 표시 조건은 자동 추정하지 않는다. 현재 파일 hash를 provenance와 대조한다.
+3. 신규 split·exclusion·reserve manifest를 만들고 분할 무결성 및 train/validation overlay를 확인한다. 결과는 `results/iter_010/`에만 저장한다.
+4. generate/run_shards/lock_protocol/evaluate의 재사용 결함을 고친다. protocol 경로를 명시적으로 받아 누락 시 실패하도록 하고, 모든 재개 경로에서 완료 요청까지 현재 입력을 검사한다. 요청 ID에는 model/adapter·split·prompt를 포함한다.
+5. 실행 lock·소유자 정보·worker별 결과·원자적 claim과 종료 확인 후 회수를 구현한다. 살아 있는 claim은 삭제하지 않는다. 중복 요청은 값이 같아도 검출하고 provenance가 다른 충돌은 즉시 중단한다. 최종 예상 요청 집합과 실제 집합이 일치해야 completion을 쓴다.
+6. 표준 torch LoRA와 assistant-only collator, optimizer·scheduler·checkpoint를 구현한다. 새 loss를 임의 설계하지 않는다. 공식 notebook과 다른 설정 및 이유를 기록한다.
+7. 필수 검증: prefix/labels mask, 초기 adapter 항등성, 유한 gradient와 frozen base, FP32 작은 선형층 기준식과의 forward/backward 대조, adapter 저장·재로드, optimizer/RNG 재개, 실제 generation 적용을 확인한다. tensor 값으로 비교 가능한 재개 fixture를 포함한다.
+8. 개발 자료에서 좌표 보정과 train prior를 고정하고 pilot·처리량 비교 후 본학습을 진행한다. validation 규칙대로 3개 seed checkpoint를 확정한 다음 새 확인 집단을 평가한다.
+9. checkpoint는 50 optimizer steps 및 epoch 경계에 원자적으로 저장한다. adapter, optimizer, scheduler, RNG, sampler 위치, base revision, train/config/protocol digest를 연결한다. 실행 재개는 남은 작업만 수행한다. 기존 log를 덮어쓰지 않는다.
+10. 원시 출력·실행량·선택 이력·실패·자원 실측과 함께 보고한다. 소스는 orchestrator 체크포인트 대상이며 대용량 adapter·optimizer·결과는 results에 둔다. 무관한 리팩터링과 download.py 일반화는 미룬다.
+
+# Evaluation (성공/실패 기준 포함)
+
+**주지표:** 확인 양성 400명의 end-to-end 환자별 F1@0.3. 형식 실패와 잘림은 F1=0이며 valid-only 성능도 별도로 보고한다. 3개 seed의 환자별 값을 평균한 뒤 같은 환자의 주 비교군과 paired bootstrap 10,000회, seed 20260925로 차이의 95% CI를 계산한다. 각 학습 seed 점수와 범위도 보고한다. 이 CI가 학습 seed 불확실성을 충분히 추정한다고 주장하지 않는다.
+
+**함께 볼 지표:** F1@0.5, precision/recall, union IoU, 유효 출력률, 유효 빈 목록, 잘림, 두 음성 층별 valid_empty와 추가 box율. 단일/복수 GT, GT 면적 train 기준 삼분위별 결과를 제시한다. 최대 IoU와 중심·크기 요약은 탐색적 분해이며 별도 성공 기준으로 바꾸지 않는다.
+
+**직접 적응의 성공:** 주 비교군 대비 평균 F1@0.3 차이 ≥0.05, paired CI 하한 >0, 세 seed의 차이가 모두 양수, 전체 유효 출력률 ≥95%를 충족한다. 두 음성 층의 valid_empty율은 같은 concise base보다 각각 5 percentage points 넘게 악화되지 않아야 한다. 이 음성 기준은 사전 운영 기준이며 정식 비열등성 입증으로 표현하지 않는다.
+
+**부분 개선:** 양성 개선은 있으나 CI·효과 크기·음성 기준 일부를 충족하지 못하면 개선 범위와 실패 층을 구분한다. 추가 표본이 판정을 바꿀 수 있는지 CI로 판단한다.
+
+**불확정:** 학습이 계속 개선 중이거나 seed 변동·정밀도 부족으로 판단하기 어려우면 inconclusive다. 다음 실험은 부족한 정보에 한정한다.
+
+**유효한 음성 결과:** 경로 검증과 학습량 확인 뒤에도 개선이 없으면 이번 데이터·rank 16·언어층 LoRA·학습 범위의 실패로 기록한다. 모든 경량 적응, vision 표현, anatomy 전이의 실패로 일반화하지 않는다.
+
+**실행 실패:** 입력/protocol 불일치, 누수, 잘못된 mask·gradient, 누락 요청, 복구 불가능한 OOM 등으로 가설을 평가하지 못하면 execution_failed다. 코드 저장과 가설 판정을 분리한다.
+
+SFT가 크게 개선되더라도 이번 성공은 직접 적응 baseline 확립이다. 새 방법의 contribution, 외부 일반화, 최종 목표 달성이나 DONE으로 판정하지 않는다.
+
+# Risks / Checks
+
+- **단순 적응으로 대부분 해결될 수 있다:** 이는 유용한 결과다. 필요성이 없는 새 loss를 붙이지 않고 남는 오류와 다른 데이터셋에서 연구 가치를 재평가한다.
+- **기존 평가 정보 사용:** iter_009 380명은 모두 개발 자료다. 새 확인 집단이나 reserve 결과로 prompt·보정·학습량을 바꾸지 않는다.
+- **주석 의미:** RSNA bbox 일치를 측정한다. 추가 box를 임상적 오진으로 단정하지 않는다. GT 경계 모호성과 모델 사전학습 노출도 미확인이다.
+- **학습 메모리:** 먼저 microbatch·checkpointing·동시성을 조절한다. frozen lm_head의 큰 logits가 병목이면 loss가 수치적으로 같은 chunked 계산을 검증한 뒤 적용한다. 단순 메모리 부족 때문에 조용히 해상도·target·학습 범위를 바꾸지 않는다. 허용 범위의 동등 계산으로도 불가하면 checkpoint와 원인을 남긴다.
+- **LoRA 구현:** peft 부재는 표준 수식 구현으로 처리하되 초기 항등성·gradient·재로드 검증을 생략하지 않는다. 실제 torch/transformers import가 안 되면 설치 금지를 우회하지 않는다.
+- **운영 안전:** 새 실행기 검증은 별도 fixture 경로에서 한다. 과거 큐·claim·결과는 건드리지 않는다. OOM·비정상 수치·진행 정체는 원인을 기록하고 안전한 checkpoint부터 재개한다.
+- **외부 자료:** Kvasir의 영상 분할을 환자 독립성으로 과장하지 않는다. 이번 RSNA 성능을 다중 데이터셋 증명으로 표현하지 않는다.
+
+## 대규모 GPU 필요 후보
+
+GETok 전체 SFT/RL, CORAL의 원문 GRPO 구성, RadGrounder 규모의 다중 과제 학습, vision encoder까지 공동 적응하는 대규모 의료 grounding을 보존한다. 이번 언어층 LoRA의 결과만으로 이들이 필수이거나 불필요하다고 판단하지 않는다.
+
+# 계획의 근거 (GPT 조사 노트)
+
+## 핵심
+
+이번 구현은 직접 병변 SFT와 강한 단순 baseline으로 범위를 좁힌다. 위치 선호 학습과 영상 교환 목적함수는 이미 선행 연구에 있으며, 현재 자료만으로 차별적인 새 목적함수를 정할 근거는 부족하다. 반면 실제 생성의 검증된 오류, 로컬 학습 자료, 실행 가능한 LoRA 경로가 있어 baseline의 잔여 오류를 확인할 정보 가치는 높다.
+
+파일·논문·설치 metadata와 기존 JSON을 읽었다. 코드 수정·파일 생성·테스트·모델 추론·학습은 하지 않았다. 기존 JSON의 개수와 기하 요약만 메모리에서 계산했다.
+
+## 1. 선행 목적함수 질문에 대한 답
+
+- CORAL의 CGO는 정답 보상에 λ·1[원본 영상 답변 ≠ hard-negative 영상 답변]을 더한다. 원문 λ는 0.5이며, 서로 다른 정답을 가진 CLIP 유사 영상을 사용한다. GRPO 기반이고 원문 학습은 4×80GB H100이다. 따라서 일반적인 image-swap 불변성 벌점이나 LoRA만으로 차별성을 주장할 수 없다. 연속 bbox는 작은 좌표 변화만으로도 문자열이 달라지므로 이 보상을 그대로 옮기는 것도 부적절하다. [CORAL 원문 §3.1](https://arxiv.org/html/2607.03647v1)
+- SPR은 의미 점수와 위치 점수를 결합해 응답을 순위화하고, 위치를 개선한 응답과 낮은 점수 응답으로 표준 reference-relative DPO를 수행한다. 따라서 bbox IoU로 선호 쌍을 만들어 학습하는 발상 자체는 이미 가까운 선행 방법이다. 의료 다중 box라는 적용 대상 차이만으로 novelty를 확정하지 않는다. [SPR 원문 §3](https://arxiv.org/html/2510.14374v1), [ICCV 공식 논문](https://openaccess.thecvf.com/content/ICCV2025/papers/Qiu_Spatial_Preference_Rewarding_for_MLLMs_Spatial_Understanding_ICCV_2025_paper.pdf)
+- CoMedPO는 저자 목록에서 논문 존재를 확인했지만, 이번에도 공식 원문 목적함수를 확보하지 못했다. 연결된 ECCV 페이지 조회는 실패했고 공식 저장소는 비어 있다. 비공식 요약을 목적함수 근거로 채택하지 않았다. 따라서 CoMedPO와의 차별성은 미확인으로 유지한다. 이번에는 새로운 counterfactual 방법을 주장하지 않으므로 이 미확인이 직접 SFT 구현을 막지는 않는다. [저자 목록](https://www.ece.ucdavis.edu/~chuah/rubinet/publications/bydate.html), [공식 저장소](https://github.com/zxgapollo/CoMedPO)
+- 결론: 먼저 직접 적응이 해결하는 범위와 남는 실패를 확인한다. 후속 공간 대조 학습을 제안할 때는 SPR·CORAL뿐 아니라 이전 라운드의 GETok·uMedGround와 구체적인 학습 신호·출력 경로 차이를 대조해야 한다.
+
+## 2. 기존 development 오류 질문에 대한 답
+
+출처: `research/results/iter_009/{pilot,dev}/run/gen_shard*.jsonl`, `manifests/gt_manifest.json`. development의 일부 요청이 pilot에 보존돼 있어 두 경로를 합쳤다. 240개 고유 요청을 확인했다. dev/run만 읽으면 양성 34명만 포함되므로 그 부분 집계를 최종 근거로 사용하지 않았다.
+
+전체 development 양성은 단일 GT 21명, 복수 GT 19명이다. 아래 중심 거리와 면적비는 유효한 비어 있지 않은 출력에서 최대 IoU 예측–GT 쌍을 골라 계산한 탐색적 요약이다. 0–1000 canvas 단위이며, GT를 사용하는 분석이므로 실행 가능한 보정법의 성능이 아니다.
+
+| prompt·GT 집단 | 환자 수 | 유효 비어 있지 않은 출력 | 모든 IoU <0.3 | 중심 거리 중앙값 | 예측/GT 면적비 중앙값 |
+|---|---:|---:|---:|---:|---:|
+| 공식·단일 GT | 21 | 21 | 20 | 174.75 | 5.979 |
+| 공식·복수 GT | 19 | 19 | 15 | 157.34 | 4.004 |
+| 간결·단일 GT | 21 | 19 | 19 | 209.48 | 3.686 |
+| 간결·복수 GT | 19 | 18 | 14 | 138.98 | 2.878 |
+
+공식 prompt는 40명 모두 box 1개, 간결 prompt의 파싱 가능한 비어 있지 않은 출력은 37명 모두 box 2개였다. 나머지 3건은 이번 간이 최종 JSON 추출로 해석하지 않았으며, 기존 엄격 parser의 상태를 대체하지 않는다.
+
+위치와 크기 오류가 함께 있어 단순 축소나 개수 보정만으로 해결된다고 말할 수 없다. 반대로 실제 고정 좌표 보정의 독립 성능도 아직 측정하지 않았으므로 무효라고 단정할 수 없다. 후속 baseline에 축 순서·이동·크기 보정과 box 집합 prior를 명시적으로 포함한다. 이전 평가 300명까지 이제 개발 자료로 취급한다.
+
+## 3. 데이터 분할·외부 확인 질문에 대한 답
+
+기존 기록상 과거 환자 제외 후 양성 pool 2,536명에서 iter_009 양성 240명을 빼면 2,296명이다. 신규 중복 검사를 통과한다는 조건으로 train 양성 1,200명, validation 200명, 이번 확인 400명을 배정할 수 있고 양성 약 496명을 후속 방법의 미사용 reserve로 남길 수 있다. 실제 수는 새 gate 통과 후 확정하며 부족하면 확인 결과를 보기 전에 변경 기록을 남겨야 한다.
+
+로컬 공식 ZIP은 3,978,753,654 bytes이며 provenance의 SHA256은 `96b97d81eb042c6513196e01079a060a980d5e62502c3266527dd9c0b2a63b50`이다. 이번에는 provenance 기록을 읽었으며 대용량 ZIP 전체 hash를 다시 계산하지 않았다. 구현 단계에서 현재 파일을 검증한다.
+
+Kvasir-SEG 공식 저장소는 1,000개 영상·mask·bbox와 연구용 사용 조건을 명시한다. 이번에는 공식 `Data-split/train.txt`의 880행을 추가로 확인했다. 그러나 대응하는 test 목록과 patient/video 식별 근거는 확보하지 못했고, 배포 페이지는 다시 timeout이었다. train 목록 확인을 다운로드 성공이나 환자 독립성 확인으로 확대하지 않는다. [공식 저장소](https://github.com/DebeshJha/Kvasir-SEG), [공식 train 목록](https://raw.githubusercontent.com/DebeshJha/Kvasir-SEG/master/Data-split/train.txt)
+
+따라서 이번 본실험은 RSNA로 고정한다. 외부 확인은 Kvasir의 공식 배포·버전·중복 및 group 분할을 확인한 뒤 같은 학습 recipe의 별도 modality 재현으로 계획한다. NIH 추가 평가를 외부 기관 일반화로 부르지 않으며, RSNA→Kvasir zero-shot과 Kvasir 내 별도 학습도 구별한다.
+
+## 4. 실제 학습 환경·공식 예제 질문에 대한 답
+
+`orchestrator.py`의 CONDA_ENV는 `/home/test/.conda/envs/medgemma`다. 이번에는 해당 경로와 metadata를 직접 확인했다: torch 2.14.0, transformers 5.17.0, numpy 2.4.6, accelerate 1.15.0. peft·TRL·bitsandbytes는 디렉터리와 metadata 모두 찾지 못했다. 이전 라운드의 metadata 조회에서 torch 등도 확인하지 못한 결과는 이번 경로 확인으로 갱신한다. 당시 조회와의 차이 원인을 설치 변화로 단정하지 않는다. 실제 import와 GPU 학습 가능성은 구현 단계 검사다.
+
+공식 fine-tuning notebook의 현재 원문은 `google/medgemma-4b-it`를 지정한다. 4-bit QLoRA, rank 16, all-linear, lm_head/embed_tokens 저장 설정이며, collator는 padding·image token을 masking하지만 user prompt 전체를 masking하지는 않는다. 이를 MedGemma 1.5 assistant-only 예제로 부를 수 없다. [공식 notebook 원문](https://raw.githubusercontent.com/Google-Health/medgemma/main/notebooks/fine_tune_with_hugging_face.ipynb)
+
+설치 금지를 유지하고 기존 torch/transformers로 bf16 직접 LoRA를 구현한다. 기존 연구 코드에서 LoRA 구현은 발견하지 못했다. 이는 보관된 head 코드를 대체하는 재구현이 아니라 새로운 학습 경로다. 표준 W·x+(α/r)B·A·x를 사용하고, language_model의 attention·MLP 선형층만 대상으로 한다. 원 논문과 저자 구현을 기준으로 초기 항등성·gradient·저장/재로드를 검증한다. [LoRA 논문](https://arxiv.org/abs/2106.09685), [저자 구현](https://raw.githubusercontent.com/microsoft/LoRA/main/loralib/layers.py)
+
+## 5. 재사용·유지·보류
+
+GOAL, LIMITATIONS와 iter_009 원본 리뷰를 읽었다. 정상 사용 조건의 134/200명 오류 검증을 유지한다. 이번에 그 주지표를 다시 계산한 것은 아니다. iter_008 anatomy 전이는 보존 후보로 유지하고 자동 재개하지 않는다.
+
+`research/`의 git status·diff는 비어 있고 HEAD는 `39aa49a6fa5943ca0d3e0327a7874e68a2c878cb`다. 승인 기반 iter_006은 `68117cfd08429ffc3cb9b77e14fb1db3221d86ab`로 확인했다. 선택한 소스 파일의 tree와 import 의존성을 확인했다. 기존 결과·ZIP은 제자리에 보존하고 새 결과만 iter_010 아래에 둔다.
+
+## 대규모 GPU 필요 후보
+
+GETok 전체 SFT/RL 및 RadGrounder 규모의 다중 과제 학습은 이전 라운드 근거와 함께 보존한다. CORAL 원문 GRPO도 4×80GB H100 조건이므로 현재 직접 LoRA와 구분한다. vision encoder까지 공동 적응하는 대규모 방법은 후보로 남기되, 이번 언어층 LoRA 실패만으로 필요성을 확정하지 않는다.
+
+이전 사고 라운드 노트: agent/runs/iter_010/think/
+
+
+
+## iter_010 CLAUDE REPORT — 2026-09-25 00:44:25
+
+학습과 생성이 백그라운드에서 진행 중입니다. epoch 1 결과 알림이 오면 이어서 진행합니다.
+
+# [orchestrator] 권한 거부된 도구 호출
+- Bash: python - <<'EOF'
+import os
+os.environ["HF_HOME"]="/SSD1_1TB/home/milab/daniel/08_medgemma/hf_cache"; os.environ["HF_HUB_OFFLINE"]="1"
+import transformers, numpy as np
+from PIL import Image
+M="google/medgemma-1.5-4b-it"; R="91850547d9f0b2fdd21aa7c5f4f3d1a8a52c243b"
+proc=transformers.AutoProcessor.from_pretrained(M,revision=R)
+img=Image.fromarray(np.zeros((896,896,3),np.uint8))
+def msgs(a=None):
+    m=[{"role":"user","content":[{"type":"image","image":img},{"type":"text","text":"hello"}]}]
+    if a is not None: m.append({"role":"assistant","content":[{"type":"text","text":a}]})
+    return m
+g=proc.apply_chat_template(msgs(),add_generation_prompt=True,tokenize=True,return_dict=True,return_tensors="pt")
+f=proc.apply_chat_template(msgs('[]'),add_generation_prompt=False,tokenize=True,return_dict=True,return_tensors="pt")
+print({k:(v.shape,v.dtype) for k,v in g.items()})
+print({k:(v.shape,v.dtype) for k,v in f.items()})
+gi=g["input_ids"][0].tolist(); fi=f["input_ids"][0].tolist()
+print(len(gi),len(fi),fi[:len(gi)]==gi, proc.tokenizer.convert_ids_to_tokens(fi[len(gi)-3:]), proc.tokenizer.padding_side)
+print(proc.tokenizer.convert_ids_to_tokens(gi[:6]), proc.tokenizer.convert_ids_to_tokens(gi[-8:]))
+EOF
+- Bash: CUDA_VISIBLE_DEVICES=0 python -m rsna_diag.train --run-dir results/iter_010/pilot/mb1 --lr 2e-4 --seed 17 --epochs 12 --protocol results/iter_010/protocols/pilot_protocol.json --train-ids results/iter_010/manifests/pilot16_ids.json --no-val --eff-batch 4 --microbatch 1 --ckpt-every 10 > results/iter_010/pilot_mb1.log 2>&1
+- Bash: CUDA_VISIBLE_DEVICES=1 python -m rsna_diag.train --run-dir results/iter_010/pilot/mb2 --lr 2e-4 --seed 17 --epochs 12 --protocol results/iter_010/protocols/pilot_protocol.json --train-ids results/iter_010/manifests/pilot16_ids.json --no-val --eff-batch 4 --microbatch 2 --ckpt-every 10 > results/iter_010/pilot_mb2.log 2>&1
+- Bash: python - <<'PYEOF'
+import json,glob
+from rsna_diag import baselines
+gt=json.load(open('results/iter_009/manifests/gt_manifest.json'))
+dev=sorted(i for i in gt if gt[i]['split']=='development')
+recs=baselines.load_iter9_records(set(dev))
+n={i:recs[(i,'official_long')]['n_output_tokens']+recs[(i,'concise')]['n_output_tokens'] for i in dev}
+o=sorted(dev,key=lambda i:n[i])
+ids=o[:12]+o[-12:]
+print(len(ids),[n[i] for i in ids])
+json.dump(sorted(ids),open('results/iter_010/pilot/thr24_ids.json','w'))
+PYEOF
+- WebFetch: https://github.com/DebeshJha/Kvasir-SEG
+
+
+
+## iter_010 GPT REVIEW [CONTINUE] — 2026-09-25 00:48:33
+
+# 요약
+
+- **판정:** CONTINUE / execution_failed. 실험은 부분 실행됐지만 가설 검증을 완료하지 못했다. 방법의 효과를 기각한 결과가 아니다.
+- **핵심 근거:** seed 17 두 LR의 학습 로그는 첫 epoch의 121·107 steps까지이며, base validation은 800개 예정 요청 중 133개다. 독립 확인 결과는 없다.
+- **의미·한계:** 실제 LoRA 학습·생성 경로와 처리량 개선은 확인했다. 일반화 개선이나 새로운 contribution은 아직 판단할 수 없다.
+- **다음:** 기존 실행 상태를 확인하고 재개·평가 검증을 보완한 뒤 원 계획을 완료한다. 기존 결과와 체크포인트는 보존한다.
+
+# Assessment
+
+계획, plan.json, Claude 보고서, changes.patch, commit.json, reuse_manifest.json, 관련 소스·fixture·원시 출력·자원 로그와 Claude 실행 종료 구간을 읽었다. execution_amendment.md는 발견되지 않았다. 코드 수정·파일 생성·테스트·GPU 실험은 수행하지 않았다. 기존 JSON과 파일 hash만 읽어 집계했다.
+
+리뷰 대상은 `5581ed255a350e42a0ad422065edf13c56a33bf6`이다. commit.json의 저장 대상 파일은 현재 작업 파일과 모두 일치한다. `git diff`는 비어 있고 `test_rsna_iter010_gpu.py`만 미추적 상태다. 이 파일은 자동 저장에서 제외됐으므로 전체 스냅샷 재사용은 승인하지 않는다.
+
+`claude_report.md`는 백그라운드 학습·생성을 기다린다는 안내이며 완료 보고서가 아니다. `claude_stream.jsonl` 마지막 구간에도 epoch 1 validation 대기와 `end_turn`이 기록돼 있다. 실행 호스트의 작업이 현재도 살아 있는지는 이 리뷰 환경에서 확정하지 못했다. 완료 전 단계 인계 문제로 판단하며 `valid_experiment=false`로 둔다.
+
+# Key Findings
+
+**데이터와 입력 검사:** `data_audit/split_checks.json`은 train/validation/confirm 2,400/400/800명, 고유 환자·SOP 각각 3,600개, 분할 간 환자 중복 0을 기록한다. 과거 환자와의 중복 및 iter_009 영상 pixel 중복도 0으로 기록돼 있다. 양성 reserve는 496명이다. source_hash_check.json에는 annotation·mapping·공식 ZIP hash 일치가 기록돼 있다. 이번 리뷰에서 대용량 ZIP 전체를 재해싱한 것은 아니다.
+
+**학습 경로:** 저장 fixture는 기존 검사 59/59, iter_010 CPU 검사 70/70, GPU 검사 24/24 PASS다. GPU 기록에는 assistant-only masking, 생성 prefix 일치, 238개 LoRA 대상 모듈, 초기 adapter logits 차이 0, 유한 gradient, frozen base, adapter 재로드와 실제 생성 변화가 포함된다. 작은 두 표본의 loss는 0.927에서 0.163으로 감소했다. 이는 학습 경로의 동작 근거이며 일반화 성능이 아니다.
+
+**실제 진행량:** `train/lr1e-4_s17/train_log.jsonl`과 `train/lr2e-4_s17/train_log.jsonl`은 각각 121·107 steps다. 계획상 한 epoch는 150 steps다. 저장된 마지막 loss는 각각 0.653·0.618이며 validation 결과는 없다. `base_val/gen_worker*.jsonl`의 133개 요청은 고유하고 중복은 없지만, 예정된 400명×2 prompts에는 미달한다. 부분 생성만으로 baseline 순위나 성능 결론을 내리지 않았다.
+
+**처리량:** 고정 24명×2 prompts의 두 pilot은 각각 48/48개 요청을 완료했고 누락·중복·추가 요청이 없다. 2 worker는 2,078.79초, 4 worker는 1,054.74초로 약 1.39→2.73 요청/분, 1.97배 개선됐다. 리뷰에서 두 구성의 원시 suffix와 EOS를 대조해 48개 모두 일치를 확인했다. sampled GPU 최대 점유는 4 worker 구성에서 17,888·17,797MiB였다.
+
+**버전 연결:** main protocol에 기록된 29개 파일 hash는 모두 현재 파일과 일치한다. 반면 pilot protocol은 현재 generate.py·lock_protocol.py와 다르므로 pilot 검사를 현 SHA 전체의 검증으로 확대할 수 없다.
+
+# Problems / Concerns
+
+현재 성능 결론을 막는 것은 본실험 미완료다. 권한 거부 기록이 일부 있지만 이후 실제 학습·생성이 수행됐으므로 전면적인 실험 미실행이나 영구 권한 차단으로 해석하지 않는다.
+
+재사용 전에는 다음을 해결해야 한다.
+
+1. **epoch validation 복구:** train.py는 epoch adapter를 저장한 뒤 `save_ckpt(epoch + 1, 0)`를 실행하고 validation을 수행한다. 이 사이 또는 validation 도중 종료되면 재개 루프는 다음 epoch부터 시작한다. 마지막 epoch에서는 validation 없이 종료할 수도 있다. select.py도 존재하는 metric만으로 best epoch를 고르므로 누락을 차단해야 한다.
+2. **학습 재개와 입력 검증:** train.py에는 run-dir 소유 lock이 없다. train/validation ID 파일은 protocol에 포함되지 않으며 train_digest는 선택 ID 자체를 검증하지 않는다. SFTDataset은 현재 image hash를 확인하지 않는다. 현재 자료가 변조됐다는 증거는 없지만 재개 안전성의 결함이다.
+3. **최종 평가의 엄격한 중단 조건:** final_eval.py는 completion·protocol을 검증하지 않고 결과를 읽는다. 누락은 sft_eval에서 점수 0으로 처리되고, 정확한 3개 seed 집합도 강제하지 않는다. 누락과 모델의 실제 실패를 섞지 않도록 평가 전에 요청·seed·adapter 연결을 검증해야 한다.
+4. **GPU 안전 여유:** 본학습과 base 추론을 함께 실행한 로그에서 GPU 전체 점유는 21,090·20,999MiB까지 올라갔다. 24,576MiB 중 여유는 3,486·3,577MiB로, GPU당 두 프로세스에 필요한 총 4GiB에 못 미친다. 관측된 OOM을 주장하는 것은 아니며 배치를 보완할 문제다. 이후 validation의 peak도 포함해야 한다.
+5. **검증 소스 보존:** GPU fixture 소스가 비밀정보 패턴 검사로 커밋에서 제외됐는데 main protocol은 해당 파일에 의존한다. 실제 민감정보 여부를 확인하고 안전한 보존·검증 연결을 해결해야 한다.
+
+기존 작은 모델 optimizer/RNG fixture는 tensor 일치를 확인하지만 실제 학습 실행기의 epoch 경계·DataLoader·validation 중단 복구를 검증하지 않는다. 필요한 보완 검사는 이 경로에 집중한다.
+
+# Interpretation
+
+사용자 보완 지시에 따라 iter_009의 validated 한계를 출발점으로 삼고 직접 병변 SFT를 먼저 구현한 방향은 타당하다. anatomy 전이를 자동 재개하거나 head 성능을 실제 VLM 개선으로 바꾸어 주장하지 않았다. 기존 한계 주장을 바꿀 새로운 성능 근거는 없으므로 limitation_updates는 비운다.
+
+두 GPU를 사용한 학습과 처리량 비교가 실제로 수행됐다. CPU 준비나 작은 pilot만 반복한 사례는 아니다. 그러나 작업 착수와 학습 loss 감소를 직접 적응 성공으로 볼 수 없다. 현재 실패 범위는 실행 완료·인계 및 재사용 안전성에 한정한다.
+
+iter_010에는 이후 도입된 단계별 표본 축소 기준을 소급 적용하지 않는다. 원래 계획의 학습량·평가 일정·seed·확인 표본을 유지한다. 기존 결과·검증된 모듈·체크포인트는 계속 보존한다.
+
+# Recommended Next Experiment
+
+새 방법을 추가하기 전에 기존 직접 SFT 비교를 완료한다. 먼저 실행 호스트에서 살아 있는 소유 작업과 종료된 작업을 구분하고, 살아 있는 claim이나 작업을 중복 실행하지 않는다. 종료된 작업은 checkpoint와 원시 결과에서 안전하게 이어간다.
+
+재개·평가 결함을 수정할 때는 기존 protocol을 덮어쓰지 말고 변경 이유, 영향을 받는 코드, 기존 학습·출력의 호환 범위를 기록한다. 필요한 회귀 검사는 epoch 경계 및 validation 도중 중단 복구, 선택 ID·영상 변경 거부, 누락 요청·seed·adapter 불일치 거부에 집중한다.
+
+그 뒤 안전한 GPU 배치에서 두 LR의 seed 17 학습, 사전 고정 확장 규칙, seed 29·43, 주 비교군 선택과 독립 확인 800명 평가를 완료한다. 효과 크기·paired CI·음성 층·출력 유효성·seed별 결과를 보고한 후에만 잔여 오류에 맞는 새 방법을 설계한다.

@@ -212,3 +212,34 @@ MedGemma 1.5로 연구하는 것 자체가 큰 제약이라고 판단되면, 근
 - 🏁 **마일스톤**: 정상 사용 조건에서도 남는 RSNA opacity grounding 오류를 실제 출력으로 검증 — JOURNEY.md
 - 📁 원본: `agent/runs/iter_009/`
 
+## iter_010 — 영상 조건부 집합 grounding (1번째 시도) · 2026-09-24 22:35
+
+- 🔎 **사고 라운드 1** (GPT deep): RSNA 출력에서 위치 오류와 prompt별 box 개수 편향을 확인했다. 직접 병변 LoRA를 필수 baseline으로 두고, 공간·대조 학습 선행 방법과의 차이 및 신규 평가 분할을 확인한 뒤 구현 범위를 확정한다.
+  - 스스로 던진 질문: CORAL·CoMedPO·Spatial Preference Rewarding의 원문 목적함수와 대조할 때, 영상별 bbox 집합의 위치·크기·개수를 학습하는 후보에 어떤 명확한 차이가 남는가? 차이가 없다면 직접 병변 SFT와 잔여 오류 확인으로 이번 구현 범위를 좁혀야 하는가? · 저장된 development 출력에서 단일·복수 GT별 위치와 크기 오류를 분리하면, 단순 좌표 보정·개수 prior·prompt 보완으로 설명 가능한 범위는 어디까지인가? 새 방법이 반드시 넘어야 할 단순 baseline을 어떻게 고정할 것인가? · RSNA의 미사용 환자를 train/validation/확인 집단으로 얼마나 배정하고, Kvasir-SEG 또는 접근 가능한 다른 외부 자료에서 어떤 분할·중복 검사를 적용할 수 있는가? 같은 방법의 다중 데이터셋 검증과 zero-shot 전이를 어떻게 구별할 것인가? · 실제 medgemma 환경에 있는 학습 라이브러리와 공식 fine-tuning 예제를 기준으로, MedGemma 1.5의 assistant-only loss·LoRA 대상 모듈·정밀도·checkpoint 경로를 어떻게 고정할 것인가? 필요한 재사용 파일과 필수 수정 범위는 무엇인가?
+- 🧭 **계획** (GPT deep): 새 RSNA 환자 분할에서 직접 병변 LoRA SFT를 좌표 보정·box 집합 prior와 비교해, 실제 생성 개선과 남는 공간 오류를 확인한다. SFT 자체의 novelty나 다중 데이터셋 일반화는 주장하지 않는다.
+  - 대안: 1) 영상 조건부 집합 grounding: 먼저 직접 병변 SFT와 강한 단순 baseline으로 실제 생성의 잔여 위치·크기·개수 오류를 확인한다. · 2) 공간 선호 학습: SFT 잔여 오류가 확인되고 SPR·CORAL·CoMedPO와 구체적인 차별성이 정리되면 검토한다. · 3) 별도 box decoder와 공간 토큰: uMedGround·GETok 대비 이점과 MedGemma 생성 경로 연결을 입증할 수 있을 때 검토한다. · 4) 해부구조에서 병변으로 grounding 전이: iter_008을 보존하되 직접 적응보다 유리할 근거가 생긴 뒤 재검토한다.
+  - 1순위 선택 근거: 직접 적응을 수행하기 전에는 새 목적함수의 필요성과 차별성을 판단하기 어렵다. 검증된 한계·로컬 데이터·허용된 GPU가 있고, 설치 없이 구현할 표준 LoRA 경로도 구체화돼 있어 baseline과 잔여 오류 확인의 정보 가치가 가장 높다.
+- ▶ **결정**: 자동 진행 (smart) — 1순위로 진행
+- 💾 **개발 이력 체크포인트** `5581ed255a350e42a0ad422065edf13c56a33bf6`: implementation_finished (검증 승인 아님)
+  - 자동 커밋 제외·확인 필요: test_rsna_iter010_gpu.py
+- 🔧 **Claude** (standard): (요약 없음) [자체 검증 없음, 파일 3888개 변경]
+  - 새 브랜치 `approach/conditional-set-grounding` ← 68117cf (68117cf)
+  - ⚠ 권한 거부 5건
+- 🔍 **리뷰** (GPT normal): [CONTINUE / execution_failed] LoRA 학습 경로와 4 worker 처리량 개선은 확인했지만 본학습·독립 평가는 미완료이며, 실행 복구와 평가 검증 보완 후 원 계획을 이어가야 한다.
+  - 접근법 판단: 학습과 추론은 실행됐으나 완료 전 Claude 단계가 끝나 가설 검증이 미완료다. 기존 작업을 보존하고 실행 인계·재개·평가 검증을 보완해 원 계획을 마친다.
+  - 목표 진전: 새 RSNA train/validation/confirm 2,400/400/800명 분할, 학습 입력 검사, 실제 LoRA gradient·생성 연결, 처리량 pilot과 본학습 착수는 확인했다. 직접 적응의 일반화 개선, 강한 baseline 대비 효과, 3개 seed 재현성, 잔여 오류 및 외부 데이터셋 증명은 아직 확인하지 못했다.
+  - 판정 범위: iter_010의 직접 병변 LoRA SFT 비교는 seed 17의 첫 epoch 도중과 base validation 부분 생성까지만 저장돼 있다. 실행 단계가 조기에 종료돼 계획한 가설 검증을 완료하지 못한 범위이며, LoRA·영상 조건부 grounding 또는 의료 VLM 적응의 실패를 뜻하지 않는다.
+  - 현재 결론 무효: 계획한 가설 비교가 미완료다. 저장된 본학습은 두 LR 각각 121·107 optimizer steps이며, epoch validation·3개 seed 선택·독립 확인 결과가 없다.
+  - 현재 결론 무효: claude_stream.jsonl은 백그라운드 작업 완료를 기다린다는 메시지 뒤 end_turn으로 끝났고, claude_report.md도 대기 안내에 머문다. 저장 시점의 실행 상태·종료 코드·안전한 인계가 확정되지 않았다.
+  - 재사용 전 수정: train.py의 epoch 경계 재개에서 미완료 validation을 먼저 복구하도록 해야 한다. 실제 학습 실행기의 중단·재개 fixture가 필요하며 작은 선형층 RNG 검사는 이를 대체하지 못한다.
+  - 재사용 전 수정: 동일 학습 run-dir에 대한 소유자 lock을 추가하고, 재개 시 checkpoint 이후 남은 log와 재실행 step의 관계를 명시해야 한다.
+  - 재사용 전 수정: 선택한 train/validation ID 내용과 실제 영상 hash를 학습 provenance에 연결하고 시작·재개 시 검증해야 한다.
+  - 재사용 전 수정: 최종 평가와 checkpoint 선택에 예상 요청 집합, 누락·추가·중복, protocol/config/adapter digest, 정확한 seed 집합과 예정 epoch 완료 검사를 강제해야 한다.
+  - 재사용 전 수정: 학습과 추론을 같은 GPU에 함께 올린 구성은 프로세스당 2GB 여유 기준을 충족하지 못했다. 기존 소유 작업 상태를 확인한 뒤 안전한 배치를 정해야 하며 살아 있는 작업을 중복 실행하면 안 된다.
+  - 재사용 전 수정: test_rsna_iter010_gpu.py가 비밀정보 패턴 검사로 커밋에서 제외됐고 main protocol은 이 파일을 참조한다. 실제 민감정보 여부를 점검하고 안전한 소스 보존과 검증 기록 연결을 해결해야 한다. 검사 우회는 하지 않는다.
+  - 재사용 전 수정: pilot protocol은 현재 generate.py와 lock_protocol.py에 대해 hash가 다르다. 당시 검증 버전과 본실험 버전의 변경 범위를 기록하고 영향받는 검사만 보완해야 한다.
+  - 추후 개선: Kvasir-SEG의 공식 배포·버전·중복 및 patient/video 정보 확인은 미완료다. 이번 RSNA 실행 복구와 별도로 후속 다중 데이터셋 증명 전에 해결한다.
+  - 추후 개선: legacy 익명 영상의 thumbnail 유사도 검사에서 후보가 없었다는 결과는 환자 비중복이나 사전학습 미노출의 완전한 증명이 아니다.
+  - 다음: 먼저 실행 호스트에서 기존 학습·추론·대기 프로세스와 소유 lock, checkpoint, 종료 코드를 확인한다. 살아 있는 작업은 중복 실행하지 않는다. 원본 결과를 보존하면서 epoch validation 복구, 학습 run lock, 입력·선택 ID provenance, 최종 평가의 완전성·seed 검사를 보완하고 필요한 중단·재개 검사를 수행한다. protocol 변경과 기존 결과의 호환 범위를 명시적으로 연결한다. 안전한 GPU 배치에서 iter_010의 기존 학습량·매 epoch validation·확장 규칙·3개 seed·확인 800명 계획을 유지해 완료하고 실제 비교 결과를 보고한다. iter_011 이후 규모 기준을 이 미완료 실험의 축소 근거로 소급 적용하지 않는다.
+- 📁 원본: `agent/runs/iter_010/`
+
