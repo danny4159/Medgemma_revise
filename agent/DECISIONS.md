@@ -243,3 +243,30 @@ MedGemma 1.5로 연구하는 것 자체가 큰 제약이라고 판단되면, 근
   - 다음: 먼저 실행 호스트에서 기존 학습·추론·대기 프로세스와 소유 lock, checkpoint, 종료 코드를 확인한다. 살아 있는 작업은 중복 실행하지 않는다. 원본 결과를 보존하면서 epoch validation 복구, 학습 run lock, 입력·선택 ID provenance, 최종 평가의 완전성·seed 검사를 보완하고 필요한 중단·재개 검사를 수행한다. protocol 변경과 기존 결과의 호환 범위를 명시적으로 연결한다. 안전한 GPU 배치에서 iter_010의 기존 학습량·매 epoch validation·확장 규칙·3개 seed·확인 800명 계획을 유지해 완료하고 실제 비교 결과를 보고한다. iter_011 이후 규모 기준을 이 미완료 실험의 축소 근거로 소급 적용하지 않는다.
 - 📁 원본: `agent/runs/iter_010/`
 
+## iter_011 — 영상 조건부 집합 grounding (2번째 시도) · 2026-09-25 00:52
+
+- 🧭 **계획** (GPT normal): iter_010의 재개·입력 검증·평가 완료 판정을 보완하고 기존 3개 seed·확인 800명 실험을 완료한다. 직접 SFT 효과와 잔여 오류를 판단하되 새 방법의 contribution은 아직 주장하지 않는다.
+  - 대안: 1) 영상 조건부 집합 grounding: 현재 checkpoint를 검증해 직접 병변 SFT와 강한 단순 baseline 비교를 완료한다. · 2) 공간 선호 학습: 충분한 SFT 이후 잔여 오류와 SPR·CORAL·CoMedPO 대비 차별성이 확인되면 검토한다. · 3) 별도 box decoder와 공간 토큰: 생성 경로의 잔여 문제와 기존 방법 대비 이점이 확인된 뒤 검토한다. · 4) 해부구조에서 병변으로 grounding 전이: iter_008을 보존하고 직접 적응보다 유리할 새로운 근거가 있을 때 재검토한다.
+  - 1순위 선택 근거: 현재 실패는 방법의 반증이 아니라 미완료 실행과 구체적인 재사용 결함이다. 목표·데이터·허용 자원을 바꾸지 않고 복구할 경로가 명확하므로 추가 사람 승인 없이 진행한다.
+- ▶ **결정**: 자동 진행 (smart) — 1순위로 진행
+- 💾 **개발 이력 체크포인트** `8b030717b813bcbff85a2ffc5f52c9561a73f452`: implementation_finished (검증 승인 아님)
+  - 자동 커밋 제외·확인 필요: test_rsna_iter010_gpu.py
+- 🔧 **Claude** (standard): 복구 결함(lock·epoch validation 복구·입력 digest·평가 gate·seed 검증)을 수정하고 seed17 두 LR 학습을 부모 checkpoint에서 재개해 epoch 2까지 진행했다. 재개 수치 검사 5개는 GPU 노이즈 범위로 FAIL이며, 5 epochs 완료·연장·seed 29/43·confirm 800명 평가는 미완료다. [자체 검증 FAIL, 파일 146개 변경]
+  - 브랜치 `approach/conditional-set-grounding`에서 계속
+- 🔍 **리뷰** (GPT normal): [CONTINUE / execution_failed] 복구 기능과 epoch 1 실제 생성 결과는 확인했지만 재개 검사 5건 실패와 본실험 미완료로 가설 판정을 보류한다. 보고서의 LR별 점수도 서로 뒤바뀌어 정정이 필요하다.
+  - 접근법 판단: 실제 학습과 부분 validation은 수행했지만 복구 수치 gate와 본실험 완료 조건을 충족하지 못했다. 실행·평가 연결을 보완하고 기존 실험을 이어가야 한다.
+  - 목표 진전: 실제 SFT 생성으로 epoch 1 validation 400명씩을 평가했고, 양성 200명의 F1@0.3은 LR 1e-4에서 0.4740, LR 2e-4에서 0.4931667이었다. 입력 검증·중복 실행 방지·validation 복구도 진전됐다. 그러나 같은 집단의 고정 baseline 비교, 전체 학습·3개 seed·확인 800명 평가가 없어 일반화 개선과 연구 가설은 아직 검증하지 못했다.
+  - 판정 범위: RSNA train 2,400명·validation 400명, 언어층 rank16 LoRA의 seed17 두 LR 복구 및 본학습이 미완료인 상태에 한정한다. 직접 SFT, 영상 조건부 grounding 또는 경량 적응 전체의 실패를 뜻하지 않는다.
+  - 현재 결론 무효: 계획한 5→8 epoch 판정, seed29/43, 주 비교군 고정, confirm 800명 평가가 미완료다. 최종 가설을 검증한 유효 실험으로 셀 수 없다.
+  - 현재 결론 무효: 사전 재개 수치 검사 5건이 FAIL인데 복구 gate 통과를 입증하지 않은 채 본학습을 시작했다. 추가 반복의 변동만으로 모든 실패를 GPU 비결정성으로 확정할 수 없다.
+  - 재사용 전 수정: optimizer step 직후 중단·재개를 포함해 실제 batch ID, optimizer state, CPU/CUDA RNG와 adapter를 대조한다. 현재 GPU A 검사는 epoch 경계·validation 중단 중심이며 epoch/pos 일치를 실제 입력 순서 검증으로 대신한다.
+  - 재사용 전 수정: pipeline의 단일 writer lock과 기존 extend/pick/comparator/final 산출물의 재검증을 추가한다. 선택 결과를 protocol digest·train config·adapter·검증 epoch 근거에 연결하고 confirm 진입 시 확인한다.
+  - 재사용 전 수정: run_shards 실패 시 이전 completion을 성공 근거로 재사용하지 않도록 하고 완료 파일을 원자적으로 기록한다.
+  - 재사용 전 수정: 수정된 실행기로 development의 짧은/긴 출력 정합성과 동시 메모리 여유를 확인한 뒤 4 worker 추론을 적용한다.
+  - 재사용 전 수정: commit.json의 unpreserved_paths에 남은 test_rsna_iter010_gpu.py의 저장 제외 원인을 안전하게 확인한다. 현재 전체 스냅샷 재사용은 승인할 수 없다.
+  - 재사용 전 수정: STATUS.md와 claude_stream의 상세 보고서에서 뒤바뀐 LR별 epoch 1 수치를 후속 정정 기록으로 바로잡는다. 최종 claude_report.md에도 실제 결과·미완료 범위·실행 상태를 담는다.
+  - 추후 개선: 샘플링한 GPU 전체 점유와 allocated/reserved peak를 구분하고, 학습·validation·base 생성별 처리량으로 잔여 시간을 갱신한다.
+  - 추후 개선: 단일 RSNA validation 결과를 다른 병변·기관 또는 추가 데이터셋으로 일반화하지 않는다. baseline 확립 뒤 다중 데이터셋 증명과 novelty를 검토한다.
+  - 다음: 실행 호스트에서 기존 train·launcher·pipeline의 PID/starttime·lock·checkpoint·종료 상태를 먼저 확인해 중복 실행을 막는다. 원본을 보존하며 재개 수치 실패를 통제 실험으로 분리하고, 실제 중간-step 재개 및 선택 provenance·pipeline 소유권·completion 처리를 보완한다. 변경 전후 protocol과 기존 산출물 호환 범위를 기록한 뒤, 영향받지 않은 결과를 재사용해 원래 두 LR 5→8 epoch 규칙, 매 epoch validation 400명, seed17/29/43, confirm 800명 계획을 완료한다. 확인 평가 전에 수정된 4 worker 생성 경로의 정합성과 메모리를 검사하고 모든 자식 종료 코드를 수집한다.
+- 📁 원본: `agent/runs/iter_011/`
+
