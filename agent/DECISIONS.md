@@ -270,3 +270,33 @@ MedGemma 1.5로 연구하는 것 자체가 큰 제약이라고 판단되면, 근
   - 다음: 실행 호스트에서 기존 train·launcher·pipeline의 PID/starttime·lock·checkpoint·종료 상태를 먼저 확인해 중복 실행을 막는다. 원본을 보존하며 재개 수치 실패를 통제 실험으로 분리하고, 실제 중간-step 재개 및 선택 provenance·pipeline 소유권·completion 처리를 보완한다. 변경 전후 protocol과 기존 산출물 호환 범위를 기록한 뒤, 영향받지 않은 결과를 재사용해 원래 두 LR 5→8 epoch 규칙, 매 epoch validation 400명, seed17/29/43, confirm 800명 계획을 완료한다. 확인 평가 전에 수정된 4 worker 생성 경로의 정합성과 메모리를 검사하고 모든 자식 종료 코드를 수집한다.
 - 📁 원본: `agent/runs/iter_011/`
 
+## iter_012 — 영상 조건부 집합 grounding (3번째 시도) · 2026-09-25 12:06
+
+- ▶ 실행 시작 (orchestrator 62ef664+수정)
+- 🧭 **계획** (GPT normal): 재개 수치 실패와 선택·완료 검증을 보완한 뒤 기존 두 LR·3개 seed·확인 800명 비교를 완료한다. 원래 규모를 유지하며 SFT 개선과 새로운 방법론 기여는 구분한다.
+  - 대안: 1) 영상 조건부 집합 grounding: 복구 정확성을 검증하고 기존 직접 SFT와 강한 baseline 비교를 완료한다. · 2) 공간 선호 학습: 충분한 SFT 이후 잔여 오류와 선행 방법 대비 차별성이 확인되면 검토한다. · 3) 별도 box decoder와 공간 토큰: 실제 생성 경로의 잔여 문제와 추가 이점이 확인된 뒤 검토한다. · 4) 해부구조에서 병변으로 grounding 전이: 보존된 iter_008을 유지하고 직접 적응보다 유리할 새 근거가 있을 때 재검토한다.
+  - 1순위 선택 근거: 기존 가설은 아직 평가되지 않았고 복구 대상과 원래 실험 규칙이 명확하다. 추가 권한이나 연구 방향 변경 없이 현재 두 GPU에서 완료할 수 있다.
+- ▶ **결정**: 자동 진행 (smart) — 1순위로 진행
+- 💾 **개발 이력 체크포인트** `783d2d04671ae296f3dc0c700e575f8af8e021c9`: implementation_finished (검증 승인 아님)
+  - 자동 커밋 제외·확인 필요: test_rsna_iter010_gpu.py
+- 🔧 **Claude** (heavy): 결정적 kernel에서 재개 상태가 bitwise로 정확함을 확인(GPU 59/59, CPU 36/36)한 뒤, 원래 규모의 LoRA SFT(두 LR, 3 seeds, confirm 800명)를 끝까지 실행했다. 사전 기준 5개를 모두 충족했다(prior_set 대비 F1@0.3 +0.216, CI 0.172–0.259). 다만 generate.py 부모 경로 결함 때문에 잠금 밖 실행기로 우회했고 test_rsna_iter011 fixture가 중단됐으며, 결과는 단일 데이터셋의 baseline 확립이라 FAIL로 표시해 검토를 요청한다. [자체 검증 FAIL, 파일 4262개 변경]
+  - 브랜치 `approach/conditional-set-grounding`에서 계속
+  - ⚠ 권한 거부 3건
+- 🔍 **리뷰** (GPT normal): [CONTINUE / success] 직접 LoRA SFT가 확인 양성 400명에서 prior_set보다 F1@0.3을 평균 0.216 높였고 독립 재계산도 일치했다. baseline은 검증됐지만 새 방법의 기여와 코드 전체 재사용 승인은 남아 있다.
+  - 접근법 판단: 직접 LoRA SFT의 독립 확인 비교가 사전 성공 기준 5개를 충족했다. baseline 확립의 성공이며 새 방법론과 외부 일반화 증명은 후속 과제다.
+  - 목표 진전: 정상 사용 조건에서 검증한 RSNA grounding 문제에 대해 직접 LoRA SFT가 실제 생성 출력을 개선한다는 독립 확인 근거를 확보했다. 두 LR·총 4개 학습 trajectory·3개 확인 seed와 강한 단순 비교군 비교를 완료했다. 새 방법론의 contribution, 충분한 학습량 대비 추가 이득, 다른 데이터셋의 재현은 아직 미검증이다.
+  - 재사용 전 수정: generate.py 부모 재사용 경로의 lock_protocol NameError를 수정하고 해당 분기를 검증해야 한다.
+  - 재사용 전 수정: pipeline.py와 run_iter012_rest.py의 기존 confirm_result.json 존재 기반 완료 처리를 근거 재검증으로 바꿔야 한다. gen_check decision도 protocol·adapter·원시 출력·자원 기록에 연결하고 출력 정합성을 채택 조건으로 강제해야 한다.
+  - 재사용 전 수정: run_iter012_rest.py를 잠긴 실행 경로에 통합하거나 별도 실행 변경 manifest로 연결해야 한다. 기존 protocol과 결과는 보존한다.
+  - 재사용 전 수정: iter_011 select fixture를 갱신해야 한다. 중단 뒤 실행되지 않은 migration 검사를 통과한 것으로 취급하지 말고, 해당 경로를 재사용할 때 검증해야 한다.
+  - 재사용 전 수정: test_rsna_iter012_gpu.py의 고정 GPU 매핑은 현재 허용 집합 0,1에 한정한다. 후속 재사용 전에 상속된 허용 집합을 지키도록 보완해야 한다.
+  - 재사용 전 수정: commit.json의 unpreserved_paths에 test_rsna_iter010_gpu.py가 남아 있어 전체 스냅샷 재사용은 승인하지 않는다. 저장 제외 원인은 내용을 노출하거나 검사를 우회하지 않고 확인해야 한다.
+  - 추후 개선: 세 seed 모두 epoch 5가 선택됐다. 사전 연장 규칙은 지켰지만 직접 SFT의 수렴이나 최적 학습량은 확정되지 않았다.
+  - 추후 개선: 환자 bootstrap CI는 학습 seed 불확실성을 충분히 포함하지 않으며, 음성 빈 응답률 기준은 정식 비열등성 검정이 아니다.
+  - 추후 개선: 수정된 결정적 경로의 재개 정확성은 확인됐지만, 과거 iter_011 FAIL 5건 모두의 원인을 kernel 비결정성으로 확정할 수는 없다. 부모 이관 경로는 재사용하지 않은 것으로 처리됐다.
+  - 추후 개선: 이번 생성 정합성 대조는 base 48요청에 대해 과거 4 worker 결과와 비교했다. 선택 adapter의 2/4 worker 직접 출력 대조와 CPU·RAM·I/O 경합 기록은 후속 구성 변경 때 보완한다.
+  - 추후 개선: GPU 메모리는 주기적 전체 점유와 worker별 peak 기록을 구분해서 보고해야 한다. 주기적 관측 최대가 연속 시간의 절대 최대를 보장하지는 않는다.
+  - 다음: 검증된 SFT baseline과 결과를 보존하고 실행기 재사용 결함을 필요한 범위에서 수정한다. 이번 confirm은 후속 개발에 사용하면 개발 자료로 전환하고 새로운 확인 집단을 보존한다. train/validation에서 직접 SFT의 학습량 부족 여부와 위치 정밀도·작은 병변·미검출 오류를 구분한 뒤, 기존 조사와 가까운 선행 방법을 대조해 추가 기여가 명확한 후보 하나를 선정한다. 충분한 직접 SFT 및 관련 방법 baseline을 포함하고, 고정된 대표 subset·1개 seed의 실제 생성 탐색에서 확대 기준을 충족하면 다중 seed와 두 번째 데이터셋으로 확장한다.
+- 🏁 **마일스톤**: 직접 LoRA SFT로 RSNA grounding 개선을 독립 확인 — JOURNEY.md
+- 📁 원본: `agent/runs/iter_012/`
+

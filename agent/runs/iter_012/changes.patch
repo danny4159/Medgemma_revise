@@ -1,0 +1,1743 @@
+diff --git a/rsna_diag/final_eval.py b/rsna_diag/final_eval.py
+index c5680f3..caeb80d 100644
+--- a/rsna_diag/final_eval.py
++++ b/rsna_diag/final_eval.py
+@@ -8,6 +8,7 @@ iter_011: 모든 입력 생성 결과는 eval_gate.verify_gen(예상 ID x prompt
+       python -m rsna_diag.final_eval confirm --comparator FILE --conf-base DIR --protocol P --sft SEED:SELECTION.json:GEN_DIR ... --out FILE
+ """
+ import argparse
++import glob
+ import hashlib
+ import json
+ import os
+@@ -49,31 +50,63 @@ def all_simple(recs, ids, bl):
+     return d
+ 
+ 
+-def cmd_comparator(a):
++def fsha(path):
++    return hashlib.sha256(open(path, "rb").read()).hexdigest()
++
++
++def comparator_payload(val_base, protocol, parent_dir=None, parent_protocol=None):
++    """validation base 생성의 원시 요청에서 주 비교군을 재계산한다 (근거 파일 hash 포함)."""
+     items, gt = inputs.load_items(MANIFEST, GT, SPLIT_IDS.format("validation"), "validation")
+     bl = json.load(open(BASE_JSON))
+     ids = [i["id"] for i in items]
+-    recs = eval_gate.verify_gen(a.val_base, items, ["official_long", "concise"], None, a.protocol, a.parent_dir, a.parent_protocol)
++    recs = eval_gate.verify_gen(val_base, items, ["official_long", "concise"], None, protocol, parent_dir, parent_protocol)
+     tr = [i for i in gt if gt[i]["split"] == "train"]
+     edges = sft_eval.area_edges(gt, tr)
+     preds = all_simple(recs, ids, bl)
+     summ = {k: sft_eval.summarize(v, gt, ids, edges) for k, v in preds.items()}
+     best = max(summ, key=lambda k: (round(summ[k]["f1@0.3"], 12), k))
+-    json.dump({"comparator": best, "selection": "validation positive mean F1@0.3 (end-to-end)", "n_val": len(ids),
+-               "protocol_digest": lock_protocol.verify(a.protocol), "baselines_json_sha256": hashlib.sha256(open(BASE_JSON, "rb").read()).hexdigest(),
+-               "val_inputs_digest": inputs.inputs_digest(items, gt),
+-               "val_f1@0.3": {k: v["f1@0.3"] for k, v in summ.items()}, "val_summaries": summ}, open(a.out, "w"), indent=1)
+-    print("comparator", best, {k: round(v["f1@0.3"], 4) for k, v in summ.items()})
++    gen_files = sorted(glob.glob(os.path.join(val_base, "gen_worker*.jsonl")))
++    par_files = sorted(glob.glob(os.path.join(parent_dir, "gen_worker*.jsonl"))) if parent_dir else []
++    return {"comparator": best, "selection": "validation positive mean F1@0.3 (end-to-end)", "n_val": len(ids),
++            "protocol_digest": lock_protocol.verify(protocol), "baselines_json_sha256": fsha(BASE_JSON),
++            "val_inputs_digest": inputs.inputs_digest(items, gt), "val_base_dir": val_base, "parent_dir": parent_dir,
++            "parent_protocol": parent_protocol, "parent_protocol_digest": lock_protocol.digest_of(parent_protocol) if parent_protocol else None,
++            "evidence": {"gen_files_sha256": {f: fsha(f) for f in gen_files + par_files},
++                         "completion_sha256": fsha(os.path.join(val_base, "completion.json"))},
++            "val_f1@0.3": {k: v["f1@0.3"] for k, v in summ.items()}, "val_summaries": summ}
++
++
++def cmd_comparator(a):
++    from . import select as SEL
++    pl = comparator_payload(a.val_base, a.protocol, a.parent_dir, a.parent_protocol)
++    st = SEL.write_or_verify(a.out, pl)
++    print("comparator", st, pl["comparator"], {k: round(v, 4) for k, v in pl["val_f1@0.3"].items()})
+ 
+ 
+ def cmd_confirm(a):
+     seeds_in = eval_gate.check_seeds([kv.split(":")[0] for kv in a.sft])  # 가장 먼저: 중복/누락/잉여 seed 거부 (dict 생성 이전)
++    from . import select as SEL
+     comp = json.load(open(a.comparator))
+     items, gt = inputs.load_items(MANIFEST, GT, SPLIT_IDS.format("confirm"), "confirm")
+     bl = json.load(open(BASE_JSON))
+     pdig = lock_protocol.verify(a.protocol)
+     if comp.get("protocol_digest") != pdig or comp["baselines_json_sha256"] != hashlib.sha256(open(BASE_JSON, "rb").read()).hexdigest():
+         raise eval_gate.GateError("comparator file was not locked under the current protocol/baselines")
++    # iter_012: 주 비교군·연장·선택을 원시 validation 근거에서 다시 계산해 파일과 완전히 같을 때만 확인 평가를 한다
++    if comp != json.loads(json.dumps(comparator_payload(comp["val_base_dir"], a.protocol, comp["parent_dir"], comp["parent_protocol"]))):
++        raise eval_gate.GateError("comparator file is stale: differs from recomputation from validation base generations")
++    ext = SEL.verify_file(a.extend, "extend", a.protocol)
++    E = 8 if ext["extend"] else 5
++    sel_files = {int(kv.split(":")[0]): SEL.verify_file(kv.split(":")[1], "pick", a.protocol) for kv in a.sft}
++    for s, sf in sel_files.items():
++        if sf["planned_epochs"] != E:
++            raise eval_gate.GateError(f"seed {s}: selection planned epochs {sf['planned_epochs']} != E={E} from extend decision")
++    if sorted(sel_files[17]["runs_in"]) != sorted(ext["runs_in"]) or len(ext["runs_in"]) != 2:
++        raise eval_gate.GateError("seed 17 LR pick must be over exactly the two seed-17 LR runs of the extend decision")
++    lr17 = sel_files[17]["runs"][sel_files[17]["selected_run"]]["lr"]
++    for s in (29, 43):
++        if len(sel_files[s]["runs_in"]) != 1 or sel_files[s]["runs"][sel_files[s]["selected_run"]]["lr"] != lr17:
++            raise eval_gate.GateError(f"seed {s}: selection must be a single run at the seed-17 selected lr {lr17}")
+     ids = [i["id"] for i in items]
+     pos = [i for i in ids if gt[i]["category"] == "opacity"]
+     tr = [i for i in gt if gt[i]["split"] == "train"]
+@@ -125,8 +158,14 @@ def cmd_confirm(a):
+            "per_seed_diff": diffs, "per_seed_f1@0.3": {s: float(per[s].mean()) for s in seeds},
+            "seed_range_f1@0.3": [min(per[s].mean() for s in seeds), max(per[s].mean() for s in seeds)]},
+            "criteria": crit, "negative_layer_detail": neg_ok, "verdict_preregistered_criteria": verdict,
+-           "diff_vs_other_baselines": boot_all, "summaries": summ}
+-    json.dump(res, open(a.out, "w"), indent=1)
++           "diff_vs_other_baselines": boot_all, "summaries": summ,
++           "provenance": {"comparator_file": a.comparator, "comparator_sha256": fsha(a.comparator), "extend_file": a.extend,
++                          "extend_sha256": fsha(a.extend), "total_epochs_E": E,
++                          "selection_files_sha256": {kv.split(":")[0]: fsha(kv.split(":")[1]) for kv in a.sft},
++                          "recomputed_and_equal": True}}
++    tmp = a.out + ".tmp"
++    json.dump(res, open(tmp, "w"), indent=1)
++    os.replace(tmp, a.out)
+     print(json.dumps({k: res["primary"][k] for k in ("mean_sft_minus_comparator_f1@0.3", "ci95", "per_seed_diff")}), crit, verdict)
+ 
+ 
+@@ -141,12 +180,13 @@ def main():
+     c.add_argument("--out", required=True)
+     f = sp.add_parser("confirm")
+     f.add_argument("--comparator", required=True)
++    f.add_argument("--extend", required=True, help="seed17 연장 판정 파일 (재계산 검증)")
+     f.add_argument("--conf-base", required=True)
+     f.add_argument("--protocol", required=True)
+     f.add_argument("--sft", nargs="+", required=True, help="SEED:SELECTION.json:GEN_DIR (정확히 17, 29, 43)")
+     f.add_argument("--out", required=True)
+     a = ap.parse_args()
+-    if os.path.exists(a.out):
++    if a.cmd == "confirm" and os.path.exists(a.out):
+         raise SystemExit(f"{a.out} exists (not overwritten)")
+     {"comparator": cmd_comparator, "confirm": cmd_confirm}[a.cmd](a)
+ 
+diff --git a/rsna_diag/launch.py b/rsna_diag/launch.py
+index 0c6cbb5..f438614 100644
+--- a/rsna_diag/launch.py
++++ b/rsna_diag/launch.py
+@@ -47,11 +47,17 @@ def main():
+             rl.flush()
+             time.sleep(30)
+     finally:  # 중단(예: SIGINT)되어도 소유 child의 현재 상태를 기록한다. child는 종료시키지 않는다.
+-        res = [{"gpu": j["gpu"], "module": j["module"], "pid": p.pid, "returncode": p.poll(), "log": j["log"]} for j, p in zip(jobs, procs)]
+-        json.dump({"jobs": res, "wall_s": time.time() - t0, "all_finished": all(p.poll() is not None for p in procs)},
+-                  open(os.path.join(a.log_dir, "launch_result.json"), "w"), indent=1)
++        # iter_012: 살아 있는 child는 returncode null이 아니라 state=running으로 명시하고, 성공은 모든 child가 0으로 종료했을 때만이다.
++        res = [{"gpu": j["gpu"], "module": j["module"], "pid": p.pid, "returncode": p.poll(),
++                "state": "exited" if p.poll() is not None else "running", "log": j["log"]} for j, p in zip(jobs, procs)]
++        fin = all(r["state"] == "exited" for r in res)
++        out = {"jobs": res, "wall_s": time.time() - t0, "all_finished": fin,
++               "status": ("success" if fin and all(r["returncode"] == 0 for r in res) else ("failed" if fin else "interrupted_children_running"))}
++        tmp = os.path.join(a.log_dir, "launch_result.json.tmp")
++        json.dump(out, open(tmp, "w"), indent=1)
++        os.replace(tmp, os.path.join(a.log_dir, "launch_result.json"))
+     print(json.dumps(res))
+-    sys.exit(0 if all(p.returncode == 0 for p in procs) else 1)
++    sys.exit(0 if out["status"] == "success" else 1)
+ 
+ 
+ if __name__ == "__main__":
+diff --git a/rsna_diag/lock_protocol.py b/rsna_diag/lock_protocol.py
+index 0f3238a..18f978c 100644
+--- a/rsna_diag/lock_protocol.py
++++ b/rsna_diag/lock_protocol.py
+@@ -16,7 +16,8 @@ CODE = ["rsna_diag/generate.py", "rsna_diag/parse.py", "rsna_diag/metrics.py", "
+         "rsna_diag/prompts.py", "rsna_diag/rsna_data.py", "rsna_diag/dicom_min.py", "rsna_diag/run_shards.py",
+         "rsna_diag/queue_lock.py", "rsna_diag/lock_protocol.py", "rsna_diag/lora.py", "rsna_diag/sft_data.py", "rsna_diag/train.py",
+         "rsna_diag/baselines.py", "rsna_diag/launch.py", "rsna_diag/select.py", "rsna_diag/final_eval.py", "rsna_diag/sft_eval.py",
+-        "rsna_diag/data_gate.py", "rsna_diag/build_data.py", "rsna_diag/inputs.py", "rsna_diag/eval_gate.py", "rsna_diag/migrate.py"]
++        "rsna_diag/data_gate.py", "rsna_diag/build_data.py", "rsna_diag/inputs.py", "rsna_diag/eval_gate.py", "rsna_diag/migrate.py",
++        "rsna_diag/pipeline.py"]  # iter_012: 단계 순서·건너뛰기 검증을 담당하는 pipeline도 잠근다
+ DATA = ["results/iter_010/manifests/infer_manifest.jsonl", "results/iter_010/manifests/gt_manifest.json",
+         "results/iter_010/manifests/exclusion_previous_patients.json", "results/iter_010/manifests/reserve_patients.json",
+         "results/iter_009/source/official/cxr_anatomy_localization_with_hugging_face.ipynb"]
+diff --git a/rsna_diag/pipeline.py b/rsna_diag/pipeline.py
+index 0ea41f3..12b3d76 100644
+--- a/rsna_diag/pipeline.py
++++ b/rsna_diag/pipeline.py
+@@ -1,16 +1,20 @@
+-"""iter_011 본실험 파이프라인 (사전 고정 규칙, 재개 가능·단계별 완료 검사). 사용: python -m rsna_diag.pipeline
+-
+-단계 (각 단계는 산출물이 이미 유효하면 건너뛴다; 모든 판정은 select/final_eval의 gate를 통과한 값만 쓴다):
+- 1. seed17 두 LR을 5 epochs까지 (GPU당 학습 1개; 이미 train.lock을 잡은 실행이 있으면 종료를 기다린다)
+- 2. select extend: 어느 LR이라도 사전 규칙을 만족하면 두 LR 모두 8 epochs로 연장
+- 3. select pick(seed17 두 run) -> LR 고정, 총 epoch E 고정
+- 4. seed 29, 43을 선택 LR/E로 학습 (GPU0: seed29, GPU1: seed43), seed별 pick
+- 5. base validation 생성(부모 133행 검증 후 연결, 나머지 신규) -> comparator 고정 (확인 결과를 보기 전에)
+- 6. confirm base(official_long/concise x 800) + SFT 3 seed(concise x 800) 생성 (run_shards 2 GPU x 2 worker)
+- 7. final_eval confirm
+-어느 단계든 실패하면 예외로 중단한다 (성공으로 넘기지 않는다). 재실행하면 완료된 단계는 건너뛰고 이어간다.
++"""iter_012 본실험 파이프라인 (iter_010 사전 고정 규칙 유지, 재개 가능·단계별 근거 검증). 사용: python -m rsna_diag.pipeline
++
++단계 (건너뛰기는 파일 존재가 아니라 현재 근거의 재검증을 통과할 때만):
++ 1. seed17 두 LR을 5 epochs까지 새 run-dir에서 처음부터 학습 (GPU당 학습 1개). select.load_epochs 통과 시에만 완료로 본다.
++ 2. extend 판정: select.payload를 원시 근거에서 재계산해 파일에 쓰거나(없을 때) 기존 파일과 완전히 같은지 검증.
++ 3. 연장이면 두 LR 모두 8 epochs, 그 뒤 seed17 LR·checkpoint pick (같은 방식).
++ 4. seed 29, 43을 선택 LR·E로 학습 (GPU0: seed29, GPU1: seed43), seed별 pick.
++ 5. 생성 경로 점검: development thr24로 4 worker(2 GPU x 2) base 두 prompt + 선택 seed17 adapter concise를 생성해
++    완료·오류·GPU 전체 점유를 확인하고 iter_010 thr_w4 출력과 대조한다. 사전 기준(아래 MEM_LIMIT_MIB)으로 worker 수를 정한다.
++ 6. base validation 생성(iter_010 부모 record 검증 후 연결) -> comparator (확인 결과를 보기 전에 고정)
++ 7. confirm base(official_long/concise x 800) + SFT 3 seed(concise x 800) 생성
++ 8. final_eval confirm (comparator·extend·pick을 모두 재계산 검증)
++실패하면 예외로 중단한다. 재실행하면 검증을 통과한 단계만 건너뛴다. pipeline.lock으로 단일 소유를 강제한다
++(train.lock은 학습 child가 run-dir별로 잡으며 pipeline은 train.lock을 보유하지 않으므로 교착하지 않는다).
+ """
+ import glob
++import hashlib
+ import json
+ import os
+ import shutil
+@@ -18,15 +22,24 @@ import subprocess
+ import sys
+ import time
+ 
+-from . import queue_lock
++from . import eval_gate, final_eval, inputs, queue_lock, select as SEL
++from .run_shards import gpu_snapshot
+ 
+-R = "results/iter_011"
++R = "results/iter_012"
+ PROT = f"{R}/protocols/main_protocol.json"
+ OLD_PROT = "results/iter_010/protocols/main_protocol.json"
+ MAN = "results/iter_010/manifests/infer_manifest.jsonl"
++GTP = "results/iter_010/manifests/gt_manifest.json"
+ IDS = "results/iter_010/manifests/{}_ids.json"
++THR_IDS = "results/iter_010/pilot/thr24_ids.json"  # iter_009 development 24명 (iter_009 manifest)
++THR_MAN = "results/iter_009/manifests/infer_manifest.jsonl"
++THR_GT = "results/iter_009/manifests/gt_manifest.json"
++THR_REF = "results/iter_010/pilot/thr_w4"
+ LOG = f"{R}/pipeline.log"
+-WORKERS = 4  # 2 GPU x 2 worker: iter_010 실측(24명x2 prompt)에서 2 worker 대비 처리량 약 1.97배, 출력 일치
++STATUS = f"{R}/pipeline_status.json"
++GPUS = ("0", "1")
++MEM_LIMIT_MIB = 24576 - 2 * 2048  # 2 worker/GPU 채택 조건: GPU 전체 점유 최대 + worker당 2GiB 여유 <= 24GiB
++FREE_BEFORE_MIB = 2000  # 학습·생성 시작 전 허용 GPU의 기존 점유 상한 (다른 작업과 섞지 않는다)
+ 
+ 
+ def log(msg):
+@@ -36,6 +49,12 @@ def log(msg):
+         f.write(line + "\n")
+ 
+ 
++def status(stage, **kw):
++    tmp = STATUS + ".tmp"
++    json.dump({"stage": stage, "ts": time.time(), "time": time.strftime("%F %T"), **kw}, open(tmp, "w"), indent=1)
++    os.replace(tmp, STATUS)
++
++
+ def sh(cmd, check=True):
+     log("RUN " + " ".join(cmd))
+     p = subprocess.run(cmd)
+@@ -45,91 +64,208 @@ def sh(cmd, check=True):
+     return p.returncode
+ 
+ 
++def wait_gpus_free(gpus=GPUS):
++    """시작 직전 허용 GPU의 실제 점유를 확인한다. 다른 작업이 점유 중이면 기다린다 (종료시키지 않는다)."""
++    while True:
++        rows, apps = gpu_snapshot({int(g) for g in gpus})
++        busy = [r for r in rows if r["mem_used_mib"] > FREE_BEFORE_MIB]
++        if not busy:
++            log(f"gpus free: {[(r['index'], r['uuid'], r['mem_used_mib']) for r in rows]}")
++            return rows
++        log(f"waiting for GPU memory to be released: {busy} apps={apps}")
++        time.sleep(120)
++
++
+ def wait_unlocked(run_dirs):
+     """실행 중인 학습(run-dir train.lock 보유)이 끝날 때까지 기다린다. lock을 빼앗지 않는다."""
++    import fcntl
+     while True:
+         busy = []
+         for d in run_dirs:
+             lp = os.path.join(d, "train.lock")
+             if os.path.exists(lp):
+-                lk, own, _ = queue_lock.try_lock(lp, queue_lock.my_info(role="pipeline_probe"))
+-                if lk is None:
+-                    busy.append((d, own))
+-                else:
+-                    lk.release()
++                fd = os.open(lp, os.O_RDONLY)  # 읽기 전용 probe: 파일 내용을 바꾸지 않는다
++                try:
++                    fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
++                    fcntl.flock(fd, fcntl.LOCK_UN)
++                except BlockingIOError:
++                    busy.append((d, open(lp).read()[:200]))
++                finally:
++                    os.close(fd)
+         if not busy:
+             return
+         log(f"waiting for live train owners: {busy}")
+         time.sleep(120)
+ 
+ 
+-def has_epoch(d, e):
+-    return os.path.exists(f"{d}/epoch_{e:02d}/val_metrics.json")
++def run_dir(lr, seed):
++    return f"{R}/train/lr{lr}_s{seed}"
++
+ 
++def trained_ok(d, epochs):
++    """epoch 1..epochs 전체가 원시 근거로 검증되면 True. 파일이 없거나 불완전하면 False. 근거 불일치(변조 등)는 예외로 중단."""
++    if not os.path.exists(os.path.join(d, "train_config.json")):
++        return False
++    for e in range(1, epochs + 1):
++        if not os.path.exists(os.path.join(d, f"epoch_{e:02d}", "val_metrics.json")):
++            return False
++    SEL.load_epochs(d, epochs, PROT)
++    return True
+ 
+-def train_jobs(name, runs, epochs, migrations=None):
+-    """runs: [(gpu, lr, seed)]. launch.py로 동시에 학습하고 종료 코드를 모두 확인한다."""
++
++def ensure_trained(name, runs, epochs):
++    """runs: [(gpu, lr, seed)]. 모두 검증되면 건너뛰고, 아니면 launch.py로 동시에 학습(재개)한다."""
++    dirs = [run_dir(lr, seed) for _, lr, seed in runs]
++    wait_unlocked(dirs)
++    if all(trained_ok(d, epochs) for d in dirs):
++        log(f"{name}: epochs 1..{epochs} verified for all runs")
++        return
++    wait_gpus_free(tuple(sorted({str(g) for g, _, _ in runs})))
+     jobs = []
+     for gpu, lr, seed in runs:
+-        d = f"{R}/train/lr{lr}_s{seed}"
+-        args = ["--run-dir", d, "--lr", lr, "--seed", str(seed), "--epochs", str(epochs), "--protocol", PROT, "--microbatch", "2"]
+-        if migrations and (lr, seed) in migrations:
+-            args += ["--migration", migrations[(lr, seed)]]
+-        jobs.append({"gpu": str(gpu), "module": "rsna_diag.train", "log": f"{d}.log", "args": args})
+-    jp = f"{R}/train/jobs_{name}.json"
++        d = run_dir(lr, seed)
++        jobs.append({"gpu": str(gpu), "module": "rsna_diag.train", "log": f"{d}.log",
++                     "args": ["--run-dir", d, "--lr", lr, "--seed", str(seed), "--epochs", str(epochs), "--protocol", PROT, "--microbatch", "2"]})
++    tag = f"{name}_e{epochs}_{time.strftime('%Y%m%d_%H%M%S')}"
++    jp = f"{R}/train/jobs_{tag}.json"
++    os.makedirs(f"{R}/train", exist_ok=True)
+     json.dump(jobs, open(jp, "w"), indent=1)
+-    sh([sys.executable, "-m", "rsna_diag.launch", "--jobs", jp, "--log-dir", f"{R}/train/launch_{name}"])
++    status("train", name=name, epochs=epochs, jobs=jp)
++    sh([sys.executable, "-m", "rsna_diag.launch", "--jobs", jp, "--log-dir", f"{R}/train/launch_{tag}"])
++    for d in dirs:
++        if not trained_ok(d, epochs):
++            raise RuntimeError(f"{d}: epochs 1..{epochs} not verified after training")
+ 
+ 
+-def ensure_trained(name, runs, epochs, migrations=None):
+-    dirs = [f"{R}/train/lr{lr}_s{seed}" for _, lr, seed in runs]
+-    wait_unlocked(dirs)
+-    if all(has_epoch(d, epochs) for d in dirs):
+-        log(f"{name}: all runs already have epoch {epochs} validation")
+-        return
+-    train_jobs(f"{name}_e{epochs}", runs, epochs, migrations)
+-    if not all(has_epoch(d, epochs) for d in dirs):
+-        raise RuntimeError(f"{name}: epoch {epochs} validation missing after training")
++def select_file(mode, runs, epochs, out):
++    pl = SEL.payload(mode, runs, PROT, epochs)
++    st = SEL.write_or_verify(out, pl)
++    log(f"{mode} {out}: {st}")
++    return json.load(open(out))
+ 
+ 
+-def gen(out_dir, ids, prompts, adapter=None, parent=None):
+-    comp = f"{out_dir}/completion.json"
+-    if os.path.exists(comp):
+-        log(f"{out_dir}: completion exists")
++def items_for(ids_path, split, man=MAN, gtp=GTP):
++    it, _ = inputs.load_items(man, gtp, ids_path, split, exact=split is not None)
++    return it
++
++
++def gen(out_dir, ids, split, prompts, workers, adapter=None, parent=None, man=MAN, gtp=GTP):
++    """생성 완료 여부는 eval_gate.verify_gen(요청 집합·provenance·completion)로만 판단한다."""
++    items = items_for(ids, split, man, gtp)
++    pn = prompts.split(",")
++    par = (parent, OLD_PROT) if parent else (None, None)
++    try:
++        eval_gate.verify_gen(out_dir, items, pn, adapter, PROT, *par)
++        log(f"{out_dir}: verified complete")
+         return
+-    cmd = [sys.executable, "-m", "rsna_diag.run_shards", "--manifest", MAN, "--ids", ids, "--out-dir", out_dir, "--protocol", PROT,
+-           "--prompts", prompts, "--workers", str(WORKERS)]
++    except (eval_gate.GateError, FileNotFoundError) as e:
++        log(f"{out_dir}: not complete/verified ({str(e)[:160]}) -> run_shards")
++    wait_gpus_free()
++    status("generate", out_dir=out_dir, workers=workers)
++    cmd = [sys.executable, "-m", "rsna_diag.run_shards", "--manifest", man, "--ids", ids, "--out-dir", out_dir, "--protocol", PROT,
++           "--prompts", prompts, "--workers", str(workers)]
+     if adapter:
+         cmd += ["--adapter", adapter]
+     if parent:
+         cmd += ["--parent-dir", parent, "--parent-protocol", OLD_PROT]
+     sh(cmd)
+-    if not os.path.exists(comp):
+-        raise RuntimeError(f"{out_dir}: no completion.json after run_shards")
++    eval_gate.verify_gen(out_dir, items, pn, adapter, PROT, *par)
++
++
++def peak_total(out_dir):
++    """run_shards resource_log에서 GPU별 전체 점유(nvidia-smi memory.used, 다른 프로세스 포함) 최대."""
++    mx = {}
++    for ln in open(os.path.join(out_dir, "resource_log.jsonl")):
++        for r in json.loads(ln)["gpus"]:
++            mx[r["index"]] = max(mx.get(r["index"], 0), r["mem_used_mib"])
++    return mx
++
++
++def gen_check(adapter17):
++    """생성 경로 점검 (development thr24). worker 수 결정은 메모리·오류·완료 기준만 사용한다 (평가 점수 미사용)."""
++    dec_p = f"{R}/gen_check/decision.json"
++    if os.path.exists(dec_p):
++        dec = json.load(open(dec_p))
++        log(f"gen_check decision exists: workers={dec['workers']}")
++        return dec["workers"]
++    os.makedirs(f"{R}/gen_check", exist_ok=True)
++    thr_items = items_for(THR_IDS, None, THR_MAN, THR_GT)
++    rep = {}
++    for name, prompts, adapter in (("base_w4", "official_long,concise", None), ("sft17_w4", "concise", adapter17)):
++        d = f"{R}/gen_check/{name}"
++        gen(d, THR_IDS, None, prompts, 4, adapter, man=THR_MAN, gtp=THR_GT)
++        last = json.load(open(os.path.join(d, "last_run.json")))
++        recs = eval_gate.verify_gen(d, thr_items, prompts.split(","), adapter, PROT)
++        rt = [r["runtime_s_total"] for r in recs.values()]
++        rep[name] = {"n_requests": len(recs), "wall_s": last["wall_s"], "requests_per_min": len(recs) / last["wall_s"] * 60,
++                     "returncodes": last["returncodes"], "gpu_total_used_max_mib": peak_total(d),
++                     "worker_peak_alloc_gb_max": max(r["peak_mem_alloc_gb_max"] for r in recs.values()),
++                     "max_request_runtime_s": max(rt), "max_output_tokens": max(r["n_output_tokens"] for r in recs.values()),
++                     "n_cap_extended": sum(len(r["attempts"]) > 1 for r in recs.values())}
++    ref = {}
++    for f in glob.glob(os.path.join(THR_REF, "gen_worker*.jsonl")):
++        for ln in open(f):
++            if ln.strip():
++                r = json.loads(ln)
++                ref[(r["id"], r["prompt_name"])] = r["suffix_ids"]
++    cur = eval_gate.verify_gen(f"{R}/gen_check/base_w4", thr_items, ["official_long", "concise"], None, PROT)
++    same = sum(1 for k, r in cur.items() if ref.get(k) == r["suffix_ids"])
++    rep["base_w4_vs_iter010_thr_w4"] = {"n_compared": sum(1 for k in cur if k in ref), "n_identical_output_tokens": same}
++    mem_ok = all(v <= MEM_LIMIT_MIB for n in ("base_w4", "sft17_w4") for v in rep[n]["gpu_total_used_max_mib"].values())
++    workers = 4 if mem_ok else 2
++    dec = {"workers": workers, "mem_limit_mib": MEM_LIMIT_MIB, "mem_ok_for_4_workers": mem_ok, "report": rep,
++           "rule": "4 workers (2 per GPU) iff every GPU's max total used <= 24576-2*2048 MiB and all requests completed without worker failure; "
++                   "2-worker throughput reused from iter_010 (1.39 req/min on the same thr24 set)",
++           "iter010_reference_req_per_min": {"w2": 1.39, "w4": 2.73}}
++    tmp = dec_p + ".tmp"
++    json.dump(dec, open(tmp, "w"), indent=1)
++    os.replace(tmp, dec_p)
++    log(f"gen_check: workers={workers} {json.dumps(rep)[:600]}")
++    return workers
++
++
++def copy_parent(src_glob, dst):
++    """iter_010 base_val 부모 record의 읽기 전용 사본. 이미 있으면 원본과 sha가 같은지만 확인한다."""
++    os.makedirs(dst, exist_ok=True)
++    for f in sorted(glob.glob(src_glob)):
++        t = os.path.join(dst, os.path.basename(f))
++        h = hashlib.sha256(open(f, "rb").read()).hexdigest()
++        if os.path.exists(t):
++            if hashlib.sha256(open(t, "rb").read()).hexdigest() != h:
++                raise RuntimeError(f"parent copy {t} differs from source {f}")
++        else:
++            shutil.copy2(f, t)
++            os.chmod(t, 0o444)
++            log(f"copied parent record file {f} -> {t}")
+ 
+ 
+ def main():
+     os.makedirs(R, exist_ok=True)
+-    mig = {("1e-4", 17): f"{R}/recovery/migration_lr1e-4_s17.json", ("2e-4", 17): f"{R}/recovery/migration_lr2e-4_s17.json"}
++    lk, own, _ = queue_lock.try_lock(os.path.join(os.path.realpath(R), "pipeline.lock"), queue_lock.my_info(role="pipeline"))
++    if lk is None:
++        sys.exit(f"another pipeline owns {R}: {own}")
++    try:
++        run()
++    finally:
++        lk.release()
++
++
++def run():
++    os.makedirs(f"{R}/select", exist_ok=True)
++    os.makedirs(f"{R}/final", exist_ok=True)
+     seed17 = [(0, "1e-4", 17), (1, "2e-4", 17)]
+-    d17 = [f"{R}/train/lr{lr}_s17" for _, lr, _ in seed17]
+-    # 1. seed17, 5 epochs
+-    ensure_trained("seed17", seed17, 5, mig)
+-    # 2. extend?
++    d17 = [run_dir(lr, s) for _, lr, s in seed17]
++    # 1-2. seed17 5 epochs, 연장 판정
++    ensure_trained("seed17", seed17, 5)
+     ext_p = f"{R}/select/extend.json"
+-    os.makedirs(f"{R}/select", exist_ok=True)
+-    if not os.path.exists(ext_p):
+-        sh([sys.executable, "-m", "rsna_diag.select", "extend", "--runs", *d17, "--epochs", "5", "--protocol", PROT, "--out", ext_p])
+-    extend = json.load(open(ext_p))["extend"]
++    extend = select_file("extend", d17, 5, ext_p)["extend"]
+     E = 8 if extend else 5
+     log(f"extend={extend} -> total epochs E={E}")
+     if extend:
+-        ensure_trained("seed17", seed17, 8, mig)
+-    # 3. LR pick (seed 17)
++        ensure_trained("seed17", seed17, 8)
++    # 3. LR pick
+     pick17 = f"{R}/select/pick_seed17.json"
+-    if not os.path.exists(pick17):
+-        sh([sys.executable, "-m", "rsna_diag.select", "pick", "--runs", *d17, "--epochs", str(E), "--protocol", PROT, "--out", pick17])
+-    sel17 = json.load(open(pick17))
++    sel17 = select_file("pick", d17, E, pick17)
+     lr = sel17["runs"][sel17["selected_run"]]["lr"]
+     lr_s = {1e-4: "1e-4", 2e-4: "2e-4"}[lr]
+     log(f"selected lr {lr_s} (seed 17 run {sel17['selected_run']}, epoch {sel17['runs'][sel17['selected_run']]['best_epoch']})")
+@@ -138,40 +274,35 @@ def main():
+     ensure_trained("seeds29_43", others, E)
+     sel = {17: pick17}
+     for _, _, s in others:
+-        d = f"{R}/train/lr{lr_s}_s{s}"
+         p = f"{R}/select/pick_seed{s}.json"
+-        if not os.path.exists(p):
+-            sh([sys.executable, "-m", "rsna_diag.select", "pick", "--runs", d, "--epochs", str(E), "--protocol", PROT, "--out", p])
++        select_file("pick", [run_dir(lr_s, s)], E, p)
+         sel[s] = p
+-    # seed17: 선택 LR run의 checkpoint만 확인 대상 (pick17의 selected_run이 이미 그 run)
+-    # 5. base validation + comparator
+-    par = f"{R}/base_val/parent"
+-    if not os.path.exists(par):
+-        os.makedirs(par)
+-        for f in sorted(glob.glob("results/iter_010/base_val/gen_worker*.jsonl")):
+-            dst = os.path.join(par, os.path.basename(f))
+-            shutil.copy2(f, dst)
+-            os.chmod(dst, 0o444)
+-        log("copied iter_010 base_val parent records (read-only copies)")
+-    gen(f"{R}/base_val", IDS.format("validation"), "official_long,concise", parent=par)
++    # 5. 생성 경로 점검 -> worker 수
++    workers = gen_check(sel17["runs"][sel17["selected_run"]]["adapter_dir"])
++    # 6. base validation + comparator
++    par = f"{R}/base_val_parent"
++    copy_parent("results/iter_010/base_val/gen_worker*.jsonl", par)
++    gen(f"{R}/base_val", IDS.format("validation"), "validation", "official_long,concise", workers, parent=par)
+     comp_p = f"{R}/final/comparator.json"
+-    os.makedirs(f"{R}/final", exist_ok=True)
+-    if not os.path.exists(comp_p):
+-        sh([sys.executable, "-m", "rsna_diag.final_eval", "comparator", "--val-base", f"{R}/base_val", "--protocol", PROT,
+-            "--parent-dir", par, "--parent-protocol", OLD_PROT, "--out", comp_p])
+-    # 6. confirm generations
+-    gen(f"{R}/confirm_base", IDS.format("confirm"), "official_long,concise")
++    pl = final_eval.comparator_payload(f"{R}/base_val", PROT, par, OLD_PROT)
++    log(f"comparator {SEL.write_or_verify(comp_p, pl)}: {pl['comparator']}")
++    # 7. confirm generations (선택·comparator 고정 뒤)
++    status("confirm_generation")
++    gen(f"{R}/confirm_base", IDS.format("confirm"), "confirm", "official_long,concise", workers)
+     sft_args = []
+     for s in (17, 29, 43):
+         j = json.load(open(sel[s]))
+         adapter = j["runs"][j["selected_run"]]["adapter_dir"]
+-        gen(f"{R}/confirm_sft_seed{s}", IDS.format("confirm"), "concise", adapter=adapter)
++        gen(f"{R}/confirm_sft_seed{s}", IDS.format("confirm"), "confirm", "concise", workers, adapter=adapter)
+         sft_args.append(f"{s}:{sel[s]}:{R}/confirm_sft_seed{s}")
+-    # 7. final
++    # 8. final
+     out = f"{R}/final/confirm_result.json"
+-    if not os.path.exists(out):
+-        sh([sys.executable, "-m", "rsna_diag.final_eval", "confirm", "--comparator", comp_p, "--conf-base", f"{R}/confirm_base",
+-            "--protocol", PROT, "--sft", *sft_args, "--out", out])
++    if os.path.exists(out):
++        log(f"{out} exists (not overwritten)")
++    else:
++        sh([sys.executable, "-m", "rsna_diag.final_eval", "confirm", "--comparator", comp_p, "--extend", ext_p, "--conf-base",
++            f"{R}/confirm_base", "--protocol", PROT, "--sft", *sft_args, "--out", out])
++    status("complete")
+     log("PIPELINE COMPLETE")
+ 
+ 
+diff --git a/rsna_diag/run_shards.py b/rsna_diag/run_shards.py
+index 2efa10f..d446e19 100644
+--- a/rsna_diag/run_shards.py
++++ b/rsna_diag/run_shards.py
+@@ -4,6 +4,8 @@
+ - 각 worker는 `python -m rsna_diag.generate`(원자적 claim 큐, worker별 출력 gen_worker{k}.jsonl). 기존 claim은 지우지 않는다
+   (죽은 소유자의 claim만 worker가 스스로 회수). 같은 out-dir에 대한 동시 orchestrator는 run.lock으로 거부한다.
+ - 종료 후 예상 요청 집합 == 실제 집합(중복·누락·잉여 0)일 때만 completion.json을 쓴다.
++- iter_012: 시도(attempt)별 상태 파일(attempts/)을 분리한다. 새 시도 시작 시 기존 completion.json은 attempts/로 이름을 바꿔 보존하므로
++  실패한 시도가 예전 completion을 현재 성공 근거로 남기지 않는다. completion/last_run은 원자적으로 쓴다. 중단 시 worker 상태를 running으로 기록.
+ - 자원 로그: GPU별 memory.used/util과 프로세스별 사용량을 resource_log.jsonl에 주기적으로 append한다.
+ 사용: python -m rsna_diag.run_shards --manifest M --ids IDS --out-dir D --protocol P --prompts a,b --workers N [--adapter DIR]
+ """
+@@ -18,6 +20,15 @@ import time
+ from . import eval_gate, generate, lock_protocol, prompts as P, queue_lock
+ 
+ 
++def atomic_json(obj, path):
++    tmp = path + ".tmp"
++    with open(tmp, "w") as f:
++        json.dump(obj, f, indent=1, default=str)
++        f.flush()
++        os.fsync(f.fileno())
++    os.replace(tmp, path)
++
++
+ def gpu_snapshot(idx_list):
+     q = lambda cmd: subprocess.run(cmd, capture_output=True, text=True).stdout
+     out = q(["nvidia-smi", "--query-gpu=index,uuid,memory.used,memory.total,utilization.gpu", "--format=csv,noheader,nounits"])
+@@ -82,8 +93,21 @@ def main():
+     rlk, own, _ = queue_lock.try_lock(rl_path, info)
+     if rlk is None:
+         sys.exit(f"another run_shards owns {a.out_dir}: {own}")
++    procs = []
++    attempt_id = f"{time.strftime('%Y%m%d_%H%M%S')}_{os.getpid()}"
++    att_dir = os.path.join(a.out_dir, "attempts")
++    os.makedirs(att_dir, exist_ok=True)
++    att_path = os.path.join(att_dir, f"attempt_{attempt_id}.json")
++    att = {"attempt_id": attempt_id, "status": "running", "pid": os.getpid(), "host": os.uname().nodename, "t_start": time.time(),
++           "workers": a.workers}
+     try:
+-        procs = []
++        # iter_012: 새 시도가 시작되면 이전 completion은 현재 성공 근거가 아니다. 삭제하지 않고 이름을 바꿔 보존한다.
++        cp = os.path.join(a.out_dir, "completion.json")
++        if os.path.exists(cp):
++            sup = os.path.join(att_dir, f"completion_superseded_by_{attempt_id}.json")
++            os.replace(cp, sup)
++            att["superseded_completion"] = sup
++        atomic_json(att, att_path)
+         for k in range(a.workers):
+             env = dict(os.environ, CUDA_VISIBLE_DEVICES=str(gpus[k % len(gpus)]))
+             cmd = [sys.executable, "-m", "rsna_diag.generate", "--manifest", a.manifest, "--prompts", a.prompts,
+@@ -124,13 +148,23 @@ def main():
+                 complete = False
+                 rep["gate_error"] = str(e)[:500]
+         rep.update({"returncodes": codes, "wall_s": time.time() - t0, "allowed_gpus": allowed, "gpus_used": gpus,
+-                    "n_workers": a.workers, "worker_gpu": [gpus[k % len(gpus)] for k in range(a.workers)]})
+-        json.dump(rep, open(f"{a.out_dir}/last_run.json", "w"), indent=1)
+-        if complete and all(c == 0 for c in codes):
+-            json.dump(rep, open(f"{a.out_dir}/completion.json", "w"), indent=1)
++                    "n_workers": a.workers, "worker_gpu": [gpus[k % len(gpus)] for k in range(a.workers)], "attempt_id": attempt_id})
++        atomic_json(rep, f"{a.out_dir}/last_run.json")
++        ok = complete and all(c == 0 for c in codes)
++        att.update({"status": "complete" if ok else "failed_or_incomplete", "returncodes": codes, "t_end": time.time(), "report": rep})
++        atomic_json(att, att_path)
++        if ok:
++            atomic_json(rep, f"{a.out_dir}/completion.json")
+         print("returncodes", codes, "wall_s", round(rep["wall_s"]), "complete", complete, {k: rep[k] for k in ("n_expected", "n_actual_unique", "n_missing")})
+-        sys.exit(0 if complete and all(c == 0 for c in codes) else 2)
++        sys.exit(0 if ok else 2)
+     finally:
++        if att["status"] == "running":  # 예외·중단: 살아 있는 worker는 running으로 남긴다 (null을 성공으로 바꾸지 않는다)
++            att.update({"status": "interrupted", "t_end": time.time(),
++                        "children": [{"pid": p.pid, "returncode": p.poll(), "state": "exited" if p.poll() is not None else "running"} for p in procs]})
++            try:
++                atomic_json(att, att_path)
++            except OSError:
++                pass
+         rlk.release()
+ 
+ 
+diff --git a/rsna_diag/select.py b/rsna_diag/select.py
+index 96e9b08..6b674f1 100644
+--- a/rsna_diag/select.py
++++ b/rsna_diag/select.py
+@@ -9,16 +9,48 @@
+ 사용: python -m rsna_diag.select extend|pick --runs DIR [DIR ...] --epochs E --protocol P --out FILE
+ """
+ import argparse
++import glob
++import hashlib
+ import json
+ import os
+ 
+-from . import eval_gate, inputs
++from . import eval_gate, inputs, lock_protocol, sft_eval
+ 
+ MANIFEST = "results/iter_010/manifests/infer_manifest.jsonl"
+ GT = "results/iter_010/manifests/gt_manifest.json"
+ VAL_IDS = "results/iter_010/manifests/validation_ids.json"
+ 
+ 
++def verify_epoch(run_dir, e, tc, v_in, protocol, val_items, gt):
++    """한 epoch의 val_metrics가 이 run·입력·adapter·원시 validation 요청 집합·protocol과 연결되는지 검증하고,
++    생성 기반 점수(utility·F1 등 summarize 결과 전체)를 원시 응답에서 다시 계산해 기록값과 같은지 확인한다. returns metrics."""
++    ed = os.path.join(run_dir, f"epoch_{e:02d}")
++    vm = os.path.join(ed, "val_metrics.json")
++    if not os.path.exists(vm):
++        raise eval_gate.GateError(f"{run_dir}: epoch {e} val_metrics missing")
++    m = json.load(open(vm))
++    if m.get("epoch") != e or m.get("train_digest") != tc["train_digest"] or m.get("val_inputs_digest") != v_in:
++        raise eval_gate.GateError(f"{run_dir}: epoch {e} metrics not linked to this run/inputs")
++    if m.get("seed") != tc["config"]["seed"] or m.get("lr") != tc["config"]["lr"]:
++        raise eval_gate.GateError(f"{run_dir}: epoch {e} seed/lr mismatch")
++    if m.get("protocol_digest") != lock_protocol.verify(protocol):
++        raise eval_gate.GateError(f"{run_dir}: epoch {e} metrics protocol digest differs from current protocol")
++    adg = eval_gate.adapter_digest(ed)
++    if m["adapter_digest"] != adg:
++        raise eval_gate.GateError(f"{run_dir}: epoch {e} adapter digest differs from metrics")
++    done = eval_gate.verify_gen(os.path.join(ed, "val_gen"), val_items, ["concise"], ed, protocol)
++    c = json.load(open(os.path.join(ed, "val_gen", "completion.json")))
++    if c.get("val_inputs_digest") != v_in:
++        raise eval_gate.GateError(f"{run_dir}: epoch {e} completion input digest differs")
++    ids = [i["id"] for i in val_items]
++    edges = sft_eval.area_edges(gt, [i for i in gt if gt[i]["split"] == "train"])
++    rec = json.loads(json.dumps(sft_eval.summarize(sft_eval.parse_records(done, ids, "concise", strict=True), gt, ids, edges)))
++    bad = [k for k in rec if m.get(k) != rec[k]]
++    if bad:
++        raise eval_gate.GateError(f"{run_dir}: epoch {e} recorded scores differ from recomputation from raw responses: {bad[:5]}")
++    return m
++
++
+ def load_epochs(run_dir, expected_epochs, protocol, val_items=None, gt=None):
+     """epoch 1..expected_epochs 전체를 검증해 {epoch: metrics}를 반환한다. 누락·불일치는 GateError."""
+     if not expected_epochs or expected_epochs < 1:
+@@ -29,28 +61,32 @@ def load_epochs(run_dir, expected_epochs, protocol, val_items=None, gt=None):
+     v_in = inputs.inputs_digest(val_items, gt)
+     if tc["config"].get("val_inputs_digest") != v_in:
+         raise eval_gate.GateError(f"{run_dir}: run was not trained/validated on the current validation inputs")
++    if tc["config"].get("deterministic"):
++        raise eval_gate.GateError(f"{run_dir}: deterministic check run cannot be used for selection")
+     out = {}
+     for e in range(1, expected_epochs + 1):
+-        ed = os.path.join(run_dir, f"epoch_{e:02d}")
+-        vm = os.path.join(ed, "val_metrics.json")
+-        if not os.path.exists(vm):
++        if not os.path.exists(os.path.join(run_dir, f"epoch_{e:02d}", "val_metrics.json")):
+             raise eval_gate.GateError(f"{run_dir}: epoch {e} val_metrics missing (planned epochs 1..{expected_epochs})")
+-        m = json.load(open(vm))
+-        if m.get("epoch") != e or m.get("train_digest") != tc["train_digest"] or m.get("val_inputs_digest") != v_in:
+-            raise eval_gate.GateError(f"{run_dir}: epoch {e} metrics not linked to this run/inputs")
+-        if m.get("seed") != tc["config"]["seed"] or m.get("lr") != tc["config"]["lr"]:
+-            raise eval_gate.GateError(f"{run_dir}: epoch {e} seed/lr mismatch")
+-        adg = eval_gate.adapter_digest(ed)
+-        if m["adapter_digest"] != adg:
+-            raise eval_gate.GateError(f"{run_dir}: epoch {e} adapter digest differs from metrics")
+-        eval_gate.verify_gen(os.path.join(ed, "val_gen"), val_items, ["concise"], ed, protocol)
+-        c = json.load(open(os.path.join(ed, "val_gen", "completion.json")))
+-        if c.get("val_inputs_digest") != v_in:
+-            raise eval_gate.GateError(f"{run_dir}: epoch {e} completion input digest differs")
+-        out[e] = m
++        out[e] = verify_epoch(run_dir, e, tc, v_in, protocol, val_items, gt)
+     return out
+ 
+ 
++def file_sha(path):
++    return hashlib.sha256(open(path, "rb").read()).hexdigest()
++
++
++def evidence(run_dir, expected_epochs):
++    """선택 근거 파일의 내용 hash (val_metrics·completion·원시 요청 파일·adapter). load_epochs 통과 뒤에만 부른다."""
++    ev = {"train_config_sha256": file_sha(os.path.join(run_dir, "train_config.json")), "epochs": {}}
++    for e in range(1, expected_epochs + 1):
++        ed = os.path.join(run_dir, f"epoch_{e:02d}")
++        ev["epochs"][str(e)] = {"val_metrics_sha256": file_sha(os.path.join(ed, "val_metrics.json")),
++                                "completion_sha256": file_sha(os.path.join(ed, "val_gen", "completion.json")),
++                                "gen_files_sha256": {os.path.basename(f): file_sha(f) for f in sorted(glob.glob(os.path.join(ed, "val_gen", "gen_worker*.jsonl")))},
++                                "adapter_file_sha256": file_sha(os.path.join(ed, "adapter.pt"))}
++    return ev
++
++
+ def should_extend(run_dirs, protocol, expected=5):
+     rep, ext = {}, False
+     vi, gt = inputs.load_items(MANIFEST, GT, VAL_IDS, "validation")
+@@ -84,6 +120,54 @@ def pick(run_dirs, protocol, expected):
+     return res, best
+ 
+ 
++RULES = {"extend": "iter010 fixed: any LR with utility(5)-utility(4)>=0.01 and val_loss(5)<=0.99*val_loss(4) -> both LRs to 8 epochs",
++         "pick": "iter010 fixed: epoch max utility, tie F1@0.5, then earlier epoch; run max utility, tie F1@0.5, then smaller lr"}
++
++
++def payload(mode, runs, protocol, epochs):
++    """선택 결정 + provenance (protocol 내용 digest, 규칙, 예정 epoch, seed/lr, 입력 digest, 근거 파일 hash). 항상 원시 근거에서 재계산한다."""
++    if len(set(runs)) != len(runs):
++        raise eval_gate.GateError("duplicate --runs")
++    if mode == "extend" and epochs != 5:
++        raise eval_gate.GateError("extend decision is defined at epoch 5 only")
++    pdig = lock_protocol.verify(protocol)
++    vi, gt = inputs.load_items(MANIFEST, GT, VAL_IDS, "validation")
++    base = {"mode": mode, "rule": RULES[mode], "protocol_path": protocol, "protocol_digest": pdig, "planned_epochs": epochs,
++            "runs_in": list(runs), "val_inputs_digest": inputs.inputs_digest(vi, gt)}
++    if mode == "extend":
++        ext, rep = should_extend(runs, protocol, 5)
++        base.update({"extend": ext, "detail": rep})
++    else:
++        res, best = pick(runs, protocol, epochs)
++        base.update({"runs": res, "selected_run": best})
++    base["evidence"] = {d: evidence(d, epochs) for d in runs}
++    return base
++
++
++def write_or_verify(path, pl):
++    """없으면 원자적으로 쓰고, 있으면 재계산 결과와 완전히 같아야 한다 (오래되거나 바뀐 선택 파일은 조용히 믿지 않는다)."""
++    if os.path.exists(path):
++        old = json.load(open(path))
++        if old != json.loads(json.dumps(pl)):
++            raise eval_gate.GateError(f"{path}: existing selection differs from recomputation from current evidence")
++        return "verified_existing"
++    tmp = path + ".tmp"
++    json.dump(pl, open(tmp, "w"), indent=1)
++    os.replace(tmp, path)
++    return "written"
++
++
++def verify_file(path, mode, protocol):
++    """선택 파일을 그 파일에 적힌 runs·예정 epoch로 다시 계산해 동일한지 검증한다 (final_eval이 사용). returns 파일 내용."""
++    old = json.load(open(path))
++    if old.get("mode") != mode:
++        raise eval_gate.GateError(f"{path}: not a {mode} selection")
++    pl = payload(mode, old["runs_in"], protocol, old["planned_epochs"])
++    if old != json.loads(json.dumps(pl)):
++        raise eval_gate.GateError(f"{path}: selection no longer matches recomputation from current evidence")
++    return old
++
++
+ def main():
+     ap = argparse.ArgumentParser()
+     ap.add_argument("mode", choices=["extend", "pick"])
+@@ -92,18 +176,9 @@ def main():
+     ap.add_argument("--protocol", required=True)
+     ap.add_argument("--out", required=True)
+     a = ap.parse_args()
+-    if len(set(a.runs)) != len(a.runs):
+-        raise SystemExit("duplicate --runs")
+-    if os.path.exists(a.out):
+-        raise SystemExit(f"{a.out} exists (not overwritten)")
+-    if a.mode == "extend":
+-        ext, rep = should_extend(a.runs, a.protocol, 5)
+-        json.dump({"extend": ext, "detail": rep, "protocol": a.protocol}, open(a.out, "w"), indent=1)
+-        print("extend", ext)
+-    else:
+-        res, best = pick(a.runs, a.protocol, a.epochs)
+-        json.dump({"runs": res, "selected_run": best, "protocol": a.protocol}, open(a.out, "w"), indent=1)
+-        print("selected", best, res[best]["best_epoch"])
++    pl = payload(a.mode, a.runs, a.protocol, a.epochs)
++    st = write_or_verify(a.out, pl)
++    print(a.mode, st, pl.get("extend", pl.get("selected_run")))
+ 
+ 
+ if __name__ == "__main__":
+diff --git a/rsna_diag/sft_data.py b/rsna_diag/sft_data.py
+index 4668db5..5229bad 100644
+--- a/rsna_diag/sft_data.py
++++ b/rsna_diag/sft_data.py
+@@ -76,4 +76,6 @@ def collate(examples, pad_id):
+     out = {"input_ids": ids, "attention_mask": att, "labels": lab, "pixel_values": torch.cat([e["pixel_values"] for e in examples], 0)}
+     if has_tt:
+         out["token_type_ids"] = tt
++    if "sample_pos" in examples[0]:  # iter_012: 학습 loop가 실제 batch ID를 대조한다 (모델 입력에는 넣지 않음)
++        out["sample_pos"] = torch.tensor([e["sample_pos"] for e in examples], dtype=torch.long)
+     return out
+diff --git a/rsna_diag/train.py b/rsna_diag/train.py
+index 6f4c456..23f98be 100644
+--- a/rsna_diag/train.py
++++ b/rsna_diag/train.py
+@@ -7,9 +7,15 @@
+ - iter_011 수정: (1) run-dir 단일 writer lock (train.lock), (2) 시작 시 epoch adapter는 있으나 val_metrics가 없는 epoch의 validation을 복구
+   (마지막 epoch 포함, 학습 상태·RNG 불변), (3) split ID 파일 내용·현재 file/pixel hash·GT를 입력 digest로 train_digest에 연결,
+   (4) 검증된 부모 checkpoint를 migration manifest로만 가져온다.
++- iter_012 수정: (1) step마다 실제 batch ID(DataLoader가 낸 sample 위치로 역산)·token/mask digest·step 전 RNG digest·optimizer step·train mode를
++  train_log에 기록하고 계획된 batch와 다르면 중단, (2) checkpoint에 adapter/optimizer/RNG digest를 저장하고 복원 직후 live 상태와 대조,
++  (3) DataLoader는 epoch별 전용 generator를 써서 iterator 생성이 전역 CPU RNG를 소비하지 않게 함 (재개 시 RNG 상태 정확 일치),
++  (4) validation 전후 adapter/optimizer/RNG 불변 검사, (5) 기존 val_metrics는 존재만으로 믿지 않고 select.verify_epoch로 검증,
++  (6) pilot 전용 --deterministic(결정적 kernel, math SDPA)과 --stop-after-step(중간 optimizer step 직후 checkpoint 뒤 종료) 검사 hook.
+ 사용: CUDA_VISIBLE_DEVICES=<gpu> python -m rsna_diag.train --run-dir D --lr 2e-4 --seed 17 --epochs 5 --protocol P [--migration M]
+ """
+ import argparse
++import hashlib
+ import json
+ import math
+ import os
+@@ -19,7 +25,7 @@ import time
+ 
+ import numpy as np
+ 
+-from . import generate, inputs, lock_protocol, lora, migrate, prompts as P, queue_lock, sft_data, sft_eval
++from . import generate, inputs, lock_protocol, lora, migrate, prompts as P, queue_lock, select, sft_data, sft_eval
+ 
+ MANIFEST = "results/iter_010/manifests/infer_manifest.jsonl"
+ GT = "results/iter_010/manifests/gt_manifest.json"
+@@ -88,7 +94,9 @@ class SFTDataset:
+         it = self.items[self.order[k]]
+         image, _, _ = inputs.load_verified(it)  # 현재 pixel hash가 manifest와 다르면 예외
+         tgt = sft_data.target_text([b["yxyx_norm"] for b in self.gt[it["id"]]["boxes"]])
+-        return sft_data.build_example(self.proc, image, self.prompt, tgt)
++        ex = sft_data.build_example(self.proc, image, self.prompt, tgt)
++        ex["sample_pos"] = int(k)  # 실제로 읽힌 epoch 순서 위치 (batch ID 역산·대조용)
++        return ex
+ 
+ 
+ def setup_model(seed):
+@@ -115,6 +123,61 @@ def set_rng_state(torch, st):
+     random.setstate(st["py"])
+ 
+ 
++def _h(b):
++    return hashlib.sha256(b).hexdigest()[:24]
++
++
++def rng_digest(torch):
++    """전역 RNG 네 종류의 상태 digest (Python/NumPy/torch CPU/CUDA 현재 장치)."""
++    npst = np.random.get_state()
++    return {"torch_cpu": _h(torch.get_rng_state().numpy().tobytes()), "cuda": _h(torch.cuda.get_rng_state().numpy().tobytes()),
++            "numpy": _h(npst[1].tobytes() + repr((npst[0],) + tuple(npst[2:])).encode()), "python": _h(repr(random.getstate()).encode())}
++
++
++def opt_digest(torch, opt):
++    """AdamW 상태(step, moment)와 param_group hyperparameter의 digest."""
++    sd = opt.state_dict()
++    h = hashlib.sha256()
++    for pid in sorted(sd["state"]):
++        for k in sorted(sd["state"][pid]):
++            v = sd["state"][pid][k]
++            h.update(f"{pid}.{k}".encode())
++            h.update(v.detach().to("cpu", torch.float32).contiguous().numpy().tobytes() if torch.is_tensor(v) else repr(v).encode())
++    h.update(json.dumps([{k: v for k, v in g.items() if k != "params"} for g in sd["param_groups"]], sort_keys=True, default=str).encode())
++    return h.hexdigest()[:24]
++
++
++def opt_step_count(opt):
++    st = [s.get("step") for s in opt.state.values() if "step" in s]
++    return int(float(st[0])) if st else 0
++
++
++def batch_token_digest(b):
++    h = hashlib.sha256()
++    for k in ("input_ids", "attention_mask", "labels", "token_type_ids"):
++        if k in b:
++            h.update(k.encode())
++            h.update(str(tuple(b[k].shape)).encode())
++            h.update(b[k].contiguous().numpy().tobytes())
++    return h
++
++
++def live_digests(torch, model, opt):
++    return {"adapter": lora.state_digest(lora.lora_state_dict(model)), "optimizer": opt_digest(torch, opt), "rng": rng_digest(torch)}
++
++
++def set_deterministic(torch):
++    """pilot 검사 전용: 결정적 kernel만 사용 (비결정 op는 예외), SDPA는 math backend만."""
++    torch.use_deterministic_algorithms(True)
++    torch.backends.cudnn.benchmark = False
++    torch.backends.cudnn.deterministic = True
++    torch.backends.cuda.enable_flash_sdp(False)
++    torch.backends.cuda.enable_mem_efficient_sdp(False)
++    if hasattr(torch.backends.cuda, "enable_cudnn_sdp"):
++        torch.backends.cuda.enable_cudnn_sdp(False)
++    torch.backends.cuda.enable_math_sdp(True)
++
++
+ def save_adapter(torch, model, path, extra):
+     st = lora.lora_state_dict(model)
+     dg = lora.state_digest(st)
+@@ -226,13 +289,17 @@ def main():
+     ap.add_argument("--migration", default=None, help="검증된 부모 checkpoint를 새 run으로 가져오는 migration manifest")
+     ap.add_argument("--stop-after-epoch-ckpt", type=int, default=None, help="test: 이 epoch의 adapter/ckpt 저장 직후(validation 전) 종료")
+     ap.add_argument("--stop-in-validation", type=int, default=None, help="test: validation 요청을 이 개수 새로 기록한 뒤 종료")
++    ap.add_argument("--stop-after-step", type=int, default=None, help="test: 이 optimizer step의 정기 checkpoint 저장 직후 종료 (epoch 중간)")
++    ap.add_argument("--deterministic", action="store_true", help="검사 전용: 결정적 kernel (본실험 금지)")
+     a = ap.parse_args()
+     CFG["eff_batch"] = a.eff_batch
+     if not a.no_val and a.eff_batch != 16 and not a.pilot:
+         sys.exit("eff-batch override is pilot-only")
+     if not a.pilot and (a.no_val or a.train_ids != SPLIT_IDS.format("train") or a.val_ids != SPLIT_IDS.format("validation")
+-                        or a.stop_after_epoch_ckpt or a.stop_in_validation):
+-        sys.exit("non-default ids / --no-val / stop hooks require --pilot")
++                        or a.stop_after_epoch_ckpt or a.stop_in_validation or a.stop_after_step or a.deterministic):
++        sys.exit("non-default ids / --no-val / stop hooks / --deterministic require --pilot")
++    if a.deterministic:  # cuBLAS 결정적 workspace는 CUDA context 생성 전에 정해야 한다
++        os.environ["CUBLAS_WORKSPACE_CONFIG"] = ":4096:8"
+     if not a.no_val and not a.pilot and a.epochs > PHASE1_EPOCHS and a.epochs != 8:
+         sys.exit("extension is defined only up to 8 epochs")
+     pdig = lock_protocol.verify(a.protocol)
+@@ -258,6 +325,8 @@ def run(a, pdig, reclaimed_lock):
+     t_in = inputs.inputs_digest(train_items, gt)
+     v_in = inputs.inputs_digest(val_items, gt) if val_items else None
+     edges = sft_eval.area_edges(gt, [i for i in gt if gt[i]["split"] == "train"])
++    if a.deterministic:
++        set_deterministic(torch)
+     seed_all(torch, a.seed)
+     _, proc, model, names = setup_model(a.seed)
+     tok = proc.tokenizer
+@@ -273,7 +342,8 @@ def run(a, pdig, reclaimed_lock):
+         sys.exit("runtime generation config digest != protocol")
+     cfg = dict(CFG, lr=a.lr, seed=a.seed, microbatch=a.microbatch, n_train=len(train_items), n_val=len(val_items),
+                model_revision=generate.MODEL_REVISION, protocol_digest=pdig, n_lora_targets=len(names), n_trainable=n_train_params,
+-               train_inputs_digest=t_in, val_inputs_digest=v_in)
++               train_inputs_digest=t_in, val_inputs_digest=v_in, deterministic=bool(a.deterministic),
++               dataloader_rng="torch.Generator seeded seed*1000+epoch (iter_012)")
+     tdig = train_digest(cfg)
+     cfg_path = os.path.join(a.run_dir, "train_config.json")
+     if os.path.exists(cfg_path):
+@@ -291,9 +361,12 @@ def run(a, pdig, reclaimed_lock):
+     logf = open(os.path.join(a.run_dir, "train_log.jsonl"), "a")
+ 
+     def save_ckpt(epoch, pos, val_pending=None, parent=None):
++        dg = live_digests(torch, model, opt)
+         atomic_save(torch, {"lora": lora.lora_state_dict(model), "optimizer": opt.state_dict(), "step": step, "epoch": epoch,
+                             "pos_in_epoch": pos, "rng": rng_state(torch), "train_digest": tdig, "val_pending_epoch": val_pending,
+-                            "base_revision": generate.MODEL_REVISION, "protocol_digest": pdig, "parent": parent}, ck)
++                            "base_revision": generate.MODEL_REVISION, "protocol_digest": pdig, "parent": parent, "digests": dg}, ck)
++        log_event(event="checkpoint", step=step, epoch=epoch, pos=pos, digests=dg)
++        return dg
+ 
+     def log_event(**kw):
+         logf.write(json.dumps({"ts": time.time(), **kw}) + "\n")
+@@ -303,12 +376,18 @@ def run(a, pdig, reclaimed_lock):
+         blob = torch.load(ck, map_location="cpu", weights_only=False)
+         if blob["train_digest"] != tdig or blob["base_revision"] != generate.MODEL_REVISION or blob["protocol_digest"] != pdig:
+             sys.exit("checkpoint provenance mismatch")
++        if "digests" not in blob:
++            sys.exit("checkpoint has no saved state digests (pre-iter_012 format); refusing to resume without restore verification")
+         lora.load_lora_state(model, blob["lora"])
+         opt.load_state_dict(blob["optimizer"])
+         step, epoch0, pos0 = blob["step"], blob["epoch"], blob["pos_in_epoch"]
+         set_rng_state(torch, blob["rng"])
++        restored = live_digests(torch, model, opt)
++        if restored != blob["digests"]:  # 복원 직후 live adapter·optimizer·RNG가 저장 상태와 정확히 같아야 한다
++            sys.exit(f"restored state != saved checkpoint state: saved {blob['digests']} restored {restored}")
+         print(f"resumed step={step} epoch={epoch0} pos={pos0}", flush=True)
+-        log_event(event="resume", step=step, epoch=epoch0, pos=pos0, stale_lock_reclaimed=bool(reclaimed_lock))
++        log_event(event="resume", step=step, epoch=epoch0, pos=pos0, stale_lock_reclaimed=bool(reclaimed_lock), restored_digests=restored,
++                  restored_equals_saved=True)
+     elif a.migration:
+         blob, mig = migrate.verify_parent(a.migration, cfg, pdig)
+         lora.load_lora_state(model, blob["lora"])
+@@ -329,9 +408,11 @@ def run(a, pdig, reclaimed_lock):
+         """epoch e adapter로 validation. from_file이면 현재 학습 상태를 보관했다가 epoch adapter를 넣고 끝난 뒤 복원한다 (optimizer 불변, RNG 복원)."""
+         epoch_dir = os.path.join(a.run_dir, f"epoch_{e:02d}")
+         vm = os.path.join(epoch_dir, "val_metrics.json")
+-        if os.path.exists(vm):
++        if os.path.exists(vm):  # 존재만으로 믿지 않는다: 원시 요청·adapter·protocol·입력 연결을 검증 (불일치는 예외)
++            verify_existing_val(e)
+             return
+         rng_before = rng_state(torch)
++        pre = live_digests(torch, model, opt)
+         snap = lora.lora_state_dict(model) if from_file else None
+         if from_file:
+             blob_a = torch.load(os.path.join(epoch_dir, "adapter.pt"), map_location="cpu", weights_only=True)
+@@ -349,9 +430,17 @@ def run(a, pdig, reclaimed_lock):
+         if from_file:
+             lora.load_lora_state(model, snap)
+         set_rng_state(torch, rng_before)
+-        log_event(event="validation_done", epoch=e, val_loss=vl, utility=summ["utility"], recovered_from_file=from_file)
++        post = live_digests(torch, model, opt)
++        if post != pre:  # validation 수행·복구가 다음 학습의 adapter·optimizer·RNG를 바꾸면 안 된다
++            raise RuntimeError(f"validation changed training state: before {pre} after {post}")
++        log_event(event="validation_done", epoch=e, val_loss=vl, utility=summ["utility"], recovered_from_file=from_file,
++                  state_unchanged=True, digests=post)
+         print(f"epoch {e}: val_loss {vl:.4f} utility {summ['utility']:.4f} f1@.3 {summ['f1@0.3']:.4f}", flush=True)
+ 
++    def verify_existing_val(e):
++        tc = json.load(open(cfg_path))
++        select.verify_epoch(a.run_dir, e, tc, v_in, a.protocol, val_items, gt)
++
+     if not a.no_val:  # adapter 저장 뒤 validation을 못 끝낸 epoch는 다음 epoch 학습 전에 복구한다 (마지막 epoch 포함)
+         for e in range(1, epoch0 + 1):
+             epoch_dir = os.path.join(a.run_dir, f"epoch_{e:02d}")
+@@ -360,15 +449,19 @@ def run(a, pdig, reclaimed_lock):
+             if not os.path.exists(os.path.join(epoch_dir, "val_metrics.json")):
+                 print(f"recovering pending validation for epoch {e}", flush=True)
+                 validate_epoch(e, from_file=True)
++            else:
++                verify_existing_val(e)
+     for epoch in range(epoch0, a.epochs):
+         rng = np.random.default_rng(a.seed * 1000 + epoch)
+         order = rng.permutation(n_tr)
+         start_pos = pos0 if epoch == epoch0 else 0
+         ds = SFTDataset(proc, train_items, gt, P.CONCISE, order)
+         idx = list(range(start_pos * CFG["eff_batch"], n_tr))
++        dl_gen = torch.Generator()
++        dl_gen.manual_seed(a.seed * 1000 + epoch)  # iterator 생성이 전역 torch CPU RNG를 소비하지 않게 한다 (dataset 자체는 무작위성 없음)
+         dl = torch.utils.data.DataLoader(torch.utils.data.Subset(ds, idx), batch_size=a.microbatch, shuffle=False, num_workers=a.workers,
+                                          collate_fn=lambda ex: sft_data.collate(ex, tok.pad_token_id), prefetch_factor=2 if a.workers else None,
+-                                         worker_init_fn=close_lock_fd)
++                                         worker_init_fn=close_lock_fd, generator=dl_gen)
+         model.train()
+         it = iter(dl)
+         for s in range(start_pos, spe):
+@@ -377,10 +470,16 @@ def run(a, pdig, reclaimed_lock):
+             lr = lr_at(step, spe, a.lr, total_epochs=8)
+             for g in opt.param_groups:
+                 g["lr"] = lr
++            rng_before, opt_step_before = rng_digest(torch), opt_step_count(opt)
++            if not model.training:
++                raise RuntimeError("model not in train mode at optimizer step")
+             loss_acc, ntok_seen = 0.0, 0
++            seen_pos, tok_h = [], hashlib.sha256()
+             n_micro = math.ceil(len(grp) / a.microbatch)
+             for _ in range(n_micro):
+                 b = next(it)
++                seen_pos += b.pop("sample_pos").tolist()
++                tok_h.update(batch_token_digest(b).digest())
+                 b = {k: v.cuda() for k, v in b.items()}
+                 if int((b["labels"] != -100).sum()) == 0:
+                     raise RuntimeError("batch without assistant tokens")
+@@ -390,6 +489,10 @@ def run(a, pdig, reclaimed_lock):
+                 ntok_seen += nt
+             if ntok_seen != tot_tok:
+                 raise RuntimeError(f"label token count mismatch {ntok_seen} != {tot_tok}")
++            planned_ids = [train_items[j]["id"] for j in grp]
++            actual_ids = [train_items[order[p]]["id"] for p in seen_pos]
++            if actual_ids != planned_ids or seen_pos != list(range(s * CFG["eff_batch"], s * CFG["eff_batch"] + len(grp))):
++                raise RuntimeError(f"step {step + 1}: DataLoader batch != planned batch")
+             gn = float(torch.nn.utils.clip_grad_norm_(params, CFG["grad_clip"]))
+             if not math.isfinite(gn) or not math.isfinite(loss_acc):
+                 raise RuntimeError(f"non-finite loss/grad at step {step}: {loss_acc} {gn}")
+@@ -398,10 +501,19 @@ def run(a, pdig, reclaimed_lock):
+             step += 1
+             logf.write(json.dumps({"step": step, "epoch": epoch + 1, "pos": s + 1, "loss": loss_acc, "grad_norm": gn, "lr": lr,
+                                    "n_examples": len(grp), "elapsed_s": time.time() - t0,
+-                                   "peak_mem_gb": torch.cuda.max_memory_allocated() / 2 ** 30}) + "\n")
++                                   "peak_mem_gb": torch.cuda.max_memory_allocated() / 2 ** 30,
++                                   "batch_ids": actual_ids, "batch_token_sha": tok_h.hexdigest()[:24], "rng_before": rng_before,
++                                   "opt_step_before": opt_step_before, "train_mode": True}) + "\n")
+             logf.flush()
++            saved_now = False
+             if step % a.ckpt_every == 0 and (s + 1) < spe:
+                 save_ckpt(epoch, s + 1)
++                saved_now = True
++            if a.stop_after_step is not None and step == a.stop_after_step:
++                if not saved_now:
++                    raise RuntimeError("--stop-after-step must coincide with a regular mid-epoch checkpoint step")
++                print("test stop after mid-epoch step checkpoint", flush=True)
++                os._exit(5)
+             if a.max_steps is not None and step >= a.max_steps:
+                 save_ckpt(epoch, s + 1)
+                 print("max-steps reached", flush=True)
+diff --git a/run_iter012_rest.py b/run_iter012_rest.py
+new file mode 100644
+index 0000000..2c26e41
+--- /dev/null
++++ b/run_iter012_rest.py
+@@ -0,0 +1,60 @@
++"""iter_012 pipeline 6-8단계 재개 실행기 (잠긴 rsna_diag.pipeline 함수를 같은 순서로 호출). 실행: python run_iter012_rest.py
++
++변경 이유: pipeline 6단계의 부모 record 재사용 경로(generate.run_worker의 --parent-dir 분기)에 iter_010부터 있던 NameError
++(lock_protocol 미import)가 있어 base_val이 시작 직후 실패했다. generate.py를 고치면 잠긴 protocol digest가 바뀌어
++이미 완료·검증된 학습/선택 기록과의 연결이 끊기므로 코드는 바꾸지 않고, base validation 800요청 전체를 부모 재사용 없이
++새 경로(base_val_full)에서 생성한다. 그 외 단계·규칙·gate는 pipeline.run()과 동일하다 (선택 파일은 write_or_verify로 재검증).
++"""
++import json
++import os
++import sys
++
++from rsna_diag import final_eval, pipeline as PL, queue_lock, select as SEL
++
++R = PL.R
++
++
++def main():
++    lk, own, _ = queue_lock.try_lock(os.path.join(os.path.realpath(R), "pipeline.lock"), queue_lock.my_info(role="pipeline_rest"))
++    if lk is None:
++        sys.exit(f"another pipeline owns {R}: {own}")
++    try:
++        d17 = [PL.run_dir(lr, 17) for lr in ("1e-4", "2e-4")]
++        ext_p = f"{R}/select/extend.json"
++        ext = PL.select_file("extend", d17, 5, ext_p)["extend"]
++        E = 8 if ext else 5
++        sel17 = PL.select_file("pick", d17, E, f"{R}/select/pick_seed17.json")
++        lr = sel17["runs"][sel17["selected_run"]]["lr"]
++        lr_s = {1e-4: "1e-4", 2e-4: "2e-4"}[lr]
++        sel = {17: f"{R}/select/pick_seed17.json"}
++        for s in (29, 43):
++            p = f"{R}/select/pick_seed{s}.json"
++            PL.select_file("pick", [PL.run_dir(lr_s, s)], E, p)
++            sel[s] = p
++        workers = PL.gen_check(sel17["runs"][sel17["selected_run"]]["adapter_dir"])
++        PL.log(f"[rest] E={E} lr={lr_s} workers={workers}; base validation without parent reuse -> {R}/base_val_full")
++        PL.gen(f"{R}/base_val_full", PL.IDS.format("validation"), "validation", "official_long,concise", workers)
++        comp_p = f"{R}/final/comparator.json"
++        pl = final_eval.comparator_payload(f"{R}/base_val_full", PL.PROT)
++        PL.log(f"comparator {SEL.write_or_verify(comp_p, pl)}: {pl['comparator']} {json.dumps({k: round(v, 4) for k, v in pl['val_f1@0.3'].items()})}")
++        PL.status("confirm_generation")
++        PL.gen(f"{R}/confirm_base", PL.IDS.format("confirm"), "confirm", "official_long,concise", workers)
++        sft_args = []
++        for s in (17, 29, 43):
++            j = json.load(open(sel[s]))
++            PL.gen(f"{R}/confirm_sft_seed{s}", PL.IDS.format("confirm"), "confirm", "concise", workers, adapter=j["runs"][j["selected_run"]]["adapter_dir"])
++            sft_args.append(f"{s}:{sel[s]}:{R}/confirm_sft_seed{s}")
++        out = f"{R}/final/confirm_result.json"
++        if os.path.exists(out):
++            PL.log(f"{out} exists (not overwritten)")
++        else:
++            PL.sh([sys.executable, "-m", "rsna_diag.final_eval", "confirm", "--comparator", comp_p, "--extend", ext_p, "--conf-base",
++                   f"{R}/confirm_base", "--protocol", PL.PROT, "--sft", *sft_args, "--out", out])
++        PL.status("complete")
++        PL.log("PIPELINE COMPLETE (rest runner)")
++    finally:
++        lk.release()
++
++
++if __name__ == "__main__":
++    main()
+diff --git a/test_rsna_iter012.py b/test_rsna_iter012.py
+new file mode 100644
+index 0000000..3e8f16c
+--- /dev/null
++++ b/test_rsna_iter012.py
+@@ -0,0 +1,309 @@
++"""iter_012 CPU 회귀·주입 검사. 실행: python test_rsna_iter012.py [OUT_DIR] -> OUT_DIR/fixtures_iter012.json (기본 results/iter_012/tests)
++
++A. DataLoader 전용 generator: iterator 생성이 전역 torch CPU RNG를 소비하는지 (없을 때) / 소비하지 않는지 (있을 때) 통제 비교
++B. collate의 sample_pos 전달, optimizer/batch digest의 안정성·민감도
++C. select.verify_epoch: 기록 점수를 원시 응답에서 재계산 (utility 변조·요청 삭제·protocol 불일치·결정적 검사 run 거부)
++D. select.payload/write_or_verify/verify_file: 같은 근거는 통과, 근거 파일이 바뀌면 오래된 선택 파일 거부
++E. final_eval confirm: 오래된 comparator(재계산과 다름) 거부, 중복 seed는 I/O 전에 거부
++F. run_shards: 새 시도 시작 시 기존 completion 보존·무효화, worker 실패 시 completion 미생성·attempt 실패 기록 (실제 CLI, 실제 protocol)
++G. launch: 성공/실패/중단(child 생존) 상태 구분 (실제 CLI)
++H. pipeline 단일 소유 lock, train.py의 검사 전용 옵션 --pilot 강제, protocol 잠금 목록에 pipeline.py 포함
++실제 protocol 파일(results/iter_012/protocols/main_protocol.json)은 F에서 읽기만 한다. C-E는 임시 디렉터리와 lock_protocol.verify 임시 대체로 검사한다.
++"""
++import argparse
++import json
++import os
++import signal
++import subprocess
++import sys
++import tempfile
++import time
++
++import numpy as np
++import torch
++from PIL import Image
++
++from rsna_diag import eval_gate, final_eval, generate, inputs, lock_protocol, lora, pipeline, prompts as P, queue_lock, select as SEL, sft_data, sft_eval
++from rsna_diag import train as T
++
++R = {}
++REAL_PROT = os.environ.get("ITER012_PROTOCOL", "results/iter_012/protocols/pilot_protocol.json")
++REAL_VERIFY = lock_protocol.verify
++
++
++def check(name, cond, detail=None):
++    R[name] = {"pass": bool(cond), "detail": detail}
++    print(("PASS " if cond else "FAIL ") + name, "" if cond else detail, flush=True)
++
++
++def raises(fn, exc):
++    try:
++        fn()
++    except exc as e:
++        return str(e) or type(e).__name__
++    except Exception:  # noqa
++        return None
++    return None
++
++
++TD = tempfile.mkdtemp(prefix="iter012_")
++
++# ---------- A. DataLoader RNG ----------
++class DS(torch.utils.data.Dataset):
++    def __len__(self):
++        return 8
++
++    def __getitem__(self, i):
++        return i
++
++
++def iter_consumes_global(gen):
++    torch.manual_seed(123)
++    before = torch.get_rng_state().clone()
++    dl = torch.utils.data.DataLoader(DS(), batch_size=2, num_workers=2, generator=gen)
++    it = iter(dl)
++    first = next(it)
++    del it
++    return not torch.equal(before, torch.get_rng_state()), first.tolist()
++
++
++c_none, f_none = iter_consumes_global(None)
++g = torch.Generator()
++g.manual_seed(17000)
++c_gen, f_gen = iter_consumes_global(g)
++check("A_control_without_generator_iterator_consumes_global_cpu_rng", c_none is True)
++check("A_with_dedicated_generator_global_cpu_rng_untouched", c_gen is False)
++check("A_batch_order_unchanged_by_generator", f_none == f_gen == [0, 1])
++
++# ---------- B. collate / digests ----------
++exs = [{"input_ids": torch.tensor([1, 2, 3]), "attention_mask": torch.ones(3, dtype=torch.long), "labels": torch.tensor([-100, 2, 3]),
++        "pixel_values": torch.zeros(1, 3, 4, 4), "sample_pos": 5},
++       {"input_ids": torch.tensor([4, 5]), "attention_mask": torch.ones(2, dtype=torch.long), "labels": torch.tensor([-100, 5]),
++        "pixel_values": torch.zeros(1, 3, 4, 4), "sample_pos": 6}]
++b = sft_data.collate(exs, 0)
++check("B_collate_carries_sample_pos", b["sample_pos"].tolist() == [5, 6])
++b2 = sft_data.collate([{k: v for k, v in e.items() if k != "sample_pos"} for e in exs], 0)
++check("B_collate_without_sample_pos_unchanged_keys", "sample_pos" not in b2 and set(b2) == set(b) - {"sample_pos"})
++h1 = T.batch_token_digest({k: v for k, v in b.items() if k != "sample_pos"}).hexdigest()
++b3 = {k: v.clone() for k, v in b.items() if k != "sample_pos"}
++b3["labels"][0, 1] = -100
++check("B_batch_token_digest_sensitive_to_label_mask", h1 != T.batch_token_digest(b3).hexdigest())
++p = torch.nn.Parameter(torch.ones(3))
++opt = torch.optim.AdamW([p], lr=1e-3)
++d0 = T.opt_digest(torch, opt)
++p.grad = torch.ones(3)
++opt.step()
++d1 = T.opt_digest(torch, opt)
++opt2 = torch.optim.AdamW([torch.nn.Parameter(p.detach().clone())], lr=1e-3)
++opt2.load_state_dict(opt.state_dict())
++check("B_opt_digest_changes_after_step_and_roundtrips", d0 != d1 and T.opt_digest(torch, opt2) == d1 and T.opt_step_count(opt2) == 1)
++
++# ---------- C. verify_epoch ----------
++rng = np.random.default_rng(0)
++man, gt = [], {}
++cats = ["opacity", "opacity", "normal", "not_normal_no_opacity"]
++for k, (split, cat) in enumerate([("train", c) for c in cats] + [("validation", c) for c in cats]):
++    arr = rng.integers(0, 255, (48, 48), dtype=np.uint8)
++    path = os.path.join(TD, f"img{k}.png")
++    Image.fromarray(arr).save(path)
++    iid = f"{split[:3]}_{k:03d}"
++    man.append({"id": iid, "split": split, "image": path, "pixel_sha256": inputs.sha(arr.tobytes()), "file_sha256": inputs.sha(open(path, "rb").read())})
++    gt[iid] = {"id": iid, "split": split, "category": cat, "pixel_sha256": inputs.sha(arr.tobytes()),
++               "boxes": ([{"yxyx_norm": [100 + 10 * k, 100, 400, 400 + 10 * k]}] if cat == "opacity" else [])}
++MP, GP = os.path.join(TD, "man.jsonl"), os.path.join(TD, "gt.json")
++open(MP, "w").write("".join(json.dumps(m) + "\n" for m in man))
++json.dump(gt, open(GP, "w"))
++VAP = os.path.join(TD, "va.json")
++json.dump([m["id"] for m in man if m["split"] == "validation"], open(VAP, "w"))
++FAKE_ENV = {"model_id": generate.MODEL_ID, "model_revision": generate.MODEL_REVISION, "dtype": "torch.bfloat16", "transformers": "x", "torch": "y",
++            "preprocess": generate.PREPROC_VERSION, "chat_template_sha256": "c", "eos_token_id": [1, 106], "do_pan_and_scan": None, "image_size": "s"}
++generate.static_env = lambda: FAKE_ENV
++PD = "pdig_iter012"
++lock_protocol.verify = lambda path: PD if os.path.basename(path) != "OTHER.json" else "other_pdig"
++PROT = os.path.join(TD, "PROT.json")
++CD1, _ = generate.config_digest(FAKE_ENV, {"concise": P.CONCISE})
++SEL.MANIFEST, SEL.GT, SEL.VAL_IDS = MP, GP, VAP
++vitems, vgt = inputs.load_items(MP, GP, VAP, "validation")
++vin = inputs.inputs_digest(vitems, vgt)
++ids = [i["id"] for i in vitems]
++edges = sft_eval.area_edges(vgt, [i for i in vgt if vgt[i]["split"] == "train"])
++
++
++def mk_adapter(dirp, v):
++    os.makedirs(dirp, exist_ok=True)
++    st = {"w.lora_A": torch.full((2, 2), float(v)), "w.lora_B": torch.zeros(2, 2)}
++    dg = lora.state_digest(st)
++    torch.save({"state": st, "config": {"r": 16, "alpha": 32}, "digest": dg}, os.path.join(dirp, "adapter.pt"))
++    return dg
++
++
++def response(it):
++    if gt[it["id"]]["boxes"]:
++        return json.dumps([{"box_2d": [110, 100, 400, 400], "label": "pulmonary opacity"}]) + "<end_of_turn>"
++    return "[]<end_of_turn>"
++
++
++def mk_run(rd, seed=17, lr=2e-4, n_ep=2, deterministic=False):
++    os.makedirs(rd, exist_ok=True)
++    tc = {"train_digest": f"td_{seed}_{lr}", "config": {"seed": seed, "lr": lr, "val_inputs_digest": vin, "deterministic": deterministic}}
++    json.dump(tc, open(os.path.join(rd, "train_config.json"), "w"))
++    for e in range(1, n_ep + 1):
++        ed = os.path.join(rd, f"epoch_{e:02d}")
++        dg = mk_adapter(ed, e + seed)
++        recs = []
++        for it in vitems:
++            recs.append({"id": it["id"], "prompt_name": "concise", "split": it["split"],
++                         "request_id": generate.request_id(generate.MODEL_REVISION, dg, it["split"], it["id"], P.digest(P.CONCISE)),
++                         "config_digest": CD1, "adapter_digest": dg, "protocol_digest": PD, "prompt_sha256": P.digest(P.CONCISE),
++                         "input_pixel_sha256": generate.load_image(it["image"])[2], "image_file_sha256": it["file_sha256"],
++                         "suffix_text_raw": response(it) if e == 1 or it["id"] != ids[0] else "[]<end_of_turn>", "ended_eos": True})
++        gd = os.path.join(ed, "val_gen")
++        os.makedirs(gd, exist_ok=True)
++        open(os.path.join(gd, "gen_worker0.jsonl"), "w").write("".join(json.dumps(r) + "\n" for r in recs))
++        json.dump({"n_expected": len(ids), "n_actual_unique": len(ids), "n_missing": 0, "n_duplicate": 0, "adapter_digest": dg, "protocol_digest": PD,
++                   "val_inputs_digest": vin}, open(os.path.join(gd, "completion.json"), "w"))
++        done = {(r["id"], "concise"): r for r in recs}
++        summ = sft_eval.summarize(sft_eval.parse_records(done, ids, "concise"), gt, ids, edges)
++        summ.update({"val_loss": 1.0 / e, "epoch": e, "adapter_digest": dg, "lr": lr, "seed": seed, "train_digest": tc["train_digest"],
++                     "val_inputs_digest": vin, "protocol_digest": PD, "generation": {"n": len(ids)}})
++        json.dump(summ, open(os.path.join(ed, "val_metrics.json"), "w"))
++    return tc
++
++
++rd = os.path.join(TD, "run_a")
++tc = mk_run(rd)
++check("C_verify_epoch_ok", SEL.verify_epoch(rd, 1, tc, vin, PROT, vitems, gt)["epoch"] == 1)
++vm = os.path.join(rd, "epoch_02", "val_metrics.json")
++orig = open(vm).read()
++m = json.loads(orig)
++m["utility"] = m["utility"] + 0.1
++json.dump(m, open(vm, "w"))
++check("C_tampered_utility_rejected_by_recomputation", raises(lambda: SEL.verify_epoch(rd, 2, tc, vin, PROT, vitems, gt), eval_gate.GateError) is not None)
++open(vm, "w").write(orig)
++gf = os.path.join(rd, "epoch_02", "val_gen", "gen_worker0.jsonl")
++gorig = open(gf).read()
++open(gf, "w").write("".join(gorig.splitlines(True)[1:]))
++check("C_missing_raw_request_rejected", raises(lambda: SEL.verify_epoch(rd, 2, tc, vin, PROT, vitems, gt), eval_gate.GateError) is not None)
++open(gf, "w").write(gorig)
++check("C_protocol_mismatch_rejected", raises(lambda: SEL.verify_epoch(rd, 2, tc, vin, os.path.join(TD, "OTHER.json"), vitems, gt), eval_gate.GateError) is not None)
++check("C_load_epochs_all_planned_ok", sorted(SEL.load_epochs(rd, 2, PROT)) == [1, 2])
++check("C_load_epochs_missing_planned_epoch_rejected", raises(lambda: SEL.load_epochs(rd, 3, PROT), eval_gate.GateError) is not None)
++rdd = os.path.join(TD, "run_det")
++mk_run(rdd, deterministic=True)
++check("C_deterministic_check_run_rejected_for_selection", raises(lambda: SEL.load_epochs(rdd, 2, PROT), eval_gate.GateError) is not None)
++
++# ---------- D. selection provenance ----------
++rb = os.path.join(TD, "run_b")
++mk_run(rb, lr=1e-4)
++pl = SEL.payload("pick", [rd, rb], PROT, 2)
++out = os.path.join(TD, "pick.json")
++check("D_write_new_selection", SEL.write_or_verify(out, pl) == "written")
++check("D_existing_identical_selection_verified", SEL.write_or_verify(out, SEL.payload("pick", [rd, rb], PROT, 2)) == "verified_existing")
++check("D_verify_file_recomputes_equal", SEL.verify_file(out, "pick", PROT)["selected_run"] == pl["selected_run"])
++check("D_selection_has_protocol_rule_epochs_inputs_evidence",
++      all(k in pl for k in ("protocol_digest", "rule", "planned_epochs", "val_inputs_digest", "evidence")) and
++      set(pl["evidence"][rd]["epochs"]) == {"1", "2"})
++open(gf, "w").write(gorig.replace('"ended_eos": true', '"ended_eos":  true', 1))  # 같은 의미, 다른 파일 내용
++check("D_changed_evidence_file_makes_stored_selection_stale", raises(lambda: SEL.verify_file(out, "pick", PROT), eval_gate.GateError) is not None)
++check("D_write_or_verify_refuses_stale_existing", raises(lambda: SEL.write_or_verify(out, SEL.payload("pick", [rd, rb], PROT, 2)), eval_gate.GateError) is not None)
++open(gf, "w").write(gorig)
++check("D_duplicate_runs_rejected", raises(lambda: SEL.payload("pick", [rd, rd], PROT, 2), eval_gate.GateError) is not None)
++check("D_extend_only_at_epoch5", raises(lambda: SEL.payload("extend", [rd, rb], PROT, 2), eval_gate.GateError) is not None)
++r5 = os.path.join(TD, "run_5ep")
++mk_run(r5, seed=29, n_ep=5)
++ep5 = SEL.load_epochs(r5, 5, PROT)
++ext5, rep5 = SEL.should_extend([r5], PROT, 5)
++exp_du = ep5[5]["utility"] - ep5[4]["utility"]
++check("D_extend_rule_hand_calc", ext5 == (exp_du >= 0.01 and (0.2 / 0.25) <= 0.99) and abs(rep5[r5]["val_loss_ratio_5_over_4"] - 0.8) < 1e-12
++      and abs(rep5[r5]["delta_utility"] - exp_du) < 1e-12, rep5)
++hand_best = sorted(ep5.values(), key=lambda m_: (-round(m_["utility"], 12), -round(m_["f1@0.5"], 12), m_["epoch"]))[0]["epoch"]
++check("D_best_epoch_rule_hand_calc", SEL.best_epoch(ep5)[0] == hand_best, [SEL.best_epoch(ep5)[0], hand_best])
++
++
++# ---------- E. final_eval confirm: stale comparator ----------
++class NS:
++    def __init__(self, **kw):
++        self.__dict__.update(kw)
++
++
++cfile = os.path.join(TD, "comparator.json")
++comp = {"comparator": "concise", "protocol_digest": PD, "baselines_json_sha256": final_eval.fsha(final_eval.BASE_JSON), "val_base_dir": "x",
++        "parent_dir": None, "parent_protocol": None}
++json.dump(comp, open(cfile, "w"))
++final_eval.comparator_payload = lambda *a_, **k_: dict(comp, comparator="prior_set")
++check("E_stale_comparator_rejected", "stale" in (raises(lambda: final_eval.cmd_confirm(NS(sft=["17:a:b", "29:a:b", "43:a:b"], comparator=cfile, protocol=PROT,
++                                                                                         extend="x", conf_base="x", out="x")), eval_gate.GateError) or ""))
++check("E_duplicate_seed_rejected_before_io", raises(lambda: final_eval.cmd_confirm(NS(sft=["17:a:b", "17:a:b", "43:a:b"], comparator="/nonexistent")), eval_gate.GateError) is not None)
++lock_protocol.verify = REAL_VERIFY
++
++# ---------- F. run_shards (실제 CLI) ----------
++env = dict(os.environ, CUDA_VISIBLE_DEVICES="0,1")
++rs = os.path.join(TD, "rs")
++os.makedirs(rs)
++json.dump({"n_expected": 1, "old": True}, open(os.path.join(rs, "completion.json"), "w"))
++bad_ids = os.path.join(TD, "bad_ids.json")
++json.dump(["not_in_manifest_id"], open(bad_ids, "w"))
++if os.path.exists(REAL_PROT):
++    p = subprocess.run([sys.executable, "-m", "rsna_diag.run_shards", "--manifest", "results/iter_010/manifests/infer_manifest.jsonl", "--ids", bad_ids,
++                        "--out-dir", rs, "--protocol", REAL_PROT, "--prompts", "concise", "--workers", "2"], env=env, capture_output=True, text=True)
++    att = [f for f in os.listdir(os.path.join(rs, "attempts")) if f.startswith("attempt_")]
++    sup = [f for f in os.listdir(os.path.join(rs, "attempts")) if f.startswith("completion_superseded")]
++    a0 = json.load(open(os.path.join(rs, "attempts", att[0]))) if att else {}
++    check("F_worker_failure_nonzero_exit_and_no_completion", p.returncode == 2 and not os.path.exists(os.path.join(rs, "completion.json")), [p.returncode, p.stdout[-300:], p.stderr[-300:]])
++    check("F_old_completion_preserved_but_superseded", len(sup) == 1 and json.load(open(os.path.join(rs, "attempts", sup[0]))).get("old") is True)
++    check("F_attempt_recorded_failed_with_worker_returncodes", a0.get("status") == "failed_or_incomplete" and all(c != 0 for c in a0.get("returncodes", [0])), a0)
++else:
++    check("F_real_protocol_exists", False, REAL_PROT)
++
++# ---------- G. launch (실제 CLI) ----------
++okj = os.path.join(TD, "ok.json")
++json.dump({"a": 1}, open(okj, "w"))
++jobs_ok = [{"gpu": "0", "module": "json.tool", "args": [okj], "log": os.path.join(TD, "g_ok.log")},
++           {"gpu": "1", "module": "json.tool", "args": [os.path.join(TD, "missing.json")], "log": os.path.join(TD, "g_bad.log")}]
++jp = os.path.join(TD, "jobs1.json")
++json.dump(jobs_ok, open(jp, "w"))
++p = subprocess.run([sys.executable, "-m", "rsna_diag.launch", "--jobs", jp, "--log-dir", os.path.join(TD, "L1")], env=env, capture_output=True, text=True)
++lr1 = json.load(open(os.path.join(TD, "L1", "launch_result.json")))
++check("G_failed_child_gives_failed_status_nonzero_exit", p.returncode == 1 and lr1["status"] == "failed" and lr1["jobs"][0]["returncode"] == 0 and lr1["jobs"][1]["returncode"] not in (0, None), lr1)
++jobs_long = [{"gpu": "0", "module": "timeit", "args": ["-n", "1", "-r", "1", "import time; time.sleep(60)"], "log": os.path.join(TD, "g_long.log")}]
++jp2 = os.path.join(TD, "jobs2.json")
++json.dump(jobs_long, open(jp2, "w"))
++pl2 = subprocess.Popen([sys.executable, "-m", "rsna_diag.launch", "--jobs", jp2, "--log-dir", os.path.join(TD, "L2")], env=env,
++                       stdout=subprocess.PIPE, stderr=subprocess.PIPE)
++time.sleep(6)
++pl2.send_signal(signal.SIGINT)
++pl2.wait(timeout=60)
++lr2 = json.load(open(os.path.join(TD, "L2", "launch_result.json")))
++check("G_interrupted_launch_marks_live_child_running_not_success",
++      pl2.returncode != 0 and lr2["status"] == "interrupted_children_running" and lr2["jobs"][0]["state"] == "running" and lr2["jobs"][0]["returncode"] is None, lr2)
++try:
++    os.kill(lr2["jobs"][0]["pid"], signal.SIGTERM)  # 이 검사가 만든 child만 정리한다
++except ProcessLookupError:
++    pass
++
++# ---------- H. pipeline lock / train guard / protocol list ----------
++pipeline.R = os.path.join(TD, "pipe")
++os.makedirs(pipeline.R)
++hold, _, _ = queue_lock.try_lock(os.path.join(os.path.realpath(pipeline.R), "pipeline.lock"), queue_lock.my_info(role="test_holder"))
++msg = raises(pipeline.main, SystemExit)
++check("H_second_pipeline_refused_while_lock_held", hold is not None and msg is not None and "another pipeline owns" in msg, msg)
++hold.release()
++p = subprocess.run([sys.executable, "-m", "rsna_diag.train", "--run-dir", os.path.join(TD, "t"), "--lr", "1e-4", "--seed", "1", "--epochs", "1",
++                    "--protocol", REAL_PROT, "--deterministic"], env=env, capture_output=True, text=True)
++check("H_train_deterministic_requires_pilot", p.returncode != 0 and "require --pilot" in p.stderr, p.stderr[-300:])
++p = subprocess.run([sys.executable, "-m", "rsna_diag.train", "--run-dir", os.path.join(TD, "t"), "--lr", "1e-4", "--seed", "1", "--epochs", "1",
++                    "--protocol", REAL_PROT, "--stop-after-step", "2"], env=env, capture_output=True, text=True)
++check("H_train_stop_after_step_requires_pilot", p.returncode != 0 and "require --pilot" in p.stderr, p.stderr[-300:])
++check("H_protocol_locks_pipeline_py", "rsna_diag/pipeline.py" in lock_protocol.CODE)
++if os.path.exists(REAL_PROT):
++    check("H_real_protocol_includes_pipeline_and_thr_manifest",
++          all(f in json.load(open(REAL_PROT))["locked"]["files"] for f in ("rsna_diag/pipeline.py", "results/iter_009/manifests/infer_manifest.jsonl")))
++
++ap = argparse.ArgumentParser()
++ap.add_argument("out", nargs="?", default="results/iter_012/tests")
++a = ap.parse_args()
++os.makedirs(a.out, exist_ok=True)
++json.dump(R, open(os.path.join(a.out, "fixtures_iter012.json"), "w"), indent=1, default=str)
++n_ok = sum(v["pass"] for v in R.values())
++print(f"{n_ok}/{len(R)} pass")
++sys.exit(0 if n_ok == len(R) else 1)
+diff --git a/test_rsna_iter012_gpu.py b/test_rsna_iter012_gpu.py
+new file mode 100644
+index 0000000..19f2e10
+--- /dev/null
++++ b/test_rsna_iter012_gpu.py
+@@ -0,0 +1,258 @@
++"""iter_012 실제 모델 GPU 재개 검사 (MedGemma 1.5, 실제 train.py 경로). 실행: python test_rsna_iter012_gpu.py
++-> results/iter_012/tests/fixtures_iter012_gpu.json, 실행 산출물 results/iter_012/pilot/. 판정 기준은 실행 전 gpu_gate_config.json에 고정한다.
++
++두 LR을 각각 한 GPU에 고정하고 (1e-4 -> GPU0, 2e-4 -> GPU1), 같은 GPU 안에서 같은 시작점의 무중단 U1·U2와 재개 R을 순차 비교한다.
++  D (결정적 kernel, pilot16/eff4/3 epochs/val8): R은 6개 프로세스로 끊는다 —
++     step2 직후(epoch1 중간) 종료 -> epoch1 adapter 저장 직후 종료 -> epoch2 validation 3요청 뒤 종료 -> step10 직후(epoch3 중간) 종료
++     -> epoch3 adapter 저장 직후 종료 -> 마지막 validation 복구 후 정상 종료.
++  M (결정적 kernel, 본학습 설정 train 2,400/eff16/microbatch2/workers3, validation 없음): U1·U2는 4 step, R은 step2 직후 종료 후 4 step까지.
++  N (본학습 기본 kernel, D와 같은 pilot·같은 중단 순서): 부동소수 궤적 차이는 참고 기록, 비부동소수 상태(batch·token·LR·RNG·optimizer step)의
++     정확한 일치와 복원 직후 상태 일치는 판정한다.
++  B: 같은 run-dir 두 번째 학습 거부(첫 학습 생존 중), 학습 ID 하나 교체 후 재개 거부.
++pilot weight는 본학습에 이월하지 않는다. 결정적 검사 run은 select.load_epochs가 선택에 쓰지 못하게 거부한다.
++"""
++import json
++import os
++import subprocess
++import sys
++import threading
++import time
++
++PROT = "results/iter_012/protocols/pilot_protocol.json"
++B = "results/iter_012/pilot"
++T = "results/iter_012/tests"
++M_ = "results/iter_010/manifests/"
++VAL8 = "results/iter_011/pilot/val8_ids.json"  # iter_011에서 고정한 validation 8명 (정렬 앞쪽 opacity4/normal2/not_normal2), 읽기 전용 재사용
++GATES = {"loss_rtol": 1e-3, "adapter_atol": 1e-4, "util_atol": 0.05,
++         "exact_required": ["batch_ids", "batch_token_sha", "lr", "rng_before", "opt_step_before", "restored_equals_saved", "validation_state_unchanged",
++                            "checkpoint_digests_at_same_steps"],
++         "note": "iter_011 기준값(loss 1e-3, adapter 1e-4, utility 0.05)을 그대로 유지한다. D·M은 수치 기준과 정확 일치 항목을 모두 판정한다. "
++                 "N은 기본 kernel의 부동소수 차이를 참고로만 기록하고 정확 일치 항목만 판정한다. 관측값에 맞춰 기준을 바꾸지 않는다."}
++LRS = {"1e-4": 0, "2e-4": 1}
++R = {}
++
++
++def check(name, cond, detail=None):
++    R[name] = {"pass": bool(cond), "detail": detail}
++    print(("PASS " if cond else "FAIL ") + name, "" if cond else json.dumps(detail, default=str)[:600], flush=True)
++
++
++def train(gpu, run_dir, args, log):
++    with open(log, "a") as f:
++        f.write(f"\n=== {time.strftime('%F %T')} {' '.join(args)}\n")
++        f.flush()
++        p = subprocess.run([sys.executable, "-m", "rsna_diag.train", "--run-dir", run_dir, "--protocol", PROT, *args],
++                           env=dict(os.environ, CUDA_VISIBLE_DEVICES=str(gpu)), stdout=f, stderr=subprocess.STDOUT)
++    return p.returncode
++
++
++def pilot_args(lr, det):
++    a = ["--pilot", "--eff-batch", "4", "--train-ids", M_ + "pilot16_ids.json", "--val-ids", VAL8, "--ckpt-every", "2", "--microbatch", "2",
++         "--workers", "2", "--seed", "17", "--lr", lr, "--epochs", "3"]
++    return a + (["--deterministic"] if det else [])
++
++
++def main_args(lr):
++    return ["--pilot", "--no-val", "--deterministic", "--microbatch", "2", "--workers", "3", "--seed", "17", "--lr", lr, "--epochs", "5",
++            "--ckpt-every", "2"]
++
++
++R_SEQ = [(["--stop-after-step", "2"], 5), (["--stop-after-epoch-ckpt", "1"], 3), (["--stop-in-validation", "3"], 4),
++         (["--stop-after-step", "10"], 5), (["--stop-after-epoch-ckpt", "3"], 3), ([], 0)]
++
++
++def run_gpu(lr, gpu, rc):
++    for mode in ("D", "N"):
++        det = mode == "D"
++        for u in ("U1", "U2"):
++            d = f"{B}/{mode}_{u}_lr{lr}"
++            rc[(mode, u, lr)] = train(gpu, d, pilot_args(lr, det), f"{d}.log")
++        d = f"{B}/{mode}_R_lr{lr}"
++        rc[(mode, "R", lr)] = [train(gpu, d, pilot_args(lr, det) + extra, f"{d}.log") for extra, _ in R_SEQ]
++    for u in ("U1", "U2"):
++        d = f"{B}/M_{u}_lr{lr}"
++        rc[("M", u, lr)] = train(gpu, d, main_args(lr) + ["--max-steps", "4"], f"{d}.log")
++    d = f"{B}/M_R_lr{lr}"
++    rc[("M", "R", lr)] = [train(gpu, d, main_args(lr) + ["--stop-after-step", "2"], f"{d}.log"),
++                          train(gpu, d, main_args(lr) + ["--max-steps", "4"], f"{d}.log")]
++
++
++def logs(d):
++    return [json.loads(l) for l in open(os.path.join(d, "train_log.jsonl")) if l.strip()]
++
++
++def steps(d):
++    return {r["step"]: r for r in logs(d) if "loss" in r}
++
++
++def ckpts(d):
++    """(step, epoch, pos) -> digests (마지막 기록). 재개 R에서는 같은 위치를 한 번만 저장한다."""
++    return {(r["step"], r["epoch"], r["pos"]): r["digests"] for r in logs(d) if r.get("event") == "checkpoint"}
++
++
++def compare(a, b, n_steps, with_val=True, numeric_gate=True):
++    import torch
++    sa, sb = steps(a), steps(b)
++    out = {"n_steps": [len(sa), len(sb)]}
++    ok_steps = sorted(sa) == sorted(sb) == list(range(1, n_steps + 1))
++    out["same_steps"] = ok_steps
++    if not ok_steps:
++        return out, False, False
++    rel = [abs(sa[k]["loss"] - sb[k]["loss"]) / abs(sa[k]["loss"]) for k in sa]
++    out["loss_max_rel_diff"] = max(rel)
++    out["loss_bitwise_equal_all"] = all(sa[k]["loss"] == sb[k]["loss"] for k in sa)
++    exact = {f: all(sa[k][f] == sb[k][f] for k in sa) for f in ("batch_ids", "batch_token_sha", "lr", "rng_before", "opt_step_before", "train_mode")}
++    ca, cb = ckpts(a), ckpts(b)
++    common = sorted(set(ca) & set(cb))
++    exact["checkpoint_digests_at_same_steps"] = bool(common) and all(ca[k] == cb[k] for k in common)
++    out["checkpoint_positions_compared"] = common
++    out["checkpoint_digest_mismatch"] = [k for k in common if ca[k] != cb[k]]
++    out["exact"] = exact
++    num_ok = out["loss_max_rel_diff"] <= GATES["loss_rtol"]
++    if with_val:
++        mx = 0.0
++        eq = {}
++        for e in (1, 2, 3):
++            x = torch.load(f"{a}/epoch_{e:02d}/adapter.pt", map_location="cpu", weights_only=True)
++            y = torch.load(f"{b}/epoch_{e:02d}/adapter.pt", map_location="cpu", weights_only=True)
++            mx = max(mx, max(float((x["state"][k] - y["state"][k]).abs().max()) for k in x["state"]))
++            eq[e] = x["digest"] == y["digest"]
++        ma = {e: json.load(open(f"{a}/epoch_{e:02d}/val_metrics.json")) for e in (1, 2, 3)}
++        mb = {e: json.load(open(f"{b}/epoch_{e:02d}/val_metrics.json")) for e in (1, 2, 3)}
++        du = max(abs(ma[e]["utility"] - mb[e]["utility"]) for e in ma)
++        dl = max(abs(ma[e]["val_loss"] - mb[e]["val_loss"]) / ma[e]["val_loss"] for e in ma)
++
++        def outs(d, e):
++            return {json.loads(l)["id"]: json.loads(l)["suffix_ids"] for l in open(f"{d}/epoch_{e:02d}/val_gen/gen_worker0.jsonl")}
++        same_out = {e: sum(outs(a, e)[i] == outs(b, e).get(i) for i in outs(a, e)) for e in (1, 2, 3)}
++        out.update({"adapter_max_abs_diff": mx, "adapter_digest_equal_by_epoch": eq, "utility_max_diff": du, "val_loss_max_rel_diff": dl,
++                    "utility_by_epoch": [[ma[e]["utility"] for e in ma], [mb[e]["utility"] for e in mb]],
++                    "val_outputs_identical_of_8_by_epoch": same_out})
++        num_ok = num_ok and mx <= GATES["adapter_atol"] and du <= GATES["util_atol"] and dl <= GATES["loss_rtol"]
++    else:
++        import torch as _t
++        x = _t.load(f"{a}/ckpt_latest.pt", map_location="cpu", weights_only=False)
++        y = _t.load(f"{b}/ckpt_latest.pt", map_location="cpu", weights_only=False)
++        mx = max(float((x["lora"][k] - y["lora"][k]).abs().max()) for k in x["lora"])
++        out.update({"final_adapter_max_abs_diff": mx, "final_digests_equal": x["digests"] == y["digests"], "final_step": [x["step"], y["step"]]})
++        num_ok = num_ok and mx <= GATES["adapter_atol"]
++    return out, all(exact.values()), num_ok
++
++
++def resume_checks(d, n_resume):
++    ev = logs(d)
++    res = [r for r in ev if r.get("event") == "resume"]
++    ck = ckpts(d)
++    restored_match_saved = all(r.get("restored_equals_saved") and ck.get((r["step"], r["epoch"], r["pos"])) == r["restored_digests"] for r in res)
++    val = [r for r in ev if r.get("event") == "validation_done"]
++    return {"n_resume": len(res), "restored_match_saved": restored_match_saved, "n_validation_done": len(val),
++            "validation_state_unchanged": all(r.get("state_unchanged") for r in val), "recovered_from_file": [r["recovered_from_file"] for r in val]}, \
++        len(res) == n_resume and restored_match_saved and all(r.get("state_unchanged") for r in val)
++
++
++def main():
++    os.makedirs(B, exist_ok=True)
++    os.makedirs(T, exist_ok=True)
++    gp = f"{T}/gpu_gate_config.json"
++    if not os.path.exists(gp):
++        json.dump(GATES, open(gp, "w"), indent=1)
++    elif json.load(open(gp)) != GATES:
++        sys.exit("gate config changed after being fixed")
++    t0 = time.time()
++    rc = {}
++    th = [threading.Thread(target=run_gpu, args=(lr, g, rc)) for lr, g in LRS.items()]
++    [t.start() for t in th]
++    [t.join() for t in th]
++    R["_wall_s_main_phases"] = {"pass": True, "detail": time.time() - t0}
++    exp_r = [c for _, c in R_SEQ]
++    for lr in LRS:
++        for mode in ("D", "N"):
++            check(f"{mode}_lr{lr}_return_codes_as_designed",
++                  rc[(mode, "U1", lr)] == 0 and rc[(mode, "U2", lr)] == 0 and rc[(mode, "R", lr)] == exp_r,
++                  {k: rc[(mode, k, lr)] for k in ("U1", "U2", "R")})
++        check(f"M_lr{lr}_return_codes_as_designed", rc[("M", "U1", lr)] == 0 and rc[("M", "U2", lr)] == 0 and rc[("M", "R", lr)] == [5, 0],
++              {k: rc[("M", k, lr)] for k in ("U1", "U2", "R")})
++        for mode in ("D", "N"):
++            u1, u2, rr = (f"{B}/{mode}_{k}_lr{lr}" for k in ("U1", "U2", "R"))
++            try:
++                o12, ex12, num12 = compare(u1, u2, 12)
++                o1r, ex1r, num1r = compare(u1, rr, 12)
++                rs, rs_ok = resume_checks(rr, 5)
++            except Exception as e:  # 실행 실패로 산출물이 없으면 FAIL로 기록
++                check(f"{mode}_lr{lr}_comparison_available", False, repr(e)[:300])
++                continue
++            comp = {}
++            for e in (1, 2, 3):
++                comp[e] = json.load(open(f"{rr}/epoch_{e:02d}/val_gen/completion.json"))["n_new_this_run"]
++            if mode == "D":
++                check(f"D_lr{lr}_U1_vs_U2_same_gpu_numeric_gate", num12, o12)
++                check(f"D_lr{lr}_U1_vs_U2_exact_state_sequence", ex12, o12.get("exact"))
++                check(f"D_lr{lr}_U1_vs_R_numeric_gate", num1r, o1r)
++                check(f"D_lr{lr}_U1_vs_R_exact_state_sequence", ex1r, o1r.get("exact"))
++            else:
++                R[f"N_lr{lr}_U1_vs_U2_default_kernels_reference"] = {"pass": True, "detail": o12}
++                R[f"N_lr{lr}_U1_vs_R_default_kernels_reference"] = {"pass": True, "detail": o1r}
++                check(f"N_lr{lr}_U1_vs_U2_exact_nonfloat_state", all(v for k, v in o12["exact"].items() if k != "checkpoint_digests_at_same_steps"), o12.get("exact"))
++                check(f"N_lr{lr}_U1_vs_R_exact_nonfloat_state", all(v for k, v in o1r["exact"].items() if k != "checkpoint_digests_at_same_steps"), o1r.get("exact"))
++            check(f"{mode}_lr{lr}_R_restored_equals_saved_and_validation_invariant", rs_ok, rs)
++            check(f"{mode}_lr{lr}_R_validation_recovery_counts_8_5_8", comp == {1: 8, 2: 5, 3: 8}, comp)
++            for e in (1, 2, 3):
++                n = sum(1 for _ in open(f"{rr}/epoch_{e:02d}/val_gen/gen_worker0.jsonl"))
++                check(f"{mode}_lr{lr}_R_epoch{e}_raw_requests_8_no_duplicates", n == 8, n)
++        u1, u2, rr = (f"{B}/M_{k}_lr{lr}" for k in ("U1", "U2", "R"))
++        try:
++            m12, mex12, mnum12 = compare(u1, u2, 4, with_val=False)
++            m1r, mex1r, mnum1r = compare(u1, rr, 4, with_val=False)
++            mrs, mrs_ok = resume_checks(rr, 1)
++            check(f"M_lr{lr}_U1_vs_U2_numeric_gate", mnum12, m12)
++            check(f"M_lr{lr}_U1_vs_U2_exact_state_sequence", mex12, m12.get("exact"))
++            check(f"M_lr{lr}_U1_vs_R_numeric_gate", mnum1r, m1r)
++            check(f"M_lr{lr}_U1_vs_R_exact_state_sequence", mex1r, m1r.get("exact"))
++            check(f"M_lr{lr}_R_restored_equals_saved", mrs_ok, mrs)
++            cfg = json.load(open(f"{u1}/train_config.json"))["config"]
++            check(f"M_lr{lr}_main_config_path", cfg["n_train"] == 2400 and cfg["eff_batch"] == 16 and cfg["microbatch"] == 2 and cfg["deterministic"],
++                  {k: cfg[k] for k in ("n_train", "eff_batch", "microbatch", "deterministic")})
++        except Exception as e:
++            check(f"M_lr{lr}_comparison_available", False, repr(e)[:300])
++
++    # ---- B. 같은 run-dir 동시 학습 거부, 입력 ID 교체 재개 거부 ----
++    TL = f"{B}/B_lock"
++    out = {}
++
++    def long_run():
++        out["T"] = train(0, TL, ["--pilot", "--eff-batch", "4", "--no-val", "--train-ids", M_ + "pilot16_ids.json", "--epochs", "6", "--ckpt-every", "2",
++                                 "--seed", "17", "--lr", "2e-4", "--microbatch", "2", "--workers", "2"], f"{TL}.log")
++
++    tl = threading.Thread(target=long_run)
++    tl.start()
++    lockfile = os.path.join(TL, "train.lock")
++    for _ in range(120):
++        if os.path.exists(lockfile) and '"role": "train"' in open(lockfile).read():
++            break
++        time.sleep(1)
++    held = os.path.exists(lockfile) and '"role": "train"' in open(lockfile).read()
++    rc2 = train(1, TL, ["--pilot", "--eff-batch", "4", "--no-val", "--train-ids", M_ + "pilot16_ids.json", "--epochs", "6", "--seed", "17",
++                        "--lr", "2e-4", "--microbatch", "2", "--workers", "2"], f"{TL}_second.log")
++    txt = open(f"{TL}_second.log").read()
++    tl.join()
++    check("B_second_train_same_run_dir_refused_while_first_alive", held and rc2 != 0 and "owned by another live train process" in txt, [held, rc2, txt[-300:]])
++    check("B_first_train_finished_rc0", out.get("T") == 0, out)
++    gt = json.load(open(M_ + "gt_manifest.json"))
++    tr16 = json.load(open(M_ + "pilot16_ids.json"))
++    other = [i for i in sorted(gt) if gt[i]["split"] == "train" and i not in tr16 and gt[i]["category"] == "opacity"][0]
++    sw = f"{B}/pilot16_swapped_ids.json"
++    json.dump(sorted(tr16)[1:] + [other], open(sw, "w"))
++    a = pilot_args("1e-4", True)
++    a[a.index("--train-ids") + 1] = sw
++    rc3 = train(0, f"{B}/D_U1_lr1e-4", a, f"{B}/B_swap.log")
++    check("B_one_train_id_swapped_resume_refused", rc3 != 0 and "train config differs" in open(f"{B}/B_swap.log").read(), rc3)
++
++    R["_wall_s_total"] = {"pass": True, "detail": time.time() - t0}
++    json.dump(R, open(f"{T}/fixtures_iter012_gpu.json", "w"), indent=1, default=str)
++    n_ok = sum(v["pass"] for v in R.values())
++    print(f"{n_ok}/{len(R)} pass")
++    sys.exit(0 if n_ok == len(R) else 1)
++
++
++if __name__ == "__main__":
++    main()

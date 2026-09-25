@@ -110,3 +110,19 @@ MedGemma 1.5로 연구하는 것 자체가 큰 제약이라고 판단되면, 근
 - 접근법: 정상 사용 조건의 병변 grounding 검증 (`approach/grounding-usage-diagnostic`), 시도: iter_009
 - 커밋: 39aa49a6fa5943ca0d3e0327a7874e68a2c878cb
 - 자세히: DECISIONS.md의 iter_009, `agent/runs/iter_009/review.md`
+
+## 🏁 직접 LoRA SFT로 RSNA grounding 개선을 독립 확인
+
+*iter_012 · 2026-09-26 07:41 · 판정: CONTINUE / success*
+
+정상 사용에서도 남던 RSNA grounding 오류가 직접 LoRA SFT로 크게 개선됨을 확인했다.
+**고민:** iter_009에서 위치 불일치를 검증했지만, 경량 적응으로 실제 출력을 개선할 수 있는지는 미확인이었다.
+**시도:** anatomy 전이를 바로 도입하지 않고 직접 병변 SFT와 좌표 보정·box prior를 먼저 비교했다.
+iter_010·011은 실행 복구와 평가 연결 문제로 본실험을 끝내지 못해 방법의 효과를 판정하지 못했다.
+**개발:** 재개 상태와 선택 근거를 검증하고, 부모 trajectory의 불확실성을 피하기 위해 새 경로에서 원래 학습을 완료했다.
+**결과:** 확인 양성 400명에서 세 seed의 F1@0.3은 0.631–0.653으로 prior_set 0.424를 넘었다. 평균 차이는 +0.216, 95% CI는 [0.172, 0.259]였다.
+**의미:** 후속 방법을 비교할 직접 적응 baseline을 확보했다. 새 방법의 기여, 더 충분한 SFT 대비 이득과 다른 데이터셋 재현은 다음 과제다.
+
+- 접근법: 영상 조건부 집합 grounding (`approach/conditional-set-grounding`), 시도: iter_010, iter_011, iter_012
+- 커밋: 5581ed255a350e42a0ad422065edf13c56a33bf6, 8b030717b813bcbff85a2ffc5f52c9561a73f452, 783d2d04671ae296f3dc0c700e575f8af8e021c9
+- 자세히: DECISIONS.md의 iter_012, `agent/runs/iter_012/review.md`

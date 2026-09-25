@@ -5,23 +5,23 @@ validated는 명시한 조건에서 사용·평가 오류를 통제해 성능 �
 
 ## lesion-grounding-generalization — validated
 
-MedGemma 1.5 revision 91850547d9f0b2fdd21aa7c5f4f3d1a8a52c243b의 값 보존 전처리·공식 chat template·충분한 생성 길이 조건에서, RSNA adjudicated 폐렴 의심 opacity 양성 200명 중 134명(67.0%, Wilson 95% CI 60.2–73.1%)은 사전 고정한 공식 긴 prompt와 간결 prompt 모두에서 유효하고 비어 있지 않은 예측의 모든 예측–GT IoU가 0.3 미만이었다. 이 특정 자료·prompt 조건의 위치 불일치를 검증한 것이며, 모든 병변의 일반화 실패나 내부 원인을 확정하지 않는다.
+MedGemma 1.5 revision 91850547d9f0b2fdd21aa7c5f4f3d1a8a52c243b의 정상 사용 조건에서 확인된 RSNA opacity grounding 위치 불일치는 유지된다(iter_009 양성 200명 중 공통 위치 불일치 134명). 다만 경량 적응으로 개선 가능한 문제임을 확인했다. iter_012의 별도 확인 양성 400명에서 미적응 official_long/concise의 F1@0.3은 0.165/0.081이고, 직접 언어층 rank16 LoRA SFT는 세 seed에서 0.631–0.653이었다. 이는 해당 데이터·학습 조건의 개선이며, 모든 병변의 일반화 실패나 내부 병목을 입증하지 않는다.
 
 - 적용 목표 시작: iter_003
-- 최신 리뷰: agent/runs/iter_009/review.json
-- 근거: research/results/iter_009/eval/run/gen_shard*.jsonl: 900개 고유 요청, 중복 0; 리뷰에서 원시 응답을 별도로 파싱해 주지표 134/200 재확인.
-- 근거: research/results/iter_009/eval/eval/metrics.json: 공식·간결 prompt 양성 유효 출력률 100%·96.5%; F1@0.3 0.147·0.066, development 단일 box prior 0.269.
-- 근거: research/results/iter_009/data_audit/split_checks.json: development 80명과 평가 300명, 기록된 이전 환자와의 교집합 0.
-- 근거: research/results/iter_009/eval/eval/cases/common_error_ind_00000103.png: GT와 전체 예측 overlay를 직접 확인.
-- 사용·평가 검증: 보존된 공식 MedGemma 1.5 notebook의 prompt·전처리 코드를 읽고 runner와 대조했다. skimage 원문 실행 대신 numpy emulation을 사용했다는 범위를 유지한다.
-- 사용·평가 검증: sanity/sanity.json에서 공식 예제·development 총 4건의 pipeline/runner input_ids 및 bf16 pixel_values 일치와 생성 결과 대조를 확인했다.
-- 사용·평가 검증: tests/fixtures.json의 58개 통과 기록과 parser·전처리·matching·union IoU 구현을 확인했다. 리뷰에서 테스트나 GPU 실험을 재실행하지 않았다.
-- 사용·평가 검증: locked_protocol.json의 모든 파일 hash, 체크포인트 SHA의 변경 파일, 380개 현재 영상 file/pixel hash 및 1,140개 생성 요청의 pixel/config digest를 대조해 불일치 0을 확인했다.
-- 사용·평가 검증: 1000→2000→4000 cap 규칙과 EOS 판별을 확인했다. 간결 prompt의 양성 잘림 7건은 주지표의 위치 오류 분자에서 제외된다.
-- 미해결: legacy 익명 NIH 10장의 환자 중복과 모델 사전학습 노출은 미확인이다. 완전한 미노출 평가라고 표현하지 않는다.
-- 미해결: 간결 prompt는 x/y 교환 시 일부 개선되어 축 순서 혼동의 부분 기여를 배제할 수 없다.
-- 미해결: GT 경계 모호성, 위치·크기 오류 및 미검출을 해결하는 방법과 다른 데이터셋의 재현성은 미검증이다.
-- 미해결: pooling·decoder 병목이나 anatomy 전이의 필요성은 이 결과로 확정할 수 없다.
+- 최신 리뷰: agent/runs/iter_012/review.json
+- 근거: agent/runs/iter_009/review.json: 정상 사용 검증과 독립 양성 200명의 위치 불일치 근거.
+- 근거: research/results/iter_012/confirm_base/gen_worker*.jsonl 및 confirm_sft_seed{17,29,43}/gen_worker*.jsonl: 확인 800명에 대한 4,000개 고유 요청.
+- 근거: research/results/iter_012/final/confirm_result.json: prior_set 대비 평균 F1@0.3 차이 0.2155833, 환자 bootstrap 95% CI [0.1715271, 0.2591139]. 리뷰의 별도 parser·matching 재계산과 일치.
+- 근거: SFT의 F1@0.5는 0.313–0.364이고 양성 빈 응답은 15.25–18.5%로 잔여 오류가 남는다.
+- 사용·평가 검증: iter_009의 공식 예제·chat template·전처리 검증 범위를 재사용했다. 이번 리뷰에서 공식 GPU 예제를 재실행하지 않았다.
+- 사용·평가 검증: iter_012 protocol에 잠긴 38개 파일 hash와 현재 파일이 모두 일치하고, tracked 파일은 리뷰 SHA 783d2d04671ae296f3dc0c700e575f8af8e021c9와 일치했다.
+- 사용·평가 검증: 현재 영상 3,600개의 file/pixel hash 불일치 0, train/validation/confirm 간 환자 및 pixel hash 교집합 0을 확인했다.
+- 사용·평가 검증: validation base와 confirm의 원시 4,800요청에서 파일·prompt·protocol·adapter 연결 및 EOS 판별 불일치 0을 확인했다.
+- 사용·평가 검증: 20개 epoch의 validation 8,000요청을 재집계해 저장 점수와 일치함을 확인했다. 확인 주지표는 별도 구현으로 재계산했다.
+- 미해결: 더 충분한 직접 SFT와 비교해도 위치 정밀도·작은 병변·미검출 개선을 위한 새 방법의 이득이 남는가?
+- 미해결: 다른 데이터셋과 새 독립 확인 집단에서도 개선되는가?
+- 미해결: 주석 경계 모호성, 사전학습 노출 및 legacy 익명 영상 중복의 불확실성은 남는다.
+- 미해결: 이번 결과는 pooling 병목이나 anatomy 전이의 필요성을 확정하지 않는다.
 
 ## context-sensitivity — observed
 

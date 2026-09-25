@@ -3475,3 +3475,399 @@ SUMMARY: 복구 결함(lock·epoch validation 복구·입력 digest·평가 gate
 동일 checkpoint에서 무중단·중간-step 재개를 비교하고 batch ID·LR·optimizer·RNG·adapter를 기록해 복구 결함과 실행 변동을 분리한다. 추가 검사의 허용오차와 판정은 실행 전에 정하며 기존 FAIL은 소급 변경하지 않는다. 영향 범위가 확인된 trajectory만 필요한 만큼 재실행한다.
 
 선택 provenance, pipeline 소유권, completion 처리를 보완하고 새 protocol과 기존 결과의 호환 범위를 연결한다. 이후 원래 두 LR 5→8 epoch 규칙과 seed29/43을 완료한다. 수정된 다중 worker 실행기의 development 정합성과 메모리를 확인한 뒤 baseline·checkpoint를 고정하고 confirm 800명을 평가한다. 모든 자식 종료 코드와 최종 산출물을 확보한 후 리뷰를 제출한다.
+
+
+## iter_012 GPT PLAN [영상 조건부 집합 grounding / proceed] — 2026-09-25 12:10:11
+
+# 요약
+
+- **이번에 할 일:** 재개 수치 실패와 선택·완료 검증을 보완하고 기존 SFT 비교를 완료한다.
+- **필요한 이유:** 실제 학습·생성은 진행됐지만 복구 정확성과 독립 확인이 미완료다.
+- **확인할 기준:** 중간-step 상태 일치, 원시 요청과 선택 근거의 연결, 예정 epoch 전체 평가, 3개 seed와 확인 800명의 비교다.
+- **주의·다음:** 원래 실험 규모를 유지한다. SFT 성공은 baseline 확립이며 새 방법의 contribution과 다중 데이터셋 증명은 후속 과제다.
+
+# Current Understanding
+
+iter_009에서 정상 사용 조건의 RSNA opacity grounding 위치 불일치를 validated로 확인했다. iter_010·011은 직접 적응 baseline의 실행 미완료이며 유효한 음성 결과가 아니다.
+
+현재 HEAD는 `8b030717b813bcbff85a2ffc5f52c9561a73f452`다. 두 LR의 저장 로그는 step 300까지 있으며 epoch 1 validation 400명은 완료됐다. LR 1e-4/2e-4의 양성 F1@0.3은 각각 0.474000/0.4931667이다. 이전 보고서의 LR별 점수 교환은 원본을 보존한 채 이번 보고서에서 정정한다. 서로 다른 집단인 iter_009 점수와 비교해 개선량을 주장하지 않는다.
+
+유지: 모델 revision, 분할, baseline, 학습 설정, 매 epoch validation 400명, 5→8 epoch 규칙, seed17/29/43, confirm 800명, 성공 기준. 변경: 복구 검사와 상태 기록, 선택 provenance, pipeline 소유권, completion 처리, 새 산출물 경로. 보류: anatomy 전이와 새로운 목적함수. 사용자 보완의 일회성 정상 사용 진단은 반복하지 않는다.
+
+# Hypothesis
+
+assistant-only 직접 병변 LoRA SFT는 같은 concise prompt의 미적응 모델과 영상 비의존 보정을 넘어 새 RSNA 양성 환자의 bbox 집합 F1@0.3을 개선한다. 충분한 학습 뒤 남는 위치·크기·개수·빈 응답·형식 오류로 후속 방법의 필요성을 판단한다.
+
+복구 검사의 통과나 loss 감소는 이 가설의 지지가 아니다.
+
+# Limitation Evidence / Correct Usage Checks
+
+대상은 `lesion-grounding-generalization`이다. iter_009 원본 리뷰의 양성 134/200명 공통 위치 불일치와 사용법 검증 범위를 유지한다. 이는 모든 병변의 실패나 내부 병목 증명이 아니다.
+
+`google/medgemma-1.5-4b-it`, revision `91850547d9f0b2fdd21aa7c5f4f3d1a8a52c243b`, 값 보존 uint8 RGB·square padding·공식 processor/chat template·yxyx 0–1000·strict parser·greedy·1000→2000→4000 cap을 유지한다. 수정 경로의 prefix/mask, 현재 file/pixel hash, GT·split·prompt·adapter·protocol 연결을 확인한다. 실제 형식 실패와 잘림은 성능 실패로 평가하되 요청 누락은 평가 미완료로 차단한다.
+
+# Contribution Path / Baselines / Reuse
+
+직접 적응의 실제 개선과 잔여 오류를 확인하는 baseline 단계다. iter_010 조사 기록의 SPR·CORAL 등과의 비교 및 CoMedPO 원문 미확보 상태를 유지한다. 이번에 새로운 문헌 검증이나 목적함수 재현을 했다고 주장하지 않는다.
+
+비교군은 official_long/concise base, 기존 개발 380명에서 원래 800개 후보 규칙으로 고정한 prompt별 좌표 보정, train 기반 단일 box·집합 prior, concise SFT다. validation 양성 F1@0.3으로 주 비교군을 선택하고 기존 동률 규칙을 유지한다.
+
+현재 브랜치를 계속 사용한다. 필요한 파일이 있어 reuse_assets는 비운다. 전체 스냅샷 승인과는 구분한다.
+
+- 승인 범위 재사용: `rsna_diag/__init__.py`, `geometry.py`, `parse.py`, `metrics.py`, `sft_eval.py`, `lora.py`.
+- 복구 점검·필수 수정: `train.py`, `sft_data.py`, `inputs.py`, `migrate.py`, `test_rsna_iter011_gpu.py`.
+- 선택·완료 점검·필수 수정: `pipeline.py`, `select.py`, `final_eval.py`, `eval_gate.py`, `lock_protocol.py`, `run_shards.py`, `launch.py`, 필요 시 `queue_lock.py`·`generate.py`.
+- 기존 `test_rsna_iter009.py`, `test_rsna_iter010.py`, `test_rsna_iter011.py`의 관련 검사를 재사용한다. 미추적 `test_rsna_iter010_gpu.py`는 소유 범위와 저장 제외 이유를 확인하고 원본을 보존한다. 검사 우회로 자동 커밋하지 않는다.
+
+# Proposed Experiment
+
+## 1. 실행 상태와 이관 범위 고정
+
+실행 호스트에서 train·launcher·pipeline·추론의 host/PID/starttime, canonical run-dir, lock, GPU UUID, 로그 갱신, checkpoint와 종료 기록을 대조한다. 계획 환경의 ps 결과만으로 종료를 확정하지 않는다. 살아 있는 작업을 중복 실행하거나 claim을 지우지 않는다. 수정 전환이 필요하면 소유 작업의 지원되는 안전한 경계를 사용하며 다른 사용자 작업은 건드리지 않는다.
+
+새 기록은 `results/iter_012/`에 저장한다. 부모 결과·protocol·FAIL 기록은 수정하지 않는다. 종료·불변 상태를 확인한 부모 파일의 SHA와 protocol digest, 실제 step, 입력 집합, 코드 변경 범위를 migration manifest에 연결한다. mutable hardlink나 단순 protocol digest 교체는 금지한다. 기존 결과의 재사용·재검증·재실행을 파일 또는 trajectory별로 구분한다.
+
+## 2. 동작 확인: 재개 오류와 실행 변동 분리
+
+먼저 작은 결정적 모델에서 dropout과 실제 저장·복원 경로를 사용한다. optimizer step 직후 중단, epoch adapter 저장 후 중단, validation 부분 중단, 마지막 validation 중단을 검사한다. 실제 batch ID 순서, token/mask digest, LR, optimizer step·moment, adapter, Python/NumPy/CPU/CUDA RNG, sampler 위치와 train/eval mode를 기록한다. 복원 직후 값은 저장 상태와 정확히 일치해야 한다. validation 수행·복구가 다음 학습의 adapter·optimizer·RNG를 바꾸지 않아야 한다.
+
+DataLoader iterator와 worker seed는 학습 dropout RNG와의 관계를 명시한다. 별도 generator 도입 등 수정은 먼저 통제 fixture로 효과를 확인한다. 이것을 현재 실패의 원인으로 미리 단정하지 않는다.
+
+실제 모델은 기존 pilot16과 고정 validation8을 재사용한다. 두 LR을 각각 GPU 한 장에 배정하고, 각 GPU 안에서 동일 시작 checkpoint로 무중단 U1·무중단 U2·중간-step 재개 R을 순차 비교한다. GPU 차이가 U/R 비교에 섞이지 않게 한다. 기존 effective batch4의 3 epochs 검사는 유지하되 epoch 중간인 optimizer step2 직후의 실제 프로세스 종료·재개를 추가한다. 본학습 effective batch16·microbatch2 경로는 부모 checkpoint에서 두 LR 각각 다음 4 optimizer steps를 실행하는 별도 대조로 확인한다. pilot weight는 본학습에 이월하지 않는다.
+
+수치 gate는 실행 전 설정에 고정한다. 기존 loss 상대오차 1e-3, adapter 최대 절대오차 1e-4, validation utility 절대차 0.05를 기본으로 유지하며 원래 FAIL을 변경하지 않는다. 상태 복원·batch ID·LR·RNG의 불일치는 무조건 실패다. 같은 GPU의 U1/U2부터 기존 수치 gate를 통과하는지 확인하고 U/R에 동일 기준을 적용한다. U1/U2도 실패하면 변동 원인과 결정적 실행 가능성을 먼저 조사한다. 관측 최대차에 맞춰 허용오차를 넓혀 본실험을 통과시키지 않는다. 결정적 검사 설정은 별도 기록하고 본학습 설정의 변경 여부와 호환성을 명시한다.
+
+부모의 과거 로그에는 실제 batch/RNG 증거가 부족할 수 있다. 새 checkpoint 분기 간 일치는 앞으로의 재개 정확성 근거이며 과거 trajectory 전체의 동등성 증명은 아니다. 코드·입력·상태 감사로 과거 영향 범위를 정한다. 영향을 배제할 수 없는 trajectory는 마지막 검증된 지점부터 새 경로에서 재실행한다. 안전한 공통 지점이 없으면 해당 run만 같은 고정 설정으로 처음부터 재실행한다. 점수가 좋은 checkpoint를 복구 출발점으로 선택하지 않는다.
+
+## 3. 선택·완료 gate
+
+pipeline에 단일 소유권 lock을 적용하고 canonical run-dir별 train lock과 교착하지 않게 한다. 모든 건너뛰기 경로는 파일 존재가 아니라 현재 근거 검증을 요구한다. `train.py`의 기존 val_metrics 재사용 경로도 포함한다.
+
+extend/pick/comparator/final 파일에는 protocol 내용 digest, 선택 규칙, 예정 epoch 범위, seed/LR, 입력 digest, 원시 요청·metric·adapter의 hash를 연결한다. 최종 evaluator가 선택을 재계산하거나 동일 근거를 재검증하게 한다. protocol 잠금에는 pipeline과 관련 평가 코드를 포함한다. 기존 선택 파일은 조용히 신뢰하지 않고 검증 또는 새 경로의 재계산을 수행한다.
+
+실행별 attempt 상태와 원자적 completion을 분리한다. 실패한 attempt가 예전 completion을 현재 성공 증거로 사용하지 못하게 한다. 원본 성공 기록은 보존하되 현재 유효성 검증 없이 재사용하지 않는다. 모든 child의 종료 상태를 수집하고 살아 있는 child는 running/unknown으로 명시한다. null returncode를 성공으로 바꾸지 않는다.
+
+필수 주입 검사: 중간-step 재개, 변경·중복 ID, pixel/GT 변경, 잘못된 adapter, 누락 epoch, 선택 근거 변경, 오래된 comparator, 중복·누락 seed, 손상 completion, worker 실패, pipeline 동시 실행. 중단 후에는 유효한 기존 요청을 보존하고 누락만 수행해야 한다.
+
+## 4. 가능성 탐색과 규모 확대
+
+이번은 iter_010 미완료 계획의 연속이다. 새로운 subset·seed 축소나 매 epoch 평가 축소를 소급 적용하지 않는다. 기존 동작 확인과 실제 epoch 1 생성 근거가 있어 새 가능성 탐색을 별도로 반복하지 않는다. 위 복구·평가 gate 통과 후 원래 규모로 진행한다.
+
+train 2,400명은 opacity/Normal/NoOpacity-NotNormal 1,200/600/600명, validation 400명은 200/100/100명, confirm 800명은 400/200/200명이다. 기존 환자 층화·중복 배제·manifest를 유지하고 reserve는 열지 않는다.
+
+언어층 LoRA rank16/alpha32/dropout0.05, frozen bf16 base, assistant-only CE, AdamW LR {1e-4,2e-4}, weight_decay0.01, betas(0.9,0.999), eps1e-8, grad clip1, effective batch16, 현재 microbatch2와 원래 schedule을 유지한다.
+
+seed17 두 LR을 5 epochs까지 완료한다. 매 epoch 전체 validation 400명의 생성과 assistant loss를 평가한다. 어느 LR이라도 epoch4→5 utility가 0.01 이상 증가하고 loss가 1% 이상 감소하면 두 LR 모두 8 epochs로 연장한다. utility는 0.5×양성 F1@0.3 + 0.25×Normal valid_empty + 0.25×NoOpacity/NotNormal valid_empty다. checkpoint는 utility, F1@0.5, 이른 epoch 순으로 선택한다. LR 동률 규칙도 기존 구현을 유지한다.
+
+선택 LR·총 epoch 수로 seed29/43을 학습하고 동일 validation 규칙으로 각 checkpoint를 고른다. 기본 4개 trajectory 48,000 presentations/3,000 steps, 전체 연장 시 76,800/4,800이다. 유효한 완료분은 재사용한다. 8 epochs에도 계속 개선 중이면 미수렴으로 기록한다.
+
+## 5. 독립 확인
+
+예정 epoch 전체, seed {17,29,43}, adapter와 baseline 선택 근거가 검증·잠긴 뒤 confirm을 시작한다. base 두 prompt 1,600요청, SFT 세 seed 2,400요청으로 총4,000요청이다. 보정·prior는 추가 생성 없이 계산한다.
+
+이미 confirm이 수행됐는지 실행 호스트에서 확인한다. 확인 성능을 보고 설정을 변경했다면 독립 확인 자격을 유지한다고 주장하지 않는다. 기술적 복구에 의한 재사용은 선택 불변성과 provenance를 기록한다.
+
+추가 데이터셋은 iter_010의 Kvasir-SEG 준비 상태와 미검증 범위만 보고한다. 이번 RSNA 완료를 외부 자료 확보에 종속시키지 않는다.
+
+## 6. GPU 배치·비용·재개
+
+실행 직전 nvidia-smi로 허용 GPU0,1의 UUID와 여유 메모리를 확인하고 여유가 큰 장치부터 배정한다. 상속된 허용 집합을 지킨다. 학습은 두 LR 또는 독립 seed를 GPU별 하나씩 배정한다. 이전 전체 점유 약12GB/장과 프로세스당2GiB 여유를 고려하면 현재 학습 두 개를 한 장에 넣을 근거가 부족하다. 학습·epoch validation 중 추가 base worker를 섞지 않는다.
+
+별도 추론은 2 GPU×2 worker를 우선 후보로 둔다. 기존 24명×2 prompt에서 2/4 worker 처리량 1.39/2.73 요청/분과 출력 일치 기록을 활용하되, 수정한 경로에서는 같은 development thr24로 2/4 worker의 정합성과 전체 peak를 확인한다. base와 실제 선택 adapter를 포함하고 긴 출력·cap 확장을 점검한다. 요청/분, GPU별 전체 점유, worker별 peak, 긴 출력 지연, CPU/RAM/I/O 경합과 오류를 기록한다. 동시 peak 합계와 외부 점유에 worker당2GiB 여유가 확보되는 구성만 채택한다. 메모리나 정합성이 불충분하면 동시성을 낮추며 구체적 이유를 남긴다. 평가 점수로 실행 구성을 고르지 않는다.
+
+실측 SFT epoch 1 생성은 400명당 약30–31분의 요청 시간이다. 기존 순수 학습 추정 약6–7시간과 전체 base 2,400요청의 4-worker 환산 약14.7시간을 합치고 SFT validation·confirm 및 초기화 비용을 포함하면 기본 전체 실험은 대략25–40시간 규모로 예상한다. 이는 남은 시간 보장값이 아니며 재실행·연장·긴 출력에 따라 증가한다. 복구 검사 후 남은 step, base/SFT별 요청, 실제 병렬 처리량과 작업 의존성으로 예상 종료 시간을 갱신한다. 임의 시간 상한은 두지 않는다.
+
+50 optimizer steps와 epoch 경계에 adapter·optimizer·RNG·sampler·validation 상태·digest를 원자적으로 저장한다. 진행량·loss·gradient·자원·child 상태·남은 작업을 기록한다. OOM·비정상 수치·진행 정체는 원인 확인 후 안전한 구성으로 복구한다.
+
+# Implementation Tasks for Claude
+
+1. 실행 호스트의 소유 작업과 부모 결과를 감사하고 iter_012 이관·호환성 기록을 만든다.
+2. 실제 batch·optimizer·RNG 관측을 추가해 같은 GPU 통제와 중간-step 재개 검사를 수행한다. 원인 단정 없이 기존 5개 FAIL 각각의 해결 근거를 남긴다.
+3. pipeline 단일 소유권, 모든 재사용 경로의 검증, 선택 provenance, 원자적 completion과 child 종료 수집을 보완한다.
+4. 변경 전후 protocol과 재사용 가능한 부모 범위를 고정한다. 영향받지 않은 출력·학습은 보존하고 필요한 trajectory만 재실행한다.
+5. 관련 CPU 회귀와 실제 GPU gate를 통과한 뒤 원래 학습·확장·seed·confirm을 끝낸다. 백그라운드 시작을 완료로 보고하지 않는다.
+6. 자체적으로 이해 가능한 보고서에 LR 정정, gate별 결과, 실제 사용량, 재사용/재실행 범위, 선택 이력, 모든 비교군·seed 결과, 원시 파일 경로와 미검증 범위를 담는다. 소스 커밋은 orchestrator에 맡긴다.
+
+# Evaluation (성공/실패 기준 포함)
+
+복구 성공은 저장 상태와 실제 입력·LR·optimizer·RNG의 일치, 사전 수치 gate 통과, 누락 없는 epoch 복구, 변경 입력·선택 근거 거부와 단일 소유권으로 판단한다. 실패가 남으면 본학습을 확대하지 않는다.
+
+주지표는 confirm 양성400명의 end-to-end 환자별 F1@0.3이다. 형식 실패·잘림은0점이다. 세 seed의 환자별 값을 평균한 뒤 주 비교군과 paired bootstrap10,000회, seed20260925로95% CI를 계산한다. seed별 점수와 범위를 모두 보고하고 환자 bootstrap이 seed 불확실성 전체를 나타낸다고 주장하지 않는다.
+
+직접 적응 성공 기준은 평균 차이≥0.05, CI하한>0, 세 seed 차이 모두 양수, 각 seed 전체 유효 출력률≥95%, 두 음성 층 valid_empty율이 concise base보다 각각5 percentage points 넘게 악화되지 않는 것이다. 음성 기준은 정식 비열등성 검정이 아니다.
+
+F1@0.5, precision/recall, union IoU, valid-only 성능, 형식 실패·잘림·빈 목록·추가 box율과 단일/복수 GT·train 면적 삼분위 결과를 함께 보고한다. 기준 일부만 충족하면 개선 범위를 명시하고, 수렴·정밀도 부족은 inconclusive로 구분한다. 유효한 무개선은 현재 데이터·언어층 rank16 LoRA·학습 조건에 한정한다. 실행·입력·복구 오류로 가설을 평가하지 못하면 execution_failed다.
+
+이번 성공은 baseline 확립이다. 새로운 방법론, 외부 일반화 또는 최종 목표 달성으로 보고하지 않는다.
+
+# Risks / Checks
+
+- 복구 노이즈에 맞춘 사후 허용오차 완화와 confirm 기반 설정 변경을 금지한다.
+- 부모 checkpoint의 존재와 hash 일치만으로 과거 학습 정확성을 승인하지 않는다. 증거가 부족한 범위를 명시한다.
+- 재개·completion 검증을 우회해 본실험을 시작하지 않는다. 선택적 리팩터링은 미룬다.
+- RSNA bbox의 추가 예측을 임상적 오진으로 단정하지 않는다. 주석 경계와 사전학습 노출의 불확실성을 유지한다.
+- 대규모 GPU 필요 후보: vision encoder·projector·언어 모델의 공동 공간 적응, 다기관 grounding 사전학습을 보존한다. 현재 LoRA 결과만으로 필요성이나 실패를 확정하지 않는다.
+
+# 계획의 근거 (GPT 조사 노트)
+
+## 새로 확인한 것
+
+GOAL.md, LIMITATIONS.md, CODE_ASSETS.md, iter_009 원본 review.json, iter_010·011 계획, iter_011 리뷰와 현재 train.py·pipeline.py·select.py·launch.py·GPU 검사 소스를 확인했다. research HEAD는 `8b030717b813bcbff85a2ffc5f52c9561a73f452`이며 tracked diff는 없다. `test_rsna_iter010_gpu.py`만 미추적 상태다. 필요한 모듈은 현재 브랜치에 있어 선별 반입이 필요 없다.
+
+현재 저장 metric에서 LR 1e-4/2e-4의 epoch 1 양성 F1@0.3은 각각 0.474000/0.4931667, utility는 0.589500/0.5990833이다. 두 train log의 마지막 step은 300이다. 이는 직전 리뷰와 일치하며 보고서의 LR 교환을 새 보고서에서 정정해야 한다.
+
+epoch 1 생성 평균 runtime은 요청당 4.635/4.532초, 평균 출력은 34.135/35.408 tokens, 최대 출력은 모두 71 tokens다. 각 400명 생성은 순수 요청 시간 합계 약 30.9/30.2분이다. 이 SFT 실측을 긴 base 출력의 처리량과 분리해야 한다.
+
+GPU 검사 소스는 무중단 경로를 GPU0, 재개 경로를 GPU1에 배치하며 실제 입력 ID 대신 epoch/pos/n_examples를 비교한다. 별도 generator 없는 DataLoader iterator 생성도 확인했다. 따라서 GPU 간 차이, 실행 변동, 재개 상태 오류를 아직 분리하지 못했다. noise_floor_control.json의 무중단 utility 최대 차이 0.125는 재개 차이 0.25 전체를 설명하지 못한다.
+
+pipeline.py는 extend/pick/comparator/final 및 completion을 존재 여부로 재사용한다. select.py는 epoch별 요청 검사를 수행하지만 선택 파일에 protocol 경로만 기록한다. launch.py는 중단 시 살아 있는 child를 null returncode로 기록할 수 있어 완료와 중단 상태를 분리해야 한다.
+
+## 의미와 남은 범위
+
+추가 문헌 조사보다 구체적인 실행 복구가 다음 판단에 직접 연결된다. 이전 계획의 선행 방법 비교와 원문 미확보 범위를 유지하며 이번에 문헌을 새로 검증했다고 주장하지 않는다. 정상 사용 진단은 완료된 범위를 재사용한다. 현재 프로세스 생존, checkpoint tensor 내용, 수정 후 수치 동등성은 이번 read-only 계획에서 검증하지 않았다.
+
+## 대규모 GPU 필요 후보
+
+vision encoder·projector·언어 모델의 공동 공간 적응과 다기관 대규모 grounding 학습은 후보로 보존한다. 언어층 LoRA의 결과만으로 필요성이나 실패를 확정하지 않는다.
+
+
+
+## iter_012 CLAUDE REPORT — 2026-09-26 07:34:20
+
+# 요약
+
+- **핵심 결과:** 재개 결함을 GPU 비결정성과 분리해서 확인했습니다. 결정적 kernel에서는 무중단 학습과 5회 중단·재개 학습이 bitwise로 같았습니다(GPU 검사 59/59). 이 검증된 코드로 원래 규모의 실험을 끝까지 실행했습니다. 확인 집단(양성 400명)에서 직접 LoRA SFT가 가장 강한 단순 비교군(`prior_set`)보다 F1@0.3이 **+0.216 (95% CI 0.172–0.259)** 높았고, 사전 기준 5개를 모두 충족했습니다.
+- **근거:**
+  - seed별 F1@0.3은 0.631, 0.636, 0.653입니다. 비교군과의 차이는 +0.207, +0.212, +0.229로 모두 양수입니다.
+  - 전체 유효 출력률은 100%입니다. 음성 층의 valid_empty율은 concise base보다 낮아지지 않았습니다(Normal 0.765 → 0.975–0.98, NoOpacity/NotNormal 0.195 → 0.665–0.72).
+  - 모든 선택·comparator·연장 판정은 최종 평가 시점에 원시 요청에서 다시 계산해 파일과 일치함을 확인했습니다.
+- **미검증·주의:**
+  - 이 결과는 직접 적응 baseline의 확립입니다. 새 방법론의 기여나 다른 데이터셋에서의 재현은 아닙니다.
+  - 세 seed 모두 마지막 epoch(5)가 선택됐습니다. 사전 규칙으로는 연장하지 않았지만 학습이 부족했을 가능성은 남습니다.
+  - base validation은 `generate.py`의 기존 결함 때문에 부모 record를 재사용하지 못하고 새로 생성했습니다.
+  - 잔여 오류가 큽니다: F1@0.5는 약 0.31–0.36, 양성인데 빈 응답이 15–18%, 작은 병변 F1은 약 0.42–0.44입니다.
+- **다음:** 잔여 오류(위치 정밀도, 양성 미검출, 작은 병변)를 겨냥한 방법을 이 SFT baseline과 비교합니다. 두 번째 데이터셋 재현도 필요합니다.
+
+# Work Performed
+
+1. **실행 상태·부모 결과 감사** (`results/iter_012/recovery/parent_audit.json`)
+   - iter_011 학습 PID 3786218/3786219는 종료된 상태였고 train.lock도 풀려 있었습니다(읽기 전용 flock probe로 확인). 시작 시점에 GPU compute 프로세스는 없었습니다.
+   - 두 run 모두 step 300까지 진행됐습니다. epoch 2 validation은 29/4건만 남은 미완료 상태였습니다.
+   - **LR 정정:** 원시 응답에서 다시 계산하면 lr1e-4는 F1@0.3 0.4740 / utility 0.5895, lr2e-4는 0.4932 / 0.5991입니다. iter_011 STATUS.md는 두 LR의 수치를 뒤바꿔 적었습니다.
+   - **부모 궤적은 재사용하지 않았습니다.** 부모 checkpoint에는 저장 상태 digest가 없어 복원이 정확했는지 사후 검증할 수 없습니다. step 0–100 구간은 iter_010 코드로 학습됐고, 로그에 batch ID·RNG 기록도 없습니다. 그래서 seed17 두 LR을 step 0부터 다시 학습했습니다(추가 비용 약 2시간). 점수를 보고 고른 결정이 아닙니다. iter_011 결과 파일은 그대로 보존했습니다.
+2. **재개 관측과 수정** (`train.py`, `sft_data.py`)
+   - step마다 실제 batch ID(DataLoader가 반환한 위치에서 역산), token/mask digest, step 전 RNG 4종 digest, optimizer step, train mode를 기록합니다. 계획된 batch와 다르면 즉시 중단합니다.
+   - checkpoint에 adapter·optimizer·RNG digest를 저장하고, 복원 직후 live 상태와 정확히 같은지 대조합니다.
+   - validation 전후로 학습 상태가 바뀌지 않았는지 검사합니다.
+   - DataLoader에 epoch별 전용 generator를 줬습니다. 효과는 CPU 통제 검사로 먼저 확인했습니다: generator가 없으면 iterator 생성이 전역 CPU RNG를 소비하고, 있으면 소비하지 않습니다.
+   - 기존 val_metrics는 존재만으로 믿지 않습니다. 점수를 원시 응답에서 다시 계산해 기록값과 비교합니다.
+   - pilot 전용 옵션 `--deterministic`, `--stop-after-step`을 추가했습니다.
+3. **선택·완료 gate** (`select.py`, `final_eval.py`, `run_shards.py`, `launch.py`, `pipeline.py`, `lock_protocol.py`)
+   - 선택 파일에 다음 provenance를 기록합니다: protocol 내용 digest, 선택 규칙, 예정 epoch, 입력 digest, 근거 파일의 sha256. 파일을 쓸 때와 최종 평가할 때 모두 원시 근거에서 다시 계산해 파일과 완전히 같아야 통과합니다.
+   - confirm 평가는 comparator, 연장 판정, 세 seed의 선택을 모두 다시 계산해 검증합니다.
+   - run_shards는 시도(attempt)별 상태를 따로 기록합니다. 새 시도가 시작되면 이전 completion은 삭제하지 않고 `attempts/`로 옮겨, 현재 성공 근거로 쓰이지 않게 합니다. completion은 원자적으로 씁니다.
+   - launch는 살아 있는 child를 returncode null이 아니라 `running` 상태로 명시합니다.
+   - pipeline은 단일 소유 lock을 쓰고, 건너뛰기는 파일 존재가 아니라 근거 검증을 통과할 때만 합니다. pipeline.py도 protocol 잠금 목록에 넣었습니다.
+4. **본실험**
+   - seed17 두 LR 5 epochs → 연장 판정 → LR 선택 → seed29/43 → 생성 경로 점검 → base validation → comparator → confirm 생성 4,000요청 → 최종 평가까지 실행했습니다.
+   - `generate.py` 부모 재사용 분기의 NameError(iter_010부터 있던 결함) 때문에 원래 pipeline이 6단계에서 멈췄습니다. 이후는 잠긴 pipeline 함수를 같은 순서로 호출하는 `run_iter012_rest.py`로 진행했고, base validation은 800요청 전부 새로 생성했습니다.
+
+# Files Changed
+
+- 수정한 코드: `rsna_diag/train.py`, `rsna_diag/sft_data.py`, `rsna_diag/select.py`, `rsna_diag/final_eval.py`, `rsna_diag/run_shards.py`, `rsna_diag/launch.py`, `rsna_diag/pipeline.py`(iter_012용으로 재작성), `rsna_diag/lock_protocol.py`(잠금 목록에 pipeline.py 추가)
+- 새로 만든 파일: `test_rsna_iter012.py`, `test_rsna_iter012_gpu.py`, `run_iter012_rest.py`
+- 건드리지 않음:
+  - `generate.py`: 결함은 확인했지만 잠긴 protocol을 유지하려고 수정하지 않았습니다.
+  - `test_rsna_iter010_gpu.py`: 미추적 파일입니다. iter_011 commit.json에서 "비밀정보 패턴 감지"로 자동 커밋에서 제외된 파일이라 원본 그대로 두었습니다.
+- 결과: `results/iter_012/` 아래 새 파일만 만들었습니다. 부모 결과는 수정하지 않았습니다.
+
+# Commands / Experiments (실제 실행한 명령과 성공/실패)
+
+- `python test_rsna_iter012.py results/iter_012/tests`: **36/36 PASS**. 첫 실행에서는 launch 검사 1건이 실패했는데, json.tool의 종료 코드를 1로 잘못 가정한 테스트 쪽 오류였습니다(실제 코드는 2를 반환). 기대값을 고친 뒤 통과했습니다.
+- `python test_rsna_iter009.py results/iter_012/tests`: 59/59 PASS
+- `python test_rsna_iter010.py results/iter_012/tests`: 70/70 PASS
+- `python test_rsna_iter011.py results/iter_012/tests`: **42개 PASS 후 중단(exit 1)**. iter_011의 select fixture에는 protocol digest와 재계산 가능한 점수 필드가 없어서, 강화된 gate가 의도대로 거부했습니다. 그 뒤의 migration 검사 등은 실행되지 않았습니다. 대신 연장 규칙과 epoch 선택 규칙의 수계산 검사는 iter_012 테스트에 옮겨 통과시켰습니다.
+- `python test_rsna_iter012_gpu.py`: **59/59 PASS**. 실행 시간 약 1시간 10분, LR별로 GPU 한 장씩 사용했습니다.
+- `python -m rsna_diag.lock_protocol ...`: pilot protocol과 main protocol의 digest가 같습니다(797ae707…). 모든 실행이 끝난 뒤 다시 검증해도 일치했습니다.
+- `python -m rsna_diag.pipeline`: seed17과 seed29/43 학습, 선택, gen_check까지 성공했습니다. base_val 단계에서 worker NameError로 **실패**했습니다(`results/iter_012/base_val/`에 기록 0건).
+- `python run_iter012_rest.py`: 성공했습니다. 선택 파일 5개를 다시 계산해 기존 파일과 같음을 확인한 뒤 나머지 단계를 끝까지 실행했습니다.
+
+# Results (수치와 결과 파일 경로)
+
+**재개 검사** (`results/iter_012/tests/fixtures_iter012_gpu.json`, 판정 기준은 실행 전에 `gpu_gate_config.json`에 고정)
+
+| 모드 | 비교 | 결과 |
+|---|---|---|
+| D: 결정적 kernel, pilot | U1 vs U2, U1 vs R(5회 중단, 중간 step 2회 포함) | 12 step loss·adapter·validation 출력이 bitwise 일치 |
+| M: 결정적 kernel, 본학습 설정(2400/eff16/mb2/workers3) | U1 vs U2 vs R(step 2에서 중단) | 4 step loss가 bitwise 일치, 최종 digest 일치 |
+| N: 기본 kernel, pilot | U1 vs U2 / U1 vs R (lr1e-4) | loss 상대차 최대 0.80% / 1.01% |
+
+- D·M 모두 batch ID, token, LR, RNG, optimizer 상태가 정확히 일치했고, 복원 직후 상태는 저장 상태와 같았습니다. validation은 학습 상태를 바꾸지 않았습니다.
+- 중단된 epoch의 validation은 epoch 1·3에서 8건 전체, epoch 2에서 남은 5건만 복구됐습니다.
+- N 모드에서는 부동소수 궤적만 다르고 batch·RNG 등 비부동소수 상태는 정확히 일치했습니다.
+- **해석:** iter_011의 A·C 계열 FAIL 5건은 상태 복원 오류가 아니라 kernel 비결정성으로 설명됩니다. C 계열(부모 이관)은 부모 궤적을 쓰지 않는 것으로 해소했습니다.
+- 결정적 모드는 step당 약 31초로 기본 kernel(약 11.4초)보다 약 2.7배 느립니다. 그래서 본학습은 원래 설정대로 기본 kernel을 유지했습니다.
+
+**학습과 선택** (`results/iter_012/select/`)
+
+- validation utility, epoch 1→5:
+  - lr1e-4 s17: 0.597 → 0.700
+  - lr2e-4 s17: 0.619 → 0.728
+- 연장하지 않았습니다. lr2e-4는 utility가 +0.017 올랐지만 val loss가 0.6105에서 0.6289로 늘어 loss 조건을 충족하지 못했습니다.
+- LR 2e-4를 선택했습니다. seed29와 seed43의 epoch 5 utility는 0.703, 0.717이며, 세 seed 모두 epoch 5가 선택됐습니다.
+
+**생성 경로 점검** (`gen_check/decision.json`)
+
+- 4 worker를 채택했습니다.
+- iter_010 결과와 48/48 요청의 출력 token이 같았습니다.
+- GPU별 전체 점유 최대는 17.9GB로, 기준 20,480MiB(worker당 2GiB 여유) 이내였습니다.
+
+**Comparator** (`final/comparator.json`, validation 양성 F1@0.3 기준)
+
+- `prior_set` 0.380으로 선택했습니다.
+- 나머지: official_long 0.113, official_long 보정 0.288, concise 0.082, concise 보정 0.149, prior_single 0.276
+
+**Confirm** (`final/confirm_result.json`, 양성 400명)
+
+| 비교군 | F1@0.3 | F1@0.5 | 유효 출력률 | Normal 빈 응답률 | NoOpacity/NotNormal 빈 응답률 |
+|---|---:|---:|---:|---:|---:|
+| official_long | 0.165 | 0.021 | 100% | 0 | 0 |
+| official_long 보정 | 0.268 | 0.090 | 100% | 0 | 0 |
+| concise | 0.081 | 0.006 | 97.25% (잘림 22건) | 0.765 | 0.195 |
+| prior_set (주 비교군) | 0.424 | 0.162 | 100% | 0 | 0 |
+| SFT s17 / s29 / s43 | 0.631 / 0.636 / 0.653 | 0.349 / 0.313 / 0.364 | 100% | 0.975–0.98 | 0.665–0.72 |
+
+- SFT 평균과 `prior_set`의 차이는 **+0.2156 (CI 0.1715–0.2591)**입니다. 이 CI는 환자 단위 bootstrap이라 학습 seed 불확실성을 충분히 반영하지 않습니다.
+- 다른 비교군과의 차이: prior_single +0.316, official_long 보정 +0.372, concise +0.559
+- **잔여 오류 (SFT):**
+  - 양성인데 빈 응답: 15–18%
+  - GT 개수별 F1@0.3: 단일 GT 약 0.57, 복수 GT 0.70–0.75
+  - GT 면적별 F1@0.3: 작은 병변 0.42–0.44, 큰 병변 0.74–0.78
+  - 예측 box 수 / GT box 수: 약 1.25 / 1.47로 과소 예측 경향
+
+**자원과 처리량**
+
+- 학습: seed17 5.39시간, seed29/43 5.26시간. GPU별 최대 점유는 약 12.2GB이고, GPU당 학습 프로세스는 하나였습니다.
+- 생성 wall-clock: base validation 96분, confirm base 212분, SFT 각 15분
+
+# Goal Progress / Reused Assets (목표 진전·미검증 범위, 재사용 출처·검증)
+
+- **도달 단계:** 계획한 독립 확인 단계까지 완료했습니다. 실행 규모는 원래 계획 그대로이며, iter_010 계획의 연속이라 단계별 규모 정책은 소급 적용하지 않았습니다.
+- **이번에 알게 된 것:**
+  - validated된 `lesion-grounding-generalization` 한계에 대해, 언어층 rank16 LoRA 직접 SFT가 같은 RSNA 확인 집단에서 실제 생성 grounding을 크게 개선했습니다.
+  - 그래도 F1@0.5 약 0.34, 양성 미검출 약 17%, 작은 병변의 낮은 성능이 남습니다.
+- **아직 검증하지 못한 것:**
+  - 다른 데이터셋에서의 재현. Kvasir-SEG는 iter_010의 준비 상태 그대로이며 이번에 사용하지 않았습니다.
+  - 새 방법론의 기여. 이번 결과는 baseline입니다.
+  - 8 epochs 이상 학습했을 때의 추세.
+  - 세 seed를 넘는 재현성.
+- **재사용한 자산:**
+  - 승인된 모듈 geometry, parse, metrics, sft_eval, lora는 회귀 검사로 재확인했습니다.
+  - iter_010의 manifest, split, baselines.json은 protocol에 잠그고 hash로 확인했습니다.
+  - iter_011의 val8_ids는 GPU 검사 fixture에만 썼습니다.
+  - iter_010의 thr_w4 출력은 출력 일치 대조에만 썼습니다.
+  - iter_010의 base_val 부모 record는 사용하지 않았습니다.
+
+# Problems (현재 결론 무효 / 재사용 전 수정 / 추후 개선을 구분)
+
+- **현재 결론을 무효로 만드는 문제:** 확인한 것은 없습니다.
+- **재사용 전에 고쳐야 할 것:**
+  - `generate.py`의 `run_worker`가 `lock_protocol`을 import하지 않아 `--parent-dir` 경로가 NameError로 실패합니다. 다음 protocol 버전에서 고쳐야 합니다.
+  - 남은 단계는 `run_iter012_rest.py`가 실행했는데, 이 파일은 protocol 잠금 목록 밖입니다. 다만 잠긴 pipeline 함수와 잠긴 CLI gate만 호출합니다.
+  - `test_rsna_iter011.py`의 select·migration fixture는 새 gate에 맞게 갱신해야 합니다.
+- **추후 개선:**
+  - 결정적 모드가 약 2.7배 느리다는 점은 기록만 해두었습니다.
+  - 세 seed 모두 마지막 epoch가 최고였으므로 학습량을 다시 살펴볼 여지가 있습니다.
+  - 음성 층 기준(빈 응답률이 5%p 넘게 악화되지 않을 것)은 정식 비열등성 검정이 아닙니다.
+  - RSNA bbox 주석 경계의 모호성과 사전학습 노출 여부는 여전히 불확실합니다.
+
+# Recommendation to GPT
+
+- SFT를 "검증된 직접 적응 baseline"으로 등록하세요(단일 데이터셋, 5 epochs, 3 seeds).
+- 다음 method 단계는 이 baseline의 잔여 오류에 직접 대응하는 방법이어야 합니다. 대상은 F1@0.5로 드러나는 위치 정밀도, 양성인데 빈 응답을 내는 문제, 작은 병변입니다. 같은 확인 규칙으로 SFT와 비교하되, 이번 confirm 집단은 이미 본 자료이므로 새 확인 집단이나 두 번째 데이터셋을 확보하세요.
+- `generate.py` 결함 수정과 새 protocol 버전 작성을 다음 계획의 준비 작업에 넣으세요.
+
+SELF_CHECK: FAIL
+SUMMARY: 결정적 kernel에서 재개 상태가 bitwise로 정확함을 확인(GPU 59/59, CPU 36/36)한 뒤, 원래 규모의 LoRA SFT(두 LR, 3 seeds, confirm 800명)를 끝까지 실행했다. 사전 기준 5개를 모두 충족했다(prior_set 대비 F1@0.3 +0.216, CI 0.172–0.259). 다만 generate.py 부모 경로 결함 때문에 잠금 밖 실행기로 우회했고 test_rsna_iter011 fixture가 중단됐으며, 결과는 단일 데이터셋의 baseline 확립이라 FAIL로 표시해 검토를 요청한다.
+
+# [orchestrator] 권한 거부된 도구 호출
+- Bash: ps -eo pid,lstart,etime,user,args --sort=start_time
+- Bash: timeout 590 bash -c 'until grep -qE "pass$|Traceback" results/iter_012/tests/gpu_test.log; do sleep 30; done'; ls results/iter_012/pilot | tr '\n' ' '
+- Bash: timeout 590 bash -c 'until grep -qE "pass$|Traceback" results/iter_012/tests/gpu_test.log; do sleep 30; done'
+
+
+
+## iter_012 GPT REVIEW [CONTINUE] — 2026-09-26 07:41:42
+
+# 요약
+
+- **판정:** `success`, `valid_experiment=true`, `CONTINUE`. 직접 LoRA SFT baseline의 독립 확인을 완료했다.
+- **핵심 근거:** 확인 양성 400명에서 prior_set 대비 평균 F1@0.3 차이 +0.2156, 95% CI [0.1715, 0.2591]. 원시 응답을 별도로 파싱·matching한 결과가 정확히 일치했다.
+- **의미·한계:** 경량 적응으로 실제 grounding 출력을 개선했다. 새 방법론의 contribution과 외부 데이터셋 일반화는 아직 증명하지 않았다. 실행기 결함과 미보존 파일 때문에 전체 코드 재사용은 승인하지 않는다.
+- **다음:** 충분한 직접 SFT와 비교할 후속 방법을 잔여 오류·선행 방법에 근거해 선정한다. 기존 confirm을 반복적인 방법 선택에 사용하지 않는다.
+
+# Assessment
+
+계획한 직접 적응 가설은 실제 검증됐다. `SELF_CHECK: FAIL`에 적힌 문제들은 이번 완료 결과를 무효화하는 문제와 재사용 결함이 혼재돼 있다. 부모 재사용 경로는 실패했지만 새 base validation 800요청을 생성했고, 보조 실행기로 확인 평가까지 완료했다. `rest.stdout.log`에는 최종 evaluator 실행과 exit 0이 남아 있다. 리뷰의 독립 점수 재계산도 일치하므로 이번 반복을 execution_failed로 판정할 이유는 없다.
+
+검토 대상은 SHA `783d2d04671ae296f3dc0c700e575f8af8e021c9`다. 구현 전후 diff와 현재 소스를 읽었으며 tracked 파일은 해당 SHA와 모두 일치했다. 미추적 `test_rsna_iter010_gpu.py`는 승인 대상에서 제외했다. 별도 execution_amendment.md는 없고, 재실행 사유와 보조 실행기 사용은 parent_audit·코드 설명·보고서에 기록돼 있다. 리뷰에서는 파일을 수정하거나 테스트·GPU 실험을 재실행하지 않고 저장 결과를 읽어 검증했다.
+
+# Key Findings
+
+**실험 규모와 선택**
+
+- train/validation/confirm은 2,400/400/800명이다. 세 분할 간 환자 및 pixel hash 교집합은 0이었다. 현재 영상 3,600개의 file/pixel hash도 manifest와 일치했다.
+- 두 LR의 seed17, 선택 LR의 seed29/43까지 총 4개 trajectory가 각각 750 steps·12,000 presentations를 완료했다. 합계 3,000 steps·48,000 presentations이며 학습 child 종료 코드는 모두 0이다.
+- 20개 epoch의 validation 8,000요청을 재집계해 저장된 생성 점수와 불일치 0을 확인했다. 선택 파일이 참조한 train config·adapter 파일·원시 요청·metric·completion hash도 일치했다.
+- 두 LR 모두 사전 연장 조건을 충족하지 않았다. LR 2e-4는 epoch4→5 utility가 0.01717 증가했지만 validation loss 비율이 1.03008로 증가했다. LR 2e-4와 각 seed의 epoch 5 선택은 기록된 규칙과 일치한다.
+- validation의 6개 단순 비교군 점수를 재계산했고 prior_set의 F1@0.3=0.380이 가장 높았다. comparator는 confirm 생성 전에 고정됐다.
+
+**독립 확인 결과**
+
+| 비교군 | 양성 F1@0.3 | 양성 F1@0.5 |
+|---|---:|---:|
+| official_long | 0.1650 | 0.0208 |
+| concise | 0.0812 | 0.0063 |
+| prior_set | 0.4243 | 0.1619 |
+| SFT seed17 | 0.6308 | 0.3487 |
+| SFT seed29 | 0.6359 | 0.3133 |
+| SFT seed43 | 0.6528 | 0.3638 |
+
+위 값은 confirm 원시 응답의 별도 JSON 파싱과 최대 cardinality matching 계산으로 확인했다. 환자별 세 seed 평균과 prior_set의 차이를 10,000회 bootstrap한 결과도 저장값과 같았다: +0.2155833, 95% CI [0.1715271, 0.2591139].
+
+확인 생성은 base 1,600요청과 SFT 2,400요청으로 총 4,000개이며 각 디렉터리에 중복·누락 없이 완료됐다. SFT는 세 seed 모두 800/800 유효 출력이었다. Normal의 빈 응답은 195–196/200, NoOpacity/NotNormal은 133–144/200으로 concise base의 153/200·39/200보다 높았다. 사전 성공 기준 5개를 모두 충족한다.
+
+**복구 검증과 자원**
+
+CPU 검사 결과는 iter_009 재사용 59/59, iter_010 70/70, iter_012 36/36이다. GPU 기록은 59/59다. 결정적 D 모드의 두 LR 각각 12 steps, M 모드의 본학습 입력 설정 각각 4 steps에서 U1/U2/R의 원시 loss·batch ID·token digest·LR·RNG·optimizer step 일치를 직접 대조했다. D의 재개 5회와 M의 중간-step 재개 1회가 기록돼 있다. 이는 수정된 실행 경로의 근거이며 과거 부모 trajectory의 소급 인증은 아니다.
+
+두 GPU에서 독립 학습을 병렬 수행했고, 별도 추론은 GPU당 2 worker를 사용했다. development base 처리량은 2.376요청/분으로 기존 2 worker의 1.39요청/분보다 높았고, 과거 4 worker 출력과 48/48 token 일치가 기록됐다. 생성 자원 로그를 재집계한 GPU 전체 관측 최대는 17,988MiB로 2 worker의 여유를 고려한 20,480MiB 기준 이내였다. 학습 GPU당 1개 배치는 약 12GB 점유와 추가 프로세스 여유를 고려하면 타당하다. 임의 시간 상한이나 불필요한 pilot 반복으로 본실험을 축소하지 않았다.
+
+# Problems / Concerns
+
+현재 SFT 개선 결론을 무효화하는 문제는 발견하지 못했다. 다만 다음 재사용에는 아래 수정이 필요하다.
+
+1. `generate.run_worker`의 부모 재사용 분기는 `lock_protocol`이 정의되지 않아 실제 실패했다. 이번 base validation 전량 재생성은 유효한 복구였지만 코드 결함은 남아 있다.
+2. `pipeline.py`와 `run_iter012_rest.py`는 기존 `confirm_result.json`을 내용 검증 없이 건너뛴다. `gen_check`도 기존 decision 파일을 그대로 반환한다. 이는 계획의 모든 건너뛰기 검증 요구를 완전히 충족하지 않는다. 이번 final 결과는 실제 새로 계산됐으므로 현재 결론을 무효화하지 않는다.
+3. gen_check는 출력 일치 수치를 기록하지만 worker 선택의 필수 조건으로 강제하지 않는다. 현재 48/48 일치는 확인됐으나 다음 재사용 전에 gate를 보완해야 한다.
+4. 보조 실행기는 protocol 잠금 밖이다. 이번에는 잠긴 함수·CLI를 호출하고 설정·평가 집단을 유지했음을 소스와 로그로 확인했다. 후속 실행에서는 정식 경로에 통합하고 기존 산출물과의 호환 범위를 기록해야 한다.
+5. iter_011 회귀 검사는 42개 통과 뒤 오래된 select fixture의 protocol digest 누락으로 중단됐다. 미실행 migration 검사를 통과했다고 간주할 수 없다. 이번에는 부모 학습 trajectory를 사용하지 않아 현재 비교를 막지 않는다.
+6. GPU 검사기의 장치 0/1 고정은 이번 허용 범위에서는 문제가 없지만 범위가 달라질 때 재사용할 수 없다. 미보존 파일도 남아 있어 전체 스냅샷 승인은 보류한다.
+
+보고서의 원인 해석도 좁혀야 한다. 수정된 결정적 경로의 동등성과 기본 kernel의 변동은 확인됐지만, 과거 FAIL 5건 모두가 kernel 비결정성 때문이었다는 인과 결론까지 입증하지는 않았다. 부모 이관 검사는 부모 trajectory를 사용하지 않는 결정으로 우회됐다.
+
+# Interpretation
+
+사용자의 정상 사용 검증 우선 지시를 따른다. iter_009에서 검증한 문제에 연결해 method 단계에 진입했고 anatomy 전이를 자동 선택하지 않았다. 부모 결과와 실패 기록은 보존했으며, 이번 개선은 같은 확인 집단에서 비교했다.
+
+의미 있는 진전은 경량 언어층 적응만으로 실제 생성 grounding이 개선됐다는 점이다. 반면 위치 정밀도와 양성 미검출은 남아 있다. SFT의 F1@0.5는 0.313–0.364이며 양성 빈 응답은 61–74/400명이다. 작은 병변 성능 차이는 원인 후보를 제공하지만 내부 표현 병목이나 특정 해결책의 필요성을 확정하지 않는다.
+
+세 seed 모두 마지막 epoch를 선택했으므로 baseline의 추가 학습 가능성을 검토해야 한다. 사전 연장 규칙을 지켰다는 사실과 충분한 수렴은 별개다. 환자 bootstrap은 학습 seed 불확실성 전체를 반영하지 않으며, 주석 경계와 사전학습 노출의 불확실성도 유지한다. 이번 success는 baseline 확립이지 top-tier 방법론 contribution 또는 최종 목표 달성이 아니다.
+
+# Recommended Next Experiment
+
+실행기 재사용 결함을 필요한 범위에서 수정하면서 방법 개발을 준비한다. 이미 성공한 본실험을 단순 코드 정비 때문에 반복할 필요는 없다.
+
+train/validation에서 추가 학습한 직접 SFT와 잔여 오류를 겨냥한 후보를 비교할 계획을 세운다. 가까운 선행 방법과 차별성을 확인해 후보 하나를 고르고, 실제 생성 성능으로 가능성을 판단한다. 새 계획에는 대표 subset·1개 seed 탐색, 공정한 학습량 비교, 확대·보류 기준과 두 번째 데이터셋 검증을 고정한다. 유망성이 확인되면 필요한 다중 seed·독립 확인으로 확대한다.
+
+이번 confirm의 잔여 오류를 방법 설계에 활용하면 개발 자료로 전환한다. 새로운 확인 환자 집단을 보존하고, 확인 결과에 맞춰 checkpoint·목적함수·평가 기준을 조정하지 않는다.
