@@ -47,11 +47,17 @@ def main():
             rl.flush()
             time.sleep(30)
     finally:  # 중단(예: SIGINT)되어도 소유 child의 현재 상태를 기록한다. child는 종료시키지 않는다.
-        res = [{"gpu": j["gpu"], "module": j["module"], "pid": p.pid, "returncode": p.poll(), "log": j["log"]} for j, p in zip(jobs, procs)]
-        json.dump({"jobs": res, "wall_s": time.time() - t0, "all_finished": all(p.poll() is not None for p in procs)},
-                  open(os.path.join(a.log_dir, "launch_result.json"), "w"), indent=1)
+        # iter_012: 살아 있는 child는 returncode null이 아니라 state=running으로 명시하고, 성공은 모든 child가 0으로 종료했을 때만이다.
+        res = [{"gpu": j["gpu"], "module": j["module"], "pid": p.pid, "returncode": p.poll(),
+                "state": "exited" if p.poll() is not None else "running", "log": j["log"]} for j, p in zip(jobs, procs)]
+        fin = all(r["state"] == "exited" for r in res)
+        out = {"jobs": res, "wall_s": time.time() - t0, "all_finished": fin,
+               "status": ("success" if fin and all(r["returncode"] == 0 for r in res) else ("failed" if fin else "interrupted_children_running"))}
+        tmp = os.path.join(a.log_dir, "launch_result.json.tmp")
+        json.dump(out, open(tmp, "w"), indent=1)
+        os.replace(tmp, os.path.join(a.log_dir, "launch_result.json"))
     print(json.dumps(res))
-    sys.exit(0 if all(p.returncode == 0 for p in procs) else 1)
+    sys.exit(0 if out["status"] == "success" else 1)
 
 
 if __name__ == "__main__":

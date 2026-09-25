@@ -8,6 +8,7 @@ iter_011: 모든 입력 생성 결과는 eval_gate.verify_gen(예상 ID x prompt
       python -m rsna_diag.final_eval confirm --comparator FILE --conf-base DIR --protocol P --sft SEED:SELECTION.json:GEN_DIR ... --out FILE
 """
 import argparse
+import glob
 import hashlib
 import json
 import os
@@ -49,31 +50,63 @@ def all_simple(recs, ids, bl):
     return d
 
 
-def cmd_comparator(a):
+def fsha(path):
+    return hashlib.sha256(open(path, "rb").read()).hexdigest()
+
+
+def comparator_payload(val_base, protocol, parent_dir=None, parent_protocol=None):
+    """validation base 생성의 원시 요청에서 주 비교군을 재계산한다 (근거 파일 hash 포함)."""
     items, gt = inputs.load_items(MANIFEST, GT, SPLIT_IDS.format("validation"), "validation")
     bl = json.load(open(BASE_JSON))
     ids = [i["id"] for i in items]
-    recs = eval_gate.verify_gen(a.val_base, items, ["official_long", "concise"], None, a.protocol, a.parent_dir, a.parent_protocol)
+    recs = eval_gate.verify_gen(val_base, items, ["official_long", "concise"], None, protocol, parent_dir, parent_protocol)
     tr = [i for i in gt if gt[i]["split"] == "train"]
     edges = sft_eval.area_edges(gt, tr)
     preds = all_simple(recs, ids, bl)
     summ = {k: sft_eval.summarize(v, gt, ids, edges) for k, v in preds.items()}
     best = max(summ, key=lambda k: (round(summ[k]["f1@0.3"], 12), k))
-    json.dump({"comparator": best, "selection": "validation positive mean F1@0.3 (end-to-end)", "n_val": len(ids),
-               "protocol_digest": lock_protocol.verify(a.protocol), "baselines_json_sha256": hashlib.sha256(open(BASE_JSON, "rb").read()).hexdigest(),
-               "val_inputs_digest": inputs.inputs_digest(items, gt),
-               "val_f1@0.3": {k: v["f1@0.3"] for k, v in summ.items()}, "val_summaries": summ}, open(a.out, "w"), indent=1)
-    print("comparator", best, {k: round(v["f1@0.3"], 4) for k, v in summ.items()})
+    gen_files = sorted(glob.glob(os.path.join(val_base, "gen_worker*.jsonl")))
+    par_files = sorted(glob.glob(os.path.join(parent_dir, "gen_worker*.jsonl"))) if parent_dir else []
+    return {"comparator": best, "selection": "validation positive mean F1@0.3 (end-to-end)", "n_val": len(ids),
+            "protocol_digest": lock_protocol.verify(protocol), "baselines_json_sha256": fsha(BASE_JSON),
+            "val_inputs_digest": inputs.inputs_digest(items, gt), "val_base_dir": val_base, "parent_dir": parent_dir,
+            "parent_protocol": parent_protocol, "parent_protocol_digest": lock_protocol.digest_of(parent_protocol) if parent_protocol else None,
+            "evidence": {"gen_files_sha256": {f: fsha(f) for f in gen_files + par_files},
+                         "completion_sha256": fsha(os.path.join(val_base, "completion.json"))},
+            "val_f1@0.3": {k: v["f1@0.3"] for k, v in summ.items()}, "val_summaries": summ}
+
+
+def cmd_comparator(a):
+    from . import select as SEL
+    pl = comparator_payload(a.val_base, a.protocol, a.parent_dir, a.parent_protocol)
+    st = SEL.write_or_verify(a.out, pl)
+    print("comparator", st, pl["comparator"], {k: round(v, 4) for k, v in pl["val_f1@0.3"].items()})
 
 
 def cmd_confirm(a):
     seeds_in = eval_gate.check_seeds([kv.split(":")[0] for kv in a.sft])  # 가장 먼저: 중복/누락/잉여 seed 거부 (dict 생성 이전)
+    from . import select as SEL
     comp = json.load(open(a.comparator))
     items, gt = inputs.load_items(MANIFEST, GT, SPLIT_IDS.format("confirm"), "confirm")
     bl = json.load(open(BASE_JSON))
     pdig = lock_protocol.verify(a.protocol)
     if comp.get("protocol_digest") != pdig or comp["baselines_json_sha256"] != hashlib.sha256(open(BASE_JSON, "rb").read()).hexdigest():
         raise eval_gate.GateError("comparator file was not locked under the current protocol/baselines")
+    # iter_012: 주 비교군·연장·선택을 원시 validation 근거에서 다시 계산해 파일과 완전히 같을 때만 확인 평가를 한다
+    if comp != json.loads(json.dumps(comparator_payload(comp["val_base_dir"], a.protocol, comp["parent_dir"], comp["parent_protocol"]))):
+        raise eval_gate.GateError("comparator file is stale: differs from recomputation from validation base generations")
+    ext = SEL.verify_file(a.extend, "extend", a.protocol)
+    E = 8 if ext["extend"] else 5
+    sel_files = {int(kv.split(":")[0]): SEL.verify_file(kv.split(":")[1], "pick", a.protocol) for kv in a.sft}
+    for s, sf in sel_files.items():
+        if sf["planned_epochs"] != E:
+            raise eval_gate.GateError(f"seed {s}: selection planned epochs {sf['planned_epochs']} != E={E} from extend decision")
+    if sorted(sel_files[17]["runs_in"]) != sorted(ext["runs_in"]) or len(ext["runs_in"]) != 2:
+        raise eval_gate.GateError("seed 17 LR pick must be over exactly the two seed-17 LR runs of the extend decision")
+    lr17 = sel_files[17]["runs"][sel_files[17]["selected_run"]]["lr"]
+    for s in (29, 43):
+        if len(sel_files[s]["runs_in"]) != 1 or sel_files[s]["runs"][sel_files[s]["selected_run"]]["lr"] != lr17:
+            raise eval_gate.GateError(f"seed {s}: selection must be a single run at the seed-17 selected lr {lr17}")
     ids = [i["id"] for i in items]
     pos = [i for i in ids if gt[i]["category"] == "opacity"]
     tr = [i for i in gt if gt[i]["split"] == "train"]
@@ -125,8 +158,14 @@ def cmd_confirm(a):
            "per_seed_diff": diffs, "per_seed_f1@0.3": {s: float(per[s].mean()) for s in seeds},
            "seed_range_f1@0.3": [min(per[s].mean() for s in seeds), max(per[s].mean() for s in seeds)]},
            "criteria": crit, "negative_layer_detail": neg_ok, "verdict_preregistered_criteria": verdict,
-           "diff_vs_other_baselines": boot_all, "summaries": summ}
-    json.dump(res, open(a.out, "w"), indent=1)
+           "diff_vs_other_baselines": boot_all, "summaries": summ,
+           "provenance": {"comparator_file": a.comparator, "comparator_sha256": fsha(a.comparator), "extend_file": a.extend,
+                          "extend_sha256": fsha(a.extend), "total_epochs_E": E,
+                          "selection_files_sha256": {kv.split(":")[0]: fsha(kv.split(":")[1]) for kv in a.sft},
+                          "recomputed_and_equal": True}}
+    tmp = a.out + ".tmp"
+    json.dump(res, open(tmp, "w"), indent=1)
+    os.replace(tmp, a.out)
     print(json.dumps({k: res["primary"][k] for k in ("mean_sft_minus_comparator_f1@0.3", "ci95", "per_seed_diff")}), crit, verdict)
 
 
@@ -141,12 +180,13 @@ def main():
     c.add_argument("--out", required=True)
     f = sp.add_parser("confirm")
     f.add_argument("--comparator", required=True)
+    f.add_argument("--extend", required=True, help="seed17 연장 판정 파일 (재계산 검증)")
     f.add_argument("--conf-base", required=True)
     f.add_argument("--protocol", required=True)
     f.add_argument("--sft", nargs="+", required=True, help="SEED:SELECTION.json:GEN_DIR (정확히 17, 29, 43)")
     f.add_argument("--out", required=True)
     a = ap.parse_args()
-    if os.path.exists(a.out):
+    if a.cmd == "confirm" and os.path.exists(a.out):
         raise SystemExit(f"{a.out} exists (not overwritten)")
     {"comparator": cmd_comparator, "confirm": cmd_confirm}[a.cmd](a)
 

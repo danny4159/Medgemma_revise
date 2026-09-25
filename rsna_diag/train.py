@@ -7,9 +7,15 @@
 - iter_011 수정: (1) run-dir 단일 writer lock (train.lock), (2) 시작 시 epoch adapter는 있으나 val_metrics가 없는 epoch의 validation을 복구
   (마지막 epoch 포함, 학습 상태·RNG 불변), (3) split ID 파일 내용·현재 file/pixel hash·GT를 입력 digest로 train_digest에 연결,
   (4) 검증된 부모 checkpoint를 migration manifest로만 가져온다.
+- iter_012 수정: (1) step마다 실제 batch ID(DataLoader가 낸 sample 위치로 역산)·token/mask digest·step 전 RNG digest·optimizer step·train mode를
+  train_log에 기록하고 계획된 batch와 다르면 중단, (2) checkpoint에 adapter/optimizer/RNG digest를 저장하고 복원 직후 live 상태와 대조,
+  (3) DataLoader는 epoch별 전용 generator를 써서 iterator 생성이 전역 CPU RNG를 소비하지 않게 함 (재개 시 RNG 상태 정확 일치),
+  (4) validation 전후 adapter/optimizer/RNG 불변 검사, (5) 기존 val_metrics는 존재만으로 믿지 않고 select.verify_epoch로 검증,
+  (6) pilot 전용 --deterministic(결정적 kernel, math SDPA)과 --stop-after-step(중간 optimizer step 직후 checkpoint 뒤 종료) 검사 hook.
 사용: CUDA_VISIBLE_DEVICES=<gpu> python -m rsna_diag.train --run-dir D --lr 2e-4 --seed 17 --epochs 5 --protocol P [--migration M]
 """
 import argparse
+import hashlib
 import json
 import math
 import os
@@ -19,7 +25,7 @@ import time
 
 import numpy as np
 
-from . import generate, inputs, lock_protocol, lora, migrate, prompts as P, queue_lock, sft_data, sft_eval
+from . import generate, inputs, lock_protocol, lora, migrate, prompts as P, queue_lock, select, sft_data, sft_eval
 
 MANIFEST = "results/iter_010/manifests/infer_manifest.jsonl"
 GT = "results/iter_010/manifests/gt_manifest.json"
@@ -88,7 +94,9 @@ class SFTDataset:
         it = self.items[self.order[k]]
         image, _, _ = inputs.load_verified(it)  # 현재 pixel hash가 manifest와 다르면 예외
         tgt = sft_data.target_text([b["yxyx_norm"] for b in self.gt[it["id"]]["boxes"]])
-        return sft_data.build_example(self.proc, image, self.prompt, tgt)
+        ex = sft_data.build_example(self.proc, image, self.prompt, tgt)
+        ex["sample_pos"] = int(k)  # 실제로 읽힌 epoch 순서 위치 (batch ID 역산·대조용)
+        return ex
 
 
 def setup_model(seed):
@@ -113,6 +121,61 @@ def set_rng_state(torch, st):
     torch.cuda.set_rng_state(st["cuda"])
     np.random.set_state(st["np"])
     random.setstate(st["py"])
+
+
+def _h(b):
+    return hashlib.sha256(b).hexdigest()[:24]
+
+
+def rng_digest(torch):
+    """전역 RNG 네 종류의 상태 digest (Python/NumPy/torch CPU/CUDA 현재 장치)."""
+    npst = np.random.get_state()
+    return {"torch_cpu": _h(torch.get_rng_state().numpy().tobytes()), "cuda": _h(torch.cuda.get_rng_state().numpy().tobytes()),
+            "numpy": _h(npst[1].tobytes() + repr((npst[0],) + tuple(npst[2:])).encode()), "python": _h(repr(random.getstate()).encode())}
+
+
+def opt_digest(torch, opt):
+    """AdamW 상태(step, moment)와 param_group hyperparameter의 digest."""
+    sd = opt.state_dict()
+    h = hashlib.sha256()
+    for pid in sorted(sd["state"]):
+        for k in sorted(sd["state"][pid]):
+            v = sd["state"][pid][k]
+            h.update(f"{pid}.{k}".encode())
+            h.update(v.detach().to("cpu", torch.float32).contiguous().numpy().tobytes() if torch.is_tensor(v) else repr(v).encode())
+    h.update(json.dumps([{k: v for k, v in g.items() if k != "params"} for g in sd["param_groups"]], sort_keys=True, default=str).encode())
+    return h.hexdigest()[:24]
+
+
+def opt_step_count(opt):
+    st = [s.get("step") for s in opt.state.values() if "step" in s]
+    return int(float(st[0])) if st else 0
+
+
+def batch_token_digest(b):
+    h = hashlib.sha256()
+    for k in ("input_ids", "attention_mask", "labels", "token_type_ids"):
+        if k in b:
+            h.update(k.encode())
+            h.update(str(tuple(b[k].shape)).encode())
+            h.update(b[k].contiguous().numpy().tobytes())
+    return h
+
+
+def live_digests(torch, model, opt):
+    return {"adapter": lora.state_digest(lora.lora_state_dict(model)), "optimizer": opt_digest(torch, opt), "rng": rng_digest(torch)}
+
+
+def set_deterministic(torch):
+    """pilot 검사 전용: 결정적 kernel만 사용 (비결정 op는 예외), SDPA는 math backend만."""
+    torch.use_deterministic_algorithms(True)
+    torch.backends.cudnn.benchmark = False
+    torch.backends.cudnn.deterministic = True
+    torch.backends.cuda.enable_flash_sdp(False)
+    torch.backends.cuda.enable_mem_efficient_sdp(False)
+    if hasattr(torch.backends.cuda, "enable_cudnn_sdp"):
+        torch.backends.cuda.enable_cudnn_sdp(False)
+    torch.backends.cuda.enable_math_sdp(True)
 
 
 def save_adapter(torch, model, path, extra):
@@ -226,13 +289,17 @@ def main():
     ap.add_argument("--migration", default=None, help="검증된 부모 checkpoint를 새 run으로 가져오는 migration manifest")
     ap.add_argument("--stop-after-epoch-ckpt", type=int, default=None, help="test: 이 epoch의 adapter/ckpt 저장 직후(validation 전) 종료")
     ap.add_argument("--stop-in-validation", type=int, default=None, help="test: validation 요청을 이 개수 새로 기록한 뒤 종료")
+    ap.add_argument("--stop-after-step", type=int, default=None, help="test: 이 optimizer step의 정기 checkpoint 저장 직후 종료 (epoch 중간)")
+    ap.add_argument("--deterministic", action="store_true", help="검사 전용: 결정적 kernel (본실험 금지)")
     a = ap.parse_args()
     CFG["eff_batch"] = a.eff_batch
     if not a.no_val and a.eff_batch != 16 and not a.pilot:
         sys.exit("eff-batch override is pilot-only")
     if not a.pilot and (a.no_val or a.train_ids != SPLIT_IDS.format("train") or a.val_ids != SPLIT_IDS.format("validation")
-                        or a.stop_after_epoch_ckpt or a.stop_in_validation):
-        sys.exit("non-default ids / --no-val / stop hooks require --pilot")
+                        or a.stop_after_epoch_ckpt or a.stop_in_validation or a.stop_after_step or a.deterministic):
+        sys.exit("non-default ids / --no-val / stop hooks / --deterministic require --pilot")
+    if a.deterministic:  # cuBLAS 결정적 workspace는 CUDA context 생성 전에 정해야 한다
+        os.environ["CUBLAS_WORKSPACE_CONFIG"] = ":4096:8"
     if not a.no_val and not a.pilot and a.epochs > PHASE1_EPOCHS and a.epochs != 8:
         sys.exit("extension is defined only up to 8 epochs")
     pdig = lock_protocol.verify(a.protocol)
@@ -258,6 +325,8 @@ def run(a, pdig, reclaimed_lock):
     t_in = inputs.inputs_digest(train_items, gt)
     v_in = inputs.inputs_digest(val_items, gt) if val_items else None
     edges = sft_eval.area_edges(gt, [i for i in gt if gt[i]["split"] == "train"])
+    if a.deterministic:
+        set_deterministic(torch)
     seed_all(torch, a.seed)
     _, proc, model, names = setup_model(a.seed)
     tok = proc.tokenizer
@@ -273,7 +342,8 @@ def run(a, pdig, reclaimed_lock):
         sys.exit("runtime generation config digest != protocol")
     cfg = dict(CFG, lr=a.lr, seed=a.seed, microbatch=a.microbatch, n_train=len(train_items), n_val=len(val_items),
                model_revision=generate.MODEL_REVISION, protocol_digest=pdig, n_lora_targets=len(names), n_trainable=n_train_params,
-               train_inputs_digest=t_in, val_inputs_digest=v_in)
+               train_inputs_digest=t_in, val_inputs_digest=v_in, deterministic=bool(a.deterministic),
+               dataloader_rng="torch.Generator seeded seed*1000+epoch (iter_012)")
     tdig = train_digest(cfg)
     cfg_path = os.path.join(a.run_dir, "train_config.json")
     if os.path.exists(cfg_path):
@@ -291,9 +361,12 @@ def run(a, pdig, reclaimed_lock):
     logf = open(os.path.join(a.run_dir, "train_log.jsonl"), "a")
 
     def save_ckpt(epoch, pos, val_pending=None, parent=None):
+        dg = live_digests(torch, model, opt)
         atomic_save(torch, {"lora": lora.lora_state_dict(model), "optimizer": opt.state_dict(), "step": step, "epoch": epoch,
                             "pos_in_epoch": pos, "rng": rng_state(torch), "train_digest": tdig, "val_pending_epoch": val_pending,
-                            "base_revision": generate.MODEL_REVISION, "protocol_digest": pdig, "parent": parent}, ck)
+                            "base_revision": generate.MODEL_REVISION, "protocol_digest": pdig, "parent": parent, "digests": dg}, ck)
+        log_event(event="checkpoint", step=step, epoch=epoch, pos=pos, digests=dg)
+        return dg
 
     def log_event(**kw):
         logf.write(json.dumps({"ts": time.time(), **kw}) + "\n")
@@ -303,12 +376,18 @@ def run(a, pdig, reclaimed_lock):
         blob = torch.load(ck, map_location="cpu", weights_only=False)
         if blob["train_digest"] != tdig or blob["base_revision"] != generate.MODEL_REVISION or blob["protocol_digest"] != pdig:
             sys.exit("checkpoint provenance mismatch")
+        if "digests" not in blob:
+            sys.exit("checkpoint has no saved state digests (pre-iter_012 format); refusing to resume without restore verification")
         lora.load_lora_state(model, blob["lora"])
         opt.load_state_dict(blob["optimizer"])
         step, epoch0, pos0 = blob["step"], blob["epoch"], blob["pos_in_epoch"]
         set_rng_state(torch, blob["rng"])
+        restored = live_digests(torch, model, opt)
+        if restored != blob["digests"]:  # 복원 직후 live adapter·optimizer·RNG가 저장 상태와 정확히 같아야 한다
+            sys.exit(f"restored state != saved checkpoint state: saved {blob['digests']} restored {restored}")
         print(f"resumed step={step} epoch={epoch0} pos={pos0}", flush=True)
-        log_event(event="resume", step=step, epoch=epoch0, pos=pos0, stale_lock_reclaimed=bool(reclaimed_lock))
+        log_event(event="resume", step=step, epoch=epoch0, pos=pos0, stale_lock_reclaimed=bool(reclaimed_lock), restored_digests=restored,
+                  restored_equals_saved=True)
     elif a.migration:
         blob, mig = migrate.verify_parent(a.migration, cfg, pdig)
         lora.load_lora_state(model, blob["lora"])
@@ -329,9 +408,11 @@ def run(a, pdig, reclaimed_lock):
         """epoch e adapter로 validation. from_file이면 현재 학습 상태를 보관했다가 epoch adapter를 넣고 끝난 뒤 복원한다 (optimizer 불변, RNG 복원)."""
         epoch_dir = os.path.join(a.run_dir, f"epoch_{e:02d}")
         vm = os.path.join(epoch_dir, "val_metrics.json")
-        if os.path.exists(vm):
+        if os.path.exists(vm):  # 존재만으로 믿지 않는다: 원시 요청·adapter·protocol·입력 연결을 검증 (불일치는 예외)
+            verify_existing_val(e)
             return
         rng_before = rng_state(torch)
+        pre = live_digests(torch, model, opt)
         snap = lora.lora_state_dict(model) if from_file else None
         if from_file:
             blob_a = torch.load(os.path.join(epoch_dir, "adapter.pt"), map_location="cpu", weights_only=True)
@@ -349,8 +430,16 @@ def run(a, pdig, reclaimed_lock):
         if from_file:
             lora.load_lora_state(model, snap)
         set_rng_state(torch, rng_before)
-        log_event(event="validation_done", epoch=e, val_loss=vl, utility=summ["utility"], recovered_from_file=from_file)
+        post = live_digests(torch, model, opt)
+        if post != pre:  # validation 수행·복구가 다음 학습의 adapter·optimizer·RNG를 바꾸면 안 된다
+            raise RuntimeError(f"validation changed training state: before {pre} after {post}")
+        log_event(event="validation_done", epoch=e, val_loss=vl, utility=summ["utility"], recovered_from_file=from_file,
+                  state_unchanged=True, digests=post)
         print(f"epoch {e}: val_loss {vl:.4f} utility {summ['utility']:.4f} f1@.3 {summ['f1@0.3']:.4f}", flush=True)
+
+    def verify_existing_val(e):
+        tc = json.load(open(cfg_path))
+        select.verify_epoch(a.run_dir, e, tc, v_in, a.protocol, val_items, gt)
 
     if not a.no_val:  # adapter 저장 뒤 validation을 못 끝낸 epoch는 다음 epoch 학습 전에 복구한다 (마지막 epoch 포함)
         for e in range(1, epoch0 + 1):
@@ -360,15 +449,19 @@ def run(a, pdig, reclaimed_lock):
             if not os.path.exists(os.path.join(epoch_dir, "val_metrics.json")):
                 print(f"recovering pending validation for epoch {e}", flush=True)
                 validate_epoch(e, from_file=True)
+            else:
+                verify_existing_val(e)
     for epoch in range(epoch0, a.epochs):
         rng = np.random.default_rng(a.seed * 1000 + epoch)
         order = rng.permutation(n_tr)
         start_pos = pos0 if epoch == epoch0 else 0
         ds = SFTDataset(proc, train_items, gt, P.CONCISE, order)
         idx = list(range(start_pos * CFG["eff_batch"], n_tr))
+        dl_gen = torch.Generator()
+        dl_gen.manual_seed(a.seed * 1000 + epoch)  # iterator 생성이 전역 torch CPU RNG를 소비하지 않게 한다 (dataset 자체는 무작위성 없음)
         dl = torch.utils.data.DataLoader(torch.utils.data.Subset(ds, idx), batch_size=a.microbatch, shuffle=False, num_workers=a.workers,
                                          collate_fn=lambda ex: sft_data.collate(ex, tok.pad_token_id), prefetch_factor=2 if a.workers else None,
-                                         worker_init_fn=close_lock_fd)
+                                         worker_init_fn=close_lock_fd, generator=dl_gen)
         model.train()
         it = iter(dl)
         for s in range(start_pos, spe):
@@ -377,10 +470,16 @@ def run(a, pdig, reclaimed_lock):
             lr = lr_at(step, spe, a.lr, total_epochs=8)
             for g in opt.param_groups:
                 g["lr"] = lr
+            rng_before, opt_step_before = rng_digest(torch), opt_step_count(opt)
+            if not model.training:
+                raise RuntimeError("model not in train mode at optimizer step")
             loss_acc, ntok_seen = 0.0, 0
+            seen_pos, tok_h = [], hashlib.sha256()
             n_micro = math.ceil(len(grp) / a.microbatch)
             for _ in range(n_micro):
                 b = next(it)
+                seen_pos += b.pop("sample_pos").tolist()
+                tok_h.update(batch_token_digest(b).digest())
                 b = {k: v.cuda() for k, v in b.items()}
                 if int((b["labels"] != -100).sum()) == 0:
                     raise RuntimeError("batch without assistant tokens")
@@ -390,6 +489,10 @@ def run(a, pdig, reclaimed_lock):
                 ntok_seen += nt
             if ntok_seen != tot_tok:
                 raise RuntimeError(f"label token count mismatch {ntok_seen} != {tot_tok}")
+            planned_ids = [train_items[j]["id"] for j in grp]
+            actual_ids = [train_items[order[p]]["id"] for p in seen_pos]
+            if actual_ids != planned_ids or seen_pos != list(range(s * CFG["eff_batch"], s * CFG["eff_batch"] + len(grp))):
+                raise RuntimeError(f"step {step + 1}: DataLoader batch != planned batch")
             gn = float(torch.nn.utils.clip_grad_norm_(params, CFG["grad_clip"]))
             if not math.isfinite(gn) or not math.isfinite(loss_acc):
                 raise RuntimeError(f"non-finite loss/grad at step {step}: {loss_acc} {gn}")
@@ -398,10 +501,19 @@ def run(a, pdig, reclaimed_lock):
             step += 1
             logf.write(json.dumps({"step": step, "epoch": epoch + 1, "pos": s + 1, "loss": loss_acc, "grad_norm": gn, "lr": lr,
                                    "n_examples": len(grp), "elapsed_s": time.time() - t0,
-                                   "peak_mem_gb": torch.cuda.max_memory_allocated() / 2 ** 30}) + "\n")
+                                   "peak_mem_gb": torch.cuda.max_memory_allocated() / 2 ** 30,
+                                   "batch_ids": actual_ids, "batch_token_sha": tok_h.hexdigest()[:24], "rng_before": rng_before,
+                                   "opt_step_before": opt_step_before, "train_mode": True}) + "\n")
             logf.flush()
+            saved_now = False
             if step % a.ckpt_every == 0 and (s + 1) < spe:
                 save_ckpt(epoch, s + 1)
+                saved_now = True
+            if a.stop_after_step is not None and step == a.stop_after_step:
+                if not saved_now:
+                    raise RuntimeError("--stop-after-step must coincide with a regular mid-epoch checkpoint step")
+                print("test stop after mid-epoch step checkpoint", flush=True)
+                os._exit(5)
             if a.max_steps is not None and step >= a.max_steps:
                 save_ckpt(epoch, s + 1)
                 print("max-steps reached", flush=True)

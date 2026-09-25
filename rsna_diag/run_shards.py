@@ -4,6 +4,8 @@
 - 각 worker는 `python -m rsna_diag.generate`(원자적 claim 큐, worker별 출력 gen_worker{k}.jsonl). 기존 claim은 지우지 않는다
   (죽은 소유자의 claim만 worker가 스스로 회수). 같은 out-dir에 대한 동시 orchestrator는 run.lock으로 거부한다.
 - 종료 후 예상 요청 집합 == 실제 집합(중복·누락·잉여 0)일 때만 completion.json을 쓴다.
+- iter_012: 시도(attempt)별 상태 파일(attempts/)을 분리한다. 새 시도 시작 시 기존 completion.json은 attempts/로 이름을 바꿔 보존하므로
+  실패한 시도가 예전 completion을 현재 성공 근거로 남기지 않는다. completion/last_run은 원자적으로 쓴다. 중단 시 worker 상태를 running으로 기록.
 - 자원 로그: GPU별 memory.used/util과 프로세스별 사용량을 resource_log.jsonl에 주기적으로 append한다.
 사용: python -m rsna_diag.run_shards --manifest M --ids IDS --out-dir D --protocol P --prompts a,b --workers N [--adapter DIR]
 """
@@ -16,6 +18,15 @@ import sys
 import time
 
 from . import eval_gate, generate, lock_protocol, prompts as P, queue_lock
+
+
+def atomic_json(obj, path):
+    tmp = path + ".tmp"
+    with open(tmp, "w") as f:
+        json.dump(obj, f, indent=1, default=str)
+        f.flush()
+        os.fsync(f.fileno())
+    os.replace(tmp, path)
 
 
 def gpu_snapshot(idx_list):
@@ -82,8 +93,21 @@ def main():
     rlk, own, _ = queue_lock.try_lock(rl_path, info)
     if rlk is None:
         sys.exit(f"another run_shards owns {a.out_dir}: {own}")
+    procs = []
+    attempt_id = f"{time.strftime('%Y%m%d_%H%M%S')}_{os.getpid()}"
+    att_dir = os.path.join(a.out_dir, "attempts")
+    os.makedirs(att_dir, exist_ok=True)
+    att_path = os.path.join(att_dir, f"attempt_{attempt_id}.json")
+    att = {"attempt_id": attempt_id, "status": "running", "pid": os.getpid(), "host": os.uname().nodename, "t_start": time.time(),
+           "workers": a.workers}
     try:
-        procs = []
+        # iter_012: 새 시도가 시작되면 이전 completion은 현재 성공 근거가 아니다. 삭제하지 않고 이름을 바꿔 보존한다.
+        cp = os.path.join(a.out_dir, "completion.json")
+        if os.path.exists(cp):
+            sup = os.path.join(att_dir, f"completion_superseded_by_{attempt_id}.json")
+            os.replace(cp, sup)
+            att["superseded_completion"] = sup
+        atomic_json(att, att_path)
         for k in range(a.workers):
             env = dict(os.environ, CUDA_VISIBLE_DEVICES=str(gpus[k % len(gpus)]))
             cmd = [sys.executable, "-m", "rsna_diag.generate", "--manifest", a.manifest, "--prompts", a.prompts,
@@ -124,13 +148,23 @@ def main():
                 complete = False
                 rep["gate_error"] = str(e)[:500]
         rep.update({"returncodes": codes, "wall_s": time.time() - t0, "allowed_gpus": allowed, "gpus_used": gpus,
-                    "n_workers": a.workers, "worker_gpu": [gpus[k % len(gpus)] for k in range(a.workers)]})
-        json.dump(rep, open(f"{a.out_dir}/last_run.json", "w"), indent=1)
-        if complete and all(c == 0 for c in codes):
-            json.dump(rep, open(f"{a.out_dir}/completion.json", "w"), indent=1)
+                    "n_workers": a.workers, "worker_gpu": [gpus[k % len(gpus)] for k in range(a.workers)], "attempt_id": attempt_id})
+        atomic_json(rep, f"{a.out_dir}/last_run.json")
+        ok = complete and all(c == 0 for c in codes)
+        att.update({"status": "complete" if ok else "failed_or_incomplete", "returncodes": codes, "t_end": time.time(), "report": rep})
+        atomic_json(att, att_path)
+        if ok:
+            atomic_json(rep, f"{a.out_dir}/completion.json")
         print("returncodes", codes, "wall_s", round(rep["wall_s"]), "complete", complete, {k: rep[k] for k in ("n_expected", "n_actual_unique", "n_missing")})
-        sys.exit(0 if complete and all(c == 0 for c in codes) else 2)
+        sys.exit(0 if ok else 2)
     finally:
+        if att["status"] == "running":  # 예외·중단: 살아 있는 worker는 running으로 남긴다 (null을 성공으로 바꾸지 않는다)
+            att.update({"status": "interrupted", "t_end": time.time(),
+                        "children": [{"pid": p.pid, "returncode": p.poll(), "state": "exited" if p.poll() is not None else "running"} for p in procs]})
+            try:
+                atomic_json(att, att_path)
+            except OSError:
+                pass
         rlk.release()
 
 

@@ -76,4 +76,6 @@ def collate(examples, pad_id):
     out = {"input_ids": ids, "attention_mask": att, "labels": lab, "pixel_values": torch.cat([e["pixel_values"] for e in examples], 0)}
     if has_tt:
         out["token_type_ids"] = tt
+    if "sample_pos" in examples[0]:  # iter_012: 학습 loop가 실제 batch ID를 대조한다 (모델 입력에는 넣지 않음)
+        out["sample_pos"] = torch.tensor([e["sample_pos"] for e in examples], dtype=torch.long)
     return out
