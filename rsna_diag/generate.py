@@ -287,7 +287,7 @@ def main():
 
 
 def run_worker(a, items, pnames, prompts_used, pdig_protocol, info):
-    from . import queue_lock
+    from . import lock_protocol, queue_lock  # iter_013: 부모 재사용 분기의 lock_protocol NameError 수정
     torch, proc, model = load_model()
     adapter_digest = load_adapter(torch, model, a.adapter) if a.adapter else None
     env = env_info(torch, proc, model)
