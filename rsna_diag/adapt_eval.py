@@ -57,8 +57,9 @@ def detail(preds, gt, ids, aedges, bedges):
     ng = np.array([len(gt[i]["boxes"]) for i in pos])
     summ["by_gt_area_tertile_S_loc"] = {n: {"n": int((bins == b).sum()), "S_loc": float(sl[bins == b].mean()) if (bins == b).any() else None}
                                         for b, n in enumerate(("small", "medium", "large"))}
-    summ["by_n_gt_S_loc"] = {n: {"n": int((ng == k).sum()), "S_loc": float(sl[ng == k].mean()) if (ng == k).any() else None}
-                             for n, k in (("single", 1), ("multi", 2))} if len(pos) else {}
+    # iter_014 정정: iter_013의 "multi"는 GT==2만 집계해 GT>=3 환자를 누락했다. multi = GT>=2, ge3 = GT>=3 (별도 보고, multi의 부분집합)
+    grp = (("single", ng == 1), ("multi", ng >= 2), ("ge3", ng >= 3))
+    summ["by_n_gt_S_loc"] = {n: {"n": int(m.sum()), "S_loc": float(sl[m].mean()) if m.any() else None} for n, m in grp} if len(pos) else {}
     rec = {}
     for thr in (0.3, 0.5):
         hit = {"small": [0, 0], "medium": [0, 0], "large": [0, 0]}
