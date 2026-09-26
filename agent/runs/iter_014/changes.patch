@@ -1,0 +1,2189 @@
+diff --git a/rsna_diag/adapt_eval.py b/rsna_diag/adapt_eval.py
+index 48b31e6..ad77815 100644
+--- a/rsna_diag/adapt_eval.py
++++ b/rsna_diag/adapt_eval.py
+@@ -57,8 +57,9 @@ def detail(preds, gt, ids, aedges, bedges):
+     ng = np.array([len(gt[i]["boxes"]) for i in pos])
+     summ["by_gt_area_tertile_S_loc"] = {n: {"n": int((bins == b).sum()), "S_loc": float(sl[bins == b].mean()) if (bins == b).any() else None}
+                                         for b, n in enumerate(("small", "medium", "large"))}
+-    summ["by_n_gt_S_loc"] = {n: {"n": int((ng == k).sum()), "S_loc": float(sl[ng == k].mean()) if (ng == k).any() else None}
+-                             for n, k in (("single", 1), ("multi", 2))} if len(pos) else {}
++    # iter_014 정정: iter_013의 "multi"는 GT==2만 집계해 GT>=3 환자를 누락했다. multi = GT>=2, ge3 = GT>=3 (별도 보고, multi의 부분집합)
++    grp = (("single", ng == 1), ("multi", ng >= 2), ("ge3", ng >= 3))
++    summ["by_n_gt_S_loc"] = {n: {"n": int(m.sum()), "S_loc": float(sl[m].mean()) if m.any() else None} for n, m in grp} if len(pos) else {}
+     rec = {}
+     for thr in (0.3, 0.5):
+         hit = {"small": [0, 0], "medium": [0, 0], "large": [0, 0]}
+diff --git a/rsna_diag/adapt_geo.py b/rsna_diag/adapt_geo.py
+new file mode 100644
+index 0000000..b1a2fd1
+--- /dev/null
++++ b/rsna_diag/adapt_geo.py
+@@ -0,0 +1,398 @@
++"""iter_014 학습기: C(직접 추가 SFT) / U(GT 질량을 맞춘 균등 pseudo-box) / G(GIoU 가중 pseudo-box). 손실 정의는 geo_loss.py 참조. 사용:
++CUDA_VISIBLE_DEVICES=<gpu> python -m rsna_diag.adapt_geo --run-dir D --stage-config S.json --loss C|U|G --lr 2e-5 --protocol P --microbatch 2 --branch-microbatch 4
++
++- adapt.py(iter_013)의 재개·validation·lock 동작을 그대로 따른다 (train.py helper 재사용). 달라지는 것은 (1) GT sequence의 token별 가중치, (2) 후보 branch의
++  순차 forward/backward 누적(같은 optimizer update 안, 모든 branch 뒤에만 optimizer.step), (3) 추가 provenance(후보 manifest digest, branch digest).
++- C는 가중치가 전부 1이고 branch가 없어 iter_013 C와 같은 손실이다 (수치 환원 검사: tests).
++- 후보 branch의 prefix hidden state/KV cache는 재사용하지 않는다 (LoRA를 통과하는 값을 detach하지 않으며 branch마다 전체 forward).
++"""
++import argparse
++import hashlib
++import json
++import math
++import os
++import sys
++import time
++
++import numpy as np
++
++from . import adapt as A, coord_loss as CL, generate, geo_loss as GL, inputs, lock_protocol, lora, migrate, prompts as P, queue_lock, select, sft_data, sft_eval
++from . import train as T
++
++STAGE_KEYS = A.STAGE_KEYS + ("cand_manifest", "cand_manifest_sha256")
++
++
++class GeoDataset:
++    def __init__(self, tok, proc, items, gt, prompt, order, dig_ids, mode, cands):
++        self.tok, self.proc, self.items, self.gt, self.prompt, self.order, self.dig, self.mode, self.cands = tok, proc, items, gt, prompt, order, dig_ids, mode, cands
++
++    def __len__(self):
++        return len(self.order)
++
++    def __getitem__(self, k):
++        import torch
++        it = self.items[self.order[k]]
++        image, _, _ = inputs.load_verified(it)
++        boxes = sft_data.target_boxes([b["yxyx_norm"] for b in self.gt[it["id"]]["boxes"]])
++        tgt = sft_data.target_text([b["yxyx_norm"] for b in self.gt[it["id"]]["boxes"]])
++        ex = sft_data.build_example(self.proc, image, self.prompt, tgt)
++        fid, npf = ex["input_ids"].tolist(), ex["n_prefix"]
++        tokw = torch.ones(len(fid), dtype=torch.float32)
++        branches = []
++        if boxes:
++            ent = self.cands.get(it["id"]) if self.mode != "C" else None
++            if self.mode != "C":
++                if ent is None or [e["gt"] for e in ent] != boxes:
++                    raise GL.GeoError(f"{it['id']}: candidate manifest GT boxes != training target boxes")
++                cl = [e["cands"] for e in ent]
++            else:
++                cl = [[{"giou": 0.5, "box": [0, 0, 1, 1]}] * GL.K_CAND for _ in boxes]  # C: q만 필요 (1,0,..), 후보 미사용
++            bd = GL.build_branches(self.tok, tgt, self.dig, cl, self.mode)
++            if list(fid[npf:npf + len(bd["gt_ids"])]) != bd["gt_ids"]:
++                raise GL.GeoError("assistant tokens in chat sequence != standalone tokenization")
++            tokw[npf:npf + len(bd["gt_ids"])] = torch.tensor(GL.gt_token_weights(len(bd["gt_ids"]), bd["gt_spans"], bd["q0"]), dtype=torch.float32)
++            pre = fid[:npf]
++            tt = ex["token_type_ids"][:npf] if "token_type_ids" in ex else None
++            for br in bd["branches"]:
++                ids = torch.tensor(pre + br["ids"], dtype=torch.long)
++                lab = torch.full_like(ids, -100)
++                w = torch.zeros(len(ids), dtype=torch.float32)
++                lab[npf + br["span"][0]:npf + br["span"][1] + 1] = ids[npf + br["span"][0]:npf + br["span"][1] + 1]
++                w[npf + br["span"][0]:npf + br["span"][1] + 1] = br["w_per_token"]
++                d = {"input_ids": ids, "labels": lab, "tokw": w, "box": br["box"], "m": br["m"], "cand": br["cand"], "span": br["span"], "w_per_token": br["w_per_token"],
++                     "giou": br["giou"], "n_b": br["n_b"], "n_bm": br["n_bm"]}
++                if tt is not None:
++                    d["token_type_ids"] = torch.cat([tt, torch.zeros(len(ids) - npf, dtype=torch.long)])
++                branches.append(d)
++        ex["tokw"] = tokw
++        ex["branches"] = branches
++        ex["sample_pos"] = int(k)
++        return ex
++
++
++def collate(ex, pad_id):
++    import torch
++    br = [e["branches"] for e in ex]
++    tw = [e["tokw"] for e in ex]
++    out = sft_data.collate([{k: v for k, v in e.items() if k not in ("tokw", "branches")} for e in ex], pad_id)
++    t = torch.zeros((len(ex), out["input_ids"].shape[1]), dtype=torch.float32)
++    for i, w in enumerate(tw):
++        t[i, :len(w)] = w
++    out["tokw"] = t
++    out["branches"] = br
++    return out
++
++
++def branch_batch(torch, per_ex_branches, pixel_values, pad_id, sel):
++    """sel: [(example index, branch)] -> 모델 입력 dict (같은 영상의 pixel_values를 branch마다 복제)."""
++    L = max(len(b["input_ids"]) for _, b in sel)
++    B = len(sel)
++    ids = torch.full((B, L), pad_id, dtype=torch.long)
++    att = torch.zeros((B, L), dtype=torch.long)
++    lab = torch.full((B, L), -100, dtype=torch.long)
++    tw = torch.zeros((B, L), dtype=torch.float32)
++    has_tt = "token_type_ids" in sel[0][1]
++    tt = torch.zeros((B, L), dtype=torch.long) if has_tt else None
++    for r, (ei, b) in enumerate(sel):
++        n = len(b["input_ids"])
++        ids[r, :n], att[r, :n], lab[r, :n], tw[r, :n] = b["input_ids"], 1, b["labels"], b["tokw"]
++        if has_tt:
++            tt[r, :n] = b["token_type_ids"]
++    out = {"input_ids": ids, "attention_mask": att, "labels": lab, "tokw": tw, "pixel_values": torch.cat([pixel_values[ei:ei + 1] for ei, _ in sel], 0)}
++    if has_tt:
++        out["token_type_ids"] = tt
++    return out
++
++
++def geo_forward(torch, model, batch, softcap_unused=None):
++    """batch(cuda): labels/tokw 포함. returns (weighted_ce_sum(grad), unweighted_ce_sum(detached), n_tok). 전체 vocabulary softmax + 모델 softcap."""
++    b = dict(batch)
++    tw, labels = b.pop("tokw"), b.pop("labels")
++    b["pixel_values"] = b["pixel_values"].to(torch.bfloat16)
++    out = model.model(**b, use_cache=False)
++    h = out.last_hidden_state[:, :-1]
++    lab = labels[:, 1:]
++    sel = lab != -100
++    logits = model.lm_head(h[sel]).float()
++    sc = getattr(model.config.get_text_config(), "final_logit_softcapping", None)
++    if sc:
++        logits = torch.tanh(logits / sc) * sc
++    y, w = lab[sel], tw[:, 1:][sel]
++    if bool((w <= 0).any()):
++        raise RuntimeError("label position with non-positive weight")
++    ce = torch.logsumexp(logits, dim=-1) - logits.gather(1, y[:, None]).squeeze(1)
++    return (ce * w).sum(), ce.detach().sum(), int(sel.sum())
++
++
++def load_stage(path, protocol):
++    st = json.load(open(path))
++    miss = [k for k in STAGE_KEYS if k not in st]
++    if miss:
++        sys.exit(f"stage config missing keys {miss}")
++    locked = json.load(open(protocol))["locked"]["files"]
++    for k in (path, st["parent_adapter"], st["train_ids"], st["val_ids"], st["cand_manifest"]):
++        if os.path.relpath(k) not in locked:
++            sys.exit(f"{k} is not a locked protocol file")
++    if hashlib.sha256(open(st["parent_adapter"], "rb").read()).hexdigest() != st["parent_adapter_sha256"]:
++        sys.exit("parent adapter file sha256 != stage config")
++    if hashlib.sha256(open(st["cand_manifest"], "rb").read()).hexdigest() != st["cand_manifest_sha256"]:
++        sys.exit("candidate manifest sha256 != stage config")
++    return st
++
++
++def main():
++    ap = argparse.ArgumentParser()
++    ap.add_argument("--run-dir", required=True)
++    ap.add_argument("--stage-config", required=True)
++    ap.add_argument("--loss", required=True, choices=["C", "U", "G"])
++    ap.add_argument("--lr", type=float, required=True)
++    ap.add_argument("--protocol", required=True)
++    ap.add_argument("--microbatch", type=int, default=2)
++    ap.add_argument("--branch-microbatch", type=int, default=4)
++    ap.add_argument("--ckpt-every", type=int, default=50)
++    ap.add_argument("--workers", type=int, default=3)
++    ap.add_argument("--max-steps", type=int, default=None, help="test: 이 optimizer step까지만 (checkpoint 저장 후 종료)")
++    ap.add_argument("--stop-after-step", type=int, default=None, help="test: 정기 checkpoint step 직후 비정상 종료 (재개 검사)")
++    ap.add_argument("--deterministic", action="store_true", help="검사 전용: 결정적 kernel (선택·본실험 금지)")
++    ap.add_argument("--stop-in-validation", type=int, default=None)
++    a = ap.parse_args()
++    if a.deterministic:
++        os.environ["CUBLAS_WORKSPACE_CONFIG"] = ":4096:8"
++    pdig = lock_protocol.verify(a.protocol)
++    st = load_stage(a.stage_config, a.protocol)
++    if a.lr not in st["allowed_lrs"]:
++        sys.exit(f"lr {a.lr} not in stage allowed_lrs {st['allowed_lrs']}")
++    os.makedirs(a.run_dir, exist_ok=True)
++    lk, own, reclaimed = queue_lock.try_lock(os.path.join(os.path.realpath(a.run_dir), "train.lock"), queue_lock.my_info(role="adapt_geo"))
++    if lk is None:
++        sys.exit(f"run-dir {a.run_dir} is owned by another live process: {own}")
++    T.LOCK_FD[0] = lk.fd
++    try:
++        run(a, st, pdig, reclaimed)
++    finally:
++        lk.release()
++
++
++def run(a, st, pdig, reclaimed_lock):
++    import torch
++    train_items, gt = inputs.load_items(T.MANIFEST, T.GT, st["train_ids"], "train", exact=False)
++    val_items = inputs.load_items(T.MANIFEST, T.GT, st["val_ids"], "validation", exact=False)[0] if st["validate"] else []
++    t_in = inputs.inputs_digest(train_items, gt)
++    v_in = inputs.inputs_digest(val_items, gt) if val_items else None
++    cands = json.load(open(st["cand_manifest"]))
++    edges = sft_eval.area_edges(gt, [i for i in gt if gt[i]["split"] == "train"])
++    if a.deterministic:
++        T.set_deterministic(torch)
++    seed = st["seed"]
++    T.seed_all(torch, seed)
++    _, proc, model, names = T.setup_model(seed)
++    tok = proc.tokenizer
++    dig_ids = CL.digit_ids(tok)
++    softcap = getattr(model.config.get_text_config(), "final_logit_softcapping", None)
++    pblob = torch.load(st["parent_adapter"], map_location="cpu", weights_only=True)
++    if lora.state_digest(pblob["state"]) != st["parent_adapter_digest"] or pblob.get("digest") != st["parent_adapter_digest"]:
++        sys.exit("parent adapter digest != stage config")
++    if pblob["config"] != {"r": T.CFG["r"], "alpha": T.CFG["alpha"]}:
++        sys.exit("parent adapter rank/alpha != trainer config")
++    lora.load_lora_state(model, pblob["state"])
++    model.gradient_checkpointing_enable(gradient_checkpointing_kwargs={"use_reentrant": False})
++    model.config.use_cache = False
++    params = list(lora.lora_params(model).values())
++    env = generate.env_info(torch, proc, model)
++    cdig, _ = generate.config_digest(env, {"concise": P.CONCISE})
++    full_cd, _ = generate.config_digest(env, P.all_prompts())
++    if full_cd != json.load(open(a.protocol))["locked"]["generation_config_digest"]:
++        sys.exit("runtime generation config digest != protocol")
++    eb = st["eff_batch"]
++    n_tr = len(train_items)
++    spe = math.ceil(n_tr / eb)
++    total = spe * st["epochs"]
++    cfg = dict(T.CFG, lr=a.lr, seed=seed, microbatch=a.microbatch, branch_microbatch=a.branch_microbatch, eff_batch=eb, n_train=n_tr, n_val=len(val_items), stage=st,
++               stage_config_sha256=migrate.file_sha(a.stage_config), loss_mode=a.loss, total_updates=total, steps_per_epoch=spe,
++               geo={"gamma": GL.GAMMA, "giou_min": GL.GIOU_MIN, "k": GL.K_CAND, "seed_tag": GL.SEED_TAG, "cand_manifest_sha256": st["cand_manifest_sha256"],
++                    "norm": "L=[CE_outside_spans + sum_b n_b sum_m q_bm ell_bm]/N", "q": {"C": "q0=1", "U": "q0=1/Z,q_m=(1-q0)/4", "G": "q=r/Z"}},
++               model_revision=generate.MODEL_REVISION, protocol_digest=pdig, n_lora_targets=len(names), n_trainable=sum(p.numel() for p in params),
++               train_inputs_digest=t_in, val_inputs_digest=v_in, deterministic=bool(a.deterministic), optimizer_init="fresh AdamW (parent optimizer not resumed)",
++               dataloader_rng="torch.Generator seeded seed*1000+epoch")
++    tdig = migrate.cfg_digest(cfg)
++    cfg_path = os.path.join(a.run_dir, "train_config.json")
++    if os.path.exists(cfg_path):
++        if json.load(open(cfg_path))["train_digest"] != tdig:
++            sys.exit("train config differs from existing run_dir (refusing to resume/overwrite)")
++    else:
++        json.dump({"train_digest": tdig, "config": cfg, "env": env}, open(cfg_path, "w"), indent=1, default=str)
++    opt = torch.optim.AdamW(params, lr=a.lr, betas=tuple(T.CFG["betas"]), eps=T.CFG["eps"], weight_decay=T.CFG["weight_decay"])
++    step, epoch0, pos0 = 0, 0, 0
++    ck = os.path.join(a.run_dir, "ckpt_latest.pt")
++    logf = open(os.path.join(a.run_dir, "train_log.jsonl"), "a")
++
++    def log_event(**kw):
++        logf.write(json.dumps({"ts": time.time(), **kw}) + "\n")
++        logf.flush()
++
++    def save_ckpt(epoch, pos, val_pending=None):
++        dg = T.live_digests(torch, model, opt)
++        T.atomic_save(torch, {"lora": lora.lora_state_dict(model), "optimizer": opt.state_dict(), "step": step, "epoch": epoch, "pos_in_epoch": pos,
++                              "rng": T.rng_state(torch), "train_digest": tdig, "val_pending_epoch": val_pending, "loss_mode": a.loss,
++                              "base_revision": generate.MODEL_REVISION, "protocol_digest": pdig, "digests": dg}, ck)
++        log_event(event="checkpoint", step=step, epoch=epoch, pos=pos, digests=dg)
++
++    if os.path.exists(ck):
++        blob = torch.load(ck, map_location="cpu", weights_only=False)
++        if blob["train_digest"] != tdig or blob["base_revision"] != generate.MODEL_REVISION or blob["protocol_digest"] != pdig or blob["loss_mode"] != a.loss:
++            sys.exit("checkpoint provenance mismatch")
++        lora.load_lora_state(model, blob["lora"])
++        opt.load_state_dict(blob["optimizer"])
++        step, epoch0, pos0 = blob["step"], blob["epoch"], blob["pos_in_epoch"]
++        T.set_rng_state(torch, blob["rng"])
++        restored = T.live_digests(torch, model, opt)
++        if restored != blob["digests"]:
++            sys.exit(f"restored state != saved checkpoint state: saved {blob['digests']} restored {restored}")
++        print(f"resumed step={step} epoch={epoch0} pos={pos0}", flush=True)
++        log_event(event="resume", step=step, epoch=epoch0, pos=pos0, stale_lock_reclaimed=bool(reclaimed_lock), restored_digests=restored, restored_equals_saved=True)
++    t0 = time.time()
++
++    def verify_existing_val(e):
++        select.verify_epoch(a.run_dir, e, json.load(open(cfg_path)), v_in, a.protocol, val_items, gt)
++
++    def validate_epoch(e, from_file, stop_after=None):
++        epoch_dir = os.path.join(a.run_dir, f"epoch_{e:02d}")
++        vm = os.path.join(epoch_dir, "val_metrics.json")
++        if os.path.exists(vm):
++            verify_existing_val(e)
++            return
++        rng_before = T.rng_state(torch)
++        pre = T.live_digests(torch, model, opt)
++        snap = lora.lora_state_dict(model) if from_file else None
++        if from_file:
++            ba = torch.load(os.path.join(epoch_dir, "adapter.pt"), map_location="cpu", weights_only=True)
++            if lora.state_digest(ba["state"]) != ba["digest"]:
++                raise RuntimeError(f"epoch {e} adapter file digest mismatch")
++            lora.load_lora_state(model, ba["state"])
++        adig = lora.state_digest(lora.lora_state_dict(model))
++        torch.cuda.reset_peak_memory_stats()
++        vl, vn = T.val_loss(torch, model, proc, val_items, gt, softcap, P.CONCISE)
++        summ = T.run_validation(torch, proc, model, env, cdig, pdig, val_items, gt, edges, os.path.join(epoch_dir, "val_gen"), e, adig,
++                                os.path.basename(a.run_dir), v_in, stop_after)
++        summ.update({"val_loss": vl, "val_loss_tokens": vn, "epoch": e, "step": e * spe, "adapter_digest": adig, "lr": a.lr, "seed": seed,
++                     "train_digest": tdig, "val_inputs_digest": v_in, "protocol_digest": pdig})
++        T.atomic_json(summ, vm)
++        if from_file:
++            lora.load_lora_state(model, snap)
++        T.set_rng_state(torch, rng_before)
++        post = T.live_digests(torch, model, opt)
++        if post != pre:
++            raise RuntimeError(f"validation changed training state: before {pre} after {post}")
++        log_event(event="validation_done", epoch=e, val_loss=vl, utility=summ["utility"], recovered_from_file=from_file, state_unchanged=True, digests=post)
++        print(f"epoch {e}: val_loss {vl:.4f} f1@.3 {summ['f1@0.3']:.4f} f1@.5 {summ['f1@0.5']:.4f}", flush=True)
++
++    mil = set(st.get("milestone_epochs") or range(1, st["epochs"] + 1))
++    if val_items:
++        for e in sorted(mil):
++            if e > epoch0:
++                continue
++            ed = os.path.join(a.run_dir, f"epoch_{e:02d}")
++            if not os.path.exists(os.path.join(ed, "adapter.pt")):
++                raise RuntimeError(f"epoch {e} adapter missing although checkpoint is at epoch {epoch0}")
++            if not os.path.exists(os.path.join(ed, "val_metrics.json")):
++                print(f"recovering pending validation for epoch {e}", flush=True)
++                validate_epoch(e, from_file=True)
++            else:
++                verify_existing_val(e)
++    for epoch in range(epoch0, st["epochs"]):
++        order = np.random.default_rng(seed * 1000 + epoch).permutation(n_tr)
++        start_pos = pos0 if epoch == epoch0 else 0
++        ds = GeoDataset(tok, proc, train_items, gt, P.CONCISE, order, dig_ids, a.loss, cands)
++        dl_gen = torch.Generator()
++        dl_gen.manual_seed(seed * 1000 + epoch)
++        dl = torch.utils.data.DataLoader(torch.utils.data.Subset(ds, list(range(start_pos * eb, n_tr))), batch_size=a.microbatch, shuffle=False,
++                                         num_workers=a.workers, collate_fn=lambda ex: collate(ex, tok.pad_token_id), prefetch_factor=2 if a.workers else None,
++                                         worker_init_fn=T.close_lock_fd, generator=dl_gen)
++        model.train()
++        it = iter(dl)
++        for s in range(start_pos, spe):
++            grp = order[s * eb:(s + 1) * eb]
++            tot_tok = sum(T.label_count(tok, sft_data.target_text([b["yxyx_norm"] for b in gt[train_items[j]["id"]]["boxes"]])) for j in grp)
++            lr = A.lr_at(step, total, a.lr, st["warmup_frac"])
++            for g in opt.param_groups:
++                g["lr"] = lr
++            rng_before, opt_step_before = T.rng_digest(torch), T.opt_step_count(opt)
++            if not model.training:
++                raise RuntimeError("model not in train mode at optimizer step")
++            acc = {"gt_w": 0.0, "gt_ce": 0.0, "br_w": 0.0, "br_ce": 0.0}
++            ntok_seen = n_branch = n_branch_tok = 0
++            seen_pos, tok_h, br_h = [], hashlib.sha256(), hashlib.sha256()
++            for _ in range(math.ceil(len(grp) / a.microbatch)):
++                b = next(it)
++                seen_pos += b.pop("sample_pos").tolist()
++                per_ex = b.pop("branches")
++                tok_h.update(T.batch_token_digest({k: v for k, v in b.items() if k != "tokw"}).digest())
++                tok_h.update(b["tokw"].contiguous().numpy().tobytes())
++                flat = [(ei, br) for ei, lst in enumerate(per_ex) for br in lst]
++                for _, br in flat:
++                    br_h.update(json.dumps([br["box"], br["m"], br["cand"], br["span"], round(br["w_per_token"], 12)]).encode())
++                    br_h.update(br["input_ids"].numpy().tobytes())
++                pv_cpu = b["pixel_values"]
++                bg = {k: v.cuda() for k, v in b.items()}
++                w_sum, ce_sum, nt = geo_forward(torch, model, bg, softcap)
++                (w_sum / tot_tok).backward()
++                acc["gt_w"] += float(w_sum.detach()) / tot_tok
++                acc["gt_ce"] += float(ce_sum) / tot_tok
++                ntok_seen += nt
++                del bg, w_sum, ce_sum
++                for c0 in range(0, len(flat), a.branch_microbatch):
++                    chunk = flat[c0:c0 + a.branch_microbatch]
++                    bb = {k: v.cuda() for k, v in branch_batch(torch, per_ex, pv_cpu, tok.pad_token_id, chunk).items()}
++                    w_sum, ce_sum, nt = geo_forward(torch, model, bb, softcap)
++                    (w_sum / tot_tok).backward()
++                    acc["br_w"] += float(w_sum.detach()) / tot_tok
++                    acc["br_ce"] += float(ce_sum) / tot_tok
++                    n_branch += len(chunk)
++                    n_branch_tok += nt
++                    del bb, w_sum, ce_sum
++            if ntok_seen != tot_tok:
++                raise RuntimeError(f"label token count mismatch {ntok_seen} != {tot_tok}")
++            planned = [train_items[j]["id"] for j in grp]
++            actual = [train_items[order[p]]["id"] for p in seen_pos]
++            if actual != planned or seen_pos != list(range(s * eb, s * eb + len(grp))):
++                raise RuntimeError(f"step {step + 1}: DataLoader batch != planned batch")
++            gn = float(torch.nn.utils.clip_grad_norm_(params, T.CFG["grad_clip"]))
++            loss_total = acc["gt_w"] + acc["br_w"]
++            if not math.isfinite(gn) or not math.isfinite(loss_total):
++                raise RuntimeError(f"non-finite loss/grad at step {step}: {loss_total} {gn}")
++            opt.step()
++            opt.zero_grad(set_to_none=True)
++            step += 1
++            logf.write(json.dumps({"step": step, "epoch": epoch + 1, "pos": s + 1, "loss": loss_total, "gt_weighted_ce": acc["gt_w"], "gt_unweighted_ce": acc["gt_ce"],
++                                   "branch_weighted_ce": acc["br_w"], "branch_unweighted_ce": acc["br_ce"], "n_branches": n_branch, "n_branch_label_tokens": n_branch_tok,
++                                   "n_label_tokens": tot_tok, "grad_norm": gn, "lr": lr, "n_examples": len(grp), "elapsed_s": time.time() - t0,
++                                   "peak_mem_gb": torch.cuda.max_memory_allocated() / 2 ** 30, "batch_ids": actual, "batch_token_sha": tok_h.hexdigest()[:24],
++                                   "branch_sha": br_h.hexdigest()[:24], "rng_before": rng_before, "opt_step_before": opt_step_before, "train_mode": True}) + "\n")
++            logf.flush()
++            saved = False
++            if step % a.ckpt_every == 0 and (s + 1) < spe:
++                save_ckpt(epoch, s + 1)
++                saved = True
++            if a.stop_after_step is not None and step == a.stop_after_step:
++                if not saved:
++                    raise RuntimeError("--stop-after-step must coincide with a regular mid-epoch checkpoint step")
++                print("test stop after mid-epoch step checkpoint", flush=True)
++                os._exit(5)
++            if a.max_steps is not None and step >= a.max_steps:
++                save_ckpt(epoch, s + 1)
++                print("max-steps reached", flush=True)
++                return
++        del dl, it
++        ed = os.path.join(a.run_dir, f"epoch_{epoch + 1:02d}")
++        T.save_adapter(torch, model, os.path.join(ed, "adapter.pt"), {"epoch": epoch + 1, "step": step, "train_digest": tdig})
++        do_val = bool(val_items) and (epoch + 1) in mil
++        save_ckpt(epoch + 1, 0, val_pending=epoch + 1 if do_val else None)
++        if do_val:
++            validate_epoch(epoch + 1, from_file=False, stop_after=a.stop_in_validation)
++        pos0 = 0
++    print("training complete", flush=True)
++    T.atomic_json({"status": "complete", "steps": step, "loss_mode": a.loss, "train_digest": tdig, "wall_s": time.time() - t0}, os.path.join(a.run_dir, "done.json"))
++
++
++if __name__ == "__main__":
++    main()
+diff --git a/rsna_diag/gen_compare.py b/rsna_diag/gen_compare.py
+new file mode 100644
+index 0000000..8a2fd5b
+--- /dev/null
++++ b/rsna_diag/gen_compare.py
+@@ -0,0 +1,37 @@
++"""1-worker vs 2-worker 생성 pilot 비교 요약. 사용: python -m rsna_diag.gen_compare W1_DIR W2_DIR OUT"""
++import glob
++import json
++import sys
++
++
++def load(d):
++    out = {}
++    for f in glob.glob(f"{d}/gen_worker*.jsonl"):
++        for line in open(f):
++            r = json.loads(line)
++            out[r["id"]] = r
++    return out
++
++
++def peak(d):
++    m = 0
++    for line in open(f"{d}/resource_log.jsonl"):
++        for g in json.loads(line)["gpus"]:
++            m = max(m, g["mem_used_mib"])
++    return m
++
++
++def main():
++    d1, d2, out = sys.argv[1:4]
++    a, b = load(d1), load(d2)
++    w1, w2 = (json.load(open(f"{d}/last_run.json"))["wall_s"] for d in (d1, d2))
++    res = {"n_requests": len(a), "w1_wall_s": w1, "w2_wall_s": w2, "req_per_min_w1": len(a) / w1 * 60, "req_per_min_w2": len(b) / w2 * 60,
++           "greedy_token_identical": sum(a[k]["suffix_ids"] == b[k]["suffix_ids"] for k in a if k in b), "id_set_mismatch": len(set(a) ^ set(b)),
++           "gpu_peak_used_mib_w1": peak(d1), "gpu_peak_used_mib_w2": peak(d2), "worker_peak_alloc_gb_max_w2": max(r["peak_mem_alloc_gb_max"] for r in b.values()),
++           "max_output_tokens_w2": max(r["n_output_tokens"] for r in b.values()), "all_eos_w2": all(r["ended_eos"] for r in b.values())}
++    json.dump(res, open(out, "w"), indent=1)
++    print(res)
++
++
++if __name__ == "__main__":
++    main()
+diff --git a/rsna_diag/geo_cands.py b/rsna_diag/geo_cands.py
+new file mode 100644
+index 0000000..9e6e300
+--- /dev/null
++++ b/rsna_diag/geo_cands.py
+@@ -0,0 +1,101 @@
++"""iter_014 후보(pseudo-box) manifest. 사용: python -m rsna_diag.geo_cands --out-dir results/iter_014/candidates
++
++train 2,400 전체의 양성 환자 GT box(sft_data.target_boxes의 정렬 순서 = 학습 target의 box index)마다 4개 후보를 결정적으로 만들고
++확보율·GIoU·변위·면적비·token 길이 분포를 GT box 크기 삼분위(train 기준)별로 보고한다. 4개를 못 얻으면 준비 gate 중단.
++U/G가 같은 manifest를 쓴다 (환자 ID·box index·고정 seed로 RNG).
++"""
++import argparse
++import hashlib
++import json
++import os
++
++import numpy as np
++
++from . import coord_loss as CL, geo_loss as GL, sft_data
++
++GT = "results/iter_010/manifests/gt_manifest.json"
++TRAIN_IDS = "results/iter_010/manifests/train_ids.json"
++
++
++def build(gt, ids, tok=None):
++    man, fails, stats = {}, [], []
++    for pid in ids:
++        if gt[pid]["category"] != "opacity":
++            continue
++        boxes = sft_data.target_boxes([b["yxyx_norm"] for b in gt[pid]["boxes"]])
++        ent = []
++        for b, gb in enumerate(boxes):
++            try:
++                cands, n = GL.gen_candidates(pid, b, gb)
++            except GL.GeoError as e:
++                fails.append({"id": pid, "box": b, "gt": gb, "error": str(e)})
++                continue
++            recs = [GL.cand_record(gb, c) for c in cands]
++            ent.append({"gt": gb, "cands": recs, "n_proposals": n})
++            stats.append((pid, b, gb, n, recs))
++        man[pid] = ent
++    return man, fails, stats
++
++
++def main():
++    ap = argparse.ArgumentParser()
++    ap.add_argument("--out-dir", required=True)
++    a = ap.parse_args()
++    gt = json.load(open(GT))
++    ids = sorted(json.load(open(TRAIN_IDS)))
++    man, fails, stats = build(gt, ids)
++    os.makedirs(a.out_dir, exist_ok=True)
++    rep = {"seed_tag": GL.SEED_TAG, "k": GL.K_CAND, "giou_min": GL.GIOU_MIN, "shift_frac": GL.SHIFT_FRAC, "scale_range": GL.SCALE_RANGE,
++           "max_proposals": GL.MAX_PROPOSALS, "grid": "1/1000 integer (R-VLM original: 1/100)", "n_patients": len(man), "n_boxes": len(stats), "n_failed_boxes": len(fails),
++           "failed": fails}
++    if fails:
++        json.dump(rep, open(os.path.join(a.out_dir, "candidate_report_FAILED.json"), "w"), indent=1)
++        raise SystemExit(f"candidate gate FAILED: {len(fails)} boxes lack {GL.K_CAND} candidates (see candidate_report_FAILED.json)")
++    areas = np.array([(g[2] - g[0]) * (g[3] - g[1]) / 1e6 for _, _, g, _, _ in stats])
++    edges = [float(np.quantile(areas, 1 / 3)), float(np.quantile(areas, 2 / 3))]
++    tier = np.digitize(areas, edges)
++    rep["box_area_tertile_edges"] = edges
++
++    def dist(x):
++        x = np.asarray(x, float)
++        return {"mean": float(x.mean()), "min": float(x.min()), "q05": float(np.quantile(x, .05)), "median": float(np.median(x)), "q95": float(np.quantile(x, .95)), "max": float(x.max())}
++
++    by = {}
++    for t, name in enumerate(("small", "medium", "large")):
++        sel = [s for s, k in zip(stats, tier) if k == t]
++        by[name] = {"n_boxes": len(sel), "acceptance_rate": dist([4 / s[3] for s in sel]), "n_proposals": dist([s[3] for s in sel]),
++                    "giou": dist([c["giou"] for s in sel for c in s[4]]), "area_ratio": dist([c["area_ratio"] for s in sel for c in s[4]]),
++                    "disp_units": dist([c["disp"] for s in sel for c in s[4]]),
++                    "r_weight": dist([1 + GL.GAMMA * np.log(c["giou"]) for s in sel for c in s[4]])}
++    rep["by_gt_box_size"] = by
++    # token 길이 (span n_bm vs n_b): tokenizer 필요
++    from transformers import AutoTokenizer
++    from . import generate
++    tok = AutoTokenizer.from_pretrained("google/medgemma-1.5-4b-it", revision=generate.MODEL_REVISION)
++    dig = CL.digit_ids(tok)
++    lens = {"same": 0, "cand_longer": 0, "cand_shorter": 0}
++    dl = []
++    for pid in list(man)[:]:
++        tgt = sft_data.target_text([b["yxyx_norm"] for b in gt[pid]["boxes"]])
++        ids_, spans = GL.box_token_spans(tok, tgt, dig)
++        for b, e in enumerate(man[pid]):
++            assert e["gt"] == json.loads(tgt)[b]["box_2d"]
++            nb = spans[b][1] - spans[b][0] + 1
++            for c in e["cands"]:
++                ctext = GL.replace_box_text(tgt, b, c["box"])
++                cids, cs = GL.box_token_spans(tok, ctext, dig)
++                nbm = cs[b][1] - cs[b][0] + 1
++                dl.append(nbm - nb)
++                lens["same" if nbm == nb else "cand_longer" if nbm > nb else "cand_shorter"] += 1
++    rep["token_span_length"] = {"cand_vs_gt": lens, "delta_dist": dist(dl), "note": "n_bm - n_b (tokens, incl. bracket/whitespace tokens)"}
++    blob = json.dumps(man, sort_keys=True)
++    rep["manifest_sha256"] = hashlib.sha256(blob.encode()).hexdigest()
++    json.dump(man, open(os.path.join(a.out_dir, "train_candidates.json"), "w"), sort_keys=True)
++    json.dump(rep, open(os.path.join(a.out_dir, "candidate_report.json"), "w"), indent=1)
++    print(json.dumps({k: rep[k] for k in ("n_patients", "n_boxes", "n_failed_boxes", "manifest_sha256")}), json.dumps(rep["token_span_length"]))
++    for k, v in by.items():
++        print(k, v["n_boxes"], "accept", v["acceptance_rate"]["mean"], "min-accept", v["acceptance_rate"]["min"], "giou", v["giou"]["median"])
++
++
++if __name__ == "__main__":
++    main()
+diff --git a/rsna_diag/geo_decide.py b/rsna_diag/geo_decide.py
+new file mode 100644
+index 0000000..1864f50
+--- /dev/null
++++ b/rsna_diag/geo_decide.py
+@@ -0,0 +1,100 @@
++"""iter_014 사전 고정 판정 규칙 (report.json -> decision.json). 결과를 본 뒤 규칙을 바꾸지 않는다. 사용: python -m rsna_diag.geo_decide explore|full --report R --out O
++
++비교 기준(baseline) checkpoint: G는 V200 선택 checkpoint(guardrail 통과 최대 S_loc)만 쓴다. 선택이 없으면 selected=null, selection_eligible=false이며
++final 점수는 별도 필드이고 확대 판정에 대체 사용하지 않는다. C·U에 선택 후보가 없을 때만 보수적 대체(V200 최고 S_loc checkpoint, guardrail 무시; G에는 불리한 기준)를 쓰고
++대체 사실을 표시한다.
++
++일반 확대: G 선택 checkpoint의 V400 guardrail 통과 AND G-C S_loc >= 0.03 AND G-U S_loc >= 0.01 AND G-C F1@0.5 > 0 (모두 V400 선택 checkpoint 기준).
++  최종 대 최종 결과의 G-C, G-U 부호가 선택 결과와 반대(선택 >0 인데 최종 <= 0)이면 자동 확대를 보류한다.
++보완 확대(1회): G가 V200·V400 guardrail을 통과(선택 존재), G-U 점추정 > 0, G-C F1@0.5 > 0, G-C paired 95% CI 상한 >= 0.03, G의 V200 마지막 milestone 간 S_loc 상승 >= 0.01
++  (explore: update150->225, full: update300->450)이면 full-train으로 한 번 확대할 수 있다. 선택 부재·guardrail 실패는 이 경로로 우회하지 않는다.
++"""
++import argparse
++import json
++
++from . import select as SEL
++
++GAP_C, GAP_U, LAST_GAIN = 0.03, 0.01, 0.01
++
++
++def baseline_point(t):
++    """trajectory entry -> dict(S_loc, f1@0.5, tag, substituted). 선택이 있으면 선택, 없으면 V200 최고 S_loc checkpoint의 V400 결과가 있어야 한다(없으면 None)."""
++    if t.get("selected"):
++        e = t["selected"]
++        return {"S_loc": e["v400"]["S_loc"], "f1@0.5": e["v400"]["f1@0.5"], "tag": "selected", "substituted": False, "epoch": e["epoch"]}
++    b = t.get("v200_best_fallback")
++    if b:
++        return {"S_loc": b["v400"]["S_loc"], "f1@0.5": b["v400"]["f1@0.5"], "tag": "v200_best_no_guardrail(fallback)", "substituted": True, "epoch": b["epoch"]}
++    return None
++
++
++def final_point(t):
++    e = t.get("final")
++    return {"S_loc": e["v400"]["S_loc"], "f1@0.5": e["v400"]["f1@0.5"], "epoch": e["epoch"]} if e else None
++
++
++def decide(rep, mode, tags=("C", "U", "G")):
++    tr = rep["trajectories"]
++    key = lambda c: next((k for k in tr if k.split("@")[0] == c), None)
++    kc, ku, kg = (key(c) for c in tags)
++    out = {"rule": __doc__.split("\n")[2:14], "mode": mode, "trajectories": {"C": kc, "U": ku, "G": kg}}
++    if not (kc and ku and kg):
++        return {**out, "error": "C, U or G trajectory missing", "expand": False}
++    C, U, G = tr[kc], tr[ku], tr[kg]
++    g_sel = G.get("selected")
++    out["G_selected"] = None if not g_sel else {"epoch": g_sel["epoch"], "update": g_sel["update"], "S_loc_v400": g_sel["v400"]["S_loc"]}
++    out["G_selection_eligible"] = bool(g_sel)
++    out["G_final"] = final_point(G)
++    out["G_final_guardrail_v400_ok"] = G["final"]["guardrail_v400"]["ok"] if G.get("final") else None
++    out["G_selected_guardrail_v400_ok"] = g_sel["guardrail_v400"]["ok"] if g_sel else None
++    cb, ub, gb = baseline_point(C), baseline_point(U), baseline_point(G)
++    out["C_baseline"], out["U_baseline"] = cb, ub
++    out["C_final"], out["U_final"] = final_point(C), final_point(U)
++    if not g_sel or cb is None or ub is None:
++        out.update({"expand": False, "reason": "G has no eligible selected checkpoint (or C/U reference unavailable): no automatic expansion, no substitution by final"})
++        return out
++    ci = rep["pairwise_v400_paired_bootstrap"]["selected"].get(f"{kg}-{kc}")
++    d_gc, d_gu = gb["S_loc"] - cb["S_loc"], gb["S_loc"] - ub["S_loc"]
++    d_f05 = gb["f1@0.5"] - cb["f1@0.5"]
++    g_guard = bool(g_sel["guardrail_v400"]["ok"])
++    fin = {}
++    if out["G_final"] and out["C_final"] and out["U_final"]:
++        fin = {"G-C": out["G_final"]["S_loc"] - out["C_final"]["S_loc"], "G-U": out["G_final"]["S_loc"] - out["U_final"]["S_loc"],
++               "G-C_f1@0.5": out["G_final"]["f1@0.5"] - out["C_final"]["f1@0.5"]}
++    v = G["v200_detail_by_epoch"]
++    eps = sorted(int(e) for e in v)
++    last_gain = v[str(eps[-1])]["S_loc"] - v[str(eps[-2])]["S_loc"]
++    out.update({"G_minus_C": d_gc, "G_minus_U": d_gu, "G_minus_C_f1@0.5": d_f05, "paired_ci_G_minus_C": ci, "G_v200_last_interval_gain": last_gain, "G_guardrail_v400_ok": g_guard,
++                "final_vs_final": fin, "U_minus_C": ub["S_loc"] - cb["S_loc"]})
++    general = g_guard and d_gc >= GAP_C and d_gu >= GAP_U and d_f05 > 0
++    opposite = bool(fin) and (fin["G-C"] <= 0 or fin["G-U"] <= 0)
++    supplement = g_guard and d_gu > 0 and d_f05 > 0 and ci is not None and ci["ci95"][1] >= GAP_C and last_gain >= LAST_GAIN
++    out["general_criteria_met"] = bool(general)
++    out["supplement_criteria_met"] = bool(supplement)
++    out["final_opposes_selected"] = opposite
++    if general and opposite:
++        out.update({"expand": False, "reason": "general criteria met on selected checkpoints but final-vs-final has opposite sign: automatic expansion held, review checkpoint trend"})
++    elif general:
++        out.update({"expand": True, "expand_path": "general", "reason": f"G-C {d_gc:.4f} >= 0.03, G-U {d_gu:.4f} >= 0.01, G-C F1@0.5 {d_f05:.4f} > 0, guardrail ok"})
++    elif supplement and mode == "explore":
++        out.update({"expand": True, "expand_path": "supplement(once)", "reason": f"G-C {d_gc:.4f} < 0.03 but CI upper {ci['ci95'][1]:.4f} >= 0.03, G-U {d_gu:.4f} > 0, F1@0.5 {d_f05:.4f} > 0, last-interval gain {last_gain:.4f} >= 0.01"})
++    else:
++        out.update({"expand": False, "reason": f"G-C {d_gc:.4f}, G-U {d_gu:.4f}, G-C F1@0.5 {d_f05:.4f}, guardrail {g_guard}, CI upper {ci['ci95'][1] if ci else None}, last gain {last_gain:.4f}: below criteria"})
++    if mode == "full":
++        out["next"] = "C_compute" if out["expand"] and out.get("expand_path") == "general" else "stop"
++    return out
++
++
++def main():
++    ap = argparse.ArgumentParser()
++    ap.add_argument("mode", choices=["explore", "full"])
++    ap.add_argument("--report", required=True)
++    ap.add_argument("--out", required=True)
++    a = ap.parse_args()
++    rep = json.load(open(a.report))
++    dec = {"mode": a.mode, "report": a.report, "report_sha256": SEL.file_sha(a.report), "decision": decide(rep, a.mode)}
++    print(SEL.write_or_verify(a.out, json.loads(json.dumps(dec))), json.dumps(dec["decision"], indent=1)[:2500])
++
++
++if __name__ == "__main__":
++    main()
+diff --git a/rsna_diag/geo_loss.py b/rsna_diag/geo_loss.py
+new file mode 100644
+index 0000000..c310611
+--- /dev/null
++++ b/rsna_diag/geo_loss.py
+@@ -0,0 +1,223 @@
++"""iter_014: R-VLM 계열 GIoU 가중 pseudo-box supervision(G), GT 질량을 맞춘 균등 대조(U), 직접 SFT(C)의 후보·span·가중치·branch 구성.
++
++GT box b 하나마다 pseudo-box 4개(m=1..4)를 만들고, m=0은 GT다. 손실(모든 조건 공통):
++    L = [ CE_outside_GT_spans + sum_b n_b * sum_m q_bm * ell_bm ] / N
++  ell_bm = 후보 m의 `box_2d` 배열 span 평균 NLL(전체 vocabulary softmax, softcap 유지), n_b = GT span token 수, N = GT assistant token 수.
++  r_b0 = 1, r_bm = 1 + 0.5 ln GIoU(cand, GT_b), Z_b = sum_m r_bm.  G: q = r/Z.  U: q_b0 = 1/Z, q_bm = (1 - q_b0)/4.  C: q_b0 = 1.
++GT branch는 원래 GT 전체 sequence에 token별 가중치(span 밖 1, span b 안 q_b0)를 곱한 CE다 (n_b * q_b0 * mean = q_b0 * sum).
++후보 branch는 [prompt + GT의 box b 이전 token prefix + 후보 span]까지의 sequence이고 span token에만 가중치 n_b*q_bm/n_bm을 준다.
++후보 span 뒤 suffix는 loss에 쓰지 않으며 causal attention 때문에 span logit에 영향이 없으므로 잘라서 계산한다 (실제 모델로 검증: 테스트).
++
++span 규약: `box_2d` 좌표 배열의 시작 `[`부터 끝 `]`까지. tokenizer가 앞 공백(" [")과 뒤 쉼표("],")를 같은 token으로 합치므로,
++그 token들은 span에 포함하되 경계 걸침이 정확히 그 두 문자(앞 공백 최대 1, 뒤 쉼표 1)일 때만 허용하고 그 외는 예외다 (조용히 자르지 않는다).
++"""
++import hashlib
++import json
++import math
++
++import numpy as np
++
++SEED_TAG = "iter014-cand-v1"
++K_CAND = 4
++GIOU_MIN = 0.3
++GAMMA = 0.5
++SHIFT_FRAC = 0.3
++SCALE_RANGE = (0.8, 1.2)
++MAX_PROPOSALS = 10000
++
++
++class GeoError(RuntimeError):
++    pass
++
++
++# ---------- 기하 ----------
++def giou(a, b):
++    """[y0,x0,y1,x1] 정수 box 두 개의 GIoU (float64, 정수 면적 계산)."""
++    ay0, ax0, ay1, ax1 = a
++    by0, bx0, by1, bx1 = b
++    ia = max(0, min(ay1, by1) - max(ay0, by0)) * max(0, min(ax1, bx1) - max(ax0, bx0))
++    aa, ab = (ay1 - ay0) * (ax1 - ax0), (by1 - by0) * (bx1 - bx0)
++    u = aa + ab - ia
++    c = (max(ay1, by1) - min(ay0, by0)) * (max(ax1, bx1) - min(ax0, bx0))
++    if u <= 0 or c <= 0:
++        raise GeoError(f"degenerate box {a} {b}")
++    return ia / u - (c - u) / c
++
++
++def _rng(pid, b):
++    h = hashlib.sha256(f"{SEED_TAG}|{pid}|{b}".encode()).digest()
++    return np.random.default_rng(int.from_bytes(h[:8], "little"))
++
++
++def gen_candidates(pid, b, gt_box, k=K_CAND):
++    """GT box(정수 yxyx) 하나에 대한 결정적 후보 k개. returns (cands, n_proposals). 10,000 proposal 안에 k개가 안 나오면 GeoError (대체 금지).
++    proposal: 폭·높이에 비례한 shift U(-0.3,0.3) 및 scale U(0.8,1.2)(축별 독립), [0,1000] clipping, 1/1000 격자 반올림 뒤 GIoU>=0.3, GT·중복 제외."""
++    rng = _rng(pid, b)
++    y0, x0, y1, x1 = gt_box
++    cy, cx, h, w = (y0 + y1) / 2, (x0 + x1) / 2, y1 - y0, x1 - x0
++    out, seen = [], {tuple(gt_box)}
++    for n in range(1, MAX_PROPOSALS + 1):
++        dy, dx = rng.uniform(-SHIFT_FRAC, SHIFT_FRAC, 2) * (h, w)
++        sy, sx = rng.uniform(*SCALE_RANGE, 2)
++        ny0, ny1 = cy + dy - sy * h / 2, cy + dy + sy * h / 2
++        nx0, nx1 = cx + dx - sx * w / 2, cx + dx + sx * w / 2
++        c = [int(min(1000, max(0, v)) + 0.5) for v in (ny0, nx0, ny1, nx1)]
++        if not (c[0] < c[2] and c[1] < c[3]) or tuple(c) in seen:
++            continue
++        if giou(c, gt_box) < GIOU_MIN:
++            continue
++        seen.add(tuple(c))
++        out.append(c)
++        if len(out) == k:
++            return out, n
++    raise GeoError(f"could not obtain {k} candidates for {pid} box {b} {gt_box} within {MAX_PROPOSALS} proposals")
++
++
++def cand_record(gt_box, cand):
++    gi = giou(cand, gt_box)
++    g_h, g_w = gt_box[2] - gt_box[0], gt_box[3] - gt_box[1]
++    return {"box": cand, "giou": gi, "area_ratio": (cand[2] - cand[0]) * (cand[3] - cand[1]) / (g_h * g_w),
++            "disp": math.hypot((cand[0] + cand[2] - gt_box[0] - gt_box[2]) / 2, (cand[1] + cand[3] - gt_box[1] - gt_box[3]) / 2)}
++
++
++# ---------- 가중치 ----------
++def r_weights(gious):
++    """gious: 후보 GIoU 리스트 -> [1, r_1..r_k]. 각 r은 양수·유한이어야 한다."""
++    r = [1.0] + [1.0 + GAMMA * math.log(g) for g in gious]
++    if not all(math.isfinite(v) and v > 0 for v in r):
++        raise GeoError(f"non-positive/non-finite weight {r} for giou {gious}")
++    return r
++
++
++def q_weights(mode, gious):
++    r = r_weights(gious)
++    if mode == "C":
++        return [1.0] + [0.0] * len(gious)
++    z = sum(r)
++    if mode == "G":
++        return [v / z for v in r]
++    if mode == "U":
++        q0 = 1.0 / z
++        return [q0] + [(1 - q0) / len(gious)] * len(gious)
++    raise ValueError(mode)
++
++
++# ---------- token span ----------
++def array_char_spans(text):
++    """target JSON의 각 `box_2d` 배열의 (시작 '[' 위치, 끝 ']' 위치, 4개 정수)를 문서 순서로 반환. 값은 json.loads와 대조한다."""
++    from . import coord_loss as CL
++    sp = CL.coord_spans(text)
++    if len(sp) % 4:
++        raise GeoError("coordinate count not multiple of 4")
++    want = [e["box_2d"] for e in json.loads(text)]
++    res = []
++    for b in range(len(sp) // 4):
++        s0, e3 = sp[4 * b][0], sp[4 * b + 3][1]
++        if text[s0 - 1] != "[" or text[e3] != "]":
++            raise GeoError(f"box {b}: array brackets not adjacent to coordinates")
++        vals = [v for _, _, v in sp[4 * b:4 * b + 4]]
++        if vals != want[b]:
++            raise GeoError(f"box {b}: scanned values {vals} != json {want[b]}")
++        res.append((s0 - 1, e3, vals))
++    return res
++
++
++def encode(tok, text):
++    enc = tok(text + "<end_of_turn>", add_special_tokens=False, return_offsets_mapping=True)
++    return list(enc["input_ids"]), [tuple(o) for o in enc["offset_mapping"]]
++
++
++def box_token_spans(tok, text, dig_ids):
++    """returns (ids, [(t_start, t_end_inclusive)] per box). 경계 걸침은 앞 공백/뒤 쉼표만 허용하고 좌표 숫자는 모두 한 자리 digit token이어야 한다."""
++    ids, offs = encode(tok, text)
++    dset = set(dig_ids)
++    res = []
++    for (a, z, _vals) in array_char_spans(text):
++        ts = [t for t, (s, e) in enumerate(offs) if s <= a < e]
++        te = [t for t, (s, e) in enumerate(offs) if s <= z < e]
++        if len(ts) != 1 or len(te) != 1:
++            raise GeoError("bracket not covered by exactly one token")
++        ts, te = ts[0], te[0]
++        s_off, e_off = offs[ts]
++        s2, e2 = offs[te]
++        if e_off != a + 1 or text[s_off:a] not in ("", " "):
++            raise GeoError(f"opening token straddles unexpected chars {text[s_off:e_off]!r}")
++        if s2 != z or text[z + 1:e2] not in ("", ","):
++            raise GeoError(f"closing token straddles unexpected chars {text[s2:e2]!r}")
++        for t in range(ts + 1, te):
++            s, e = offs[t]
++            seg = text[s:e]
++            if seg.isdigit():
++                if ids[t] not in dset or e - s != 1:
++                    raise GeoError(f"non single-digit token {seg!r} inside box span")
++            elif seg not in (",", " ", ", "):
++                raise GeoError(f"unexpected token {seg!r} inside box span")
++        res.append((ts, te))
++    return ids, res
++
++
++def replace_box_text(text, b, new_box):
++    """text의 b번째 box_2d 배열을 new_box(정수 4개)로 교체한 문자열 (json.dumps와 같은 서식 '[a, b, c, d]')."""
++    a, z, _ = array_char_spans(text)[b]
++    return text[:a] + "[" + ", ".join(str(int(v)) for v in new_box) + "]" + text[z + 1:]
++
++
++def build_branches(tok, text, dig_ids, cand_lists, mode):
++    """text: GT target. cand_lists: [[cand_record x4] per box] (GT box 순서). returns dict:
++    gt_ids, gt_spans, gt_tokw_by_box(q_b0), branches=[{box, m, ids(assistant part), span=(ts,te), q, w_per_token, n_b, n_bm, giou}].
++    C에서는 branch 없이 q_b0=1이다."""
++    gt_ids, gt_spans = box_token_spans(tok, text, dig_ids)
++    if len(cand_lists) != len(gt_spans):
++        raise GeoError("candidate list count != box count")
++    branches, q0s = [], []
++    for b, cl in enumerate(cand_lists):
++        q = q_weights(mode, [c["giou"] for c in cl])
++        q0s.append(q[0])
++        ts, te = gt_spans[b]
++        n_b = te - ts + 1
++        if mode == "C":
++            continue
++        for m, c in enumerate(cl, start=1):
++            ctext = replace_box_text(text, b, c["box"])
++            cids, cspans = box_token_spans(tok, ctext, dig_ids)
++            cts, cte = cspans[b]
++            if cts != ts or cids[:ts + 1] != gt_ids[:ts + 1]:
++                raise GeoError(f"box {b} cand {m}: GT prefix (incl. opening bracket token) differs")
++            n_bm = cte - cts + 1
++            branches.append({"box": b, "m": m, "ids": cids[:cte + 1], "span": (cts, cte), "q": q[m], "n_b": n_b, "n_bm": n_bm,
++                             "w_per_token": q[m] * n_b / n_bm, "giou": c["giou"], "cand": c["box"]})
++    return {"gt_ids": gt_ids, "gt_spans": gt_spans, "q0": q0s, "branches": branches}
++
++
++def gt_token_weights(gt_len, gt_spans, q0s):
++    """assistant 부분(길이 gt_len) token별 가중치: span 밖 1, box b span 안 q_b0."""
++    w = [1.0] * gt_len
++    for (ts, te), q0 in zip(gt_spans, q0s):
++        for t in range(ts, te + 1):
++            w[t] = q0
++    return w
++
++
++def branch_digest(br):
++    """branch 목록의 결정적 지문 (batch ID·후보 ID 대조용)."""
++    h = hashlib.sha256()
++    for b in br:
++        h.update(json.dumps([b["box"], b["m"], b["ids"], b["span"], round(b["w_per_token"], 12)]).encode())
++    return h.hexdigest()[:16]
++
++
++# ---------- 독립 기준(테스트용, float64) ----------
++def reference_loss(nll_gt, gt_spans, nll_cands, q):
++    """FP64 기준 손실 합. nll_gt: GT assistant token별 NLL(list). nll_cands: {(b,m): span token별 NLL list}. q: {(b,m): q_bm}.
++    returns sum (분모 N으로 나누기 전) = CE_outside + sum_b n_b * sum_m q_bm * mean(NLL_bm)."""
++    inside = set()
++    for ts, te in gt_spans:
++        inside.update(range(ts, te + 1))
++    total = sum(v for t, v in enumerate(nll_gt) if t not in inside)
++    for b, (ts, te) in enumerate(gt_spans):
++        n_b = te - ts + 1
++        total += n_b * q[(b, 0)] * (sum(nll_gt[ts:te + 1]) / n_b)
++    for (b, m), nll in nll_cands.items():
++        n_b = gt_spans[b][1] - gt_spans[b][0] + 1
++        total += n_b * q[(b, m)] * (sum(nll) / len(nll))
++    return total
+diff --git a/rsna_diag/geo_pipeline.py b/rsna_diag/geo_pipeline.py
+new file mode 100644
+index 0000000..c6820ee
+--- /dev/null
++++ b/rsna_diag/geo_pipeline.py
+@@ -0,0 +1,448 @@
++"""iter_014 실행 파이프라인 (재개 가능, 단계별 근거 재검증). 사용:
++python -m rsna_diag.geo_pipeline --stage explore|full|compute --trajs G:2e-5,U:2e-5,C:2e-5 [--reuse-c results/iter_013/explore/C_lr2e-05]
++
++한 stage = 여러 trajectory(조건 x LR)의 추가 적응 학습 + milestone V200 검증 + V400 완성(V200 응답을 부모로 재사용해 나머지 200만 생성) + 보고.
++iter_013 adapt_pipeline.py에서 고친 것 (reuse_issues):
++- GPU 허용 집합: 상속된 CUDA_VISIBLE_DEVICES(정수 목록)의 원소만 쓰고, 자식에게는 그 원소를 물리 장치로 전달한다 (덮어써서 허용 밖으로 확장하지 않는다).
++- 메모리 확인은 train.lock 존재와 무관하게 항상 수행한다. 필요 여유 = exec_config의 측정 peak + 2GiB.
++- 완료 판정(trained_ok)은 done.json·milestone 검증뿐 아니라 요청한 stage 파일 hash, loss, LR, 부모 adapter digest, 후보 manifest digest, train/validation
++  입력 digest, 예정 update 수, 현재 protocol과 train_config를 대조한다 (불일치는 예외, 조용한 재사용 없음).
++- selected=null 은 null로 두고 final과 분리해 기록한다 (selection_eligible=false). 대체는 geo_decide의 사전 규칙(C/U 한정)만.
++- iter_013 C의 재사용은 호환성 manifest(compat_C.json)로 입력·설정·adapter·원시 응답을 검증한 경우에만 읽기 전용으로 쓴다.
++"""
++import argparse
++import hashlib
++import json
++import os
++import subprocess
++import sys
++import threading
++import time
++
++import numpy as np
++
++from . import adapt_eval as AE, eval_gate, inputs, lock_protocol, metrics as M, migrate, parse as PA, queue_lock, select as SEL, sft_eval
++from .run_shards import gpu_snapshot
++
++R = "results/iter_014"
++PROT = f"{R}/protocols/main_protocol.json"
++EXEC = f"{R}/decisions/exec_config.json"
++MAN = AE.MANIFEST
++OLD_PROT = "results/iter_013/protocols/main_protocol.json"
++OLD_STAGE = "results/iter_013/stage/explore.json"
++MARGIN_MIB = 2048
++
++
++def lrs(x):
++    return f"{x:g}"
++
++
++def allowed_gpus():
++    raw = os.environ.get("CUDA_VISIBLE_DEVICES")
++    if not raw:
++        raise SystemExit("CUDA_VISIBLE_DEVICES not set")
++    return [int(x) for x in raw.split(",")]
++
++
++class Ctx:
++    def __init__(self, stage):
++        self.stage = stage
++        self.stage_path = f"{R}/stage/{stage}.json"
++        self.cfg = json.load(open(self.stage_path))
++        self.dir = f"{R}/{stage}"
++        os.makedirs(self.dir, exist_ok=True)
++        self.logp = f"{self.dir}/pipeline.log"
++        self.ex = json.load(open(EXEC))
++        self.allowed = allowed_gpus()
++        for g in self.ex["train_gpus"] + self.ex["gen_gpus"]:
++            if g not in self.allowed:
++                raise SystemExit(f"exec_config gpu {g} not within inherited allowed set {self.allowed}")
++        self.pdig = lock_protocol.verify(PROT)
++        self.val_items, self.gt = inputs.load_items(MAN, AE.GT, self.cfg["val_ids"], "validation", exact=False)
++        self.v_in = inputs.inputs_digest(self.val_items, self.gt)
++        self.train_items = inputs.load_items(MAN, AE.GT, self.cfg["train_ids"], "train", exact=False)[0]
++        self.t_in = inputs.inputs_digest(self.train_items, self.gt)
++        self.v400_items, _ = inputs.load_items(MAN, AE.GT, AE.V400_IDS, "validation", exact=True)
++        self.tr_ids = [i for i in self.gt if self.gt[i]["split"] == "train"]
++        self.aed = sft_eval.area_edges(self.gt, self.tr_ids)
++        self.bed = AE.box_edges_train(self.gt, self.tr_ids)
++        self.milestones = sorted(self.cfg.get("milestone_epochs") or range(1, self.cfg["epochs"] + 1))
++        self.spe = -(-len(self.train_items) // self.cfg["eff_batch"])
++
++    def log(self, msg):
++        line = f"[{time.strftime('%F %T')}] {msg}"
++        print(line, flush=True)
++        with open(self.logp, "a") as f:
++            f.write(line + "\n")
++
++
++def wait_gpu_free(ctx, gpu, need_mib):
++    """실제 여유가 need_mib + 2GiB 이상일 때까지 기다린다 (lock 존재 여부와 무관)."""
++    while True:
++        rows, apps = gpu_snapshot({gpu})
++        if rows and rows[0]["mem_total_mib"] - rows[0]["mem_used_mib"] >= need_mib + MARGIN_MIB:
++            ctx.log(f"gpu {gpu} ok (need {need_mib}+{MARGIN_MIB} MiB): {rows[0]}")
++            return
++        ctx.log(f"waiting for gpu {gpu} (need {need_mib}+{MARGIN_MIB} MiB free): {rows} apps={apps}")
++        time.sleep(120)
++
++
++def run_dir(ctx, cond, lr):
++    return f"{ctx.dir}/{cond}_lr{lrs(lr)}"
++
++
++def expected_cfg_check(ctx, tc, cond, lr):
++    """train_config가 이번 요청(stage 파일·loss·LR·부모·후보·입력·예정 update)과 일치하는지 검사한다. 불일치는 예외."""
++    c = tc["config"]
++    want = {"loss_mode": cond, "lr": lr, "seed": ctx.cfg["seed"], "n_train": len(ctx.train_items), "n_val": len(ctx.val_items), "eff_batch": ctx.cfg["eff_batch"],
++            "total_updates": ctx.spe * ctx.cfg["epochs"], "steps_per_epoch": ctx.spe, "train_inputs_digest": ctx.t_in, "val_inputs_digest": ctx.v_in,
++            "stage_config_sha256": migrate.file_sha(ctx.stage_path), "protocol_digest": ctx.pdig, "model_revision": AE_MODEL_REVISION(), "deterministic": False,
++            "microbatch": ctx.ex["train_microbatch"], "branch_microbatch": ctx.ex["branch_microbatch"]}
++    bad = {k: (c.get(k), v) for k, v in want.items() if c.get(k) != v}
++    st = c.get("stage", {})
++    for k in ("parent_adapter_digest", "parent_adapter_sha256", "cand_manifest_sha256", "train_ids", "val_ids", "epochs", "warmup_frac"):
++        if st.get(k) != ctx.cfg.get(k):
++            bad[f"stage.{k}"] = (st.get(k), ctx.cfg.get(k))
++    if c.get("geo", {}).get("cand_manifest_sha256") != ctx.cfg["cand_manifest_sha256"]:
++        bad["geo.cand_manifest_sha256"] = (c.get("geo", {}).get("cand_manifest_sha256"), ctx.cfg["cand_manifest_sha256"])
++    if bad:
++        raise RuntimeError(f"train_config differs from requested run: {bad}")
++
++
++def AE_MODEL_REVISION():
++    from . import generate
++    return generate.MODEL_REVISION
++
++
++def trained_ok(ctx, d, cond, lr):
++    """done.json + milestone epoch 전체 검증(원시 응답 재계산) + 요청 일치. 파일이 없으면 False, 근거 불일치는 예외."""
++    if not os.path.exists(os.path.join(d, "train_config.json")):
++        return False
++    tc = json.load(open(os.path.join(d, "train_config.json")))
++    expected_cfg_check(ctx, tc, cond, lr)
++    if not os.path.exists(os.path.join(d, "done.json")):
++        return False
++    dn = json.load(open(os.path.join(d, "done.json")))
++    if dn.get("status") != "complete" or dn.get("steps") != ctx.spe * ctx.cfg["epochs"] or dn.get("loss_mode") != cond or dn.get("train_digest") != tc["train_digest"]:
++        raise RuntimeError(f"{d}: done.json inconsistent with request: {dn}")
++    for e in ctx.milestones:
++        if not os.path.exists(os.path.join(d, f"epoch_{e:02d}", "val_metrics.json")):
++            return False
++        SEL.verify_epoch(d, e, tc, ctx.v_in, PROT, ctx.val_items, ctx.gt)
++    return True
++
++
++def train_cmd(ctx, cond, lr, d, gpu):
++    return [sys.executable, "-m", "rsna_diag.adapt_geo", "--run-dir", d, "--stage-config", ctx.stage_path, "--loss", cond, "--lr", str(lr), "--protocol", PROT,
++            "--microbatch", str(ctx.ex["train_microbatch"]), "--branch-microbatch", str(ctx.ex["branch_microbatch"]), "--workers", "3"]
++
++
++def train_traj(ctx, gpu, cond, lr):
++    d = run_dir(ctx, cond, lr)
++    if trained_ok(ctx, d, cond, lr):
++        ctx.log(f"{d}: verified complete")
++        return
++    wait_gpu_free(ctx, gpu, ctx.ex["train_peak_mib"][cond])
++    ctx.log(f"train {cond} lr={lr} on gpu {gpu} -> {d}")
++    t0 = time.time()
++    rc = subprocess.run(train_cmd(ctx, cond, lr, d, gpu), env=dict(os.environ, CUDA_VISIBLE_DEVICES=str(gpu)), stdout=open(f"{d}.log", "a"), stderr=subprocess.STDOUT).returncode
++    ctx.log(f"train {cond} lr={lr} rc={rc} wall={time.time() - t0:.0f}s")
++    if rc != 0 or not trained_ok(ctx, d, cond, lr):
++        raise RuntimeError(f"{d}: training failed or not verified (rc={rc})")
++
++
++# ---------- iter_013 C 재사용 (읽기 전용, 호환성 manifest) ----------
++def c_compat(ctx, d, lr):
++    """iter_013 C trajectory가 이 stage의 새 C와 같은 조건인지 검증하고 근거를 반환한다. 다르면 (False, 사유). 원본은 수정하지 않는다."""
++    if ctx.stage != "explore":
++        return False, "reuse only defined for the explore stage"
++    tc = json.load(open(os.path.join(d, "train_config.json")))
++    c, old = tc["config"], json.load(open(OLD_STAGE))
++    st_now = ctx.cfg
++    chk = {"loss_mode": (c["loss_mode"], "C"), "lr": (c["lr"], lr), "seed": (c["seed"], st_now["seed"]), "n_train": (c["n_train"], len(ctx.train_items)), "n_val": (c["n_val"], len(ctx.val_items)),
++           "eff_batch": (c["eff_batch"], st_now["eff_batch"]), "microbatch": (c["microbatch"], ctx.ex["train_microbatch"]), "total_updates": (c["total_updates"], ctx.spe * st_now["epochs"]),
++           "train_inputs_digest": (c["train_inputs_digest"], ctx.t_in), "val_inputs_digest": (c["val_inputs_digest"], ctx.v_in), "model_revision": (c["model_revision"], AE_MODEL_REVISION()),
++           "lora_r/dropout/wd/clip/warmup": ((c["r"], c["dropout"], c["weight_decay"], c["grad_clip"], c["warmup_frac"]), (16, 0.05, 0.01, 1.0, 0.05)),
++           "optimizer_init": (c["optimizer_init"], "fresh AdamW (parent optimizer not resumed)"), "dataloader_rng": (c["dataloader_rng"], "torch.Generator seeded seed*1000+epoch"),
++           "parent_adapter_digest": (c["stage"]["parent_adapter_digest"], st_now["parent_adapter_digest"]), "parent_adapter_sha256": (c["stage"]["parent_adapter_sha256"], st_now["parent_adapter_sha256"]),
++           "train_ids/val_ids/epochs": ((c["stage"]["train_ids"], c["stage"]["val_ids"], c["stage"]["epochs"]), (st_now["train_ids"], st_now["val_ids"], st_now["epochs"])),
++           "old_stage_file_sha": (c["stage_config_sha256"], migrate.file_sha(OLD_STAGE)), "deterministic": (c["deterministic"], False)}
++    bad = {k: v for k, v in chk.items() if v[0] != v[1]}
++    if old["parent_adapter_digest"] != st_now["parent_adapter_digest"]:
++        bad["old_stage_parent"] = "differs"
++    return (not bad), (bad or {"checked": sorted(chk)})
++
++
++def verify_gen_reused(ctx, gen_dir, items, adapter_dir, parent_dir):
++    """iter_013 원시 응답(구 protocol digest)을 읽기 전용으로 검증한다: verify_gen의 부모 경로 + 구 completion 대조."""
++    recs = eval_gate.verify_gen(gen_dir if os.path.isdir(gen_dir) else parent_dir, items, ["concise"], adapter_dir, PROT, parent_dir, OLD_PROT, require_completion=False)
++    adg = eval_gate.adapter_digest(adapter_dir)
++    old_dig = lock_protocol.digest_of(OLD_PROT)
++    for dd in {parent_dir, gen_dir}:
++        cp = os.path.join(dd, "completion.json")
++        if os.path.isdir(dd) and os.path.exists(cp):
++            c = json.load(open(cp))
++            if c.get("adapter_digest") != adg or c.get("protocol_digest") != old_dig or c.get("n_missing") != 0 or c.get("n_duplicate") != 0:
++                raise eval_gate.GateError(f"reused completion inconsistent: {cp}")
++        elif dd == gen_dir and os.path.isdir(dd):
++            raise eval_gate.GateError(f"reused completion missing: {cp}")
++    return recs
++
++
++def verify_epoch_reused(ctx, d, e, tc):
++    ed = os.path.join(d, f"epoch_{e:02d}")
++    m = json.load(open(os.path.join(ed, "val_metrics.json")))
++    if m.get("epoch") != e or m.get("train_digest") != tc["train_digest"] or m.get("val_inputs_digest") != ctx.v_in:
++        raise eval_gate.GateError(f"{d} epoch {e}: metrics not linked to run/inputs")
++    if m.get("protocol_digest") != lock_protocol.digest_of(OLD_PROT) or m.get("adapter_digest") != eval_gate.adapter_digest(ed):
++        raise eval_gate.GateError(f"{d} epoch {e}: protocol/adapter digest mismatch")
++    recs = verify_gen_reused(ctx, os.path.join(ed, "val_gen"), ctx.val_items, ed, os.path.join(ed, "val_gen"))
++    ids = [i["id"] for i in ctx.val_items]
++    edges = sft_eval.area_edges(ctx.gt, ctx.tr_ids)
++    rec = json.loads(json.dumps(sft_eval.summarize(sft_eval.parse_records(recs, ids, "concise", strict=True), ctx.gt, ids, edges)))
++    bad = [k for k in rec if m.get(k) != rec[k]]
++    if bad:
++        raise eval_gate.GateError(f"{d} epoch {e}: recorded scores differ from recomputation: {bad[:5]}")
++    return recs
++
++
++# ---------- 평가 ----------
++def v200_detail(ctx, d, e, reused=False):
++    tc = json.load(open(os.path.join(d, "train_config.json")))
++    if reused:
++        recs = verify_epoch_reused(ctx, d, e, tc)
++    else:
++        SEL.verify_epoch(d, e, tc, ctx.v_in, PROT, ctx.val_items, ctx.gt)
++        ed = os.path.join(d, f"epoch_{e:02d}")
++        recs = eval_gate.verify_gen(os.path.join(ed, "val_gen"), ctx.val_items, ["concise"], ed, PROT)
++    ids = [i["id"] for i in ctx.val_items]
++    return detail14(ctx, AE.preds_of(recs, ids), ids), tc["config"]["steps_per_epoch"]
++
++
++def iou_bins(preds, gt, ids):
++    """개별 GT box의 best IoU(모든 예측 box 대상) 구간 분포 - one-to-one matching recall과는 다른 분석. 그리고 예측 개수 부족/일치/초과."""
++    edges = [0.0, 0.1, 0.3, 0.5, 1.0000001]
++    cnt = [0, 0, 0, 0]
++    under = over = same = 0
++    pos = [i for i in ids if gt[i]["category"] == "opacity"]
++    for i in pos:
++        pr = preds[i]
++        pb = pr["boxes"] if pr["status"] in PA.VALID else []
++        g = [b["yxyx_norm"] for b in gt[i]["boxes"]]
++        for b in g:
++            best = max([M.iou(p, b) for p in pb], default=0.0)
++            cnt[int(np.digitize(best, edges[1:-1]))] += 1
++        under += len(pb) < len(g)
++        over += len(pb) > len(g)
++        same += len(pb) == len(g)
++    n = sum(cnt)
++    return {"gt_boxes": n, "best_iou<0.1": cnt[0], "0.1<=best<0.3": cnt[1], "0.3<=best<0.5": cnt[2], "best>=0.5": cnt[3],
++            "pred_count_vs_gt": {"under": under, "same": same, "over": over}, "note": "best-IoU 구간(모든 예측 대상)과 one-to-one recall@thr는 다른 분석"}
++
++
++def detail14(ctx, preds, ids):
++    d = AE.detail(preds, ctx.gt, ids, ctx.aed, ctx.bed)
++    d["best_iou_bins"] = iou_bins(preds, ctx.gt, ids)
++    return d
++
++
++def b0_details(ctx):
++    recs = AE.b0_records(PROT, ctx.v400_items)
++    ids400 = [i["id"] for i in ctx.v400_items]
++    p400 = AE.preds_of(recs, ids400)
++    v200 = [i["id"] for i in ctx.val_items]
++    return p400, detail14(ctx, p400, ids400), detail14(ctx, {i: p400[i] for i in v200}, v200)
++
++
++def gen_v400(ctx, gpu_list, d, e, reused=False):
++    """epoch e adapter의 V400 완성. V200 val_gen을 부모로 재사용하고 나머지만 새로 생성한다. returns records."""
++    ed = os.path.join(d, f"epoch_{e:02d}")
++    out = os.path.join(d, f"v400_epoch{e:02d}")
++    par = os.path.join(ed, "val_gen")
++    if reused:
++        return verify_gen_reused(ctx, out, ctx.v400_items, ed, par)
++    try:
++        return eval_gate.verify_gen(out, ctx.v400_items, ["concise"], ed, PROT, par, PROT)
++    except (eval_gate.GateError, FileNotFoundError) as ex:
++        ctx.log(f"{out}: not complete/verified ({str(ex)[:120]}) -> run_shards")
++    for g in gpu_list:
++        wait_gpu_free(ctx, g, ctx.ex["gen_peak_mib_per_worker"] * ctx.ex["gen_workers_per_gpu"])
++    nw = ctx.ex["gen_workers_per_gpu"] * len(gpu_list)
++    cmd = [sys.executable, "-m", "rsna_diag.run_shards", "--manifest", MAN, "--ids", AE.V400_IDS, "--out-dir", out, "--protocol", PROT, "--prompts", "concise",
++           "--workers", str(nw), "--gpus", ",".join(map(str, gpu_list)), "--adapter", ed, "--parent-dir", par, "--parent-protocol", PROT]
++    rc = subprocess.run(cmd, env=dict(os.environ, CUDA_VISIBLE_DEVICES=",".join(map(str, gpu_list))), stdout=open(f"{out}.log", "a"), stderr=subprocess.STDOUT).returncode
++    ctx.log(f"gen {out} rc={rc}")
++    if rc != 0:
++        raise RuntimeError(f"{out}: run_shards failed rc={rc}")
++    return eval_gate.verify_gen(out, ctx.v400_items, ["concise"], ed, PROT, par, PROT)
++
++
++def select_traj(ctx, d, b0_v200, reused=False):
++    """milestone별 V200 detail. guardrail 통과 최대 S_loc 선택(동률 이른 update). 통과 후보가 없으면 selected=null (final로 대체하지 않는다).
++    v200_best_fallback = guardrail 무시 최고 S_loc milestone (geo_decide가 C/U 비교 기준으로만 쓰는 사전 규칙)."""
++    cands, det = {}, {}
++    spe = None
++    for e in ctx.milestones:
++        dt, spe = v200_detail(ctx, d, e, reused)
++        cands[e * spe], det[e] = dt, dt
++    sel_upd, table = AE.select_checkpoint(cands, b0_v200)
++    best = max(cands, key=lambda k: (round(cands[k]["S_loc"], 12), -k))
++    return {"update_to_epoch": {u: u // spe for u in cands}, "selected_update": sel_upd, "selected_epoch": (sel_upd // spe if sel_upd else None),
++            "selection_eligible": sel_upd is not None, "fallback_best_update_ignoring_guardrail": best, "fallback_best_epoch": best // spe,
++            "table": {str(u): t for u, t in table.items()}}, det, spe
++
++
++def compare(preds_by, gt, ids, pairs):
++    return {f"{a}-{b}": AE.paired_ci(preds_by[a], preds_by[b], gt, ids) for a, b in pairs if a in preds_by and b in preds_by}
++
++
++def report(ctx, trajs, reuse_map):
++    """trajs: [(cond, lr)] 모두 학습·검증 완료 상태. V400 완성 후 report.json (결정적 내용). reuse_map: {(cond, lr): iter_013 dir}."""
++    ids400 = [i["id"] for i in ctx.v400_items]
++    p400_b0, d400_b0, d200_b0 = b0_details(ctx)
++    rep = {"stage": ctx.stage, "protocol_digest": ctx.pdig, "b0": {"v400": d400_b0, "v200": d200_b0}, "trajectories": {}, "reused": {f"{c}@{lrs(l)}": v for (c, l), v in reuse_map.items()}}
++    preds = {"B0": p400_b0}
++    for cond, lr in trajs:
++        reused = (cond, lr) in reuse_map
++        d = reuse_map.get((cond, lr)) or run_dir(ctx, cond, lr)
++        name = f"{cond}@{lrs(lr)}"
++        sel, det200, spe = select_traj(ctx, d, d200_b0, reused)
++        E = ctx.cfg["epochs"]
++        entry = {"lr": lr, "cond": cond, "steps_per_epoch": spe, "reused_from": d if reused else None, "selection_v200": sel,
++                 "v200_detail_by_epoch": {str(e): det200[e] for e in det200}}
++        want = {"final": E, "selected": sel["selected_epoch"], "v200_best_fallback": sel["fallback_best_epoch"]}
++        for tag, e in want.items():
++            if e is None:
++                entry[tag] = None
++                continue
++            if tag == "v200_best_fallback" and cond == "G":
++                continue  # G에는 대체를 허용하지 않는다
++            if tag == "v200_best_fallback" and sel["selected_epoch"] is not None:
++                continue  # 선택이 있으면 필요 없음
++            recs = gen_v400(ctx, [int(g) for g in ctx.ex["gen_gpus"]], d, e, reused)
++            p = AE.preds_of(recs, ids400)
++            dt = detail14(ctx, p, ids400)
++            entry[tag] = {"epoch": e, "update": e * spe, "v400": dt, "guardrail_v400": AE.guardrail(dt, d400_b0)}
++            preds[f"{name}/{tag}"] = p
++        entry["final_v400_reported_separately_from_selection"] = True
++        rep["trajectories"][name] = entry
++    rep["pairwise_v400_paired_bootstrap"] = {}
++    for tag in ("selected", "final"):
++        pb = {"B0": preds["B0"]}
++        for n, p in preds.items():
++            if n.endswith("/" + tag):
++                pb[n.split("/")[0]] = p
++        for n, p in preds.items():  # 선택 checkpoint가 없는 C/U는 사전 규칙의 V200 최고 checkpoint(대체)를 selected 비교에 쓴다
++            if tag == "selected" and n.endswith("/v200_best_fallback"):
++                pb.setdefault(n.split("/")[0], p)
++        cs = sorted(k for k in pb if k != "B0")
++        pairs = [(a, "B0") for a in cs] + [(a, b) for a in cs for b in cs if a != b and a.split("@")[0] in ("G", "U") and b.split("@")[0] in ("C", "U") and not (a[0] == b[0])]
++        rep["pairwise_v400_paired_bootstrap"][tag] = compare(pb, ctx.gt, ids400, pairs)
++    return rep, preds
++
++
++def write_or_verify(path, obj):
++    return SEL.write_or_verify(path, obj)
++
++
++ABORT = threading.Event()
++_B0 = {}
++_LOCK = threading.Lock()
++
++
++def run_lanes(lanes):
++    errs = []
++
++    def w(fns):
++        try:
++            for f in fns:
++                f()
++        except BaseException as e:  # noqa
++            errs.append(e)
++            ABORT.set()
++
++    ths = [threading.Thread(target=w, args=(fns,)) for fns in lanes.values()]
++    [t.start() for t in ths]
++    [t.join() for t in ths]
++    if errs:
++        raise errs[0]
++
++
++def b0_cached(ctx):
++    with _LOCK:
++        if "v" not in _B0:
++            _B0["v"] = b0_details(ctx)
++        return _B0["v"]
++
++
++def prefetch(ctx, gpu, pending, dirs, reuse_map):
++    """학습이 끝난 trajectory부터 claim해 final/selected(/C·U 대체) checkpoint의 V400 나머지 200요청을 자기 GPU에서 생성한다 (결과는 report()가 재검증)."""
++    while True:
++        with _LOCK:
++            ready = [t for t in pending if os.path.exists(os.path.join(dirs[t], "done.json"))]
++            if not pending:
++                return
++            claim = ready[0] if ready else None
++            if claim:
++                pending.remove(claim)
++        if claim is None:
++            if ABORT.is_set():
++                return
++            time.sleep(60)
++            continue
++        d = dirs[claim]
++        _, _, d200_b0 = b0_cached(ctx)
++        sel, _, _ = select_traj(ctx, d, d200_b0)
++        es = {ctx.cfg["epochs"], sel["selected_epoch"]}
++        if sel["selected_epoch"] is None and claim[0] != "G":
++            es.add(sel["fallback_best_epoch"])
++        for e in sorted(x for x in es if x is not None):
++            gen_v400(ctx, [gpu], d, e)
++
++
++def main():
++    ap = argparse.ArgumentParser()
++    ap.add_argument("--stage", required=True)
++    ap.add_argument("--trajs", required=True, help="예: G:2e-5,U:2e-5,C:2e-5 (lane 배정: 순서대로 train_gpus에 번갈아)")
++    ap.add_argument("--reuse-c", default=None, help="iter_013 C trajectory 디렉터리 (호환성 검증 통과 시 읽기 전용 재사용, 아니면 새로 학습)")
++    ap.add_argument("--report-name", default="report")
++    a = ap.parse_args()
++    ctx = Ctx(a.stage)
++    lk, own, _ = queue_lock.try_lock(os.path.join(os.path.realpath(ctx.dir), "pipeline.lock"), queue_lock.my_info(role="geo_pipeline"))
++    if lk is None:
++        sys.exit(f"another pipeline owns {ctx.dir}: {own}")
++    try:
++        trajs = [(c, float(l)) for c, l in (x.split(":") for x in a.trajs.split(","))]
++        reuse_map = {}
++        if a.reuse_c:
++            lr_c = [l for c, l in trajs if c == "C"][0]
++            okc, why = c_compat(ctx, a.reuse_c, lr_c)
++            comp = {"source": a.reuse_c, "compatible": okc, "detail": why, "source_protocol": OLD_PROT, "source_protocol_digest": lock_protocol.digest_of(OLD_PROT),
++                    "new_protocol_digest": ctx.pdig, "note": "읽기 전용 재사용. 원시 응답은 report에서 구 protocol digest(parent 경로)로 재검증·재계산한다."}
++            SEL.write_or_verify(f"{ctx.dir}/compat_C.json", json.loads(json.dumps(comp, default=str)))
++            ctx.log(f"C reuse compat={okc}: {str(why)[:300]}")
++            if okc:
++                reuse_map[("C", lr_c)] = a.reuse_c
++        gpus = [int(g) for g in ctx.ex["train_gpus"]]
++        todo = [(c, l) for c, l in trajs if (c, l) not in reuse_map]
++        lanes = {g: [] for g in gpus}
++        dirs = {(c, l): (reuse_map.get((c, l)) or run_dir(ctx, c, l)) for c, l in trajs}
++        pending = [t for t in dirs if t not in reuse_map]
++        # 재사용 trajectory의 V400 검증은 report에서 수행. 학습 lane 배정은 순서대로
++        for k, (c, l) in enumerate(todo):
++            g = gpus[k % len(gpus)]
++            lanes[g].append(lambda g=g, c=c, l=l: train_traj(ctx, g, c, l))
++        for g in gpus:
++            lanes[g].append(lambda g=g: prefetch(ctx, g, pending, dirs, reuse_map))
++        t0 = time.time()
++        run_lanes(lanes)
++        ctx.log(f"all trainings verified; wall={time.time() - t0:.0f}s")
++        rep, preds = report(ctx, trajs, reuse_map)
++        ctx.log(f"report {write_or_verify(f'{ctx.dir}/{a.report_name}.json', json.loads(json.dumps(rep)))}")
++        ctx.log("STAGE COMPLETE")
++    finally:
++        lk.release()
++
++
++if __name__ == "__main__":
++    main()
+diff --git a/rsna_diag/geo_stages.py b/rsna_diag/geo_stages.py
+new file mode 100644
+index 0000000..c31d813
+--- /dev/null
++++ b/rsna_diag/geo_stages.py
+@@ -0,0 +1,62 @@
++"""iter_014 stage config (결과를 보기 전에 고정). 사용: python -m rsna_diag.geo_stages --out-dir results/iter_014/stage [--compute-updates K]
++
++sanity   : 동작·재개 검사 (sanity16, val8, 2 epochs x 4 examples/update). 본실험 미사용.
++pilot_mb : 처리량·메모리 pilot (sanity16, eff16, 3 epochs, validation 없음). 본실험 weight 이월 없음.
++explore  : 가능성 탐색. train1200 (iter_013 explore와 동일 ID·seed·일정), V200, seed17, 3 epochs x 75 updates, peak LR 2e-5. milestone = update 75/150/225.
++full     : 확대. train 2,400 전체, seed17, 3 epochs x 150 updates = 450 updates, LR 2e-5. milestone = update 150/300/450.
++compute  : C_compute (계산량 대조 SFT). K = 450 * ceil(max(1, r)) updates (r = pilot의 G/C 학습 시간 비율; epoch 경계·3등분 milestone에 맞춰 450 단위로 올림).
++공통: 부모 = iter_012 seed17 epoch_05 adapter, 5% warmup + cosine(0), effective batch 16 (sanity는 4), optimizer 새로 초기화.
++"""
++import argparse
++import hashlib
++import json
++import math
++import os
++
++from . import adapt_stages as AS
++
++CAND = "results/iter_014/candidates/train_candidates.json"
++
++
++def stage(sid, seed, train_ids, val_ids, epochs, eff, validate, note):
++    d = AS.stage(sid, seed, train_ids, val_ids, epochs, eff, [2e-5], validate, note)
++    d["cand_manifest"] = CAND
++    d["cand_manifest_sha256"] = hashlib.sha256(open(CAND, "rb").read()).hexdigest()
++    d["loss_spec"] = "geo_loss.py: L=[CE_outside_spans + sum_b n_b sum_m q_bm ell_bm]/N; alpha/tau(iter_013)는 사용하지 않는다"
++    return d
++
++
++def main():
++    ap = argparse.ArgumentParser()
++    ap.add_argument("--out-dir", required=True)
++    ap.add_argument("--compute-updates", type=int, default=None)
++    a = ap.parse_args()
++    S = AS.S
++    MI = AS.MI
++    cfgs = {
++        "sanity": stage("sanity", 17, S + "sanity16_ids.json", S + "val8_ids.json", 2, 4, True, "동작·재개 검사 (결정적 kernel), 본실험 미사용"),
++        "pilot_mb": stage("pilot_mb", 17, S + "sanity16_ids.json", S + "val8_ids.json", 3, 16, False, "branch microbatch·처리량·메모리 pilot"),
++        "pilot_thr": stage("pilot_thr", 17, S + "thr48_ids.json", S + "val8_ids.json", 2, 16, False, "G/C 학습 시간 비율 r 측정 (thr48: train 분포 층화 24 양성+24 음성, train1200 밖)"),
++        "explore": stage("explore", 17, S + "train1200_ids.json", S + "v200_ids.json", 3, 16, True, "가능성 탐색 (1,200 train, V200)"),
++        "full": stage("full", 17, MI + "train_ids.json", S + "v200_ids.json", 3, 16, True, "확대 (train 2,400, V200)"),
++    }
++    if a.compute_updates:
++        k = a.compute_updates
++        assert k % 450 == 0 and k >= 450
++        cfgs["compute"] = stage("compute", 17, MI + "train_ids.json", S + "v200_ids.json", k // 150, 16, True,
++                                f"C_compute: K={k} updates, milestone {k // 3}/{2 * k // 3}/{k} (epoch 경계)")
++        e = k // 150
++        cfgs["compute"]["milestone_epochs"] = [e // 3, 2 * e // 3, e]
++    os.makedirs(a.out_dir, exist_ok=True)
++    for k, v in cfgs.items():
++        p = os.path.join(a.out_dir, f"{k}.json")
++        if os.path.exists(p):
++            assert json.load(open(p)) == v, f"{p} exists and differs (not overwritten)"
++            print(k, "ok")
++        else:
++            json.dump(v, open(p, "w"), indent=1)
++            print(k, "written")
++
++
++if __name__ == "__main__":
++    main()
+diff --git a/rsna_diag/on_gpu.py b/rsna_diag/on_gpu.py
+new file mode 100644
+index 0000000..6de14e8
+--- /dev/null
++++ b/rsna_diag/on_gpu.py
+@@ -0,0 +1,39 @@
++"""허용 GPU 집합 안에서 한 장을 골라 명령을 실행한다 (셸 환경변수 접두 없이). 사용: python -m rsna_diag.on_gpu --gpu 1 -- python -m rsna_diag.adapt_geo ...
++상속된 CUDA_VISIBLE_DEVICES(정수 목록)의 원소만 허용하며 자식의 종료 코드를 그대로 반환한다. 실행 직전 GPU 여유 메모리를 기록한다."""
++import argparse
++import os
++import subprocess
++import sys
++
++from .run_shards import gpu_snapshot
++
++
++def allowed_gpus():
++    raw = os.environ.get("CUDA_VISIBLE_DEVICES")
++    if not raw:
++        raise SystemExit("CUDA_VISIBLE_DEVICES not set (allowed GPU set unknown)")
++    try:
++        return [int(x) for x in raw.split(",")]
++    except ValueError:
++        raise SystemExit(f"non-integer CUDA_VISIBLE_DEVICES {raw!r}: this launcher supports integer ids only")
++
++
++def main():
++    ap = argparse.ArgumentParser()
++    ap.add_argument("--gpu", type=int, required=True)
++    ap.add_argument("--min-free-mib", type=int, default=0, help="이 여유가 없으면 실행하지 않는다")
++    ap.add_argument("cmd", nargs=argparse.REMAINDER)
++    a = ap.parse_args()
++    al = allowed_gpus()
++    if a.gpu not in al:
++        raise SystemExit(f"gpu {a.gpu} not within allowed {al}")
++    cmd = a.cmd[1:] if a.cmd and a.cmd[0] == "--" else a.cmd
++    rows, apps = gpu_snapshot({a.gpu})
++    print(f"[on_gpu] gpu {a.gpu} before: {rows} apps={apps}", flush=True)
++    if a.min_free_mib and rows and rows[0]["mem_total_mib"] - rows[0]["mem_used_mib"] < a.min_free_mib:
++        raise SystemExit(f"gpu {a.gpu} free < {a.min_free_mib} MiB")
++    sys.exit(subprocess.run(cmd, env=dict(os.environ, CUDA_VISIBLE_DEVICES=str(a.gpu))).returncode)
++
++
++if __name__ == "__main__":
++    main()
+diff --git a/test_rsna_iter014.py b/test_rsna_iter014.py
+new file mode 100644
+index 0000000..3245955
+--- /dev/null
++++ b/test_rsna_iter014.py
+@@ -0,0 +1,234 @@
++"""iter_014 CPU fixture: geo_loss(후보·q·span·branch·FP64 기준)와 실제 tokenizer/processor 연결. 결과: results/iter_014/tests/fixtures_iter014.json
++허용 오차는 실행 전에 고정: FP64 손실/가중치 1e-12, FP32 toy gradient 상대 1e-5 (float64 기준 대비)."""
++import json
++import math
++import os
++import sys
++
++os.environ.setdefault("HF_HOME", "/SSD1_1TB/home/milab/daniel/08_medgemma/hf_cache")
++os.environ.setdefault("HF_HUB_OFFLINE", "1")
++
++import numpy as np
++
++from rsna_diag import coord_loss as CL, generate, geo_loss as GL, sft_data
++
++OUT = "results/iter_014/tests/fixtures_iter014.json"
++res = []
++
++
++def ok(name, cond, detail=""):
++    res.append({"name": name, "pass": bool(cond), "detail": str(detail)[:300]})
++    print(("PASS " if cond else "FAIL ") + name, str(detail)[:120], flush=True)
++
++
++def close(a, b, tol):
++    return abs(a - b) <= tol
++
++
++def main():
++    import torch
++    from transformers import AutoTokenizer, AutoProcessor
++    tok = AutoTokenizer.from_pretrained("google/medgemma-1.5-4b-it", revision=generate.MODEL_REVISION)
++    dig = CL.digit_ids(tok)
++    # 1. GIoU
++    ok("giou identical=1", close(GL.giou([0, 0, 10, 10], [0, 0, 10, 10]), 1.0, 1e-12))
++    ok("giou half overlap", close(GL.giou([0, 0, 10, 10], [0, 5, 10, 15]), 1 / 3, 1e-12),
++       GL.giou([0, 0, 10, 10], [0, 5, 10, 15]))
++    ok("giou disjoint negative & closed-form", close(GL.giou([0, 0, 10, 10], [0, 20, 10, 30]), 0 - (300 - 200) / 300, 1e-12), GL.giou([0, 0, 10, 10], [0, 20, 10, 30]))
++    ok("giou symmetric", close(GL.giou([1, 2, 30, 40], [5, 6, 50, 60]), GL.giou([5, 6, 50, 60], [1, 2, 30, 40]), 1e-15))
++    # 2. candidates
++    gt_box = [100, 200, 400, 500]
++    c1, n1 = GL.gen_candidates("p1", 0, gt_box)
++    c2, n2 = GL.gen_candidates("p1", 0, gt_box)
++    c3, _ = GL.gen_candidates("p1", 1, gt_box)
++    ok("candidates deterministic", c1 == c2 and n1 == n2 and c1 != c3)
++    ok("candidates valid/unique/GIoU>=0.3/!=GT/int grid", len(c1) == 4 and len({tuple(c) for c in c1}) == 4 and all(GL.giou(c, gt_box) >= 0.3 and c != gt_box and c[0] < c[2] and c[1] < c[3]
++                                                                                                                     and all(isinstance(v, int) and 0 <= v <= 1000 for v in c) for c in c1))
++    tiny, _ = GL.gen_candidates("p2", 0, [500, 500, 502, 503])
++    ok("candidates for tiny box", len(tiny) == 4 and all(GL.giou(c, [500, 500, 502, 503]) >= 0.3 for c in tiny), tiny)
++    edge, _ = GL.gen_candidates("p3", 0, [0, 0, 900, 1000])
++    ok("candidates at image border clipped", all(0 <= v <= 1000 for c in edge for v in c))
++    # 실패 gate: 후보가 부족한 경우 조용히 대체하지 않고 예외
++    saved = GL.MAX_PROPOSALS
++    GL.MAX_PROPOSALS = 5
++    try:
++        GL.gen_candidates("p4", 0, [10, 10, 11, 11])
++        failed = False
++    except GL.GeoError:
++        failed = True
++    GL.MAX_PROPOSALS = saved
++    ok("insufficient candidates -> GeoError (no silent substitution)", failed)
++    # yxyx round trip through target text + parser-independent json
++    tgt = sft_data.target_text([[10, 200, 300, 999], [0, 9, 100, 1000], [40, 39, 99, 100]])
++    rt = GL.replace_box_text(tgt, 1, [1, 2, 3, 4])
++    js = json.loads(rt)
++    ok("replace_box_text json round trip", js[1]["box_2d"] == [1, 2, 3, 4] and js[0] == json.loads(tgt)[0] and js[2] == json.loads(tgt)[2] and rt.count("box_2d") == 3, rt)
++    # 3. q
++    g = [0.3, 0.5, 0.8, 0.99]
++    r = GL.r_weights(g)
++    qg, qu, qc = GL.q_weights("G", g), GL.q_weights("U", g), GL.q_weights("C", g)
++    ok("r closed form", all(close(r[i + 1], 1 + 0.5 * math.log(g[i]), 1e-15) for i in range(4)) and r[0] == 1.0 and all(v > 0 for v in r))
++    ok("q sums to 1 (G,U,C)", all(close(sum(q), 1.0, 1e-12) for q in (qg, qu, qc)))
++    ok("U and G share GT mass and total pseudo mass", close(qg[0], qu[0], 1e-15) and close(sum(qg[1:]), sum(qu[1:]), 1e-12) and close(qg[0], 1 / sum(r), 1e-15))
++    ok("U pseudo uniform; G ordered by GIoU", len(set(round(v, 15) for v in qu[1:])) == 1 and qg[1] < qg[2] < qg[3] < qg[4])
++    ok("C q0=1", qc == [1.0, 0, 0, 0, 0])
++    try:
++        GL.r_weights([0.1])
++        bad = False
++    except GL.GeoError:
++        bad = True
++    ok("weight <=0 rejected", bad)
++    # 4. spans / boundary digits / 3 boxes / empty
++    boxes = [[0, 9, 10, 39], [40, 99, 100, 999], [1, 2, 999, 1000]]
++    text = sft_data.target_text(boxes)
++    ids, sp = GL.box_token_spans(tok, text, dig)
++    ok("3 boxes -> 3 spans", len(sp) == 3, sp)
++    _, offs = GL.encode(tok, text)
++    seg = [text[offs[ts][0]:offs[te][1]] for ts, te in sp]
++    exp = ["".join(f" [{', '.join(map(str, b))}]," for b in [sft_data.target_boxes(boxes)[i]]) for i in range(3)]
++    ok("span text = ' [a, b, c, d],' (space/comma straddle only)", seg == exp, seg)
++    ok("empty response has no span", GL.box_token_spans(tok, "[]", dig)[1] == [])
++    bts = [[0, 0, 9, 10], [10, 39, 40, 99], [100, 999, 101, 1000]]
++    tb = sft_data.target_text(bts)
++    _, sb = GL.box_token_spans(tok, tb, dig)
++    ok("boundary values 0/9/10/39/40/99/100/999/1000 single-digit tokens", len(sb) == 3)
++    # 5. branches
++    cl = []
++    for b, gb in enumerate(sft_data.target_boxes(boxes)):
++        cs, _ = GL.gen_candidates("pt", b, gb)
++        cl.append([GL.cand_record(gb, c) for c in cs])
++    for mode in ("G", "U", "C"):
++        bd = GL.build_branches(tok, text, dig, cl, mode)
++        if mode == "C":
++            ok("C: no branches, q0=1", bd["branches"] == [] and bd["q0"] == [1.0, 1.0, 1.0])
++            continue
++        allow = all(b["ids"][:bd["gt_spans"][b["box"]][0] + 1] == bd["gt_ids"][:bd["gt_spans"][b["box"]][0] + 1] for b in bd["branches"])
++        ok(f"{mode}: 12 branches, GT prefix identical incl. opening bracket token", len(bd["branches"]) == 12 and allow)
++        ok(f"{mode}: branch ends exactly at closing token (suffix dropped)", all(tok.decode([b["ids"][-1]]) == "]," for b in bd["branches"]))
++        mass = {}
++        for b in bd["branches"]:
++            mass[b["box"]] = mass.get(b["box"], 0) + b["n_bm"] * b["w_per_token"]
++        wgt = GL.gt_token_weights(len(bd["gt_ids"]), bd["gt_spans"], bd["q0"])
++        tot = []
++        for k, (ts, te) in enumerate(bd["gt_spans"]):
++            tot.append(sum(wgt[ts:te + 1]) + mass[k])
++        nb = [te - ts + 1 for ts, te in bd["gt_spans"]]
++        ok(f"{mode}: per-box supervision mass = n_b (GT + candidates)", all(close(a, b_, 1e-12) for a, b_ in zip(tot, nb)), (tot, nb))
++        outside = [t for t in range(len(bd["gt_ids"])) if not any(ts <= t <= te for ts, te in bd["gt_spans"])]
++        ok(f"{mode}: tokens outside spans (keys/label/EOS) weight 1 exactly once", all(wgt[t] == 1.0 for t in outside) and len(outside) + sum(nb) == len(bd["gt_ids"]) and bd["gt_ids"][-1] == tok.convert_tokens_to_ids("<end_of_turn>"))
++    # 6. FP64 reference loss & gradient on toy logits
++    torch.manual_seed(0)
++    V = 7
++    bd = GL.build_branches(tok, text, dig, cl, "G")
++    gt_len = len(bd["gt_ids"])
++    lg_gt = torch.randn(gt_len, V, dtype=torch.float64, requires_grad=True)
++    y_gt = torch.tensor([t % V for t in range(gt_len)])
++    lg_br = [torch.randn(len(b["ids"]) - 0, V, dtype=torch.float64, requires_grad=True) for b in bd["branches"]]
++    q = {(k, 0): bd["q0"][k] for k in range(3)}
++    for b in bd["branches"]:
++        q[(b["box"], b["m"])] = b["q"]
++
++    def nll(lg, y):
++        return torch.logsumexp(lg, -1) - lg.gather(1, y[:, None]).squeeze(1)
++
++    nll_gt = nll(lg_gt, y_gt)
++    nll_c = {}
++    for b, lg in zip(bd["branches"], lg_br):
++        yb = torch.tensor([t % V for t in range(len(b["ids"]))])
++        nll_c[(b["box"], b["m"])] = nll(lg, yb)[b["span"][0]:b["span"][1] + 1]
++    ref = GL.reference_loss(list(nll_gt), bd["gt_spans"], {k: list(v) for k, v in nll_c.items()}, q)
++    # 구현식: token 가중 합
++    wgt = torch.tensor(GL.gt_token_weights(gt_len, bd["gt_spans"], bd["q0"]), dtype=torch.float64)
++    impl = (nll_gt * wgt).sum()
++    for b in bd["branches"]:
++        impl = impl + b["w_per_token"] * nll_c[(b["box"], b["m"])].sum()
++    ok("FP64 weighted-token loss == reference formula", close(float(impl), float(ref), 1e-12), (float(impl), float(ref)))
++    # 손으로 계산한 작은 사례로도 확인
++    hand = 0.0
++    inside = set()
++    for ts, te in bd["gt_spans"]:
++        inside.update(range(ts, te + 1))
++    hand += sum(float(nll_gt[t]) for t in range(gt_len) if t not in inside)
++    for k, (ts, te) in enumerate(bd["gt_spans"]):
++        n_b = te - ts + 1
++        hand += n_b * bd["q0"][k] * float(nll_gt[ts:te + 1].mean())
++        for b in bd["branches"]:
++            if b["box"] == k:
++                hand += n_b * b["q"] * float(nll_c[(k, b["m"])].mean())
++    ok("independent hand computation matches", close(float(impl), hand, 1e-12))
++    # gradient: FP32 toy vs FP64 reference autograd
++    impl.backward(retain_graph=True)
++    g_impl = [lg_gt.grad.clone()] + [l.grad.clone() for l in lg_br]
++    for l in [lg_gt] + lg_br:
++        l.grad = None
++    ref_t = 0.0
++    inside_t = torch.tensor([t in inside for t in range(gt_len)])
++    ref_t = nll_gt[~inside_t].sum()
++    for k, (ts, te) in enumerate(bd["gt_spans"]):
++        ref_t = ref_t + bd["q0"][k] * nll_gt[ts:te + 1].sum()
++    for b in bd["branches"]:
++        n_b = bd["gt_spans"][b["box"]][1] - bd["gt_spans"][b["box"]][0] + 1
++        v = nll_c[(b["box"], b["m"])]
++        ref_t = ref_t + n_b * b["q"] * v.mean()
++    ref_t.backward()
++    g_ref = [lg_gt.grad.clone()] + [l.grad.clone() for l in lg_br]
++    err = max(float((a - b).abs().max()) for a, b in zip(g_impl, g_ref))
++    ok("toy gradient == reference autograd (FP64 abs<=1e-12)", err <= 1e-12, err)
++    # FP32 재계산
++    l32 = [lg_gt.detach().float().requires_grad_()] + [l.detach().float().requires_grad_() for l in lg_br]
++    n32 = nll(l32[0], y_gt)
++    im32 = (n32 * wgt.float()).sum()
++    for b, l in zip(bd["branches"], l32[1:]):
++        yb = torch.tensor([t % V for t in range(len(b["ids"]))])
++        im32 = im32 + b["w_per_token"] * nll(l, yb)[b["span"][0]:b["span"][1] + 1].sum()
++    im32.backward()
++    rel = max(float((a.grad.double() - b).abs().max() / (b.abs().max() + 1e-12)) for a, b in zip(l32, g_ref))
++    ok("FP32 toy gradient rel<=1e-5 vs FP64 reference", rel <= 1e-5, rel)
++    # C reduction: q0=1 & no branches -> plain CE
++    bc = GL.build_branches(tok, text, dig, cl, "C")
++    wc = torch.tensor(GL.gt_token_weights(gt_len, bc["gt_spans"], bc["q0"]), dtype=torch.float64)
++    ok("C weights all 1 => equals plain CE sum", bool((wc == 1).all()) and float((nll_gt * wc).sum()) == float(nll_gt.sum()))
++    # microbatch: 합의 분할 불변
++    parts = [float(b["w_per_token"] * nll_c[(b["box"], b["m"])].sum()) for b in bd["branches"]]
++    ok("branch-chunk accumulation == single sum", close(sum(parts[:5]) + sum(parts[5:]), sum(parts), 1e-12))
++    # 7. 실제 processor 연결 (CPU): sanity16의 모든 환자
++    proc = AutoProcessor.from_pretrained("google/medgemma-1.5-4b-it", revision=generate.MODEL_REVISION)
++    from rsna_diag import inputs, prompts as P
++    from rsna_diag.adapt_geo import GeoDataset
++    items, gtm = inputs.load_items("results/iter_010/manifests/infer_manifest.jsonl", "results/iter_010/manifests/gt_manifest.json", "results/iter_013/subsets/sanity16_ids.json", "train", exact=False)
++    cands = json.load(open("results/iter_014/candidates/train_candidates.json"))
++    order = np.arange(len(items))
++    nbr, okc, okfull, ntot = 0, True, True, 0
++    for mode in ("G", "U", "C"):
++        ds = GeoDataset(tok, proc, items, gtm, P.CONCISE, order, dig, mode, cands)
++        for k in range(len(items)):
++            e = ds[k]
++            nb = len(gtm[items[k]["id"]]["boxes"])
++            if len(e["branches"]) != (4 * nb if mode != "C" else 0):
++                okc = False
++            if mode == "G":
++                ntot += 1
++                for br in e["branches"][:2] + e["branches"][-1:]:
++                    # 완전한 chat template으로 만든 후보 sequence의 앞부분 == 수동 구성 branch ids
++                    boxes_i = sft_data.target_boxes([b["yxyx_norm"] for b in gtm[items[k]["id"]]["boxes"]])
++                    ctext = GL.replace_box_text(sft_data.target_text([b["yxyx_norm"] for b in gtm[items[k]["id"]]["boxes"]]), br["box"], br["cand"])
++                    img, _, _ = inputs.load_verified(items[k])
++                    full = sft_data.build_example(proc, img, P.CONCISE, ctext)
++                    if full["input_ids"].tolist()[:len(br["input_ids"])] != br["input_ids"].tolist():
++                        okfull = False
++                    if "token_type_ids" in full and full["token_type_ids"][:len(br["input_ids"])].tolist() != br["token_type_ids"].tolist():
++                        okfull = False
++                    del boxes_i
++            if mode == "C":
++                if not bool((e["tokw"] == 1).all()):
++                    okc = False
++    ok("sanity16: branch counts (4/box; C none) & C weights all 1", okc)
++    ok("sanity16: manual branch ids/token_type_ids == full chat-template sequence prefix", okfull and ntot == 16)
++    os.makedirs(os.path.dirname(OUT), exist_ok=True)
++    json.dump({"n": len(res), "n_pass": sum(r["pass"] for r in res), "results": res}, open(OUT, "w"), indent=1)
++    print(f"{sum(r['pass'] for r in res)}/{len(res)} PASS")
++    return 0 if all(r["pass"] for r in res) else 1
++
++
++if __name__ == "__main__":
++    sys.exit(main())
+diff --git a/test_rsna_iter014_eval.py b/test_rsna_iter014_eval.py
+new file mode 100644
+index 0000000..61557fc
+--- /dev/null
++++ b/test_rsna_iter014_eval.py
+@@ -0,0 +1,89 @@
++"""iter_014 평가·판정 fixture (CPU): multi(GT>=2)/ge3 집계 정정, selected=null 판정, 확대 규칙 경계. 결과: results/iter_014/tests/fixtures_iter014_eval.json"""
++import json
++import os
++import sys
++
++import numpy as np
++
++from rsna_diag import adapt_eval as AE, geo_decide as GD, sft_eval
++
++OUT = "results/iter_014/tests/fixtures_iter014_eval.json"
++res = []
++
++
++def ok(name, cond, detail=""):
++    res.append({"name": name, "pass": bool(cond), "detail": str(detail)[:400]})
++    print(("PASS " if cond else "FAIL ") + name, str(detail)[:200], flush=True)
++
++
++def synth():
++    """GT box 1/2/3/4개 환자와 음성. 예측 = GT를 그대로 복사한 부분집합으로 환자별 S_loc를 손으로 알 수 있게 한다."""
++    gt, preds, ids = {}, {}, []
++    for pid, n, k in (("a", 1, 1), ("b", 2, 2), ("c", 3, 3), ("d", 3, 1), ("e", 4, 2)):
++        boxes = [[10 * (j + 1), 10 * (j + 1), 10 * (j + 1) + 50, 10 * (j + 1) + 50] for j in range(n)]
++        gt[pid] = {"category": "opacity", "split": "validation", "boxes": [{"yxyx_norm": b} for b in boxes], "image_w": 1000, "image_h": 1000}
++        preds[pid] = {"status": "valid_nonempty", "boxes": boxes[:k]}
++        ids.append(pid)
++    gt["n"] = {"category": "normal", "split": "validation", "boxes": []}
++    preds["n"] = {"status": "valid_empty", "boxes": []}
++    ids.append("n")
++    return gt, preds, ids
++
++
++def main():
++    gt, preds, ids = synth()
++    try:
++        d = AE.detail(preds, gt, ids, [0.01, 0.02], [0.01, 0.02])
++    except Exception as e:  # sft_eval.summarize가 다른 필드를 요구할 수 있다
++        d = None
++        print("detail error", repr(e))
++    ok("AE.detail runs on synthetic patients", d is not None)
++    if d is not None:
++        g = d["by_n_gt_S_loc"]
++        ok("multi counts GT>=2 (b,c,d,e = 4), single 1, ge3 = 3 (c,d,e)", g["single"]["n"] == 1 and g["multi"]["n"] == 4 and g["ge3"]["n"] == 3, {k: v["n"] for k, v in g.items()})
++        # 환자별 F1(thr 0.3 = 0.5 동일, IoU=1): F1 = 2k/(k+n)
++        f = {"a": 1.0, "b": 2 * 2 / (2 + 2), "c": 2 * 3 / (3 + 3), "d": 2 * 1 / (1 + 3), "e": 2 * 2 / (2 + 4)}
++        want_multi = np.mean([f[p] for p in "bcde"])
++        want_ge3 = np.mean([f[p] for p in "cde"])
++        ok("multi/ge3 S_loc equal hand-computed patient means", abs(g["multi"]["S_loc"] - want_multi) < 1e-12 and abs(g["ge3"]["S_loc"] - want_ge3) < 1e-12, (g["multi"]["S_loc"], want_multi, g["ge3"]["S_loc"], want_ge3))
++        ok("overall S_loc unchanged by the multi fix (= mean over all 5 positives)", abs(d["S_loc"] - np.mean(list(f.values()))) < 1e-12, d["S_loc"])
++
++    def entry(sel_S, fin_S, guard=True, sel_ok=True):
++        mk = lambda e, s, f05: {"epoch": e, "update": 75 * e, "v400": {"S_loc": s, "f1@0.5": f05}, "guardrail_v400": {"ok": guard}}
++        return {"selected": mk(2, sel_S, sel_S - 0.05) if sel_ok else None, "final": mk(3, fin_S, fin_S - 0.05),
++                "v200_best_fallback": None if sel_ok else mk(1, sel_S, sel_S - 0.05),
++                "v200_detail_by_epoch": {"1": {"S_loc": 0.5}, "2": {"S_loc": 0.52}, "3": {"S_loc": 0.53}}}
++
++    def rep(c, u, g, ci_hi=0.05):
++        return {"trajectories": {"C@2e-05": c, "U@2e-05": u, "G@2e-05": g},
++                "pairwise_v400_paired_bootstrap": {"selected": {"G@2e-05-C@2e-05": {"diff": 0.0, "ci95": [-0.01, ci_hi]}}}}
++
++    r = rep(entry(0.50, 0.51), entry(0.51, 0.52), entry(0.55, 0.56))
++    d = GD.decide(r, "explore")
++    ok("general expansion: G-C 0.05>=0.03, G-U 0.04>=0.01, F1@0.5 diff>0", d["expand"] and d["expand_path"] == "general", d.get("reason"))
++    r = rep(entry(0.50, 0.51), entry(0.545, 0.52), entry(0.55, 0.56))
++    ok("G-U below 0.01 -> no general expansion (augmentation effect)", not GD.decide(r, "explore")["expand"] or GD.decide(r, "explore")["expand_path"] != "general")
++    g_null = entry(0.55, 0.56, sel_ok=False)
++    g_null["selected"] = None
++    g_null["v200_best_fallback"] = None
++    d = GD.decide(rep(entry(0.50, 0.51), entry(0.51, 0.52), g_null), "explore")
++    ok("G selected=null -> expand False, no substitution by final", d["expand"] is False and d["G_selection_eligible"] is False and d["G_final"]["S_loc"] == 0.56, d.get("reason"))
++    d = GD.decide(rep(entry(0.50, 0.51, sel_ok=False), entry(0.51, 0.52), entry(0.55, 0.56)), "explore")
++    ok("C has no selected -> conservative V200-best fallback flagged as substituted", d["C_baseline"]["substituted"] is True and d["C_baseline"]["tag"].startswith("v200_best"))
++    r = rep(entry(0.50, 0.49), entry(0.51, 0.50), entry(0.55, 0.48))
++    d = GD.decide(r, "explore")
++    ok("selected wins but final-vs-final opposite sign -> automatic expansion held", d["general_criteria_met"] and d["final_opposes_selected"] and not d["expand"], d.get("reason"))
++    r = rep(entry(0.50, 0.51), entry(0.51, 0.52), entry(0.52, 0.56), ci_hi=0.031)
++    r["trajectories"]["G@2e-05"]["v200_detail_by_epoch"] = {"1": {"S_loc": 0.5}, "2": {"S_loc": 0.52}, "3": {"S_loc": 0.535}}
++    d = GD.decide(r, "explore")
++    ok("supplement path (once): CI upper>=0.03, last gain>=0.01, G-U>0, F1@0.5>0", d["expand"] and d["expand_path"] == "supplement(once)", d.get("reason"))
++    d = GD.decide(r, "full")
++    ok("supplement path is not available in full stage", not d["expand"])
++    os.makedirs(os.path.dirname(OUT), exist_ok=True)
++    json.dump({"n": len(res), "n_pass": sum(x["pass"] for x in res), "results": res}, open(OUT, "w"), indent=1)
++    print(f"{sum(x['pass'] for x in res)}/{len(res)} PASS")
++    return 0 if all(x["pass"] for x in res) else 1
++
++
++if __name__ == "__main__":
++    sys.exit(main())
+diff --git a/test_rsna_iter014_gpu.py b/test_rsna_iter014_gpu.py
+new file mode 100644
+index 0000000..083cf02
+--- /dev/null
++++ b/test_rsna_iter014_gpu.py
+@@ -0,0 +1,158 @@
++"""iter_014 GPU fixture (실제 MedGemma). 사용: python -m rsna_diag.on_gpu --gpu N -- python test_rsna_iter014_gpu.py
++결과: results/iter_014/tests/fixtures_iter014_gpu.json
++사전 고정 허용 오차(bf16): A 후보 span logits |suffix 유무 차이| <= 0.05 (softcap 후 logit), NLL 차이 <= 0.02;
++B C 환원: CE 합 상대 1e-6, LoRA gradient 최대 상대 1e-5 (같은 연산이므로 사실상 비트 동일 기대); C branch chunk 합 상대 <= 1e-2(bf16 padding·batch 효과)."""
++import json
++import os
++import sys
++
++os.environ.setdefault("HF_HOME", "/SSD1_1TB/home/milab/daniel/08_medgemma/hf_cache")
++os.environ.setdefault("HF_HUB_OFFLINE", "1")
++os.environ["CUBLAS_WORKSPACE_CONFIG"] = ":4096:8"  # run2: 결정적 kernel (run1은 비결정 kernel이라 B의 gradient 대조가 잡음에 묻혔다; run1 결과는 별도 파일에 보존)
++
++import numpy as np
++
++OUT = "results/iter_014/tests/fixtures_iter014_gpu.json"
++res = []
++
++
++def ok(name, cond, detail=""):
++    res.append({"name": name, "pass": bool(cond), "detail": str(detail)[:400]})
++    print(("PASS " if cond else "FAIL ") + name, str(detail)[:200], flush=True)
++
++
++def main():
++    import torch
++    from rsna_diag import adapt as A, adapt_geo as AG, coord_loss as CL, geo_loss as GL, inputs, lora, prompts as P, sft_data
++    from rsna_diag import train as T
++    items, gt = inputs.load_items(T.MANIFEST, T.GT, "results/iter_013/subsets/sanity16_ids.json", "train", exact=False)
++    cands = json.load(open("results/iter_014/candidates/train_candidates.json"))
++    T.set_deterministic(torch)
++    _, proc, model, names = T.setup_model(17)
++    tok = proc.tokenizer
++    dig = CL.digit_ids(tok)
++    pb = torch.load("results/iter_012/train/lr2e-4_s17/epoch_05/adapter.pt", map_location="cpu", weights_only=True)
++    lora.load_lora_state(model, pb["state"])
++    model.eval()  # dropout 끔 (수치 등가 검사 전용; 본학습 설정은 바꾸지 않음)
++    params = list(lora.lora_params(model).values())
++    pos = [k for k, it in enumerate(items) if gt[it["id"]]["category"] == "opacity"]
++    multi = [k for k in pos if len(gt[items[k]["id"]]["boxes"]) >= 2]
++    sel = [pos[0], multi[0]]
++    order = np.arange(len(items))
++    dsG = AG.GeoDataset(tok, proc, items, gt, P.CONCISE, order, dig, "G", cands)
++    dsC = AG.GeoDataset(tok, proc, items, gt, P.CONCISE, order, dig, "C", cands)
++    exG = [dsG[k] for k in sel]
++    softcap = getattr(model.config.get_text_config(), "final_logit_softcapping", None)
++    cuda = lambda d: {k: v.cuda() for k, v in d.items()}
++
++    # A. suffix가 span logits에 영향이 없다 (causal)
++    e = exG[1]
++    br = e["branches"][1]
++    tgt = sft_data.target_text([b["yxyx_norm"] for b in gt[items[sel[1]]["id"]]["boxes"]])
++    ctext = GL.replace_box_text(tgt, br["box"], br["cand"])
++    img, _, _ = inputs.load_verified(items[sel[1]])
++    full = sft_data.build_example(proc, img, P.CONCISE, ctext)
++    n_br = len(br["input_ids"])
++    a0, a1 = br["span"]
++    npf = full["n_prefix"]
++
++    def span_logits(input_ids, tt):
++        b = {"input_ids": input_ids[None].cuda(), "attention_mask": torch.ones(1, len(input_ids), dtype=torch.long).cuda(), "pixel_values": full["pixel_values"].to(torch.bfloat16).cuda()}
++        if tt is not None:
++            b["token_type_ids"] = tt[None].cuda()
++        with torch.no_grad():
++            h = model.model(**b, use_cache=False).last_hidden_state[0]
++            lg = model.lm_head(h[npf + a0 - 1:npf + a1]).float()
++            if softcap:
++                lg = torch.tanh(lg / softcap) * softcap
++        return lg
++
++    l_trunc = span_logits(br["input_ids"], br.get("token_type_ids"))
++    l_full = span_logits(full["input_ids"], full.get("token_type_ids"))
++    lab = br["input_ids"][npf + a0:npf + a1 + 1].cuda()
++    nll = lambda lg: (torch.logsumexp(lg, -1) - lg.gather(1, lab[:, None]).squeeze(1))
++    d_lg, d_nll = float((l_trunc - l_full).abs().max()), float((nll(l_trunc) - nll(l_full)).abs().max())
++    ok("A(preset tol): truncated-branch span logits vs full-candidate-sequence span logits (|dlogit|<=0.05, |dNLL|<=0.02; run1 FAILED this bf16 tolerance: length-dependent kernel noise)", d_lg <= 0.05 and d_nll <= 0.02, (d_lg, d_nll))
++    # A1(run2 추가, 결과를 본 뒤 정의): 같은 길이에서 suffix token만 무작위 교체 -> span logits는 정확히 같아야 한다 (causal). A2: 길이가 다른 경우의 잡음 하한
++    # (같은 sequence에 마지막 token 하나를 더 붙인 것 vs 원본)과 truncated-vs-full 차이를 비교한다.
++    ids_full = full["input_ids"].clone()
++    tt_full = full.get("token_type_ids")
++    ids_mod = ids_full.clone()
++    g_ = torch.Generator().manual_seed(1)
++    ids_mod[npf + a1 + 1:] = torch.randint(1000, 5000, (len(ids_full) - (npf + a1 + 1),), generator=g_)
++    l_mod = span_logits(ids_mod, tt_full)
++    d_same = float((l_full - l_mod).abs().max())
++    ok("A1: same length, random suffix tokens -> span logits identical (abs<=1e-5)", d_same <= 1e-5 and len(ids_full) > npf + a1 + 1, (d_same, len(ids_full) - (npf + a1 + 1)))
++    # A2: 배치 padding(오른쪽, attention_mask=0)으로 길이만 45 token 늘린 경우의 span logits 변화 = 길이 변화에 따른 kernel 수치 잡음 하한.
++    # truncated-vs-full 차이가 이 잡음과 같은 규모면 (같은 길이 suffix 교체가 정확히 0인 A1과 함께) 차이는 수치 잡음이지 정보 누출이 아니다.
++    npad = len(ids_full) - n_br
++    ids_pad = torch.cat([ids_full, torch.full((npad,), tok.pad_token_id)])
++    tt_pad = torch.cat([tt_full, torch.zeros(npad, dtype=torch.long)]) if tt_full is not None else None
++    bpad = {"input_ids": ids_pad[None].cuda(), "attention_mask": torch.cat([torch.ones(len(ids_full)), torch.zeros(npad)]).long()[None].cuda(),
++            "pixel_values": full["pixel_values"].to(torch.bfloat16).cuda()}
++    if tt_pad is not None:
++        bpad["token_type_ids"] = tt_pad[None].cuda()
++    with torch.no_grad():
++        hp = model.model(**bpad, use_cache=False).last_hidden_state[0]
++        lp = model.lm_head(hp[npf + a0 - 1:npf + a1]).float()
++        if softcap:
++            lp = torch.tanh(lp / softcap) * softcap
++    d_floor = float((l_full - lp).abs().max())
++    d_nll_floor = float((nll(l_full) - nll(lp)).abs().max())
++    ok("A2: truncated-vs-full difference <= 2x length-change noise floor (full vs full right-padded by same token count)", d_lg <= max(2 * d_floor, 1e-3) and d_nll <= max(2 * d_nll_floor, 1e-3),
++       {"trunc_vs_full": (d_lg, d_nll), "pad_floor": (d_floor, d_nll_floor)})
++
++    # B. C 환원: 새 geo_forward(C, tokw=1) == iter_013 adapt_loss C (CE 합·gradient)
++    exC = [dsC[k] for k in sel]
++    bC_new = cuda({k: v for k, v in AG.collate(exC, tok.pad_token_id).items() if k not in ("branches", "sample_pos")})
++    bC_old = cuda({k: v for k, v in A.collate([dict(dsC_old) for dsC_old in [A.AdaptDataset(tok, proc, items, gt, P.CONCISE, order, dig)[k] for k in sel]], tok.pad_token_id).items() if k != "sample_pos"})
++    for p in params:
++        p.grad = None
++    w_new, ce_new, n_new = AG.geo_forward(torch, model, bC_new, softcap)
++    w_new.backward()
++    g_new = [p.grad.detach().clone() for p in params]
++    for p in params:
++        p.grad = None
++    r_old = A.adapt_loss(torch, model, bC_old, softcap, "C", dig, 0.1, 1.0)
++    r_old["ce_sum"].backward()
++    g_old = [p.grad.detach().clone() for p in params]
++    rel_ce = abs(float(w_new) - float(r_old["ce_sum"])) / abs(float(r_old["ce_sum"]))
++    gerr = max(float((a - b).abs().max() / (b.abs().max() + 1e-12)) for a, b in zip(g_new, g_old) if b.abs().max() > 0)
++    ok("B: C path (q0=1, no branch) == iter_013 adapt_loss C: CE sum and LoRA gradient", rel_ce <= 1e-6 and gerr <= 1e-5 and n_new == r_old["n_tok"], (rel_ce, gerr, n_new, r_old["n_tok"]))
++    for p in params:
++        p.grad = None
++
++    # C. branch chunk 분할 (1개씩 vs 4개씩) 합 일치 (bf16 허용)
++    flat = [(ei, b) for ei, ee in enumerate(exG) for b in ee["branches"]][:8]
++    pv = torch.cat([ee["pixel_values"] for ee in exG], 0)
++
++    def total(chunk):
++        s = 0.0
++        for c0 in range(0, len(flat), chunk):
++            bb = cuda(AG.branch_batch(torch, None, pv, tok.pad_token_id, flat[c0:c0 + chunk]))
++            with torch.no_grad():
++                w, _, _ = AG.geo_forward(torch, model, bb, softcap)
++            s += float(w)
++        return s
++
++    t1, t4, t8 = total(1), total(2), total(4)
++    ok("C: branch microbatch 1/2/4 weighted sums agree (bf16 tol rel 1e-2)", abs(t1 - t4) / t1 <= 1e-2 and abs(t1 - t8) / t1 <= 1e-2, (t1, t4, t8))
++
++    # D. 실제 branch로 gradient가 LoRA에 흐르고 GT prefix hidden을 detach하지 않는다 (branch 하나의 loss가 LoRA grad를 만든다)
++    model.train()
++    bb = cuda(AG.branch_batch(torch, None, pv, tok.pad_token_id, flat[:2]))
++    for p in params:
++        p.grad = None
++    w, _, _ = AG.geo_forward(torch, model, bb, softcap)
++    w.backward()
++    gn = float(torch.sqrt(sum((p.grad.float() ** 2).sum() for p in params if p.grad is not None)))
++    ok("D: branch-only loss produces finite non-zero LoRA gradient", np.isfinite(gn) and gn > 0, gn)
++    model.eval()
++    os.makedirs(os.path.dirname(OUT), exist_ok=True)
++    json.dump({"n": len(res), "n_pass": sum(r["pass"] for r in res), "results": res}, open(OUT, "w"), indent=1)
++    print(f"{sum(r['pass'] for r in res)}/{len(res)} PASS")
++    return 0 if all(r["pass"] for r in res) else 1
++
++
++if __name__ == "__main__":
++    sys.exit(main())
+diff --git a/test_rsna_iter014_pipeline.py b/test_rsna_iter014_pipeline.py
+new file mode 100644
+index 0000000..8e6ebe9
+--- /dev/null
++++ b/test_rsna_iter014_pipeline.py
+@@ -0,0 +1,126 @@
++"""iter_014 실행 경로 fixture (CPU/파일): geo_pipeline의 완료 판정·재사용·GPU 허용 집합·메모리 대기 검사. 사용: python test_rsna_iter014_pipeline.py PROTOCOL
++PROTOCOL은 sanity/explore stage 파일을 잠근 protocol (본실험 전 검사는 pilot3, 본실험 protocol이 만들어진 뒤에는 main).
++결과: results/iter_014/tests/fixtures_iter014_pipeline.json"""
++import copy
++import json
++import os
++import sys
++
++os.environ.setdefault("HF_HOME", "/SSD1_1TB/home/milab/daniel/08_medgemma/hf_cache")
++os.environ.setdefault("HF_HUB_OFFLINE", "1")
++
++from rsna_diag import geo_pipeline as GP
++
++OUT = "results/iter_014/tests/fixtures_iter014_pipeline.json"
++res = []
++
++
++def ok(name, cond, detail=""):
++    res.append({"name": name, "pass": bool(cond), "detail": str(detail)[:400]})
++    print(("PASS " if cond else "FAIL ") + name, str(detail)[:200], flush=True)
++
++
++def raises(fn, exc=Exception):
++    try:
++        fn()
++    except exc as e:
++        return True, repr(e)[:150]
++    return False, "no exception"
++
++
++def main():
++    GP.PROT = sys.argv[1]
++    ctx = GP.Ctx("sanity")
++    # --- 완료 판정: 실제 재개 검사 run의 train_config를 기반으로, 요청과 일치하는 경우만 통과
++    tc = json.load(open("results/iter_014/tests/resume2/uninterrupted/train_config.json"))
++    tc["config"]["deterministic"] = False  # 검사 run은 결정적 kernel이었다 (양성 대조용으로만 되돌림)
++    ctx_lr = 2e-5
++    base = copy.deepcopy(tc)
++    base["config"]["microbatch"], base["config"]["branch_microbatch"] = ctx.ex["train_microbatch"], ctx.ex["branch_microbatch"]
++    base["config"]["protocol_digest"] = ctx.pdig
++    good = raises(lambda: GP.expected_cfg_check(ctx, base, "G", ctx_lr))
++    ok("positive control: matching train_config accepted", not good[0], good[1])
++    muts = {"loss_mode": lambda c: c.__setitem__("loss_mode", "U"), "lr": lambda c: c.__setitem__("lr", 5e-5), "seed": lambda c: c.__setitem__("seed", 29),
++            "stage_config_sha256": lambda c: c.__setitem__("stage_config_sha256", "0" * 64), "protocol_digest": lambda c: c.__setitem__("protocol_digest", "0" * 64),
++            "train_inputs_digest": lambda c: c.__setitem__("train_inputs_digest", "0" * 64), "val_inputs_digest": lambda c: c.__setitem__("val_inputs_digest", "0" * 64),
++            "total_updates": lambda c: c.__setitem__("total_updates", 999), "geo.cand_manifest_sha256": lambda c: c["geo"].__setitem__("cand_manifest_sha256", "0" * 64),
++            "stage.parent_adapter_digest": lambda c: c["stage"].__setitem__("parent_adapter_digest", "0" * 64), "stage.epochs": lambda c: c["stage"].__setitem__("epochs", 9),
++            "stage.train_ids": lambda c: c["stage"].__setitem__("train_ids", "x.json"), "microbatch": lambda c: c.__setitem__("microbatch", 4)}
++    for k, f in muts.items():
++        t = copy.deepcopy(base)
++        f(t["config"])
++        r = raises(lambda: GP.expected_cfg_check(ctx, t, "G", ctx_lr), RuntimeError)
++        ok(f"negative: {k} mismatch is refused (not accepted as completion)", r[0], r[1])
++    # --- done.json 검증 (임시 run dir)
++    d = "results/iter_014/tests/pipeline_tmp/run"
++    os.makedirs(d, exist_ok=True)
++    json.dump(base, open(os.path.join(d, "train_config.json"), "w"))
++    ok("no done.json -> trained_ok False (not complete)", GP.trained_ok(ctx, d, "G", ctx_lr) is False)
++    json.dump({"status": "complete", "steps": 3, "loss_mode": "G", "train_digest": base["train_digest"]}, open(os.path.join(d, "done.json"), "w"))
++    r = raises(lambda: GP.trained_ok(ctx, d, "G", ctx_lr), RuntimeError)
++    ok("negative: done.json with wrong step count refused", r[0], r[1])
++    json.dump({"status": "complete", "steps": ctx.spe * ctx.cfg["epochs"], "loss_mode": "U", "train_digest": base["train_digest"]}, open(os.path.join(d, "done.json"), "w"))
++    r = raises(lambda: GP.trained_ok(ctx, d, "G", ctx_lr), RuntimeError)
++    ok("negative: done.json for a different loss refused", r[0], r[1])
++    # --- 부족한 응답: 검증 epoch의 val_metrics 없음 -> False (complete로 인정 안 함)
++    json.dump({"status": "complete", "steps": ctx.spe * ctx.cfg["epochs"], "loss_mode": "G", "train_digest": base["train_digest"]}, open(os.path.join(d, "done.json"), "w"))
++    ok("missing milestone val_metrics -> not complete", GP.trained_ok(ctx, d, "G", ctx_lr) is False)
++    # --- GPU 허용 집합
++    saved = os.environ["CUDA_VISIBLE_DEVICES"]
++    os.environ["CUDA_VISIBLE_DEVICES"] = "0"
++    r = raises(lambda: GP.Ctx("sanity"), SystemExit)
++    os.environ["CUDA_VISIBLE_DEVICES"] = saved
++    ok("exec_config GPU outside inherited allowed set -> refused", r[0], r[1])
++    # --- 메모리 대기: lock 존재와 무관하게 실제 여유를 본다
++    calls = []
++    orig_snap, orig_sleep = GP.gpu_snapshot, GP.time.sleep
++    GP.gpu_snapshot = lambda s: ([{"index": 0, "mem_total_mib": 24576, "mem_used_mib": 20000, "util": 0}], [])
++
++    class Stop(Exception):
++        pass
++
++    def sl(_):
++        calls.append(1)
++        raise Stop()
++    GP.time.sleep = sl
++    r = raises(lambda: GP.wait_gpu_free(ctx, 0, 13000), Stop)
++    GP.gpu_snapshot = lambda s: ([{"index": 0, "mem_total_mib": 24576, "mem_used_mib": 5000, "util": 0}], [])
++    ok_free = raises(lambda: GP.wait_gpu_free(ctx, 0, 13000), Stop)
++    GP.gpu_snapshot, GP.time.sleep = orig_snap, orig_sleep
++    ok("wait_gpu_free waits when free (4.5GB) < need 13GB+2GiB, returns when free 19.5GB", r[0] and not ok_free[0], (r, ok_free))
++    # --- iter_013 C 재사용 호환성 (실제 파일)
++    cx = GP.Ctx("explore")
++    okc, why = GP.c_compat(cx, "results/iter_013/explore/C_lr2e-05", 2e-5)
++    ok("iter_013 C trajectory compatible with iter_014 explore C (inputs/config/parent/order)", okc, why)
++    okc2, why2 = GP.c_compat(cx, "results/iter_013/explore/C_lr2e-05", 5e-5)
++    ok("negative: C reuse refused when LR differs", not okc2, why2)
++    okd, whyd = GP.c_compat(cx, "results/iter_013/explore/D_lr2e-05", 2e-5)
++    ok("negative: iter_013 D trajectory refused as C reuse", not okd, str(whyd)[:200])
++    # --- 재사용 원시 응답 검증과 집계 정정 (V200, epoch 1..3)
++    d13 = "results/iter_013/explore/C_lr2e-05"
++    rep13 = json.load(open("results/iter_013/explore/report.json"))
++    old = rep13["trajectories"]["C@2e-05"]["v200_detail_by_epoch"]
++    _, _, d200_b0 = GP.b0_details(cx)
++    sel, det, spe = GP.select_traj(cx, d13, d200_b0, reused=True)
++    same_main = all(abs(det[e]["S_loc"] - old[str(e)]["S_loc"]) < 1e-12 and abs(det[e]["f1@0.3"] - old[str(e)]["f1@0.3"]) < 1e-12 for e in (1, 2, 3))
++    ok("reused C V200 raw responses re-verified; S_loc/F1@0.3 unchanged vs iter_013 report (main metric invariant)", same_main, {e: det[e]["S_loc"] for e in det})
++    ok("multi fix visible: iter_013 V200 multi n vs corrected", det[3]["by_n_gt_S_loc"]["multi"]["n"] >= old["3"]["by_n_gt_S_loc"]["multi"]["n"] and det[3]["by_n_gt_S_loc"]["ge3"]["n"] > 0,
++       {"old_multi_n": old["3"]["by_n_gt_S_loc"]["multi"]["n"], "new_multi_n": det[3]["by_n_gt_S_loc"]["multi"]["n"], "new_ge3_n": det[3]["by_n_gt_S_loc"]["ge3"]["n"]})
++    ok("C selection from reused V200 equals iter_013 selected epoch (1) and selection_eligible", sel["selected_epoch"] == 1 and sel["selection_eligible"], (sel["selected_epoch"], sel["selection_eligible"]))
++    recs = GP.gen_v400(cx, [0], d13, 1, reused=True)
++    ok("reused V400 epoch1 (V200 parent + 200 new) verified: 400 requests", len(recs) == 400, len(recs))
++    recs3 = GP.gen_v400(cx, [0], d13, 3, reused=True)
++    ok("reused V400 epoch3 verified: 400 requests", len(recs3) == 400, len(recs3))
++    # 결정: 저장된 iter_013 C 응답의 V400 selected S_loc가 iter_013 report와 같다
++    p = GP.AE.preds_of(recs, [i["id"] for i in cx.v400_items])
++    dt = GP.detail14(cx, p, [i["id"] for i in cx.v400_items])
++    old400 = rep13["trajectories"]["C@2e-05"]["selected"]["v400"]
++    ok("reused C selected V400 S_loc equals iter_013 report", abs(dt["S_loc"] - old400["S_loc"]) < 1e-12, (dt["S_loc"], old400["S_loc"]))
++    os.makedirs(os.path.dirname(OUT), exist_ok=True)
++    json.dump({"protocol": sys.argv[1], "n": len(res), "n_pass": sum(x["pass"] for x in res), "results": res}, open(OUT, "w"), indent=1)
++    print(f"{sum(x['pass'] for x in res)}/{len(res)} PASS")
++    return 0 if all(x["pass"] for x in res) else 1
++
++
++if __name__ == "__main__":
++    sys.exit(main())
+diff --git a/test_rsna_iter014_resume.py b/test_rsna_iter014_resume.py
+new file mode 100644
+index 0000000..91e9949
+--- /dev/null
++++ b/test_rsna_iter014_resume.py
+@@ -0,0 +1,80 @@
++"""iter_014 G 재개 검사 (실제 GPU, 결정적 kernel, sanity stage): 중간 optimizer-step checkpoint에서 저장·강제 종료·재개한 실행이 끊김 없는 실행과 같은지 대조한다.
++사용: python test_rsna_iter014_resume.py PROTOCOL  -> results/iter_014/tests/fixtures_iter014_resume.json
++비교: step별 batch ID·batch_token_sha·branch_sha(후보 ID/token/mask)·rng_before·opt_step_before·LR·loss·grad_norm, 저장 시점 digest(adapter/optimizer/RNG), 최종 epoch adapter digest.
++허용 오차는 사전 고정: 이산 항목(ID/digest/sha/opt_step)은 정확 일치, 수치(loss, grad_norm, lr)는 상대 1e-6 (결정적 kernel)."""
++import json
++import os
++import subprocess
++import sys
++import threading
++
++R = "results/iter_014/tests/resume2"
++STAGE = "results/iter_014/stage/sanity.json"
++
++
++def cmd(d, prot, extra=()):
++    return [sys.executable, "-m", "rsna_diag.on_gpu", "--gpu", "%s", "--", sys.executable, "-m", "rsna_diag.adapt_geo", "--run-dir", d, "--stage-config", STAGE, "--loss", "G", "--lr", "2e-5",
++            "--protocol", prot, "--microbatch", "1", "--branch-microbatch", "2", "--workers", "0", "--ckpt-every", "2", "--deterministic", *extra]
++
++
++def run(gpu, d, prot, extra=()):
++    c = [x if x != "%s" else str(gpu) for x in cmd(d, prot, extra)]
++    return subprocess.run(c, stdout=open(d + ".log", "a"), stderr=subprocess.STDOUT).returncode
++
++
++def steps(d):
++    rows = [json.loads(l) for l in open(os.path.join(d, "train_log.jsonl"))]
++    return {r["step"]: r for r in rows if "step" in r and "event" not in r}, [r for r in rows if r.get("event")]
++
++
++def main():
++    prot = sys.argv[1]
++    os.makedirs(R, exist_ok=True)
++    A, B = os.path.join(R, "uninterrupted"), os.path.join(R, "interrupted")
++    rc = {}
++
++    def a():
++        rc["A"] = run(0, A, prot)
++
++    def b():
++        rc["B1"] = run(1, B, prot, ("--stop-after-step", "2"))
++        rc["B2"] = run(1, B, prot)
++
++    ts = [threading.Thread(target=a), threading.Thread(target=b)]
++    [t.start() for t in ts]
++    [t.join() for t in ts]
++    out = {"returncodes": rc, "checks": []}
++
++    def ck(name, cond, detail=""):
++        out["checks"].append({"name": name, "pass": bool(cond), "detail": str(detail)[:400]})
++        print(("PASS " if cond else "FAIL ") + name, str(detail)[:200], flush=True)
++
++    ck("A completed rc=0; B interrupted rc=5 then resumed rc=0", rc.get("A") == 0 and rc.get("B1") == 5 and rc.get("B2") == 0, rc)
++    sa, ea = steps(A)
++    sb, eb = steps(B)
++    ck("same step set (1..8)", sorted(sa) == sorted(sb) == list(range(1, 9)), (sorted(sa), sorted(sb)))
++    disc = ("batch_ids", "batch_token_sha", "branch_sha", "rng_before", "opt_step_before", "n_branches", "n_label_tokens", "n_branch_label_tokens", "epoch", "pos")
++    bad = {s: [k for k in disc if sa[s][k] != sb[s][k]] for s in sa if s in sb and any(sa[s][k] != sb[s][k] for k in disc)}
++    ck("discrete provenance identical every step (batch/candidate/token-mask sha, RNG digest, optimizer step count)", not bad, bad)
++    rel = lambda x, y: abs(x - y) / max(abs(y), 1e-12)
++    badn = {s: {k: (sa[s][k], sb[s][k]) for k in ("loss", "grad_norm", "lr", "gt_weighted_ce", "branch_weighted_ce") if rel(sa[s][k], sb[s][k]) > 1e-6} for s in sa if s in sb}
++    badn = {s: v for s, v in badn.items() if v}
++    ck("loss/grad_norm/LR equal within 1e-6 (deterministic kernels)", not badn, badn)
++    ck_a = {(e["step"]): e["digests"] for e in ea if e.get("event") == "checkpoint"}
++    ck_b = {(e["step"]): e["digests"] for e in eb if e.get("event") == "checkpoint"}
++    common = sorted(set(ck_a) & set(ck_b))
++    ck("checkpoint digests (adapter/optimizer/RNG) identical at every common step incl. mid-epoch step 2 and post-resume", bool(common) and all(ck_a[s] == ck_b[s] for s in common), common)
++    rs = [e for e in eb if e.get("event") == "resume"]
++    ck("resume event: restored state == saved checkpoint state, from step 2", len(rs) == 1 and rs[0]["restored_equals_saved"] and rs[0]["step"] == 2, rs[:1])
++    ma = json.load(open(os.path.join(A, "epoch_02", "val_metrics.json")))
++    mb = json.load(open(os.path.join(B, "epoch_02", "val_metrics.json")))
++    ck("final adapter digest identical (epoch 2)", ma["adapter_digest"] == mb["adapter_digest"], (ma["adapter_digest"][:12], mb["adapter_digest"][:12]))
++    out["n_pass"] = sum(c["pass"] for c in out["checks"])
++    out["n"] = len(out["checks"])
++    json.dump(out, open("results/iter_014/tests/fixtures_iter014_resume.json", "w"), indent=1)
++    print(f"{out['n_pass']}/{out['n']} PASS")
++    return 0 if out["n_pass"] == out["n"] else 1
++
++
++if __name__ == "__main__":
++    sys.exit(main())
