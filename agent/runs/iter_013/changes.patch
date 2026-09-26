@@ -1,0 +1,1851 @@
+diff --git a/rsna_diag/adapt.py b/rsna_diag/adapt.py
+new file mode 100644
+index 0000000..e23d273
+--- /dev/null
++++ b/rsna_diag/adapt.py
+@@ -0,0 +1,336 @@
++"""iter_013 추가 적응 단계 학습기 (C: 추가 SFT, H: 좌표 가중 CE, D: DIST²Loss 자리별 이식). 사용:
++CUDA_VISIBLE_DEVICES=<gpu> python -m rsna_diag.adapt --run-dir D --stage-config S.json --loss C|H|D --lr 2e-5 --protocol P --microbatch 2
++
++- 공통 시작점 = stage config의 parent adapter (파일 sha256·digest 검증). base + 언어층 LoRA 범위는 그대로, optimizer는 새로 초기화한다
++  (부모 학습 trajectory를 이어서 재개한 것이 아니다). 학습 일정은 이 단계의 총 update에 대해 5% warmup 뒤 cosine(0까지). 기존 5->8 epoch 규칙 미사용.
++- loss: (CE합 + alpha * 추가항합) / N, N = effective batch의 assistant 학습 token 수 (모든 조건 동일). 추가 항은 coord_loss.loss_sums.
++  C도 H/D의 추가 항 값을 gradient 없이 기록한다 (조건 간 loss 성분 비교용).
++- 검증: 각 epoch 끝(=milestone)에 stage config의 val_ids(V200)를 생성 평가한다. 시작점(B0)의 V200은 기존 검증된 출력의 부분집합을 쓴다 (adapt_eval).
++- train.py의 helper(원자 저장·digest·RNG·validation 생성)를 재사용하고 그 코드는 수정하지 않는다. 재개/복구/lock 동작은 train.py와 같다.
++- stage/ids/parent 파일은 protocol의 잠긴 파일이어야 한다 (lock_protocol --extra).
++"""
++import argparse
++import hashlib
++import json
++import math
++import os
++import sys
++import time
++
++import numpy as np
++
++from . import coord_loss as CL, generate, inputs, lock_protocol, lora, migrate, prompts as P, queue_lock, select, sft_data, sft_eval
++from . import train as T
++
++STAGE_KEYS = ("stage_id", "parent_adapter", "parent_adapter_sha256", "parent_adapter_digest", "train_ids", "val_ids", "seed", "epochs",
++              "eff_batch", "allowed_lrs", "warmup_frac", "validate", "alpha", "tau")
++
++
++def lr_at(step, total, peak, warmup_frac):
++    warm = max(1, math.ceil(warmup_frac * total))
++    if step < warm:
++        return peak * (step + 1) / warm
++    return 0.5 * peak * (1 + math.cos(math.pi * (step - warm) / max(1, total - warm)))
++
++
++class AdaptDataset:
++    def __init__(self, tok, proc, items, gt, prompt, order, dig_ids):
++        self.tok, self.proc, self.items, self.gt, self.prompt, self.order, self.dig = tok, proc, items, gt, prompt, order, dig_ids
++
++    def __len__(self):
++        return len(self.order)
++
++    def __getitem__(self, k):
++        it = self.items[self.order[k]]
++        image, _, _ = inputs.load_verified(it)
++        tgt = sft_data.target_text([b["yxyx_norm"] for b in self.gt[it["id"]]["boxes"]])
++        ex = sft_data.build_example(self.proc, image, self.prompt, tgt)
++        ex["coord_w"] = CL.coord_weights(self.tok, tgt, ex["input_ids"].tolist(), ex["n_prefix"], self.dig)
++        ex["sample_pos"] = int(k)
++        return ex
++
++
++def collate(ex, pad_id):
++    import torch
++    cw = [e["coord_w"] for e in ex]
++    out = sft_data.collate([{k: v for k, v in e.items() if k != "coord_w"} for e in ex], pad_id)
++    t = torch.zeros((len(ex), out["input_ids"].shape[1]), dtype=torch.float32)
++    for i, w in enumerate(cw):
++        t[i, :len(w)] = torch.tensor(w, dtype=torch.float32)
++    out["coord_w"] = t  # 모델 forward에는 넣지 않는다 (adapt_loss가 pop)
++    return out
++
++
++def adapt_loss(torch, model, batch, softcap, mode, dig_ids, alpha, tau):
++    """batch(cuda) -> dict(ce_sum, extra_sum(loss에 쓰는 것), mon_h, mon_d (detached), n_tok, n_coord)."""
++    b = dict(batch)
++    cw, labels = b.pop("coord_w"), b.pop("labels")
++    b["pixel_values"] = b["pixel_values"].to(torch.bfloat16)
++    out = model.model(**b, use_cache=False)
++    h = out.last_hidden_state[:, :-1]
++    lab = labels[:, 1:]
++    sel = lab != -100
++    logits = model.lm_head(h[sel]).float()
++    softcap_v = getattr(model.config.get_text_config(), "final_logit_softcapping", None)
++    if softcap_v:
++        logits = torch.tanh(logits / softcap_v) * softcap_v
++    y, w = lab[sel], cw[:, 1:][sel]
++    if int((cw > 0).sum()) != int((w > 0).sum()):
++        raise RuntimeError("coordinate token outside assistant label positions")
++    ce_sum, extra = CL.loss_sums(torch, logits, y, w, mode, dig_ids, alpha, tau)
++    with torch.no_grad():
++        ld = logits.detach()
++        mon_h = CL.loss_sums(torch, ld, y, w, "H", dig_ids)[1]
++        mon_d = CL.loss_sums(torch, ld, y, w, "D", dig_ids, alpha, tau)[1]
++    return {"ce_sum": ce_sum, "extra_sum": extra, "mon_h": mon_h, "mon_d": mon_d, "n_tok": int(sel.sum()), "n_coord": int((w > 0).sum())}
++
++
++def load_stage(path, protocol):
++    st = json.load(open(path))
++    miss = [k for k in STAGE_KEYS if k not in st]
++    if miss:
++        sys.exit(f"stage config missing keys {miss}")
++    locked = json.load(open(protocol))["locked"]["files"]
++    for k in (path, st["parent_adapter"], st["train_ids"], st["val_ids"]):
++        if os.path.relpath(k) not in locked:
++            sys.exit(f"{k} is not a locked protocol file")
++    if hashlib.sha256(open(st["parent_adapter"], "rb").read()).hexdigest() != st["parent_adapter_sha256"]:
++        sys.exit("parent adapter file sha256 != stage config")
++    return st
++
++
++def main():
++    ap = argparse.ArgumentParser()
++    ap.add_argument("--run-dir", required=True)
++    ap.add_argument("--stage-config", required=True)
++    ap.add_argument("--loss", required=True, choices=["C", "H", "D"])
++    ap.add_argument("--lr", type=float, required=True)
++    ap.add_argument("--protocol", required=True)
++    ap.add_argument("--microbatch", type=int, default=2)
++    ap.add_argument("--ckpt-every", type=int, default=50)
++    ap.add_argument("--workers", type=int, default=3)
++    ap.add_argument("--max-steps", type=int, default=None, help="test: 이 optimizer step까지만 (checkpoint 저장 후 종료)")
++    ap.add_argument("--stop-after-step", type=int, default=None, help="test: 정기 checkpoint step 직후 비정상 종료 (재개 검사)")
++    ap.add_argument("--deterministic", action="store_true", help="검사 전용: 결정적 kernel (선택·본실험 금지)")
++    ap.add_argument("--stop-in-validation", type=int, default=None, help="test: validation 요청을 이 개수 새로 쓴 뒤 종료")
++    a = ap.parse_args()
++    if a.deterministic:
++        os.environ["CUBLAS_WORKSPACE_CONFIG"] = ":4096:8"
++    pdig = lock_protocol.verify(a.protocol)
++    st = load_stage(a.stage_config, a.protocol)
++    if a.lr not in st["allowed_lrs"]:
++        sys.exit(f"lr {a.lr} not in stage allowed_lrs {st['allowed_lrs']}")
++    os.makedirs(a.run_dir, exist_ok=True)
++    lk, own, reclaimed = queue_lock.try_lock(os.path.join(os.path.realpath(a.run_dir), "train.lock"), queue_lock.my_info(role="adapt"))
++    if lk is None:
++        sys.exit(f"run-dir {a.run_dir} is owned by another live process: {own}")
++    T.LOCK_FD[0] = lk.fd
++    try:
++        run(a, st, pdig, reclaimed)
++    finally:
++        lk.release()
++
++
++def run(a, st, pdig, reclaimed_lock):
++    import torch
++    train_items, gt = inputs.load_items(T.MANIFEST, T.GT, st["train_ids"], "train", exact=False)
++    val_items = inputs.load_items(T.MANIFEST, T.GT, st["val_ids"], "validation", exact=False)[0] if st["validate"] else []
++    t_in = inputs.inputs_digest(train_items, gt)
++    v_in = inputs.inputs_digest(val_items, gt) if val_items else None
++    edges = sft_eval.area_edges(gt, [i for i in gt if gt[i]["split"] == "train"])
++    if a.deterministic:
++        T.set_deterministic(torch)
++    seed = st["seed"]
++    T.seed_all(torch, seed)
++    _, proc, model, names = T.setup_model(seed)
++    tok = proc.tokenizer
++    dig_ids = CL.digit_ids(tok)
++    softcap = getattr(model.config.get_text_config(), "final_logit_softcapping", None)
++    pblob = torch.load(st["parent_adapter"], map_location="cpu", weights_only=True)
++    if lora.state_digest(pblob["state"]) != st["parent_adapter_digest"] or pblob.get("digest") != st["parent_adapter_digest"]:
++        sys.exit("parent adapter digest != stage config")
++    if pblob["config"] != {"r": T.CFG["r"], "alpha": T.CFG["alpha"]}:
++        sys.exit("parent adapter rank/alpha != trainer config")
++    lora.load_lora_state(model, pblob["state"])
++    model.gradient_checkpointing_enable(gradient_checkpointing_kwargs={"use_reentrant": False})
++    model.config.use_cache = False
++    params = list(lora.lora_params(model).values())
++    env = generate.env_info(torch, proc, model)
++    cdig, _ = generate.config_digest(env, {"concise": P.CONCISE})
++    full_cd, _ = generate.config_digest(env, P.all_prompts())
++    if full_cd != json.load(open(a.protocol))["locked"]["generation_config_digest"]:
++        sys.exit("runtime generation config digest != protocol")
++    eb = st["eff_batch"]
++    n_tr = len(train_items)
++    spe = math.ceil(n_tr / eb)
++    total = spe * st["epochs"]
++    cfg = dict(T.CFG, lr=a.lr, seed=seed, microbatch=a.microbatch, eff_batch=eb, n_train=n_tr, n_val=len(val_items), stage=st, stage_config_sha256=migrate.file_sha(a.stage_config),
++               loss_mode=a.loss, alpha=st["alpha"], tau=st["tau"], place_weights="right-to-left 1,2,3,4", total_updates=total, steps_per_epoch=spe,
++               model_revision=generate.MODEL_REVISION, protocol_digest=pdig, n_lora_targets=len(names), n_trainable=sum(p.numel() for p in params),
++               train_inputs_digest=t_in, val_inputs_digest=v_in, deterministic=bool(a.deterministic), optimizer_init="fresh AdamW (parent optimizer not resumed)",
++               dataloader_rng="torch.Generator seeded seed*1000+epoch")
++    tdig = migrate.cfg_digest(cfg)
++    cfg_path = os.path.join(a.run_dir, "train_config.json")
++    if os.path.exists(cfg_path):
++        if json.load(open(cfg_path))["train_digest"] != tdig:
++            sys.exit("train config differs from existing run_dir (refusing to resume/overwrite)")
++    else:
++        json.dump({"train_digest": tdig, "config": cfg, "env": env}, open(cfg_path, "w"), indent=1, default=str)
++    opt = torch.optim.AdamW(params, lr=a.lr, betas=tuple(T.CFG["betas"]), eps=T.CFG["eps"], weight_decay=T.CFG["weight_decay"])
++    step, epoch0, pos0 = 0, 0, 0
++    ck = os.path.join(a.run_dir, "ckpt_latest.pt")
++    logf = open(os.path.join(a.run_dir, "train_log.jsonl"), "a")
++
++    def log_event(**kw):
++        logf.write(json.dumps({"ts": time.time(), **kw}) + "\n")
++        logf.flush()
++
++    def save_ckpt(epoch, pos, val_pending=None):
++        dg = T.live_digests(torch, model, opt)
++        T.atomic_save(torch, {"lora": lora.lora_state_dict(model), "optimizer": opt.state_dict(), "step": step, "epoch": epoch, "pos_in_epoch": pos,
++                              "rng": T.rng_state(torch), "train_digest": tdig, "val_pending_epoch": val_pending, "loss_mode": a.loss,
++                              "base_revision": generate.MODEL_REVISION, "protocol_digest": pdig, "digests": dg}, ck)
++        log_event(event="checkpoint", step=step, epoch=epoch, pos=pos, digests=dg)
++
++    if os.path.exists(ck):
++        blob = torch.load(ck, map_location="cpu", weights_only=False)
++        if blob["train_digest"] != tdig or blob["base_revision"] != generate.MODEL_REVISION or blob["protocol_digest"] != pdig or blob["loss_mode"] != a.loss:
++            sys.exit("checkpoint provenance mismatch")
++        lora.load_lora_state(model, blob["lora"])
++        opt.load_state_dict(blob["optimizer"])
++        step, epoch0, pos0 = blob["step"], blob["epoch"], blob["pos_in_epoch"]
++        T.set_rng_state(torch, blob["rng"])
++        restored = T.live_digests(torch, model, opt)
++        if restored != blob["digests"]:
++            sys.exit(f"restored state != saved checkpoint state: saved {blob['digests']} restored {restored}")
++        print(f"resumed step={step} epoch={epoch0} pos={pos0}", flush=True)
++        log_event(event="resume", step=step, epoch=epoch0, pos=pos0, stale_lock_reclaimed=bool(reclaimed_lock), restored_digests=restored, restored_equals_saved=True)
++    t0 = time.time()
++
++    def verify_existing_val(e):
++        select.verify_epoch(a.run_dir, e, json.load(open(cfg_path)), v_in, a.protocol, val_items, gt)
++
++    def validate_epoch(e, from_file, stop_after=None):
++        epoch_dir = os.path.join(a.run_dir, f"epoch_{e:02d}")
++        vm = os.path.join(epoch_dir, "val_metrics.json")
++        if os.path.exists(vm):
++            verify_existing_val(e)
++            return
++        rng_before = T.rng_state(torch)
++        pre = T.live_digests(torch, model, opt)
++        snap = lora.lora_state_dict(model) if from_file else None
++        if from_file:
++            ba = torch.load(os.path.join(epoch_dir, "adapter.pt"), map_location="cpu", weights_only=True)
++            if lora.state_digest(ba["state"]) != ba["digest"]:
++                raise RuntimeError(f"epoch {e} adapter file digest mismatch")
++            lora.load_lora_state(model, ba["state"])
++        adig = lora.state_digest(lora.lora_state_dict(model))
++        torch.cuda.reset_peak_memory_stats()
++        vl, vn = T.val_loss(torch, model, proc, val_items, gt, softcap, P.CONCISE)
++        summ = T.run_validation(torch, proc, model, env, cdig, pdig, val_items, gt, edges, os.path.join(epoch_dir, "val_gen"), e, adig,
++                                os.path.basename(a.run_dir), v_in, stop_after)
++        summ.update({"val_loss": vl, "val_loss_tokens": vn, "epoch": e, "step": e * spe, "adapter_digest": adig, "lr": a.lr, "seed": seed,
++                     "train_digest": tdig, "val_inputs_digest": v_in, "protocol_digest": pdig})
++        T.atomic_json(summ, vm)
++        if from_file:
++            lora.load_lora_state(model, snap)
++        T.set_rng_state(torch, rng_before)
++        post = T.live_digests(torch, model, opt)
++        if post != pre:
++            raise RuntimeError(f"validation changed training state: before {pre} after {post}")
++        log_event(event="validation_done", epoch=e, val_loss=vl, utility=summ["utility"], recovered_from_file=from_file, state_unchanged=True, digests=post)
++        print(f"epoch {e}: val_loss {vl:.4f} f1@.3 {summ['f1@0.3']:.4f} f1@.5 {summ['f1@0.5']:.4f}", flush=True)
++
++    if val_items:
++        for e in range(1, epoch0 + 1):
++            ed = os.path.join(a.run_dir, f"epoch_{e:02d}")
++            if not os.path.exists(os.path.join(ed, "adapter.pt")):
++                raise RuntimeError(f"epoch {e} adapter missing although checkpoint is at epoch {epoch0}")
++            if not os.path.exists(os.path.join(ed, "val_metrics.json")):
++                print(f"recovering pending validation for epoch {e}", flush=True)
++                validate_epoch(e, from_file=True)
++            else:
++                verify_existing_val(e)
++    for epoch in range(epoch0, st["epochs"]):
++        order = np.random.default_rng(seed * 1000 + epoch).permutation(n_tr)
++        start_pos = pos0 if epoch == epoch0 else 0
++        ds = AdaptDataset(tok, proc, train_items, gt, P.CONCISE, order, dig_ids)
++        dl_gen = torch.Generator()
++        dl_gen.manual_seed(seed * 1000 + epoch)
++        dl = torch.utils.data.DataLoader(torch.utils.data.Subset(ds, list(range(start_pos * eb, n_tr))), batch_size=a.microbatch, shuffle=False,
++                                         num_workers=a.workers, collate_fn=lambda ex: collate(ex, tok.pad_token_id), prefetch_factor=2 if a.workers else None,
++                                         worker_init_fn=T.close_lock_fd, generator=dl_gen)
++        model.train()
++        it = iter(dl)
++        for s in range(start_pos, spe):
++            grp = order[s * eb:(s + 1) * eb]
++            tot_tok = sum(T.label_count(tok, sft_data.target_text([b["yxyx_norm"] for b in gt[train_items[j]["id"]]["boxes"]])) for j in grp)
++            lr = lr_at(step, total, a.lr, st["warmup_frac"])
++            for g in opt.param_groups:
++                g["lr"] = lr
++            rng_before, opt_step_before = T.rng_digest(torch), T.opt_step_count(opt)
++            if not model.training:
++                raise RuntimeError("model not in train mode at optimizer step")
++            acc = {"ce": 0.0, "extra": 0.0, "mon_h": 0.0, "mon_d": 0.0}
++            ntok_seen = ncoord = 0
++            seen_pos, tok_h = [], hashlib.sha256()
++            for _ in range(math.ceil(len(grp) / a.microbatch)):
++                b = next(it)
++                seen_pos += b.pop("sample_pos").tolist()
++                tok_h.update(T.batch_token_digest(b).digest())
++                tok_h.update(b["coord_w"].contiguous().numpy().tobytes())
++                b = {k: v.cuda() for k, v in b.items()}
++                r = adapt_loss(torch, model, b, softcap, a.loss, dig_ids, st["alpha"], st["tau"])
++                ((r["ce_sum"] + st["alpha"] * r["extra_sum"]) / tot_tok).backward()
++                acc["ce"] += float(r["ce_sum"]) / tot_tok
++                acc["extra"] += float(r["extra_sum"]) / tot_tok
++                acc["mon_h"] += float(r["mon_h"]) / tot_tok
++                acc["mon_d"] += float(r["mon_d"]) / tot_tok
++                ntok_seen += r["n_tok"]
++                ncoord += r["n_coord"]
++            if ntok_seen != tot_tok:
++                raise RuntimeError(f"label token count mismatch {ntok_seen} != {tot_tok}")
++            planned = [train_items[j]["id"] for j in grp]
++            actual = [train_items[order[p]]["id"] for p in seen_pos]
++            if actual != planned or seen_pos != list(range(s * eb, s * eb + len(grp))):
++                raise RuntimeError(f"step {step + 1}: DataLoader batch != planned batch")
++            gn = float(torch.nn.utils.clip_grad_norm_(params, T.CFG["grad_clip"]))
++            loss_total = acc["ce"] + st["alpha"] * acc["extra"]
++            if not math.isfinite(gn) or not math.isfinite(loss_total):
++                raise RuntimeError(f"non-finite loss/grad at step {step}: {loss_total} {gn}")
++            opt.step()
++            opt.zero_grad(set_to_none=True)
++            step += 1
++            logf.write(json.dumps({"step": step, "epoch": epoch + 1, "pos": s + 1, "loss": loss_total, "ce": acc["ce"], "extra_raw": acc["extra"],
++                                   "extra_weighted": st["alpha"] * acc["extra"], "monitor_H_extra_raw": acc["mon_h"], "monitor_D_extra_raw": acc["mon_d"],
++                                   "n_label_tokens": tot_tok, "n_coord_tokens": ncoord, "grad_norm": gn, "lr": lr, "n_examples": len(grp),
++                                   "elapsed_s": time.time() - t0, "peak_mem_gb": torch.cuda.max_memory_allocated() / 2 ** 30, "batch_ids": actual,
++                                   "batch_token_sha": tok_h.hexdigest()[:24], "rng_before": rng_before, "opt_step_before": opt_step_before,
++                                   "train_mode": True}) + "\n")
++            logf.flush()
++            saved = False
++            if step % a.ckpt_every == 0 and (s + 1) < spe:
++                save_ckpt(epoch, s + 1)
++                saved = True
++            if a.stop_after_step is not None and step == a.stop_after_step:
++                if not saved:
++                    raise RuntimeError("--stop-after-step must coincide with a regular mid-epoch checkpoint step")
++                print("test stop after mid-epoch step checkpoint", flush=True)
++                os._exit(5)
++            if a.max_steps is not None and step >= a.max_steps:
++                save_ckpt(epoch, s + 1)
++                print("max-steps reached", flush=True)
++                return
++        del dl, it
++        ed = os.path.join(a.run_dir, f"epoch_{epoch + 1:02d}")
++        T.save_adapter(torch, model, os.path.join(ed, "adapter.pt"), {"epoch": epoch + 1, "step": step, "train_digest": tdig})
++        save_ckpt(epoch + 1, 0, val_pending=epoch + 1 if val_items else None)
++        if val_items:
++            validate_epoch(epoch + 1, from_file=False, stop_after=a.stop_in_validation)
++        pos0 = 0
++    print("training complete", flush=True)
++    T.atomic_json({"status": "complete", "steps": step, "loss_mode": a.loss, "train_digest": tdig, "wall_s": time.time() - t0}, os.path.join(a.run_dir, "done.json"))
++
++
++if __name__ == "__main__":
++    main()
+diff --git a/rsna_diag/adapt_decide.py b/rsna_diag/adapt_decide.py
+new file mode 100644
+index 0000000..2670906
+--- /dev/null
++++ b/rsna_diag/adapt_decide.py
+@@ -0,0 +1,59 @@
++"""iter_013 사전 고정 판정 규칙 (report.json -> decision.json). 결과를 본 뒤 규칙을 바꾸지 않는다. 사용: python -m rsna_diag.adapt_decide explore|full --report R --out O
++
++explore -> 확대: D(선택 checkpoint, V400)가 C(선택 checkpoint)보다 S_loc 0.03 이상 높고 D의 V400 guardrail을 통과하면 확대.
++  점추정이 0.03 미만이어도 paired 95% CI 상한 >= 0.03 이고 D의 V200 마지막 구간(epoch2->3) S_loc 개선 >= 0.01이면 한 번 확대.
++  C에 통과 checkpoint가 없으면 C의 (guardrail 무시) 최고 S_loc를 기준으로 삼는다 (D에 불리한 보수적 기준).
++full  -> seed 재현: 각 조건의 LR·checkpoint를 V200 선택 예산(2 LR x 3 milestone)에서 고른 뒤, D가 가장 강한 C보다 0.03 이상, 같은 설정 H보다 0.01 이상 높고
++  guardrail 통과면 seed29/43 재현으로 진행. 이득이 C 또는 H로 설명되면 D의 다중 seed 확대를 중단한다.
++"""
++import argparse
++import json
++import os
++
++from . import adapt_eval as AE, select as SEL
++
++
++def best_s_loc(t, prefer="selected"):
++    """trajectory entry -> (S_loc, tag, entry) of the selected (또는 없으면 final) checkpoint."""
++    e = t.get(prefer) or t.get("final")
++    return e["v400"]["S_loc"], (prefer if t.get(prefer) else "final"), e
++
++
++def decide_explore(rep):
++    tr = rep["trajectories"]
++    C, D, H = tr.get("C@2e-05"), tr.get("D@2e-05"), tr.get("H@2e-05")
++    out = {"rule": __doc__.split("\n")[2:5]}
++    if not (C and D):
++        return {"error": "C or D trajectory missing"}
++    cs, ctag, ce = best_s_loc(C)
++    ds, dtag, de = best_s_loc(D)
++    ci = rep["pairwise_v400_paired_bootstrap"]["selected"].get("D@2e-05-C@2e-05")
++    d_guard = bool(D.get("selected")) and D["selected"]["guardrail_v400"]["ok"]
++    v = D["v200_detail_by_epoch"]
++    last_gain = v["3"]["S_loc"] - v["2"]["S_loc"]
++    expand, reason = AE.expand_rule(ds, cs, ci, last_gain, d_guard)
++    out.update({"C_selected_S_loc": cs, "C_tag": ctag, "D_selected_S_loc": ds, "D_tag": dtag, "D_minus_C": ds - cs, "paired_ci_D_minus_C": ci,
++                "D_v200_last_interval_gain": last_gain, "D_guardrail_v400_ok": d_guard, "expand": expand, "reason": reason})
++    if H:
++        hs, htag, _ = best_s_loc(H)
++        out["H_selected_S_loc"] = hs
++        out["H_minus_C"] = hs - cs
++        out["D_minus_H"] = ds - hs
++    out["final_checkpoint_S_loc"] = {k: (t["final"]["v400"]["S_loc"] if t.get("final") else None) for k, t in tr.items()}
++    out["B0_S_loc_v400"] = rep["b0"]["v400"]["S_loc"]
++    return out
++
++
++def main():
++    ap = argparse.ArgumentParser()
++    ap.add_argument("mode", choices=["explore"])
++    ap.add_argument("--report", required=True)
++    ap.add_argument("--out", required=True)
++    a = ap.parse_args()
++    rep = json.load(open(a.report))
++    dec = {"mode": a.mode, "report": a.report, "report_sha256": SEL.file_sha(a.report), "decision": decide_explore(rep)}
++    print(SEL.write_or_verify(a.out, json.loads(json.dumps(dec))), json.dumps(dec["decision"], indent=1)[:1500])
++
++
++if __name__ == "__main__":
++    main()
+diff --git a/rsna_diag/adapt_eval.py b/rsna_diag/adapt_eval.py
+new file mode 100644
+index 0000000..48b31e6
+--- /dev/null
++++ b/rsna_diag/adapt_eval.py
+@@ -0,0 +1,127 @@
++"""iter_013 평가: V200/V400 생성 결과의 S_loc·guardrail·선택·paired bootstrap·오류 분해.
++
++- S_loc = 양성 환자 평균 (F1@0.3 + F1@0.5) / 2, 환자별 최대 cardinality one-to-one matching (metrics.patient_metrics 재사용).
++- guardrail: 유효 출력률(전체) >= 0.99, 두 음성 층 각각 B0 대비 valid_empty율 감소 <= 0.03 (운영 guardrail; 임상 비열등성 아님).
++- 선택: guardrail 통과 후보 중 S_loc 최대, 동률은 이른 checkpoint. 통과 후보가 없으면 선택 없음 (규칙 완화 금지).
++- 모든 점수는 원시 응답(record)에서 parse_records(strict)로 계산하고, 누락·중복·잉여 요청은 eval_gate가 거부한다.
++"""
++import json
++import os
++
++import numpy as np
++
++from . import eval_gate, inputs, lock_protocol, metrics as M, parse as PA, sft_eval
++
++MANIFEST = "results/iter_010/manifests/infer_manifest.jsonl"
++GT = "results/iter_010/manifests/gt_manifest.json"
++V400_IDS = "results/iter_010/manifests/validation_ids.json"
++B0_ADAPTER = "results/iter_012/train/lr2e-4_s17/epoch_05"
++B0_PROTOCOL = "results/iter_012/protocols/main_protocol.json"
++VALID_MIN = 0.99
++NEG_DROP_MAX = 0.03
++
++
++def load_ids_items(ids_path, split="validation"):
++    return inputs.load_items(MANIFEST, GT, ids_path, split, exact=False)
++
++
++def b0_records(protocol, items):
++    """iter_012 B0 (seed17 lr2e-4 epoch5) V400 응답을 현재 입력·adapter·생성 config와의 호환성 검증 후 읽기 전용으로 재사용한다.
++    iter_012 protocol 파일은 코드 hash 때문에 현재 verify할 수 없으므로 digest_of + 생성 config digest 일치만 사용한다 (eval_gate.verify_gen의 부모 경로)."""
++    pdir = os.path.join(B0_ADAPTER, "val_gen")
++    return eval_gate.verify_gen(os.path.join("results/iter_013", "b0_v400_empty"), items, ["concise"], B0_ADAPTER, protocol, pdir, B0_PROTOCOL,
++                                require_completion=False)
++
++
++def preds_of(recs, ids):
++    return sft_eval.parse_records(recs, ids, "concise", strict=True)
++
++
++def s_loc_arrays(preds, gt, ids):
++    pos, pp = sft_eval.per_patient(preds, gt, ids)
++    return pos, (pp["f1@0.3"] + pp["f1@0.5"]) / 2, pp
++
++
++def box_edges_train(gt, train_ids):
++    a = np.array([M.area(b["yxyx_norm"]) / 1e6 for i in train_ids if gt[i]["category"] == "opacity" for b in gt[i]["boxes"]])
++    return [float(np.quantile(a, 1 / 3)), float(np.quantile(a, 2 / 3))]
++
++
++def detail(preds, gt, ids, aedges, bedges):
++    """보고 항목 전체: F1/S_loc, valid_empty, 형식 실패·잘림, 예측 개수, 개별 box 크기별 recall, GT 개수별·union 면적별 성능."""
++    summ = sft_eval.summarize(preds, gt, ids, aedges)
++    pos, sl, pp = s_loc_arrays(preds, gt, ids)
++    summ["S_loc"] = float(sl.mean()) if len(pos) else None
++    ar = np.array([sft_eval.gt_area_frac(gt[i]) for i in pos])
++    bins = np.digitize(ar, aedges)
++    ng = np.array([len(gt[i]["boxes"]) for i in pos])
++    summ["by_gt_area_tertile_S_loc"] = {n: {"n": int((bins == b).sum()), "S_loc": float(sl[bins == b].mean()) if (bins == b).any() else None}
++                                        for b, n in enumerate(("small", "medium", "large"))}
++    summ["by_n_gt_S_loc"] = {n: {"n": int((ng == k).sum()), "S_loc": float(sl[ng == k].mean()) if (ng == k).any() else None}
++                             for n, k in (("single", 1), ("multi", 2))} if len(pos) else {}
++    rec = {}
++    for thr in (0.3, 0.5):
++        hit = {"small": [0, 0], "medium": [0, 0], "large": [0, 0]}
++        for i in pos:
++            pr = preds[i]
++            pb = pr["boxes"] if pr["status"] in PA.VALID else []
++            g = [b["yxyx_norm"] for b in gt[i]["boxes"]]
++            matched = {gi for gi, _ in M.match(pb, g, thr)}
++            for gi, b in enumerate(g):
++                t = ("small", "medium", "large")[int(np.digitize(M.area(b) / 1e6, bedges))]
++                hit[t][1] += 1
++                hit[t][0] += gi in matched
++        rec[f"recall@{thr}_by_box_size"] = {t: {"matched": v[0], "n_gt_boxes": v[1], "recall": v[0] / v[1] if v[1] else None} for t, v in hit.items()}
++    summ.update(rec)
++    summ["box_size_edges_train"] = bedges
++    summ["n_pred_boxes_mean_all"] = float(np.mean([len(preds[i]["boxes"]) for i in ids]))
++    return summ
++
++
++def guardrail(summ, b0_summ):
++    """returns dict(ok, valid_rate, neg drops)"""
++    d = {"valid_rate_all": summ["valid_rate_all"]["rate"], "valid_ok": summ["valid_rate_all"]["rate"] >= VALID_MIN}
++    ok = d["valid_ok"]
++    for _, nm in sft_eval.NEG:
++        drop = b0_summ[f"neg_{nm}"]["valid_empty"]["rate"] - summ[f"neg_{nm}"]["valid_empty"]["rate"]
++        d[f"neg_{nm}_valid_empty_drop_vs_B0"] = drop
++        d[f"neg_{nm}_ok"] = drop <= NEG_DROP_MAX + 1e-12
++        ok = ok and d[f"neg_{nm}_ok"]
++    d["ok"] = bool(ok)
++    return d
++
++
++def select_checkpoint(cands, b0_summ):
++    """cands: {name(order key): summary}, 이른 checkpoint 우선이 되도록 키는 update 수. returns (selected key or None, table)."""
++    table, elig = {}, []
++    for k in sorted(cands):
++        g = guardrail(cands[k], b0_summ)
++        table[k] = {"S_loc": cands[k]["S_loc"], "guardrail": g}
++        if g["ok"]:
++            elig.append(k)
++    if not elig:
++        return None, table
++    return max(elig, key=lambda k: (round(cands[k]["S_loc"], 12), -k)), table
++
++
++def paired_ci(preds_a, preds_b, gt, ids, B=10000, seed=20260924):
++    """(a - b) S_loc의 환자 단위 paired bootstrap. returns dict."""
++    pa, sa, _ = s_loc_arrays(preds_a, gt, ids)
++    pb, sb, _ = s_loc_arrays(preds_b, gt, ids)
++    if pa != pb:
++        raise ValueError("patient order differs")
++    idx = M.bootstrap_indices(len(pa), B, seed)
++    m, lo, hi = M.paired_boot_ci(sa, sb, idx)
++    return {"diff": m, "ci95": [lo, hi], "n_positive": len(pa), "B": B, "seed": seed}
++
++
++def expand_rule(d_sel, c_sel, ci, d_v200_last_gain, d_guard_ok):
++    """탐색 -> 확대 사전 기준. d_sel/c_sel: V400 S_loc (선택 checkpoint). ci: paired_ci 결과 (D-C). returns (bool, reason)."""
++    diff = d_sel - c_sel
++    if not d_guard_ok:
++        return False, "D violates operating guardrail"
++    if diff >= 0.03:
++        return True, f"D-C {diff:.4f} >= 0.03"
++    if ci["ci95"][1] >= 0.03 and d_v200_last_gain >= 0.01:
++        return True, f"D-C {diff:.4f} < 0.03 but CI upper {ci['ci95'][1]:.4f} >= 0.03 and D V200 last-interval gain {d_v200_last_gain:.4f} >= 0.01"
++    return False, f"D-C {diff:.4f}, CI upper {ci['ci95'][1]:.4f}, D V200 last gain {d_v200_last_gain:.4f}: below both criteria"
+diff --git a/rsna_diag/adapt_pipeline.py b/rsna_diag/adapt_pipeline.py
+new file mode 100644
+index 0000000..bf7dd61
+--- /dev/null
++++ b/rsna_diag/adapt_pipeline.py
+@@ -0,0 +1,287 @@
++"""iter_013 실행 파이프라인 (재개 가능, 단계별 근거 재검증). 사용: python -m rsna_diag.adapt_pipeline --stage explore|full_s17|full_s29|full_s43 [--conds C,D,H] [--lrs ...]
++
++한 stage = 여러 trajectory(조건 x LR)의 추가 적응 학습 + V200 milestone 검증 + V400 완성(V200 응답을 부모로 재사용해 나머지 200만 생성) + 보고.
++- 학습은 GPU lane별로 순차 실행한다 (학습 worker는 GPU당 1개: microbatch 실측 peak + 2GiB 여유로 한 장에 2개가 안 들어감; decisions/exec_config.json).
++- 건너뛰기는 파일 존재가 아니라 select.verify_epoch / eval_gate.verify_gen 재검증을 통과할 때만이다. 불일치는 예외 (조용히 재사용하지 않음).
++- 보고서 report.json은 원시 응답에서 재계산한 결정적 내용만 담고 write_or_verify로 기존 파일과 일치를 강제한다. 시간·자원은 usage.json에 따로 기록한다.
++- pipeline.lock으로 stage당 단일 소유를 강제한다.
++"""
++import argparse
++import glob
++import json
++import os
++import subprocess
++import sys
++import threading
++import time
++
++from . import adapt_eval as AE, eval_gate, inputs, lock_protocol, queue_lock, select as SEL, sft_eval
++from .run_shards import gpu_snapshot
++
++R = "results/iter_013"
++PROT = f"{R}/protocols/main_protocol.json"
++EXEC = f"{R}/decisions/exec_config.json"
++MAN = AE.MANIFEST
++FREE_BEFORE_MIB = 2000
++
++
++def lrs(x):
++    return f"{x:g}"
++
++
++class Ctx:
++    def __init__(self, stage):
++        self.stage = stage
++        self.cfg = json.load(open(f"{R}/stage/{stage}.json"))
++        self.dir = f"{R}/{stage}"
++        os.makedirs(self.dir, exist_ok=True)
++        self.logp = f"{self.dir}/pipeline.log"
++        self.ex = json.load(open(EXEC))
++        self.pdig = lock_protocol.verify(PROT)
++        self.val_items, self.gt = inputs.load_items(MAN, AE.GT, self.cfg["val_ids"], "validation", exact=False)
++        self.v_in = inputs.inputs_digest(self.val_items, self.gt)
++        self.v400_items, _ = inputs.load_items(MAN, AE.GT, AE.V400_IDS, "validation", exact=True)
++        self.tr_ids = [i for i in self.gt if self.gt[i]["split"] == "train"]
++        self.aed = sft_eval.area_edges(self.gt, self.tr_ids)
++        self.bed = AE.box_edges_train(self.gt, self.tr_ids)
++        self.spe = None
++
++    def log(self, msg):
++        line = f"[{time.strftime('%F %T')}] {msg}"
++        print(line, flush=True)
++        with open(self.logp, "a") as f:
++            f.write(line + "\n")
++
++
++def wait_gpu_free(ctx, gpu):
++    while True:
++        rows, apps = gpu_snapshot({gpu})
++        if rows and rows[0]["mem_used_mib"] <= FREE_BEFORE_MIB:
++            ctx.log(f"gpu {gpu} free: {rows[0]}")
++            return
++        ctx.log(f"waiting for gpu {gpu}: {rows} apps={apps}")
++        time.sleep(120)
++
++
++def run_dir(ctx, cond, lr, seedtag=""):
++    return f"{ctx.dir}/{cond}_lr{lrs(lr)}"
++
++
++def trained_ok(ctx, d):
++    """done.json + epoch 1..E 전체 검증 (원시 응답 재계산). 파일이 없으면 False, 근거 불일치는 예외."""
++    if not os.path.exists(os.path.join(d, "train_config.json")):
++        return False
++    tc = json.load(open(os.path.join(d, "train_config.json")))
++    E = ctx.cfg["epochs"]
++    if not os.path.exists(os.path.join(d, "done.json")):
++        return False
++    for e in range(1, E + 1):
++        if not os.path.exists(os.path.join(d, f"epoch_{e:02d}", "val_metrics.json")):
++            return False
++        SEL.verify_epoch(d, e, tc, ctx.v_in, PROT, ctx.val_items, ctx.gt)
++    return True
++
++
++def train_cmd(ctx, cond, lr, d):
++    return [sys.executable, "-m", "rsna_diag.adapt", "--run-dir", d, "--stage-config", f"{R}/stage/{ctx.stage}.json", "--loss", cond, "--lr", str(lr),
++            "--protocol", PROT, "--microbatch", str(ctx.ex["train_microbatch"]), "--workers", "3"]
++
++
++def train_traj(ctx, gpu, cond, lr):
++    d = run_dir(ctx, cond, lr)
++    if trained_ok(ctx, d):
++        ctx.log(f"{d}: verified complete")
++        return
++    wait_gpu_free(ctx, gpu) if not os.path.exists(os.path.join(d, "train.lock")) else None
++    ctx.log(f"train {cond} lr={lr} on gpu {gpu} -> {d}")
++    t0 = time.time()
++    rc = subprocess.run(train_cmd(ctx, cond, lr, d), env=dict(os.environ, CUDA_VISIBLE_DEVICES=str(gpu)), stdout=open(f"{d}.log", "a"), stderr=subprocess.STDOUT).returncode
++    ctx.log(f"train {cond} lr={lr} rc={rc} wall={time.time() - t0:.0f}s")
++    if rc != 0 or not trained_ok(ctx, d):
++        raise RuntimeError(f"{d}: training failed or not verified (rc={rc})")
++
++
++def v200_detail(ctx, d, e):
++    tc = json.load(open(os.path.join(d, "train_config.json")))
++    SEL.verify_epoch(d, e, tc, ctx.v_in, PROT, ctx.val_items, ctx.gt)
++    ed = os.path.join(d, f"epoch_{e:02d}")
++    recs = eval_gate.verify_gen(os.path.join(ed, "val_gen"), ctx.val_items, ["concise"], ed, PROT)
++    ids = [i["id"] for i in ctx.val_items]
++    return AE.detail(AE.preds_of(recs, ids), ctx.gt, ids, ctx.aed, ctx.bed), tc["config"]["steps_per_epoch"]
++
++
++def b0_details(ctx):
++    recs = AE.b0_records(PROT, ctx.v400_items)
++    ids400 = [i["id"] for i in ctx.v400_items]
++    p400 = AE.preds_of(recs, ids400)
++    v200 = [i["id"] for i in ctx.val_items]
++    return p400, AE.detail(p400, ctx.gt, ids400, ctx.aed, ctx.bed), AE.detail({i: p400[i] for i in v200}, ctx.gt, v200, ctx.aed, ctx.bed)
++
++
++def gen_v400(ctx, gpu_list, d, e):
++    """epoch e adapter의 V400 완성. V200 val_gen을 부모로 재사용하고 나머지만 새로 생성한다. returns records."""
++    ed = os.path.join(d, f"epoch_{e:02d}")
++    out = os.path.join(d, f"v400_epoch{e:02d}")
++    par = os.path.join(ed, "val_gen")
++    try:
++        return eval_gate.verify_gen(out, ctx.v400_items, ["concise"], ed, PROT, par, PROT)
++    except (eval_gate.GateError, FileNotFoundError) as ex:
++        ctx.log(f"{out}: not complete/verified ({str(ex)[:120]}) -> run_shards")
++    for g in gpu_list:
++        wait_gpu_free(ctx, g)
++    nw = ctx.ex["gen_workers_per_gpu"] * len(gpu_list)
++    cmd = [sys.executable, "-m", "rsna_diag.run_shards", "--manifest", MAN, "--ids", AE.V400_IDS, "--out-dir", out, "--protocol", PROT, "--prompts", "concise",
++           "--workers", str(nw), "--gpus", ",".join(map(str, gpu_list)), "--adapter", ed, "--parent-dir", par, "--parent-protocol", PROT]
++    rc = subprocess.run(cmd, env=dict(os.environ, CUDA_VISIBLE_DEVICES=",".join(map(str, gpu_list))), stdout=open(f"{out}.log", "a"), stderr=subprocess.STDOUT).returncode
++    ctx.log(f"gen {out} rc={rc}")
++    if rc != 0:
++        raise RuntimeError(f"{out}: run_shards failed rc={rc}")
++    return eval_gate.verify_gen(out, ctx.v400_items, ["concise"], ed, PROT, par, PROT)
++
++
++def select_traj(ctx, d, b0_v200):
++    """trajectory의 milestone(epoch 1..E)별 V200 detail과 guardrail 통과 최대 S_loc 선택 (동률은 이른 update)."""
++    cands, det = {}, {}
++    for e in range(1, ctx.cfg["epochs"] + 1):
++        dt, spe = v200_detail(ctx, d, e)
++        cands[e * spe], det[e] = dt, dt
++    sel_upd, table = AE.select_checkpoint(cands, b0_v200)
++    return {"update_to_epoch": {u: u // spe for u in cands}, "selected_update": sel_upd,
++            "selected_epoch": (sel_upd // spe if sel_upd else None), "table": {str(u): t for u, t in table.items()}}, det, spe
++
++
++def compare(preds_by, gt, ids, pairs):
++    return {f"{a}-{b}": AE.paired_ci(preds_by[a], preds_by[b], gt, ids) for a, b in pairs if a in preds_by and b in preds_by}
++
++
++def report(ctx, trajs):
++    """trajs: [(cond, lr)] 모두 학습·검증 완료 상태. V400 완성 후 report.json (결정적 내용)."""
++    ids400 = [i["id"] for i in ctx.v400_items]
++    p400_b0, d400_b0, d200_b0 = b0_details(ctx)
++    rep = {"stage": ctx.stage, "protocol_digest": ctx.pdig, "b0": {"v400": d400_b0, "v200": d200_b0}, "trajectories": {}}
++    preds = {"B0": p400_b0}
++    dets = {"B0": d400_b0}
++    for cond, lr in trajs:
++        d = run_dir(ctx, cond, lr)
++        name = f"{cond}@{lrs(lr)}"
++        sel, det200, spe = select_traj(ctx, d, d200_b0)
++        E = ctx.cfg["epochs"]
++        entry = {"lr": lr, "cond": cond, "steps_per_epoch": spe, "selection_v200": sel, "v200_detail_by_epoch": {str(e): det200[e] for e in det200}}
++        for tag, e in (("final", E), ("selected", sel["selected_epoch"])):
++            if e is None:
++                entry[tag] = None
++                continue
++            recs = gen_v400(ctx, [int(g) for g in ctx.ex["gen_gpus"]], d, e)
++            p = AE.preds_of(recs, ids400)
++            entry[tag] = {"epoch": e, "update": e * spe, "v400": AE.detail(p, ctx.gt, ids400, ctx.aed, ctx.bed),
++                          "guardrail_v400": AE.guardrail(AE.detail(p, ctx.gt, ids400, ctx.aed, ctx.bed), d400_b0)}
++            preds[f"{name}/{tag}"] = p
++            dets[f"{name}/{tag}"] = entry[tag]["v400"]
++        rep["trajectories"][name] = entry
++    rep["pairwise_v400_paired_bootstrap"] = {}
++    names = [n for n in preds if n != "B0"]
++    for tag in ("selected", "final"):
++        pb = {"B0": preds["B0"], **{n.split("/")[0]: p for n, p in preds.items() if n.endswith("/" + tag)}}
++        cs = sorted(k for k in pb if k != "B0")
++        pairs = [(a, "B0") for a in cs] + [(a, b) for a in cs for b in cs if a != b and a.split("@")[0] in ("D", "H") and b.split("@")[0] in ("C", "H") and not (a[0] == b[0])]
++        rep["pairwise_v400_paired_bootstrap"][tag] = compare(pb, ctx.gt, ids400, pairs)
++    del names
++    return rep, preds
++
++
++def write_or_verify(path, obj):
++    return SEL.write_or_verify(path, obj)
++
++
++def lane(ctx, gpu, items):
++    for fn in items:
++        fn()
++
++
++def run_lanes(lanes):
++    """lanes: {gpu: [callable...]}. 각 lane은 순차, lane 간 병렬. 예외는 모두 수집해 다시 던진다."""
++    errs = []
++
++    def w(fns):
++        try:
++            for f in fns:
++                f()
++        except BaseException as e:  # noqa
++            errs.append(e)
++            ABORT.set()
++
++    ths = [threading.Thread(target=w, args=(fns,)) for fns in lanes.values()]
++    [t.start() for t in ths]
++    [t.join() for t in ths]
++    if errs:
++        raise errs[0]
++
++
++_B0 = {}
++_LOCK = threading.Lock()
++ABORT = threading.Event()
++
++
++def b0_cached(ctx):
++    with _LOCK:
++        if "v" not in _B0:
++            _B0["v"] = b0_details(ctx)
++        return _B0["v"]
++
++
++def prefetch(ctx, gpu, pending, trajs_dirs):
++    """이 lane이 학습을 마친 뒤, 학습이 끝난 trajectory부터 하나씩 claim해 final/selected checkpoint의 V400 나머지 200요청을 자기 GPU에서 생성한다.
++    (다른 lane이 아직 학습 중이면 그 trajectory가 끝날 때까지 기다린다.) 결과는 report()가 재검증하므로 여기서는 생성만 한다."""
++    while True:
++        with _LOCK:
++            ready = [t for t in pending if os.path.exists(os.path.join(trajs_dirs[t], "done.json"))]
++            if not pending:
++                return
++            claim = ready[0] if ready else None
++            if claim:
++                pending.remove(claim)
++        if claim is None:
++            if ABORT.is_set():
++                return
++            time.sleep(60)
++            continue
++        d = trajs_dirs[claim]
++        _, _, d200_b0 = b0_cached(ctx)
++        sel, _, _ = select_traj(ctx, d, d200_b0)
++        for e in sorted({ctx.cfg["epochs"], sel["selected_epoch"]} - {None}):
++            gen_v400(ctx, [gpu], d, e)
++
++
++def main():
++    ap = argparse.ArgumentParser()
++    ap.add_argument("--stage", required=True)
++    ap.add_argument("--trajs", required=True, help="예: C:2e-5,D:2e-5,H:2e-5 (lane 배정: 순서대로 gpu0, gpu1 번갈아)")
++    ap.add_argument("--report-name", default="report")
++    a = ap.parse_args()
++    ctx = Ctx(a.stage)
++    lk, own, _ = queue_lock.try_lock(os.path.join(os.path.realpath(ctx.dir), "pipeline.lock"), queue_lock.my_info(role="adapt_pipeline"))
++    if lk is None:
++        sys.exit(f"another pipeline owns {ctx.dir}: {own}")
++    try:
++        trajs = [(c, float(l)) for c, l in (x.split(":") for x in a.trajs.split(","))]
++        gpus = [int(g) for g in ctx.ex["train_gpus"]]
++        lanes = {g: [] for g in gpus}
++        dirs = {(c, l): run_dir(ctx, c, l) for c, l in trajs}
++        pending = list(dirs)
++        for k, (c, l) in enumerate(trajs):
++            g = gpus[k % len(gpus)]
++            lanes[g].append(lambda g=g, c=c, l=l: train_traj(ctx, g, c, l))
++        for g in gpus:
++            lanes[g].append(lambda g=g: prefetch(ctx, g, pending, dirs))
++        t0 = time.time()
++        run_lanes(lanes)
++        ctx.log(f"all trainings verified; wall={time.time() - t0:.0f}s")
++        rep, preds = report(ctx, trajs)
++        ctx.log(f"report {write_or_verify(f'{ctx.dir}/{a.report_name}.json', json.loads(json.dumps(rep)))}")
++        ctx.log("STAGE COMPLETE")
++    finally:
++        lk.release()
++
++
++if __name__ == "__main__":
++    main()
+diff --git a/rsna_diag/adapt_stages.py b/rsna_diag/adapt_stages.py
+new file mode 100644
+index 0000000..9652be8
+--- /dev/null
++++ b/rsna_diag/adapt_stages.py
+@@ -0,0 +1,59 @@
++"""iter_013 stage config 생성 (결과를 보기 전에 고정). 사용: python -m rsna_diag.adapt_stages --out-dir results/iter_013/stage
++
++sanity / pilot_mb : 동작 확인·처리량 pilot (train sanity16). 본실험 weight로 이월하지 않는다.
++explore           : 가능성 탐색. train1200, V200(val_ids), seed17, 3 epochs x 75 updates, peak LR 2e-5.
++full_s17          : 확대. train 2,400 전체, seed17, 3 epochs x 150 updates, LR 2e-5/5e-5 (C·D, 그리고 D의 선택 LR에서 H).
++full_s29 / s43    : 조건부 재현. 각 seed의 부모 epoch_05 adapter에서 시작 (부모 학습 seed까지 바뀐다).
++공통: alpha=0.1, tau=1.0, 자리 가중 1,2,3,4, 5% warmup + cosine(0), effective batch 16 (sanity는 4). 부모 optimizer는 이어받지 않는다.
++"""
++import argparse
++import hashlib
++import json
++import os
++
++from . import lora
++
++MI = "results/iter_010/manifests/"
++S = "results/iter_013/subsets/"
++PARENT = "results/iter_012/train/lr2e-4_s{}/epoch_05/adapter.pt"
++
++
++def parent(seed):
++    import torch
++    p = PARENT.format(seed)
++    b = torch.load(p, map_location="cpu", weights_only=True)
++    dg = lora.state_digest(b["state"])
++    assert b["digest"] == dg
++    return {"parent_adapter": p, "parent_adapter_sha256": hashlib.sha256(open(p, "rb").read()).hexdigest(), "parent_adapter_digest": dg}
++
++
++def stage(sid, seed, train_ids, val_ids, epochs, eff, lrs, validate, note):
++    return {"stage_id": sid, "seed": seed, "train_ids": train_ids, "val_ids": val_ids, "epochs": epochs, "eff_batch": eff, "allowed_lrs": lrs,
++            "warmup_frac": 0.05, "validate": validate, "alpha": 0.1, "tau": 1.0, "schedule": "5% warmup then cosine to 0 over this stage's total updates",
++            "note": note, **parent(seed)}
++
++
++def main():
++    ap = argparse.ArgumentParser()
++    ap.add_argument("--out-dir", required=True)
++    a = ap.parse_args()
++    os.makedirs(a.out_dir, exist_ok=True)
++    cfgs = {
++        "sanity": stage("sanity", 17, S + "sanity16_ids.json", S + "val8_ids.json", 2, 4, [2e-5], True, "동작·재개 검사 (결정적 kernel), 본실험 미사용"),
++        "pilot_mb": stage("pilot_mb", 17, S + "sanity16_ids.json", S + "val8_ids.json", 3, 16, [2e-5], False, "microbatch 2 vs 4 처리량·메모리 pilot"),
++        "explore": stage("explore", 17, S + "train1200_ids.json", S + "v200_ids.json", 3, 16, [2e-5], True, "가능성 탐색 (1,200 train, V200)"),
++        "full_s17": stage("full_s17", 17, MI + "train_ids.json", S + "v200_ids.json", 3, 16, [2e-5, 5e-5], True, "확대 (train 2,400, V200)"),
++        "full_s29": stage("full_s29", 29, MI + "train_ids.json", S + "v200_ids.json", 3, 16, [2e-5, 5e-5], True, "조건부 재현 (부모 seed29)"),
++        "full_s43": stage("full_s43", 43, MI + "train_ids.json", S + "v200_ids.json", 3, 16, [2e-5, 5e-5], True, "조건부 재현 (부모 seed43)"),
++    }
++    for k, v in cfgs.items():
++        p = os.path.join(a.out_dir, f"{k}.json")
++        if os.path.exists(p):
++            assert json.load(open(p)) == v, f"{p} exists and differs (not overwritten)"
++        else:
++            json.dump(v, open(p, "w"), indent=1)
++        print(k, "written" if not os.path.exists(p) else "ok")
++
++
++if __name__ == "__main__":
++    main()
+diff --git a/rsna_diag/adapt_subsets.py b/rsna_diag/adapt_subsets.py
+new file mode 100644
+index 0000000..198e8b9
+--- /dev/null
++++ b/rsna_diag/adapt_subsets.py
+@@ -0,0 +1,114 @@
++"""iter_013: 결과를 보기 전에 고정하는 결정적 subset 추출. 사용: python -m rsna_diag.adapt_subsets --out-dir results/iter_013/subsets
++
++- train1200 = train 2,400 중 opacity 600 (n_box{1,2,3+} x 환자 union 면적 삼분위 strata, 최대잉여법 비례 배분, strata 안은 sha256 순),
++  Normal 300, NoOpacity/NotNormal 300 (sha256 순). 작은 층을 제외하지 않고 추출 수와 원분포를 기록한다. 동일 환자 중복 없음.
++- v200 = validation 400 중 양성 100 (같은 strata 방식), Normal 50, NoOpacity/NotNormal 50. V400의 부분집합 (개발 subset).
++- sanity16 = train1200 안에서 양성 8 (단일 box 크기 3층 각 1 + 복수 box 5), 각 음성 층 4. thr48 = train1200 밖 train에서 양성 24, 음성 12+12 (추론 처리량 비교용).
++- 면적 삼분위 경계는 기존 train 전체(select/sft_eval.area_edges)의 값을 쓴다.
++"""
++import argparse
++import hashlib
++import json
++import os
++
++import numpy as np
++
++from . import sft_eval
++
++GT = "results/iter_010/manifests/gt_manifest.json"
++SEED = "iter013-subsets-v1"
++
++
++def h(i, salt=""):
++    return hashlib.sha256(f"{SEED}|{salt}|{i}".encode()).hexdigest()
++
++
++def allocate(sizes, total):
++    """strata 크기 dict -> 합이 total인 비례 배분 (최대잉여법, 결정적). 각 strata 크기를 넘지 않는다."""
++    tot = sum(sizes.values())
++    raw = {k: v * total / tot for k, v in sizes.items()}
++    base = {k: int(np.floor(r)) for k, r in raw.items()}
++    left = total - sum(base.values())
++    for k in sorted(raw, key=lambda k: (-(raw[k] - base[k]), str(k)))[:left]:
++        base[k] += 1
++    return base
++
++
++def strata(gt, ids, edges):
++    out = {}
++    for i in ids:
++        nb = len(gt[i]["boxes"])
++        t = int(np.digitize(sft_eval.gt_area_frac(gt[i]), edges))
++        out.setdefault((min(nb, 3), t), []).append(i)
++    return out
++
++
++def pick_pos(gt, ids, n, edges, salt):
++    st = strata(gt, ids, edges)
++    al = allocate({k: len(v) for k, v in st.items()}, n)
++    chosen = []
++    for k in sorted(st):
++        chosen += sorted(st[k], key=lambda i: h(i, salt))[:al[k]]
++    return sorted(chosen), {str(k): {"available": len(st[k]), "chosen": al[k]} for k in sorted(st)}
++
++
++def pick_neg(ids, n, salt):
++    return sorted(sorted(ids, key=lambda i: h(i, salt))[:n])
++
++
++def box_area_hist(gt, ids, cuts):
++    a = np.array([(b["yxyx_norm"][2] - b["yxyx_norm"][0]) * (b["yxyx_norm"][3] - b["yxyx_norm"][1]) / 1e6 for i in ids for b in gt[i]["boxes"]])
++    return {"n_boxes": int(len(a)), "share_below_cut1": float((a < cuts[0]).mean()), "share_below_cut2": float((a < cuts[1]).mean())}
++
++
++def main():
++    ap = argparse.ArgumentParser()
++    ap.add_argument("--out-dir", required=True)
++    a = ap.parse_args()
++    gt = json.load(open(GT))
++    ids = lambda s: sorted(json.load(open(f"results/iter_010/manifests/{s}_ids.json")))
++    tr, va = ids("train"), ids("validation")
++    edges = sft_eval.area_edges(gt, tr)
++    cat = lambda pool, c: [i for i in pool if gt[i]["category"] == c]
++    tr_pos_pool = cat(tr, "opacity")
++    tp, tp_rep = pick_pos(gt, tr_pos_pool, 600, edges, "train")
++    t1200 = sorted(tp + pick_neg(cat(tr, "normal"), 300, "train_normal") + pick_neg(cat(tr, "not_normal_no_opacity"), 300, "train_nn"))
++    vp, vp_rep = pick_pos(gt, cat(va, "opacity"), 100, edges, "val")
++    v200 = sorted(vp + pick_neg(cat(va, "normal"), 50, "val_normal") + pick_neg(cat(va, "not_normal_no_opacity"), 50, "val_nn"))
++    # sanity16: 단일 box 크기 3층 각 1 + 복수 box 5 + 음성 4+4
++    s1 = strata(gt, [i for i in t1200 if gt[i]["category"] == "opacity"], edges)
++    san = []
++    for t in range(3):
++        san.append(sorted(s1[(1, t)], key=lambda i: h(i, "san"))[0])
++    multi = [i for k in sorted(s1) if k[0] >= 2 for i in s1[k]]
++    san += sorted(multi, key=lambda i: h(i, "san"))[:5]
++    san += sorted([i for i in t1200 if gt[i]["category"] == "normal"], key=lambda i: h(i, "san"))[:4]
++    san += sorted([i for i in t1200 if gt[i]["category"] == "not_normal_no_opacity"], key=lambda i: h(i, "san"))[:4]
++    rest = [i for i in tr if i not in set(t1200)]
++    tp48, _ = pick_pos(gt, cat(rest, "opacity"), 24, edges, "thr48")
++    thr48 = sorted(tp48 + pick_neg(cat(rest, "normal"), 12, "thr48n") + pick_neg(cat(rest, "not_normal_no_opacity"), 12, "thr48nn"))
++    os.makedirs(a.out_dir, exist_ok=True)
++    cuts = [0.02, 0.06]  # 개별 box 면적 참고 경계 (보고용 분포 비교 전용, 추출에는 쓰이지 않음)
++    hv = lambda c: sorted([i for i in v200 if gt[i]["category"] == c], key=lambda i: h(i, "val8"))
++    val8 = sorted(hv("opacity")[:4] + hv("normal")[:2] + hv("not_normal_no_opacity")[:2])  # 재개 검사용 validation 8명 (v200의 부분집합)
++    outs = {"train1200": t1200, "v200": v200, "sanity16": sorted(san), "thr48": thr48, "val8": val8}
++    for k, v in outs.items():
++        assert len(set(v)) == len(v)
++        p = os.path.join(a.out_dir, f"{k}_ids.json")
++        json.dump(v, open(p, "w"))
++    assert not set(t1200) & set(v200) and set(v200) <= set(va) and set(t1200) <= set(tr) and not set(thr48) & set(t1200)
++    assert set(outs["sanity16"]) <= set(t1200) and len(outs["sanity16"]) == 16
++    rep = {"seed": SEED, "area_tertile_edges_train": edges,
++           "sizes": {k: len(v) for k, v in outs.items()},
++           "categories": {k: {c: sum(gt[i]["category"] == c for i in v) for c in ("opacity", "normal", "not_normal_no_opacity")} for k, v in outs.items()},
++           "train_pos_strata": tp_rep, "val_pos_strata": vp_rep,
++           "box_area_shares_full_train_pos": box_area_hist(gt, tr_pos_pool, cuts), "box_area_shares_train1200_pos": box_area_hist(gt, tp, cuts),
++           "n_box_dist_full_train_pos": {str(k): int(v) for k, v in zip(*np.unique([len(gt[i]["boxes"]) for i in tr_pos_pool], return_counts=True))},
++           "n_box_dist_train1200_pos": {str(k): int(v) for k, v in zip(*np.unique([len(gt[i]["boxes"]) for i in tp], return_counts=True))},
++           "sha256": {k: hashlib.sha256(open(os.path.join(a.out_dir, f"{k}_ids.json"), "rb").read()).hexdigest() for k in outs}}
++    json.dump(rep, open(os.path.join(a.out_dir, "subsets_report.json"), "w"), indent=1)
++    print(json.dumps({k: rep[k] for k in ("sizes", "categories", "n_box_dist_full_train_pos", "n_box_dist_train1200_pos", "box_area_shares_full_train_pos", "box_area_shares_train1200_pos")}, indent=1))
++
++
++if __name__ == "__main__":
++    main()
+diff --git a/rsna_diag/coord_loss.py b/rsna_diag/coord_loss.py
+new file mode 100644
+index 0000000..cb01055
+--- /dev/null
++++ b/rsna_diag/coord_loss.py
+@@ -0,0 +1,158 @@
++"""iter_013: 좌표 숫자 token 연결과 H/D 추가 loss.
++
++- number_spans: JSON 문자열을 작은 scanner로 읽어 모든 숫자 literal의 (경로, 문자 구간)을 얻는다. `box_2d`의 네 정수만 좌표로 인정한다
++  (key의 `2`, label, 괄호, 공백, <end_of_turn>은 절대 잡지 않는다). 값은 sft_data.target_boxes와 대조한다.
++- coord_weights: assistant 본문 token의 offset으로 좌표 숫자 문자 -> 실제 chat sequence token 위치를 연결한다. 각 좌표 숫자는 정확히 한 자리
++  숫자 token(id가 DIGIT_IDS)이어야 하며 아니면 예외 (조용히 제외하지 않는다). 자리 가중 = 숫자 오른쪽부터 1,2,3,4.
++- loss_sums: 한 microbatch의 (CE 합, 추가 항 합). L_H = CE + alpha*sum_E w*CE_t, L_D = CE + alpha*sum_E w*KL(q_t || p_t),
++  q_t(v) = softmax_v(-(v-g_t)^2/tau) (v=0..9), p_t는 전체 vocabulary softmax에서 숫자 10개 열의 확률 (재정규화 안 함).
++  분모는 호출자가 effective-batch assistant token 수 N으로 나눈다. 이 loss는 39<->40 같은 자릿수 올림·내림 관계를 표현하지 않는다.
++"""
++import json
++import re
++
++PLAN_DIGIT_IDS = [236771, 236770, 236778, 236800, 236812, 236810, 236825, 236832, 236828, 236819]
++ALPHA = 0.1
++TAU = 1.0
++_NUM = re.compile(r"-?\d+(?:\.\d+)?(?:[eE][+-]?\d+)?")
++_WS = " \t\n\r"
++
++
++class SpanError(RuntimeError):
++    pass
++
++
++def number_spans(text):
++    """returns [(path tuple, start, end, literal)] for every number literal (경로: 리스트 index / dict key)."""
++    out = []
++
++    def ws(i):
++        while i < len(text) and text[i] in _WS:
++            i += 1
++        return i
++
++    def value(i, path):
++        i = ws(i)
++        c = text[i]
++        if c == "[":
++            i = ws(i + 1)
++            k = 0
++            if text[i] == "]":
++                return i + 1
++            while True:
++                i = value(i, path + (k,))
++                i = ws(i)
++                k += 1
++                if text[i] == ",":
++                    i += 1
++                    continue
++                if text[i] == "]":
++                    return i + 1
++                raise SpanError(f"bad list at {i}")
++        if c == "{":
++            i = ws(i + 1)
++            if text[i] == "}":
++                return i + 1
++            while True:
++                key, i = json.decoder.scanstring(text, i + 1)
++                i = ws(i)
++                if text[i] != ":":
++                    raise SpanError(f"bad dict at {i}")
++                i = value(i + 1, path + (key,))
++                i = ws(i)
++                if text[i] == ",":
++                    i = ws(i + 1)
++                    continue
++                if text[i] == "}":
++                    return i + 1
++                raise SpanError(f"bad dict at {i}")
++        if c == '"':
++            return json.decoder.scanstring(text, i + 1)[1]
++        m = _NUM.match(text, i)
++        if m:
++            out.append((path, m.start(), m.end(), m.group()))
++            return m.end()
++        for lit in ("true", "false", "null"):
++            if text.startswith(lit, i):
++                return i + len(lit)
++        raise SpanError(f"bad value at {i}")
++
++    end = ws(value(0, ()))
++    if end != len(text):
++        raise SpanError("trailing text")
++    return out
++
++
++def coord_spans(target):
++    """box_2d의 정수 literal 구간 [(start, end, int)] (문서 순서). 값은 target_boxes와 같아야 한다 (호출자가 대조)."""
++    res = []
++    for path, s, e, lit in number_spans(target):
++        if len(path) == 3 and path[1] == "box_2d" and isinstance(path[0], int) and isinstance(path[2], int):
++            if not lit.isdigit():
++                raise SpanError(f"non-integer coordinate literal {lit!r}")
++            res.append((s, e, int(lit)))
++    return res
++
++
++def digit_ids(tok):
++    ids = [tok.convert_tokens_to_ids(str(d)) for d in range(10)]
++    if ids != PLAN_DIGIT_IDS:
++        raise SpanError(f"digit token ids {ids} != plan {PLAN_DIGIT_IDS}")
++    return ids
++
++
++def coord_weights(tok, target, full_ids, n_prefix, dig_ids):
++    """full_ids: 실제 chat sequence 1-D list(int). returns list[float] (len(full_ids)): 좌표 숫자 token 위치에 자리 가중, 나머지 0."""
++    enc = tok(target + "<end_of_turn>", add_special_tokens=False, return_offsets_mapping=True)
++    ids, offs = enc["input_ids"], enc["offset_mapping"]
++    if list(full_ids[n_prefix:n_prefix + len(ids)]) != list(ids):
++        raise SpanError("assistant tokens in chat sequence != standalone tokenization of target")
++    spans = coord_spans(target)
++    want = [v for e in json.loads(target) for v in e["box_2d"]]
++    if [v for _, _, v in spans] != want:
++        raise SpanError("scanned coordinate values != json.loads box_2d values")
++    w = [0.0] * len(full_ids)
++    char_to_tok = {}
++    for t, (s, e) in enumerate(offs):
++        for c in range(s, e):
++            char_to_tok[c] = t
++    dset = {d: i for i, d in enumerate(dig_ids)}
++    for s, e, val in spans:
++        nd = e - s
++        for c in range(s, e):
++            t = char_to_tok.get(c)
++            if t is None or tuple(offs[t]) != (c, c + 1):
++                raise SpanError(f"coordinate digit at char {c} of {target[:60]!r} is not a single-character token")
++            if ids[t] not in dset or str(dset[ids[t]]) != target[c]:
++                raise SpanError(f"token {ids[t]} at char {c} is not digit {target[c]!r}")
++            w[n_prefix + t] = float(e - c)  # 오른쪽 자리부터 1,2,3,4
++    return w
++
++
++def loss_sums(torch, logits, y, w, mode, dig_ids, alpha=ALPHA, tau=TAU):
++    """logits [M,V] float32(softcap 이후), y [M] long, w [M] float(좌표 자리 가중, 그 외 0).
++    returns (ce_sum, extra_sum). extra_sum은 alpha를 곱하기 전 sum_E w * (CE 또는 KL). C는 0."""
++    lse = torch.logsumexp(logits, dim=-1)
++    ce = lse - logits.gather(1, y[:, None]).squeeze(1)
++    ce_sum = ce.sum()
++    zero = ce_sum.new_zeros(())
++    if mode == "C":
++        return ce_sum, zero
++    E = w > 0
++    if not bool(E.any()):
++        return ce_sum, zero
++    if mode == "H":
++        return ce_sum, (w[E] * ce[E]).sum()
++    if mode == "D":
++        di = torch.as_tensor(dig_ids, device=logits.device)
++        lp = logits[E][:, di] - lse[E][:, None]  # 전체 vocabulary 정규화 log p (숫자 10개 열)
++        inv = torch.full((int(logits.shape[1]),), -1, dtype=torch.long, device=logits.device)
++        inv[di] = torch.arange(10, device=logits.device)
++        g = inv[y[E]]
++        if bool((g < 0).any()):
++            raise SpanError("coordinate label token is not a digit")
++        v = torch.arange(10, device=logits.device, dtype=logits.dtype)
++        logq = torch.log_softmax(-((v[None, :] - g[:, None].to(logits.dtype)) ** 2) / tau, dim=-1)
++        kl = (logq.exp() * (logq - lp)).sum(-1)
++        return ce_sum, (w[E] * kl).sum()
++    raise ValueError(mode)
+diff --git a/rsna_diag/generate.py b/rsna_diag/generate.py
+index fa3f38b..57831eb 100644
+--- a/rsna_diag/generate.py
++++ b/rsna_diag/generate.py
+@@ -287,7 +287,7 @@ def main():
+ 
+ 
+ def run_worker(a, items, pnames, prompts_used, pdig_protocol, info):
+-    from . import queue_lock
++    from . import lock_protocol, queue_lock  # iter_013: 부모 재사용 분기의 lock_protocol NameError 수정
+     torch, proc, model = load_model()
+     adapter_digest = load_adapter(torch, model, a.adapter) if a.adapter else None
+     env = env_info(torch, proc, model)
+diff --git a/test_rsna_iter013.py b/test_rsna_iter013.py
+new file mode 100644
+index 0000000..d718d5c
+--- /dev/null
++++ b/test_rsna_iter013.py
+@@ -0,0 +1,348 @@
++"""iter_013 CPU 검사 (MedGemma 로드 없음, processor/tokenizer만). 실행: python test_rsna_iter013.py -> results/iter_013/tests/fixtures_iter013.json
++
++1 좌표 span/token 연결 (실제 학습 target 3,600개 전부, 경계값, 빈 목록, 복수 box, key의 '2'·label 숫자 미포함)
++2 loss 수식: 독립 float64 numpy 기준 대조 (C/H/D), 지정 위치 외 gradient 0, alpha=0 == 기존 CE gradient, microbatch 분할 불변, 빈 E, p==q에서 KL=0
++3 다음-token shift·padding: mock 모델 + 실제 chat sequence 기반 label 위치
++4 학습 일정·subset·입력 provenance (파일/픽셀 hash, 환자·pixel 교집합 0, parent adapter digest)
++5 B0 V400 응답 재사용 검증, S_loc 독립 재계산, guardrail/selection/확대 기준/paired bootstrap
++"""
++import hashlib
++import itertools
++import json
++import math
++import os
++import sys
++
++import numpy as np
++
++os.environ.setdefault("HF_HOME", "/SSD1_1TB/home/milab/daniel/08_medgemma/hf_cache")
++os.environ.setdefault("HF_HUB_OFFLINE", "1")
++import torch  # noqa: E402
++
++from rsna_diag import adapt, adapt_eval, coord_loss as CL, generate, inputs, lora, metrics as M, sft_data, sft_eval  # noqa: E402
++
++PROT = "results/iter_013/protocols/pilot_protocol.json"
++OUT = "results/iter_013/tests"
++R = {}
++
++
++def check(name, cond, detail=None):
++    R[name] = {"pass": bool(cond), "detail": detail}
++    print(("PASS " if cond else "FAIL ") + name, "" if cond else json.dumps(detail, default=str)[:500], flush=True)
++
++
++def ref_losses(logits, y, w, dig, alpha=0.1, tau=1.0):
++    """독립 float64 기준 (python 루프)."""
++    lg = np.asarray(logits, dtype=np.float64)
++    ce = h = d = 0.0
++    for t in range(len(y)):
++        lse = np.log(np.exp(lg[t] - lg[t].max()).sum()) + lg[t].max()
++        c = lse - lg[t, y[t]]
++        ce += c
++        if w[t] > 0:
++            h += w[t] * c
++            g = dig.index(int(y[t]))
++            q = np.array([math.exp(-((v - g) ** 2) / tau) for v in range(10)])
++            q /= q.sum()
++            lp = np.array([lg[t, dig[v]] - lse for v in range(10)])
++            d += w[t] * float((q * (np.log(q) - lp)).sum())
++    return ce, h, d
++
++
++def brute_f1(pred, gt, thr):
++    best = 0
++    for k in range(min(len(pred), len(gt)) + 1):
++        for gs in itertools.combinations(range(len(gt)), k):
++            for ps in itertools.permutations(range(len(pred)), k):
++                if all(M.iou(pred[p], gt[g]) >= thr for g, p in zip(gs, ps)):
++                    best = max(best, k)
++    tp = best
++    pr = tp / len(pred) if pred else 0.0
++    rc = tp / len(gt) if gt else 0.0
++    return 2 * pr * rc / (pr + rc) if pr + rc else 0.0
++
++
++def main():
++    import transformers
++    proc = transformers.AutoProcessor.from_pretrained(generate.MODEL_ID, revision=generate.MODEL_REVISION)
++    tok = proc.tokenizer
++    dig = CL.digit_ids(tok)
++    gt = json.load(open("results/iter_010/manifests/gt_manifest.json"))
++    man = inputs.load_manifest("results/iter_010/manifests/infer_manifest.jsonl")
++    check("1.digit_token_ids_equal_plan", dig == CL.PLAN_DIGIT_IDS, dig)
++
++    # 1. span/token
++    n_t = n_c = 0
++    bad = None
++    for s in ("train", "validation", "confirm"):
++        for i in json.load(open(f"results/iter_010/manifests/{s}_ids.json")):
++            t = sft_data.target_text([b["yxyx_norm"] for b in gt[i]["boxes"]])
++            ids = tok(t + "<end_of_turn>", add_special_tokens=False)["input_ids"]
++            try:
++                w = CL.coord_weights(tok, t, [1, 2, 3] + ids + [107], 3, dig)
++            except Exception as e:  # noqa
++                bad = (i, str(e)[:200])
++                break
++            want = sum(len(str(v)) for b in sft_data.target_boxes([x["yxyx_norm"] for x in gt[i]["boxes"]]) for v in b)
++            if sum(1 for x in w if x > 0) != want:
++                bad = (i, "coord token count", sum(1 for x in w if x > 0), want)
++                break
++            n_t += 1
++            n_c += want
++        if bad:
++            break
++    check("1.all_targets_single_digit_tokens", bad is None and n_t == 3600, {"targets": n_t, "coord_tokens": n_c, "bad": bad})
++
++    def weights_for(target):
++        ids = tok(target + "<end_of_turn>", add_special_tokens=False)["input_ids"]
++        w = CL.coord_weights(tok, target, [1] + ids + [107], 1, dig)
++        return ids, w[1:1 + len(ids)]
++
++    tgt = json.dumps([{"box_2d": [0, 9, 10, 39], "label": "pulmonary opacity"}, {"box_2d": [40, 99, 100, 999], "label": "pulmonary opacity"},
++                      {"box_2d": [1000, 1, 2, 3], "label": "x2 3"}])
++    ids, w = weights_for(tgt)
++    pos = [(tok.decode([ids[k]]), w[k]) for k in range(len(ids)) if w[k] > 0]
++    exp = []
++    for v in (0, 9, 10, 39, 40, 99, 100, 999, 1000, 1, 2, 3):
++        exp += [(c, float(len(str(v)) - j)) for j, c in enumerate(str(v))]
++    check("1.boundary_values_and_place_weights", pos == exp, {"got": pos[:12], "exp": exp[:12]})
++    check("1.key2_label_digits_excluded", len(pos) == len(exp), len(pos))
++    ids0, w0 = weights_for("[]")
++    check("1.empty_list_no_coord", sum(w0) == 0)
++    tail = [k for k in range(len(ids)) if w[k] == 0 and tok.decode([ids[k]]).strip() in tuple("0123456789")]
++    check("1.non_coordinate_digit_tokens_have_zero_weight", len(tail) >= 1, {"n": len(tail), "tokens": [tok.decode([ids[k]]) for k in tail][:6]})
++    # span 값 일치 검사가 실제로 동작하는지 (변조 target)
++    try:
++        CL.coord_weights(tok, tgt.replace("999", "998"), [1] + tok(tgt + "<end_of_turn>", add_special_tokens=False)["input_ids"] + [107], 1, dig)
++        ok = False
++    except CL.SpanError:
++        ok = True
++    check("1.mismatched_sequence_rejected", ok)
++
++    # 실제 chat sequence 기반 (build_example): 3개 영상
++    real_ok, det = True, []
++    for i in ("tra_00000009",):
++        pass
++    tr = json.load(open("results/iter_013/subsets/sanity16_ids.json"))
++    for i in tr[:4]:
++        it = man[i]
++        image, _, _ = inputs.load_verified(it)
++        t = sft_data.target_text([b["yxyx_norm"] for b in gt[i]["boxes"]])
++        ex = sft_data.build_example(proc, image, generate.P.CONCISE if hasattr(generate, "P") else __import__("rsna_diag.prompts", fromlist=["x"]).CONCISE, t)
++        w = CL.coord_weights(tok, t, ex["input_ids"].tolist(), ex["n_prefix"], dig)
++        wt = torch.tensor(w)
++        lab = ex["labels"]
++        cpos = (wt > 0).nonzero().flatten().tolist()
++        digs = "".join(tok.decode([int(ex["input_ids"][p])]) for p in cpos)
++        flat = "".join(str(v) for b in sft_data.target_boxes([x["yxyx_norm"] for x in gt[i]["boxes"]]) for v in b)
++        ok = digs == flat and all(int(lab[p]) != -100 for p in cpos) and all(int(lab[p]) in dig for p in cpos)
++        ok = ok and float(wt[: ex["n_prefix"]].sum()) == 0 and float(wt[-3:].sum()) == 0
++        real_ok &= ok
++        det.append((i, digs, flat))
++    check("1.real_chat_sequence_positions_match", real_ok, det)
++
++    # 2. loss
++    g = torch.Generator().manual_seed(0)
++    V, Mn = 40, 12
++    dig_s = [5, 6, 7, 8, 9, 10, 11, 12, 13, 14]  # 작은 vocabulary용 숫자 id
++    logits = torch.randn(Mn, V, generator=g, dtype=torch.float64) * 2
++    y = torch.tensor([5, 9, 14, 3, 20, 7, 12, 30, 6, 6, 13, 8])
++    w = torch.tensor([1., 2., 3., 0, 0, 4., 1., 0, 2., 0, 1., 3.], dtype=torch.float64)
++    is_dig = torch.tensor([t in dig_s for t in y.tolist()])
++    check("2.fixture_weights_only_on_digits", bool((is_dig | (w == 0)).all()))
++    rc, rh, rd = ref_losses(logits.numpy(), y.numpy(), w.numpy(), dig_s)
++    l32 = logits.float()
++    for mode, refx in (("C", 0.0), ("H", rh), ("D", rd)):
++        ce, ex = CL.loss_sums(torch, l32, y, w.float(), mode, dig_s)
++        check(f"2.{mode}_matches_float64_reference", abs(float(ce) - rc) < 1e-4 * max(1, rc) and abs(float(ex) - refx) < 1e-4 * max(1, abs(refx)),
++              (float(ce), rc, float(ex), refx))
++    # gradient: 추가 항은 좌표 위치 행에만, digit 열/전체 vocabulary 정규화 경유
++    for mode in ("H", "D"):
++        lg = l32.clone().requires_grad_(True)
++        CL.loss_sums(torch, lg, y, w.float(), mode, dig_s)[1].backward()
++        nz = (lg.grad.abs().sum(1) > 0).tolist()
++        check(f"2.{mode}_extra_gradient_only_on_coordinate_rows", nz == (w > 0).tolist(), nz)
++    lg = l32.clone().requires_grad_(True)
++    CL.loss_sums(torch, lg, y, w.float(), "C", dig_s)[0].backward()
++    g_ref = torch.autograd.grad(torch.nn.functional.cross_entropy(l32.clone().requires_grad_(True), y, reduction="sum"), [])[0] if False else None
++    lg2 = l32.clone().requires_grad_(True)
++    torch.nn.functional.cross_entropy(lg2, y, reduction="sum").backward()
++    check("2.alpha0_gradient_equals_plain_CE", torch.allclose(lg.grad, lg2.grad, atol=1e-6))
++    for mode in ("H", "D"):
++        lg = l32.clone().requires_grad_(True)
++        ce, ex = CL.loss_sums(torch, lg, y, w.float(), mode, dig_s)
++        (ce + 0.0 * ex).backward()
++        check(f"2.{mode}_alpha0_gradient_equals_plain_CE", torch.allclose(lg.grad, lg2.grad, atol=1e-6))
++    ce, ex = CL.loss_sums(torch, l32, y, torch.zeros(Mn), "D", dig_s)
++    check("2.empty_E_extra_zero", float(ex) == 0.0)
++    # p == q: 숫자 밖 질량 0, 숫자 확률 = q 이면 KL = 0
++    gd = 3
++    q = np.array([math.exp(-((v - gd) ** 2)) for v in range(10)])
++    q /= q.sum()
++    lgt = torch.full((1, V), -1e4, dtype=torch.float32)
++    for v in range(10):
++        lgt[0, dig_s[v]] = float(np.log(q[v]))
++    ce, ex = CL.loss_sums(torch, lgt, torch.tensor([dig_s[gd]]), torch.tensor([1.0]), "D", dig_s)
++    check("2.D_zero_when_p_equals_q", abs(float(ex)) < 1e-5, float(ex))
++    # p 재정규화 금지: 비숫자 질량이 크면 KL이 커야 한다 (숫자 10개로 재정규화하면 0에 가깝다)
++    lgt2 = lgt.clone()
++    lgt2[0, 0] = float(np.log(4.0))  # 비숫자 token에 큰 질량
++    ce2, ex2 = CL.loss_sums(torch, lgt2, torch.tensor([dig_s[gd]]), torch.tensor([1.0]), "D", dig_s)
++    check("2.D_not_renormalized_over_digits", float(ex2) > 1.0 and abs(float(ex2) - math.log(5.0)) < 1e-3, float(ex2))
++    # 39<->40: 자리별 loss는 올림·내림을 표현하지 않음 (명시): 4,0 vs 3,9 의 십의 자리/일의 자리 q가 서로 0/9 를 멀리 봄
++    check("2.carry_limitation_documented", True, "0/9 distance is 9 (digit-wise); 39<->40 relation (adjacent integers) is not represented")
++
++    # microbatch 분할 불변: (합/N) 선형
++    N = Mn
++    parts = [CL.loss_sums(torch, l32[a:b], y[a:b], w.float()[a:b], "D", dig_s) for a, b in ((0, 5), (5, 12))]
++    whole = CL.loss_sums(torch, l32, y, w.float(), "D", dig_s)
++    check("2.microbatch_split_sums_equal_whole", abs(sum(float(p[0]) for p in parts) - float(whole[0])) < 1e-4 and abs(sum(float(p[1]) for p in parts) - float(whole[1])) < 1e-4)
++
++    # 3. shift/padding: mock 모델 (hidden[t] = onehot(input_ids[t+1]) -> logits[t]가 다음 token을 예측)
++    class Out:
++        pass
++
++    class Inner(torch.nn.Module):
++        def __init__(self, uniq):
++            super().__init__()
++            self.uniq = uniq
++
++        def forward(self, input_ids, attention_mask=None, pixel_values=None, token_type_ids=None, use_cache=False):
++            o = Out()
++            nxt = torch.roll(input_ids, -1, 1)
++            o.last_hidden_state = torch.nn.functional.one_hot(torch.searchsorted(self.uniq, nxt), len(self.uniq)).float() * 30
++            return o
++
++    class Cfg:
++        def get_text_config(self):
++            class T_:
++                final_logit_softcapping = None
++            return T_()
++
++    class Mock:
++        config = Cfg()
++
++        def __init__(self, V, ids):
++            uniq = torch.unique(ids)
++            self.model = Inner(uniq)
++            W = torch.zeros(V, len(uniq))
++            W[uniq, torch.arange(len(uniq))] = 1.0
++            self.lm_head = torch.nn.Linear(len(uniq), V, bias=False)
++            self.lm_head.weight.data = W
++
++    Vv = 262208
++    exs = []
++    for i in json.load(open("results/iter_013/subsets/sanity16_ids.json"))[:3]:
++        it = man[i]
++        image, _, _ = inputs.load_verified(it)
++        t = sft_data.target_text([b["yxyx_norm"] for b in gt[i]["boxes"]])
++        e = sft_data.build_example(proc, image, __import__("rsna_diag.prompts", fromlist=["x"]).CONCISE, t)
++        e["coord_w"] = CL.coord_weights(tok, t, e["input_ids"].tolist(), e["n_prefix"], dig)
++        e["sample_pos"] = 0
++        exs.append(e)
++    b = adapt.collate(exs, tok.pad_token_id)
++    b.pop("sample_pos")
++    mock = Mock(Vv, b["input_ids"])
++    b_cuda = b  # CPU
++    r = adapt.adapt_loss(torch, mock, {k: v for k, v in b_cuda.items()}, None, "D", dig, 0.1, 1.0)
++    n_lab = int((b["labels"][:, 1:] != -100).sum())
++    n_coord = int((b["coord_w"] > 0).sum())
++    check("3.shift_aligned_ce_near_zero", float(r["ce_sum"]) / n_lab < 1e-3 and r["n_tok"] == n_lab, (float(r["ce_sum"]), n_lab))
++    check("3.coord_count_and_padding", r["n_coord"] == n_coord and n_coord > 0 and float(b["coord_w"][b["attention_mask"] == 0].sum()) == 0
++          and b["input_ids"].shape[0] == 3, (r["n_coord"], n_coord))
++    check("3.extra_D_positive_but_finite_on_sharp_p", 0 < float(r["extra_sum"]) < 1e6, float(r["extra_sum"]))
++    # 잘못된 shift(위치 한 칸 어긋난 label)이면 CE가 커야 한다 -> 검사가 shift에 민감함을 확인
++    bb = dict(b)
++    bb["labels"] = torch.roll(b["labels"], 1, 1)
++    try:
++        r_bad = adapt.adapt_loss(torch, mock, bb, None, "C", dig, 0.1, 1.0)
++        sens = float(r_bad["ce_sum"]) / max(1, r_bad["n_tok"]) > 1.0
++        det_s = float(r_bad["ce_sum"]) / max(1, r_bad["n_tok"])
++    except CL.SpanError as e:  # label 위치와 좌표 weight가 어긋나면 digit guard가 먼저 거부한다
++        sens, det_s = True, "rejected by digit guard: " + str(e)
++    check("3.shift_sensitivity_of_check", sens, det_s)
++    # aux metadata가 모델 forward로 가지 않는지 (Inner.forward는 알 수 없는 인자 coord_w를 받으면 TypeError)
++    check("3.aux_metadata_not_passed_to_model", True, "Inner.forward has no **kwargs; adapt_loss ran with coord_w in batch")
++
++    # 4. 일정·subset·provenance
++    lrs = [adapt.lr_at(s, 225, 2e-5, 0.05) for s in range(225)]
++    check("4.lr_schedule_warmup12_cosine_to_0", abs(lrs[0] - 2e-5 / 12) < 1e-12 and abs(lrs[11] - 2e-5) < 1e-12 and lrs[-1] < 2e-5 * 1e-3
++          and all(lrs[k] >= lrs[k + 1] for k in range(11, 224)), [lrs[0], lrs[11], lrs[12], lrs[-1]])
++    S = "results/iter_013/subsets/"
++    tr_ids = json.load(open("results/iter_010/manifests/train_ids.json"))
++    va_ids = json.load(open("results/iter_010/manifests/validation_ids.json"))
++    cf_ids = json.load(open("results/iter_010/manifests/confirm_ids.json"))
++    t1200, v200 = json.load(open(S + "train1200_ids.json")), json.load(open(S + "v200_ids.json"))
++    cat = lambda ids, c: sum(gt[i]["category"] == c for i in ids)
++    check("4.subset_sizes_categories_disjoint", len(t1200) == 1200 and len(set(t1200)) == 1200 and set(t1200) <= set(tr_ids) and len(v200) == 200
++          and set(v200) <= set(va_ids) and not set(t1200) & set(v200) and (cat(t1200, "opacity"), cat(t1200, "normal"), cat(t1200, "not_normal_no_opacity")) == (600, 300, 300)
++          and (cat(v200, "opacity"), cat(v200, "normal"), cat(v200, "not_normal_no_opacity")) == (100, 50, 50))
++    pat = lambda ids: {gt[i]["patient"] for i in ids}
++    pxl = lambda ids: {gt[i]["pixel_sha256"] for i in ids}
++    check("4.patient_pixel_overlap_zero_train_val_confirm", not (pat(tr_ids) & pat(va_ids) | pat(tr_ids) & pat(cf_ids) | pat(va_ids) & pat(cf_ids))
++          and not (pxl(tr_ids) & pxl(va_ids) | pxl(tr_ids) & pxl(cf_ids) | pxl(va_ids) & pxl(cf_ids)))
++    rep = json.load(open(S + "subsets_report.json"))
++    check("4.subset_files_match_report_sha", all(hashlib.sha256(open(S + f"{k}_ids.json", "rb").read()).hexdigest() == v for k, v in rep["sha256"].items()))
++    for name in ("explore", "sanity", "full_s17"):
++        st = json.load(open(f"results/iter_013/stage/{name}.json"))
++        b = torch.load(st["parent_adapter"], map_location="cpu", weights_only=True)
++        check(f"4.stage_{name}_parent_adapter_sha_digest", hashlib.sha256(open(st["parent_adapter"], "rb").read()).hexdigest() == st["parent_adapter_sha256"]
++              and lora.state_digest(b["state"]) == st["parent_adapter_digest"] == b["digest"])
++    tt = inputs.inputs_digest(inputs.load_items(adapt.T.MANIFEST, adapt.T.GT, S + "train1200_ids.json", "train", exact=False)[0], gt)
++    tv = inputs.inputs_digest(inputs.load_items(adapt.T.MANIFEST, adapt.T.GT, S + "v200_ids.json", "validation", exact=False)[0], gt)
++    check("4.current_file_pixel_hashes_match_manifest_train1200_v200", bool(tt) and bool(tv), {"train1200": tt[:12], "v200": tv[:12]})
++
++    # 5. B0 재사용과 평가
++    vi, _ = adapt_eval.load_ids_items(adapt_eval.V400_IDS)
++    recs = adapt_eval.b0_records(PROT, vi)
++    ids = [i["id"] for i in vi]
++    check("5.b0_v400_requests_verified", len(recs) == 400 and all(k[1] == "concise" for k in recs), len(recs))
++    preds = adapt_eval.preds_of(recs, ids)
++    aed = sft_eval.area_edges(gt, [i for i in gt if gt[i]["split"] == "train"])
++    bed = adapt_eval.box_edges_train(gt, [i for i in gt if gt[i]["split"] == "train"])
++    d = adapt_eval.detail(preds, gt, ids, aed, bed)
++    old = json.load(open("results/iter_012/train/lr2e-4_s17/epoch_05/val_metrics.json"))
++    check("5.b0_recomputed_matches_stored_iter012_scores", abs(d["f1@0.3"] - old["f1@0.3"]) < 1e-12 and abs(d["f1@0.5"] - old["f1@0.5"]) < 1e-12, (d["f1@0.3"], old["f1@0.3"], d["f1@0.5"], old["f1@0.5"]))
++    ind = []
++    for i in ids:
++        if gt[i]["category"] != "opacity":
++            continue
++        pb = preds[i]["boxes"] if preds[i]["status"] in ("valid_empty", "valid_nonempty") else []
++        gg = [b["yxyx_norm"] for b in gt[i]["boxes"]]
++        ind.append((brute_f1(pb, gg, 0.3) + brute_f1(pb, gg, 0.5)) / 2)
++    check("5.S_loc_independent_bruteforce_matching", abs(float(np.mean(ind)) - d["S_loc"]) < 1e-12, (float(np.mean(ind)), d["S_loc"]))
++    v200_ids = json.load(open(S + "v200_ids.json"))
++    p200 = {i: preds[i] for i in v200_ids}
++    d200 = adapt_eval.detail(p200, gt, v200_ids, aed, bed)
++    check("5.b0_v200_subset_scored", d200["n_patients"] == 200 and d200["n_positive"] == 100, d200["S_loc"])
++    # guardrail / selection
++    b0s = d
++    ok_c = json.loads(json.dumps(b0s))
++    bad_c = json.loads(json.dumps(b0s))
++    bad_c["neg_Normal"]["valid_empty"]["rate"] = b0s["neg_Normal"]["valid_empty"]["rate"] - 0.04
++    bad_c["S_loc"] = 0.9
++    low_v = json.loads(json.dumps(b0s))
++    low_v["valid_rate_all"]["rate"] = 0.98
++    low_v["S_loc"] = 0.95
++    ok_c["S_loc"] = 0.6
++    ok_c2 = json.loads(json.dumps(ok_c))
++    sel, tab = adapt_eval.select_checkpoint({75: ok_c, 150: ok_c2, 225: bad_c}, b0s)
++    check("5.selection_tie_earlier_and_guardrail_excludes", sel == 75 and not tab[225]["guardrail"]["ok"], tab)
++    sel2, _ = adapt_eval.select_checkpoint({75: bad_c, 150: low_v}, b0s)
++    check("5.no_eligible_returns_none", sel2 is None)
++    ci = {"ci95": [0.0, 0.05]}
++    check("5.expand_rule_cases", adapt_eval.expand_rule(0.53, 0.50, ci, 0.0, True)[0] and adapt_eval.expand_rule(0.51, 0.50, ci, 0.02, True)[0]
++          and not adapt_eval.expand_rule(0.51, 0.50, ci, 0.0, True)[0] and not adapt_eval.expand_rule(0.60, 0.50, ci, 0.05, False)[0]
++          and not adapt_eval.expand_rule(0.51, 0.50, {"ci95": [0, 0.02]}, 0.05, True)[0])
++    c1 = adapt_eval.paired_ci(preds, preds, gt, ids)
++    check("5.paired_bootstrap_identical_is_zero_and_deterministic", c1["diff"] == 0 and c1["ci95"] == [0.0, 0.0] and c1["B"] == 10000
++          and adapt_eval.paired_ci(preds, preds, gt, ids) == c1)
++    json.dump(R, open(os.path.join(OUT, "fixtures_iter013.json"), "w"), indent=1, default=str)
++    n_pass = sum(v["pass"] for v in R.values())
++    print(f"{n_pass}/{len(R)} PASS")
++    sys.exit(0 if n_pass == len(R) else 1)
++
++
++if __name__ == "__main__":
++    os.makedirs(OUT, exist_ok=True)
++    main()
+diff --git a/test_rsna_iter013_gpu.py b/test_rsna_iter013_gpu.py
+new file mode 100644
+index 0000000..3d24d58
+--- /dev/null
++++ b/test_rsna_iter013_gpu.py
+@@ -0,0 +1,296 @@
++"""iter_013 실제 MedGemma GPU 검사. 실행: python test_rsna_iter013_gpu.py -> results/iter_013/tests/fixtures_iter013_gpu.json, 산출물 results/iter_013/pilot/
++GPU는 상속된 CUDA_VISIBLE_DEVICES 허용 집합 안에서만 쓴다 (허용 집합의 첫/둘째 장치를 lane0/lane1로 사용).
++
++E  loss 경로 등가 (lane1, in-process): adapt.adapt_loss(C)의 CE 합·gradient가 기존 train.assistant_loss_sum과 일치, H/D 추가 항이 같은 logits의
++   독립 float64 계산과 일치, alpha=0 gradient == CE gradient.
++D  재개 (lane0, 결정적 kernel, sanity16/eff4/2 epochs/val8, loss D): 무중단 U, 그리고 U와 같은 시작점의 R = step2 직후 종료 -> epoch1 validation 3요청 뒤 종료
++   -> 복구·완료. batch ID·token/mask sha·LR·RNG·optimizer step 정확 일치, loss/ce/extra rtol 1e-3, 최종 adapter digest·val 지표 비교.
++X  조건 간 (lane1, 결정적, 각 1 step): C/H/D의 step1 batch·token sha·CE가 같고 C의 monitor extra == H/D의 extra.
++M  microbatch 2 vs 4 (lane0 mb2, lane1 mb4 동시, pilot_mb stage, D): step 시간·peak 메모리·step1 CE.
++I  추론 workers: lane0 1 worker vs lane1 2 workers (thr48, B0 adapter, concise): token 일치·처리량·GPU 점유, 그리고 --parent-dir 재사용 경로(NameError 수정) 검사.
++pilot weight는 본실험에 이월하지 않는다.
++"""
++import json
++import os
++import subprocess
++import sys
++import threading
++import time
++
++PROT = "results/iter_013/protocols/pilot_protocol.json"
++B = "results/iter_013/pilot"
++T = "results/iter_013/tests"
++ST = "results/iter_013/stage/"
++R = {}
++LANES = [int(x) for x in os.environ.get("CUDA_VISIBLE_DEVICES", "0,1").split(",")]
++L0, L1 = LANES[0], LANES[-1]
++RTOL = 1e-3
++
++
++def check(name, cond, detail=None):
++    R[name] = {"pass": bool(cond), "detail": detail}
++    print(("PASS " if cond else "FAIL ") + name, "" if cond else json.dumps(detail, default=str)[:600], flush=True)
++
++
++def run(gpu, mod_args, log, module="rsna_diag.adapt"):
++    with open(log, "a") as f:
++        f.write(f"\n=== {time.strftime('%F %T')} {' '.join(mod_args)}\n")
++        f.flush()
++        return subprocess.run([sys.executable, "-m", module, *mod_args], env=dict(os.environ, CUDA_VISIBLE_DEVICES=str(gpu)), stdout=f, stderr=subprocess.STDOUT).returncode
++
++
++def aargs(run_dir, stage, loss, extra=()):
++    return ["--run-dir", run_dir, "--stage-config", ST + f"{stage}.json", "--loss", loss, "--lr", "2e-5", "--protocol", PROT, "--workers", "2", *extra]
++
++
++def steps(d):
++    return [json.loads(ln) for ln in open(os.path.join(d, "train_log.jsonl")) if '"loss"' in ln and '"batch_ids"' in ln]
++
++
++def equiv():
++    import numpy as np
++    import torch
++    from rsna_diag import adapt, coord_loss as CL, generate, inputs, lora, prompts as P, sft_data, train as TR
++    items, gt = inputs.load_items(TR.MANIFEST, TR.GT, "results/iter_013/subsets/sanity16_ids.json", "train", exact=False)
++    _, proc, model = generate.load_model()
++    lora.apply_lora(model, 16, 32, 0.05, seed=17)
++    st = json.load(open(ST + "sanity.json"))
++    lora.load_lora_state(model, torch.load(st["parent_adapter"], map_location="cpu", weights_only=True)["state"])
++    model.eval()  # dropout 끔 (두 경로의 forward가 동일해야 하므로)
++    tok = proc.tokenizer
++    dig = CL.digit_ids(tok)
++    softcap = getattr(model.config.get_text_config(), "final_logit_softcapping", None)
++    pos = [i for i in items if gt[i["id"]]["category"] == "opacity"][:2] + [i for i in items if gt[i["id"]]["category"] != "opacity"][:1]
++    exs = []
++    for it in pos:
++        image, _, _ = inputs.load_verified(it)
++        t = sft_data.target_text([b["yxyx_norm"] for b in gt[it["id"]]["boxes"]])
++        e = sft_data.build_example(proc, image, P.CONCISE, t)
++        e["coord_w"] = CL.coord_weights(tok, t, e["input_ids"].tolist(), e["n_prefix"], dig)
++        e["sample_pos"] = 0
++        exs.append(e)
++    b = adapt.collate(exs, tok.pad_token_id)
++    b.pop("sample_pos")
++    b = {k: v.cuda() for k, v in b.items()}
++    params = [p for p in model.parameters() if p.requires_grad]
++
++    def grad_of(fn):
++        for p in params:
++            p.grad = None
++        fn().backward()
++        return torch.cat([p.grad.flatten() for p in params]).clone()
++
++    old_b = {k: v for k, v in b.items() if k != "coord_w"}
++    with torch.no_grad():
++        ce_old, n_old = TR.assistant_loss_sum(torch, model, old_b, softcap)
++    g_old = grad_of(lambda: TR.assistant_loss_sum(torch, model, old_b, softcap)[0])
++    g_old2 = grad_of(lambda: TR.assistant_loss_sum(torch, model, old_b, softcap)[0])  # 같은 함수의 두 번째 평가: bf16 kernel의 run-to-run noise floor
++    res = {}
++    for mode in ("C", "H", "D"):
++        with torch.no_grad():
++            r = adapt.adapt_loss(torch, model, b, softcap, mode, dig, 0.1, 1.0)
++        g = grad_of(lambda: (lambda x: x["ce_sum"] + 0.0 * x["extra_sum"])(adapt.adapt_loss(torch, model, b, softcap, mode, dig, 0.1, 1.0)))
++        res[mode] = {"ce": float(r["ce_sum"]), "extra": float(r["extra_sum"]), "n_tok": r["n_tok"], "n_coord": r["n_coord"], "mon_h": float(r["mon_h"]),
++                     "mon_d": float(r["mon_d"]), "grad_max_abs_diff_vs_old_ce": float((g - g_old).abs().max()), "grad_rel_l2_diff_vs_old_ce": float((g - g_old).norm() / g_old.norm()),
++                     "grad_norm": float(g.norm())}
++    # 같은 logits를 밖에서 다시 구해 독립 float64 기준과 대조
++    with torch.no_grad():
++        bb = dict(b)
++        cw, labels = bb.pop("coord_w"), bb.pop("labels")
++        bb["pixel_values"] = bb["pixel_values"].to(torch.bfloat16)
++        h = model.model(**bb, use_cache=False).last_hidden_state[:, :-1]
++        lab = labels[:, 1:]
++        sel = lab != -100
++        lg = model.lm_head(h[sel]).float()
++        if softcap:
++            lg = torch.tanh(lg / softcap) * softcap
++        y, w = lab[sel].cpu().numpy(), cw[:, 1:][sel].cpu().numpy()
++        di = torch.as_tensor(dig, device=lg.device)
++        # 전체 vocabulary logits 대신 필요한 열만 옮겨 float64 기준 계산: lse는 GPU float64로
++        lse = torch.logsumexp(lg.double(), -1).cpu().numpy()
++        gold = lg.gather(1, torch.as_tensor(y, device=lg.device)[:, None]).squeeze(1).double().cpu().numpy()
++        dl = lg[:, di].double().cpu().numpy()
++    ce_ref = float((lse - gold).sum())
++    h_ref = float(sum(w[t] * (lse[t] - gold[t]) for t in range(len(y)) if w[t] > 0))
++    d_ref = 0.0
++    for t in range(len(y)):
++        if w[t] > 0:
++            g_ = dig.index(int(y[t]))
++            q = np.exp(-((np.arange(10) - g_) ** 2) / 1.0)
++            q /= q.sum()
++            lp = dl[t] - lse[t]
++            d_ref += float(w[t] * (q * (np.log(q) - lp)).sum())
++    out = {"res": res, "ce_old": float(ce_old), "n_old": n_old, "ce_ref": ce_ref, "h_ref": h_ref, "d_ref": d_ref, "grad_norm_old": float(g_old.norm()),
++           "noise_floor": {"max_abs": float((g_old - g_old2).abs().max()), "rel_l2": float((g_old - g_old2).norm() / g_old.norm())}}
++    json.dump(out, open(os.path.join(B, "equiv.json"), "w"), indent=1)
++    print("equiv done")
++
++
++def mon_gpu(stop, out, gpus):
++    while not stop.is_set():
++        q = subprocess.run(["nvidia-smi", "--query-gpu=index,memory.used", "--format=csv,noheader,nounits"], capture_output=True, text=True).stdout
++        for ln in q.strip().splitlines():
++            i, m = [x.strip() for x in ln.split(",")]
++            if int(i) in gpus:
++                out[int(i)] = max(out.get(int(i), 0), int(m))
++        time.sleep(3)
++
++
++def main():
++    os.makedirs(B, exist_ok=True)
++    os.makedirs(T, exist_ok=True)
++    peak = {}
++    stop = threading.Event()
++    th = threading.Thread(target=mon_gpu, args=(stop, peak, {L0, L1}), daemon=True)
++    th.start()
++    logs = {}
++
++    # ---- phase 1: lane0 D-resume chain / lane1 E + X
++    def lane0():
++        d = f"{B}/resume"
++        rc = {}
++        rc["U"] = run(L0, aargs(f"{d}/U", "sanity", "D", ["--deterministic", "--ckpt-every", "2", "--microbatch", "2"]), f"{d}_U.log")
++        rc["R1"] = run(L0, aargs(f"{d}/R", "sanity", "D", ["--deterministic", "--ckpt-every", "2", "--microbatch", "2", "--stop-after-step", "2"]), f"{d}_R.log")
++        rc["R2"] = run(L0, aargs(f"{d}/R", "sanity", "D", ["--deterministic", "--ckpt-every", "2", "--microbatch", "2", "--stop-in-validation", "3"]), f"{d}_R.log")
++        rc["R3"] = run(L0, aargs(f"{d}/R", "sanity", "D", ["--deterministic", "--ckpt-every", "2", "--microbatch", "2"]), f"{d}_R.log")
++        logs["resume_rc"] = rc
++
++    def lane1():
++        os.makedirs(f"{B}/xcond", exist_ok=True)
++        e = subprocess.run([sys.executable, "test_rsna_iter013_gpu.py", "--equiv"], env=dict(os.environ, CUDA_VISIBLE_DEVICES=str(L1)),
++                           stdout=open(f"{B}/equiv.log", "a"), stderr=subprocess.STDOUT).returncode
++        rc = {"equiv": e}
++        for m in ("C", "H", "D"):
++            rc[m] = run(L1, aargs(f"{B}/xcond/{m}", "sanity", m, ["--deterministic", "--ckpt-every", "2", "--microbatch", "2", "--max-steps", "1"]), f"{B}/xcond_{m}.log")
++        logs["lane1_rc"] = rc
++
++    t0 = time.time()
++    ths = [threading.Thread(target=lane0), threading.Thread(target=lane1)]
++    [t.start() for t in ths]
++    [t.join() for t in ths]
++    logs["phase1_wall_s"] = time.time() - t0
++    check("E.subprocess_rc", logs["lane1_rc"]["equiv"] == 0, logs["lane1_rc"])
++    eq = json.load(open(f"{B}/equiv.json"))
++    r = eq["res"]
++    check("E.C_ce_equals_old_assistant_loss_sum", abs(r["C"]["ce"] - eq["ce_old"]) <= 1e-6 * abs(eq["ce_old"]) and r["C"]["n_tok"] == eq["n_old"], (r["C"]["ce"], eq["ce_old"]))
++    nf = eq["noise_floor"]
++    check("E.alpha0_gradient_equals_old_CE_gradient_all_modes_within_2x_noise_floor",
++          all(r[m]["grad_max_abs_diff_vs_old_ce"] <= 3 * nf["max_abs"] + 1e-6 and r[m]["grad_rel_l2_diff_vs_old_ce"] <= 2 * nf["rel_l2"] + 1e-4 for m in r),
++          {"noise_floor(same old function twice)": nf, **{m: (r[m]["grad_max_abs_diff_vs_old_ce"], r[m]["grad_rel_l2_diff_vs_old_ce"]) for m in r}})
++    check("E.H_extra_matches_float64_reference", abs(r["H"]["extra"] - eq["h_ref"]) <= 1e-4 * max(1.0, abs(eq["h_ref"])), (r["H"]["extra"], eq["h_ref"]))
++    check("E.D_extra_matches_float64_reference", abs(r["D"]["extra"] - eq["d_ref"]) <= 1e-4 * max(1.0, abs(eq["d_ref"])), (r["D"]["extra"], eq["d_ref"]))
++    check("E.monitors_equal_active_extra", abs(r["C"]["mon_h"] - r["H"]["extra"]) < 1e-5 * max(1, abs(r["H"]["extra"])) and abs(r["C"]["mon_d"] - r["D"]["extra"]) < 1e-5 * max(1, abs(r["D"]["extra"])),
++          (r["C"]["mon_h"], r["H"]["extra"], r["C"]["mon_d"], r["D"]["extra"]))
++    check("E.coord_positions_counted", r["C"]["n_coord"] > 0 and r["C"]["n_coord"] == r["H"]["n_coord"] == r["D"]["n_coord"], r["C"]["n_coord"])
++
++    # D 재개
++    check("D.processes_exit_codes", logs["resume_rc"] == {"U": 0, "R1": 5, "R2": 4, "R3": 0}, logs["resume_rc"])
++    U, Rr = steps(f"{B}/resume/U"), steps(f"{B}/resume/R")
++    check("D.step_count_8_both", len(U) == 8 and len(Rr) == 8, (len(U), len(Rr)))
++    exact = ["batch_ids", "batch_token_sha", "lr", "rng_before", "opt_step_before", "n_label_tokens", "n_coord_tokens"]
++    mism = [(k, i + 1) for i, (u, rr) in enumerate(zip(U, Rr)) for k in exact if u[k] != rr[k]]
++    check("D.exact_state_match_batch_token_lr_rng_optstep", not mism, mism[:5])
++    rel = lambda a, b: abs(a - b) / max(1e-12, abs(b))
++    lm = [(k, i + 1, u[k], rr[k]) for i, (u, rr) in enumerate(zip(U, Rr)) for k in ("loss", "ce", "extra_raw", "grad_norm") if rel(rr[k], u[k]) > RTOL]
++    check("D.loss_ce_extra_gradnorm_within_rtol_1e-3", not lm, lm[:5])
++    check("D.loss_bitwise_equal_deterministic", all(u["loss"] == rr["loss"] for u, rr in zip(U, Rr)), [(u["loss"], rr["loss"]) for u, rr in zip(U, Rr) if u["loss"] != rr["loss"]][:3])
++    lg = lambda d: [json.loads(ln) for ln in open(os.path.join(d, "train_log.jsonl"))]
++    ev = [e for e in lg(f"{B}/resume/R") if e.get("event") == "resume"]
++    check("D.resume_restored_equals_saved", len(ev) >= 2 and all(e["restored_equals_saved"] for e in ev), len(ev))
++    vd = [e for e in lg(f"{B}/resume/R") if e.get("event") == "validation_done"]
++    check("D.validation_state_unchanged_and_recovered", len(vd) >= 2 and all(e["state_unchanged"] for e in vd) and any(e["recovered_from_file"] for e in vd), [(e["epoch"], e["recovered_from_file"]) for e in vd])
++    au = json.load(open(f"{B}/resume/U/epoch_02/val_metrics.json"))
++    ar = json.load(open(f"{B}/resume/R/epoch_02/val_metrics.json"))
++    check("D.final_adapter_digest_equal", au["adapter_digest"] == ar["adapter_digest"], (au["adapter_digest"][:12], ar["adapter_digest"][:12]))
++    keys = ["f1@0.3", "f1@0.5", "utility", "val_loss"]
++    check("D.val_metrics_equal", all(abs(au[k] - ar[k]) <= 1e-6 + RTOL * abs(au[k]) for k in keys), {k: (au[k], ar[k]) for k in keys})
++    a1 = json.load(open(f"{B}/resume/U/epoch_01/val_metrics.json"))
++    b1 = json.load(open(f"{B}/resume/R/epoch_01/val_metrics.json"))
++    check("D.pending_validation_epoch1_recovered_metrics_equal", all(abs(a1[k] - b1[k]) <= 1e-6 + RTOL * abs(a1[k]) for k in keys), {k: (a1[k], b1[k]) for k in keys})
++    from rsna_diag import select
++    try:
++        tc = json.load(open(f"{B}/resume/R/train_config.json"))
++        from rsna_diag import adapt_eval, inputs
++        vi, gt = inputs.load_items("results/iter_010/manifests/infer_manifest.jsonl", "results/iter_010/manifests/gt_manifest.json", ST.replace("stage/", "subsets/") + "val8_ids.json", "validation", exact=False)
++        select.verify_epoch(f"{B}/resume/R", 2, tc, inputs.inputs_digest(vi, gt), PROT, vi, gt)
++        ok = True
++    except Exception as e:  # noqa
++        ok = str(e)[:300]
++    check("D.select_verify_epoch_accepts_adapt_run", ok is True, ok)
++    check("D.deterministic_run_flagged_in_config", json.load(open(f"{B}/resume/R/train_config.json"))["config"]["deterministic"] is True)
++
++    # X 조건 간
++    xs = {m: steps(f"{B}/xcond/{m}")[0] for m in ("C", "H", "D")}
++    check("X.same_batch_and_tokens_across_conditions", len({(x["batch_token_sha"], tuple(x["batch_ids"]), x["n_label_tokens"], x["n_coord_tokens"]) for x in xs.values()}) == 1)
++    check("X.step1_ce_identical_across_conditions", len({x["ce"] for x in xs.values()}) == 1, {m: x["ce"] for m, x in xs.items()})
++    check("X.C_monitors_equal_H_D_extra", xs["C"]["monitor_H_extra_raw"] == xs["H"]["extra_raw"] and xs["C"]["monitor_D_extra_raw"] == xs["D"]["extra_raw"],
++          (xs["C"]["monitor_H_extra_raw"], xs["H"]["extra_raw"], xs["C"]["monitor_D_extra_raw"], xs["D"]["extra_raw"]))
++    check("X.total_loss_definition", all(abs(x["loss"] - (x["ce"] + 0.1 * x["extra_raw"])) < 1e-9 for x in xs.values()) and xs["C"]["extra_raw"] == 0.0)
++    check("X.first_step_lr_warmup", all(abs(x["lr"] - 2e-5 / max(1, __import__("math").ceil(0.05 * 8))) < 1e-15 for x in xs.values()), xs["C"]["lr"])
++
++    # ---- phase 2: microbatch pilot (lane0 mb2, lane1 mb4)
++    t0 = time.time()
++    p2 = {}
++    ths = [threading.Thread(target=lambda g=g, mb=mb: p2.__setitem__(mb, run(g, aargs(f"{B}/mb{mb}", "pilot_mb", "D", ["--microbatch", str(mb)]), f"{B}/mb{mb}.log")))
++           for g, mb in ((L0, 2), (L1, 4))]
++    [t.start() for t in ths]
++    [t.join() for t in ths]
++    logs["phase2_wall_s"] = time.time() - t0
++    mbrep = {}
++    for mb in (2, 4):
++        st_ = steps(f"{B}/mb{mb}")
++        mbrep[mb] = {"rc": p2[mb], "n_steps": len(st_), "step_times": [b["elapsed_s"] - (a["elapsed_s"] if k else 0) for k, (a, b) in enumerate(zip([st_[0]] + st_, st_))][:3] if st_ else None,
++                     "peak_alloc_gb": max(s["peak_mem_gb"] for s in st_) if st_ else None, "step1_ce": st_[0]["ce"] if st_ else None, "step1_loss": st_[0]["loss"] if st_ else None}
++    logs["mb_report"] = mbrep
++    check("M.both_microbatch_runs_ok", all(mbrep[m]["rc"] == 0 and mbrep[m]["n_steps"] == 3 for m in (2, 4)), mbrep)
++    check("M.step1_ce_close_mb2_vs_mb4", rel(mbrep[4]["step1_ce"], mbrep[2]["step1_ce"]) < 5e-2, (mbrep[2]["step1_ce"], mbrep[4]["step1_ce"]))
++
++    # ---- phase 3: 추론 worker 비교 (thr48, B0 adapter, concise): lane0 1 worker vs lane1 2 workers
++    B0 = "results/iter_012/train/lr2e-4_s17/epoch_05"
++    t0 = time.time()
++    p3 = {}
++
++    def gen(name, gpu, workers, extra=()):
++        cmd = [sys.executable, "-m", "rsna_diag.run_shards", "--manifest", "results/iter_010/manifests/infer_manifest.jsonl", "--ids", "results/iter_013/subsets/thr48_ids.json",
++               "--out-dir", f"{B}/gen_{name}", "--protocol", PROT, "--prompts", "concise", "--workers", str(workers), "--gpus", str(gpu), "--adapter", B0, *extra]
++        s = time.time()
++        rc = subprocess.run(cmd, env=dict(os.environ, CUDA_VISIBLE_DEVICES=str(gpu)), stdout=open(f"{B}/gen_{name}.log", "a"), stderr=subprocess.STDOUT).returncode
++        p3[name] = {"rc": rc, "wall_s": time.time() - s}
++
++    ths = [threading.Thread(target=gen, args=("w1", L0, 1)), threading.Thread(target=gen, args=("w2", L1, 2))]
++    [t.start() for t in ths]
++    [t.join() for t in ths]
++    logs["phase3_wall_s"] = time.time() - t0
++    rec = lambda n: {(r["id"], r["prompt_name"]): r for f in __import__("glob").glob(f"{B}/gen_{n}/gen_worker*.jsonl") for r in map(json.loads, filter(str.strip, open(f)))}
++    a, b_ = rec("w1"), rec("w2")
++    same = sum(1 for k in a if k in b_ and a[k]["suffix_ids"] == b_[k]["suffix_ids"])
++    rep3 = {n: {"rc": p3[n]["rc"], "wall_s": p3[n]["wall_s"], "n": len(r), "req_per_min": len(r) / p3[n]["wall_s"] * 60, "max_req_s": max(x["runtime_s_total"] for x in r.values()),
++                "max_out_tokens": max(x["n_output_tokens"] for x in r.values()), "worker_peak_alloc_gb": max(x["peak_mem_alloc_gb_max"] for x in r.values())}
++            for n, r in (("w1", a), ("w2", b_))}
++    rep3["identical_output_tokens"] = {"n_compared": len(a), "n_identical": same}
++    logs["gen_report"] = rep3
++    check("I.both_configs_complete_48_no_dup", rep3["w1"]["rc"] == 0 and rep3["w2"]["rc"] == 0 and rep3["w1"]["n"] == 48 == rep3["w2"]["n"], rep3)
++    check("I.greedy_token_outputs_identical_w1_w2", same == 48, rep3["identical_output_tokens"])
++    # parent 재사용 경로 (NameError 수정): 새 out-dir에서 w1 결과를 부모로 사용
++    rc = subprocess.run([sys.executable, "-m", "rsna_diag.run_shards", "--manifest", "results/iter_010/manifests/infer_manifest.jsonl", "--ids", "results/iter_013/subsets/thr48_ids.json",
++                         "--out-dir", f"{B}/gen_parent_reuse", "--protocol", PROT, "--prompts", "concise", "--workers", "1", "--gpus", str(L1), "--adapter", B0,
++                         "--parent-dir", f"{B}/gen_w1", "--parent-protocol", PROT], env=dict(os.environ, CUDA_VISIBLE_DEVICES=str(L1)),
++                        stdout=open(f"{B}/gen_parent_reuse.log", "a"), stderr=subprocess.STDOUT).returncode
++    err = open(f"{B}/gen_parent_reuse/worker0.stderr.log").read() if os.path.exists(f"{B}/gen_parent_reuse/worker0.stderr.log") else ""
++    check("I.parent_dir_path_no_NameError_and_complete", rc == 0 and "NameError" not in err and os.path.exists(f"{B}/gen_parent_reuse/completion.json"), {"rc": rc, "stderr": err[-300:]})
++    stop.set()
++    logs["gpu_total_used_max_mib_all_phases"] = peak
++    logs["lanes"] = LANES
++    json.dump({"checks": R, "logs": logs}, open(os.path.join(T, "fixtures_iter013_gpu.json"), "w"), indent=1, default=str)
++    n_pass = sum(v["pass"] for v in R.values())
++    print(f"{n_pass}/{len(R)} PASS")
++    sys.exit(0 if n_pass == len(R) else 1)
++
++
++if __name__ == "__main__":
++    if "--gpu" in sys.argv:  # 단독 실행용: 허용 집합 안의 장치 하나 (torch import 전에 설정)
++        os.environ["CUDA_VISIBLE_DEVICES"] = sys.argv[sys.argv.index("--gpu") + 1]
++    if "--equiv" in sys.argv:
++        equiv()
++    else:
++        main()

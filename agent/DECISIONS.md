@@ -300,8 +300,37 @@ MedGemma 1.5로 연구하는 것 자체가 큰 제약이라고 판단되면, 근
 - 🏁 **마일스톤**: 직접 LoRA SFT로 RSNA grounding 개선을 독립 확인 — JOURNEY.md
 - 📁 원본: `agent/runs/iter_012/`
 
-## iter_013 — ? (1번째 시도) · 2026-09-26 08:06
+## iter_013 — 영상 조건부 집합 grounding (4번째 시도) · 2026-09-26 08:06
 
 - ⏹ 중단: 오류: GPT 사고 라운드 1: 3번 다시 시도했지만 실패. 마지막 오류: codex 종료 코드 1. 로그: /SSD1_1TB/home/milab/daniel/08_medgemma/agent/runs/iter_013/plan_codex.log (GPT 사고 라운드 1 중)
+- ↻ 재실행: '계획' 단계부터 이어서 (orchestrator 900031c+수정)
+- 🔎 **사고 라운드 1** (GPT deep): SFT 이후의 위치 오류를 검토해 checkpoint 선택과 small 지표의 해석 문제를 확인했다. 새로 찾은 MedLoc-R1·IoU-PD와의 차별성 및 오류 분해를 더 확인한 뒤 후속 방법을 확정한다.
+  - 스스로 던진 질문: 기존 validation 원시 출력에서 개별 GT box 면적·GT 개수·환자 union 면적을 분리하면, 미검출과 위치 오차 중 어느 문제가 주로 남는가? checkpoint별 양성 성능과 두 음성 층 성능의 관계는 방법 선택을 어떻게 바꾸는가? · SPR의 sequence-level preference와 MedLoc-R1의 IoU curriculum을 넘어, 무병변·누락·추가 box·위치 오차를 다루는 집합 학습에 검증 가능한 차이가 있는가? 목적함수와 필수 ablation을 구체적으로 정의할 수 있는가? · 현재 5-epoch SFT에서 출발하는 추가 학습 baseline의 LR schedule·학습량·checkpoint 선택 기준을 어떻게 고정해야 하는가? 동일 시작점·노출량·선택 예산의 1-seed 탐색과 확대 기준은 무엇인가? · reserve 양성 496명을 보존하면서 필요한 독립 확인 정밀도를 확보할 수 있는가? Kvasir-SEG 등 두 번째 데이터셋의 실제 파일·주석·중복·분할 근거를 확인해 이번 계획의 조건부 확대 단계에 포함할 수 있는가?
+- 🔎 **사고 라운드 2** (GPT deep): 저장 validation에서 빈 응답·위치 정밀도·작은 box 오류를 분리했고, DIST²Loss와 R-VLM을 필수 비교 후보로 추가했다. 목적함수 차별성을 한 번 더 확인한 뒤 구현 범위를 확정한다.
+  - 스스로 던진 질문: DIST²Loss의 다자리 숫자 처리와 R-VLM의 IoU 가중 학습을 현재 MedGemma tokenizer·assistant mask·LoRA에 이식할 때 무엇을 그대로 재현할 수 있는가? 두 방법 중 잔여 위치 오류에 더 직접적이고 재현 가능한 1순위 baseline은 무엇인가? · 오류 하나만 수정하는 preference에서 추가·삭제·좌표 교정의 token span과 종료 결정을 일관되게 정의할 수 있는가? 동일 pair의 sequence DPO·수정 정답 SFT·기존 거리 loss로 설명되지 않는 차이와 이를 반증할 최소 ablation이 있는가? · 위 비교 결과에 따라 추가 SFT와 후보의 LR·노출량·선택 예산 및 확대 schedule을 어떻게 최종 고정할 것인가? 차별성이 남지 않으면 추가 SFT와 선행 목적함수 비교만으로 다음 구현을 확정할 수 있는가?
+- 🧭 **계획** (GPT deep): 추가 SFT·좌표 가중 CE·DIST²Loss 이식안을 같은 조건에서 비교해 잔여 위치 오류의 개선 가능성을 확인한다. 최소 수정 preference는 차별성 근거가 부족해 보류하며, 이번 결과를 새 방법의 기여로 주장하지 않는다.
+  - 대안: 1) 영상 조건부 집합 grounding: 추가 SFT와 자리별 거리 supervision을 실제 생성에서 비교해 후속 방법의 기준선을 강화한다. · 2) R-VLM 기하 목적함수 이식: GIoU 가중 pseudo-box 학습을 복수 병변 출력에 적용하되 label 구성과 계산량을 별도로 통제한다. · 3) 오류별 최소 수정 preference: SPR·TD-DPO와 구별되는 기여가 확보될 때 재검토한다. · 4) 해부구조에서 병변으로 grounding 전이: 보존된 후보이며 직접 SFT와 거리 supervision 이후에도 전이 필요성이 남을 때 검토한다.
+  - 1순위 선택 근거: 현재 residual 오류와 바로 연결되고 구현 조건을 명시할 수 있는 비교다. 최소 수정 preference의 신규성은 약해졌지만 추가 SFT·거리 supervision의 실제 효과는 미확인이다. 현재 자원과 권한으로 그 차이를 검증할 수 있어 추가 조사 라운드나 사용자 결정이 필요하지 않다.
+- ▶ **결정**: 자동 진행 (smart) — 1순위로 진행
+- 💾 **개발 이력 체크포인트** `d68840e0f9317700a8b585bcf6edbb8ef73703a0`: implementation_finished (검증 승인 아님)
+  - 자동 커밋 제외·확인 필요: test_rsna_iter010_gpu.py
+- 🔧 **Claude** (standard): 추가 SFT·좌표 가중 CE·DIST²Loss를 같은 시작점에서 비교한 가능성 탐색을 마쳤고, 최종 S_loc이 B0 0.498에 대해 C 0.522·H 0.520·D 0.525로 서로 구분되지 않으며 D가 선택 guardrail을 통과하지 못해 확대하지 않음. GPU 검사는 27/29에 E 단독 재실행을 더한 기록이라 FAIL로 표기함. [자체 검증 FAIL, 파일 1378개 변경]
+  - 브랜치 `approach/conditional-set-grounding`에서 계속
+  - ⚠ 권한 거부 3건
+- 🔍 **리뷰** (GPT normal): [CONTINUE / inconclusive] 실제 생성 비교에서 D−C의 최종 S_loc 차이는 +0.0032였고 V200 선택 조건을 충족하지 못해 확대를 보류했다. 결과는 유효하지만 전체 방법의 기각이나 코드 전체 재사용 승인을 뜻하지 않는다.
+  - 접근법 판단: 현 설정의 추가 이득이 작다는 유효한 관찰은 얻었지만, D의 선택 후보 부재와 말기 상승 추세로 방법 전체의 효과·수렴은 불확정이다. 자동 확대는 보류하고 후속 후보의 정보 이득을 비교한다.
+  - 목표 진전: 추가 SFT와 좌표 가중 CE를 통제한 실제 생성 비교를 완료했다. 이번 설정에서 거리 분포 항의 추가 이득은 작았으며 사전 선택·확대 기준을 충족하지 못했다. 새로운 방법의 기여, 충분한 수렴, 다중 seed 및 다른 데이터셋 일반화는 미검증이다.
+  - 판정 범위: RSNA 개발 train 1,200명, seed17, 공통 seed17 epoch5 adapter, LR 2e-5, alpha=0.1, tau=1, 추가 225 updates에서 수행한 자리별 DIST²Loss 이식 비교에 한정한다. 다른 LR·학습량·seed·데이터셋이나 기하 supervision 전체의 실패로 일반화하지 않는다.
+  - 재사용 전 수정: adapt_eval.detail의 multi를 GT 2개와 3개 이상으로 나누거나 >=2로 수정하고 양성 200명 전체가 오류 분해에 포함되는지 검증해야 한다.
+  - 재사용 전 수정: adapt_decide에서 선택 부재, final 보조 비교, V200 탈락, 실제 V400 guardrail을 별도 필드로 표현해야 한다. C 선택 부재 시 설명은 최고 checkpoint를 말하지만 구현은 final을 사용하며, 필요한 CI가 없는 경우도 명시적으로 처리해야 한다.
+  - 재사용 전 수정: adapt_pipeline은 상속된 GPU 허용 집합과 물리 장치 대응을 검증하고, 기존 lock 파일 유무와 무관하게 실행 직전 메모리 여유를 확인해야 한다.
+  - 재사용 전 수정: trained_ok는 done.json 내용과 요청 stage·loss·LR·train digest·완료 update 수를 대조해야 한다. 현재 결과의 설정은 일치하지만 재사용 시 잘못된 완료 파일을 수용할 여지가 있다.
+  - 재사용 전 수정: GPU 검사기의 수정된 허용 기준과 종료 코드 수집을 정리해야 한다. 전체 검사 재실행 여부와 E 단독 보완을 구분하고 기존 실패 기록을 보존해야 한다.
+  - 재사용 전 수정: 이전 리뷰의 미사용 pipeline.py/run_iter012_rest.py 완료 판정·provenance 결함은 해결된 것으로 간주하지 않는다. 해당 경로를 다시 사용할 때 보완해야 한다.
+  - 재사용 전 수정: commit.json의 unpreserved_paths에 test_rsna_iter010_gpu.py가 남아 있어 전체 스냅샷 재사용은 승인하지 않는다.
+  - 추후 개선: GPU 처리량 기록에 단계별 전체 장치 peak, reserved memory, CPU/RAM/I/O 경합을 더 명확히 연결한다. 현재 전체 pilot peak에는 E 검사 OOM이 섞여 있어 정상 추론 peak와 분리해야 한다.
+  - 추후 개선: 처리량 pilot의 최대 출력은 71 tokens였다. 장문 출력이 예상되는 다른 과제로 재사용할 때 긴 출력의 메모리·지연을 추가 확인한다.
+  - 추후 개선: 자리별 loss의 carry 및 숫자 길이 변화 한계는 유지한다. 현재 음성 결과로 전체 좌표·box 기하 목적함수의 효과를 판단하지 않는다.
+  - 다음: 현재 baseline·원시 응답을 보존하고 multi 집계와 선택 부재 표시를 보완한다. 수정된 잔여 오류 분석으로 자리별 loss의 추가 탐색과 box 기하 supervision 후보를 비교해 다음 의사결정을 바꿀 실험 하나를 선정한다. 새 방법의 차별성과 강한 직접 SFT 비교를 명시하고, 기존 guardrail을 현재 결과에 맞춰 완화하지 않는다. 후속 GPU 실행 전에 사용하는 실행 경로의 허용 GPU·메모리·완료 검증을 보완하며 reserve는 보존한다.
 - 📁 원본: `agent/runs/iter_013/`
 

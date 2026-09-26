@@ -18,7 +18,7 @@
 - iter_010 [CONTINUE] (deep/standard/normal) <영상 조건부 집합 grounding: execution_failed> 💾5581ed255a350e42a0ad422065edf13c56a33bf6 LoRA 학습 경로와 4 worker 처리량 개선은 확인했지만 본학습·독립 평가는 미완료이며, 실행 복구와 평가 검증 보완 후 원 계획을 이어가야 한다. → 다음: 먼저 실행 호스트에서 기존 학습·추론·대기 프로세스와 소유 lock, checkpoint, 종료 코드를 확인한다. 살아 있는 작업은 중복 실행하지 않는다. 원본 결과를 보존하면서 epoch validation 복구, 학습 run lock, 입력·선택 ID provenance, 최종 평가의 완전성·seed 검사를 보완하고 필요한 중단·재개 검사를 수행한다. protocol 변경과 기존 결과의 호환 범위를 명시적으로 연결한다. 안전한 GPU 배치에서 iter_010의 기존 학습량·매 epoch validation·확장 규칙·3개 seed·확인 800명 계획을 유지해 완료하고 실제 비교 결과를 보고한다. iter_011 이후 규모 기준을 이 미완료 실험의 축소 근거로 소급 적용하지 않는다.
 - iter_011 [CONTINUE] (normal/standard/normal) <영상 조건부 집합 grounding: execution_failed> 💾8b030717b813bcbff85a2ffc5f52c9561a73f452 복구 기능과 epoch 1 실제 생성 결과는 확인했지만 재개 검사 5건 실패와 본실험 미완료로 가설 판정을 보류한다. 보고서의 LR별 점수도 서로 뒤바뀌어 정정이 필요하다. → 다음: 실행 호스트에서 기존 train·launcher·pipeline의 PID/starttime·lock·checkpoint·종료 상태를 먼저 확인해 중복 실행을 막는다. 원본을 보존하며 재개 수치 실패를 통제 실험으로 분리하고, 실제 중간-step 재개 및 선택 provenance·pipeline 소유권·completion 처리를 보완한다. 변경 전후 protocol과 기존 산출물 호환 범위를 기록한 뒤, 영향받지 않은 결과를 재사용해 원래 두 LR 5→8 epoch 규칙, 매 epoch validation 400명, seed17/29/43, confirm 800명 계획을 완료한다. 확인 평가 전에 수정된 4 worker 생성 경로의 정합성과 메모리를 검사하고 모든 자식 종료 코드를 수집한다.
 - iter_012 [CONTINUE] (normal/heavy/normal) <영상 조건부 집합 grounding: success> 💾783d2d04671ae296f3dc0c700e575f8af8e021c9 직접 LoRA SFT가 확인 양성 400명에서 prior_set보다 F1@0.3을 평균 0.216 높였고 독립 재계산도 일치했다. baseline은 검증됐지만 새 방법의 기여와 코드 전체 재사용 승인은 남아 있다. → 다음: 검증된 SFT baseline과 결과를 보존하고 실행기 재사용 결함을 필요한 범위에서 수정한다. 이번 confirm은 후속 개발에 사용하면 개발 자료로 전환하고 새로운 확인 집단을 보존한다. train/validation에서 직접 SFT의 학습량 부족 여부와 위치 정밀도·작은 병변·미검출 오류를 구분한 뒤, 기존 조사와 가까운 선행 방법을 대조해 추가 기여가 명확한 후보 하나를 선정한다. 충분한 직접 SFT 및 관련 방법 baseline을 포함하고, 고정된 대표 subset·1개 seed의 실제 생성 탐색에서 확대 기준을 충족하면 다중 seed와 두 번째 데이터셋으로 확장한다.
-- iter_013 [진행 중]
+- iter_013 [CONTINUE] (deep/standard/normal) <영상 조건부 집합 grounding: inconclusive> 💾d68840e0f9317700a8b585bcf6edbb8ef73703a0 실제 생성 비교에서 D−C의 최종 S_loc 차이는 +0.0032였고 V200 선택 조건을 충족하지 못해 확대를 보류했다. 결과는 유효하지만 전체 방법의 기각이나 코드 전체 재사용 승인을 뜻하지 않는다. → 다음: 현재 baseline·원시 응답을 보존하고 multi 집계와 선택 부재 표시를 보완한다. 수정된 잔여 오류 분석으로 자리별 loss의 추가 탐색과 box 기하 supervision 후보를 비교해 다음 의사결정을 바꿀 실험 하나를 선정한다. 새 방법의 차별성과 강한 직접 SFT 비교를 명시하고, 기존 guardrail을 현재 결과에 맞춰 완화하지 않는다. 후속 GPU 실행 전에 사용하는 실행 경로의 허용 GPU·메모리·완료 검증을 보완하며 reserve는 보존한다.
 
 ## 이전 목표들의 접근법 (참고용, 현재 목표의 재평가 횟수에는 안 들어감)
 
@@ -32,6 +32,13 @@
 - Pooling 전후 frozen feature probe [approach/pooling-feature-probe]: 1회 (iter_007), 유효한 실험 0회, 미분류 1회, 최근 판정: abandon, 커밋: 없음
 - 해부구조에서 병변으로 grounding 전이 [approach/anatomy-lesion-transfer]: 1회 (iter_008), 유효한 실험 0회, 미분류 0회, 최근 판정: 사용자 보완으로 전환 (검증 미완료), 커밋: 없음
 - 정상 사용 조건의 병변 grounding 검증 [approach/grounding-usage-diagnostic]: 1회 (iter_009), 유효한 실험 1회, 미분류 0회, 최근 판정: success, 커밋: 39aa49a6fa5943ca0d3e0327a7874e68a2c878cb
-- 영상 조건부 집합 grounding [approach/conditional-set-grounding]: 3회 (iter_010, iter_011, iter_012), 유효한 실험 1회, 미분류 0회, 최근 판정: success, 커밋: 5581ed255a350e42a0ad422065edf13c56a33bf6, 8b030717b813bcbff85a2ffc5f52c9561a73f452, 783d2d04671ae296f3dc0c700e575f8af8e021c9
+- 영상 조건부 집합 grounding [approach/conditional-set-grounding]: 4회 (iter_010, iter_011, iter_012, iter_013), 유효한 실험 2회, 미분류 0회, 최근 판정: inconclusive, 커밋: 5581ed255a350e42a0ad422065edf13c56a33bf6, 8b030717b813bcbff85a2ffc5f52c9561a73f452, 783d2d04671ae296f3dc0c700e575f8af8e021c9, d68840e0f9317700a8b585bcf6edbb8ef73703a0
 
 현재 연구 브랜치: approach/conditional-set-grounding (코드 위치: /SSD1_1TB/home/milab/daniel/08_medgemma/research)
+
+### 최근 계획의 대안 순위
+
+1. 영상 조건부 집합 grounding: 추가 SFT와 자리별 거리 supervision을 실제 생성에서 비교해 후속 방법의 기준선을 강화한다.
+2. R-VLM 기하 목적함수 이식: GIoU 가중 pseudo-box 학습을 복수 병변 출력에 적용하되 label 구성과 계산량을 별도로 통제한다.
+3. 오류별 최소 수정 preference: SPR·TD-DPO와 구별되는 기여가 확보될 때 재검토한다.
+4. 해부구조에서 병변으로 grounding 전이: 보존된 후보이며 직접 SFT와 거리 supervision 이후에도 전이 필요성이 남을 때 검토한다.

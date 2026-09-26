@@ -1,0 +1,135 @@
+# 사고 라운드 2
+
+## 새로 확인한 것
+
+잔여 오류는 빈 응답과 위치 정밀도 문제가 함께 나타난다. 작은 개별 box의 낮은 recall도 확인됐다. 그러나 matching 충돌이나 일률적인 box 크기 편향이 주된 문제라는 근거는 없다. 추가 조사에서 DIST²Loss와 R-VLM을 확인했으므로, 단순 좌표 거리 학습·IoU 가중 학습을 새 방법으로 선정해서는 안 된다.
+
+이번에는 파일·문헌을 읽고 저장된 validation 응답을 메모리에서 집계했다. 파일 생성·수정, 테스트, 모델 추론·학습은 하지 않았다. 아래 신규 수치는 독립 확인 결과가 아니라 개발 자료의 기술 통계다.
+
+## 1. 이전 질문: 미검출과 위치 오차 중 무엇이 남는가?
+
+자료는 `research/results/iter_010/manifests/{gt_manifest,train_ids,validation_ids}.json`과 `research/results/iter_012/train/*/epoch_{04,05}/val_gen/gen_worker*.jsonl`이다. 네 trajectory의 두 checkpoint씩 읽었으며 각각 validation 400명의 고유 요청과 ID 집합이 일치했다. 현재 승인 범위의 parser와 최대 cardinality one-to-one matching 함수를 사용했다. 독립 구현으로 metric 전체를 다시 인증한 것은 아니다.
+
+validation 양성은 200명, GT는 309개다. GT 개수별 환자는 단일 box 98명, 2개 95명, 3개 7명이다.
+
+LR 2e-4, epoch5의 세 seed 결과는 다음과 같다.
+
+| 항목 | seed17 | seed29 | seed43 |
+|---|---:|---:|---:|
+| 양성 빈 응답 환자 / 200명 | 36 | 40 | 37 |
+| 빈 응답 영상의 GT box / 309개 | 48 | 52 | 51 |
+| IoU≥0.3 matched GT | 197 | 186 | 195 |
+| IoU≥0.5 matched GT | 111 | 105 | 111 |
+| 비어 있지 않은 응답에서 best IoU<0.3인 GT | 64 | 71 | 63 |
+| best IoU가 0.3 이상 0.5 미만인 GT | 86 | 81 | 84 |
+| 예측 개수가 GT보다 적은 환자 | 61 | 69 | 60 |
+| 예측 개수가 GT보다 많은 환자 | 18 | 22 | 19 |
+
+seed17에서 IoU 0.5 기준 unmatched GT 198개는 빈 응답 영상의 48개, 비어 있지 않지만 best IoU<0.3인 64개, 0.3≤best IoU<0.5인 86개로 나뉜다. 두 번째 범주에는 실제 누락과 심한 위치 오류가 섞여 있다. 모두 '미검출 원인'으로 단정할 수 없다.
+
+읽은 8개 checkpoint에서 best IoU≥0.3인데 one-to-one 경쟁 때문에 unmatched가 된 GT는 0개였다. 따라서 현재 관찰은 matching 충돌 해소를 우선 개발할 근거가 약하다. 반면 위치 정밀도와 빈 응답을 함께 다루되, 추가 box 증가를 감시할 필요는 있다.
+
+### 개별 box 크기와 환자 union 면적을 구분한 결과
+
+train 개별 GT box 면적의 삼분위 경계는 canvas 면적의 0.0322895, 0.0637582다. 기존 환자 union 면적 경계 0.0397461, 0.0878518과 다르다. 이 train 경계로 나눈 validation box 수는 작은 순서로 113/103/93개다.
+
+seed17 epoch5의 개별 box recall은 다음과 같다.
+
+| 개별 면적 층 | Recall@0.3 | Recall@0.5 |
+|---|---:|---:|
+| small, 113개 | 55/113 = 48.7% | 22/113 = 19.5% |
+| medium, 103개 | 64/103 = 62.1% | 35/103 = 34.0% |
+| large, 93개 | 78/93 = 83.9% | 54/93 = 58.1% |
+
+small box의 Recall@0.5는 다른 seed에서도 19/113, 23/113이었다. seed17에서 small box의 Recall@0.3은 단일 병변 환자에서 32/49, 다중 병변 환자에서 23/64다. 따라서 크기와 병변 개수를 함께 층화해야 한다. 환자 내 box 상관도 있으므로 이 box들을 독립 표본으로 간주한 CI는 사용하지 않는다.
+
+이는 small-lesion 방향을 검토할 관찰 근거지만, 크기 자체의 인과 효과나 vision encoder 병목을 입증하지 않는다. 기존 `by_gt_area_tertile`은 계속 환자 union 면적 지표로 보고한다.
+
+### 단순 크기 보정으로 설명되는가?
+
+seed17의 IoU 0.3–0.5 matched pair 86개에서 예측/GT 면적비 중앙값은 0.962, 사분위 범위는 0.611–1.785였다. GT 높이·너비로 나눈 절대 중심 오차 중앙값은 각각 0.204, 0.145다. IoU≥0.5인 111개에서는 각각 0.063, 0.083이었다. seed29/43의 낮은 IoU pair도 면적비가 넓게 분포했다.
+
+이 조건부 통계만으로 위치 이동이 원인이라고 확정할 수는 없다. 다만 모든 box를 일정 비율로 줄이는 보정이 핵심 해법이라는 근거는 약하다. 실제로 `rsna_diag/baselines.py`의 기존 보정은 미적응 iter_009 출력으로 선택됐으므로 'SFT 이후 보정 baseline도 이미 검증됐다'고 표현해서는 안 된다.
+
+## 2. 이전 질문: checkpoint와 양성·음성 성능의 관계는?
+
+seed29의 epoch4→5에서 양성 F1@0.3은 0.61983→0.59567, F1@0.5는 0.36950→0.33250으로 감소했다. 동시에 Normal 빈 응답은 95→98/100, NoOpacity/NotNormal은 57→64/100으로 증가했다. 양성 빈 응답도 31→40/200으로 늘었다.
+
+seed17에서는 같은 구간의 F1@0.3이 0.62117→0.64050으로 증가했고, F1@0.5는 0.35467→0.35500으로 거의 같았다. 따라서 '마지막 epoch가 잘못됐다'거나 '단순히 더 학습하면 해결된다'는 결론은 모두 부적절하다.
+
+기존 utility 선택은 원 계획에 맞았고 과거 결과는 변경하지 않는다. 새 위치 정밀도 실험에서는 양성 위치 지표와 두 음성 층을 따로 보고, 동일한 선택 규칙을 모든 방법에 적용해야 한다. 선택 규칙 개선 자체를 방법 효과와 섞지 않는다.
+
+## 3. 이전 질문: 집합 preference의 차별성을 수식과 ablation으로 정의할 수 있는가?
+
+### 기존 후보의 차별성은 더 좁아졌다
+
+SPR의 Algorithm 1은 이미 여러 GT·예측 object를 사용하며, GT별 최대 IoU를 평균한다. 선호 응답의 위치 정제와 중복 제거도 포함한다. 따라서 '복수 box와 GT 정제를 사용한다'는 차이는 성립하지 않는다. [SPR 원문](https://arxiv.org/html/2510.14374v1)
+
+MedLoc-R1은 단일 target box의 IoU reward threshold를 성능에 따라 조절한다. 무병변·복수 box 과제와 설정 차이는 있지만, 단순한 집합 reward 확장만으로 새 기여를 주장하기 어렵다. [MedLoc-R1 원문](https://arxiv.org/html/2603.28120v1)
+
+새로 확인한 **DIST²Loss, ICLR 2026**은 거리 기반 분포와 모델 분포의 KL 항을 CE에 더한다: `L = L_CE + α L_dist`, `p_d(v) ∝ exp(-d(v,x,t)/τ)`. 다자리 숫자에 대한 contrastive target augmentation과 자리값 가중도 다룬다. 따라서 거리 label smoothing이나 자릿수 가중 자체는 신규 기여가 아니다. [공식 proceedings](https://proceedings.iclr.cc/paper_files/paper/2026/hash/13b45b44e26c353c64cba9529bf4724f-Abstract-Conference.html), [원문 v3](https://arxiv.org/html/2503.02379v3)
+
+새로 확인한 **R-VLM, Findings of ACL 2025**은 GT 주변 pseudo box에 GIoU 기반 CE 가중치를 주며, 대체 box 간 attention 차단과 position 재사용으로 계산을 묶는다. 두 단계 zoom-in도 포함한다. IoU를 반영하는 좌표 학습이나 crop 정제만으로 차별화하기 어렵다. 목적함수 이식과 전체 R-VLM 재현은 구분해야 한다. [원문](https://arxiv.org/html/2507.05673v1), [ACL 논문](https://aclanthology.org/2025.findings-acl.501.pdf)
+
+추가로 **Phrase-grounded APO, CVPR 2026**은 흉부 보고서에서 preference와 위치 정렬을 결합한다. 공식 초록과 검색에 제공된 원문 수식 구간을 확인했지만 전체 PDF 조회는 실패했다. 현재 bbox-only 학습의 직접 baseline으로 확정하지 않았으며, 의료 preference와 위치 loss의 결합 자체도 새로운 주장으로 삼지 않는다. [공식 기록](https://openaccess.thecvf.com/content/CVPR2026/html/Mahmood_Phrase-grounded_APO_for_Improving_Chest_X-ray_Report_Generation_CVPR_2026_paper.html)
+
+### 아직 검토할 수 있는 후보와 필수 대조
+
+잠정 후보는 모델의 train 출력에서 오류 하나만 고친 응답을 구성하고, 위치 교정·누락 추가·추가 box 제거를 구분해 학습하는 방식이다. 그러나 이것을 표준 sequence DPO에 넣으면 새 목적함수가 아니라 preference 데이터 구성법이다.
+
+수정 구간 E만 사용하는 후보는 `Δ_E = Σ_E log(πθ/πref)(y+) − Σ_E log(πθ/πref)(y−)`, `L = L_SFT − λ E[log σ(βΔ_E)]`로 적을 수 있다. 이는 검토용 식이지 채택한 방법이 아니다. 일반 DPO와 달리 전체 sequence 확률비가 아니므로 그 이론을 그대로 주장할 수 없다. 공통 prefix의 항은 상쇄되지만, 수정 이후 동일한 suffix도 조건부 context가 달라 자동 상쇄되지 않는다. box 추가·삭제는 token 위치와 종료 결정을 바꾸므로 mask 정의를 먼저 해결해야 한다.
+
+차이가 있는지 검증하려면 같은 pair의 full-sequence DPO, 같은 수정 정답의 SFT, 오류 종류별 균형만 적용한 DPO, 거리·IoU 기반 학습과 비교해야 한다. 단순한 정답 노출 증가·긴 응답 선호·표본 가중 효과로 설명되면 별도 방법론 주장을 중단한다. 현재 데이터에서 matching 충돌이 관찰되지 않았으므로 matching 자체를 핵심 기여로 내세우는 우선순위는 낮춘다.
+
+## 4. 이전 질문: 추가 SFT의 공정한 탐색 조건은?
+
+다음 구현 계획에 사용할 잠정 설계는 다음과 같다. 아직 실행 protocol로 확정하지 않았다.
+
+- 시작점은 기존 LR 2e-4, seed17, epoch5 adapter로 통일한다. 과거 optimizer trajectory를 그대로 이어갔다고 주장하지 않고, 모든 비교군의 optimizer를 같은 규칙으로 새로 시작하는 별도 적응 단계로 정의한다.
+- train에서 1,200명: opacity 600명과 두 음성 층 각 300명. 양성은 개별 box 크기·병변 개수·union 면적을 반영해 결정적으로 추출한다. 같은 환자 목록과 순서를 모든 조건이 공유한다.
+- 직접 SFT의 초기 비교안은 추가 3 epochs, effective batch16, 225 updates, 3,600 image presentations다. peak LR 2e-5, 5% warmup과 해당 단계에 고정된 cosine schedule을 사용한다. 이는 기존 peak의 0.1배라는 출발값이며 충분한 수렴을 보장하지 않는다.
+- DPO는 image 수가 같아도 chosen/rejected와 reference 계산이 추가된다. image 노출량 일치 비교와 실제 token·GPU 비용 비교를 분리한다. 필요한 경우 유망 후보에 한해 계산량을 맞춘 추가 SFT를 둔다.
+- validation 400명 중 층화한 200명으로 추세를 보고, 시작점과 사전 지정 최종 후보에서 400명 전체를 비교하는 방향이다. 원본 epoch마다 전체 validation을 자동 반복하지 않는다.
+- 선택 지표의 잠정안은 `S_loc=(F1@0.3+F1@0.5)/2`이며, 시작점 대비 두 음성 층 valid_empty 감소 각각 3 percentage points 이내와 valid 출력률 99% 이상을 운영상 제약으로 둔다. 이는 임상적 비열등성 기준이 아니다. 기존 utility도 병기한다.
+- 추가 학습 SFT 대비 S_loc +0.03 이상이면서 제약을 지키면 확대 후보로 삼는다. paired 불확실성과 학습 추세를 함께 보고, 짧은 학습의 무개선만으로 전체 설계를 기각하지 않는다. 더 많은 표본·학습으로 판단이 바뀔 구체적 근거가 있으면 보완한다.
+
+최종 LR 비교 범위와 확대 schedule은 새 목적함수를 정한 뒤 동일 선택 예산으로 잠근다. 유망 후보와 가장 강한 baseline만 train 2,400명 및 seed29/43으로 확대한다. 이 탐색은 SFT의 최종 수렴을 선언하기 위한 실험이 아니다.
+
+로컬 tokenizer JSON도 읽었다. 모델 revision `91850547d9f0b2fdd21aa7c5f4f3d1a8a52c243b`의 vocabulary에는 숫자 한 자리 항목이 있고 조회한 `10`, `39`, `40`, `100`, `1000` 항목은 없다. 정확한 좌표 span과 경계 token 연결은 아직 검사하지 않았다. DIST²Loss를 단일 좌표 token용으로 바로 이식해서는 안 된다.
+
+## 5. 이전 질문: reserve와 두 번째 데이터셋은 충분한가?
+
+reserve manifest에는 opacity 496명, Normal 5,562명, NoOpacity/NotNormal 2,050명이 있고 각 목록 내 중복은 없다. 현재 train/validation/기존 confirm 3,600명의 patient ID와의 교집합은 모두 0이었다. 신규 영상의 decoded hash와 전체 과거 exclusion 대조까지 완료한 것은 아니다.
+
+양성 496명을 모두 후속 확인용으로 보존하는 것이 타당하다. 환자별 paired 차이의 표준편차를 0.3/0.4/0.5로 가정하면, n=496의 정규근사 95% CI 반폭은 약 0.026/0.035/0.044이고, 양측 5%·80% power의 검출 효과는 약 0.038/0.050/0.063이다. 이는 가정에 따른 계산으로 실제 새 방법의 power가 아니다. 작은 개선을 반드시 입증할 수 있는 규모라고 약속할 수 없다. 학습 seed 변동도 별도로 남는다.
+
+Kvasir-SEG 저자 저장소는 1,000개 polyp 영상, mask와 bbox JSON, 46.2MB 배포를 설명하며 원래 polyp class에서 영상 13개를 교체했다고 명시한다. mirror·Kvasir 버전 혼합을 피해야 한다. 읽은 공식 README에는 patient/video 분할 근거가 없었다. 공식 배포 사이트는 조회 timeout이 났고, 이번에 실제 archive·bbox 파일·중복을 검증하지 않았다. [저자 저장소](https://github.com/DebeshJha/Kvasir-SEG)
+
+MediaEval 2020 저자 저장소는 별도 test 자료 링크도 제공한다. 그러나 파일 내용·접근 가능성·주석·환자 독립성은 확인하지 않았다. [공식 challenge 저장소](https://github.com/DebeshJha/2020-MediaEval-Medico-polyp-segmentation)
+
+따라서 Kvasir-SEG는 조건부 두 번째 데이터셋 후보다. 양성 polyp 자료만으로 무병변 suppression을 증명할 수 없으며, 이미지 중복 제거를 patient independence로 바꾸어 표현해서도 안 된다. 파일·주석·분할 검증 전에는 확정된 독립 확인 규모를 적지 않는다. RSNA의 기존 confirm 800명은 후속 개발 자료로 취급하되, 과거 독립 확인의 역사적 유효성은 유지한다.
+
+## 6. 재사용·자원·보완 지시
+
+`research/`의 HEAD는 `783d2d04671ae296f3dc0c700e575f8af8e021c9`이며 tracked diff는 없다. 미추적 `test_rsna_iter010_gpu.py`는 그대로 보존한다. 현재 브랜치에 필요한 parser·geometry·metrics·LoRA·학습·생성 파일이 있으므로 외부 반입을 요청하지 않는다. 전체 스냅샷 승인으로 해석하지 않는다.
+
+iter_012 리뷰의 부모 재사용 NameError, final·gen_check의 존재 기반 재사용, 출력 일치 gate, protocol 밖 보조 실행기와 fixture·GPU mapping 문제는 실제 새 경로에 필요한 범위에서 수정해야 한다. 과거 완료 실험을 다시 실행할 이유는 아니다.
+
+직전 보고서의 학습 GPU별 약 12.2GB, 병렬 두 trajectory 약 5.3시간, SFT 800요청 약 15분을 비용 추정의 출발점으로 유지한다. 추가 forward가 있는 목적함수의 peak와 처리량은 미측정이다. 다음 계획에서는 두 GPU에 독립 조건을 배치하고, 추론은 batch 확대 또는 GPU당 복수 worker를 비교하되 출력 정합성과 worker당 2GB 여유를 강제한다. 임의 시간 상한은 두지 않는다.
+
+사용자 보완 중 정상 사용 diagnostic 우선 요구는 iter_009에서 충족됐고, iter_012에서 실제 생성 개선이 검증됐다. 공식 sanity를 반복할 필요는 없다. anatomy 전이는 보존 후보이며 자동 재개하지 않는다. pooling·decoder 병목도 확정하지 않는다.
+
+## 대규모 GPU 필요 후보
+
+이전 노트의 GETok 전체 SFT/RL, MedLoc-R1 원논문 GRPO, IoU-PD full-parameter teacher/student 학습을 보존한다. 현 두 GPU에서는 LoRA 및 순차 reference 계산 가능성을 별도 실측해야 하며, 원논문 자원 규모만으로 경량 변형을 배제하지 않는다.
+
+## 이번 판단과 다음 정보 이득
+
+추가 조사는 실제 비교군을 바꿨다. 오류 분석은 matching 중심 후보의 우선순위를 낮췄고, 새 문헌은 거리·IoU 학습을 필수 baseline으로 올렸다. 아직 오류별 최소 수정 preference의 차별성과 token-level 정의가 충분하지 않아 전체 구현 계획을 확정하지 않는다.
+
+다음 라운드는 DIST²Loss·R-VLM의 구현 조건과 최소 수정 후보의 목적함수 차이만 확인한다. 독립적인 기여를 정의하지 못하면 새 이름의 방법을 강행하지 않고, 추가 SFT와 가까운 선행 목적함수의 실제 생성 비교를 다음 구현 과제로 확정한다. 데이터셋 다운로드의 불확실성 때문에 RSNA 개발 실험 전체를 보류하지 않는다.
+
+## 다음에 파고들 질문
+- DIST²Loss의 다자리 숫자 처리와 R-VLM의 IoU 가중 학습을 현재 MedGemma tokenizer·assistant mask·LoRA에 이식할 때 무엇을 그대로 재현할 수 있는가? 두 방법 중 잔여 위치 오류에 더 직접적이고 재현 가능한 1순위 baseline은 무엇인가?
+- 오류 하나만 수정하는 preference에서 추가·삭제·좌표 교정의 token span과 종료 결정을 일관되게 정의할 수 있는가? 동일 pair의 sequence DPO·수정 정답 SFT·기존 거리 loss로 설명되지 않는 차이와 이를 반증할 최소 ablation이 있는가?
+- 위 비교 결과에 따라 추가 SFT와 후보의 LR·노출량·선택 예산 및 확대 schedule을 어떻게 최종 고정할 것인가? 차별성이 남지 않으면 추가 SFT와 선행 목적함수 비교만으로 다음 구현을 확정할 수 있는가?
