@@ -14,10 +14,11 @@ Claude로 넘어간다. 라운드별 노트는 runs/iter_NNN/think/, 최대 --ma
 
 단계별 모델/사고 수준은 agent/tiers.json의 등급으로 정한다.
     GPT 계획  : 직전 리뷰의 next_plan_tier (deep / normal / light), 첫 반복은 deep
-    Claude    : 계획의 claude_tier (creative / heavy / light)
-    GPT 리뷰  : Claude 등급을 따라감 (creative→deep, heavy→normal, light→light)
+    Claude    : 계획의 claude_tier (기본 standard, creative / heavy / standard / light)
+    GPT 리뷰  : creative→deep, heavy/standard→normal, light→light
 
-GPT 리뷰는 계획의 review_mode가 full일 때만 한다. skip이어도 Claude의 SELF_CHECK가
+연구 진단·방법 개발·독립 확인은 항상 GPT 리뷰를 한다. 나머지는 review_mode가 full일 때 한다.
+skip이어도 Claude의 SELF_CHECK가
 PASS가 아니거나 권한 거부가 있으면 리뷰한다. 리뷰를 건너뛴 반복은 다음 계획 단계에서
 GPT가 Claude 보고서를 직접 읽고 확인한다.
 
@@ -30,13 +31,15 @@ GPT가 Claude 보고서를 직접 읽고 확인한다.
     묻지 않고 GPT 제안대로 진행한다 (물었을 지점은 "사람 부재로 자동 결정"으로 기록·알림).
 
 접근법 관리: 계획은 대안 순위(alternatives)와 이번 approach를 내고, 리뷰는 approach를
-success / improve / abandon으로 판정한다. 같은 approach는 --max-attempts번까지만 시도하고
-(마지막 시도는 GPT 리뷰 강제), 넘으면 다음 대안으로 넘어가거나 사람에게 묻는다.
+success / improve / inconclusive / execution_failed / abandon으로 판정한다.
+--max-attempts는 유효한 실험 이후 방향을 재평가할 기준이며, 자동 포기 횟수가 아니다.
 
 코드 버전 관리: Claude는 research/ 폴더(자체 git 저장소)에서 작업한다.
-접근법마다 approach/<approach_id> 브랜치를 쓰고, 직전 접근법이 success면 그 위에서,
-아니면 그 접근법이 시작한 지점으로 돌아가 새 브랜치를 만든다. 커밋은 GPT 리뷰가
-commit_worthy로 판단한 경우에만 한다. 버리는 접근법의 미커밋 작업은 git stash로 보관한다.
+접근법마다 approach/<approach_id> 브랜치를 쓴다. 가설 성공 여부와 코드 보존을 분리하고,
+검토된 재사용 가능 커밋 또는 계획이 지정한 재사용 반복에서 새 브랜치를 만든다.
+구현 종료·안전한 중단 뒤 소스 변경은 검증 판정과 무관하게 체크포인트 커밋으로 보존한다.
+전체/모듈 재사용 승인은 GPT 리뷰로 별도 기록하며, 명시한 모듈은 다음 구현 전에 선별 반입한다.
+소유 범위가 불명확한 기존 미커밋 작업은 stash·영구 ref·patch로 보관한다.
 브랜치는 research/ 안에서만 바뀌므로 오케스트레이터, agent/ 기록, legacy/는 그대로다.
 연구 커밋에는 iter_NNN 태그를 붙여 브랜치를 지워도 기록이 가리키는 커밋이 남게 하고,
 stash한 작업은 반복 폴더에 patch로도 저장한다.
@@ -55,6 +58,7 @@ orchestrator.py를 고친 뒤 다시 실행해도 완료되지 않은 단계부�
     - 에이전트 호출이 실패하면(네트워크 등) 1분·5분·15분 뒤 다시 시도한다.
     - GPT·Claude 사용 한도에 걸리면 한도가 풀릴 때까지 --limit-poll-minutes마다 다시 시도하며
       최대 --limit-max-hours 기다렸다가 자동으로 이어간다 (Telegram으로 대기·재개 알림).
+      월간 지출 한도는 예외로 즉시 중단한다. 계정 상태 확인 후 수동 재개한다.
     - 예전 반복 파일에 없는 필드는 기본값으로 채워 읽는다.
 연구 목표 변경: --goal "새 목표"는 기록을 지우지 않고 새 챕터를 연다. 반복 번호는 이어지고,
 새 목표의 첫 계획(deep)은 이전 기록에서 가져올 것을 정리한 뒤 새 목표 기준으로 다시 사고한다.
@@ -63,7 +67,8 @@ orchestrator.py를 고친 뒤 다시 실행해도 완료되지 않은 단계부�
 정지: 터미널 Ctrl+C, `touch agent/STOP`(현재 단계 후), Telegram `stop` / `stop now` / `status`.
 
 사용 예:
-    python orchestrator.py                     # smart: 애매할 때만 확인
+    python orchestrator.py                     # 횟수 제한 없이 진행, smart: 애매할 때만 확인
+    python orchestrator.py --max-iters 3       # 이번 실행만 최대 3회로 제한
     python orchestrator.py --autonomy manual   # 매 반복 계획을 확인
     python orchestrator.py --auto --max-iters 5
     python orchestrator.py --goal "새 연구 목표"     # 이전 기록을 이어받아 목표 변경
@@ -75,16 +80,24 @@ orchestrator.py를 고친 뒤 다시 실행해도 완료되지 않은 단계부�
 from pathlib import Path
 import argparse
 import datetime
+import contextlib
+import fcntl
 import json
 import os
 import re
+import signal
 import shutil
 import subprocess
 import sys
 import threading
 import urllib.request
+import uuid
 
 from notifier import Human
+from claude_usage import summarize_stream, usage_report
+import research_history as history
+import gpt_usage
+from presentation import notice, iteration_result
 
 PROJECT_DIR = Path(__file__).resolve().parent
 AGENT_DIR = PROJECT_DIR / "agent"
@@ -104,6 +117,8 @@ DECISIONS_FILE = AGENT_DIR / "DECISIONS.md"
 RECORD_PATHS = (
     "agent/GOAL.md", "agent/GOALS.json", "agent/INDEX.md", "agent/DECISIONS.md",
     "agent/JOURNEY.md", "agent/PAPERS.md", "agent/RESEARCH_LOG.md", "agent/runs", "agent/archive",
+    "agent/CODE_ASSETS.md",
+    "agent/LIMITATIONS.md", "agent/LIMITATIONS.json", "agent/interventions",
     # 오케스트레이터 도입 전 수동 실행 기록
     "agent/GPT_PLAN.md", "agent/CLAUDE_REPORT.md", "agent/GPT_REVIEW.md",
 )
@@ -114,6 +129,16 @@ STOP_FILE = AGENT_DIR / "STOP"
 RETRY_DELAYS = (60, 300, 900)
 LOG_FILE = AGENT_DIR / "RESEARCH_LOG.md"
 TIERS_FILE = AGENT_DIR / "tiers.json"
+RESOURCE_POLICY_FILE = AGENT_DIR / "RESOURCE_POLICY.md"
+RESEARCH_POLICY_FILE = AGENT_DIR / "RESEARCH_POLICY.md"
+CLAUDE_USAGE_POLICY_FILE = AGENT_DIR / "CLAUDE_USAGE_POLICY.md"
+REPORTING_STYLE_FILE = AGENT_DIR / "REPORTING_STYLE.md"
+CODE_ASSETS_FILE = AGENT_DIR / "CODE_ASSETS.md"
+LIMITATIONS_FILE = AGENT_DIR / "LIMITATIONS.json"
+LIMITATIONS_REPORT = AGENT_DIR / "LIMITATIONS.md"
+RESUME_FILE = AGENT_DIR / "RESUME.md"
+INTERVENTIONS_DIR = AGENT_DIR / "interventions"
+LOCK_FILE = AGENT_DIR / ".orchestrator.lock"
 # runs/ 도입 전 수동 실행의 마지막 리뷰. 첫 반복 계획의 참고 자료로 쓴다.
 LEGACY_REVIEW_FILE = AGENT_DIR / "GPT_REVIEW.md"
 # Telegram 봇 설정 (TELEGRAM_BOT_TOKEN, TELEGRAM_CHAT_ID). git에 올리지 않는다.
@@ -152,6 +177,13 @@ class UsageLimitError(RetryableError):
     """구독 사용 한도 초과. 한도가 풀릴 때까지 기다렸다 다시 시도한다."""
 
 
+class SpendLimitError(AgentError):
+    """월간 지출 한도. 자동 재시도·지출 한도 인상 없이 중단한다."""
+
+
+SPEND_LIMIT_PATTERN = re.compile(r"monthly\s+(?:spend(?:ing)?|cost)\s+limit", re.IGNORECASE)
+
+
 # 한도 초과 에러 문구 (실제 문구를 보면 여기에 맞춰 다듬는다)
 USAGE_LIMIT_PATTERN = re.compile(
     r"usage limit|rate.?limit|limit reached|hit your (usage )?limit|quota|too many requests"
@@ -163,7 +195,13 @@ LIMIT = {"poll": 30 * 60, "max": 8 * 60 * 60}
 
 
 def failure_error(message, output):
-    """실패 출력이 사용 한도 초과처럼 보이면 UsageLimitError, 아니면 RetryableError."""
+    """월간 지출 한도는 중단, 일시적 사용 한도와 그 외 오류는 각각 재시도한다."""
+    if SPEND_LIMIT_PATTERN.search(output or ""):
+        return SpendLimitError(
+            f"월간 지출 한도로 중단 (자동 재시도 안 함): {message}\n"
+            "Claude 계정의 /usage 또는 Settings > Usage에서 제한을 확인한 뒤 재실행하세요. "
+            "지출 한도는 자동으로 올리지 않습니다."
+        )
     if USAGE_LIMIT_PATTERN.search(output or ""):
         return UsageLimitError(f"사용 한도 초과로 보임: {message}", output)
     return RetryableError(message, output)
@@ -215,8 +253,11 @@ def with_retries(what, fn):
                 limited = True
                 hours = LIMIT["max"] / 3600
                 print(f"\n[한도] {what}: 사용 한도 도달 → {LIMIT['poll'] // 60}분마다 확인하며 최대 {hours:g}시간 대기")
-                notify(f"⏳ {what}: 사용 한도에 걸렸습니다. {LIMIT['poll'] // 60}분마다 확인하며 "
-                       f"한도가 풀리면 자동으로 이어갑니다 (최대 {hours:g}시간).\n{str(e.output or e)[-300:]}")
+                notify(notice(f"⏳ {what} | 사용 한도로 대기", [
+                    ("현재", "사용 한도에 도달해 작업이 대기 중입니다."),
+                    ("다음", f"{LIMIT['poll'] // 60}분마다 재시도합니다. 최대 {hours:g}시간 대기하며 한도가 풀리면 자동으로 이어갑니다."),
+                    ("오류", str(e.output or e)),
+                ]))
                 if STATE["n"] is not None:
                     record_event(STATE["n"], "limit_wait", what=what)
                 STATE["limit_wait"] = (what, datetime.datetime.now())
@@ -231,7 +272,10 @@ def with_retries(what, fn):
             attempt += 1
             minutes = delay // 60
             print(f"\n[재시도] {what} 실패 → {minutes}분 뒤 다시 시도 ({attempt}/{len(RETRY_DELAYS)})")
-            notify(f"🔁 {what} 실패, {minutes}분 뒤 다시 시도 ({attempt}/{len(RETRY_DELAYS)})\n{str(last)[:300]}")
+            notify(notice(f"🔁 {what} | 일시적 실패", [
+                ("오류", str(last)),
+                ("다음", f"{minutes}분 뒤 다시 시도합니다 ({attempt}/{len(RETRY_DELAYS)})."),
+            ]))
             sleep_with_stop(delay)
             continue
 
@@ -266,6 +310,111 @@ def read(path, default=""):
 def save(path, text):
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(text, encoding="utf-8")
+
+
+def save_atomic(path, text):
+    """중단돼도 제어 상태 파일이 반쪽짜리 JSON으로 남지 않게 게시한다."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    temporary = path.with_name(path.name + ".tmp")
+    temporary.write_text(text, encoding="utf-8")
+    temporary.replace(path)
+
+
+@contextlib.contextmanager
+def orchestrator_lock():
+    LOCK_FILE.parent.mkdir(parents=True, exist_ok=True)
+    with LOCK_FILE.open("a") as handle:
+        try:
+            fcntl.flock(handle, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError:
+            raise AgentError("orchestrator가 이미 실행 중입니다. 중단·종료를 확인한 뒤 다시 실행하세요.")
+        try:
+            yield
+        finally:
+            fcntl.flock(handle, fcntl.LOCK_UN)
+
+
+def pending_interventions():
+    return [p for p in sorted(INTERVENTIONS_DIR.glob("*/transaction.json"))
+            if (load_json(p) or {}).get("status") == "preparing"]
+
+
+def queue_replan(text):
+    if not text.strip():
+        raise AgentError("보완 지시가 비어 있습니다.")
+    if RESUME_FILE.exists() or pending_interventions():
+        raise AgentError("미적용 보완 지시가 있습니다. agent/RESUME.md를 확인하거나 먼저 적용하세요.")
+    save_atomic(RESUME_FILE, text.strip() + "\n")
+
+
+def apply_pending_replan():
+    """실험 기록을 삭제하지 않고 새 반복으로 전환한다. 재시작 시 같은 전환을 마무리한다."""
+    pending = pending_interventions()
+    if len(pending) > 1:
+        raise AgentError("미완료 보완 전환이 여러 개입니다. agent/interventions를 확인하세요.")
+    if pending:
+        tx_file = pending[0]
+        tx = load_json(tx_file)
+    else:
+        if not RESUME_FILE.exists():
+            return None
+        instructions = read(RESUME_FILE)
+        if not instructions.strip():
+            raise AgentError("agent/RESUME.md가 비어 있습니다. 지시를 작성한 뒤 재개하세요.")
+        source = current_iteration()
+        # 아직 시작하지 않은 빈 반복은 그대로 사용한다. 산출물이 있으면 다음 번호로 전환한다.
+        active = iter_dir(source).exists() and any(iter_dir(source).iterdir())
+        target = source + 1 if active else source
+        if active and iter_dir(target).exists():
+            raise AgentError(f"전환 대상 iter_{target:03d}가 이미 있습니다. 덮어쓰지 않습니다.")
+        identity = datetime.datetime.now().strftime("%Y%m%d_%H%M%S_") + uuid.uuid4().hex[:8]
+        tx_file = INTERVENTIONS_DIR / identity / "transaction.json"
+        tx = {"id": identity, "status": "preparing", "source_iteration": source if active else None,
+              "target_iteration": target, "source_stage": stage_of(source) if active else "새 계획",
+              "instructions": instructions, "time": now()}
+        save_atomic(tx_file, json.dumps(tx, ensure_ascii=False, indent=2))
+
+    target = tx["target_iteration"]
+    source = tx["source_iteration"]
+    if source is not None:
+        old = iter_dir(source)
+        if ((old / "code_baseline.json").exists() and not (old / "checkpoint.json").exists()
+                and not (old / "review.json").exists()):
+            checkpoint_code(source, "before_replan")
+    d = iter_dir(target)
+    marker = load_json(d / "intervention.json")
+    if marker and marker.get("id") != tx["id"]:
+        raise AgentError("다른 보완 지시의 전환 대상과 충돌했습니다. 기존 기록은 유지합니다.")
+    save_atomic(tx_file.parent / "request.md", tx["instructions"])
+    save_atomic(d / "intervention.json", json.dumps(tx, ensure_ascii=False, indent=2))
+    if source is not None:
+        superseded = {"intervention": tx["id"], "successor": target, "time": tx["time"],
+                      "reason": "사용자 보완으로 재계획. 성공·실패 판정 아님", "source_stage": tx["source_stage"]}
+        save_atomic(iter_dir(source) / "superseded.json", json.dumps(superseded, ensure_ascii=False, indent=2))
+    # 파일을 변경하는 동안 새 지시가 들어왔다면 새 지시는 남겨 다음 경계에서 별도로 처리한다.
+    if RESUME_FILE.exists() and read(RESUME_FILE) == tx["instructions"]:
+        RESUME_FILE.replace(tx_file.parent / "consumed_request.md")
+    tx["status"] = "applied"
+    save_atomic(tx_file, json.dumps(tx, ensure_ascii=False, indent=2))
+    rebuild_index()
+    print(f"보완 지시 적용: iter_{target:03d}에서 GPT 재계획 → 새 Claude 세션. 원본 기록·코드는 보존합니다.")
+    return target
+
+
+def intervention_context(n):
+    starts = [i for i in existing_iterations() if goal_start(n) <= i <= n
+              and (iter_dir(i) / "intervention.json").exists()]
+    tx = load_json(iter_dir(starts[-1]) / "intervention.json") if starts else None
+    if not tx:
+        return "없음"
+    source = tx["source_iteration"]
+    origin = f"agent/runs/iter_{source:03d}/" if source is not None else "이전 미완료 반복 없음"
+    return (f"보완 ID: {tx['id']}\n이전 기록: {origin}\n중단 당시 단계: {tx['source_stage']}\n"
+            f"현재 사용자 지시:\n{tx['instructions']}\n"
+            "이전 계획은 참고 후보이며 자동으로 이어서 실행하지 않는다. 현재 지시에 맞춰 재계획한다.\n"
+            "기존 소스·부분 산출물은 먼저 확인하고 검증해 재사용한다. 새 결과는 이번 반복 경로에 저장한다.\n"
+            "이미 검증 완료된 일회성 보완 작업은 반복하지 않는다. 이후 반복에도 유지할 운영 기준은 계속 적용한다.\n"
+            "이전 세션·완료 표시·실험 결과를 삭제하거나 새 결과로 덮어쓰지 않는다.")
 
 
 def log(title, text):
@@ -332,15 +481,18 @@ def run_streaming(cmd, log_path, timeout, env, on_line, cwd=PROJECT_DIR):
             stdout=subprocess.PIPE,
             stderr=subprocess.STDOUT,
             bufsize=1,
+            start_new_session=True,
         )
         STATE["proc"] = proc
 
         def kill():
             timed_out.set()
-            proc.kill()
+            kill_agent_group(proc)
 
-        timer = threading.Timer(timeout, kill)
-        timer.start()
+        # 0은 시간 제한 없음. 명시적으로 설정한 양수 timeout만 적용한다.
+        timer = threading.Timer(timeout, kill) if timeout > 0 else None
+        if timer is not None:
+            timer.start()
         try:
             for line in proc.stdout:
                 log_f.write(line)
@@ -349,11 +501,17 @@ def run_streaming(cmd, log_path, timeout, env, on_line, cwd=PROJECT_DIR):
                 on_line(line)
             proc.wait()
         except KeyboardInterrupt:
-            proc.kill()
+            kill_agent_group(proc)
+            proc.wait()
+            raise
+        except BaseException:
+            kill_agent_group(proc)
             proc.wait()
             raise
         finally:
-            timer.cancel()
+            if timer is not None:
+                timer.cancel()
+            proc.stdout.close()
             STATE["proc"] = None
 
     if STATE["stop_now"]:
@@ -364,20 +522,51 @@ def run_streaming(cmd, log_path, timeout, env, on_line, cwd=PROJECT_DIR):
         raise failure_error(f"{cmd[0]} 종료 코드 {proc.returncode}. 로그: {log_path}", "".join(tail))
 
 
+def kill_agent_group(proc):
+    """이번 호출이 만든 전용 프로세스 그룹만 종료한다 (다른 사용자의 작업은 대상 아님)."""
+    try:
+        os.killpg(proc.pid, signal.SIGKILL)
+    except ProcessLookupError:
+        pass
+
+
 # --------------------------------------------------
 # 에이전트 호출
 # --------------------------------------------------
 
 GPT_TIERS = ["deep", "normal", "light"]
-CLAUDE_TIERS = ["creative", "heavy", "light"]
-# 같은 접근법 최대 시도 횟수 (--max-attempts로 덮어씀)
+CLAUDE_TIERS = ["creative", "heavy", "standard", "light"]
+# 같은 접근법의 유효한 실험을 재평가하는 기준 (--max-attempts로 덮어씀)
 MAX_ATTEMPTS = 3
 # Claude 작업 등급 → 그 결과를 검토할 GPT 리뷰 등급
-REVIEW_TIER_FOR_CLAUDE = {"creative": "deep", "heavy": "normal", "light": "light"}
+REVIEW_TIER_FOR_CLAUDE = {"creative": "deep", "heavy": "normal", "standard": "normal", "light": "light"}
 
 
 def tier_spec(agent, tier):
     return json.loads(read(TIERS_FILE))[agent][tier]
+
+
+def resource_context(args):
+    """재시도·세션 재개를 포함한 모든 호출에 최신 사용자 자원 정책을 전달한다."""
+    policy = read(RESOURCE_POLICY_FILE).strip()
+    if not policy:
+        raise AgentError(f"연구 자원 정책이 없거나 비어 있음: {RESOURCE_POLICY_FILE}")
+    research_policy = read(RESEARCH_POLICY_FILE).strip()
+    if not research_policy:
+        raise AgentError(f"연구 운영 정책이 없거나 비어 있음: {RESEARCH_POLICY_FILE}")
+    usage_policy = read(CLAUDE_USAGE_POLICY_FILE).strip()
+    if not usage_policy:
+        raise AgentError(f"Claude 사용량 정책이 없거나 비어 있음: {CLAUDE_USAGE_POLICY_FILE}")
+    visible = args.gpus if args.gpus is not None else os.environ.get("CUDA_VISIBLE_DEVICES", "미지정 (실행 전 확인)")
+    timeout = f"{args.claude_timeout}초 (명시된 실행 제한)" if args.claude_timeout else "시간 제한 없음"
+    return (
+        f"=== 현재 사용자 자원 정책 (이전 계획의 임의 시간 상한보다 우선) ===\n{policy}\n\n"
+        f"=== 현재 연구 운영 정책 (이전 자동 포기·코드 폐기 규칙보다 우선) ===\n{research_policy}\n\n"
+        f"=== 현재 Claude 사용량 정책 (필수 검증·GPU 활용 유지) ===\n{usage_policy}\n\n"
+        f"=== 사람이 읽는 설명·보고서의 표현 기준 (실행·검증 기준은 유지) ===\n{read(REPORTING_STYLE_FILE)}\n\n"
+        f"=== 현재 실행 설정 ===\nCUDA_VISIBLE_DEVICES: {visible}\n"
+        f"Claude 단계 timeout: {timeout}\n\n"
+    )
 
 
 def run_codex(args, prompt, out_file, log_path, tier, schema=None):
@@ -394,13 +583,22 @@ def run_codex(args, prompt, out_file, log_path, tier, schema=None):
     ]
     if schema:
         cmd += ["--output-schema", str(schema)]
-    cmd.append(prompt)
+    cmd.append(resource_context(args) + prompt)
 
     out_file.unlink(missing_ok=True)
-    run_streaming(
-        cmd, log_path, args.gpt_timeout, agent_env(args.gpus),
-        on_line=lambda line: print(f"  [gpt] {line}", end="", flush=True),
-    )
+    try:
+        run_streaming(
+            cmd, log_path, args.gpt_timeout, agent_env(args.gpus),
+            on_line=lambda line: print(f"  [gpt] {line}", end="", flush=True),
+        )
+    finally:
+        if log_path.exists():
+            try:
+                usage = gpt_usage.summarize_log(log_path)
+                path = log_path.with_name(log_path.stem.replace("_codex", "") + "_usage.json")
+                save_atomic(path, json.dumps(usage, ensure_ascii=False, indent=2))
+            except (OSError, ValueError) as e:
+                print(f"[WARN] GPT 사용량 요약 저장 실패 (원본 로그 보존): {e}")
 
     text = read(out_file).strip()
     if not text:
@@ -439,7 +637,7 @@ def run_claude(args, prompt, log_path, tier, session_file=None, resume_id=None):
     ]
     if resume_id:
         cmd += ["--resume", resume_id]
-    cmd.append(prompt)
+    cmd.append(resource_context(args) + prompt)
 
     result = {}
 
@@ -463,7 +661,19 @@ def run_claude(args, prompt, log_path, tier, session_file=None, resume_id=None):
         elif event.get("type") == "result":
             result.update(event)
 
-    run_streaming(cmd, log_path, args.claude_timeout, agent_env(args.gpus), on_line, cwd=RESEARCH_DIR)
+    try:
+        run_streaming(cmd, log_path, args.claude_timeout, agent_env(args.gpus), on_line, cwd=RESEARCH_DIR)
+    finally:
+        # 실패·timeout·사용자 정지도 집계한다. 원본을 재집계하므로 누적값/재시도를 중복 합산하지 않는다.
+        if log_path.exists():
+            try:
+                usage = summarize_stream(log_path)
+                usage.update(last_requested_tier=tier, updated_at=now())
+                save_atomic(log_path.with_name("claude_usage.json"),
+                            json.dumps(usage, ensure_ascii=False, indent=2))
+            except (OSError, ValueError) as e:
+                # 집계 실패가 원래 실행 결과나 중단 이유를 가리지 않게 한다.
+                print(f"[WARN] Claude 사용량 요약 저장 실패 (원본 로그 보존): {e}")
 
     if not result:
         raise RetryableError(f"Claude result 이벤트 없음. 로그: {log_path}")
@@ -597,11 +807,17 @@ PLAN_DEFAULTS = {
     "plan_summary": "", "approach": "?", "approach_id": "", "alternatives": [],
     "decision": "proceed", "decision_reason": "", "claude_tier": "heavy", "tier_reason": "",
     "review_mode": "full", "review_reason": "", "plan_markdown": "",
+    "experiment_role": "legacy", "research_question": "", "contribution_path": "",
+    "baseline_plan": "", "reuse_iteration": 0, "continuation_reason": "",
+    "limitation_ids": [], "reuse_assets": [],
 }
 REVIEW_DEFAULTS = {
     "verdict": "CONTINUE", "approach_status": "", "approach_note": "", "commit_worthy": False,
     "commit_message": "", "one_line_summary": "", "next_task": "", "next_plan_tier": "normal",
     "reason": "", "review_markdown": "", "paper_recommendation": {}, "milestone": {},
+    "valid_experiment": None, "reusable_code": None, "failure_scope": "", "goal_progress": "",
+    "blocking_issues": [], "reuse_issues": [], "deferred_issues": [],
+    "limitation_updates": [], "code_assets": [],
 }
 
 
@@ -623,6 +839,8 @@ def record_tier(n, step, tier):
 def plan_tier(args, n):
     if args.gpt_tier:
         return args.gpt_tier
+    if (iter_dir(n) / "intervention.json").exists():
+        return "deep"
     if goal_start(n) == n:
         return "deep"  # 새 목표의 첫 계획은 이전 기록을 다시 읽고 깊게 사고한다
     prev = load_review(n - 1) if n > 1 else None
@@ -652,11 +870,15 @@ def parse_trailer(report, key):
 def review_decision(args, n):
     """(GPT 리뷰 여부, 이유). 계획이 skip이어도 Claude 결과에 문제 신호가 있으면 리뷰한다."""
     d = iter_dir(n)
+    if (d / "intervention.json").exists():
+        return True, "사용자 보완 후 첫 반복은 전체 리뷰 필요"
     if args.always_review:
         return True, "--always-review 지정"
+    if (load_plan(n) or {}).get("experiment_role") in {"diagnostic", "method", "confirmatory"}:
+        return True, "연구 가설·방법·독립 확인 실험은 전체 리뷰 필요"
     entry = approach_ledger(upto=n).get(approach_key(load_plan(n)))
-    if entry and entry["attempts"] >= MAX_ATTEMPTS:
-        return True, f"'{entry['name']}' {entry['attempts']}번째 시도라 계속/포기 판단 필요"
+    if entry and entry["valid_experiments"] >= MAX_ATTEMPTS:
+        return True, f"'{entry['name']}' 유효한 실험 {entry['valid_experiments']}회 이후 방향 재평가"
     override = read(d / "review_mode_override.txt").strip()
     mode = override or load_plan(n)["review_mode"]
     if mode == "full":
@@ -675,6 +897,63 @@ def load_plan(n):
 
 def load_json(path):
     return json.loads(read(path)) if path.exists() else None
+
+
+def validate_limitation_updates(review):
+    seen = set()
+    for update in review.get("limitation_updates", []):
+        identity = update.get("id", "")
+        if not re.fullmatch(r"[a-z0-9][a-z0-9-]{0,59}", identity) or identity in seen:
+            raise AgentError(f"중복 또는 잘못된 한계 주장 id: {identity}")
+        seen.add(identity)
+        if update.get("status") not in {"candidate", "observed", "validated", "rejected"}:
+            raise AgentError(f"잘못된 한계 주장 상태: {identity}")
+        if not update.get("claim", "").strip() or not update.get("evidence"):
+            raise AgentError(f"한계 주장과 근거 파일/출처가 필요합니다: {identity}")
+        if update["status"] == "validated" and (
+            review.get("valid_experiment") is not True or review.get("blocking_issues")
+            or not update.get("usage_checks")
+        ):
+            raise AgentError(f"한계 재현 확인에는 유효한 실험·사용법 검증·현재 결론 무결성이 필요합니다: {identity}")
+
+
+def limitation_registry(upto=None):
+    """사용자 초기 판단과 반복별 리뷰를 합성한다. 과거 주장·정정 원문은 삭제하지 않는다."""
+    entries = {entry["id"]: entry.copy() for entry in (load_json(LIMITATIONS_FILE) or {}).get("claims", [])}
+    for n in existing_iterations():
+        if upto is not None and n > upto:
+            break
+        review = load_review(n) or {}
+        validate_limitation_updates(review)
+        for update in review.get("limitation_updates", []):
+            entries[update["id"]] = {**update, "goal_start": goal_start(n), "review_iteration": n}
+    return entries
+
+
+def limitations_text():
+    lines = ["# 한계 주장과 검증 근거", "", "초기 판단: LIMITATIONS.json. 이후 변경 근거: 각 반복의 review.json/limitation_updates.",
+             "validated는 명시한 조건에서 사용·평가 오류를 통제해 성능 문제를 재현했다는 뜻이며, 내부 원인 확정이 아니다.", ""]
+    for identity, entry in limitation_registry().items():
+        lines += [f"## {identity} — {entry['status']}", "", entry["claim"], "",
+                  f"- 적용 목표 시작: iter_{entry.get('goal_start', 1):03d}"]
+        if entry.get("review_iteration"):
+            lines.append(f"- 최신 리뷰: agent/runs/iter_{entry['review_iteration']:03d}/review.json")
+        for key, title in (("evidence", "근거"), ("usage_checks", "사용·평가 검증"), ("remaining_questions", "미해결")):
+            lines += [f"- {title}: {value}" for value in entry.get(key, [])]
+        lines.append("")
+    return "\n".join(lines) + "\n"
+
+
+def method_gate_errors(n, plan):
+    if plan.get("experiment_role") not in {"method", "confirmatory"}:
+        return []
+    identities = plan.get("limitation_ids", [])
+    if not identities:
+        return ["방법 개발·확인 실험은 검증된 한계 주장 limitation_ids를 지정해야 합니다."]
+    entries = limitation_registry(upto=n - 1)
+    return [f"한계 {identity}: 현재 목표에서 재현 확인(validated)된 근거가 없습니다. 진단 계획이 먼저 필요합니다."
+            for identity in identities if entries.get(identity, {}).get("status") != "validated"
+            or entries.get(identity, {}).get("goal_start") != goal_start(n)]
 
 
 def approach_key(plan):
@@ -709,6 +988,7 @@ def approach_ledger(upto=None, since=None):
         entry = ledger.setdefault(key, {
             "name": plan.get("approach", key), "attempts": 0, "iters": [], "status": "진행 중",
             "branch": approach_branch(key), "base": None, "commits": [],
+            "valid_experiments": 0, "unclassified_experiments": 0,
         })
         git_info = load_json(iter_dir(n) / "git.json") or {}
         if git_info.get("created") and entry["base"] is None:
@@ -721,6 +1001,12 @@ def approach_ledger(upto=None, since=None):
         review = load_review(n)
         if review:
             entry["status"] = review.get("approach_status") or "미검토"
+            if review.get("valid_experiment") is True:
+                entry["valid_experiments"] += 1
+            elif review.get("valid_experiment") is None:
+                entry["unclassified_experiments"] += 1
+        elif (iter_dir(n) / "superseded.json").exists():
+            entry["status"] = "사용자 보완으로 전환 (검증 미완료)"
     return ledger
 
 
@@ -759,7 +1045,7 @@ def current_iteration():
 
 
 def is_done(n):
-    return (iter_dir(n) / "done.json").exists()
+    return (iter_dir(n) / "done.json").exists() or (iter_dir(n) / "superseded.json").exists()
 
 
 def post_flags(n):
@@ -775,6 +1061,8 @@ def set_post_flag(n, key):
 
 def stage_of(n):
     d = iter_dir(n)
+    if (d / "superseded.json").exists():
+        return "사용자 보완으로 전환"
     if not (d / "plan.md").exists():
         return "계획"
     if not (d / "claude_report.md").exists():
@@ -787,8 +1075,9 @@ def stage_of(n):
 def code_version():
     """지금 돌고 있는 orchestrator 버전 (main 커밋 + 커밋 안 된 수정 여부)."""
     sha = git("rev-parse", "--short", "HEAD")[1].strip()
-    dirty = git("status", "--porcelain", "--", "orchestrator.py", "notifier.py", "agent/prompts",
-                "agent/tiers.json", "agent/claude_settings.json")[1].strip()
+    dirty = git("status", "--porcelain", "--", "orchestrator.py", "notifier.py", "presentation.py", "claude_usage.py", "gpt_usage.py", "research_history.py", "agent/prompts",
+                "agent/tiers.json", "agent/claude_settings.json", "agent/RESOURCE_POLICY.md",
+                "agent/RESEARCH_POLICY.md", "agent/CLAUDE_USAGE_POLICY.md", "agent/REPORTING_STYLE.md")[1].strip()
     return f"{sha}+수정" if dirty else sha
 
 
@@ -800,8 +1089,14 @@ def rebuild_index():
             k, text = goal_starts[n]
             lines += ["", f"### 연구 목표 {k} (iter_{n:03d}부터): {text.splitlines()[0][:200] if text else ''}", ""]
         review = load_review(n)
+        superseded = load_json(iter_dir(n) / "superseded.json")
+        if superseded:
+            lines.append(f"- iter_{n:03d} [사용자 보완으로 전환 → iter_{superseded['successor']:03d}] "
+                         f"기존 기록 보존, 성공·실패 판정 아님 ({superseded['source_stage']})")
+            continue
         if review is None:
-            lines.append(f"- iter_{n:03d} [진행 중]")
+            suffix = " — 사용자 보완 반영, GPT 재계획부터" if (iter_dir(n) / "intervention.json").exists() else ""
+            lines.append(f"- iter_{n:03d} [진행 중]{suffix}")
             continue
         used = tiers_used(n)
         tiers = "/".join(used.get(k, "?") for k in ("plan", "claude", "review"))
@@ -822,17 +1117,18 @@ def rebuild_index():
     ledger = approach_ledger(upto=latest)
     earlier = approach_ledger(upto=goal_start(latest) - 1, since=1) if goal_start(latest) > 1 else {}
     if earlier:
-        lines += ["", "## 이전 목표들의 접근법 (참고용, 시도 횟수 제한에는 안 들어감)", ""]
+        lines += ["", "## 이전 목표들의 접근법 (참고용, 현재 목표의 재평가 횟수에는 안 들어감)", ""]
         for entry in earlier.values():
             lines.append(f"- {entry['name']} [{entry['branch']}]: {entry['attempts']}회, 최근 판정: {entry['status']}, "
                          f"커밋: {', '.join(entry['commits']) or '없음'}")
     if ledger:
-        lines += ["", f"## 접근법 기록 — 현재 목표 (같은 접근법 최대 {MAX_ATTEMPTS}회)", ""]
+        lines += ["", f"## 접근법 기록 — 현재 목표 (유효한 실험 {MAX_ATTEMPTS}회부터 방향 재평가)", ""]
         for entry in ledger.values():
             iters = ", ".join(f"iter_{i:03d}" for i in entry["iters"])
             commits = ", ".join(entry["commits"]) or "없음"
             lines.append(
                 f"- {entry['name']} [{entry['branch']}]: {entry['attempts']}회 ({iters}), "
+                f"유효한 실험 {entry['valid_experiments']}회, 미분류 {entry['unclassified_experiments']}회, "
                 f"최근 판정: {entry['status']}, 커밋: {commits}"
             )
         lines += ["", f"현재 연구 브랜치: {current_branch()} (코드 위치: {RESEARCH_DIR})"]
@@ -841,7 +1137,37 @@ def rebuild_index():
             lines += ["", "### 최근 계획의 대안 순위", ""]
             lines += [f"{i}. {alt}" for i, alt in enumerate(last_plan["alternatives"], 1)]
     save(INDEX_FILE, "\n".join(lines) + "\n")
+    save(CODE_ASSETS_FILE, code_assets_text())
+    save(LIMITATIONS_REPORT, limitations_text())
     rebuild_decisions()
+
+
+def code_assets_text():
+    """성공·실패와 관계없이 보존된 코드의 위치와 재사용 판정을 모은다."""
+    lines = ["# 연구 코드 보존·재사용 목록", "", "보관본은 검증 완료를 뜻하지 않는다. 재사용 전 해당 리뷰의 결함을 확인한다.", ""]
+    for n in existing_iterations():
+        d = iter_dir(n)
+        review = load_review(n) or {}
+        commit = load_json(d / "commit.json") or load_json(d / "checkpoint.json")
+        archive = load_json(d / "code_archive.json")
+        if commit:
+            if reusable_commit(n):
+                label = "재사용 가능" if review.get("reusable_code") is True else "과거 success: 기존 정책에 따라 재사용 가능"
+            else:
+                label = "재사용 미승인: 리뷰 확인 필요"
+            lines.append(f"- iter_{n:03d}: 커밋 `{commit['sha']}` ({label}), 리뷰: `{d.relative_to(PROJECT_DIR)}/review.md`")
+            for asset in review.get("code_assets", []):
+                lines.append(f"  - 모듈 {', '.join(asset['paths'])}: {asset['status']} — {asset['reason']}; "
+                             f"검증: {'; '.join(asset['checks'])}")
+            if commit.get("unpreserved_paths"):
+                lines.append(f"  - 자동 커밋 제외/별도 확인: {', '.join(commit['unpreserved_paths'])}")
+        if archive:
+            lines.append(f"- iter_{n:03d} 전환 전 보관: `{archive['source_branch']}` → `{archive['ref']}` "
+                         f"(stash `{archive['stash']}`); 미추적 파일이 있으면 해당 ref의 `^3` tree에 있다. "
+                         f"기록: `{d.relative_to(PROJECT_DIR)}/code_archive.json`")
+        if (d / "code_recovery.md").exists():
+            lines.append(f"- iter_{n:03d} 선별 복구 출처·주의사항: `{d.relative_to(PROJECT_DIR)}/code_recovery.md`")
+    return "\n".join(lines) + "\n"
 
 
 def iteration_block(n):
@@ -857,6 +1183,11 @@ def iteration_block(n):
     attempt = iters.index(n) + 1 if n in iters else 1
 
     lines = [f"## iter_{n:03d} — {plan.get('approach', '?')} ({attempt}번째 시도) · {events[0]['time'][:16]}", ""]
+    superseded = load_json(d / "superseded.json")
+    if superseded:
+        lines += [f"사용자 보완으로 iter_{superseded['successor']:03d}에서 재계획. 아래는 보존된 이전 기록이며 실패 판정이 아니다.", ""]
+    if (d / "intervention.json").exists():
+        lines += [f"사용자 보완 원문: agent/runs/iter_{n:03d}/intervention.json", ""]
     plan_question = None
     for ev in events:
         stage = ev["stage"]
@@ -906,12 +1237,23 @@ def iteration_block(n):
             )
             if review.get("approach_note"):
                 lines.append(f"  - 접근법 판단: {review['approach_note']}")
+            for key, label in (("goal_progress", "목표 진전"), ("failure_scope", "판정 범위")):
+                if review.get(key):
+                    lines.append(f"  - {label}: {review[key]}")
+            for key, label in (("blocking_issues", "현재 결론 무효"), ("reuse_issues", "재사용 전 수정"),
+                               ("deferred_issues", "추후 개선")):
+                for issue in review.get(key, []):
+                    lines.append(f"  - {label}: {issue}")
             if review.get("next_task"):
                 lines.append(f"  - 다음: {review['next_task']}")
         elif stage == "review_skipped":
             lines.append(f"- ⏭ 리뷰 생략: {ev.get('reason')}")
         elif stage == "commit":
             lines.append(f"- 💾 **커밋** `{ev.get('sha')}` ({ev.get('branch')}): {ev.get('message')}")
+        elif stage == "checkpoint":
+            lines.append(f"- 💾 **개발 이력 체크포인트** `{ev.get('sha')}`: {ev.get('reason')} (검증 승인 아님)")
+            if ev.get("excluded"):
+                lines.append(f"  - 자동 커밋 제외·확인 필요: {', '.join(ev['excluded'])}")
         elif stage == "paper":
             lines.append(f"- 📚 논문 추천: {ev.get('title')} — PAPERS.md")
         elif stage == "milestone":
@@ -963,7 +1305,12 @@ def step_plan(args, goal, n):
     banner(f"[iter_{n:03d} · 1/3] GPT가 연구 계획을 작성합니다.")
 
     prev = load_review(n - 1) if n > 1 else None
-    if prev and prev.get("skipped"):
+    superseded = load_json(iter_dir(n - 1) / "superseded.json") if n > 1 else None
+    if superseded:
+        prev_text = (f"직전 반복 iter_{n - 1:03d}은 사용자 보완으로 전환됐다. 실패나 완료 판정이 아니다.\n"
+                     f"agent/runs/iter_{n - 1:03d}/의 계획·조사·부분 구현 기록을 읽되, 이전 next_task를 자동 수행하지 않는다.\n"
+                     "아래 보완 지시와 한계 검증 근거에 따라 유지·보류·변경할 사항을 정한다.")
+    elif prev and prev.get("skipped"):
         prev_text = (
             f"직전 반복(iter_{n - 1:03d})은 GPT 리뷰를 생략했다 ({prev['reason']}).\n"
             f"먼저 agent/runs/iter_{n - 1:03d}/claude_report.md 와 changed_files.txt 를 직접 읽고\n"
@@ -1015,14 +1362,25 @@ iter_{n:03d}
 연구 코드: research/ (자체 git 저장소, 현재 브랜치 {current_branch()}), 결과: research/results/
 이전 수동 분석 기록과 입력 데이터: legacy/ (scripts, docs, eval_samples, eval_results)
 
+=== 보존된 코드와 재사용 후보 ===
+{code_assets_text()}
+새 코드를 쓰기 전에 재사용할 파일이 현재 브랜치에 있는지 확인하라. 보관본은 코드 소실이 아니다.
+
 === 직전 결과 ===
 {prev_text}
 
 === 사람의 추가 지시 ===
 {read(d / "human_to_gpt.md", "없음")}
 
+=== 중단 후 보완 지시 (이전 계획보다 우선) ===
+{intervention_context(n)}
+
+=== 한계 주장·사용법 검증·미해결 질문 ===
+{limitations_text()}
+방법 개발은 현재 목표에서 validated인 한계 주장과 연결해야 한다. 후보만 있으면 먼저 diagnostic을 설계한다.
+
 === 규칙 ===
-같은 접근법 최대 시도 횟수: {MAX_ATTEMPTS}
+같은 접근법의 유효한 실험 {MAX_ATTEMPTS}회부터 방향 재평가 (자동 포기 아님).
 """
     tier = plan_tier(args, n)
     think_dir = d / "think"
@@ -1093,7 +1451,7 @@ def think_section(done_rounds, r, max_rounds, final):
     for path in done_rounds:
         prev = json.loads(read(path))
         questions = "\n".join(f"- {q}" for q in prev.get("open_questions", []))
-        text += (f"\n--- 라운드 {path.stem[-2:]}에서 알게 된 것 ---\n{prev.get('research_notes', '')[:4000]}\n"
+        text += (f"\n--- 라운드 {path.stem[-2:]}에서 알게 된 것 (원문: {path}) ---\n{prev.get('research_notes', '')}\n"
                  f"라운드 {path.stem[-2:]}가 남긴 질문:\n{questions}\n")
     if done_rounds:
         text += "\n이번 라운드에서는 위 질문들에 먼저 답하라 (웹 검색, 논문, 코드·결과 파일 확인).\n"
@@ -1108,11 +1466,12 @@ def plan_concerns(n, plan):
     concerns = []
     if plan.get("decision") == "ask_human":
         concerns.append(plan.get("decision_reason", ""))
-    before = approach_ledger(upto=n - 1).get(approach_key(plan))
-    if before and before["status"] == "abandon":
-        concerns.append(f"이미 포기(abandon) 판정된 접근법 '{before['name']}'을 다시 고름")
-    elif before and before["attempts"] >= MAX_ATTEMPTS and before["status"] != "success":
-        concerns.append(f"'{before['name']}'을 이미 {before['attempts']}번 시도함 (최대 {MAX_ATTEMPTS})")
+    before = approach_ledger(upto=n - 1, since=goal_start(n)).get(approach_key(plan))
+    if before and not plan.get("continuation_reason", "").strip():
+        if before["status"] == "abandon":
+            concerns.append(f"'{before['name']}'의 기각 범위와 새 근거를 설명하는 continuation_reason이 없음")
+        elif before["valid_experiments"] >= MAX_ATTEMPTS:
+            concerns.append(f"'{before['name']}' 유효한 실험 {before['valid_experiments']}회 이후 계속할 정보 이득의 근거가 없음")
     return concerns
 
 
@@ -1120,6 +1479,10 @@ def step_checkpoint(args, n):
     """계획을 Claude에 넘기기 전 확인. 'go' / 'replan' / 'quit'."""
     d = iter_dir(n)
     plan = load_plan(n)
+    gate_errors = method_gate_errors(n, plan)
+    if gate_errors:
+        raise AgentError("방법 개발 진입 보류:\n" + "\n".join(gate_errors)
+                         + "\n--replan으로 검증 계획을 요청하세요. --auto도 이 검사를 생략하지 않습니다.")
     concerns = plan_concerns(n, plan)
     approach = plan.get("approach", "?")
     attempt = approach_ledger(upto=n).get(approach_key(plan), {}).get("attempts", 1)
@@ -1130,11 +1493,12 @@ def step_checkpoint(args, n):
         print(f"\n자동 진행 ({mode}): {approach} {attempt}번째 시도")
         note = ("\n원래는 물어볼 지점이었지만 사람 부재 시간이라 1순위로 진행:\n"
                 + "\n".join(f"• {c}" for c in concerns)) if away else ""
-        notify(
-            f"▶ iter_{n:03d} 자동 진행: {approach} ({attempt}번째 시도)\n"
-            f"근거: {plan.get('decision_reason', '')}\n"
-            f"Claude {claude_tier(args, n)} / 리뷰 {plan.get('review_mode', 'full')}{note}"
-        )
+        notify(notice(f"▶ iter_{n:03d} | 계획대로 자동 진행", [
+            ("할 일", plan.get("plan_summary") or approach),
+            ("이유", plan.get("decision_reason")),
+            ("진행 설정", f"{approach} · {attempt}번째 시도 · Claude {claude_tier(args, n)} · GPT 리뷰 {plan.get('review_mode', 'full')}"),
+            ("주의", note),
+        ], reference=f"agent/runs/iter_{n:03d}/plan.md"))
         record_event(n, "decision", by="auto", mode=mode, result="1순위로 진행",
                      concerns=concerns if away else [])
         return "go"
@@ -1162,27 +1526,28 @@ def step_checkpoint(args, n):
         print("ENTER / ok / 1 : 현재 계획(1순위)대로 Claude에게 전달")
         print("2, 3, ...      : 해당 대안으로 계획 다시 세우기")
         print("f [지시]       : 추가 지시 후 전달")
+        print("p [지시]       : 기존 반복 보존 후 새 반복에서 GPT 재계획")
         print(f"t [등급]       : Claude 등급 바꾸기 ({' / '.join(CLAUDE_TIERS)})")
         print("r full|skip    : Claude 작업 후 GPT 리뷰 여부 바꾸기")
         print("a              : 이후 확인 없이 자동 진행")
         print("q              : 종료 (다시 실행하면 여기서 이어짐)")
 
         reasons = "\n".join(f"• {c}" for c in concerns) or "(수동 확인 모드)"
-        telegram_text = (
-            f"🙋 iter_{n:03d} 계획 확인 필요\n\n"
-            f"{reasons}\n\n"
-            f"대안 순위 (1번이 현재 계획):\n{alt_text}\n\n"
-            f"Claude {tier} / 리뷰 {review_mode}\n\n"
-            f"{plan['plan_markdown'][:1200]}\n\n"
-            "답장:\n"
+        telegram_text = notice(f"🙋 iter_{n:03d} | 계획 확인 필요", [
+            ("제안", plan.get("plan_summary") or approach),
+            ("확인할 내용", reasons),
+            ("대안 (1번이 현재 제안)", alt_text),
+            ("진행 설정", f"Claude {tier} · GPT 리뷰 {review_mode}"),
+        ], reference=f"agent/runs/iter_{n:03d}/plan.md", actions=(
             "ok 또는 1 → 1순위로 진행\n"
             "2, 3… → 그 대안으로 계획 다시\n"
             "f 지시내용 → 추가 지시 후 진행\n"
+            "p 지시내용 → 보존 후 GPT부터 재계획\n"
             f"t {'|'.join(CLAUDE_TIERS)} → Claude 등급 변경\n"
             "r full|skip → GPT 리뷰 여부 변경\n"
             "a → 이후 자동 진행\n"
             "q → 종료"
-        )
+        ))
         reply = ask("> ", telegram_text)
         if reply is None:
             return "quit"
@@ -1190,6 +1555,13 @@ def step_checkpoint(args, n):
 
         if cmd == "q":
             return decided("quit", "종료", reply)
+        if cmd == "p":
+            note = rest or ask("GPT에게 줄 재계획 지시:\n> ") or ""
+            if not note.strip():
+                print("재계획 지시가 필요합니다.")
+                continue
+            queue_replan(note)
+            return decided("replan", "사용자 보완으로 새 반복에서 재계획", reply)
         if cmd.isdigit() and 1 <= int(cmd) <= max(len(alternatives), 1):
             k = int(cmd)
             if k == 1:
@@ -1198,13 +1570,8 @@ def step_checkpoint(args, n):
             note = f"사용자가 대안 {k}번을 선택했다: {choice}\n이 대안을 approach로 계획을 다시 세워라."
             if rest:
                 note += f"\n추가 지시: {rest}"
-            earlier = read(d / "human_to_gpt.md").strip()
-            save(d / "human_to_gpt.md", f"{earlier}\n\n{note}".strip())
+            queue_replan(note)
             log(f"iter_{n:03d} USER CHOSE ALTERNATIVE", note)
-            # 기존 계획은 기록으로 남기고 다시 계획한다
-            for name in ("plan.json", "plan.md"):
-                if (d / name).exists():
-                    (d / name).rename(d / f"rejected_{now().replace(' ', '_').replace(':', '')}_{name}")
             return decided("replan", f"대안 {k}번으로 재계획: {choice}", reply)
         if cmd == "t":
             if args.claude_tier:
@@ -1241,21 +1608,85 @@ def step_checkpoint(args, n):
 
 
 def base_for_new_branch(cur):
-    """새 접근법 브랜치의 출발점.
-
-    직전 접근법이 success면 그 위에서 이어가고, 아니면 그 접근법이 시작했던 지점으로 돌아간다.
-    """
+    """가설 판정과 분리해 가장 최근 재사용 승인 커밋을 출발점으로 삼는다."""
     if cur == BASE_BRANCH or not cur.startswith(BRANCH_PREFIX):
         return cur
-    entry = approach_ledger().get(cur[len(BRANCH_PREFIX):])
-    if entry and entry["status"] == "success":
-        return cur
-    return (entry or {}).get("base") or BASE_BRANCH
+    for n in reversed(existing_iterations()):
+        commit = reusable_commit(n)
+        if commit:
+            return commit["sha"]
+    return BASE_BRANCH
+
+
+def reusable_commit(n):
+    commit = load_json(iter_dir(n) / "commit.json")
+    review = load_review(n) or {}
+    if review.get("reviewed_commit") and review["reviewed_commit"] != (commit or {}).get("sha"):
+        return None
+    # 과거 success 커밋은 기존 재사용 정책과 호환한다. 과거 abandon은 재심사 없이 승격하지 않는다.
+    approved = review.get("reusable_code")
+    if approved is None:
+        approved = review.get("approach_status") == "success"
+    return commit if (approved and not review.get("blocking_issues") and not review.get("reuse_issues")
+                      and not (commit or {}).get("unpreserved_paths")) else None
+
+
+def reuse_base(n, cur):
+    source = (load_plan(n) or {}).get("reuse_iteration", 0)
+    if not source:
+        return base_for_new_branch(cur)
+    if not isinstance(source, int) or source < 1 or source >= n:
+        raise AgentError(f"reuse_iteration은 현재 반복보다 앞선 양수여야 함: {source}")
+    commit = reusable_commit(source)
+    if not commit:
+        raise AgentError(f"iter_{source:03d}에 재사용 승인된 커밋이 없음. 보관본은 검토 후 선별 복구해야 함")
+    return commit["sha"]
+
+
+def archive_pending_code(n, source_branch):
+    """stash를 영구 ref로 고정해 stash 정리 후에도 소스와 미추적 파일을 복구할 수 있게 한다."""
+    d = iter_dir(n)
+    try:
+        files, excluded = history.source_state(RESEARCH_DIR)
+        dirty = (history.listed(RESEARCH_DIR, "diff", "--name-only", "HEAD") |
+                 history.listed(RESEARCH_DIR, "ls-files", "--others", "--exclude-standard"))
+        unsafe = [p for p in sorted(dirty) if history.path_reason(p) or p in excluded
+                  or ((RESEARCH_DIR / p).exists() and p not in files)]
+        if unsafe:
+            raise AgentError("브랜치 전환 보류: 자동 보관에서 제외되는 파일이 있습니다. "
+                             "stash에 비밀정보·데이터를 넣지 않고 원본을 유지합니다: " + ", ".join(unsafe))
+    except history.HistoryError as e:
+        raise AgentError(f"브랜치 전환 전 보관 검사 실패: {e}") from e
+    message = f"iter_{n:03d}: {source_branch}의 미커밋 작업 (접근법 전환 전 보관)"
+    code, out = wgit("stash", "push", "-u", "-m", message)
+    if code:
+        raise AgentError(f"git stash 실패: {out}")
+    code, sha = wgit("rev-parse", "stash@{0}")
+    if code:
+        raise AgentError("보관한 stash의 commit ID를 확인할 수 없음")
+    sha = sha.strip()
+    ref = f"refs/research-archive/before-iter-{n:03d}-{sha[:12]}"
+    code, out = wgit("update-ref", ref, sha)
+    if code:
+        raise AgentError(f"코드는 stash에 보존됐으나 영구 ref 생성 실패: {out}")
+    save(d / "code_archive.json", json.dumps({
+        "source_branch": source_branch, "stash": sha, "ref": ref, "time": now(),
+    }, ensure_ascii=False, indent=2))
+    code, patch = wgit("stash", "show", "-p", "--include-untracked", sha)
+    if code:
+        raise AgentError("영구 ref는 보존됐으나 보관 코드 patch 생성 실패")
+    save(d / "stashed.patch", patch)
+    save(CODE_ASSETS_FILE, code_assets_text())
+    return message
 
 
 def ensure_branch(n):
     """이번 반복 접근법의 브랜치로 research/를 맞춘다. 결과는 git.json에 기록."""
     d = iter_dir(n)
+    try:
+        history.resolve_assets(RESEARCH_DIR, (load_plan(n) or {}).get("reuse_assets", []))
+    except history.HistoryError as e:
+        raise AgentError(f"재사용 준비 보류: {e}") from e
     info = load_json(d / "git.json")
     if info:
         # 재실행: 이미 준비된 브랜치에 있는지만 확인
@@ -1269,19 +1700,14 @@ def ensure_branch(n):
     cur = current_branch()
     info = {"branch": target, "from_branch": cur}
     if cur != target:
+        # 잘못된 재사용 요청은 작업 트리를 바꾸기 전에 거부한다.
+        base_ref = reuse_base(n, cur)
         if wgit("status", "--porcelain")[1].strip():
-            message = f"iter_{n:03d}: {cur}의 미커밋 작업 (접근법 전환 전 보관)"
-            code, out = wgit("stash", "push", "-u", "-m", message)
-            if code:
-                raise AgentError(f"git stash 실패: {out}")
-            info["stashed"] = message
-            # stash는 오래되면 정리될 수 있으므로 내용을 patch로도 남긴다 (main 기록에 커밋됨)
-            save(d / "stashed.patch", wgit("stash", "show", "-p", "--include-untracked", "stash@{0}")[1])
-            print(f"미커밋 작업을 stash로 보관 (patch: {d / 'stashed.patch'}): {message}")
+            info["stashed"] = archive_pending_code(n, cur)
+            print(f"미커밋 작업을 stash·영구 ref·patch로 보관: {info['stashed']}")
         if wgit("show-ref", "--verify", "--quiet", f"refs/heads/{target}")[0] == 0:
             code, out = wgit("checkout", target)
         else:
-            base_ref = base_for_new_branch(cur)
             info["base_ref"] = base_ref
             info["base"] = wgit("rev-parse", "--short", base_ref)[1].strip()
             info["created"] = True
@@ -1317,6 +1743,11 @@ def step_claude(args, goal, n):
     banner(f"[iter_{n:03d} · 2/3] Claude가 구현/실험합니다.")
 
     branch = ensure_branch(n)["branch"]
+    try:
+        history.begin(RESEARCH_DIR, d)
+        history.prepare_assets(RESEARCH_DIR, d, (load_plan(n) or {}).get("reuse_assets", []))
+    except history.HistoryError as e:
+        raise AgentError(f"연구 코드 준비 보류: {e}") from e
     # 중단 후 재실행해도 첫 시도 이전 상태와 비교하도록 스냅샷은 한 번만 찍는다.
     snap_file = d / "snapshot_before.json"
     if not snap_file.exists():
@@ -1328,7 +1759,18 @@ def step_claude(args, goal, n):
 {goal}
 
 === GPT 계획 ===
-{d / "plan.md"} 를 먼저 읽고 그 계획을 구현/실행하라.
+{d / "plan.md"} 와 {d / "plan.json"}을 먼저 읽고 그 계획을 구현/실행하라.
+JSON의 연구 질문·기여 경로·baseline·재사용 조건도 확인한다.
+
+=== 연구 운영 보완 지시 ===
+{read(d / "execution_amendment.md", "없음")}
+
+=== 보존된 코드와 재사용 후보 ===
+{code_assets_text()}
+
+=== 이번 계획의 선별 반입·검증 조건 ===
+{read(d / "reuse_manifest.json", "없음")}
+반입은 검증 승인이 아니다. required_checks를 구현·실험 전에 확인하고 결과를 보고하라.
 
 === 작업 위치 ===
 현재 디렉터리는 {RESEARCH_DIR} (연구 코드 git 저장소, 브랜치 {branch})다.
@@ -1338,6 +1780,12 @@ def step_claude(args, goal, n):
 
 === 사용자 추가 지시 ===
 {read(d / "human_to_claude.md", "없음")}
+
+=== 중단 후 보완 지시 (원문) ===
+{intervention_context(n)}
+
+=== 한계 주장과 검증 근거 ===
+{limitations_text()}
 """
     tier = claude_tier(args, n)
     record_tier(n, "claude", tier)
@@ -1351,7 +1799,8 @@ def step_claude(args, goal, n):
             print(f"이전 Claude 세션을 이어서 진행합니다 ({session[:8]}…)")
             record_event(n, "claude_resume", session=session)
             try:
-                return run_claude(args, CLAUDE_RESUME_PROMPT, stream_log, tier, session_file, resume_id=session)
+                return run_claude(args, CLAUDE_RESUME_PROMPT + "\n\n" + prompt,
+                                  stream_log, tier, session_file, resume_id=session)
             except RetryableError as e:
                 if "No conversation found" not in e.output:
                     raise
@@ -1361,7 +1810,20 @@ def step_claude(args, goal, n):
         return run_claude(args, prompt + (CLAUDE_RESTART_NOTE if restarted else ""),
                           stream_log, tier, session_file)
 
-    result = with_retries("Claude 구현/실험", attempt)
+    try:
+        result = load_json(d / "claude_result.raw.json")
+        if result is None:
+            result = with_retries("Claude 구현/실험", attempt)
+            # 결과 응답 뒤 체크포인트/보고서 저장 중 끊겨도 모델·실험을 다시 호출하지 않는다.
+            save_atomic(d / "claude_result.raw.json", json.dumps(result, ensure_ascii=False, indent=2))
+    except BaseException:
+        # 프로세스가 정리된 뒤에만 보존한다. 보존 실패가 원래 중단 원인을 가리지 않는다.
+        try:
+            checkpoint_code(n, "interrupted")
+        except (AgentError, OSError) as e:
+            print(f"[WARN] 중단 코드 체크포인트 보류 (작업 파일 유지): {e}")
+        raise
+    checkpoint_code(n, "implementation_finished", final=True)
 
     report = result.get("result", "").strip()
     denials = result.get("permission_denials") or []
@@ -1373,10 +1835,9 @@ def step_claude(args, goal, n):
 
     changed = diff_snapshots(json.loads(read(snap_file)), snapshot())
     save(d / "changed_files.txt", changed + "\n")
-    save(d / "changes.patch", wgit("diff", "HEAD")[1])
     save(d / "claude_meta.json", json.dumps({
         key: result.get(key)
-        for key in ("session_id", "is_error", "num_turns", "duration_ms", "total_cost_usd")
+        for key in ("session_id", "is_error", "num_turns", "duration_ms", "total_cost_usd", "usage", "modelUsage")
     } | {"permission_denials": len(denials)}, indent=2))
     save(d / "claude_report.md", report)
     log(f"iter_{n:03d} CLAUDE REPORT", report)
@@ -1392,6 +1853,13 @@ def step_claude(args, goal, n):
 def step_review(args, goal, n):
     d = iter_dir(n)
     banner(f"[iter_{n:03d} · 3/3] GPT가 결과를 리뷰합니다.")
+    commit = load_json(d / "commit.json") or {}
+    if commit.get("kind") == "checkpoint":
+        if wgit("rev-parse", "HEAD")[1].strip() != commit["sha"]:
+            raise AgentError("리뷰 대상 체크포인트 이후 HEAD가 변경됐습니다. 코드 버전을 확인하세요.")
+        dirty = set(wgit("diff", "HEAD", "--name-only")[1].splitlines())
+        if dirty.intersection(commit.get("owned_paths", [])):
+            raise AgentError("체크포인트 이후 리뷰 대상 코드가 변경됐습니다. 새 반복으로 검증하세요.")
 
     changed = read(d / "changed_files.txt").strip().splitlines()
     changed_text = "\n".join(changed[:200]) or "없음"
@@ -1407,7 +1875,17 @@ iter_{n:03d}
 {goal}
 
 === 이번 접근법 ===
-{(load_plan(n) or {}).get("approach", "?")} — {approach_ledger(upto=n).get(approach_key(load_plan(n)), {}).get("attempts", 1)}번째 시도 (최대 {MAX_ATTEMPTS})
+{(load_plan(n) or {}).get("approach", "?")} — {approach_ledger(upto=n).get(approach_key(load_plan(n)), {}).get("attempts", 1)}번째 반복
+유효한 실험 {MAX_ATTEMPTS}회부터 방향을 재평가하되, 횟수만으로 포기하지 않는다.
+
+=== 연구 운영 보완 지시 ===
+{read(d / "execution_amendment.md", "없음")}
+
+=== 중단 후 보완 지시 (준수 여부도 검토) ===
+{intervention_context(n)}
+
+=== 현재 한계 주장과 검증 근거 ===
+{limitations_text()}
 브랜치: {current_branch()} (코드 위치: {RESEARCH_DIR})
 
 === 지금까지의 반복 요약과 접근법 기록 (agent/INDEX.md) ===
@@ -1418,9 +1896,12 @@ iter_{n:03d}
 
 === 검토 자료 (직접 열어 확인하라) ===
 - 계획: agent/runs/iter_{n:03d}/plan.md
+- 구조화된 계획: agent/runs/iter_{n:03d}/plan.json
 - Claude 보고서: agent/runs/iter_{n:03d}/claude_report.md
 - Claude 도구 호출 전체 기록: agent/runs/iter_{n:03d}/claude_stream.jsonl
-- 코드 변경 diff (마지막 커밋 대비): agent/runs/iter_{n:03d}/changes.patch
+- 코드 버전·제외 파일: agent/runs/iter_{n:03d}/commit.json (체크포인트이지 검증 승인이 아님)
+- 코드 변경 diff (구현 전 SHA → 리뷰 대상 SHA): agent/runs/iter_{n:03d}/changes.patch
+- 선별 재사용 출처·필수 검증: agent/runs/iter_{n:03d}/reuse_manifest.json
 - 코드는 research/, 결과는 research/results/ 에 있다.
 
 === 이번 반복에서 바뀐 파일 (A 추가 / M 수정 / D 삭제) ===
@@ -1437,6 +1918,10 @@ iter_{n:03d}
     except json.JSONDecodeError as e:
         raise AgentError(f"리뷰 JSON 파싱 실패: {e}. 파일: {d / 'review.raw.json'}")
 
+    validate_limitation_updates(review)
+    validate_code_assets(n, review)
+    if commit:
+        review["reviewed_commit"] = commit["sha"]
     save(d / "review.md", review["review_markdown"])
     # review.json이 있으면 이 반복은 완료로 본다 (마지막에 저장)
     save(d / "review.json", json.dumps(review, ensure_ascii=False, indent=2))
@@ -1486,7 +1971,7 @@ def handle_paper(n, review):
     if not PAPERS_FILE.exists():
         save(PAPERS_FILE, "# 읽어볼 논문\n\n읽은 논문은 [ ]를 [x]로 바꿔 두세요.\n")
     entry = (
-        f"\n## [ ] {paper['title']} ({paper['authors_year']})\n"
+        f"\n## [ ] {paper['title']} ({paper['authors_year']})\n\n"
         f"- 링크: {url}\n"
         f"- 추천: iter_{n:03d}, {now()[:10]}\n"
         f"- 지금 하고 있는 것: {paper['current_work']}\n"
@@ -1498,13 +1983,12 @@ def handle_paper(n, review):
     log(f"iter_{n:03d} PAPER RECOMMENDATION", entry)
     record_event(n, "paper", title=paper["title"], url=url)
     print(f"\n📚 논문 추천: {paper['title']}")
-    notify(
-        f"📚 읽어볼 논문 (iter_{n:03d})\n\n"
-        f"{paper['title']} ({paper['authors_year']})\n{url}\n\n"
-        f"지금 하고 있는 것:\n{paper['current_work']}\n\n"
-        f"추천 이유:\n{paper['why']}\n\n"
-        f"읽어볼 부분:\n{paper['what_to_read']}"
-    )
+    notify(notice(f"📚 iter_{n:03d} | 읽어볼 논문", [
+        ("논문", f"{paper['title']} ({paper['authors_year']})\n{url}"),
+        ("현재 연구와의 연결", paper["current_work"]),
+        ("추천 이유", paper["why"]),
+        ("먼저 읽을 부분", paper["what_to_read"]),
+    ], reference="agent/PAPERS.md"))
 
 
 def handle_milestone(n, review):
@@ -1523,7 +2007,7 @@ def handle_milestone(n, review):
             "연구 목표에 의미 있는 진전이 있을 때만 기록한다. 반복별 결정은 DECISIONS.md, 원본은 runs/.\n"
         ))
     text = (
-        f"\n## 🏁 {milestone['title']}\n"
+        f"\n## 🏁 {milestone['title']}\n\n"
         f"*iter_{n:03d} · {now()[:16]} · 판정: {review['verdict']} / {review.get('approach_status', '')}*\n\n"
         f"{milestone['story'].strip()}\n\n"
         f"- 접근법: {plan.get('approach', '?')} (`{entry.get('branch', '')}`), 시도: {iters}\n"
@@ -1535,7 +2019,9 @@ def handle_milestone(n, review):
     record_event(n, "milestone", title=milestone["title"])
     rebuild_index()
     print(f"\n🏁 마일스톤: {milestone['title']}")
-    notify(f"🏁 마일스톤 (iter_{n:03d})\n{milestone['title']}\n\n{milestone['story'][:1500]}")
+    notify(notice(f"🏁 iter_{n:03d} | 주요 연구 진전", [
+        ("핵심", milestone["title"]), ("무엇이 달라졌나", milestone["story"]),
+    ], reference="agent/JOURNEY.md"))
 
 
 def step_skip_review(n, reason):
@@ -1567,51 +2053,70 @@ def step_skip_review(n, reason):
 
 
 def step_commit(n, review):
-    """GPT 리뷰가 commit_worthy로 판단했을 때만 연구 브랜치에 커밋한다."""
-    if (iter_dir(n) / "commit.json").exists() or review.get("skipped") or not review.get("commit_worthy") or review.get("approach_status") == "abandon":
-        return
+    """호환용 후처리 이름. 코드는 이미 보존됐으며 여기서는 리뷰와 SHA를 연결한다."""
     d = iter_dir(n)
-    wgit("add", "-A")
-    skipped_large = []
-    for path in wgit("diff", "--cached", "--name-only")[1].splitlines():
-        full = RESEARCH_DIR / path
-        if full.is_file() and full.stat().st_size > MAX_COMMIT_FILE_BYTES:
-            wgit("reset", "-q", "--", path)
-            skipped_large.append(path)
-    if wgit("diff", "--cached", "--quiet")[0] == 0:
-        print("커밋할 코드 변경 없음.")
-        return
+    commit = load_json(d / "commit.json")
+    if not commit:
+        # 업그레이드 전 작업의 소유 범위가 불명확하면 무조건 add -A하지 않는다.
+        if (d / "code_baseline.json").exists():
+            commit = checkpoint_code(n, "legacy_review_boundary", final=True)
+        else:
+            return
+    save_atomic(d / "code_review.json", json.dumps({
+        "sha": commit["sha"], "review_skipped": bool(review.get("skipped")),
+        "reusable_code": review.get("reusable_code", False), "code_assets": review.get("code_assets", []),
+        "approach_status": review.get("approach_status"), "review_file": "review.json",
+    }, ensure_ascii=False, indent=2))
 
-    plan = load_plan(n)
-    title = review.get("commit_message") or review["one_line_summary"]
-    message = (
-        f"[{approach_key(plan)}] {title}\n\n"
-        f"iter_{n:03d}, 접근법: {plan.get('approach', '')}\n"
-        f"GPT 리뷰({tiers_used(n).get('review', '?')}) 검증: {review.get('approach_status', '')}"
-    )
-    code, out = wgit("commit", "-m", message)
-    if code:
-        print(f"[WARN] git commit 실패: {out}")
-        notify(f"⚠ iter_{n:03d} git commit 실패: {out[:300]}")
-        return
 
-    sha = wgit("rev-parse", "--short", "HEAD")[1].strip()
-    branch = current_branch()
-    # 태그가 있으면 나중에 브랜치를 지워도 이 커밋은 남는다
-    tag = f"iter_{n:03d}"
-    wgit("tag", "-f", tag)
-    save(d / "commit.json", json.dumps(
-        {"sha": sha, "branch": branch, "tag": tag, "message": title, "skipped_large_files": skipped_large},
-        ensure_ascii=False, indent=2,
-    ))
-    rebuild_index()
-    log(f"iter_{n:03d} GIT COMMIT", f"{sha} ({branch}) {title}")
-    record_event(n, "commit", sha=sha, branch=branch, message=title)
-    rebuild_index()
-    print(f"\n💾 커밋 {sha} ({branch}): {title}")
-    if skipped_large:
-        print(f"   5MB 넘는 파일은 제외: {', '.join(skipped_large)}")
-    notify(f"💾 커밋 {sha} ({branch})\n{title}")
+def checkpoint_code(n, reason, final=False):
+    """에이전트가 종료된 안전한 경계에서만 체크포인트를 저장한다."""
+    if STATE["proc"] is not None:
+        raise AgentError("에이전트 실행 중에는 코드 체크포인트를 만들지 않습니다.")
+    d = iter_dir(n)
+    try:
+        entry = history.checkpoint(RESEARCH_DIR, d, n, reason)
+        # 커밋 이후 HEAD diff가 비더라도 원래 구현 전후 비교를 유지한다.
+        patch = history.git(RESEARCH_DIR, "diff", "--binary", entry["before_sha"], entry["sha"]).decode()
+        save(d / "changes.patch", patch)
+        if final:
+            tag = f"iter_{n:03d}"
+            existing = wgit("rev-parse", "--verify", f"refs/tags/{tag}")
+            if existing[0] == 0 and existing[1].strip() != entry["sha"]:
+                raise AgentError(f"기존 {tag}가 다른 커밋을 가리킵니다. 덮어쓰지 않습니다.")
+            if existing[0] != 0:
+                history.git(RESEARCH_DIR, "tag", tag, entry["sha"])
+            entry = {**entry, "kind": "checkpoint", "tag": tag}
+            save_atomic(d / "commit.json", json.dumps(entry, ensure_ascii=False, indent=2))
+    except history.HistoryError as e:
+        raise AgentError(f"체크포인트 보류 (작업 파일 유지): {e}") from e
+    record_event(n, "checkpoint", sha=entry["sha"], reason=reason, excluded=entry["unpreserved_paths"])
+    save(CODE_ASSETS_FILE, code_assets_text())
+    print(f"💾 iter_{n:03d} 체크포인트: {entry['sha'][:12]} ({reason}, 검증 승인 아님)")
+    return entry
+
+
+def validate_code_assets(n, review):
+    commit = load_json(iter_dir(n) / "commit.json")
+    assets = review.get("code_assets", [])
+    if not commit:
+        if assets:
+            raise AgentError("리뷰 대상 코드 SHA 없이 모듈 재사용을 승인할 수 없습니다.")
+        return
+    excluded = set(commit.get("unpreserved_paths", []))
+    if review.get("reusable_code") and excluded:
+        raise AgentError("커밋되지 않은 작업 파일이 있습니다. 전체 재사용 승인 대신 검증된 모듈만 지정하세요.")
+    for asset in assets:
+        if asset.get("status") not in {"approved", "needs_fix", "rejected"}:
+            raise AgentError("code_assets의 재사용 상태가 올바르지 않습니다.")
+        if asset["status"] == "approved" and (not asset.get("checks") or excluded.intersection(asset["paths"])):
+            raise AgentError("모듈 승인에는 실제 검증 근거와 커밋에 포함된 파일이 필요합니다.")
+        try:
+            history.resolve_assets(RESEARCH_DIR, [{"source_commit": history.text_git(
+                RESEARCH_DIR, "rev-parse", commit["sha"]), "paths": asset["paths"],
+                "reason": asset["reason"], "required_checks": asset.get("checks") or ["미검증"]}])
+        except history.HistoryError as e:
+            raise AgentError(f"모듈 재사용 판정 오류: {e}") from e
 
 
 def handle_needs_human(review, n):
@@ -1622,16 +2127,15 @@ def handle_needs_human(review, n):
     print("f [지시]     : 다음 계획에 반영할 지시 입력 후 계속")
     print("q            : 종료")
 
-    telegram_text = (
-        f"🙋 iter_{n:03d} 결정이 필요합니다\n\n"
-        f"{review['reason']}\n\n"
-        f"이번 결과: {review['one_line_summary']}\n"
-        f"GPT 제안: {review['next_task']}\n\n"
-        "답장:\n"
+    telegram_text = notice(f"🙋 iter_{n:03d} | 사용자 결정 필요", [
+        ("질문", review["reason"]),
+        ("현재 결과", review["one_line_summary"]),
+        ("GPT 제안", review["next_task"]),
+    ], reference=f"agent/runs/iter_{n:03d}/review.md", actions=(
         "ok → GPT 제안대로 계속\n"
         "f 지시내용 → 지시 반영해서 계속\n"
         "q → 종료"
-    )
+    ))
     while True:
         reply = ask("> ", telegram_text)
         if reply is None:
@@ -1663,14 +2167,30 @@ def handle_needs_human(review, n):
 # main
 # --------------------------------------------------
 
+def nonnegative_seconds(value):
+    seconds = int(value)
+    if seconds < 0:
+        raise argparse.ArgumentTypeError("timeout은 0 이상이어야 합니다 (0=시간 제한 없음)")
+    return seconds
+
+
+def nonnegative_iterations(value):
+    count = int(value)
+    if count < 0:
+        raise argparse.ArgumentTypeError("반복 수는 0 이상이어야 합니다 (0=횟수 제한 없음)")
+    return count
+
+
 def parse_args():
     p = argparse.ArgumentParser(description="GPT(Codex) ↔ Claude Code 자동 연구 루프")
-    p.add_argument("--max-iters", type=int, default=3, help="이번 실행에서 진행할 최대 반복 수")
+    p.add_argument("--max-iters", type=nonnegative_iterations, default=0,
+                   help="이번 실행의 최대 반복 수. 기본 0=횟수 제한 없음, 양수 지정 시에만 제한")
     p.add_argument("--autonomy", choices=["manual", "smart", "full"], default="smart",
                    help="계획 확인: manual=매번, smart=애매할 때만(기본), full=안 함")
     p.add_argument("--auto", action="store_true", help="--autonomy full과 같음")
     p.add_argument("--no-ask-until", help="이 시각까지는 사람에게 묻지 않고 진행. 예: 09:00 또는 '2026-09-24 09:00'")
-    p.add_argument("--max-attempts", type=int, default=MAX_ATTEMPTS, help="같은 접근법 최대 시도 횟수")
+    p.add_argument("--max-attempts", type=int, default=MAX_ATTEMPTS,
+                   help="같은 접근법의 유효한 실험 재평가 기준 횟수 (자동 포기 아님)")
     p.add_argument("--max-think-rounds", type=int, default=4, help="반복당 GPT 사고 라운드 최대 횟수")
     p.add_argument("--goal", help="새 연구 목표. 이전 기록을 이어받아 새 목표로 다시 계획한다")
     p.add_argument("--reset", action="store_true", help="모든 기록을 archive로 옮기고 완전히 새로 시작")
@@ -1678,12 +2198,23 @@ def parse_args():
     p.add_argument("--gpt-tier", choices=GPT_TIERS, help="GPT 계획/리뷰 등급 고정 (agent/tiers.json)")
     p.add_argument("--claude-tier", choices=CLAUDE_TIERS, help="Claude 등급 고정 (agent/tiers.json)")
     p.add_argument("--gpt-timeout", type=int, default=30 * 60, help="GPT 단계 제한 시간(초)")
-    p.add_argument("--claude-timeout", type=int, default=3 * 60 * 60, help="Claude 단계 제한 시간(초)")
+    p.add_argument("--claude-timeout", type=nonnegative_seconds, default=0,
+                   help="Claude 단계 제한 시간(초), 0=시간 제한 없음(기본). 양수 지정 시에만 강제 종료")
     p.add_argument("--always-review", action="store_true", help="계획과 상관없이 매 반복 GPT 리뷰")
     p.add_argument("--limit-poll-minutes", type=int, default=30, help="사용 한도 대기 중 다시 시도하는 간격(분)")
     p.add_argument("--limit-max-hours", type=float, default=8, help="사용 한도가 풀리길 최대 몇 시간 기다릴지")
     p.add_argument("--no-telegram", action="store_true", help="Telegram 알림/답장 끄기")
+    p.add_argument("--replan", metavar="지시", help="현재 작업을 보존하고 보완 지시로 GPT부터 재계획")
+    p.add_argument("--prepare-only", action="store_true", help="보완 지시의 재개 상태만 준비. 에이전트·실험·알림 실행 안 함")
+    p.add_argument("--status", action="store_true", help="현재 단계·보완 대기 여부만 표시. 실행 안 함")
+    p.add_argument("--usage", action="store_true", help="GPT·Claude 로컬 로그 사용량 조회. 모델·실험·알림 실행 안 함")
     args = p.parse_args()
+    if (args.prepare_only or args.replan) and (args.reset or args.goal):
+        p.error("보완 재개는 --reset/--goal과 함께 쓸 수 없습니다. 기존 목표와 기록을 보존합니다.")
+    if args.status and (args.replan or args.prepare_only or args.reset or args.goal):
+        p.error("--status는 조회 전용입니다. 상태 변경 옵션과 함께 쓸 수 없습니다.")
+    if args.usage and (args.status or args.replan or args.prepare_only or args.reset or args.goal):
+        p.error("--usage는 단독 조회 옵션입니다. 상태 변경 또는 --status와 함께 쓸 수 없습니다.")
     if args.auto:
         args.autonomy = "full"
     args.no_ask_until = parse_until(args.no_ask_until)
@@ -1732,7 +2263,9 @@ def change_goal(text):
             f.write(f"\n## 🎯 연구 목표 변경 (iter_{start:03d}부터, {now()[:16]})\n\n"
                     f"- 이전: {previous}\n- 새 목표: {text}\n")
         print(f"연구 목표를 바꿨습니다. iter_{start:03d}부터 새 목표로 계획합니다 (이전 기록 참고).")
-        notify(f"🎯 연구 목표 변경 (iter_{start:03d}부터)\n이전: {previous[:300]}\n새 목표: {text[:500]}")
+        notify(notice(f"🎯 iter_{start:03d}부터 연구 목표 변경", [
+            ("새 목표", text), ("이전 목표", previous),
+        ], reference="agent/GOAL.md · 변경 이력: agent/GOALS.json"))
     rebuild_index()
 
 
@@ -1793,7 +2326,7 @@ def request_stop_now():
     STOP_FILE.touch()
     STATE["stop_now"] = True
     if STATE["proc"] is not None:
-        STATE["proc"].kill()
+        kill_agent_group(STATE["proc"])
     HUMAN.interrupt()
     return f"진행 중인 작업({STATE['stage']})을 중단하고 멈춥니다. 다시 실행하면 이어서 진행합니다."
 
@@ -1811,8 +2344,35 @@ def record_stop(reason):
 
 
 def main():
-    global HUMAN, MAX_ATTEMPTS
     args = parse_args()
+    if args.usage:
+        print(usage_report(RUNS_DIR))
+        print("\n" + gpt_usage.usage_report(RUNS_DIR))
+        return
+    if args.status:
+        n = current_iteration()
+        print(f"현재: iter_{n:03d} / {stage_of(n)}")
+        print(f"보완 지시 대기: {'있음' if RESUME_FILE.exists() or pending_interventions() else '없음'}")
+        print(f"지시 파일: {RESUME_FILE}")
+        info = load_json(iter_dir(n) / "intervention.json")
+        if info:
+            print(f"반영된 보완: {info['id']} (원문: {iter_dir(n) / 'intervention.json'})")
+        return
+    with orchestrator_lock():
+        if (args.reset or args.goal) and (RESUME_FILE.exists() or pending_interventions()):
+            raise AgentError("대기 중인 보완 지시가 있습니다. 먼저 기존 목표에서 반영한 뒤 목표 변경/초기화하세요.")
+        if args.replan:
+            queue_replan(args.replan)
+        target = apply_pending_replan()
+        if args.prepare_only:
+            print(f"준비 완료: iter_{current_iteration():03d}, 실험·에이전트·알림 미실행. "
+                  + ("새 보완 지시를 적용했습니다." if target else "새 보완 지시가 없습니다."))
+            return
+        run_loop(args)
+
+
+def run_loop(args):
+    global HUMAN, MAX_ATTEMPTS
     MAX_ATTEMPTS = args.max_attempts
     LIMIT.update(poll=args.limit_poll_minutes * 60, max=int(args.limit_max_hours * 3600))
     HUMAN = Human(None if args.no_telegram else NOTIFY_ENV_FILE)
@@ -1838,15 +2398,20 @@ def main():
     n = current_iteration()
     # 직전 반복이 DONE이어도, 그 뒤에 새 목표가 시작됐으면 묻지 않는다 (DONE은 이전 목표의 완료)
     if (not goal_changed and n > 1 and goal_start(n) < n
+            and not (iter_dir(n) / "intervention.json").exists()
             and load_review(n - 1) and load_review(n - 1)["verdict"] == "DONE"):
         print("\n직전 반복에서 DONE 판정이 났습니다. 새 목표로 이어가려면 --goal \"새 목표\"로 실행하세요.")
         if args.autonomy == "full" or (ask("계속할까요? [y/N] ") or "").lower() != "y":
             return
 
-    first_line = goal.splitlines()[0][:200] if goal else ""
+    first_line = goal.splitlines()[0] if goal else ""
     away_text = (f"\n{args.no_ask_until:%m-%d %H:%M}까지는 묻지 않고 진행합니다 (그 후 원래 규칙)."
                  if args.no_ask_until else "")
-    notify(f"▶ 연구 루프 시작 (iter_{current_iteration():03d}부터, 최대 {args.max_iters}회)\n목표: {first_line}{away_text}")
+    notify(notice(f"▶ iter_{current_iteration():03d} | 연구 루프 시작", [
+        ("목표", first_line), ("진행 범위", f"이번 실행에서 최대 {args.max_iters}회 반복" if args.max_iters
+         else "반복 횟수 제한 없이 계속 진행합니다. 목표 달성·오류·정지 요청 시 종료하고, 필요한 사용자 판단은 기다립니다."),
+        ("사용자 확인", away_text),
+    ], reference="agent/GOAL.md"))
 
     first = current_iteration()
     events_file = iter_dir(first) / "events.jsonl"
@@ -1860,7 +2425,10 @@ def main():
 
     completed = 0
     finished = False
-    while completed < args.max_iters:
+    while args.max_iters == 0 or completed < args.max_iters:
+        # 외부 에이전트가 실행되는 중에는 작업을 바꾸지 않고 다음 안전한 단계 경계에서 전환한다.
+        check_stop()
+        apply_pending_replan()
         n = current_iteration()
         d = iter_dir(n)
         d.mkdir(parents=True, exist_ok=True)
@@ -1869,6 +2437,8 @@ def main():
         if not (d / "plan.md").exists():
             set_stage(n, "GPT 계획")
             step_plan(args, goal_for(n), n)
+        if RESUME_FILE.exists() or pending_interventions():
+            continue
         if not (d / "claude_report.md").exists():
             check_stop()
             set_stage(n, "계획 확인")
@@ -1879,9 +2449,13 @@ def main():
                 return
             if action == "replan":
                 continue
+            if RESUME_FILE.exists() or pending_interventions():
+                continue
             check_stop()
             set_stage(n, "Claude 구현/실험")
             step_claude(args, goal_for(n), n)
+        if RESUME_FILE.exists() or pending_interventions():
+            continue
         if not (d / "review.json").exists():
             check_stop()
             needs_review, reason = review_decision(args, n)
@@ -1891,6 +2465,8 @@ def main():
                 step_review(args, goal_for(n), n)
             else:
                 step_skip_review(n, reason)
+        if RESUME_FILE.exists() or pending_interventions():
+            continue
 
         # 리뷰 뒤 처리: 끊겼다가 다시 실행해도 각각 한 번만 한다
         set_stage(n, "리뷰 후 처리")
@@ -1908,24 +2484,21 @@ def main():
             set_post_flag(n, "milestone")
         if "notified" not in flags:
             if review["verdict"] == "CONTINUE" and review.get("skipped"):
-                notify(f"✅ iter_{n:03d} 완료 (GPT 리뷰 생략)\n{review['one_line_summary']}")
+                notify(iteration_result(n, review))
             elif review["verdict"] == "CONTINUE":
-                notify(
-                    f"✅ iter_{n:03d} 완료 [{review['approach_status']}]\n"
-                    f"{review['one_line_summary']}\n"
-                    f"접근법: {review['approach_note']}\n"
-                    f"다음: {review['next_task']}"
-                )
+                notify(iteration_result(n, review))
             elif review["verdict"] == "DONE":
-                notify(f"🎉 iter_{n:03d} 연구 목표 완료 (DONE)\n{review['one_line_summary']}")
+                notify(iteration_result(n, review))
             set_post_flag(n, "notified")
 
         if review["verdict"] == "NEEDS_HUMAN" and human_away(args):
             record_event(n, "needs_human", question=review["reason"], reply="(사람 부재, 자동)",
                          result="GPT 제안대로 계속")
             rebuild_index()
-            notify(f"🙋 iter_{n:03d} 원래는 결정을 물어볼 지점이지만 사람 부재 시간이라 GPT 제안대로 계속합니다.\n"
-                   f"질문: {review['reason'][:500]}\n진행: {review['next_task'][:300]}")
+            notify(notice(f"▶ iter_{n:03d} | 설정된 부재 시간에 따라 자동 진행", [
+                ("원래 확인할 질문", review["reason"]), ("진행할 일", review["next_task"]),
+                ("주의", "사용자가 승인한 답변이 아니라, 기존 부재 시간 설정에 따른 자동 결정입니다."),
+            ], reference=f"agent/runs/iter_{n:03d}/review.md"))
         elif review["verdict"] == "NEEDS_HUMAN":
             set_stage(n, "사람 결정 대기")
             if not handle_needs_human(review, n):
@@ -1960,7 +2533,10 @@ if __name__ == "__main__":
     except AgentError as e:
         record_stop(f"오류: {e}")
         print(f"\n[ERROR] {e}")
-        notify(f"❌ 오류로 멈췄습니다\n{e}\n다시 실행하면 이어서 진행합니다.")
+        notify(notice("❌ 오류로 중단", [
+            ("오류", str(e)),
+            ("다음", "오류 내용을 확인하세요. 다시 실행하면 미완료 단계부터 이어갑니다."),
+        ]))
         print("다시 실행하면 완료되지 않은 단계부터 이어서 진행합니다.")
         sys.exit(1)
     except KeyboardInterrupt:
