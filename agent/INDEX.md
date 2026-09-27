@@ -24,6 +24,7 @@
 - iter_016 [CONTINUE] (deep/standard/normal) <질문 대상과 음성 의미 보존 진단: success> 💾6a4fb41d490305061028de9cab863c0b5e9747ad 6,180건의 유효한 진단에서 SFT의 strict 저하 대부분이 형식 효과로 설명됐고, 예측 bbox reader는 direct M0보다 S_scope가 0.078 높았다. 문구·검출 정보·좌표의 기여는 아직 분리되지 않았다. → 다음: 진단을 우선 권고한다. 다음 deep 계획에서 현재 방법 개선·evidence 인터페이스 원인 진단·다른 의료 VLM 질문으로 전환을 비교하되, 이번에 실제 이득이 확인된 모듈형 조건을 단순히 기각하지 않는다. 기존 개발 panel과 checkpoint를 활용해 문구를 맞춘 predicted/unavailable 대조, 좌표 없는 검출 유무 전달, 필요한 좌표 교란 대조 중 다음 결정을 구분할 최소 실험을 선택한다. direct M0를 유지하고 category별 손익을 평가한다. 이득이 단순 검출 유무나 문구로 설명되면 이를 강한 baseline으로 보존하고 새 loss 투자 없이 전환을 검토한다. 의미 있는 잔여 이득이나 일반적 실패 조건이 남을 때만 추가 환자·데이터로 확대한다. 필요한 provenance 수정만 먼저 수행하고 reserve·새 학습은 자동 투입하지 않는다.
 - iter_017 [CONTINUE] (deep/standard/normal) <질문 대상과 음성 의미 보존 진단: success> 💾d12ef5ccea60d05b9163519980cdb1624b3fa682 E600 통제 진단에서 B−U +0.0533과 K−B +0.0150을 재현했고 좌표의 정답 쌍 추가 이득은 없었다. direct 대비 이득과 일반화는 미확인이며, NoOpacity/NotNormal 손실을 포함해 다음 연구 질문으로의 전환을 검토한다. → 다음: 전환을 우선 검토한다. iter_017에서 예정한 정보 수준 진단은 종료하고 새 loss·좌표 교란·reserve 확대를 자동 예약하지 않는다. 다음 deep 계획에서 현재 grounding 개선, 질문 범위가 다른 evidence를 과도하게 일반화하는 현상의 최소 독립 진단, 다른 중요한 의료 VLM 질문을 중요성·정보 이득·선행 대비 차별성·두 GPU 비용으로 비교한다. 현재 실패 현상을 후보로 택한다면 direct M0와 B/K baseline을 유지하고, 단순 문구 변경으로 해결되는지와 정답이 보장되는 다른 finding·독립 환자에서도 남는지를 구분한다. 재현되는 중요한 잔여 실패가 확인될 때만 방법 개발과 충분한 확대를 계획하고, 좁은 RSNA 문구 현상으로 설명되면 다른 질문으로 이동한다. 재사용 수정은 실제 선택한 경로에 필요한 것만 수행한다.
 - iter_018 [CONTINUE] (deep/standard/normal) <질문 대상과 음성 의미 보존 진단: inconclusive> 💾4e453bbba4b0e798c0deeb6a940644dd62707fa3 CheXpert E48 실제 출력에서 범위 안내 후 손실 6.25 pp와 CI [-6.25, 18.75] pp를 재현해 F 확대 보류를 지지한다. 일반적 한계·새 방법의 필요성은 미확인이며 코드 재사용과 원본 보존 절차는 보완이 필요하다. → 다음: 전환을 우선 검토하는 deep 전략 판단을 수행한다. 이번 진단은 사전 계획대로 종료하고 F·새 loss·추가 문구 탐색을 자동 예약하지 않는다. 다른 중요한 의료 VLM 질문, 기존 grounding 개선, 현재 범위 민감성의 추가 진단을 정보 이득·가까운 선행 방법·자료 접근·두 GPU 비용으로 비교한다. 현재 방향을 유지하려면 단일 질문에서 R=D로 해결되는 한계를 넘어, 관련 evidence를 유지해야 하는 실제 사용 과제와 공정한 분리 실행 baseline을 제시해야 한다. category별 사후 관찰만으로 주가설·기준을 바꾸지 않는다. 실제 선택한 경로에 필요한 재사용 결함만 먼저 수정하고 기존 결과와 F를 보존한다.
+- iter_019 [CONTINUE] (deep/standard/normal) <동일 volume의 reference 대상 선택 진단: execution_failed> 💾ff16f12f6fca43e62c5e3ff795456db9200220b2 iter_019는 합성 검사·GPU 메모리 측정에 머물렀고 다운로드 종료와 방향·NCC 좌표 결함을 확인했다. 실제 환자 실험은 미실행이므로 가설·신규 기여는 미판정이며 복구 후 원 계획을 이어간다. → 다음: 현재 방향을 유지하며 복구·검증을 우선한다. 실행 호스트에서 기존 다운로드·worker·lock·종료 상태를 확인하고 부분 파일과 checkpoint를 보존한다. images.zip을 별도 복구 경로에서 완성해 원저자 checksum을 확인한다. 본평가 전에 MHA 방향과 sagittal 축, NCC padding, 사전 pair 선택, 필수 provenance·pipeline 종료·완전성 결함을 수정한다. 실제 image/mask overlay와 중복·연결성 검증 후 적격 N과 D8/E48/F를 고정한다. N<56이면 원 계획대로 자료 식별성 부족으로 종료하고, 충분하면 D8·24개 재개 검사·두 GPU 처리량 비교를 완료해 E48로 진행한다. F는 원래 확대 조건을 충족할 때만 연다. 성능 결과가 나오기 전 새 loss·방법 학습이나 광범위한 재조사를 추가하지 않는다.
 
 ## 이전 목표들의 접근법 (참고용, 현재 목표의 재평가 횟수에는 안 들어감)
 
@@ -39,11 +40,13 @@
 - 정상 사용 조건의 병변 grounding 검증 [approach/grounding-usage-diagnostic]: 1회 (iter_009), 유효한 실험 1회, 미분류 0회, 최근 판정: success, 커밋: 39aa49a6fa5943ca0d3e0327a7874e68a2c878cb
 - 영상 조건부 집합 grounding [approach/conditional-set-grounding]: 5회 (iter_010, iter_011, iter_012, iter_013, iter_014), 유효한 실험 3회, 미분류 0회, 최근 판정: abandon, 커밋: 5581ed255a350e42a0ad422065edf13c56a33bf6, 8b030717b813bcbff85a2ffc5f52c9561a73f452, 783d2d04671ae296f3dc0c700e575f8af8e021c9, d68840e0f9317700a8b585bcf6edbb8ef73703a0, 698c161f51ec098b1263ea8a5acf4d2870930e0b
 - 질문 대상과 음성 의미 보존 진단 [approach/target-scope-diagnostic]: 4회 (iter_015, iter_016, iter_017, iter_018), 유효한 실험 3회, 미분류 0회, 최근 판정: inconclusive, 커밋: 3265f117bf3f4de99ba084f2c9b4e476568f24bd, 6a4fb41d490305061028de9cab863c0b5e9747ad, d12ef5ccea60d05b9163519980cdb1624b3fa682, 4e453bbba4b0e798c0deeb6a940644dd62707fa3
+- 동일 volume의 reference 대상 선택 진단 [approach/reference-instance-diagnostic]: 1회 (iter_019), 유효한 실험 0회, 미분류 0회, 최근 판정: execution_failed, 커밋: ff16f12f6fca43e62c5e3ff795456db9200220b2
 
-현재 연구 브랜치: approach/target-scope-diagnostic (코드 위치: /SSD1_1TB/home/milab/daniel/08_medgemma/research)
+현재 연구 브랜치: approach/reference-instance-diagnostic (코드 위치: /SSD1_1TB/home/milab/daniel/08_medgemma/research)
 
 ### 최근 계획의 대안 순위
 
-1. 질문 대상과 음성 의미 보존 진단: 다른 finding·새 환자에서 범위 문구 이후의 손상을 확인해 현재 후보의 투자 여부를 결정한다.
-2. 시간 변화 판단으로 전환: 임상적 중요성은 높지만 longitudinal 자료 접근과 모델 학습 원천 중복을 먼저 해결해야 한다.
-3. 현재 grounding 방법 개선: 직접 SFT 자산은 보존하되 새 일반화·효율·오류 원인 근거가 생길 때 학습 투자를 재검토한다.
+1. 동일 volume의 reference 대상 선택 진단: 실제 instance 주석으로 대상 선택·경계 오차·단순 위치 해결을 구분해 다음 학습 투자를 판단한다.
+2. 임상 다중 영상 통합 질문으로 전환: MedThinkVQA 자료 접근성은 있으나 기존 단계별 오류 분석과 구별할 구체적 질문이 더 필요하다.
+3. 현재 grounding 방법 개선: 직접 SFT와 잔여 오류 자산을 보존하되 일반화·효율에 관한 새 가설이 생길 때 재개한다.
+4. 기존 범위 민감성 추가 진단: 관련 evidence를 유지해야 하는 실제 과제와 새로운 식별 근거가 없어 F·문구 탐색을 보류한다.
