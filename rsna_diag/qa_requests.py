@@ -13,7 +13,7 @@ import os
 
 from . import generate, parse as PA, prompts as P, qa_spec as S
 
-OUT = os.environ.get("QA_RUN_ROOT", "results/iter_016")   # 새 출력은 항상 이 run-root 아래에만 쓴다
+OUT = os.environ.get("QA_RUN_ROOT", "results/iter_017")   # 새 출력은 항상 이 run-root 아래에만 쓴다
 SRC = "results/iter_015"                                   # 과거(iter_015) 입력·결과는 읽기 전용 source-root
 CKPT_SPEC = {
     "M0": None,
@@ -113,15 +113,39 @@ def bbox_sources(ckpt):
     return src
 
 
-def bbox_records(ckpt, sources=None):
-    """ckpt의 concise bbox 원시 record {id: record}. 명시한 출처만 읽고, 출처 간 동일 id 충돌은 거부한다."""
+PINNED_SHA = {}   # iter_017: 검증된 reuse manifest의 {원본 파일 경로: sha256}. 비어 있지 않으면 reuse 출처는 여기에 있고 hash가 같아야 한다.
+
+
+def _file_sha(p):
+    import hashlib
+    h = hashlib.sha256()
+    with open(p, "rb") as f:
+        for b in iter(lambda: f.read(1 << 20), b""):
+            h.update(b)
+    return h.hexdigest()
+
+
+def bbox_records(ckpt, sources=None, pinned=None):
+    """ckpt의 concise bbox 원시 record {id: record}. 명시한 출처만 읽고, 출처 간 동일 id 충돌은 거부한다.
+    iter_017: pinned(기본 PINNED_SHA)가 있으면 reuse 출처의 현재 sha256이 pin과 다를 때, pin에 없을 때 거부한다.
+    gen 출처는 completion.json의 내용(누락·중복·잉여 0, 자식 종료 코드 0)도 확인한다."""
+    pinned = PINNED_SHA if pinned is None else pinned
     out, origin = {}, {}
     for kind, p in (sources or bbox_sources(ckpt)):
         if kind == "reuse":
+            if pinned:
+                if p not in pinned:
+                    raise RequestError(f"bbox source {p} is not pinned in the verified reuse manifest")
+                if _file_sha(p) != pinned[p]:
+                    raise RequestError(f"bbox source {p} changed since verification")
             recs = [json.loads(ln) for ln in open(p) if ln.strip()]
         else:
             if not os.path.exists(f"{p}/completion.json"):
                 raise RequestError(f"bbox source {p} has no completion.json (incomplete stage)")
+            c = json.load(open(f"{p}/completion.json"))
+            if (c.get("n_missing") != 0 or c.get("n_duplicate") != 0 or c.get("n_extra") != 0 or c.get("n_expected") != c.get("n_actual_unique")
+                    or not c.get("returncodes") or any(x != 0 for x in c["returncodes"])):
+                raise RequestError(f"bbox source {p}: completion content invalid")
             recs = [r for f in sorted(glob.glob(f"{p}/gen_worker*.jsonl")) for r in generate.read_records(f)
                     if r.get("condition") == "bbox" and r.get("checkpoint") == ckpt]
         seen = set()

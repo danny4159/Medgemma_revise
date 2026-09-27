@@ -136,6 +136,22 @@ def verify_job(out_dir, rows, cfg, pdig, adapter_dir, require_complete=True):
     return done, missing
 
 
+def verify_completion(out_dir, rows, cfg, pdig, rp, n_done):
+    """completion.json의 내용을 현재 요청·protocol과 대조한다 (존재만으로 완료로 보지 않는다). 위반이면 QAError."""
+    c = json.load(open(os.path.join(out_dir, "completion.json")))
+    checks = {"protocol_digest": c.get("protocol_digest") == pdig, "n_expected": c.get("n_expected") == len(rows),
+              "n_actual_unique": c.get("n_actual_unique") == n_done == len(rows), "n_missing": c.get("n_missing") == 0,
+              "n_duplicate": c.get("n_duplicate") == 0, "n_extra": c.get("n_extra") == 0,
+              "returncodes": bool(c.get("returncodes")) and all(x == 0 for x in c["returncodes"]),
+              "requests_sha256": c.get("requests_sha256") == generate.sha(open(rp, "rb").read()),
+              "adapter_digest": c.get("adapter_digest") == rows[0]["adapter_digest"], "config_digest": c.get("config_digest") == cfg,
+              "verify_error": c.get("verify_error") is None}
+    bad = [k for k, v in checks.items() if not v]
+    if bad:
+        raise qa_gen.QAError(f"completion.json content invalid in {out_dir}: {bad}")
+    return c
+
+
 class _Term(BaseException):
     pass
 
@@ -172,10 +188,12 @@ def main():
         cp = os.path.join(out_dir, "completion.json")
         if os.path.exists(cp):
             done, missing = verify_job(out_dir, rows, cfg, pdig, adapter)
-            c = json.load(open(cp))
-            if (not missing and c.get("protocol_digest") == pdig and c.get("n_expected") == len(rows)
-                    and c.get("requests_sha256") == generate.sha(open(rp, "rb").read()) and c.get("adapter_digest") == rows[0]["adapter_digest"]
-                    and c.get("n_actual_unique") == len(done) and c.get("config_digest") == cfg):
+            try:
+                verify_completion(out_dir, rows, cfg, pdig, rp, len(done))
+                ok_c = not missing
+            except qa_gen.QAError:
+                ok_c = False
+            if ok_c:
                 print(f"[{ckpt}] already complete & re-verified ({len(rows)} requests); skip", flush=True)
                 summary.append({"ckpt": ckpt, "status": "verified_complete", "n": len(rows)})
                 continue

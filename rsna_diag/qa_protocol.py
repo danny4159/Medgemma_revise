@@ -12,7 +12,7 @@ import sys
 
 from . import generate, lock_protocol
 
-SCHEMA = "iter016_qa_protocol_v1"
+SCHEMA = "iter016_qa_protocol_v1"  # iter_017도 같은 스키마 (REQUIRED_CODE에 ev17_* 추가)
 # 반입한 16개 파일 + 이번 반복의 신규 모듈. 하나라도 없으면 실패한다.
 REQUIRED_CODE = [
     "rsna_diag/__init__.py", "rsna_diag/geometry.py", "rsna_diag/parse.py", "rsna_diag/metrics.py", "rsna_diag/sft_eval.py",
@@ -21,6 +21,8 @@ REQUIRED_CODE = [
     "rsna_diag/dicom_min.py",
     "rsna_diag/qa_spec.py", "rsna_diag/qa_data.py", "rsna_diag/qa_protocol.py", "rsna_diag/qa_requests.py", "rsna_diag/qa_gen.py",
     "rsna_diag/qa_run.py",
+    # iter_017: evidence 정보 수준(U/B/K/L/X) 진단
+    "rsna_diag/ev17_spec.py", "rsna_diag/ev17_requests.py", "rsna_diag/ev17_analysis.py", "rsna_diag/ev17_reuse.py",
     # iter_016: semantic parser(qa_spec)·평가·보고·재사용 검증·확대 결정 코드
     "rsna_diag/qa_eval.py", "rsna_diag/qa_report.py", "rsna_diag/qa_reuse.py", "rsna_diag/qa_scope.py", "rsna_diag/qa_pilot.py",
 ]
@@ -49,9 +51,10 @@ def create(out, extra=(), note=""):
     return lock_protocol.locked_digest(cur)
 
 
-def verify(path, allow_changed=()):
-    """allow_changed: 잠금 이후 수정이 허용된(결과와 무관한 오류 수정으로 기록된) 파일. 나머지가 하나라도 다르면 실패한다.
-    반환 digest는 항상 잠긴 목록의 digest이다. 허용한 파일의 실제 hash 차이는 호출자가 기록해야 한다."""
+def verify(path, allowed_edits=None):
+    """잠긴 모든 파일이 존재하고 sha가 같아야 통과 (파일명만으로 허용하는 우회는 없다).
+    allowed_edits: {파일: {"before": 잠긴 sha, "after": 현재 sha, "reason": 사유}} 형태의 명시적 허용. before가 잠긴 값, after가 현재 값과
+    정확히 같을 때만 그 파일의 차이를 허용하고, 사유가 없거나 hash가 다르면 실패한다. 반환 digest는 항상 잠긴 목록의 digest이다."""
     if not path or not os.path.exists(path):
         raise RuntimeError(f"protocol file missing: {path!r}")
     old = json.load(open(path))
@@ -63,7 +66,15 @@ def verify(path, allow_changed=()):
         raise RuntimeError(f"protocol does not lock required files: {missing_req}")
     extra = [f for f in lk["files"] if f not in REQUIRED_CODE]
     cur = current(extra)
-    diff = {k: (lk["files"].get(k), v) for k, v in cur["files"].items() if lk["files"].get(k) != v and k not in allow_changed}
+    allowed_edits = allowed_edits or {}
+    diff = {}
+    for k, v in cur["files"].items():
+        if lk["files"].get(k) == v:
+            continue
+        e = allowed_edits.get(k)
+        if e and e.get("reason") and e.get("before") == lk["files"].get(k) and e.get("after") == v:
+            continue
+        diff[k] = (lk["files"].get(k), v)
     if diff or lk["generation_config_digest"] != cur["generation_config_digest"]:
         raise RuntimeError("LOCK MISMATCH " + json.dumps(diff, indent=1)[:2000])
     return lock_protocol.locked_digest(lk)

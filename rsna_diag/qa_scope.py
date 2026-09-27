@@ -418,7 +418,6 @@ def main():
         print(json.dumps({k: r[k] for k in ("gate_pass_semantic", "primary_format", "alternate_format", "conversion_counts")}, indent=1))
         return
     from . import lock_protocol, qa_protocol
-    E.ALLOW_CHANGED = ("rsna_diag/qa_scope.py", "rsna_diag/qa_eval.py", "rsna_diag/qa_protocol.py")
 
     def changed(path):
         lk = json.load(open(path))["locked"]["files"]

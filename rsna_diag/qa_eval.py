@@ -19,13 +19,13 @@ OUT = Q.OUT
 BOOT_N, BOOT_SEED = 10000, 20260927
 
 
-ALLOW_CHANGED = ()  # 분석 진입점(qa_scope)이 설정: 결과를 보기 전에 고친 분석 코드 오류(기록됨)만 허용
+ALLOWED_EDITS = {}  # {파일: {before, after, reason}} 명시적 허용만 (파일명만으로 허용하지 않는다). iter_017 기본은 비어 있다
 
 
 def load_stage(stage, ckpt, protocol, gen_root="gen"):
     """완료된 stage/ckpt를 검증하고 record를 반환한다. 미완료·불일치면 예외."""
     from . import qa_protocol
-    pdig = qa_protocol.verify(protocol, ALLOW_CHANGED)
+    pdig = qa_protocol.verify(protocol, ALLOWED_EDITS)
     rp, rows, cfg = qa_run.load_job(stage, ckpt, protocol)
     tab = json.load(open(f"{OUT}/manifests/checkpoints.json"))
     d = f"{OUT}/{gen_root}/{stage}__{ckpt}"
@@ -34,6 +34,7 @@ def load_stage(stage, ckpt, protocol, gen_root="gen"):
     done, missing = qa_run.verify_job(d, rows, cfg, pdig, tab[ckpt]["dir"])
     if missing:
         raise qa_gen.QAError(f"{len(missing)} requests missing in {d}")
+    qa_run.verify_completion(d, rows, cfg, pdig, rp, len(done))
     by = {r["request_id"]: r for r in rows}
     return [(by[k], v) for k, v in done.items()]
 
