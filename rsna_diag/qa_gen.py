@@ -1,16 +1,19 @@
-"""iter_015 요청 행렬(qa_requests) 전용 생성 worker. generate.py의 모델 로더·adapter 로더·run_request(cap 래더 1000/2000/4000)를 재사용하고,
+"""iter_015/016 요청 행렬(qa_requests) 전용 생성 worker. generate.py의 모델 로더·adapter 로더·run_request(cap 래더 1000/2000/4000)를 재사용하고,
 요청 식별·재개 검증·claim만 request 단위로 새로 구현한다 (환자마다 prompt/evidence가 달라 전역 prompt 이름으로 식별할 수 없다).
 
 - 시작 시: qa_protocol.verify, 요청 파일이 protocol에 잠긴 파일과 같은지, 각 행의 request_id 재계산·config digest, 모든 영상의 현재 file/pixel hash.
 - adapter digest(tensor 재계산)가 모든 행의 adapter_digest와 같아야 한다 (base면 None).
 - 재개: 완료 record를 포함해 모든 worker 파일을 요청 행과 대조한다. 중복·잉여·id/prompt/adapter/config/protocol 불일치·입력 hash 변경·잘린 JSONL은 중단.
   --repair-tail: 마지막 줄이 개행 없이 잘렸을 때만 그 줄을 *.partial로 옮기고 계속한다 (기록을 지우지 않는다).
+  iter_016 소유권: repair는 (a) 내 worker 파일(내 lock 보유) 또는 (b) 작성 worker가 종료돼 그 worker lock을 내가 확보한 파일에만 한다.
+  살아 있는 다른 worker의 파일은 읽기에서 개행 없는 마지막 줄만 유보하고 절대 수정하지 않는다.
 사용: CUDA_VISIBLE_DEVICES=<gpu> python -m rsna_diag.qa_gen --requests R --out-dir D --worker K --protocol P [--adapter DIR]
 """
 import argparse
 import glob
 import json
 import os
+import re
 import sys
 import time
 
@@ -47,6 +50,41 @@ def read_strict(path, repair_tail=False, tolerate_tail=False):
             except ValueError as e:
                 raise QAError(f"corrupt JSON line {k} in {path}") from e
     return recs
+
+
+def _worker_of(path):
+    m = re.fullmatch(r"gen_worker(\d+)\.jsonl", os.path.basename(path))
+    return int(m.group(1)) if m else None
+
+
+def _has_tail(path):
+    if not os.path.exists(path):
+        return False
+    with open(path, "rb") as f:
+        data = f.read()
+    return bool(data.split(b"\n")[-1].strip())
+
+
+def read_all_owned(out_dir, my_worker, repair, live, info):
+    """out_dir의 모든 gen_worker*.jsonl을 읽는다. 잘린 마지막 줄의 처리:
+    내 파일 -> repair 옵션이 있으면 격리·복구, 없으면 오류(live=False). 다른 worker 파일 -> 그 worker의 lock을 non-blocking으로 시도해
+    확보되면(작성자 종료) repair 옵션에 따라 복구/오류, 확보 실패(작성자 생존)이면 읽기에서만 유보하고 수정하지 않는다.
+    tail이 없는 파일은 lock을 건드리지 않는다 (동시에 시작하는 worker의 lock을 잠시라도 가로채지 않는다)."""
+    out = {}
+    for f in sorted(glob.glob(os.path.join(out_dir, "gen_worker*.jsonl"))):
+        w = _worker_of(f)
+        if w == my_worker or not _has_tail(f):
+            out[f] = read_strict(f, repair_tail=repair and w == my_worker and not live)
+            continue
+        lk, _, _ = queue_lock.try_lock(os.path.join(out_dir, f"worker{w}.lock"), info)
+        if lk is None:
+            out[f] = read_strict(f, tolerate_tail=True)  # 살아 있는 writer: 수정 금지
+        else:
+            try:  # 작성자가 종료했고 lock을 내가 잡고 있다
+                out[f] = read_strict(f, repair_tail=repair and not live, tolerate_tail=live)
+            finally:
+                lk.release()
+    return out
 
 
 def validate_records(files_records, rows, cdig, adapter_digest, protocol_digest, pixel_sha):
@@ -140,8 +178,7 @@ def run_worker(a, rows, pdig, cfg, info):
         return cache[path]
 
     def read_all(repair, live=False):
-        return {f: read_strict(f, repair, tolerate_tail=live and f != out)
-                for f in sorted(glob.glob(os.path.join(a.out_dir, "gen_worker*.jsonl")))}
+        return read_all_owned(a.out_dir, a.worker, repair, live, info)
 
     done = validate_records(read_all(a.repair_tail), rows, cdig, adapter_digest, pdig, px)
     out = os.path.join(a.out_dir, f"gen_worker{a.worker}.jsonl")

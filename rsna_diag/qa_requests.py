@@ -1,4 +1,4 @@
-"""iter_015 요청 행렬. 요청 행(row)은 실제 prompt 원문과 evidence digest를 포함하고, request_id는 모델 revision·adapter digest·영상 identity·
+"""iter_015/016 요청 행렬 (iter_016: OUT=run-root, SRC=읽기 전용 source-root). 요청 행(row)은 실제 prompt 원문과 evidence digest를 포함하고, request_id는 모델 revision·adapter digest·영상 identity·
 target·format·condition·실제 prompt·evidence·config digest·전처리 버전 전체의 hash다 (하나라도 바뀌면 id가 바뀐다).
 
 - 일반 요청 파일에는 category·정답이 없다. oracle 요청만 GT bbox를 prompt로 받으며 별도 stage(condition=ev_oracle)로 생성한다.
@@ -13,7 +13,8 @@ import os
 
 from . import generate, parse as PA, prompts as P, qa_spec as S
 
-OUT = "results/iter_015"
+OUT = os.environ.get("QA_RUN_ROOT", "results/iter_016")   # 새 출력은 항상 이 run-root 아래에만 쓴다
+SRC = "results/iter_015"                                   # 과거(iter_015) 입력·결과는 읽기 전용 source-root
 CKPT_SPEC = {
     "M0": None,
     "B0": "results/iter_012/train/lr2e-4_s17/epoch_05",
@@ -92,27 +93,46 @@ def checkpoints(out=f"{OUT}/manifests/checkpoints.json"):
     return tab
 
 
-def patients(sets, name, exclude=None):
-    ids = [i for c in S.CATEGORIES for i in sets[name][c]]
+def patients(sets, name, exclude=None, per_cat=None):
+    ids = [i for c in S.CATEGORIES for i in (sets[name][c][:per_cat] if per_cat else sets[name][c])]
     if exclude:
         ex = {i for c in S.CATEGORIES for i in sets[exclude][c]}
         ids = [i for i in ids if i not in ex]
     return ids
 
 
-def bbox_records(ckpt):
-    """ckpt의 concise bbox 원시 record: 검증된 재사용 파일 + 이번 반복 신규 생성 결과. returns {id: record dict(suffix_text_raw, ended_eos)}."""
-    out = {}
-    for p in glob.glob(f"{OUT}/reuse/bbox_{ckpt}_concise.jsonl"):
-        for ln in open(p):
-            if ln.strip():
-                r = json.loads(ln)
-                out[r["id"]] = r
-    for d in glob.glob(f"{OUT}/gen/*__{ckpt}"):
-        for f in glob.glob(f"{d}/gen_worker*.jsonl"):
-            for r in generate.read_records(f):
-                if r.get("condition") == "bbox" and r.get("checkpoint") == ckpt:
-                    out[r["id"]] = r
+# bbox 원시 출력의 명시적 출처 목록. glob의 마지막 결과로 덮어쓰지 않는다. 같은 id가 두 출처에 있으면 오류.
+# ("reuse", jsonl 경로) | ("gen", 완료된 stage 디렉터리). 신규(iter_016) e600 C bbox는 run-root gen에 있으면 추가된다.
+def bbox_sources(ckpt):
+    src = {"M0": [("reuse", f"{SRC}/reuse/bbox_M0_concise.jsonl")],
+           "B0": [("reuse", f"{SRC}/reuse/bbox_B0_concise.jsonl"), ("gen", f"{SRC}/gen/d12_bbox__B0")],
+           "C": [("gen", f"{SRC}/gen/e180_bbox__C"), ("gen", f"{SRC}/gen/d12_bbox__C")]}[ckpt]
+    extra = f"{OUT}/gen/e600x_bbox__{ckpt}"
+    if ckpt == "C" and os.path.isdir(extra):
+        src.append(("gen", extra))
+    return src
+
+
+def bbox_records(ckpt, sources=None):
+    """ckpt의 concise bbox 원시 record {id: record}. 명시한 출처만 읽고, 출처 간 동일 id 충돌은 거부한다."""
+    out, origin = {}, {}
+    for kind, p in (sources or bbox_sources(ckpt)):
+        if kind == "reuse":
+            recs = [json.loads(ln) for ln in open(p) if ln.strip()]
+        else:
+            if not os.path.exists(f"{p}/completion.json"):
+                raise RequestError(f"bbox source {p} has no completion.json (incomplete stage)")
+            recs = [r for f in sorted(glob.glob(f"{p}/gen_worker*.jsonl")) for r in generate.read_records(f)
+                    if r.get("condition") == "bbox" and r.get("checkpoint") == ckpt]
+        seen = set()
+        for r in recs:
+            if r["id"] in seen:
+                raise RequestError(f"duplicate bbox record for {r['id']} inside source {p}")
+            seen.add(r["id"])
+            if r["id"] in out:
+                raise RequestError(f"bbox record for {r['id']} present in both {origin[r['id']]} and {p}")
+            out[r["id"]] = r
+            origin[r["id"]] = p
     return out
 
 
@@ -136,7 +156,7 @@ def build(a):
     tab = json.load(open(f"{OUT}/manifests/checkpoints.json"))
     from . import qa_protocol
     cfg, _ = qa_protocol.static_cfg()
-    ids = patients(sets, a.set, a.exclude_set)
+    ids = a.ids.split(',') if a.ids else patients(sets, a.set, a.exclude_set, a.per_cat)
     os.makedirs(f"{OUT}/requests", exist_ok=True)
     counts = {}
     ckpts = a.ckpts.split(",")
@@ -186,7 +206,9 @@ def main():
     b = sp.add_parser("build")
     b.add_argument("--stage", required=True)
     b.add_argument("--kind", required=True, choices=["qa", "bbox", "evidence"])
-    b.add_argument("--set", required=True)
+    b.add_argument("--set", default=None)
+    b.add_argument("--per-cat", type=int, default=None, help="각 category의 앞 N명 (표본은 category별로 먼저 고정한 뒤 요청을 구성한다)")
+    b.add_argument("--ids", default=None, help="stress 등 명시적 id 목록(쉼표)")
     b.add_argument("--exclude-set", default=None)
     b.add_argument("--ckpts", required=True)
     b.add_argument("--fmt", default="plain")

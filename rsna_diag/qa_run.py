@@ -1,13 +1,16 @@
-"""iter_015 stage 실행기: worker 수와 GPU 수를 분리하고, 허용 GPU 집합·메모리 여유·완료 검증·자식 종료 코드를 강제한다.
+"""iter_015/016 stage 실행기: worker 수와 GPU 수를 분리하고, 허용 GPU 집합·메모리 여유·완료 검증·자식 종료 코드를 강제한다.
 
 - 허용 집합 = 상속된 CUDA_VISIBLE_DEVICES(정수 목록). --gpus는 그 부분집합. worker k -> gpus[k % len(gpus)] (같은 GPU에 여러 worker 가능).
 - 실행 전 nvidia-smi를 조회한다. 조회 실패·파싱 실패는 실행하지 않는다. GPU별 (다른 프로세스 점유 + worker 수 x (측정 peak + 2GiB 여유)) <= 총 용량이어야 한다.
 - 이미 완료된 job은 모델을 올리지 않고 현재 입력·config·protocol·adapter와 다시 대조한 뒤 건너뛴다.
+- iter_016: 시작 전 out_dir의 worker*.lock을 조사해 살아 있는 이전 자식(부모 강제 종료 후 남은 worker)이 있으면 실행하지 않는다.
+  정상 중단·예외·SIGTERM에서는 이 실행이 띄운 자식만 종료·회수한 뒤 lock을 해제한다. attempt 기록에 자식 PID/starttime을 남긴다.
 - job 종료 후 모든 자식 종료 코드 수집, 요청 집합 == record 집합(누락·중복·잉여 0)이고 record 검증을 통과할 때만 completion.json을 원자적으로 쓴다.
 사용: python -m rsna_diag.qa_run --stage S --ckpts M0,B0 --protocol P --workers 4 --peak-gb 10
 """
 import argparse
 import glob
+import signal
 import json
 import os
 import subprocess
@@ -85,8 +88,43 @@ def load_job(stage, ckpt, protocol):
     return rp, rows, cfg
 
 
+def live_workers(out_dir):
+    """out_dir의 worker*.lock 중 살아 있는 프로세스가 잡고 있는 것. returns [(lock파일, 소유자 정보)]. lock을 잡으면 즉시 놓는다(파일 내용 유지)."""
+    live = []
+    for f in sorted(glob.glob(os.path.join(out_dir, "worker*.lock"))):
+        fd = os.open(f, os.O_RDWR)
+        try:
+            import fcntl
+            try:
+                fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            except BlockingIOError:
+                live.append((f, queue_lock._read(fd)))
+                continue
+            fcntl.flock(fd, fcntl.LOCK_UN)
+        finally:
+            os.close(fd)
+    return live
+
+
+def stop_children(procs, grace=60.0):
+    """이 실행이 띄운 자식만 SIGTERM -> grace 후 SIGKILL, 모두 wait로 회수한다. returns [{pid, returncode}]."""
+    for p in procs:
+        if p.poll() is None:
+            p.terminate()
+    t0 = time.time()
+    while time.time() - t0 < grace and any(p.poll() is None for p in procs):
+        time.sleep(0.5)
+    for p in procs:
+        if p.poll() is None:
+            p.kill()
+    for p in procs:
+        p.wait()
+    return [{"pid": p.pid, "returncode": p.returncode} for p in procs]
+
+
 def verify_job(out_dir, rows, cfg, pdig, adapter_dir, require_complete=True):
-    """out_dir의 모든 record를 요청 행·현재 입력·adapter·config·protocol과 대조. returns (done dict, missing list)."""
+    """out_dir의 모든 record를 요청 행·현재 입력(file/raw pixel/모델 입력 pixel)·adapter·config·protocol과 대조. returns (done dict, missing list)."""
+    qa_gen.check_inputs(rows)
     adg = eval_gate.adapter_digest(adapter_dir) if adapter_dir else None
     if adg != rows[0]["adapter_digest"]:
         raise qa_gen.QAError(f"adapter digest {adg} != requests {rows[0]['adapter_digest']}")
@@ -98,7 +136,16 @@ def verify_job(out_dir, rows, cfg, pdig, adapter_dir, require_complete=True):
     return done, missing
 
 
+class _Term(BaseException):
+    pass
+
+
+def _on_term(signum, frame):
+    raise _Term(f"signal {signum}")
+
+
 def main():
+    signal.signal(signal.SIGTERM, _on_term)
     ap = argparse.ArgumentParser()
     ap.add_argument("--stage", required=True)
     ap.add_argument("--ckpts", required=True)
@@ -126,10 +173,15 @@ def main():
         if os.path.exists(cp):
             done, missing = verify_job(out_dir, rows, cfg, pdig, adapter)
             c = json.load(open(cp))
-            if not missing and c.get("protocol_digest") == pdig and c.get("n_expected") == len(rows):
+            if (not missing and c.get("protocol_digest") == pdig and c.get("n_expected") == len(rows)
+                    and c.get("requests_sha256") == generate.sha(open(rp, "rb").read()) and c.get("adapter_digest") == rows[0]["adapter_digest"]
+                    and c.get("n_actual_unique") == len(done) and c.get("config_digest") == cfg):
                 print(f"[{ckpt}] already complete & re-verified ({len(rows)} requests); skip", flush=True)
                 summary.append({"ckpt": ckpt, "status": "verified_complete", "n": len(rows)})
                 continue
+        alive = live_workers(out_dir)
+        if alive:
+            sys.exit(f"live worker(s) still own {out_dir}: {alive} (parent was killed?). Wait for/stop them, then rerun.")
         snap = query_gpus(gpus)
         assign = plan_gpus(gpus, a.workers, a.peak_gb, allowed, snap)
         info = queue_lock.my_info(role="qa_run")
@@ -162,6 +214,8 @@ def main():
                 env = dict(os.environ, CUDA_VISIBLE_DEVICES=str(g), CUDA_DEVICE_ORDER="PCI_BUS_ID")
                 procs.append(subprocess.Popen(cmd, env=env, stdout=open(f"{out_dir}/worker{k}.stdout.log", "a"),
                                               stderr=open(f"{out_dir}/worker{k}.stderr.log", "a")))
+            att["children"] = [{"pid": p.pid, "start": queue_lock.proc_start(p.pid), "worker": k, "gpu": g} for p, (k, g) in zip(procs, assign)]
+            atomic_json(att, att_path)
             t0 = time.time()
             rl = open(f"{out_dir}/resource_log.jsonl", "a")
             while any(p.poll() is None for p in procs):
@@ -185,7 +239,7 @@ def main():
             rep = {"stage": a.stage, "checkpoint": ckpt, "n_expected": len(rows), "n_actual_unique": len(done), "n_missing": len(missing),
                    "n_duplicate": 0, "n_extra": 0, "returncodes": codes, "wall_s": wall, "per_file": per_file, "protocol_digest": pdig,
                    "adapter_digest": rows[0]["adapter_digest"], "worker_gpu": assign, "gpu_uuid": att["gpu_uuid"], "verify_error": err,
-                   "requests": rp, "attempt_id": aid}
+                   "requests": rp, "requests_sha256": generate.sha(open(rp, "rb").read()), "config_digest": cfg, "attempt_id": aid}
             atomic_json(rep, f"{out_dir}/last_run.json")
             ok = not missing and err is None and all(c == 0 for c in codes)
             att.update({"status": "complete" if ok else "failed_or_incomplete", "returncodes": codes, "t_end": time.time(), "report": rep})
@@ -197,9 +251,9 @@ def main():
             print(f"[{ckpt}] rc={codes} wall={wall:.0f}s n={len(done)}/{len(rows)} ok={ok}", flush=True)
             summary.append({"ckpt": ckpt, "status": "complete" if ok else "incomplete", "n": len(done), "of": len(rows), "wall_s": wall})
         finally:
+            stopped = stop_children(procs) if any(p.poll() is None for p in procs) else [{"pid": p.pid, "returncode": p.returncode} for p in procs]
             if att["status"] == "running":
-                att.update({"status": "interrupted", "t_end": time.time(),
-                            "children": [{"pid": p.pid, "returncode": p.poll()} for p in procs]})
+                att.update({"status": "interrupted", "t_end": time.time(), "children_final": stopped})
                 try:
                     atomic_json(att, att_path)
                 except OSError:

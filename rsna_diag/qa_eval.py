@@ -1,4 +1,4 @@
-"""iter_015 QA/target-scope 평가. 점수는 검증을 통과한(완료·요청 집합 일치) stage에서만 계산한다 (qa_run.verify_job).
+"""iter_015/016 QA/target-scope 평가. 점수는 검증을 통과한(완료·요청 집합 일치) stage에서만 계산한다 (qa_run.verify_job).
 
 - 답 표: (checkpoint, condition, fmt, id) -> {target: (status, answer)}. invalid/truncated는 전체 분모에서 실패로 센다.
 - S_scope: 환자에서 두 target을 모두 맞힘. category별 비율 후 3 category 균등 평균.
@@ -7,6 +7,7 @@
       python -m rsna_diag.qa_eval e --set E180 ... (analysis는 아래 함수 사용)
 """
 import argparse
+import glob
 import json
 import os
 
@@ -18,10 +19,13 @@ OUT = Q.OUT
 BOOT_N, BOOT_SEED = 10000, 20260927
 
 
+ALLOW_CHANGED = ()  # 분석 진입점(qa_scope)이 설정: 결과를 보기 전에 고친 분석 코드 오류(기록됨)만 허용
+
+
 def load_stage(stage, ckpt, protocol, gen_root="gen"):
     """완료된 stage/ckpt를 검증하고 record를 반환한다. 미완료·불일치면 예외."""
     from . import qa_protocol
-    pdig = qa_protocol.verify(protocol)
+    pdig = qa_protocol.verify(protocol, ALLOW_CHANGED)
     rp, rows, cfg = qa_run.load_job(stage, ckpt, protocol)
     tab = json.load(open(f"{OUT}/manifests/checkpoints.json"))
     d = f"{OUT}/{gen_root}/{stage}__{ckpt}"
@@ -34,15 +38,44 @@ def load_stage(stage, ckpt, protocol, gen_root="gen"):
     return [(by[k], v) for k, v in done.items()]
 
 
-def answer_table(pairs):
-    """pairs: [(row, record)] -> {(ckpt, cond, fmt, id): {target: (status, answer, ended_eos, n_out)}}"""
+def load_reused(stage_dir, requests, ckpt, old_protocol, tab):
+    """iter_015에서 완료된 stage를 원래 protocol과 별도 호환성 검증 후 [(row, record)]로 반환 (qa_reuse.verify_old_stage)."""
+    from . import qa_reuse
+    qa_reuse.verify_old_stage(stage_dir, requests, ckpt, old_protocol, tab)
+    from . import qa_protocol
+    cfg, _ = qa_protocol.static_cfg()
+    rows = {r["request_id"]: r for r in Q.load_rows(requests, cfg)}
+    recs = [r for f in sorted(glob.glob(f"{stage_dir}/gen_worker*.jsonl")) for r in qa_gen.read_strict(f)]
+    return [(rows[r["request_id"]], r) for r in recs]
+
+
+def answer_table(pairs, parser="strict"):
+    """pairs: [(row, record)] -> {(ckpt, cond, fmt, id): {target: (status, answer, ended_eos, n_out)}}. parser: strict | semantic(semantic_v1).
+    같은 (ckpt, cond, fmt, id, target)가 두 번 나오면 오류 (조용히 덮어쓰지 않는다)."""
     t = {}
     for row, rec in pairs:
         if row["target"] not in S.TARGETS:
             continue
-        st, ans = S.parse_answer(row["fmt"], rec["suffix_text_raw"], rec["ended_eos"])
+        if parser == "semantic":
+            st, ans, _conv = S.parse_semantic(row["target"], row["fmt"], rec["suffix_text_raw"], rec["ended_eos"])
+        else:
+            st, ans = S.parse_answer(row["fmt"], rec["suffix_text_raw"], rec["ended_eos"])
+        key = (row["checkpoint"], row["condition"], row["fmt"], row["id"])
+        if row["target"] in t.get(key, {}):
+            raise qa_gen.QAError(f"duplicate answer for {key} target {row['target']}")
         t.setdefault((row["checkpoint"], row["condition"], row["fmt"], row["id"]), {})[row["target"]] = (st, ans, rec["ended_eos"], rec["n_output_tokens"])
     return t
+
+
+def require_complete(tab, ckpts, conds, fmts, ids):
+    """기대 (ckpt, cond, fmt, id) 집합이 표와 정확히 일치하고 각 항목에 두 target이 모두 있는지 검사한다. 누락·잉여는 예외."""
+    want = {(c, d, f, i) for c in ckpts for d in conds for f in fmts for i in ids}
+    have = {k for k in tab if k[0] in set(ckpts) and k[1] in set(conds) and k[2] in set(fmts)}
+    miss, extra = want - have, have - want
+    bad = [k for k in have if set(tab[k]) != set(S.TARGETS)]
+    if miss or extra or bad:
+        raise qa_gen.QAError(f"answer table incomplete: missing {len(miss)} extra {len(extra)} bad-targets {len(bad)} e.g. {sorted(miss)[:2]}")
+    return True
 
 
 def patient_correct(tab, key, cat):
@@ -109,9 +142,7 @@ def balanced_accuracy(tab, ckpt, cond, fmt, target, gt_cat):
     k = S.TARGETS.index(target)
     pos, neg = [], []
     for i, c in gt_cat.items():
-        r = tab.get((ckpt, cond, fmt, i))
-        if r is None:
-            continue
+        r = tab[(ckpt, cond, fmt, i)]  # 누락 환자는 KeyError (조용히 건너뛰지 않는다)
         ok = r[target][0] == "valid" and r[target][1] == S.GT_PAIR[c][k]
         (pos if S.GT_PAIR[c][k] == "yes" else neg).append(ok)
     return {"sensitivity": float(np.mean(pos)), "specificity": float(np.mean(neg)), "balanced_accuracy": float((np.mean(pos) + np.mean(neg)) / 2),
@@ -122,9 +153,7 @@ def pair_confusion(tab, ckpt, cond, fmt, gt_cat):
     """category별 (Q_O,Q_A) 답 쌍 분포. invalid는 'invalid'."""
     out = {c: {} for c in S.CATEGORIES}
     for i, c in gt_cat.items():
-        r = tab.get((ckpt, cond, fmt, i))
-        if r is None:
-            continue
+        r = tab[(ckpt, cond, fmt, i)]
         k = tuple((r[t][1] if r[t][0] == "valid" else "invalid") for t in S.TARGETS)
         out[c]["/".join(k)] = out[c].get("/".join(k), 0) + 1
     return out
@@ -134,9 +163,7 @@ def agreement(tab, ckpt, cond, ids):
     """plain·json 두 형식에서 유효한 답이 일치하는 비율 (양쪽 모두 유효한 (환자,target)만)."""
     n = k = nb = 0
     for i in ids:
-        a, b = tab.get((ckpt, cond, "plain", i)), tab.get((ckpt, cond, "json", i))
-        if a is None or b is None:
-            continue
+        a, b = tab[(ckpt, cond, "plain", i)], tab[(ckpt, cond, "json", i)]
         for t in S.TARGETS:
             nb += 1
             if a[t][0] == "valid" and b[t][0] == "valid":

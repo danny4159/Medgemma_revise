@@ -1,4 +1,4 @@
-"""iter_015 protocol 잠금. 기존 lock_protocol과 달리 필수 파일이 없으면 조용히 생략하지 않고 실패한다.
+"""iter_015/016 protocol 잠금. 기존 lock_protocol과 달리 필수 파일이 없으면 조용히 생략하지 않고 실패한다.
 
 - create: 코드(REQUIRED_CODE 전부 존재해야 함) + 명시한 extra 파일(요청·manifest 등)의 sha256과 생성 config digest를 잠근다. 기존 파일은 덮어쓰지 않는다.
 - verify: 잠긴 모든 파일이 존재하고 sha가 같으며 config digest가 현재 processor/generation_config와 같아야 통과. returns protocol digest.
@@ -12,7 +12,7 @@ import sys
 
 from . import generate, lock_protocol
 
-SCHEMA = "iter015_qa_protocol_v1"
+SCHEMA = "iter016_qa_protocol_v1"
 # 반입한 16개 파일 + 이번 반복의 신규 모듈. 하나라도 없으면 실패한다.
 REQUIRED_CODE = [
     "rsna_diag/__init__.py", "rsna_diag/geometry.py", "rsna_diag/parse.py", "rsna_diag/metrics.py", "rsna_diag/sft_eval.py",
@@ -21,6 +21,8 @@ REQUIRED_CODE = [
     "rsna_diag/dicom_min.py",
     "rsna_diag/qa_spec.py", "rsna_diag/qa_data.py", "rsna_diag/qa_protocol.py", "rsna_diag/qa_requests.py", "rsna_diag/qa_gen.py",
     "rsna_diag/qa_run.py",
+    # iter_016: semantic parser(qa_spec)·평가·보고·재사용 검증·확대 결정 코드
+    "rsna_diag/qa_eval.py", "rsna_diag/qa_report.py", "rsna_diag/qa_reuse.py", "rsna_diag/qa_scope.py", "rsna_diag/qa_pilot.py",
 ]
 
 
@@ -47,7 +49,9 @@ def create(out, extra=(), note=""):
     return lock_protocol.locked_digest(cur)
 
 
-def verify(path):
+def verify(path, allow_changed=()):
+    """allow_changed: 잠금 이후 수정이 허용된(결과와 무관한 오류 수정으로 기록된) 파일. 나머지가 하나라도 다르면 실패한다.
+    반환 digest는 항상 잠긴 목록의 digest이다. 허용한 파일의 실제 hash 차이는 호출자가 기록해야 한다."""
     if not path or not os.path.exists(path):
         raise RuntimeError(f"protocol file missing: {path!r}")
     old = json.load(open(path))
@@ -59,7 +63,7 @@ def verify(path):
         raise RuntimeError(f"protocol does not lock required files: {missing_req}")
     extra = [f for f in lk["files"] if f not in REQUIRED_CODE]
     cur = current(extra)
-    diff = {k: (lk["files"].get(k), v) for k, v in cur["files"].items() if lk["files"].get(k) != v}
+    diff = {k: (lk["files"].get(k), v) for k, v in cur["files"].items() if lk["files"].get(k) != v and k not in allow_changed}
     if diff or lk["generation_config_digest"] != cur["generation_config_digest"]:
         raise RuntimeError("LOCK MISMATCH " + json.dumps(diff, indent=1)[:2000])
     return lock_protocol.locked_digest(lk)
