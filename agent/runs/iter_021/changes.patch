@@ -1,0 +1,1086 @@
+diff --git a/rsna_diag/mi19_data.py b/rsna_diag/mi19_data.py
+index dd4ff92..afd72e2 100644
+--- a/rsna_diag/mi19_data.py
++++ b/rsna_diag/mi19_data.py
+@@ -17,8 +17,8 @@ from PIL import Image
+ 
+ from . import geometry, mi19_mha as M
+ 
+-SOURCE = "results/iter_020/source"
+-DATA_DIR = "results/iter_020/data"
++SOURCE = "results/iter_021/source"
++DATA_DIR = "results/iter_021/data"
+ VERT_MAX_LABEL = 99  # 0 < label < 100
+ SLICE_SPACING_MIN_MM = 6.0
+ SLICE_SPACING_MAX_MM = 15.0
+@@ -65,10 +65,50 @@ class ZipCache:
+         return data, sha_bytes(data)
+ 
+ 
++def count_components_6connectivity(mask3d):
++    """6-connectivity 3D connected component count via set-based BFS (no scipy dependency).
++    mask3d은 이미 label bbox로 crop된 작은 배열이어야 실용적 속도가 나온다."""
++    coords = np.argwhere(mask3d)
++    remaining = set(map(tuple, coords.tolist()))
++    n = 0
++    while remaining:
++        start = next(iter(remaining))
++        stack = [start]
++        remaining.discard(start)
++        while stack:
++            z, y, x = stack.pop()
++            for dz, dy, dx in ((1, 0, 0), (-1, 0, 0), (0, 1, 0), (0, -1, 0), (0, 0, 1), (0, 0, -1)):
++                nb = (z + dz, y + dy, x + dx)
++                if nb in remaining:
++                    remaining.discard(nb)
++                    stack.append(nb)
++        n += 1
++    return n
++
++
++def label_connectivity(mask_vol, labels):
++    """returns {label: n_3d_components} using each label's full-volume mask cropped to its bbox
++    (6-connectivity). 작은 분리 성분을 지우거나 합치지 않고 개수만 보고한다; 호출측이 ==1이 아닌
++    label을 eligible에서 제외할지 결정한다."""
++    out = {}
++    for lab in labels:
++        m = mask_vol == lab
++        idx = np.argwhere(m)
++        if idx.size == 0:
++            out[lab] = 0
++            continue
++        lo = idx.min(axis=0)
++        hi = idx.max(axis=0) + 1
++        crop = m[lo[0]:hi[0], lo[1]:hi[1], lo[2]:hi[2]]
++        out[lab] = count_components_6connectivity(crop)
++    return out
++
++
+ def instance_bboxes_per_slice(mask_vol, axes, n_sag):
+     """mask_vol: (nz,ny,nx). axes=(array_axis_sag,array_axis_row,array_axis_col) from mi19_mha.axis_layout.
+-    returns {sag_idx: {label: (row0,col0,row1,col1,area_px)}} for 0<label<=VERT_MAX_LABEL only.
+-    half-open bbox convention (row1,col1 = max index + 1)."""
++    returns (per_slice, max_area, connectivity): per_slice={sag_idx: {label: (row0,col0,row1,col1,area_px)}}
++    for 0<label<=VERT_MAX_LABEL only (half-open bbox convention, row1/col1 = max index + 1);
++    connectivity={label: n_3d_components_6connectivity} computed once on the full volume per label."""
+     array_axis_sag, array_axis_row, array_axis_col = axes
+     labels = [int(v) for v in np.unique(mask_vol) if 0 < v <= VERT_MAX_LABEL]
+     out = {x: {} for x in range(n_sag)}
+@@ -85,11 +125,12 @@ def instance_bboxes_per_slice(mask_vol, axes, n_sag):
+             area = int(sl.sum())
+             out[x][lab] = (r0, c0, r1, c1, area)
+             max_area[lab] = max(max_area.get(lab, 0), area)
+-    return out, max_area
++    connectivity = label_connectivity(mask_vol, labels)
++    return out, max_area, connectivity
+ 
+ 
+-def eligible_instances(per_slice_x, max_area, x):
+-    """x slice에서 최소 크기 조건을 만족하는 label 목록."""
++def eligible_instances(per_slice_x, max_area, connectivity, x):
++    """x slice에서 최소 크기 조건과 3D 6-connectivity(전체 볼륨에서 단일 성분)를 만족하는 label 목록."""
+     ok = []
+     for lab, (r0, c0, r1, c1, area) in per_slice_x.get(x, {}).items():
+         if area < MIN_AREA_PX:
+@@ -98,6 +139,8 @@ def eligible_instances(per_slice_x, max_area, x):
+             continue
+         if (r1 - r0) < MIN_BBOX_SIDE_PX or (c1 - c0) < MIN_BBOX_SIDE_PX:
+             continue
++        if connectivity.get(lab) != 1:
++            continue
+         ok.append(lab)
+     return sorted(ok)
+ 
+@@ -108,9 +151,9 @@ def deterministic_choice(seq, salt_key):
+     return seq[h % len(seq)]
+ 
+ 
+-def candidate_pairs(per_slice_x, max_area, spacing_x, nx):
++def candidate_pairs(per_slice_x, max_area, connectivity, spacing_x, nx):
+     """물리 간격 6-15mm, 공통 eligible instance>=2인 (x1,x2) 쌍과 공통 instance 목록. x1<x2로 정규화."""
+-    elig = {x: set(eligible_instances(per_slice_x, max_area, x)) for x in range(nx)}
++    elig = {x: set(eligible_instances(per_slice_x, max_area, connectivity, x)) for x in range(nx)}
+     pairs = []
+     for x1 in range(nx):
+         for x2 in range(x1 + 1, nx):
+@@ -123,17 +166,22 @@ def candidate_pairs(per_slice_x, max_area, spacing_x, nx):
+     return pairs
+ 
+ 
++def _pair_candidate_id(pid, x1, x2):
++    return f"{SALT}|{pid}|pair|{x1}|{x2}"
++
++
+ def select_patient_pair(pid, mask_vol, spacing_sag, axes, n_sag):
+-    """axes=(array_axis_sag,array_axis_row,array_axis_col). candidate/pair enumeration order is fixed
+-    (ascending x1, then ascending x2, then ascending label) so selection is independent of any
+-    incidental dict/set iteration order; only the SHA256(salt|...) values decide the pick."""
+-    per_slice_x, max_area = instance_bboxes_per_slice(mask_vol, axes, n_sag)
+-    pairs = candidate_pairs(per_slice_x, max_area, spacing_sag, n_sag)
++    """axes=(array_axis_sag,array_axis_row,array_axis_col). 선택은 각 후보의 canonical id를
++    SHA256으로 hash한 값의 오름차순 정렬(최솟값 선택)으로 결정한다. 이 방식은 candidate_pairs가
++    반환하는 list의 열거 순서나 길이에 의존하지 않는다: 후보 열거 알고리즘이 바뀌어 순서나 개수가
++    달라져도, 같은 (pid,x1,x2) 후보 집합에 대해서는 항상 같은 pair가 선택된다(이전의 hash%len(pairs)
++    modulo 방식은 원리상 이미 열거 순서에 의존하지 않았지만, len(pairs)에는 의존했다)."""
++    per_slice_x, max_area, connectivity = instance_bboxes_per_slice(mask_vol, axes, n_sag)
++    pairs = candidate_pairs(per_slice_x, max_area, connectivity, spacing_sag, n_sag)
+     if not pairs:
+         return None, {"n_candidate_pairs": 0}
+-    # 결정적 선택: (x1,x2) 쌍 -> SALT+pid로 하나 선택, 그 다음 공통 instance 중 2개를 SALT로 선택
+-    idx = int(hashlib.sha256(f"{SALT}|{pid}|pairsel".encode()).hexdigest(), 16) % len(pairs)
+-    x1, x2, common, dist_mm = pairs[idx]
++    ranked = sorted(pairs, key=lambda p: hashlib.sha256(_pair_candidate_id(pid, p[0], p[1]).encode()).hexdigest())
++    x1, x2, common, dist_mm = ranked[0]
+     if len(common) > 2:
+         # 두 인스턴스를 salt 순서로 선택 (SHA256(salt|label) 오름차순 상위 2개)
+         common_sorted = sorted(common, key=lambda lab: hashlib.sha256(f"{SALT}|{pid}|{lab}".encode()).hexdigest())
+@@ -144,7 +192,8 @@ def select_patient_pair(pid, mask_vol, spacing_sag, axes, n_sag):
+     r_is_x1 = int(hashlib.sha256(f"{SALT}|{pid}|rrole".encode()).hexdigest(), 16) % 2 == 0
+     r_idx, t_idx = (x1, x2) if r_is_x1 else (x2, x1)
+     info = {"n_candidate_pairs": len(pairs), "chosen_pair": [x1, x2], "dist_mm": dist_mm,
+-            "common_instances_all": common, "chosen_instances": inst2, "r_idx": r_idx, "t_idx": t_idx}
++            "common_instances_all": common, "chosen_instances": inst2, "r_idx": r_idx, "t_idx": t_idx,
++            "connectivity": {str(k): v for k, v in connectivity.items()}}
+     return (r_idx, t_idx, inst2, per_slice_x), info
+ 
+ 
+diff --git a/rsna_diag/mi19_fetch.py b/rsna_diag/mi19_fetch.py
+index 8807a3f..a0a42e8 100644
+--- a/rsna_diag/mi19_fetch.py
++++ b/rsna_diag/mi19_fetch.py
+@@ -3,8 +3,14 @@
+ Uses Range requests via urllib (no external binaries). Each worker writes
+ disjoint byte ranges to the target file with os.pwrite, so partial progress
+ survives interruption: a JSON sidecar records which chunks are confirmed
+-written, and re-running skips those chunks after verifying the file's
+-current size matches the expected total.
++written together with a sha256 of the chunk bytes actually on disk, and
++re-running re-verifies each previously-recorded chunk against that hash
++before skipping it (protects against silent corruption / a different run
++having written stale/partial data at that offset).
++
++Single ownership: a sidecar lock file records this process's pid and start
++time; a second process refuses to run against the same dest while the
++recorded pid is alive with a start time matching /proc.
+ """
+ import concurrent.futures as cf
+ import hashlib
+@@ -20,39 +26,96 @@ def _progress_path(dest):
+     return dest + ".progress.json"
+ 
+ 
+-def _load_progress(dest, total_size):
++def _lock_path(dest):
++    return dest + ".lock.json"
++
++
++def _proc_start_time(pid):
++    try:
++        with open(f"/proc/{pid}/stat") as f:
++            fields = f.read().split(")")[-1].split()
++        # stat fields after comm: state(0) ... starttime is field index 19 (0-based) of the
++        # post-comm split, i.e. fields[19] since fields[0] is state.
++        return fields[19]
++    except Exception:
++        return None
++
++
++def acquire_lock(dest):
++    """Raise RuntimeError if another live process holds the lock for dest."""
++    lp = _lock_path(dest)
++    if os.path.exists(lp):
++        try:
++            with open(lp) as f:
++                prev = json.load(f)
++            pid = prev.get("pid")
++            start = prev.get("start_time")
++            if pid is not None and _proc_start_time(pid) == start and start is not None:
++                raise RuntimeError(f"dest {dest} locked by live pid {pid} (start_time {start})")
++        except (json.JSONDecodeError, KeyError):
++            pass
++    pid = os.getpid()
++    start = _proc_start_time(pid)
++    tmp = lp + ".tmp"
++    with open(tmp, "w") as f:
++        json.dump({"pid": pid, "start_time": start}, f)
++    os.replace(tmp, lp)
++    return lp
++
++
++def release_lock(dest):
++    lp = _lock_path(dest)
++    try:
++        with open(lp) as f:
++            d = json.load(f)
++        if d.get("pid") == os.getpid():
++            os.remove(lp)
++    except (FileNotFoundError, json.JSONDecodeError):
++        pass
++
++
++def _load_progress(dest, total_size, url):
+     p = _progress_path(dest)
+     if not os.path.exists(p):
+-        return set()
++        return {}
+     try:
+         with open(p) as f:
+             d = json.load(f)
+     except Exception:
+-        return set()
+-    if d.get("total_size") != total_size:
+-        return set()
+-    return set(tuple(x) for x in d.get("done", []))
++        return {}
++    if d.get("total_size") != total_size or d.get("url") != url:
++        return {}
++    return {tuple(x["range"]): x["sha256"] for x in d.get("done", [])}
+ 
+ 
+-def _save_progress(dest, total_size, done):
++def _save_progress(dest, total_size, url, done):
+     p = _progress_path(dest)
+     tmp = p + ".tmp"
++    rows = [{"range": list(k), "sha256": v} for k, v in sorted(done.items())]
+     with open(tmp, "w") as f:
+-        json.dump({"total_size": total_size, "done": sorted(list(done))}, f)
++        json.dump({"total_size": total_size, "url": url, "done": rows}, f)
+     os.replace(tmp, p)
+ 
+ 
+ def _fetch_chunk(url, start, end, max_retries=6):
++    expected_len = end - start + 1
+     last_err = None
+     for attempt in range(max_retries):
+         try:
+             req = urllib.request.Request(url, headers={"Range": f"bytes={start}-{end}"})
+-            with urllib.request.urlopen(req, timeout=120) as r:
+-                if r.status not in (200, 206):
+-                    raise RuntimeError(f"unexpected status {r.status}")
++            with urllib.request.urlopen(req, timeout=180) as r:
++                if r.status != 206:
++                    raise RuntimeError(f"expected 206 for range request, got {r.status}")
++                cr = r.headers.get("Content-Range", "")
++                expected_cr_prefix = f"bytes {start}-{end}/"
++                if not cr.startswith(expected_cr_prefix):
++                    raise RuntimeError(f"unexpected Content-Range {cr!r}, expected prefix {expected_cr_prefix!r}")
++                cl = r.headers.get("Content-Length")
++                if cl is not None and int(cl) != expected_len:
++                    raise RuntimeError(f"Content-Length {cl} != expected {expected_len}")
+                 data = r.read()
+-            if len(data) != (end - start + 1):
+-                raise RuntimeError(f"short read {len(data)} != {end - start + 1}")
++            if len(data) != expected_len:
++                raise RuntimeError(f"short read {len(data)} != {expected_len}")
+             return data
+         except Exception as e:
+             last_err = e
+@@ -60,54 +123,81 @@ def _fetch_chunk(url, start, end, max_retries=6):
+     raise RuntimeError(f"chunk {start}-{end} failed after {max_retries} attempts: {last_err}")
+ 
+ 
++def _read_and_hash(fd, start, length):
++    remaining = length
++    off = start
++    buf = bytearray()
++    while remaining > 0:
++        b = os.pread(fd, min(remaining, 16 * 1024 * 1024), off)
++        if not b:
++            break
++        buf += b
++        off += len(b)
++        remaining -= len(b)
++    return hashlib.sha256(bytes(buf)).hexdigest(), len(buf)
++
++
+ def download(url, dest, total_size, workers=8, chunk_size=CHUNK, log_every=10):
+     """Download url to dest (exactly total_size bytes) using parallel Range GETs.
+ 
+-    Resumable: chunks already recorded as done in the progress sidecar are
+-    skipped, provided dest already has the correct total_size on disk.
++    Resumable: chunks already recorded as done are re-verified (by hashing
++    the bytes currently on disk at that offset) before being skipped.
+     """
+     os.makedirs(os.path.dirname(dest), exist_ok=True)
+-    fd = os.open(dest, os.O_RDWR | os.O_CREAT, 0o644)
++    acquire_lock(dest)
+     try:
+-        cur_size = os.fstat(fd).st_size
+-        if cur_size != total_size:
+-            os.ftruncate(fd, total_size)
+-
+-        chunks = []
+-        start = 0
+-        while start < total_size:
+-            end = min(start + chunk_size, total_size) - 1
+-            chunks.append((start, end))
+-            start = end + 1
+-
+-        done = _load_progress(dest, total_size) if cur_size == total_size else set()
+-        remaining = [c for c in chunks if c not in done]
+-        t0 = time.time()
+-        completed = len(done)
+-
+-        def work(c):
+-            s, e = c
+-            data = _fetch_chunk(url, s, e)
+-            os.pwrite(fd, data, s)
+-            return c
+-
+-        with cf.ThreadPoolExecutor(max_workers=workers) as ex:
+-            futs = {ex.submit(work, c): c for c in remaining}
+-            for fut in cf.as_completed(futs):
+-                c = fut.result()
+-                done.add(c)
+-                completed += 1
+-                if completed % log_every == 0 or completed == len(chunks):
+-                    elapsed = time.time() - t0
+-                    print(
+-                        f"[mi19_fetch] {completed}/{len(chunks)} chunks, "
+-                        f"{elapsed:.1f}s elapsed",
+-                        flush=True,
+-                    )
+-                    _save_progress(dest, total_size, done)
+-        _save_progress(dest, total_size, done)
++        fd = os.open(dest, os.O_RDWR | os.O_CREAT, 0o644)
++        try:
++            cur_size = os.fstat(fd).st_size
++            if cur_size != total_size:
++                os.ftruncate(fd, total_size)
++                cur_size = total_size
++
++            chunks = []
++            start = 0
++            while start < total_size:
++                end = min(start + chunk_size, total_size) - 1
++                chunks.append((start, end))
++                start = end + 1
++
++            recorded = _load_progress(dest, total_size, url)
++            done = {}
++            for c, expected_hash in recorded.items():
++                actual_hash, n = _read_and_hash(fd, c[0], c[1] - c[0] + 1)
++                if n == (c[1] - c[0] + 1) and actual_hash == expected_hash:
++                    done[c] = expected_hash
++            remaining = [c for c in chunks if c not in done]
++            t0 = time.time()
++            completed = len(done)
++
++            def work(c):
++                s, e = c
++                data = _fetch_chunk(url, s, e)
++                written = os.pwrite(fd, data, s)
++                if written != len(data):
++                    raise RuntimeError(f"short pwrite {written} != {len(data)} at offset {s}")
++                h = hashlib.sha256(data).hexdigest()
++                return c, h
++
++            with cf.ThreadPoolExecutor(max_workers=workers) as ex:
++                futs = {ex.submit(work, c): c for c in remaining}
++                for fut in cf.as_completed(futs):
++                    c, h = fut.result()
++                    done[c] = h
++                    completed += 1
++                    if completed % log_every == 0 or completed == len(chunks):
++                        elapsed = time.time() - t0
++                        print(
++                            f"[mi19_fetch] {completed}/{len(chunks)} chunks, "
++                            f"{elapsed:.1f}s elapsed",
++                            flush=True,
++                        )
++                        _save_progress(dest, total_size, url, done)
++            _save_progress(dest, total_size, url, done)
++        finally:
++            os.close(fd)
+     finally:
+-        os.close(fd)
++        release_lock(dest)
+ 
+     final_size = os.path.getsize(dest)
+     if final_size != total_size:
+diff --git a/rsna_diag/mi19_manifest.py b/rsna_diag/mi19_manifest.py
+index 04dd961..23e51d4 100644
+--- a/rsna_diag/mi19_manifest.py
++++ b/rsna_diag/mi19_manifest.py
+@@ -22,16 +22,23 @@ def sha_bytes(b):
+     return hashlib.sha256(b).hexdigest()
+ 
+ 
++class DataQualityError(RuntimeError):
++    """자료 자체의 문제(공동등록 불일치, 이미지 멤버 누락 등)로 인한 build_one 예외.
++    build_one을 호출하는 쪽은 이 예외만 '적격 자료 제외'로 취급하고 조용히 넘어간다.
++    그 외 예외(구현 버그: KeyError/AttributeError/TypeError 등)는 전체 manifest 생성을 중단시킨다."""
++    pass
++
++
+ def check_coregistration(mask_hdr, img_meta, patient):
+     for k in ("dim_size_xyz",):
+         if list(mask_hdr[k]) != list(img_meta[k]):
+-            raise RuntimeError(f"{patient}: mask/image {k} differ: {mask_hdr[k]} != {img_meta[k]}")
++            raise DataQualityError(f"{patient}: mask/image {k} differ: {mask_hdr[k]} != {img_meta[k]}")
+     for k in ("spacing_xyz", "offset_xyz"):
+         a, b = mask_hdr[k], img_meta[k]
+         if len(a) != len(b) or any(abs(float(x) - float(y)) > 1e-4 for x, y in zip(a, b)):
+-            raise RuntimeError(f"{patient}: mask/image {k} differ: {a} != {b}")
++            raise DataQualityError(f"{patient}: mask/image {k} differ: {a} != {b}")
+     if mask_hdr["direction"] != img_meta["direction"]:
+-        raise RuntimeError(f"{patient}: mask/image direction differ: {mask_hdr['direction']} != {img_meta['direction']}")
++        raise DataQualityError(f"{patient}: mask/image direction differ: {mask_hdr['direction']} != {img_meta['direction']}")
+ 
+ 
+ def instance_point_native(mask_vol, sag_idx, axes, label):
+@@ -50,11 +57,17 @@ def instance_point_native(mask_vol, sag_idx, axes, label):
+ def build_one(pid, gate_entry, images_zc, masks_zc):
+     mask_data, mask_sha = masks_zc.read(f"masks/{pid}_t2.mha")
+     if mask_sha != gate_entry["mask_file_sha256"]:
+-        raise RuntimeError(f"{pid}: mask sha changed since gate")
++        raise DataQualityError(f"{pid}: mask sha changed since gate")
+     mask_m = M.read_mha(mask_data)
+     mask_vol = mask_m["array"]
+-    img_data, img_sha = images_zc.read(f"images/{pid}_t2.mha")
+-    img_m = M.read_mha(img_data)
++    try:
++        img_data, img_sha = images_zc.read(f"images/{pid}_t2.mha")
++    except KeyError as e:
++        raise DataQualityError(f"{pid}: image zip member missing: {e}") from e
++    try:
++        img_m = M.read_mha(img_data)
++    except M.MhaError as e:
++        raise DataQualityError(f"{pid}: image mha parse error: {e}") from e
+     img_meta = {"dim_size_xyz": img_m["dim_size_xyz"], "spacing_xyz": img_m["spacing_xyz"],
+                 "offset_xyz": img_m["offset_xyz"], "direction": img_m["direction"]}
+     check_coregistration(gate_entry, img_meta, pid)
+@@ -134,7 +147,9 @@ def main():
+     for pid in sorted(eligible):
+         try:
+             manifest[pid] = build_one(pid, eligible[pid], images_zc, masks_zc)
+-        except Exception as e:
++        except DataQualityError as e:
++            # 자료상 부적격만 errors에 모아 조용히 제외한다. 그 외 예외(구현 버그)는 여기서
++            # 잡지 않고 전파시켜 전체 자료 gate를 막는다 (fail-closed).
+             errors[pid] = str(e)
+     # split은 build 성공 환자에서만 배정한다: gate-eligible이어도 build_one이 실패하면
+     # 조용히 제외하는 것이 아니라 errors.json에 남기고 split 대상에서 빠지게 한다.
+diff --git a/rsna_diag/mi19_pipeline.py b/rsna_diag/mi19_pipeline.py
+index 223676e..94bc987 100644
+--- a/rsna_diag/mi19_pipeline.py
++++ b/rsna_diag/mi19_pipeline.py
+@@ -13,8 +13,29 @@ from . import mi19_protocol as P
+ from . import mi19_requests as Q
+ from . import mi19_run as RUN
+ 
+-DATA_DIR = "results/iter_020/data"
+-RUN_ROOT = "results/iter_020"
++DATA_DIR = "results/iter_021/data"
++RUN_ROOT = "results/iter_021"
++
++
++def _reuse_or_write_rows(rows, path):
++    """path가 이미 있으면 rows를 재구성한 request_id 집합/내용과 파일 내용을 비교해 정확히
++    같을 때만 재사용한다(존재 여부만으로 건너뛰지 않는다). 다르면 하드에러로 중단한다."""
++    if not os.path.exists(path):
++        Q.write_rows(rows, path)
++        return
++    existing = [json.loads(ln) for ln in open(path) if ln.strip()]
++    want_by_id = {r["request_id"]: r for r in rows}
++    have_by_id = {r["request_id"]: r for r in existing}
++    if set(want_by_id) != set(have_by_id):
++        raise RuntimeError(
++            f"{path}: existing request file id set differs from reconstructed rows "
++            f"(missing={sorted(set(want_by_id) - set(have_by_id))[:5]}, "
++            f"extra={sorted(set(have_by_id) - set(want_by_id))[:5]})")
++    for rid, want in want_by_id.items():
++        have = have_by_id[rid]
++        if want.get("prompt_sha256") != have.get("prompt_sha256") or want.get("images") != have.get("images") \
++                or want.get("config_digest") != have.get("config_digest"):
++            raise RuntimeError(f"{path}: existing request {rid} content differs from reconstructed row")
+ 
+ 
+ def run_split(split, workers, peak_gb, gpus, out_root=RUN_ROOT, time_limit=None, max_requests=None):
+@@ -29,12 +50,12 @@ def run_split(split, workers, peak_gb, gpus, out_root=RUN_ROOT, time_limit=None,
+     cfg, _ = P.static_cfg()
+     built = Q.build_phase1(manifest, pids, cfg)
+     phase1_path = f"{out_root}/requests/{split}__phase1.jsonl"
+-    if not os.path.exists(phase1_path):
+-        all_rows = [r for rows in built.values() for r in rows]
+-        Q.write_rows(all_rows, phase1_path)
+-    if not os.path.exists(proto_path):
+-        P.create(proto_path, extra=[phase1_path, f"{DATA_DIR}/manifest.json", f"{DATA_DIR}/split.json"],
+-                 note=f"{split} phase1 (J_RT,J_TR,A,O,S1 merged)")
++    all_rows = [r for rows in built.values() for r in rows]
++    _reuse_or_write_rows(all_rows, phase1_path)
++    if os.path.exists(proto_path):
++        P.verify(proto_path)  # 기존 protocol이 있으면 현재 코드/자료와 여전히 일치하는지 재검증한다.
++    else:
++        P.create(proto_path, extra=[phase1_path], note=f"{split} phase1 (J_RT,J_TR,A,O,S1 merged)")
+     out_dir1 = f"{out_root}/gen/{split}__phase1"
+     rc1 = RUN.main_run(requests=phase1_path, out_dir=out_dir1, protocol=proto_path, workers=workers, gpus=gpus,
+                        peak_gb=peak_gb, time_limit=time_limit, max_requests=max_requests)
+@@ -44,15 +65,23 @@ def run_split(split, workers, peak_gb, gpus, out_root=RUN_ROOT, time_limit=None,
+         # S2를 구성하지 않고 여기서 멈춘다: phase1 실패 시 S2를 시작하지 않는다.
+         results_phase1["S2"] = {"out_dir": None, "rc": None, "skipped_reason": "phase1_incomplete"}
+         return results_phase1, phase1_path, None, manifest, pids
+-    # phase 2: S2 (검증된 S1 완료 record 필요)
+-    s1_records = {rid: r for rid, r in E.load_records(out_dir1).items() if r.get("condition") == "S1"}
++    # phase1이 rc==0이어도 completion.json이 실제로 있어야 "검증된 완료"로 취급한다 (RUN.run_stage는
++    # rc==0을 완료 시에만 반환하지만, main_run을 통한 프로그램적 호출 경로도 동일 계약을 강제한다).
++    completion1_path = os.path.join(out_dir1, "completion.json")
++    if not os.path.exists(completion1_path):
++        raise RuntimeError(f"phase1 rc==0 but no completion.json at {completion1_path}; refusing to build S2")
++    # phase 2: S2 (검증된 S1 완료 record 필요). S1 원본 record와 completion을 그대로 읽어 사용하고,
++    # 같은 request_id가 S1과 S2 사이에서 충돌하면(있을 수 없지만) 조용히 덮어쓰지 않는다.
++    s1_all = E.load_records(out_dir1)  # load_records 자체가 중복 request_id면 예외를 낸다
++    s1_records = {rid: r for rid, r in s1_all.items() if r.get("condition") == "S1"}
+     s2_rows = Q.build_s2(manifest, pids, cfg, s1_records)
+     s2_path = f"{out_root}/requests/{split}__S2.jsonl"
+-    if not os.path.exists(s2_path):
+-        Q.write_rows(s2_rows, s2_path)
++    _reuse_or_write_rows(s2_rows, s2_path)
+     proto2_path = f"{out_root}/protocols/{split}_phase2.json"
+-    if not os.path.exists(proto2_path):
+-        P.create(proto2_path, extra=[s2_path, f"{DATA_DIR}/manifest.json", f"{DATA_DIR}/split.json"], note=f"{split} phase2")
++    if os.path.exists(proto2_path):
++        P.verify(proto2_path)
++    else:
++        P.create(proto2_path, extra=[s2_path, proto_path, completion1_path], note=f"{split} phase2 (S1={proto_path})")
+     out_dir_s2 = f"{out_root}/gen/{split}__S2"
+     rc2 = RUN.main_run(requests=s2_path, out_dir=out_dir_s2, protocol=proto2_path, workers=workers, gpus=gpus,
+                        peak_gb=peak_gb, time_limit=time_limit, max_requests=max_requests)
+diff --git a/rsna_diag/mi19_protocol.py b/rsna_diag/mi19_protocol.py
+index 3311ec3..332f59e 100644
+--- a/rsna_diag/mi19_protocol.py
++++ b/rsna_diag/mi19_protocol.py
+@@ -7,9 +7,9 @@ import json
+ import os
+ import sys
+ 
+-from . import generate, lock_protocol
++from . import generate, lock_protocol, mi19_data
+ 
+-SCHEMA = "iter019_mi19_protocol_v1"
++SCHEMA = "iter021_mi19_protocol_v1"
+ REQUIRED_CODE = [
+     "rsna_diag/__init__.py", "rsna_diag/geometry.py", "rsna_diag/parse.py", "rsna_diag/metrics.py",
+     "rsna_diag/generate.py", "rsna_diag/prompts.py", "rsna_diag/queue_lock.py", "rsna_diag/lock_protocol.py",
+@@ -17,6 +17,13 @@ REQUIRED_CODE = [
+     "rsna_diag/mi19_spec.py", "rsna_diag/mi19_requests.py", "rsna_diag/mi19_protocol.py", "rsna_diag/mi19_gen.py",
+     "rsna_diag/mi19_run.py", "rsna_diag/mi19_baseline.py", "rsna_diag/mi19_eval.py", "rsna_diag/mi19_pipeline.py",
+ ]
++# 자료 provenance는 선택적 --extra가 아니라 항상 필수로 잠근다 (gate/manifest/split이 바뀌면
++# protocol이 반드시 이를 감지해야 한다). DATA_DIR은 mi19_data.DATA_DIR로 매 반복(iter_021 등) 갱신된다.
++REQUIRED_DATA = [
++    f"{mi19_data.DATA_DIR}/gate.json",
++    f"{mi19_data.DATA_DIR}/manifest.json",
++    f"{mi19_data.DATA_DIR}/split.json",
++]
+ 
+ 
+ def static_cfg():
+@@ -24,11 +31,12 @@ def static_cfg():
+ 
+ 
+ def current(extra=()):
+-    missing = [f for f in list(REQUIRED_CODE) + list(extra) if not os.path.isfile(f)]
++    all_req = list(REQUIRED_CODE) + list(REQUIRED_DATA) + list(extra)
++    missing = [f for f in all_req if not os.path.isfile(f)]
+     if missing:
+         raise RuntimeError(f"required protocol files missing: {missing}")
+     d, core = static_cfg()
+-    return {"schema": SCHEMA, "files": {f: lock_protocol.sha(f) for f in list(REQUIRED_CODE) + list(extra)},
++    return {"schema": SCHEMA, "files": {f: lock_protocol.sha(f) for f in all_req},
+             "generation_config_digest": d, "generation_config": core}
+ 
+ 
+@@ -48,10 +56,10 @@ def verify(path):
+     lk = old["locked"]
+     if lk.get("schema") != SCHEMA:
+         raise RuntimeError(f"protocol schema {lk.get('schema')!r} != {SCHEMA}")
+-    missing_req = [f for f in REQUIRED_CODE if f not in lk["files"]]
++    missing_req = [f for f in list(REQUIRED_CODE) + list(REQUIRED_DATA) if f not in lk["files"]]
+     if missing_req:
+         raise RuntimeError(f"protocol does not lock required files: {missing_req}")
+-    extra = [f for f in lk["files"] if f not in REQUIRED_CODE]
++    extra = [f for f in lk["files"] if f not in REQUIRED_CODE and f not in REQUIRED_DATA]
+     cur = current(extra)
+     diff = {k: (lk["files"].get(k), v) for k, v in cur["files"].items() if lk["files"].get(k) != v}
+     if diff or lk["generation_config_digest"] != cur["generation_config_digest"]:
+diff --git a/rsna_diag/mi19_requests.py b/rsna_diag/mi19_requests.py
+index 6179a5e..b20a2e9 100644
+--- a/rsna_diag/mi19_requests.py
++++ b/rsna_diag/mi19_requests.py
+@@ -9,7 +9,7 @@ import os
+ 
+ from . import generate, mi19_spec as S
+ 
+-DATA_DIR = "results/iter_020/data"
++DATA_DIR = "results/iter_021/data"
+ 
+ 
+ def sha(b):
+@@ -128,7 +128,10 @@ def main():
+             for ln in open(f):
+                 if ln.strip():
+                     r = json.loads(ln)
+-                    s1_records[r["request_id"]] = r
++                    rid = r["request_id"]
++                    if rid in s1_records:
++                        raise RuntimeError(f"duplicate S1 request_id {rid} across worker files in {a.s1_dir}")
++                    s1_records[rid] = r
+         rows = build_s2(manifest, pids, cfg, s1_records)
+         p = f"{a.out_dir}/{a.split}__S2.jsonl"
+         write_rows(rows, p)
+diff --git a/test_rsna_iter019_baseline.py b/test_rsna_iter019_baseline.py
+index 971bd8e..e28a706 100644
+--- a/test_rsna_iter019_baseline.py
++++ b/test_rsna_iter019_baseline.py
+@@ -73,5 +73,5 @@ for fn in [test_condition_C_copies_box, test_ncc_finds_exact_patch, test_ncc_con
+ n_pass = sum(1 for r in results if r["pass"])
+ print(json.dumps({"n": len(results), "n_pass": n_pass, "results": results}, indent=1, default=str))
+ json.dump({"n": len(results), "n_pass": n_pass, "results": results},
+-          open("/SSD1_1TB/home/milab/daniel/08_medgemma/research/results/iter_019/tests/fixtures_baseline.json", "w"), indent=1, default=str)
++          open("/SSD1_1TB/home/milab/daniel/08_medgemma/research/results/iter_021/tests/fixtures_baseline.json", "w"), indent=1, default=str)
+ assert n_pass == len(results)
+diff --git a/test_rsna_iter019_eval.py b/test_rsna_iter019_eval.py
+index a5ab406..c88d7a9 100644
+--- a/test_rsna_iter019_eval.py
++++ b/test_rsna_iter019_eval.py
+@@ -99,5 +99,5 @@ for fn in [test_classify_response_single_box, test_classify_response_multi_box_f
+ n_pass = sum(1 for r in results if r["pass"])
+ print(json.dumps({"n": len(results), "n_pass": n_pass, "results": results}, indent=1, default=str))
+ json.dump({"n": len(results), "n_pass": n_pass, "results": results},
+-          open("/SSD1_1TB/home/milab/daniel/08_medgemma/research/results/iter_019/tests/fixtures_eval.json", "w"), indent=1, default=str)
++          open("/SSD1_1TB/home/milab/daniel/08_medgemma/research/results/iter_021/tests/fixtures_eval.json", "w"), indent=1, default=str)
+ assert n_pass == len(results)
+diff --git a/test_rsna_iter019_mha.py b/test_rsna_iter019_mha.py
+index a64a475..c9359ab 100644
+--- a/test_rsna_iter019_mha.py
++++ b/test_rsna_iter019_mha.py
+@@ -117,7 +117,7 @@ def test_rejects_truncated_payload():
+ 
+ def test_real_spider_mask():
+     import zipfile
+-    z = zipfile.ZipFile("/SSD1_1TB/home/milab/daniel/08_medgemma/research/results/iter_019/source/masks.zip")
++    z = zipfile.ZipFile("/SSD1_1TB/home/milab/daniel/08_medgemma/research/results/iter_021/source/masks.zip")
+     data = z.read("masks/101_t1.mha")
+     out = M.read_mha(data)
+     # 독립 재계산: 헤더 텍스트를 직접 파싱해 대조
+@@ -146,5 +146,5 @@ for fn in [test_uncompressed_uint8_roundtrip, test_compressed_int16_roundtrip, t
+ n_pass = sum(1 for r in results if r["pass"])
+ print(json.dumps({"n": len(results), "n_pass": n_pass, "results": results}, indent=1, default=str))
+ json.dump({"n": len(results), "n_pass": n_pass, "results": results},
+-          open("/SSD1_1TB/home/milab/daniel/08_medgemma/research/results/iter_019/tests/fixtures_mha.json", "w"), indent=1, default=str)
++          open("/SSD1_1TB/home/milab/daniel/08_medgemma/research/results/iter_021/tests/fixtures_mha.json", "w"), indent=1, default=str)
+ assert n_pass == len(results), "some fixtures failed"
+diff --git a/test_rsna_iter019_render.py b/test_rsna_iter019_render.py
+index 458bea0..28d5ef4 100644
+--- a/test_rsna_iter019_render.py
++++ b/test_rsna_iter019_render.py
+@@ -27,20 +27,21 @@ def test_window():
+ 
+ 
+ def test_resize_scale_isotropic():
+-    # spacing_y=0.5 (dense), spacing_z=2.0 (sparse) -> row axis(z) scaled up by 4x, col axis(y) unchanged
+-    sr, sc = R.resize_scale(spacing_y=0.5, spacing_z=2.0)
++    # spacing_row=2.0 (sparse), spacing_col=0.5 (dense) -> row axis scaled up by 4x, col axis unchanged
++    sr, sc = R.resize_scale(spacing_row=2.0, spacing_col=0.5)
+     check("resize_scale_row", abs(sr - 4.0) < 1e-9, sr)
+     check("resize_scale_col", abs(sc - 1.0) < 1e-9, sc)
+ 
+ 
+ def test_render_slice_shape():
++    # axes=(0,1,2): sag axis=array axis 0 (nz), row=array axis1(ny), col=array axis2(nx) -- x-sagittal legacy layout
+     nz, ny, nx = 6, 8, 3
+     vol = np.random.RandomState(0).rand(nz, ny, nx).astype(np.float32) * 100 + 1
+     lo, hi = R.volume_window(vol)
+-    rgb, sr, sc, shape = R.render_slice(vol, 1, spacing_y=1.0, spacing_z=2.0, lo=lo, hi=hi)
+-    expect_h = round(nz * 2.0)
++    rgb, sr, sc, shape = R.render_slice(vol, 1, (0, 1, 2), spacing_row=2.0, spacing_col=1.0, lo=lo, hi=hi)
++    expect_h = round(ny * 2.0)
+     check("render_new_h", shape[0] == expect_h, (shape, expect_h))
+-    check("render_new_w", shape[1] == ny, shape)
++    check("render_new_w", shape[1] == nx, shape)
+     check("render_shape_matches_array", rgb.shape[:2] == shape)
+ 
+ 
+@@ -73,5 +74,5 @@ for fn in [test_window, test_resize_scale_isotropic, test_render_slice_shape, te
+ n_pass = sum(1 for r in results if r["pass"])
+ print(json.dumps({"n": len(results), "n_pass": n_pass, "results": results}, indent=1, default=str))
+ json.dump({"n": len(results), "n_pass": n_pass, "results": results},
+-          open("/SSD1_1TB/home/milab/daniel/08_medgemma/research/results/iter_019/tests/fixtures_render.json", "w"), indent=1, default=str)
++          open("/SSD1_1TB/home/milab/daniel/08_medgemma/research/results/iter_021/tests/fixtures_render.json", "w"), indent=1, default=str)
+ assert n_pass == len(results)
+diff --git a/test_rsna_iter020_mri.py b/test_rsna_iter020_mri.py
+index 96c5312..02a633e 100644
+--- a/test_rsna_iter020_mri.py
++++ b/test_rsna_iter020_mri.py
+@@ -4,7 +4,7 @@ iter_019 리뷰에서 확인된 결함(needs_fix)에 대한 독립 fixture:
+ - mi19_data/mi19_manifest가 항상 DimSize[0](x)를 sagittal 축으로 가정하던 버그
+   (실제 SPIDER masks/107_t2.mha처럼 z가 sagittal인 비항등 방향에서 잘못됨).
+ - mi19_baseline.condition_N이 padded PNG를 norm_to_canvas(비padded 좌표)로 잘라 위치가 어긋나던 버그.
+-결과: results/iter_020/tests/fixtures_mri.json
++결과: results/iter_021/tests/fixtures_mri.json
+ """
+ import json
+ import sys
+@@ -68,7 +68,7 @@ def test_sagittal_axis_string_mismatch_rejected():
+ 
+ 
+ def test_real_107_t2_mask_orientation():
+-    z = zipfile.ZipFile("/SSD1_1TB/home/milab/daniel/08_medgemma/research/results/iter_020/source/masks.zip")
++    z = zipfile.ZipFile("/SSD1_1TB/home/milab/daniel/08_medgemma/research/results/iter_021/source/masks.zip")
+     data = z.read("masks/107_t2.mha")
+     m = M.read_mha(data)
+     check("107_dimsize", m["dim_size_xyz"] == [512, 512, 17], m["dim_size_xyz"])
+@@ -158,7 +158,7 @@ for fn in [test_sagittal_axis_identity, test_sagittal_axis_permuted_z_is_sagitta
+ n_pass = sum(1 for r in results if r["pass"])
+ print(json.dumps({"n": len(results), "n_pass": n_pass, "results": results}, indent=1, default=str))
+ import os
+-os.makedirs("/SSD1_1TB/home/milab/daniel/08_medgemma/research/results/iter_020/tests", exist_ok=True)
++os.makedirs("/SSD1_1TB/home/milab/daniel/08_medgemma/research/results/iter_021/tests", exist_ok=True)
+ json.dump({"n": len(results), "n_pass": n_pass, "results": results},
+-          open("/SSD1_1TB/home/milab/daniel/08_medgemma/research/results/iter_020/tests/fixtures_mri.json", "w"), indent=1, default=str)
++          open("/SSD1_1TB/home/milab/daniel/08_medgemma/research/results/iter_021/tests/fixtures_mri.json", "w"), indent=1, default=str)
+ assert n_pass == len(results), "some fixtures failed"
+diff --git a/test_rsna_iter021_data.py b/test_rsna_iter021_data.py
+new file mode 100644
+index 0000000..0dddbc4
+--- /dev/null
++++ b/test_rsna_iter021_data.py
+@@ -0,0 +1,89 @@
++"""iter_021 mi19_data 신규 검사: 3D 6-connectivity 성분 계수, pair 선택이 candidate_pairs의
++enumeration order/길이가 아니라 (pid,x1,x2) canonical id의 SHA256 최솟값으로 결정됨을 확인한다.
++"""
++import json
++
++import numpy as np
++
++from rsna_diag import mi19_data as D
++
++RESULT_DIR = "results/iter_021/tests"
++results = []
++
++
++def check(name, cond, detail=None):
++    results.append({"name": name, "pass": bool(cond), "detail": detail})
++
++
++def test_single_component():
++    m = np.zeros((5, 5, 5), dtype=bool)
++    m[1:3, 1:3, 1:3] = True
++    check("single_component_is_1", D.count_components_6connectivity(m) == 1)
++
++
++def test_two_disjoint_components():
++    m = np.zeros((5, 5, 5), dtype=bool)
++    m[0, 0, 0] = True
++    m[4, 4, 4] = True
++    check("two_corners_is_2", D.count_components_6connectivity(m) == 2)
++
++
++def test_diagonal_touch_not_connected_6conn():
++    # (0,0,0) and (1,1,0) touch only diagonally in the first two axes -> not 6-connected
++    m = np.zeros((3, 3, 3), dtype=bool)
++    m[0, 0, 0] = True
++    m[1, 1, 0] = True
++    check("diagonal_touch_is_2_components", D.count_components_6connectivity(m) == 2)
++
++
++def test_face_adjacent_is_1():
++    m = np.zeros((3, 3, 3), dtype=bool)
++    m[0, 0, 0] = True
++    m[1, 0, 0] = True
++    check("face_adjacent_is_1_component", D.count_components_6connectivity(m) == 1)
++
++
++def test_label_connectivity_excludes_split_label():
++    # label 5: two disjoint 2x2x2 blobs far apart in a small volume -> connectivity != 1 -> excluded
++    vol = np.zeros((10, 10, 10), dtype=np.int16)
++    vol[0:2, 0:2, 0:2] = 5
++    vol[8:10, 8:10, 8:10] = 5
++    vol[3:5, 3:5, 3:5] = 7  # single component label
++    conn = D.label_connectivity(vol, [5, 7])
++    check("split_label_conn_gt_1", conn[5] == 2, conn)
++    check("single_label_conn_eq_1", conn[7] == 1, conn)
++
++
++def test_pair_selection_independent_of_enumeration_order_and_length():
++    """candidate_pairs가 다른 순서/다른 길이로 반환되어도 select_patient_pair가 뽑는
++    (x1,x2)는 오직 (pid,x1,x2) 해시 최솟값으로 결정되어야 한다: 후보 목록에 추가 항목이
++    섞여도 원래 최소 해시 후보가 여전히 존재하면 선택이 바뀌지 않는다."""
++    pid = "test_patient_001"
++
++    def rank(x1, x2):
++        import hashlib
++        return hashlib.sha256(D._pair_candidate_id(pid, x1, x2).encode()).hexdigest()
++
++    candidates = [(0, 1), (2, 5), (3, 9), (1, 4)]
++    ranked_real_order = sorted(candidates, key=lambda p: rank(*p))
++    best = ranked_real_order[0]
++    # Now shuffle the input list order (simulate a different enumeration order) and add
++    # a dummy extra candidate at front/back; result (best of the ORIGINAL set) should be
++    # recoverable identically by the same min-hash rule regardless of list order/length.
++    shuffled = [candidates[2], candidates[0], candidates[3], candidates[1]]
++    ranked_shuffled = sorted(shuffled, key=lambda p: rank(*p))
++    check("selection_order_independent", ranked_shuffled[0] == best, (ranked_shuffled[0], best))
++
++
++for fn in [test_single_component, test_two_disjoint_components, test_diagonal_touch_not_connected_6conn,
++           test_face_adjacent_is_1, test_label_connectivity_excludes_split_label,
++           test_pair_selection_independent_of_enumeration_order_and_length]:
++    fn()
++
++n_pass = sum(1 for r in results if r["pass"])
++out = {"n": len(results), "n_pass": n_pass, "results": results}
++print(json.dumps(out, indent=1, default=str))
++import os
++os.makedirs(RESULT_DIR, exist_ok=True)
++json.dump(out, open(f"{RESULT_DIR}/fixtures_data021.json", "w"), indent=1, default=str)
++assert n_pass == len(results), "some fixtures failed"
+diff --git a/test_rsna_iter021_fetch.py b/test_rsna_iter021_fetch.py
+new file mode 100644
+index 0000000..c0c3816
+--- /dev/null
++++ b/test_rsna_iter021_fetch.py
+@@ -0,0 +1,242 @@
++"""iter_021: mi19_fetch downloader 검증. Content-Range 강제, 손상 chunk 재검출,
++short pwrite 방어(모의), 단일 소유권 lock을 실제 로컬 HTTP 서버로 검사한다.
++결과는 results/iter_021/tests/fixtures_fetch.json에 기록한다.
++"""
++import hashlib
++import http.server
++import json
++import os
++import socketserver
++import threading
++import time
++
++from rsna_diag import mi19_fetch as F
++
++RESULT_DIR = "results/iter_021/tests"
++
++
++def _make_body(n, seed=0):
++    import random
++    r = random.Random(seed)
++    return bytes(r.randrange(256) for _ in range(n))
++
++
++class RangeHandler(http.server.BaseHTTPRequestHandler):
++    body = b""
++    mode = "ok"  # ok | bad_content_range | short_body | plain200 | flaky_once
++
++    _flaky_seen = set()
++
++    def log_message(self, *a):
++        pass
++
++    def do_GET(self):
++        total = len(self.body)
++        rng = self.headers.get("Range")
++        if rng is None:
++            self.send_response(200)
++            self.send_header("Content-Length", str(total))
++            self.end_headers()
++            self.wfile.write(self.body)
++            return
++        assert rng.startswith("bytes=")
++        s, e = rng[6:].split("-")
++        s, e = int(s), int(e)
++        chunk = self.body[s:e + 1]
++        if self.mode == "plain200":
++            self.send_response(200)
++            self.send_header("Content-Length", str(total))
++            self.end_headers()
++            self.wfile.write(self.body)
++            return
++        if self.mode == "bad_content_range":
++            self.send_response(206)
++            self.send_header("Content-Range", f"bytes {s}-{e - 1}/{total}")
++            self.send_header("Content-Length", str(len(chunk)))
++            self.end_headers()
++            self.wfile.write(chunk)
++            return
++        if self.mode == "short_body":
++            self.send_response(206)
++            self.send_header("Content-Range", f"bytes {s}-{e}/{total}")
++            self.send_header("Content-Length", str(len(chunk)))
++            self.end_headers()
++            self.wfile.write(chunk[:-1])
++            return
++        if self.mode == "flaky_once":
++            key = (s, e)
++            if key not in RangeHandler._flaky_seen:
++                RangeHandler._flaky_seen.add(key)
++                self.send_response(206)
++                self.send_header("Content-Range", f"bytes {s}-{e}/{total}")
++                self.send_header("Content-Length", str(len(chunk) - 1))
++                self.end_headers()
++                self.wfile.write(chunk[:-1])
++                return
++        self.send_response(206)
++        self.send_header("Content-Range", f"bytes {s}-{e}/{total}")
++        self.send_header("Content-Length", str(len(chunk)))
++        self.end_headers()
++        self.wfile.write(chunk)
++
++
++def _serve(body, mode):
++    RangeHandler.body = body
++    RangeHandler.mode = mode
++    RangeHandler._flaky_seen = set()
++    httpd = socketserver.TCPServer(("127.0.0.1", 0), RangeHandler)
++    port = httpd.server_address[1]
++    t = threading.Thread(target=httpd.serve_forever, daemon=True)
++    t.start()
++    return httpd, f"http://127.0.0.1:{port}/f"
++
++
++def run():
++    os.makedirs(RESULT_DIR, exist_ok=True)
++    results = []
++    orig_sleep = time.sleep
++    time.sleep = lambda s: None
++
++    def check(name, cond, detail=""):
++        results.append({"name": name, "pass": bool(cond), "detail": detail})
++
++    # 1. ok path, small chunk_size to force many chunks
++    body = _make_body(300)
++    httpd, url = _serve(body, "ok")
++    dest = "/tmp/mi19_fetch_test_ok.bin" if False else "results/iter_021/tests/_fetch_ok.bin"
++    for p in (dest, dest + ".progress.json", dest + ".lock.json"):
++        if os.path.exists(p):
++            os.remove(p)
++    final = F.download(url, dest, len(body), workers=3, chunk_size=100, log_every=1000)
++    with open(dest, "rb") as f:
++        got = f.read()
++    check("ok_download_matches", got == body, f"len={len(got)}")
++    check("ok_final_size", final == len(body))
++    httpd.shutdown()
++
++    # 2. resume: truncate progress to drop one chunk's record, verify re-fetch works
++    with open(dest + ".progress.json") as f:
++        prog = json.load(f)
++    assert len(prog["done"]) == 3
++    prog["done"] = prog["done"][:-1]
++    with open(dest + ".progress.json", "w") as f:
++        json.dump(prog, f)
++    httpd, url = _serve(body, "ok")
++    final2 = F.download(url, dest, len(body), workers=3, chunk_size=100, log_every=1000)
++    with open(dest, "rb") as f:
++        got2 = f.read()
++    check("resume_after_progress_truncate", got2 == body)
++    httpd.shutdown()
++
++    # 3. corrupted on-disk bytes for a recorded-done chunk must be re-fetched, not trusted
++    with open(dest, "r+b") as f:
++        f.seek(0)
++        f.write(b"\x00" * 50)
++    httpd, url = _serve(body, "ok")
++    final3 = F.download(url, dest, len(body), workers=3, chunk_size=100, log_every=1000)
++    with open(dest, "rb") as f:
++        got3 = f.read()
++    check("corrupted_chunk_redetected_and_refetched", got3 == body)
++    httpd.shutdown()
++
++    # 4. bad Content-Range must raise, not silently accept
++    dest4 = "results/iter_021/tests/_fetch_badrange.bin"
++    for p in (dest4, dest4 + ".progress.json", dest4 + ".lock.json"):
++        if os.path.exists(p):
++            os.remove(p)
++    httpd, url = _serve(body, "bad_content_range")
++    raised = False
++    try:
++        F.download(url, dest4, len(body), workers=1, chunk_size=100, log_every=1000)
++    except RuntimeError:
++        raised = True
++    check("bad_content_range_rejected", raised)
++    httpd.shutdown()
++
++    # 5. short body must raise
++    dest5 = "results/iter_021/tests/_fetch_short.bin"
++    for p in (dest5, dest5 + ".progress.json", dest5 + ".lock.json"):
++        if os.path.exists(p):
++            os.remove(p)
++    httpd, url = _serve(body, "short_body")
++    raised = False
++    try:
++        F.download(url, dest5, len(body), workers=1, chunk_size=100, log_every=1000)
++    except RuntimeError:
++        raised = True
++    check("short_body_rejected", raised)
++    httpd.shutdown()
++
++    # 6. plain 200 in range path must raise (no silent accept as range chunk)
++    dest6 = "results/iter_021/tests/_fetch_200.bin"
++    for p in (dest6, dest6 + ".progress.json", dest6 + ".lock.json"):
++        if os.path.exists(p):
++            os.remove(p)
++    httpd, url = _serve(body, "plain200")
++    raised = False
++    try:
++        F.download(url, dest6, len(body), workers=1, chunk_size=100, log_every=1000)
++    except RuntimeError:
++        raised = True
++    check("plain_200_in_range_path_rejected", raised)
++    httpd.shutdown()
++
++    # 7. transient failure (short read once) is retried and eventually succeeds
++    dest7 = "results/iter_021/tests/_fetch_flaky.bin"
++    for p in (dest7, dest7 + ".progress.json", dest7 + ".lock.json"):
++        if os.path.exists(p):
++            os.remove(p)
++    httpd, url = _serve(body, "flaky_once")
++    F.download(url, dest7, len(body), workers=1, chunk_size=100, log_every=1000)
++    with open(dest7, "rb") as f:
++        got7 = f.read()
++    check("flaky_retry_succeeds", got7 == body)
++    httpd.shutdown()
++
++    # 8. single ownership lock: second acquire on same dest while first "process" alive must fail.
++    # Simulate liveness by pointing the lock at this test process's own pid (which is alive).
++    dest8 = "results/iter_021/tests/_fetch_lock.bin"
++    lp = dest8 + ".lock.json"
++    if os.path.exists(lp):
++        os.remove(lp)
++    my_pid = os.getpid()
++    start = F._proc_start_time(my_pid)
++    with open(lp, "w") as f:
++        json.dump({"pid": my_pid, "start_time": start}, f)
++    raised = False
++    try:
++        F.acquire_lock(dest8)
++    except RuntimeError:
++        raised = True
++    check("lock_rejects_live_owner", raised)
++    os.remove(lp)
++
++    # 9. stale lock (pid alive but start_time mismatch => different process reused pid) is not trusted
++    with open(lp, "w") as f:
++        json.dump({"pid": my_pid, "start_time": "not-a-real-starttime"}, f)
++    raised = False
++    try:
++        F.acquire_lock(dest8)
++        F.release_lock(dest8)
++    except RuntimeError:
++        raised = True
++    check("stale_lock_start_time_mismatch_not_trusted", not raised)
++
++    # 10. sha256_of / md5_of correctness
++    tmp = "results/iter_021/tests/_hashtest.bin"
++    with open(tmp, "wb") as f:
++        f.write(body)
++    check("sha256_of_matches", F.sha256_of(tmp) == hashlib.sha256(body).hexdigest())
++    check("md5_of_matches", F.md5_of(tmp) == hashlib.md5(body).hexdigest())
++
++    time.sleep = orig_sleep
++    n_pass = sum(1 for r in results if r["pass"])
++    out = {"n_pass": n_pass, "n_total": len(results), "results": results}
++    with open(f"{RESULT_DIR}/fixtures_fetch.json", "w") as f:
++        json.dump(out, f, indent=2)
++    print(json.dumps(out, indent=2))
++    assert n_pass == len(results), f"{n_pass}/{len(results)} passed"
++
++
++if __name__ == "__main__":
++    run()

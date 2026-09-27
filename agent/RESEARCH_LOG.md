@@ -7063,3 +7063,210 @@ iter_019/020의 전략 판단을 유지한다. 현재 grounding에 새 loss를 �
 실행 호스트에서 기존 작업의 소유권·생존·종료 상태부터 확인한다. 원본 부분 archive와 checkpoint를 보존하고 최종 checksum·SHA256·ZIP CRC가 확인되는 자료 복구를 완료한다. 위 재사용 결함을 실제 사용할 경로에 한정해 해결한다.
 
 그 뒤 실제 overlay·중복·연결성 검증을 마친 적격 N과 D8/E48/F를 고정한다. N<56이면 모델 능력 판정 없이 자료 식별성 부족으로 종료한다. 충분하면 D8 공식 입력 대조·출력 길이와 형식 gate·24개 재개 검사·두 GPU 처리량 비교를 통과한 뒤 E48을 실행한다. F는 원래 확대 조건을 만족할 때만 실행하며 가설·metric·성공 기준을 바꾸지 않는다.
+
+
+## iter_021 GPT PLAN [동일 volume의 reference 대상 선택 진단 / proceed] — 2026-09-28 00:37:18
+
+# 요약
+
+- **이번에 할 일:** 자료 복구와 필수 실행 검증을 마치고 기존 D8→E48→조건부 F 진단을 완료한다.
+- **필요한 이유:** iter_019/020에는 실제 환자 출력이 없어 연구 가설을 판정하지 못했다.
+- **확인할 기준:** source·좌표·요청·재개 gate를 통과한 뒤 원래 H와 baseline 기준을 적용한다.
+- **주의·다음:** 새 결과는 `research/results/iter_021/`에 저장한다. 준비 검사 통과와 한계 재현을 구분하고, F는 사전 조건을 충족할 때만 연다.
+
+# Current Understanding
+
+iter_020은 execution_failed, valid_experiment=false다. 27개 회귀 검사 통과는 제한된 구현 근거이며 최종 manifest·split·환자 출력은 없다. mask 후보 210명은 최종 적격 환자 수가 아니다.
+
+현재 HEAD는 `5720d0c82da88c67af5843554afd1791308c6007`이고 작업 트리는 clean이다. 같은 `approach/reference-instance-diagnostic` 브랜치를 이어간다. 전체 스냅샷의 재사용 승인은 없으며 필요한 모듈을 아래 검사 후 사용한다.
+
+images.zip은 전체 길이가 미리 할당되어 있다. 현재 progress의 40개 범위는 다운로드 무결성 증거가 아니다. 기존 프로세스의 생존 여부도 계획 환경의 ps만으로 확정할 수 없다.
+
+**유지:** 연구 질문, 조건별 입력, H와 판정 기준, 모델 revision, D8/E48/F 규약, 기존 결과·부분 파일·reserve.
+
+**변경:** 다운로드 검증, 방향·자료 검증, 후보별 SHA 선택, 필수 provenance, 단계 gate, 완료 재사용 검증, 새 결과 경로.
+
+**보류:** 새 loss·MRI SFT·추가 데이터셋·기존 범위 문구 탐색. iter_008의 보완 취지는 유지하되 이미 수행한 일회성 작업을 반복하지 않는다.
+
+# Strategy Check / 연구 방향 판단
+
+중요한 능력은 여러 영상에서 사용자가 지정한 대상의 정체성을 유지하는 것이다. iter_019 계획과 iter_020 리뷰의 전략 판단을 유지한다. 유효 실험 0회이므로 성능 근거에 따른 대규모 재투자 시점은 아니다.
+
+현재 grounding 개선은 강한 SFT baseline이 있지만 새 loss의 추가 가치가 확인되지 않았다. 다른 임상 다중 영상 질문은 새 자료와 식별 가능한 비교 설계가 필요하다. 현재 진단은 이미 마련한 자산으로 대상 선택, localization, 위치 shortcut, 언어 매개 해결을 구분할 수 있다. 따라서 구체적 결함을 수정해 실제 출력을 얻는 선택을 우선한다.
+
+자료 접근 실패의 구체적 원인, N<56, 정상 사용 gate 실패 또는 단순 baseline으로 충분한 해결이 확인되면 투자 방향을 재평가한다. 실행 실패를 가설 기각으로 세지 않는다. 반복 횟수만으로 계속하거나 포기하지 않는다.
+
+# Hypothesis
+
+O의 target 내부점 조건에서 두 인스턴스를 모두 localization할 수 있어도, J_RT와 J_TR에서 동일한 다른 인스턴스를 반복 선택하는 환자가 존재한다. 전체 평가 환자를 분모로 하는 H의 중요도 기준은 기존 15%다.
+
+이 수치는 연구 투자 기준이며 임상 허용 오류율이 아니다. 높은 H만으로 내부 병목이나 새 학습 방법의 필요성을 확정하지 않는다.
+
+# Limitation Evidence / Correct Usage Checks
+
+`context-sensitivity`는 observed이며 이번 진단의 관련 출발점이다. iter_003의 3 case 결과는 MRI 대상 선택 실패의 근거가 아니다. RSNA의 validated grounding 한계를 이번 과제에 전이해 주장하지 않는다.
+
+모델은 `google/medgemma-1.5-4b-it`, revision `91850547d9f0b2fdd21aa7c5f4f3d1a8a52c243b`를 유지한다. iter_019에 보존된 공식 다중 영상 예제·출처를 사용하고 실제 D 입력에서 공식 chat 구성과 wrapper의 input_ids·pixel_values·영상 순서를 대조한다. 모델·processor·라이브러리 버전을 기록한다.
+
+square padding, yxyx 0–1000, 고정 single-box parser, EOS 판정과 1000→2000→4000 생성 ladder를 유지한다. 형식 실패·잘림·빈 출력·내용 오류를 분리한다. 위치를 잘못 변환한 출력을 모델 오류로 세지 않는다.
+
+MHA 방향은 기존에 확인한 MetaIO 규약과 독립 index→physical 계산으로 검증한다. 비대칭 비항등 방향, 축 순열·반전, 비등방 spacing과 origin을 포함한다. AnatomicalOrientation 문자열만으로 방향을 추정하지 않는다. `107_t2.mha`의 sagittal 축 사례를 유지하며 실제 image/mask overlay를 추가한다.
+
+# Contribution Path / Baselines / Reuse
+
+기여는 미확정이다. 이번 진단은 직접 다중 영상 SFT, 언어 매개 grounding, reference 기반 mask propagation과 구별되는 새 방법을 제안하지 않는다. 어느 실패 조건에 방법 개발이 필요한지 판단하는 것이 목적이다.
+
+환자마다 reference 인스턴스 두 개를 질의한다.
+
+- **J_RT/J_TR:** 같은 R/T와 reference box를 제공하고 영상 순서와 역할 지시만 함께 변경한다. 각 2회 호출.
+- **S:** R/T로 설명을 생성한 뒤 T와 생성 설명으로 grounding한다. 총 4회 호출. 설명을 GT로 교정하거나 임의 절단하지 않는다.
+- **A:** T와 reference box만 제공한다. 2회 호출. reference pixels 제거 대조다.
+- **O:** T와 지정 target mask 내부점을 제공한다. 2회 호출. 추가 정답 정보가 있는 oracle이다.
+- **C:** 같은 volume grid와 표시 affine으로 reference 위치를 전달한다.
+- **N:** box가 그려지지 않은 grayscale reference template으로 전체 target NCC 검색을 수행한다. scale {0.75,1.0,1.25}, 최대 NCC, scale 1과 가까운 순서, 좌상단 동점 규칙을 유지한다. target GT를 검색·선택에 쓰지 않는다.
+
+호출 수·입력 정보·추론 시간을 조건별로 공개한다. MedSAM2는 기존 호환 설치와 checkpoint가 있는 경우에만 iter_019에 확인한 공식 경로로 D 검증 후 사용한다. 두 slice와 중간 slice 추가 조건을 구분한다. 설치 변경은 하지 않는다. 미실행이면 NCC를 강한 신경망 baseline으로 부르지 않는다. RSNA adapter는 MRI의 강한 직접 SFT를 대신하지 않는다. 방법 개발 전에는 과제에 맞는 충분한 직접 SFT와 학습된 모듈형 대안을 별도 계획해야 한다.
+
+현재 브랜치에 필요한 파일이 있으므로 reuse_assets는 비운다. `rsna_diag/geometry.py`, `mi19_baseline.py`는 iter_020의 padded NCC 수정 범위만 승인됐다. 실제 MRI 성능은 미검증이다.
+
+재사용·수정 범위는 다음과 같다.
+
+- 자료: `mi19_fetch.py`, `mi19_mha.py`, `mi19_render.py`, `mi19_data.py`, `mi19_manifest.py`.
+- 실행·평가: `mi19_spec.py`, `mi19_requests.py`, `mi19_protocol.py`, `mi19_gen.py`, `mi19_run.py`, `mi19_pipeline.py`, `mi19_eval.py`.
+- 공통 의존: `__init__.py`, `geometry.py`, `generate.py`, `parse.py`, `metrics.py`, `prompts.py`, `queue_lock.py`, `lock_protocol.py` 및 실제 import closure.
+- 검사: 현재 `test_rsna_iter019_baseline.py`, `test_rsna_iter019_eval.py`, `test_rsna_iter019_mha.py`, `test_rsna_iter019_render.py`, `test_rsna_iter020_mri.py`를 재사용한다. 출력 경로를 이번 반복으로 지정해 기존 결과를 덮어쓰지 않는다.
+
+# Proposed Experiment
+
+## 1. 자료 복구와 실행 소유권
+
+실행 호스트에서 기존 downloader·pipeline·worker의 PID/starttime, command, lock 소유권, 로그, 종료 코드를 확인한다. 살아 있는 작업은 중복 실행하지 않는다. 조회 범위가 제한되면 종료로 추정하지 않는다. 다른 사용자의 프로세스는 건드리지 않는다.
+
+기존 부분 파일은 보존한다. 종료된 작업을 복구할 때는 `results/iter_021/source/`의 새 파일을 사용한다. 기존 archive가 완성되었다면 원저자 checksum·SHA256·ZIP CRC를 검증한 뒤 읽기 전용 출처로 연결한다.
+
+현재 progress에는 객체 동일성 증거가 부족하므로 기록된 done 범위를 곧바로 신뢰하지 않는다. 원본과 동일한 객체·범위임을 재검증할 수 있을 때만 복사본에서 이어받고, 불가능하면 검증 가능한 새 다운로드를 수행한다.
+
+다운로드 완료 조건은 다음을 모두 포함한다.
+
+- 배포 record, 실제 URL, 길이, 원저자 checksum, 사용 가능한 객체 validator를 기록한다.
+- Range 응답은 206과 정확한 Content-Range·전체 길이·body 길이를 검증한다. 200은 전체 다운로드 경로에서만 처리하며 range chunk로 기록하지 않는다.
+- short pwrite를 처리하고 write 완료 후 chunk hash와 진행 기록을 원자적으로 저장한다. 재개 시 chunk를 다시 검증한다.
+- 단일 소유권·중단·재개와 객체 변경·잘못된 range·짧은 응답 거부를 검사한다. 안정적인 range 검증이 불가능하면 검증 가능한 전체 다운로드를 사용한다.
+- 최종 원저자 checksum, 자체 SHA256, archive member 중복·ZIP CRC 검증을 모두 통과해야 extraction과 자료 gate로 진행한다.
+
+다운로드가 진행 중이라는 안내만 남기고 구현 완료로 종료하지 않는다. 정상 완료까지 추적하거나, 실제 차단 원인·부분 상태·다음 재개 지점을 보고한다. 권한 거부는 우회하지 않고 정확한 동작과 원인을 기록한다.
+
+## 2. 적격 자료와 분할 고정
+
+모든 후보에서 image/mask shape·spacing·origin·direction·payload·유한 intensity·정수 label을 검증한다. 원본 sagittal 축, in-plane 축·반전, index→physical→display 변환을 저장한다. image와 mask에 동일한 변환을 적용한다.
+
+원래 적격 규약을 유지한다: regular T2 한 series/환자, 서로 다른 원본 sagittal slice 간격 6–15 mm, 공통 인스턴스 2개 이상, 원본 면적 128 pixels 이상이면서 해당 인스턴스 최대 slice 면적의 20% 이상, bbox 각 변 8 pixels 이상. volume 비배경 유한 intensity의 1–99 percentile window와 spacing 기반 표시를 사용한다.
+
+vertebra label 범위와 3D 연결성을 검사한다. 작은 분리 성분을 임의 삭제하거나 서로 다른 label을 합치지 않는다. 연결성·지원 방향에 대한 판정 규칙과 수치 허용오차를 출력 전에 고정한다. 자료상 부적격과 구현 예외를 분리한다. 구현 예외는 전체 자료 gate를 막으며, errors에 적었다는 이유만으로 해당 환자를 제외하고 진행하지 않는다.
+
+pair 선택은 `iter019-reference-v1` salt와 환자·후보 slice 식별자를 포함한 canonical serialization의 후보별 SHA256 정렬로 수정한다. R/T 역할·인스턴스 선택·동점 규칙을 잠근다. 후보 열거 순서가 달라도 같은 pair를 선택해야 한다. C/N 점수로 pair를 선택하지 않는다.
+
+환자 ID·source volume hash·decoded pixel hash를 현재 후보와 기존 자료에 대조한다. 중복 연결요소가 split을 넘지 않게 하고 독립 환자 수를 부풀리지 않는다. 익명 legacy 및 사전학습 중복의 잔여 불확실성은 기록한다.
+
+모든 자료 검증과 렌더링 완료 후 최종 N을 고정한다. 기존 `iter019-split-v1` 규칙으로 D8/E48/F를 분리한다. 신뢰 가능한 기관 metadata를 사용하는 경우 기존 계획대로 결정적 층화 규칙을 생성 전에 명시한다. 성능에 따라 분할 규칙을 바꾸지 않는다.
+
+실제 overlay는 D8 전체와 D에서 대표되지 않은 방향 유형을 확인한다. 선택 reference, target mask, bbox·내부점의 표시 연결을 확인하되 E/F 모델 출력은 보지 않는다. N<56이면 자료 식별성 부족으로 종료하며 조건을 완화하지 않는다.
+
+## 3. 동작 확인: D8
+
+학습 없음, greedy generation, seed 19. 기본 8명×12=96회다. J_RT/J_TR/O는 정확히 한 box를 요구한다. 빈 list·복수 box·invalid·잘림을 각각 기록한다. EOS가 없을 때만 1000→2000→4000으로 늘리며 모든 시도를 보존한다. S 설명에도 같은 규칙을 적용한다.
+
+공식 입력 대조와 함께 J_RT/J_TR/O 각각 valid 단일 box≥95%, 최종 cap 도달≤5%를 요구한다. 실패하면 E로 진행하지 않으며 E 결과로 prompt/parser를 조정하지 않는다.
+
+현재 코드의 고정 D 요청 24개로 정상 실행과 부모 SIGTERM, worker 중단, 마지막 record 절단 후 재개를 비교한다. S1→S2 경계도 포함한다. 완료 요청 재사용, 고유 요청 중복·누락 0, 기준 greedy suffix 일치, 모든 자식의 종료 상태와 소유권을 확인한다. 손상 원본과 실패 attempt는 보존한다.
+
+## 4. 가능성 탐색: E48
+
+자료·입력·형식·재개·자원 gate를 모두 통과하면 E48의 576회와 C/N을 실행한다. 전체 고정 행렬을 완료한 뒤 한 번 분석한다. D는 주지표에 합치지 않는다.
+
+전체 환자의 pair success, instance IoU, wrong-instance, 경계 오차, 빈 응답·형식 실패를 보고한다. 기관·간격·크기별 분석은 보조 관찰이며 확대 기준을 바꾸지 않는다.
+
+## 5. 규모 확대와 독립 확인: F
+
+F=N−56을 보존하고 아래 원래 조건을 모두 만족할 때만 동일 설정으로 12×nF회를 수행한다.
+
+1. 자료·입력·형식 gate 유지 및 O pair success≥0.75.
+2. C/N/S 어느 것도 pair success≥0.90에 도달하지 않음.
+3. F≥64명.
+4. H_E≥0.15, 또는 H_E<0.15이면서 Wilson 95% 상한≥0.15이고 예상 F Wilson 반폭≤0.10 및 E 반폭의 80% 이하. 예상 p=(k+0.5)/49를 사용한다.
+
+확대 decision은 E의 완전한 원시 결과·protocol digest에 연결한다. F 실행기는 이를 실제 검증하고 거부 조건을 강제한다. F 중간 성능으로 중단·설정 변경하지 않는다. F와 E를 분리 보고하며 조건 미충족이면 F를 보존한다. F 후에도 불확정이면 이번 반복을 종료하고 추가 투자 가치를 재평가한다.
+
+## 6. GPU 배치·비용·checkpoint
+
+실행 직전 nvidia-smi로 허용 GPU 0,1의 UUID·여유 메모리를 확인하고 여유가 큰 장치부터 배정한다. 상속 CUDA_VISIBLE_DEVICES의 허용 집합을 유지하고 물리 장치와 worker 논리 index를 기록한다.
+
+D의 혼합 요청 24개로 총 2 worker를 측정한 뒤 안전하면 총 4 worker를 비교한다. 실제 process peak의 합, 다른 점유, worker당 최소 2GiB 여유가 GPU 용량 안에 들어야 한다. 다중 영상·4000-token 출력과 긴 S1 설명을 받는 S2도 stress 검사한다. 4 worker가 부적합하면 batch 확대가 유망한지 검토한다. 둘 다 안전하지 않거나 처리량 이득이 없으면 2 worker 유지 근거를 남긴다.
+
+전체 wall-clock 처리량, GPU별 전체 점유·allocator peak, 긴 요청 지연, CPU/RAM/I/O 경합, 오류·OOM, greedy suffix·평가 정합성으로 선택한다. validation/test 점수로 실행 구성을 선택하지 않는다. OOM이면 조건·생성 길이를 바꾸지 않고 batch/동시성을 낮춰 재개한다.
+
+기본 규모는 D 96회, E 576회, 조건부 F 12×nF회다. 원천 T2 210 series 기준 기본 행렬 상한 시나리오는 2,520회이며 확보된 적격 N을 뜻하지 않는다. 재개·처리량·cap 재시도는 별도 집계한다. 측정 전 총 처리량 2–10 calls/min 시나리오에서 E는 약 1–5시간, 최대 기본 행렬은 약 4.2–21시간이다. D 실측 후 S 의존성과 조건별 지연을 반영해 예상 시간을 갱신한다. 자료 전송 시간은 별도다. 임의 시간 상한을 두지 않는다.
+
+request별 원자적 claim, worker별 append-only 결과, attempt별 PID/starttime·종료 코드·resource log를 남긴다. source 완료→manifest 고정→D gate→E 결과·decision→F 완료가 재개 지점이다. 파일 존재만으로 단계를 건너뛰지 않는다.
+
+# Implementation Tasks for Claude
+
+1. 실제 Python·의존성·실행 호스트·프로세스 소유권을 확인한다. 패키지 설치, HF cache 변경, 상위 저장소 브랜치 변경은 하지 않는다.
+2. 모든 신규 출력의 root를 `results/iter_021/`로 명시적으로 전달한다. 현재 코드와 테스트에 남은 iter_019/020 hardcoded 출력 경로를 사용하는 경로부터 수정한다. 과거 결과는 읽기 전용 출처로만 연결한다.
+3. downloader의 객체·범위·write·checksum 검증과 단일 소유권을 보완하고 실제 자료 복구를 완료한다. 작은 파일도 출처 checksum을 재확인한다.
+4. 방향의 독립 물리좌표 fixture, 실제 overlay, 연결성·중복, 후보별 SHA 선택과 구현 오류 시 fail-closed 자료 gate를 구현한다. 검증 완료된 집합에서만 manifest·split을 잠근다.
+5. protocol에 source verification, gate, manifest, split, 평가 GT, 요청, prompt, 모델·processor revision, 생성 config, 관련 코드와 의존성을 필수로 연결한다. 요청 ID·prompt hash·ordered image hash를 재계산하고 재구성한 예상 요청과 저장 요청을 비교한다. 평가 GT는 일반 생성 입력에서 차단하고 O만 내부점을 받는다.
+6. S2 protocol에 S1 protocol·성공 completion·원시 worker 파일·선택 record와 설명 digest를 연결한다. S1 오류·누락·변경 시 S2를 거부한다. phase1과 S2 사이 중복 ID도 조용히 덮어쓰지 않는다.
+7. completion 재사용 시 status, 모든 자식 종료 코드, 정확한 환자×인스턴스×condition 집합, 입력·config·protocol 연결을 재검증한다. D 없이 E, E decision 없이 F, 변경된 source를 가진 완료 재사용을 거부한다. 실패 attempt는 보존하고 현재 성공 표시는 남기지 않는다.
+8. H·pair success·wrong-instance·Wilson·paired bootstrap·discordance 구간과 D/E/F 경계값을 독립 fixture로 검사한다. 누락·중복·잉여 조건, 변경된 S1, 실패 completion, GT 유출을 검출하는 검사를 포함한다.
+9. gate 통과 후 같은 호출 안에서 D→E→조건부 F까지 수행한다. 기존 NCC 회귀 검사는 유지하고 수정된 경로의 재개·처리량 검증을 실제 실행한다.
+10. 한국어 보고서에 실제 도달 단계, 필수 gate 상태, 표본·호출·GPU 사용량, 확대/보류 이유, 미실행 baseline, 원시 결과·재현 명령·종료 상태를 기록한다. 소스 커밋은 orchestrator에 맡긴다.
+
+# Evaluation (성공/실패 기준 포함)
+
+localization 성공은 유효 단일 box와 지정 target IoU≥0.5다. 환자의 두 요청 모두 성공한 비율이 pair success다. IoU≥0.3과 평균 IoU는 보조 지표다.
+
+명백한 wrong-instance는 지정 target IoU≤0.1이고 다른 vertebra 하나와 IoU≥0.3이며 그 대상이 유일한 최대 IoU인 경우다. 동점·큰 범위 box·단순 저IoU는 강제로 분류하지 않는다.
+
+H 사건은 O에서 두 target을 모두 성공하고, 두 reference 중 적어도 하나에 대해 J_RT/J_TR이 모두 유효 단일 box로 동일한 다른 vertebra를 wrong-instance 선택한 경우다. 분모는 모든 평가 환자다. invalid·잘림은 H에 넣지 않고 전체 실패 분해에 남긴다.
+
+H는 환자 단위 Wilson 95% CI로 보고한다. pair success 차이는 환자 paired bootstrap 10,000회, seed 19019로 계산한다. 차이가 모두 0이면 [0,0]만 제시하지 않고 discordance 수와 비율의 이항 구간을 함께 제시한다. 이 구간을 signed 차이의 CI로 오표기하지 않는다. 두 reference를 독립 환자로 세지 않는다.
+
+- **양성:** 독립 F에서 H≥0.15이고 Wilson 하한>0.05이며 모든 gate가 유지되면 이 SPIDER 구성의 반복 대상 선택 실패를 지지한다. J/A/C/N/S/O로 설명 범위를 좁힌다. diagnostic success 후보이며 새 방법 성공은 아니다. 다음에는 충분한 직접 SFT·학습된 모듈형 대안·추가 원천 비교의 투자 가치를 판단한다.
+- **음성·투자 보류:** H Wilson 상한<0.15이면 사전 중요도 크기의 보수적 사건을 약화한다. C/N/S pair success≥0.90이면 단순 해결 경로를 보존하고 F를 열지 않는다. O가 낮으면 localization·표시·주석 범위가 더 중요한 경쟁 설명이다. 다중 영상 능력 전체에 일반화하지 않는다.
+- **불확정:** CI가 기준을 가로지르거나 O의 식별력이 부족하면 사전 F 규칙으로만 확대한다. F 부족·정밀도 개선 부족 또는 F 이후 불확정이면 보류하고 다음 판단을 바꿀 근거와 비용을 검토한다. 다른 loss·문구 탐색을 자동 예약하지 않는다.
+- **실행 실패:** source·좌표·입력 연결·재개·완전성 gate 실패면 가설을 판정하지 않는다. N<56은 자료 식별성 부족이며 모델 실패가 아니다. 준비만 완료한 경우 valid_experiment=true로 보고하지 않는다.
+
+# Risks / Checks
+
+같은 volume의 위치 shortcut은 강할 수 있다. C와 A를 유지하고 J 성공만으로 reference pixels 활용을 주장하지 않는다. O는 정답 위치를 추가로 제공하므로 O−J 차이가 내부 병목의 인과 증명은 아니다.
+
+vertebra 전체와 body-only 주석을 혼동하지 않는다. 임상 level 이름이나 정상 여부를 생성 정답으로 만들지 않는다. GT 기반 적격 조건과 모든 제외 사유를 공개한다.
+
+현재 승인된 NCC 좌표 수정은 실제 MRI baseline의 성능 승인이 아니다. MedSAM2 미실행 상태에서는 모듈형 대안으로 해결할 수 없다는 결론을 내리지 않는다.
+
+원본 checksum이 맞지 않는 자료, 원인을 모르는 방향 처리, 구현 예외로 줄어든 표본을 성능 평가에 사용하지 않는다. 기존 결과·부분 archive·실패 attempt·claim을 임의 삭제하지 않는다. host 상태를 확인하지 못하면 프로세스가 없다고 추정하지 않는다.
+
+## 대규모 GPU 필요 후보
+
+다양한 anatomy·modality의 reference 관계와 단일 영상 능력을 함께 학습하는 vision encoder–언어 모델 공동 post-training을 후보로 보존한다. 현재 두 GPU에서 가능한 diagnostic, LoRA, frozen correspondence 모듈과 구분한다. 이번 실제 출력 근거 없이 대규모 공동 학습의 필요성을 주장하지 않는다.
+
+# 계획의 근거 (GPT 조사 노트)
+
+## 확인한 사실
+
+- `agent/GOAL.md`, `agent/LIMITATIONS.md`, `agent/REPORTING_STYLE.md`, `agent/CODE_ASSETS.md`의 관련 항목, iter_019/020 계획과 iter_020 리뷰를 확인했다. `context-sensitivity`의 원본인 iter_003 리뷰도 읽었다. 그 근거는 3 case의 제한된 context 관찰이며 이번 MRI correspondence 실패를 검증한 기록은 아니다.
+- 현재 research HEAD는 `5720d0c82da88c67af5843554afd1791308c6007`이고 `git status --short`와 `git diff --stat`는 비어 있다. `git ls-files`로 mi19 모듈 13개와 iter_019/020 관련 테스트가 현재 브랜치에 있음을 확인했다. 새 반입은 필요 없다.
+- `research/results/iter_020/`에는 작은 파일 checksum 기록, images.zip, progress, mask·CSV, 27개 검사 결과와 mask 기반 gate가 있다. 최종 manifest·split·환자 생성 산출물은 확인되지 않았다.
+- images.zip의 논리 크기는 3,700,562,886 bytes다. 현재 progress에는 40개 범위, 합계 2,684,354,560 bytes가 기록되어 있다. `mi19_fetch.py`는 ftruncate로 전체 길이를 먼저 확보하므로 파일 크기가 완료를 뜻하지 않는다. 불완전 ZIP 판정은 직전 리뷰의 검사 결과이며 이번에 CRC나 전체 checksum을 재실행하지 않았다.
+- downloader는 200/206을 모두 허용하고 Content-Range·객체 validator를 검증하지 않는다. progress에 URL·chunk hash가 없고 pwrite 반환 길이도 확인하지 않는다. 최종 반환 조건은 파일 크기뿐이다.
+- `mi19_manifest.py`는 모든 build 예외를 errors에 모으고 성공 환자만으로 split을 계속 만들 수 있다. `mi19_data.py`의 pair 선택은 후보별 SHA 정렬 대신 hash modulo다.
+- `mi19_pipeline.py`에는 phase1 실패 시 S2를 중단하는 수정이 있다. 반면 요청·protocol의 존재 기반 재사용, S1 원본 연결 부족, E/F 선행 gate 미강제가 남는다. protocol의 자료 입력은 여전히 선택적 extra다.
+- 현재 ps 조회는 격리된 실행 범위만 보여 주므로 실행 호스트의 downloader·worker가 종료됐다고 판정할 수 없다. Claude가 호스트에서 PID/starttime·소유권·종료 코드를 확인해야 한다.
+
+## 의미와 결정
+
+추가 문헌 조사로 해결할 불확실성보다 명시적인 실행 결함이 우선이다. iter_019의 전략 판단과 iter_020 리뷰를 유지하고, 원래 실험을 수행할 수 있게 복구하는 implement를 선택한다. 모델 실패·방법론 기여는 여전히 미확인이다. 일반 구현으로 처리할 수정 사항을 구체화했으므로 standard를 유지한다.
+
+이번 라운드는 읽기만 수행했다. 코드·파일 수정, 다운로드, 모델 로딩, 테스트·GPU 실험은 하지 않았다.
+
