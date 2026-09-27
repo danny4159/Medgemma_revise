@@ -99,5 +99,5 @@ for fn in [test_classify_response_single_box, test_classify_response_multi_box_f
 n_pass = sum(1 for r in results if r["pass"])
 print(json.dumps({"n": len(results), "n_pass": n_pass, "results": results}, indent=1, default=str))
 json.dump({"n": len(results), "n_pass": n_pass, "results": results},
-          open("/SSD1_1TB/home/milab/daniel/08_medgemma/research/results/iter_019/tests/fixtures_eval.json", "w"), indent=1, default=str)
+          open("/SSD1_1TB/home/milab/daniel/08_medgemma/research/results/iter_021/tests/fixtures_eval.json", "w"), indent=1, default=str)
 assert n_pass == len(results)

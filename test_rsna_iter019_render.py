@@ -27,20 +27,21 @@ def test_window():
 
 
 def test_resize_scale_isotropic():
-    # spacing_y=0.5 (dense), spacing_z=2.0 (sparse) -> row axis(z) scaled up by 4x, col axis(y) unchanged
-    sr, sc = R.resize_scale(spacing_y=0.5, spacing_z=2.0)
+    # spacing_row=2.0 (sparse), spacing_col=0.5 (dense) -> row axis scaled up by 4x, col axis unchanged
+    sr, sc = R.resize_scale(spacing_row=2.0, spacing_col=0.5)
     check("resize_scale_row", abs(sr - 4.0) < 1e-9, sr)
     check("resize_scale_col", abs(sc - 1.0) < 1e-9, sc)
 
 
 def test_render_slice_shape():
+    # axes=(0,1,2): sag axis=array axis 0 (nz), row=array axis1(ny), col=array axis2(nx) -- x-sagittal legacy layout
     nz, ny, nx = 6, 8, 3
     vol = np.random.RandomState(0).rand(nz, ny, nx).astype(np.float32) * 100 + 1
     lo, hi = R.volume_window(vol)
-    rgb, sr, sc, shape = R.render_slice(vol, 1, spacing_y=1.0, spacing_z=2.0, lo=lo, hi=hi)
-    expect_h = round(nz * 2.0)
+    rgb, sr, sc, shape = R.render_slice(vol, 1, (0, 1, 2), spacing_row=2.0, spacing_col=1.0, lo=lo, hi=hi)
+    expect_h = round(ny * 2.0)
     check("render_new_h", shape[0] == expect_h, (shape, expect_h))
-    check("render_new_w", shape[1] == ny, shape)
+    check("render_new_w", shape[1] == nx, shape)
     check("render_shape_matches_array", rgb.shape[:2] == shape)
 
 
@@ -73,5 +74,5 @@ for fn in [test_window, test_resize_scale_isotropic, test_render_slice_shape, te
 n_pass = sum(1 for r in results if r["pass"])
 print(json.dumps({"n": len(results), "n_pass": n_pass, "results": results}, indent=1, default=str))
 json.dump({"n": len(results), "n_pass": n_pass, "results": results},
-          open("/SSD1_1TB/home/milab/daniel/08_medgemma/research/results/iter_019/tests/fixtures_render.json", "w"), indent=1, default=str)
+          open("/SSD1_1TB/home/milab/daniel/08_medgemma/research/results/iter_021/tests/fixtures_render.json", "w"), indent=1, default=str)
 assert n_pass == len(results)

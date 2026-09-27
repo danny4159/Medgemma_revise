@@ -17,8 +17,8 @@ from PIL import Image
 
 from . import geometry, mi19_mha as M
 
-SOURCE = "results/iter_020/source"
-DATA_DIR = "results/iter_020/data"
+SOURCE = "results/iter_021/source"
+DATA_DIR = "results/iter_021/data"
 VERT_MAX_LABEL = 99  # 0 < label < 100
 SLICE_SPACING_MIN_MM = 6.0
 SLICE_SPACING_MAX_MM = 15.0
@@ -65,10 +65,50 @@ class ZipCache:
         return data, sha_bytes(data)
 
 
+def count_components_6connectivity(mask3d):
+    """6-connectivity 3D connected component count via set-based BFS (no scipy dependency).
+    mask3d은 이미 label bbox로 crop된 작은 배열이어야 실용적 속도가 나온다."""
+    coords = np.argwhere(mask3d)
+    remaining = set(map(tuple, coords.tolist()))
+    n = 0
+    while remaining:
+        start = next(iter(remaining))
+        stack = [start]
+        remaining.discard(start)
+        while stack:
+            z, y, x = stack.pop()
+            for dz, dy, dx in ((1, 0, 0), (-1, 0, 0), (0, 1, 0), (0, -1, 0), (0, 0, 1), (0, 0, -1)):
+                nb = (z + dz, y + dy, x + dx)
+                if nb in remaining:
+                    remaining.discard(nb)
+                    stack.append(nb)
+        n += 1
+    return n
+
+
+def label_connectivity(mask_vol, labels):
+    """returns {label: n_3d_components} using each label's full-volume mask cropped to its bbox
+    (6-connectivity). 작은 분리 성분을 지우거나 합치지 않고 개수만 보고한다; 호출측이 ==1이 아닌
+    label을 eligible에서 제외할지 결정한다."""
+    out = {}
+    for lab in labels:
+        m = mask_vol == lab
+        idx = np.argwhere(m)
+        if idx.size == 0:
+            out[lab] = 0
+            continue
+        lo = idx.min(axis=0)
+        hi = idx.max(axis=0) + 1
+        crop = m[lo[0]:hi[0], lo[1]:hi[1], lo[2]:hi[2]]
+        out[lab] = count_components_6connectivity(crop)
+    return out
+
+
 def instance_bboxes_per_slice(mask_vol, axes, n_sag):
     """mask_vol: (nz,ny,nx). axes=(array_axis_sag,array_axis_row,array_axis_col) from mi19_mha.axis_layout.
-    returns {sag_idx: {label: (row0,col0,row1,col1,area_px)}} for 0<label<=VERT_MAX_LABEL only.
-    half-open bbox convention (row1,col1 = max index + 1)."""
+    returns (per_slice, max_area, connectivity): per_slice={sag_idx: {label: (row0,col0,row1,col1,area_px)}}
+    for 0<label<=VERT_MAX_LABEL only (half-open bbox convention, row1/col1 = max index + 1);
+    connectivity={label: n_3d_components_6connectivity} computed once on the full volume per label."""
     array_axis_sag, array_axis_row, array_axis_col = axes
     labels = [int(v) for v in np.unique(mask_vol) if 0 < v <= VERT_MAX_LABEL]
     out = {x: {} for x in range(n_sag)}
@@ -85,11 +125,12 @@ def instance_bboxes_per_slice(mask_vol, axes, n_sag):
             area = int(sl.sum())
             out[x][lab] = (r0, c0, r1, c1, area)
             max_area[lab] = max(max_area.get(lab, 0), area)
-    return out, max_area
+    connectivity = label_connectivity(mask_vol, labels)
+    return out, max_area, connectivity
 
 
-def eligible_instances(per_slice_x, max_area, x):
-    """x slice에서 최소 크기 조건을 만족하는 label 목록."""
+def eligible_instances(per_slice_x, max_area, connectivity, x):
+    """x slice에서 최소 크기 조건과 3D 6-connectivity(전체 볼륨에서 단일 성분)를 만족하는 label 목록."""
     ok = []
     for lab, (r0, c0, r1, c1, area) in per_slice_x.get(x, {}).items():
         if area < MIN_AREA_PX:
@@ -97,6 +138,8 @@ def eligible_instances(per_slice_x, max_area, x):
         if max_area.get(lab, 0) <= 0 or area < MIN_AREA_FRAC_OF_MAX * max_area[lab]:
             continue
         if (r1 - r0) < MIN_BBOX_SIDE_PX or (c1 - c0) < MIN_BBOX_SIDE_PX:
+            continue
+        if connectivity.get(lab) != 1:
             continue
         ok.append(lab)
     return sorted(ok)
@@ -108,9 +151,9 @@ def deterministic_choice(seq, salt_key):
     return seq[h % len(seq)]
 
 
-def candidate_pairs(per_slice_x, max_area, spacing_x, nx):
+def candidate_pairs(per_slice_x, max_area, connectivity, spacing_x, nx):
     """물리 간격 6-15mm, 공통 eligible instance>=2인 (x1,x2) 쌍과 공통 instance 목록. x1<x2로 정규화."""
-    elig = {x: set(eligible_instances(per_slice_x, max_area, x)) for x in range(nx)}
+    elig = {x: set(eligible_instances(per_slice_x, max_area, connectivity, x)) for x in range(nx)}
     pairs = []
     for x1 in range(nx):
         for x2 in range(x1 + 1, nx):
@@ -123,17 +166,22 @@ def candidate_pairs(per_slice_x, max_area, spacing_x, nx):
     return pairs
 
 
+def _pair_candidate_id(pid, x1, x2):
+    return f"{SALT}|{pid}|pair|{x1}|{x2}"
+
+
 def select_patient_pair(pid, mask_vol, spacing_sag, axes, n_sag):
-    """axes=(array_axis_sag,array_axis_row,array_axis_col). candidate/pair enumeration order is fixed
-    (ascending x1, then ascending x2, then ascending label) so selection is independent of any
-    incidental dict/set iteration order; only the SHA256(salt|...) values decide the pick."""
-    per_slice_x, max_area = instance_bboxes_per_slice(mask_vol, axes, n_sag)
-    pairs = candidate_pairs(per_slice_x, max_area, spacing_sag, n_sag)
+    """axes=(array_axis_sag,array_axis_row,array_axis_col). 선택은 각 후보의 canonical id를
+    SHA256으로 hash한 값의 오름차순 정렬(최솟값 선택)으로 결정한다. 이 방식은 candidate_pairs가
+    반환하는 list의 열거 순서나 길이에 의존하지 않는다: 후보 열거 알고리즘이 바뀌어 순서나 개수가
+    달라져도, 같은 (pid,x1,x2) 후보 집합에 대해서는 항상 같은 pair가 선택된다(이전의 hash%len(pairs)
+    modulo 방식은 원리상 이미 열거 순서에 의존하지 않았지만, len(pairs)에는 의존했다)."""
+    per_slice_x, max_area, connectivity = instance_bboxes_per_slice(mask_vol, axes, n_sag)
+    pairs = candidate_pairs(per_slice_x, max_area, connectivity, spacing_sag, n_sag)
     if not pairs:
         return None, {"n_candidate_pairs": 0}
-    # 결정적 선택: (x1,x2) 쌍 -> SALT+pid로 하나 선택, 그 다음 공통 instance 중 2개를 SALT로 선택
-    idx = int(hashlib.sha256(f"{SALT}|{pid}|pairsel".encode()).hexdigest(), 16) % len(pairs)
-    x1, x2, common, dist_mm = pairs[idx]
+    ranked = sorted(pairs, key=lambda p: hashlib.sha256(_pair_candidate_id(pid, p[0], p[1]).encode()).hexdigest())
+    x1, x2, common, dist_mm = ranked[0]
     if len(common) > 2:
         # 두 인스턴스를 salt 순서로 선택 (SHA256(salt|label) 오름차순 상위 2개)
         common_sorted = sorted(common, key=lambda lab: hashlib.sha256(f"{SALT}|{pid}|{lab}".encode()).hexdigest())
@@ -144,7 +192,8 @@ def select_patient_pair(pid, mask_vol, spacing_sag, axes, n_sag):
     r_is_x1 = int(hashlib.sha256(f"{SALT}|{pid}|rrole".encode()).hexdigest(), 16) % 2 == 0
     r_idx, t_idx = (x1, x2) if r_is_x1 else (x2, x1)
     info = {"n_candidate_pairs": len(pairs), "chosen_pair": [x1, x2], "dist_mm": dist_mm,
-            "common_instances_all": common, "chosen_instances": inst2, "r_idx": r_idx, "t_idx": t_idx}
+            "common_instances_all": common, "chosen_instances": inst2, "r_idx": r_idx, "t_idx": t_idx,
+            "connectivity": {str(k): v for k, v in connectivity.items()}}
     return (r_idx, t_idx, inst2, per_slice_x), info
 
 

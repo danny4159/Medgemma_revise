@@ -117,7 +117,7 @@ def test_rejects_truncated_payload():
 
 def test_real_spider_mask():
     import zipfile
-    z = zipfile.ZipFile("/SSD1_1TB/home/milab/daniel/08_medgemma/research/results/iter_019/source/masks.zip")
+    z = zipfile.ZipFile("/SSD1_1TB/home/milab/daniel/08_medgemma/research/results/iter_021/source/masks.zip")
     data = z.read("masks/101_t1.mha")
     out = M.read_mha(data)
     # 독립 재계산: 헤더 텍스트를 직접 파싱해 대조
@@ -146,5 +146,5 @@ for fn in [test_uncompressed_uint8_roundtrip, test_compressed_int16_roundtrip, t
 n_pass = sum(1 for r in results if r["pass"])
 print(json.dumps({"n": len(results), "n_pass": n_pass, "results": results}, indent=1, default=str))
 json.dump({"n": len(results), "n_pass": n_pass, "results": results},
-          open("/SSD1_1TB/home/milab/daniel/08_medgemma/research/results/iter_019/tests/fixtures_mha.json", "w"), indent=1, default=str)
+          open("/SSD1_1TB/home/milab/daniel/08_medgemma/research/results/iter_021/tests/fixtures_mha.json", "w"), indent=1, default=str)
 assert n_pass == len(results), "some fixtures failed"

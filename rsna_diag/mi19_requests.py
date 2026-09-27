@@ -9,7 +9,7 @@ import os
 
 from . import generate, mi19_spec as S
 
-DATA_DIR = "results/iter_020/data"
+DATA_DIR = "results/iter_021/data"
 
 
 def sha(b):
@@ -128,7 +128,10 @@ def main():
             for ln in open(f):
                 if ln.strip():
                     r = json.loads(ln)
-                    s1_records[r["request_id"]] = r
+                    rid = r["request_id"]
+                    if rid in s1_records:
+                        raise RuntimeError(f"duplicate S1 request_id {rid} across worker files in {a.s1_dir}")
+                    s1_records[rid] = r
         rows = build_s2(manifest, pids, cfg, s1_records)
         p = f"{a.out_dir}/{a.split}__S2.jsonl"
         write_rows(rows, p)

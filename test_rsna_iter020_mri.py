@@ -4,7 +4,7 @@ iter_019 리뷰에서 확인된 결함(needs_fix)에 대한 독립 fixture:
 - mi19_data/mi19_manifest가 항상 DimSize[0](x)를 sagittal 축으로 가정하던 버그
   (실제 SPIDER masks/107_t2.mha처럼 z가 sagittal인 비항등 방향에서 잘못됨).
 - mi19_baseline.condition_N이 padded PNG를 norm_to_canvas(비padded 좌표)로 잘라 위치가 어긋나던 버그.
-결과: results/iter_020/tests/fixtures_mri.json
+결과: results/iter_021/tests/fixtures_mri.json
 """
 import json
 import sys
@@ -68,7 +68,7 @@ def test_sagittal_axis_string_mismatch_rejected():
 
 
 def test_real_107_t2_mask_orientation():
-    z = zipfile.ZipFile("/SSD1_1TB/home/milab/daniel/08_medgemma/research/results/iter_020/source/masks.zip")
+    z = zipfile.ZipFile("/SSD1_1TB/home/milab/daniel/08_medgemma/research/results/iter_021/source/masks.zip")
     data = z.read("masks/107_t2.mha")
     m = M.read_mha(data)
     check("107_dimsize", m["dim_size_xyz"] == [512, 512, 17], m["dim_size_xyz"])
@@ -158,7 +158,7 @@ for fn in [test_sagittal_axis_identity, test_sagittal_axis_permuted_z_is_sagitta
 n_pass = sum(1 for r in results if r["pass"])
 print(json.dumps({"n": len(results), "n_pass": n_pass, "results": results}, indent=1, default=str))
 import os
-os.makedirs("/SSD1_1TB/home/milab/daniel/08_medgemma/research/results/iter_020/tests", exist_ok=True)
+os.makedirs("/SSD1_1TB/home/milab/daniel/08_medgemma/research/results/iter_021/tests", exist_ok=True)
 json.dump({"n": len(results), "n_pass": n_pass, "results": results},
-          open("/SSD1_1TB/home/milab/daniel/08_medgemma/research/results/iter_020/tests/fixtures_mri.json", "w"), indent=1, default=str)
+          open("/SSD1_1TB/home/milab/daniel/08_medgemma/research/results/iter_021/tests/fixtures_mri.json", "w"), indent=1, default=str)
 assert n_pass == len(results), "some fixtures failed"

@@ -22,16 +22,23 @@ def sha_bytes(b):
     return hashlib.sha256(b).hexdigest()
 
 
+class DataQualityError(RuntimeError):
+    """자료 자체의 문제(공동등록 불일치, 이미지 멤버 누락 등)로 인한 build_one 예외.
+    build_one을 호출하는 쪽은 이 예외만 '적격 자료 제외'로 취급하고 조용히 넘어간다.
+    그 외 예외(구현 버그: KeyError/AttributeError/TypeError 등)는 전체 manifest 생성을 중단시킨다."""
+    pass
+
+
 def check_coregistration(mask_hdr, img_meta, patient):
     for k in ("dim_size_xyz",):
         if list(mask_hdr[k]) != list(img_meta[k]):
-            raise RuntimeError(f"{patient}: mask/image {k} differ: {mask_hdr[k]} != {img_meta[k]}")
+            raise DataQualityError(f"{patient}: mask/image {k} differ: {mask_hdr[k]} != {img_meta[k]}")
     for k in ("spacing_xyz", "offset_xyz"):
         a, b = mask_hdr[k], img_meta[k]
         if len(a) != len(b) or any(abs(float(x) - float(y)) > 1e-4 for x, y in zip(a, b)):
-            raise RuntimeError(f"{patient}: mask/image {k} differ: {a} != {b}")
+            raise DataQualityError(f"{patient}: mask/image {k} differ: {a} != {b}")
     if mask_hdr["direction"] != img_meta["direction"]:
-        raise RuntimeError(f"{patient}: mask/image direction differ: {mask_hdr['direction']} != {img_meta['direction']}")
+        raise DataQualityError(f"{patient}: mask/image direction differ: {mask_hdr['direction']} != {img_meta['direction']}")
 
 
 def instance_point_native(mask_vol, sag_idx, axes, label):
@@ -50,11 +57,17 @@ def instance_point_native(mask_vol, sag_idx, axes, label):
 def build_one(pid, gate_entry, images_zc, masks_zc):
     mask_data, mask_sha = masks_zc.read(f"masks/{pid}_t2.mha")
     if mask_sha != gate_entry["mask_file_sha256"]:
-        raise RuntimeError(f"{pid}: mask sha changed since gate")
+        raise DataQualityError(f"{pid}: mask sha changed since gate")
     mask_m = M.read_mha(mask_data)
     mask_vol = mask_m["array"]
-    img_data, img_sha = images_zc.read(f"images/{pid}_t2.mha")
-    img_m = M.read_mha(img_data)
+    try:
+        img_data, img_sha = images_zc.read(f"images/{pid}_t2.mha")
+    except KeyError as e:
+        raise DataQualityError(f"{pid}: image zip member missing: {e}") from e
+    try:
+        img_m = M.read_mha(img_data)
+    except M.MhaError as e:
+        raise DataQualityError(f"{pid}: image mha parse error: {e}") from e
     img_meta = {"dim_size_xyz": img_m["dim_size_xyz"], "spacing_xyz": img_m["spacing_xyz"],
                 "offset_xyz": img_m["offset_xyz"], "direction": img_m["direction"]}
     check_coregistration(gate_entry, img_meta, pid)
@@ -134,7 +147,9 @@ def main():
     for pid in sorted(eligible):
         try:
             manifest[pid] = build_one(pid, eligible[pid], images_zc, masks_zc)
-        except Exception as e:
+        except DataQualityError as e:
+            # 자료상 부적격만 errors에 모아 조용히 제외한다. 그 외 예외(구현 버그)는 여기서
+            # 잡지 않고 전파시켜 전체 자료 gate를 막는다 (fail-closed).
             errors[pid] = str(e)
     # split은 build 성공 환자에서만 배정한다: gate-eligible이어도 build_one이 실패하면
     # 조용히 제외하는 것이 아니라 errors.json에 남기고 split 대상에서 빠지게 한다.
