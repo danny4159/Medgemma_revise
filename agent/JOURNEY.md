@@ -141,3 +141,19 @@ QA 형식 실패를 의미 능력 손실로 오해하지 않도록 실제 출력
 - 접근법: 질문 대상과 음성 의미 보존 진단 (`approach/target-scope-diagnostic`), 시도: iter_015, iter_016
 - 커밋: 3265f117bf3f4de99ba084f2c9b4e476568f24bd, 6a4fb41d490305061028de9cab863c0b5e9747ad
 - 자세히: DECISIONS.md의 iter_016, `agent/runs/iter_016/review.md`
+
+## 🏁 bbox reader의 이득을 검출 정보·개수·인터페이스 효과로 좁힘
+
+*iter_017 · 2026-09-27 13:39 · 판정: CONTINUE / success*
+
+기존 bbox reader 개선을 좌표 활용의 성과로 해석할 근거가 약해져 다음 투자 방향을 재검토하게 됐다.
+**고민:** iter_016에서 reader가 direct M0보다 좋았지만 문구와 검출·개수·좌표가 함께 바뀌었다.
+**시도:** 추가 grounding loss 학습을 이어가지 않고 같은 영상과 공통 문구에서 전달 정보만 달리했다.
+**개발:** 정보 미제공 U, 검출 B, 개수 K, 좌표 L의 요청·평가·조건부 확대를 구현했다.
+**결과:** E600 신규 4,800건에서 B−U +0.0533, K−B +0.0150을 확인했고 L−K의 정답 쌍 차이는 0이었다.
+**한계:** L−direct M0는 +0.0117 [−0.0150, 0.0400]으로 불확정이며 NoOpacity/NotNormal 정확도는 40/200에서 4/200으로 낮아졌다.
+**의미:** 현재 좌표 방향의 추가 투자는 보류한다. 단순 baseline을 보존하고 질문 범위 오류의 독립 진단과 다른 중요한 연구 질문으로의 전환을 비교한다.
+
+- 접근법: 질문 대상과 음성 의미 보존 진단 (`approach/target-scope-diagnostic`), 시도: iter_015, iter_016, iter_017
+- 커밋: 3265f117bf3f4de99ba084f2c9b4e476568f24bd, 6a4fb41d490305061028de9cab863c0b5e9747ad, d12ef5ccea60d05b9163519980cdb1624b3fa682
+- 자세히: DECISIONS.md의 iter_017, `agent/runs/iter_017/review.md`

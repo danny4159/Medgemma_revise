@@ -5551,3 +5551,415 @@ H_modular에는 제한된 긍정적 근거가 있다. 예측 bbox reader는 사�
 - 추천 이유: 이번 진단은 형식과 실제 답변 성능을 분리했고, 모듈형 구성의 제한된 개선도 확인했다. 논문의 형식 rehearsal·실제 grounding supervision 대조와 인터페이스 비교는 다음 원인 진단에 도움이 된다. 논문의 crop 결과를 원본 영상+bbox text 결과에 그대로 적용할 수 없고, 이번 연구의 독립 일반화·좌표 활용·신규 기여는 미검증이다.
 - 읽어볼 부분: IV-C와 Table III에서 direct·self·oracle의 공정한 비교 조건을, IV-D와 Table IV에서 형식 복구와 실제 위치 능력을 나누는 대조를 먼저 본다. V Limitations에서는 인터페이스 효과의 관찰과 원인 해석을 구분하는 범위를 확인한다.
 
+
+
+## iter_017 GPT PLAN [질문 대상과 음성 의미 보존 진단 / proceed] — 2026-09-27 12:26:41
+
+# 요약
+
+- **이번에 할 일:** 같은 영상과 공통 안내문에서 정보 없음·검출 유무·개수·좌표를 비교한다.
+- **필요한 이유:** 기존 bbox reader의 개선은 확인됐지만 문구와 전달 정보의 효과가 섞여 있다.
+- **확인할 기준:** P180에서 단순 정보 baseline 대비 잔여 효과와 category별 손익을 확인하고, 판단에 필요할 때만 E600과 좌표 교란으로 확대한다.
+- **주의·다음:** 새 학습과 reserve 사용은 없다. 이번 진단의 성공은 원인 후보를 좁히는 것이며 신규 contribution이나 임상 reasoning의 증명이 아니다.
+
+# Current Understanding
+
+iter_009의 정상 사용 조건 RSNA grounding 한계와 iter_012의 직접 SFT 개선은 유지한다. iter_014의 현재 GIoU 가중 설계에 대한 투자 중단도 유지한다. iter_016에서는 큰 QA strict 저하의 상당 부분이 형식 차이로 설명됐고, 예측 bbox를 받은 M0 reader의 제한된 이득이 확인됐다.
+
+동일 P180에서 predicted/unavailable/direct M0의 S_scope는 0.7000/0.5722/0.6222다. predicted−direct는 +0.0778이었다. 그러나 기존 evidence 문구는 비어 있는 예측, 비어 있지 않은 예측, unavailable에서 서로 다르다. 또한 비어 있지 않은 bbox는 Q_O의 검출 신호와 개수·좌표를 함께 전달한다.
+
+현재 소스와 결과를 확인했다. P180의 B0 비어 있지 않은 예측은 총 72명이며, E600에서는 236명이다. 빈 예측이 많은 조건에서 전체 평균만 보고 좌표 활용의 부재를 주장하면 안 된다. P180과 E180은 동일 집단이 아니다.
+
+iter_008 사용자 보완 중 정상 사용법 검증은 iter_009에서 수행됐다. 이를 다시 처음부터 반복하지 않는다. 실제 출력·정답·parser 분리, 기존 자산 보존, 새 결과 경로 사용은 계속 지킨다. anatomy 전이와 후속 loss는 자동 재개하지 않는다.
+
+# Strategy Check / 연구 방향 판단
+
+중요한 사용 과제는 전문 localizer의 불완전한 출력을 원본 영상과 함께 읽고, 특정 finding의 검출 여부를 더 넓은 질문에 과도하게 일반화하지 않는 것이다.
+
+확인된 사실은 형식 효과와 P180의 모듈형 개선이다. 미확인 경쟁 설명은 안내 문구의 효과, 검출 유무 전달, 개수 정보, 환자에 맞는 좌표의 활용이다. 시각적 forgetting과 새로운 방법의 필요성도 확정되지 않았다.
+
+1. **현재 방법 개선:** 직접 SFT baseline은 강하고 추가 loss의 이득은 입증되지 않았다. 새 학습 비용에 비해 현재 정보 이득이 낮다.
+2. **원인 진단:** 이미 관찰된 +0.0778의 개선을 기존 자산으로 분해할 수 있다. 단순 baseline과 잔여 효과를 구분하면 다음 학습 투자를 바꿀 수 있어 이번에 선택한다.
+3. **다른 질문으로 전환:** 연구 범위를 넓힐 가치가 있지만 유효한 정답·데이터·선행 차이를 새로 확인해야 한다. 현재 효과가 단순 정보 전달로 설명되거나 조건부 확대 후에도 가치 있는 잔여 현상이 불명확하면 우선한다.
+
+이번 선택은 iter_015 전략 검토와 iter_016 리뷰의 후속이다. 같은 접근법에서 기존 형식 가설을 반복하지 않고 새로 확인된 evidence 효과를 조사한다. 모든 결과를 다음 loss 탐색으로 연결하지 않는다.
+
+# Hypothesis
+
+- **H_detection:** 공통 문구에서도 검출 유무 전달 B가 정보 미제공 U보다 유용하다.
+- **H_count:** 개수 K가 binary B와 다른 효과를 낸다. 차이가 있으면 L−B를 좌표 효과로 해석할 수 없다.
+- **H_coordinates:** 개수까지 맞춘 K 대비 L의 잔여 효과가 존재하며, 그 효과가 환자에 맞는 좌표 연결에 의존할 수 있다.
+- **H_wording:** 기존 조건과 공통 문구 조건의 차이에서 인터페이스 문구의 영향을 관찰할 수 있다. 여러 표현이 함께 바뀌므로 특정 한 문장이 원인이라고 주장하지 않는다.
+
+각 가설은 양립할 수 있다. 좌표 정보가 이 과제에서 불필요하다는 결과는 모델에 좌표 활용 능력이 없다는 뜻이 아니다.
+
+# Limitation Evidence / Correct Usage Checks
+
+이번 대상 `rsna-evidence-interface-sensitivity`는 observed다. diagnostic으로 수행하며 방법 개발이나 validated 승격을 전제하지 않는다.
+
+- 모델은 MedGemma 1.5 revision `91850547d9f0b2fdd21aa7c5f4f3d1a8a52c243b`다. 기존 processor/chat template, bf16, greedy, 값 보존 RGB 변환, square padding을 유지한다.
+- Q_O/Q_A와 plain 출력 지시는 승인된 `qa_spec.py` 그대로 사용한다. 질문은 각각 독립 대화다.
+- strict와 `semantic_v1`을 모두 보고한다. Normal/Abnormal 대응은 Q_A에만 허용하고 설명문·bbox·모순을 임의로 구제하지 않는다.
+- 생성 cap 1000→2000→4000과 EOS 검사를 유지한다. 처리량을 위해 길이를 줄이지 않는다.
+- bbox는 square-padded image 기준 yxyx 정수 0–1000이다. invalid·truncated를 빈 검출로 바꾸지 않는다.
+- 정답은 RSNA 판독 규약의 opacity=(yes,yes), Normal=(no,no), NoOpacity/NotNormal=(no,yes)다. 일반적인 임상 정상 판정으로 확대하지 않는다.
+- 모든 실용 조건에 동일 원본 영상을 제공한다. GT category는 요청 생성의 evidence 결정에 사용하지 않는다. GT는 표본 층화와 평가에만 사용한다.
+
+# Contribution Path / Baselines / Reuse
+
+## 선행과 기여 경로
+
+[Visual Evidence Prompting, ACL 2025](https://aclanthology.org/2025.acl-long.205/)는 전문 시각 모델 출력을 prompt로 전달한다. [Why Does Grounding Hurt Medical VQA? v2](https://arxiv.org/html/2604.27720v2)는 crop 인터페이스와 형식·공간 supervision을 구분한다. 따라서 형식 복구, bbox text 추가, 단순 혼합 SFT 자체를 신규 contribution으로 삼지 않는다.
+
+이번 진단의 가치는 단순 검출 전달을 넘는 효과 또는 질문 범위에 따른 재현 가능한 실패 조건이 남는지 확인하는 데 있다. 양성이어도 여러 데이터·독립 환자·강한 baseline을 통한 후속 검증이 필요하다.
+
+## 비교군
+
+- **Direct M0:** 기존 iter_016 plain 응답을 정확히 같은 환자에서 재사용한다.
+- **Direct B0/C:** 같은 환자의 기존 QA를 배경 비교로 보고한다. B0는 직접 grounding SFT이며 C는 추가 SFT 단일 경로다. C를 독립 seed나 선택된 최적 모델로 부르지 않는다.
+- **U/B/K/L:** 같은 M0 reader와 같은 B0 localizer 출력으로 구성한다.
+- **기존 predicted/unavailable:** P180의 문구 변경 전 참조다. 공통 문구 조건과의 차이를 특정 문장의 단독 인과 효과로 해석하지 않는다.
+- **B0 bbox+규칙:** 비어 있지 않은 유효 예측은 (yes,yes), 유효 빈 예측은 Q_O=no·Q_A=판단 불가다. 판단 불가는 전체 분모에서 실패이며 coverage를 별도로 보고한다. 고정 답 쌍 baseline도 유지한다.
+- 기존 GT oracle는 참고 자료로만 보존하고 새 실용 비교나 순위에 포함하지 않는다.
+
+학습 환자 수·presentations·checkpoint 선택 이력은 원본 학습 manifest와 리뷰에서 가져와 표로 남긴다. 이번 신규 조건끼리는 학습량 차이가 없다. direct와 모듈형 구성의 호출 수·입력 token 수·wall-clock을 구분하고, 모듈형 실용 비용에 localizer 추론을 포함한다. 후속 방법 개발에서 detector/encoder+head와 충분한 직접·다과제 SFT 비교를 생략하는 근거로 이번 진단을 사용하지 않는다.
+
+## 재사용 범위
+
+현재 `approach/target-scope-diagnostic`, HEAD `6a4fb41d490305061028de9cab863c0b5e9747ad`를 이어간다. 필요한 파일이 현재 브랜치에 있어 `reuse_assets=[]`다.
+
+- 승인 범위 재사용: `qa_spec.py`의 질문·strict/semantic parser, `geometry.py`, `parse.py`, `metrics.py`, `sft_eval.py`, `lora.py`의 기존 역할.
+- 필요한 수정: `qa_eval.py`, `qa_requests.py`, `qa_reuse.py`, `qa_protocol.py`와 이들을 사용하는 `qa_run.py`, `qa_gen.py`, 분석 코드.
+- 실행 경로 의존성: `generate.py`, `inputs.py`, `eval_gate.py`, `queue_lock.py`, `lock_protocol.py`, `on_gpu.py` 등 기존 protocol에 명시된 파일을 보존하고 잠금 목록에 연결한다.
+- 재사용 결과: iter_016의 manifests·direct QA·P180 evidence, iter_015의 B0 concise 추출 결과, 그 원본인 iter_012 confirm_sft_seed17 응답과 provenance.
+
+원본 hash, 요청·영상·adapter 연결을 재검증하고 이번 `results/iter_017/reuse/`에 검증 근거를 남긴다. 과거 protocol을 현재 코드로 재잠금하지 않는다. 현재 실험에서 사용하지 않는 geo 학습 경로의 수치 결함은 선행 작업으로 넣지 않는다.
+
+# Proposed Experiment
+
+## 1. 동작 확인과 입력 고정
+
+새 산출물은 모두 `results/iter_017/` 아래에 저장한다. 기존 D36/D12/P180/E600 목록을 그대로 사용하고 재추출하지 않는다. 환자·pixel hash 중복과 P180⊂E600, D와 평가 집단의 분리를 검사한다. E600은 기존 개발 자료이며 reserve는 접근하지 않는다.
+
+B0의 기존 유효 bbox에서 k와 좌표를 계산한다. 현재 계획에서 정한 공통 evidence template을 별도 버전으로 구현하고 기존 문구를 덮어쓰지 않는다.
+
+공통 header는 기존 EVIDENCE_HEAD를 사용한다. 공통 설명은 다음으로 고정한다:
+`The localization output may be incorrect or incomplete and concerns only pulmonary opacity. Assess the original image for the question. Fields marked not_provided contain no supplied information. Box coordinates, when supplied, are yxyx integers in [0,1000] relative to the entire square-padded image.`
+
+이후 고정 key 순서의 packet과 기존 질문·plain 지시를 붙인다. packet은 `detection`, `count`, `boxes` 세 필드다.
+
+| 조건 | 비어 있지 않은 유효 예측 | 유효 빈 예측 |
+| --- | --- | --- |
+| U | 세 필드 모두 not_provided | 세 필드 모두 not_provided |
+| B | detection=present, 나머지 not_provided | detection=none, count=0, boxes=[] |
+| K | detection=present, count=k, boxes=not_provided | detection=none, count=0, boxes=[] |
+| L | detection=present, count=k, boxes=예측 좌표 | detection=none, count=0, boxes=[] |
+
+invalid/truncated localizer 출력은 B/K/L에서도 세 필드를 모두 not_provided로 표시하고 원래 실패 상태를 별도 metadata에 남긴다. source row 자체의 누락은 검출 실패가 아니라 입력 오류이므로 중단한다. 빈 예측에서는 B/K/L prompt가 완전히 같아야 한다. 이를 단위 검사와 GPU 출력 정합성 검사에 사용한다.
+
+D12 12명×4조건×2질문=96 논리 요청으로 형식·영상 연결·prompt·출력·메모리를 확인한다. D12에 없는 empty/nonempty/multiple/invalid 사례는 CPU fixture로 검사한다. 개발 정확도를 보고 문구를 고르지 않는다. condition×target의 semantic valid가 95% 미만이면 형식 문제를 조사하고 본평가를 보류한다. parser 허용 범위를 확대하지 않는다.
+
+정확히 동일한 prompt·영상·모델·generation config의 요청을 재사용할 경우 source request와 대상 condition의 명시적 alias를 잠그고 논리 요청 수와 실제 생성 수를 구분한다. 검증된 alias 경로가 없으면 임의 deduplication하지 않는다.
+
+## 2. 가능성 탐색: P180
+
+기존 category별 60명, 총 180명에 U/B/K/L과 두 질문을 적용한다. 신규 논리 요청은 1,440건이다. 기존 direct M0/B0/C와 predicted/unavailable 응답은 같은 ID만 추출해 재사용한다.
+
+새 학습은 없으며 localizer는 B0 seed17로 고정한다. 이 단계의 모든 요청이 완료된 뒤 한 번 평가한다. 주 비교는 B−U와 L−K다. K−B, L−B, 각 조건−direct M0 및 기존 문구 조건과의 차이를 함께 보고한다.
+
+비어 있지 않은 예측 72명과 빈 예측 108명의 효과를 분리한다. nonempty subset은 모델 예측으로 정의된 조건부 분석이며 전체 환자 효과를 대체하지 않는다. category별 분모가 작으면 그 불확실성을 그대로 남긴다.
+
+## 3. 조건부 규모 확대: E600
+
+이번 진단의 투자 판단 경계는 S_scope 절댓값 0.05, category별 정답 쌍 정확도 절댓값 0.10으로 사전에 정한다. 이는 iter_016의 기존 판정 기준을 수정하는 것이 아니다.
+
+다음 중 하나이고 입력·형식 gate가 통과했을 때 E600으로 확대한다.
+
+- B−U 또는 L−K의 점추정 절댓값이 0.05 이상이며, 확대가 효과의 방향·실용성·category 손익 판단을 바꿀 수 있다.
+- 해당 비교의 category별 차이 절댓값이 0.10 이상이며, 더 많은 해당 category 환자가 판단에 필요하다.
+- 중요 효과의 존재와 실질적 무효과를 CI가 모두 포함하고, 현재 paired 차이 분산으로 계산한 E600 예상 CI 반폭이 S_scope 0.05 이하 또는 해당 category 0.10 이하가 되어 판단 개선이 예상된다.
+
+이미 차이가 정밀하게 배제되거나, 추가 환자로 해결할 수 없는 형식·정답·정보 조작 문제가 있으면 확대하지 않는다. 효과가 명확하더라도 추가 표본이 다음 행동을 바꾸지 않는다면 진단을 종료할 수 있으며 이유를 기록한다.
+
+확대는 기존 E600에서 P180을 제외한 category별 140명, 총 420명을 추가한다. 추가 논리 요청은 3,360건, 누적은 4,800건이다. 네 조건을 모두 같은 집단에서 평가하며 유리한 조건만 확대하지 않는다. P180, 추가 420명, 누적 600명의 결과를 구분한다. 추가 420명도 새 독립 test가 아니다.
+
+확대 판단용 분산은 category 내 환자별 paired 차이에서 계산한다. macro 평균 분산은 category 평균 분산의 합을 9로 나눈다. nonempty 분석은 실제 추가 가능 표본 수와 category 구성을 사용한다. E600도 필요한 정밀도에 못 미치면 reserve를 자동 사용하지 않는다.
+
+## 4. 조건부 좌표 연결 교란 X
+
+도달한 표본에서 L−K의 절댓값이 0.05 이상이거나 category별 절댓값이 0.10 이상이고, 좌표 내용에 대한 반응을 확인하는 것이 다음 투자를 바꿀 때 실행한다. CI가 중요 효과를 포함하며 X 비교가 판단에 충분한 정밀도를 제공할 것으로 예상되는 경우도 허용한다. 단순 L−B 차이만으로 실행하지 않는다.
+
+같은 nonempty box 개수 k를 가진 환자끼리, patient ID의 고정 hash 순서와 seed17로 정한 순환 이동을 사용해 좌표 목록을 다른 환자에게 배정한다. category·정답·영상 유사도는 donor 선택에 사용하지 않는다. reader는 원래 환자의 영상을 계속 받는다. detection, k, 문구, 좌표 serialization 형식은 L과 같다. 각 k 그룹의 좌표 목록 분포는 보존된다.
+
+donor 규칙과 P180/E600 각각의 mapping은 본평가 전에 잠근다. 그룹 크기가 1이거나 좌표가 우연히 같으면 그대로 기록하고 사후 유리한 donor로 바꾸지 않는다. mapping이 달라지는 P180용 X와 E600용 X를 같은 조건처럼 합치지 않는다.
+
+X는 도달한 N명×2질문으로 최대 2N 논리 요청이다. 빈 예측과 invalid의 packet은 L과 동일하다. 실제로 좌표가 바뀐 환자 수와 변위·기존 GT에 대한 정합성 변화를 사후 진단 표로 보고하되, GT로 교란을 선택하지 않는다.
+
+L−X는 환자–좌표 연결의 효과다. 모든 교란이 틀린 영역이라는 보장은 없으므로 음성 결과를 좌표 무사용의 증명으로 삼지 않는다. L−X가 양성이어도 이것만으로 임상 reasoning이나 공간 grounding 능력을 확정하지 않는다.
+
+## 5. 독립 확인
+
+이번 반복에서는 새로운 학습, 다른 B0 seed, reserve, 외부 데이터 평가를 수행하지 않는다. 기존 개발 자료에서 경쟁 설명을 좁히는 단계다. 가치 있는 잔여 효과 또는 실패 조건이 남으면 후속 계획에서 질문·방법·강한 baseline을 고정하고 새 환자 및 원천이 다른 데이터의 확인을 설계한다.
+
+## 6. GPU 배치·비용·재개
+
+실행 직전에 nvidia-smi로 상속 허용 집합 0,1의 UUID·논리 index·남은 메모리를 확인한다. 다른 사용자의 프로세스는 변경하지 않는다.
+
+D12 동일 96요청에서 GPU당 1 worker와 2 worker를 짧게 비교한다. 요청 집합·greedy token·parser 결과가 같고 전체 wall-clock 처리량이 개선되며 메모리 조건을 만족하면 총 4 worker를 사용한다. batch 확대까지 전수 탐색하지 않는다. 두 GPU에 독립 요청 shard를 배치한다.
+
+메모리 판단은 다른 점유에 각 worker의 실제 peak와 worker당 최소 2GiB 여유를 합산한다. 기존 evidence 두 worker/GPU의 전체 점유 약 17.2GiB는 참고값이다. 새 prompt와 development 긴 출력 사례의 KV cache·reserved memory·최대 요청 지연을 측정한다. 안전 여유 부족이나 OOM·경합이 있으면 worker 수를 줄인다.
+
+기존 evidence 처리량은 약 267–305 req/min이었다. 새 조건의 초기 추정은 150–300 req/min으로 두며, P180 1,440건은 생성 약 5–10분, E600 누적 4,800건은 약 16–32분이다. X까지 포함하면 최대 6,000건으로 약 20–40분이다. 로딩·pilot·검증·긴 출력·GPU 대기를 포함한 총 실행은 약 1–2시간을 초기 추정으로 기록하고 실제 처리량으로 갱신한다. 이는 timeout이나 실행 상한이 아니다.
+
+새 학습 checkpoint는 없다. protocol, 요청 manifest, worker별 JSONL, 원자적 claim, 시도별 종료 코드, completion, 단계별 분석을 재개 지점으로 사용한다. 완료 요청도 현재 입력·출처를 검증한 뒤 재사용한다. 활성 claim을 삭제하지 않으며 부모 중단 시 자기 자식만 정상 회수한다. 진행량·처리량·peak·오류를 로그로 남긴다.
+
+# Implementation Tasks for Claude
+
+1. 현재 git 상태와 실행 중인 소유 작업을 확인한다. 기존 기록·결과·checkpoint를 보존하고 새 출력 root를 `results/iter_017`로 고정한다.
+2. `qa_eval.load_stage`에서 completion 내용, protocol/request digest, 예상·실제 고유 요청 집합, 누락·중복·잉여, 자식 종료 코드를 검증한다. 생성 재개와 평가에 같은 검증을 연결한다.
+3. bbox를 읽을 때 reuse manifest의 원본 hash와 source request·adapter·영상 연결을 확인한다. 신규 bbox stage를 읽는 경로에는 완료 내용 검증도 적용한다. 누락이나 충돌을 임의 출처 선택으로 해결하지 않는다.
+4. 파일명만으로 허용하는 ALLOW_CHANGED 우회를 이번 경로에서 제거한다. 새 실행·분석 코드를 결과 열람 전에 잠근다. 불가피한 분석 수정은 정확한 before/after hash·사유·영향 범위를 별도 기록하고 허용 목록을 명시적으로 검증한다.
+5. 별도 버전의 U/B/K/L 및 조건부 X 요청·분석을 구현한다. 기존 질문·parser·evidence 문구는 보존한다. common prompt, packet, source hash, 좌표 mapping을 request ID와 protocol에 연결한다.
+6. malformed completion, 비정상 종료 코드, missing/extra/duplicate 요청, 변경된 bbox 원본, 잘못된 adapter·영상 hash, 무허가 코드 변경을 거부하는 회귀 검사를 실행한다. 정상 재사용과 중단·재개 검사가 실제 원문 token 및 요청 집합을 대조하도록 한다.
+7. D12 동작 확인과 자원 비교 후 P180을 실행한다. 확대 및 X 여부는 사전 규칙으로 결정해 실행 전에 decision artifact를 저장한다. 원래 결과를 덮어쓰지 않는다.
+8. 각 단계의 원시 답변·환자별 차이·category별 손익·CI·실제 요청 수·자원 사용량·미실행 조건을 보고한다. 기존 direct와 old evidence 참조는 정확한 환자·질문·출처를 명시한다.
+
+# Evaluation (성공/실패 기준 포함)
+
+## 지표와 불확실성
+
+주지표는 기존 semantic S_scope, 즉 두 질문을 모두 맞힌 환자의 비율을 category별 계산한 뒤 균등 평균한 값이다. strict S_scope, 질문별 정확도·validity, category별 정답 쌍 정확도, (yes,yes)/(no,no)/(no,yes)/(yes,no)/invalid 분포를 함께 보고한다. invalid는 전체 분모에서 실패다.
+
+두 주 비교 B−U와 L−K에는 category 내 환자 paired bootstrap 10,000회, seed 20260927, 개별 97.5% CI를 사용한다. 나머지는 95% 탐색 CI로 구분한다. 모든 질문·조건을 환자 단위로 함께 재표집한다. 단계적 확대와 기존 개발 자료 사용 때문에 이 CI를 독립 confirmatory 검정으로 표현하지 않는다.
+
+빈 예측에서 동일 prompt 조건의 출력이 다르면 정보 효과보다 실행 정합성을 먼저 검사한다. 형식 차이의 가능한 영향이 결론을 뒤집으면 의미 효과 판정을 보류한다. 정답률을 보고 parser를 수정하지 않는다.
+
+## 양성
+
+B−U에서 실질적 양의 효과가 확인되면 검출 정보 전달의 가치를 인정한다. L−K와 필요시 L−X에서도 양의 잔여 효과가 있고 direct M0 대비 실용 이득이 유지되면 환자에 맞는 좌표 정보의 가치가 있다는 제한된 근거로 기록한다. category별 중요한 손실을 함께 표시한다. 이 경우에만 후속 데이터·방법 비교의 투자 가치를 검토하며 신규성은 별도로 확인한다.
+
+## 음성
+
+L−K의 CI가 ±0.05 안에 있고 category별 ±0.10 규모의 손익도 배제되면, 이번 과제에서는 좌표의 중요한 추가 효과가 지지되지 않는다고 판단한다. 단순 B/K가 기존 이득을 재현하면 강한 모듈형 baseline으로 보존한다. 공통 문구에서 이득이 사라져도 이전 결과를 무효화하지 않고 인터페이스 의존성을 기록한다. 새 loss를 예약하지 않고 다른 중요한 연구 질문을 우선 검토한다.
+
+좌표가 일관되게 성능을 낮추는 결과도 정보 이득이다. 단순 부정 결과로 버리지 않고 어떤 질문·category에서 손실이 생기는지 보고한다. 반복 가능한 실패 조건의 중요성이 충분할 때만 추가 연구를 검토한다.
+
+## 불확정
+
+CI가 중요 효과와 무효과를 함께 포함하면 유의하지 않다는 이유로 동등성을 선언하지 않는다. 추가 표본이 정밀도를 개선할 때만 E600으로 확대한다. E600 또는 X 이후에도 식별력이 부족하면 적용 범위와 필요한 표본·대조를 기록하고 이번 투자를 보류한다. reserve·새 seed·새 학습을 자동 추가하지 않는다.
+
+## 실행 판정
+
+진단 success는 실제 통제 비교를 유효하게 완료해 다음 선택을 구분한 경우다. 성능 향상·가설 지지·신규 기여·최종 목표 달성은 별도 판단이다. 입력·출처·완료 검증 오류로 유효한 비교를 못 하면 execution_failed이며 과학적 가설의 기각이 아니다.
+
+# Risks / Checks
+
+- 새 packet 형식 자체가 응답에 영향을 줄 수 있다. D12에서 측정 가능성을 확인하고 문구 차이를 단일 문장의 인과 효과로 과장하지 않는다.
+- 좌표는 개수 정보를 포함하므로 K를 생략하지 않는다. 빈 예측에서 B/K/L이 같아야 하며 nonempty subset의 작은 분모를 숨기지 않는다.
+- 특정 opacity의 음성을 전체 정상으로 바꾸지 않는다. RSNA category와 질문 정의의 범위를 유지한다.
+- X는 정보 연결 교란이며 모든 donor 좌표가 임상적으로 틀린 것은 아니다. 효과 부재를 시각 정보 미사용으로 일반화하지 않는다.
+- P180/E600은 개발 자료다. 기존 confirm의 역사적 유효성은 유지하지만 이번 결과를 새 독립 확인으로 부르지 않는다.
+- 모듈형 reader의 비용에서 localizer 학습·추론을 제외하지 않는다. 내부 SFT와 모듈형 대안의 우열을 이번 한 비교로 확정하지 않는다.
+- source 보존·hash 검증·완료 판정에 필요한 수정만 수행한다. 연구 질문과 무관한 리팩터링은 미룬다.
+
+## 대규모 GPU 필요 후보
+
+다양한 modality·finding·질문 범위를 함께 다루는 vision encoder–language model 공동 post-training과 근거 supervision을 후보로 보존한다. 현재 결과는 그 필요성을 입증하지 않는다. 두 GPU에서 가능한 기존 자산 진단과 이후의 경량 적응·모듈형 비교를 먼저 수행한다.
+
+# 계획의 근거 (GPT 조사 노트)
+
+## 새로 확인한 것
+
+- `agent/GOAL.md`, `agent/LIMITATIONS.md`, iter_015 조사 기록, iter_016 계획·리뷰·보고서, `agent/CODE_ASSETS.md`와 실제 QA 코드를 확인했다. 현재 연구 HEAD는 `6a4fb41d490305061028de9cab863c0b5e9747ad`이며 `git status --short`와 `git diff --stat`는 비어 있다. 필요한 qa_* 파일과 iter_016 테스트가 현재 브랜치에 있어 선별 반입이 필요하지 않다. 전체 코드의 재사용 승인을 뜻하지 않는다.
+- iter_016 리뷰에서 P180 predicted/unavailable/direct M0의 S_scope는 각각 0.7000/0.5722/0.6222다. predicted−direct는 +0.0778, 95% CI [0.0278, 0.1333]이었다. category별 정답 수가 크게 달라 단순 총점만으로 해석할 수 없다.
+- `rsna_diag/qa_spec.py`에서 predicted_nonempty에는 proposal 오류 가능성을, predicted_empty와 unavailable에는 Normal을 의미하지 않는다는 설명을 넣는 것을 확인했다. 조건별 문구와 전달 정보가 함께 달라 기존 차이를 좌표 효과나 특정 문장 효과로 분해할 수 없다.
+- `results/iter_015/reuse/bbox_B0_concise.jsonl`의 저장 응답을 읽기 전용 JSON 집계로 확인했다. P180의 비어 있지 않은 예측은 opacity 54/60, Normal 1/60, NoOpacity/NotNormal 17/60으로 총 72/180이다. E600에서는 각각 164/200, 5/200, 67/200으로 총 236/600이다. P180 양성 54명 중 27명은 box 2개이므로, 좌표 조건과 binary 조건의 차이에는 개수 정보도 섞일 수 있다. 이 집계는 정식 bbox parser 재검증을 대체하지 않는다.
+- `sets.json`에서 P180은 E600의 부분집합임을 확인했다. P180과 E180은 크기가 같아도 서로 다른 목록이므로 혼용하면 안 된다.
+- `qa_eval.load_stage`는 completion의 존재만 검사한다. `qa_requests.bbox_records`는 원본 hash를 읽을 때마다 대조하지 않는다. `qa_protocol.verify`의 allow_changed는 파일명 기준 예외다. 이번에 사용하는 경로에서 이 세 결함을 먼저 보완해야 한다.
+- `throughput_summary.json`에서 기존 evidence 생성은 360건/81.0초 및 720건/141.8초, 약 267–305 req/min이었다. 당시 두 worker/GPU의 전체 점유는 약 17.2–17.4 GiB였다. 새 prompt의 처리량·긴 출력 메모리는 별도 실측이 필요하다.
+
+## 선행과 의미
+
+기존 조사에서 초록만 확인한 모듈형 선행과 후속 문구 대조의 관계를 확인하기 위해 공식 페이지를 재조회했다. [Visual Evidence Prompting, ACL 2025](https://aclanthology.org/2025.acl-long.205/)는 전문 시각 모델의 출력을 prompt로 전달한다. 따라서 이번 모듈형 구성 자체를 새 방법이라고 주장할 수 없다.
+
+[Why Does Grounding Hurt Medical VQA? v2](https://arxiv.org/html/2604.27720v2)의 원문은 crop 인터페이스의 문제와 형식 rehearsal·실제 grounding supervision의 차이를 다룬다. 이번 원본 영상+bbox text 조건과 동일한 실험은 아니다. 기존 논문의 결론을 우리 조건에 그대로 적용하지 않는다. 이 논문은 이미 `agent/PAPERS.md`에 추천됐으므로 중복 추천하지 않는다.
+
+## 방향 판단
+
+현재 grounding loss 개선은 새 원인 근거가 부족하다. 다른 의료 VLM 질문으로의 전환은 여전히 대안이지만, 실제 모듈형 이득이 있는 현재 자산으로 정보 전달 효과를 구분하는 비용과 정보 이득이 더 유리하다. 네 정보 수준의 공통 문구 대조를 먼저 수행하고, 좌표 효과가 남을 때만 환자–좌표 연결 교란을 추가한다. 이 진단은 공간 reasoning이나 임상 추론의 증명이 아니며, 추가 표본도 기존 개발 집단 안에서만 조건부로 사용한다.
+
+## 대규모 GPU 필요 후보
+
+여러 modality·finding·질문 범위를 함께 학습하는 vision encoder–language model 공동 post-training과 다과제 근거 supervision은 보존 후보다. 일반화와 능력 보존을 비교할 수 있지만, 현재 결과만으로 대규모 학습 투자 근거가 생긴 것은 아니다.
+
+
+
+## iter_017 CLAUDE REPORT — 2026-09-27 13:33:19
+
+# 요약
+
+- **핵심 결과:** 공통 문구에서는 B0 bbox reader의 이득 대부분이 "검출 유무·개수" 정보로 설명된다. 좌표는 추가 효과가 없었다. E600 기준 semantic S_scope는 U 0.5533, B 0.6067, K 0.6217, L 0.6217이다. L−K는 정확히 0이다.
+- **근거:**
+  - B−U는 +0.0533이고 97.5% CI는 [0.032, 0.077]이다. L−K는 600명 모두에서 정오가 같았다(불일치 0/600).
+  - L과 K의 유효 응답은 P180 360건 전부 같았다.
+  - 기존 문구의 P180 predicted는 0.7000이었는데, 공통 문구의 L은 0.6333이다. 기존 이득 일부는 문구 의존이다.
+  - L−direct M0는 +0.0117 [−0.015, 0.040]으로 실용 이득이 불확정이다.
+- **미검증·주의:**
+  - X(좌표 교란)는 실행하지 않았다. 사전 규칙상 L−K가 0이라 조건이 충족되지 않았다.
+  - 따라서 "좌표를 읽지 않는다"와 "좌표가 무의미하다"를 구분하지 못했다.
+  - 이 결과는 P180/E600 개발 자료 안의 진단이다. 새 학습·reserve·독립 확인은 하지 않았다.
+- **다음:** 좌표 추가 투자는 지금 근거가 없다. 이 방향은 단순 검출 baseline을 남기고, 다른 연구 질문으로의 전환을 우선 검토하는 편이 낫다.
+
+# Work Performed
+
+- 계획을 읽고 기존 QA 코드를 확인했다. 결함 3개를 이번 경로에서 보완했다: completion 내용 검증, bbox 원본 hash pin, ALLOW_CHANGED 파일명 우회 제거.
+- U/B/K/L(+조건부 X) 요청·분석·확대 결정 코드를 새로 만들었다. 기존 질문·parser·evidence 문구는 그대로 두었다.
+- 재사용 자산(iter_015 B0 bbox, iter_016 direct·evidence)을 원본 hash·adapter·영상 기준으로 검증했다.
+- D12 동작 확인과 worker 비교, P180 탐색, 사전 규칙에 따른 E600 확대를 차례로 실행했다.
+
+# Files Changed
+
+- 새 파일: `rsna_diag/ev17_spec.py`, `ev17_requests.py`, `ev17_reuse.py`, `ev17_analysis.py`, `ev17_pilot_report.py`, `test_rsna_iter017.py`, `test_rsna_iter017_dry.py`
+- 수정:
+  - `qa_requests.py`: OUT 기본값 iter_017, `bbox_records` pin·completion 검증
+  - `qa_eval.py`: `load_stage`에 completion 검증 연결
+  - `qa_run.py`: `verify_completion` 추가
+  - `qa_protocol.py`: `verify`를 `allowed_edits`(before/after/reason) 방식으로 변경, `REQUIRED_CODE`에 ev17 모듈 추가
+  - `qa_scope.py`: 우회 대입 한 줄 삭제
+
+# Commands / Experiments
+
+- `python -m rsna_diag.ev17_reuse build` — 성공. 8개 stage와 B0 bbox 600건 검증, checkpoint 표가 iter_016과 일치.
+- `python test_rsna_iter017.py ...` — 70/70 통과. `test_rsna_iter017_dry.py` — 분석 경로 dry-run 통과(가짜 입력이라 결론에 쓰지 않음).
+- D12 96요청: GPU당 1 worker(46.2초)와 2 worker(41.1초)를 비교했다. 요청 집합·greedy token·parse가 동일하고 형식 유효율은 100%였다. GPU당 peak 사용량은 8.8GiB → 17.6GiB(24GiB 중)라서 4 worker를 채택했다. 이 소규모 비교의 이득은 약 12%로 모델 로딩이 지배한다.
+- P180 1,440건: 257초, 약 336 req/min, rc 전부 0.
+- E600 확대 3,360건: 644초, rc 전부 0.
+- 분석 실행: P180은 첫 시도에서 출력 디렉터리가 없어 실패했다. `mkdir` 후 재실행했고 코드는 바꾸지 않았다. E600도 성공했다.
+- OOM 없음. 논리 요청 합계는 4,800건이며 dedup(중복 제거)은 하지 않았다.
+
+# Results
+
+- **P180 확대 결정:** `results/iter_017/p180/analysis_p180_decision.json`에 E600 요청 생성 전에 저장했다. B−U가 규칙 3으로 확대를 트리거했다. 그 시점의 B−U는 +0.0444 [0.011, 0.083]이다.
+- **E600 (`results/iter_017/e600/analysis_e600.json`):** gate 통과(유효율 ≥95%, 빈 예측 B/K/L 응답 불일치 0/728).
+
+| 비교 | 차이 | CI |
+| --- | --- | --- |
+| B−U | +0.0533 | 97.5% [0.032, 0.077] |
+| L−K | 0.0000 | [0, 0] |
+| K−B | +0.015 | 95% [0.007, 0.025] |
+| K−U | +0.068 | 95% [0.048, 0.090] |
+| U−directM0 | −0.057 | 95% [−0.085, −0.028] |
+| L−directM0 | +0.012 | 95% [−0.015, 0.040] |
+| L−directB0 | +0.043 | 95% [0.017, 0.070] |
+
+- **category별 B−U:** opacity +0.085, normal +0.060, NoOpacity/NotNormal +0.015.
+- **정보 없는 U:** direct M0보다 낮다. 문구가 반응을 바꾼다는 증거이며 특정 문장의 인과는 아니다.
+- **NoOpacity/NotNormal:** 모든 evidence 조건이 0.005–0.02이고 direct M0는 0.20이다. evidence 조건이 이 category를 크게 잃는다.
+- **B0 bbox+규칙:** S_scope는 0.2733이다(빈 예측의 Q_A는 판단 불가로 계산).
+- **비용:** reader 입력은 약 400토큰으로 direct의 301토큰보다 길다. 모듈형에는 localizer 1회 호출이 추가된다. localizer 시간은 재사용 자료에 기록되어 있지 않다.
+
+# Goal Progress / Reused Assets
+
+- **진전:** iter_016의 bbox reader 이득이 좌표가 아니라 검출 신호·개수·문구로 설명된다는 것을 통제 조건으로 확인했다. 좌표 손익은 P180·E600 어디서도 관찰되지 않았다.
+- **재사용:** `qa_spec.py`, 승인된 parser·metric, iter_016 direct/evidence 결과를 사용했고 검증 근거는 `results/iter_017/reuse/reuse_manifest.json`에 있다.
+- **미검증:** X(L−X), 다른 seed·환자·데이터셋, 좌표가 유용한 다른 과제, 모듈형 대비 detector/encoder+head 비교. 학습 환자 수·presentations 표는 만들지 않았다. checkpoint 표에 epoch·step·train digest만 있다.
+
+# Problems
+
+- **현재 결론 무효:** 없음.
+- **재사용 전 수정:**
+  - `qa_run`의 tail 재개·부모 중단 처리와 `qa_scope`의 옛 경로는 이번에 검증하지 않았다.
+  - 재사용한 iter_016 stage는 과거 protocol을 재잠금하지 않고 호환성만 확인했다.
+- **추후 개선:**
+  - 워커가 끝부분에서 느려진다. 요청 파일 재읽기 때문으로 보이며 원인은 확인하지 않았다.
+  - L과 K가 응답 텍스트 수준에서 52/360건 다른 것은 대소문자·개행 차이이고 answer 값은 같았다.
+  - 확대 규칙 3의 "중요·무효 값 동시 포함" 해석은 내 구현이다.
+  - `B−U` 확대는 이 해석 덕분에 트리거됐다(점추정 0.0444는 임계 0.05 미만).
+
+# Recommendation to GPT
+
+- 좌표 방향은 투자를 보류한다. B/K 단순 검출 baseline을 강한 모듈형 baseline으로 남긴다.
+- 다른 질문으로 전환을 우선 검토한다. 특히 NoOpacity/NotNormal에서 evidence 조건이 direct M0 대비 크게 잃는 현상(0.2 → 0.02)이 후보다. 이 category에서는 정답이 "no opacity, but abnormal"이라는 점이 직접 질문과 evidence 조건을 갈라놓는다.
+- 그 현상은 질문 범위 해석·prior 문제일 수 있고, 아직 원인을 분리하지 못했다.
+- X는 필요하면 후속에서 별도 계획으로 다룬다.
+
+SELF_CHECK: FAIL
+SUMMARY: 공통 문구 U/B/K/L 진단에서 E600 기준 B−U +0.053 [0.032, 0.077], L−K 정확히 0(불일치 0/600)이라 bbox reader 이득은 검출 유무·개수와 문구로 설명되고 좌표 효과는 없었다. X는 사전 규칙상 미실행이며 좌표 무사용과 무의미의 구분은 미검증이다.
+
+
+## iter_017 GPT REVIEW [CONTINUE] — 2026-09-27 13:39:34
+
+# 요약
+
+- **판정:** CONTINUE / success. 원 계획의 통제 진단을 유효하게 완료했다. SELF_CHECK: FAIL은 남은 검증·보고 항목을 뜻하며 실험 전체의 무효 근거는 확인되지 않았다.
+- **핵심 근거:** E600에서 B−U +0.0533, K−B +0.0150을 독립 재계산했다. L과 K의 정답 쌍 성패는 600명 모두 같았다.
+- **의미·한계:** 검출 정보와 개수 전달의 효과는 있지만 L−direct M0 +0.0117은 불확정이다. 좌표 활용 능력의 부재나 새로운 contribution은 입증하지 않았다.
+- **다음:** 현재 좌표 진단을 종료하고 연구 질문 전환을 우선 비교한다. NoOpacity/NotNormal 손실은 후속 후보지만 확정된 새 목표로 삼지 않는다.
+
+# Assessment
+
+계획·구조화 계획·보고서·changes.patch·commit.json·reuse_manifest.json, 관련 코드와 원시 결과를 확인했다. 리뷰 대상은 d12ef5ccea60d05b9163519980cdb1624b3fa682이며 unpreserved_paths는 없다. 현재 tracked 파일은 해당 SHA와 모두 일치하고 작업 diff도 비어 있다. 별도 execution_amendment 파일은 확인되지 않았다.
+
+파일 생성·수정과 GPU 실험은 수행하지 않았다. 기존 결과에 읽기 전용 재계산을 적용했다. 독립 재계산에서 현재 과학적 결론을 무효화하는 문제는 발견되지 않았다. 다만 전체 스냅샷 재사용은 승인하지 않는다.
+
+# Key Findings
+
+**실행·입력 검증:** P180 1,440건과 추가 420명 3,360건의 요청·출력 집합이 정확히 일치했다. 중복·누락·잉여는 없고 자식 종료 코드는 모두 0이다. 신규 4,800건은 전부 EOS로 종료했으며 주요 request/provenance 불일치는 0이었다. 고정 template과 B0 bbox에서 요청을 다시 구성했을 때 저장 요청과 모두 일치했다.
+
+영상 636개의 file/raw pixel hash와 본평가 출력의 padded pixel hash를 대조해 불일치 0을 확인했다. P180⊂E600이고 D36과 E600 환자 교집합은 없다. 재사용한 manifest 4개 및 iter_016 8개 stage의 worker·request·completion hash는 이번 reuse 기록과 일치했다. 세 protocol의 잠긴 파일 각 32개도 현재 파일과 일치한다. 정상 사용법 검증은 iter_009의 범위를 이어받으며 공식 GPU 예제를 이번 리뷰에서 재실행하지 않았다.
+
+**독립 점수 재계산:** 별도 parser와 환자 paired bootstrap 10,000회, seed 20260927로 주요 결과를 재현했다.
+
+| 조건 | S_scope | opacity 정답 쌍 | Normal 정답 쌍 | NoOpacity/NotNormal 정답 쌍 |
+| --- | ---: | ---: | ---: | ---: |
+| U | 0.5533 | 149/200 | 182/200 | 1/200 |
+| B | 0.6067 | 166/200 | 194/200 | 4/200 |
+| K | 0.6217 | 175/200 | 194/200 | 4/200 |
+| L | 0.6217 | 175/200 | 194/200 | 4/200 |
+| direct M0 | 0.6100 | 148/200 | 178/200 | 40/200 |
+
+B−U의 97.5% CI는 [0.031667, 0.076667], K−B의 탐색 95% CI는 [0.006667, 0.025000]이다. L−direct M0는 +0.011667 [−0.015000, 0.040000]으로 불확정이다. U−direct M0는 −0.056667 [−0.085000, −0.028333]이다. 따라서 B−U의 양성 결과만으로 direct보다 좋은 실용 시스템이라고 주장할 수 없다.
+
+**좌표 비교:** L/K 정답 쌍 성패는 600명 모두 같으며 nonempty 236명에서도 같다. 그러나 Normal 환자 con_00020008의 Q_A는 L=yes, K=no로 다르다. 해당 환자는 정답 쌍 기준으로 두 조건 모두 오답이므로 주지표에는 드러나지 않는다. P180 360개 답변의 일치와 E600 전체 답변의 일치는 구분해야 한다.
+
+**규모·GPU:** P180의 B−U는 +0.0444, 97.5% CI [0.0111, 0.0833]이었다. 0.05 이상의 효과와 그보다 작은 효과를 함께 포함하고 E600 예상 macro 반폭이 0.01875여서 계획의 실질적 무효과 해석에 따른 확대는 수용 가능하다. 결정 artifact가 확대 요청 생성 전에 만들어진 실행 순서를 확인했다. L−K는 확대·X 기준을 충족하지 않았으므로 X 미실행은 타당하다.
+
+D12 96개 요청의 worker 비교에서 greedy token이 모두 일치했다. 2 worker와 4 worker의 wall-clock은 46.19초와 41.09초였다. 4 worker의 GPU별 peak는 17,608/17,537 MiB이며 본평가에서도 같은 최대 점유가 기록됐다. GPU별 24,576 MiB 안에서 worker당 2 GiB 여유를 충족한다. 본평가 wall-clock은 257.18초와 644.00초였다. 두 GPU 사용과 단계적 확대는 사용자 자원 정책에 부합한다.
+
+# Problems / Concerns
+
+현재 결론의 blocker는 없다. 다만 protocol이 분석용 label·set·reuse manifest를 잠그지 않고, 재사용 경로 일부가 completion 수치 확인에 머무르는 점은 후속 재사용 전에 보완해야 한다. 이번 파일의 실제 일치는 리뷰에서 별도로 확인했다.
+
+확대 코드의 rule3는 macro 효과 조건을 관련 없는 category의 정밀도와 연결할 수 있다. 이번에는 macro 자체가 정밀도 기준을 통과해 결과에 영향이 없지만 범용 재사용에는 수정이 필요하다. 완료 필드 변조 검사 70/70 기록은 실제 중단·재개와 모든 원시 요청 오류 경로의 검증을 대신하지 않는다.
+
+학습량·전체 비용 표와 추가 420명 별도 보고도 미완성이다. 이 항목들은 공통 localizer를 사용하는 네 조건의 현재 비교를 무효화하지 않는다. D12 최대 출력은 4 token이므로 긴 생성의 메모리 안전성까지 검증됐다고 보고해서는 안 된다.
+
+# Interpretation
+
+H_detection은 공통 문구의 B−U 비교에서 지지된다. H_count도 K−B의 제한된 양성 효과로 지지된다. 다만 이것은 전달된 값과 표현에 따른 효과이며 실제 개수 추론의 증명이 아니다.
+
+H_coordinates의 추가 성능 이득은 현재 조건에서 지지되지 않는다. [0,0] bootstrap CI는 관찰된 paired 차이가 모두 0인 결과다. 이를 모집단의 정확한 무효과나 일반적인 좌표 무사용의 증명으로 해석하지 않는다. X가 미실행이므로 환자–좌표 연결의 효과도 직접 검증하지 않았다.
+
+동일 P180에서 기존 predicted 0.7000이 공통 문구 L 0.6333으로 낮아졌다. 새로운 packet과 안내문 전체의 인터페이스 의존성을 보여주지만 특정 문장 하나의 원인을 분리한 실험은 아니다. 이전 개선 결과를 무효화하지 않고 그 적용 조건을 좁힌다.
+
+E600은 개발 자료다. 독립 확인·다른 localizer seed·외부 데이터·임상 reasoning에 대한 주장은 불가능하다. 기존 환자 분할과 checkpoint를 유지하고 reserve와 새 학습을 투입하지 않은 점은 사용자 보완 지시에 부합한다.
+
+# Strategy Check / 연구 방향 판단
+
+**실행 유효성:** 실제 생성과 통제 비교를 완료해 다음 선택을 구분했다. diagnostic success로 판정한다.
+
+**성능 개선:** B/K 정보는 U보다 유용하지만 U 자체가 direct보다 낮다. L의 direct 대비 평균 이득은 불확정이고 NoOpacity/NotNormal 손실이 크다. 전체 시스템 개선으로 묶을 수 없다.
+
+**가설 지지:** 검출 정보·개수 전달과 인터페이스 의존성은 확인됐다. 좌표 추가 성능 이득은 관찰되지 않았고, 시각 정보 활용·질문 범위 해석·답변 prior 중 내부 원인은 미확인이다.
+
+**신규 기여 가능성:** 현재 결과는 bbox text 추가를 새 방법으로 개발할 근거를 강화하지 않는다. 넓은 질문에 좁은 evidence를 과도하게 적용하는 실패 조건이 다른 자료에서도 재현된다면 연구 가치가 있을 수 있으나 아직 후보 수준이다.
+
+후속 투자는 현재 grounding 개선보다 연구 질문 전환을 우선한다. 현재 실패 조건의 최소 독립 진단은 기존 자산을 활용할 수 있어 비교할 가치가 있다. 그러나 다른 의료 VLM 질문보다 중요성과 차별성이 낮다면 계속 같은 RSNA prompt를 늘리지 않는다. 접근법 반복 횟수만으로 포기하지 않되 이번에 실제로 얻은 정보에 따라 투자 방향을 바꾼다.
+
+추가 논문 추천은 보류한다. 현재 해석에 직접 연결되는 논문은 iter_016에서 이미 추천됐고, 이번 리뷰에서는 새로 선택할 연구 방향과 중복되지 않는 적격 논문의 원문을 확인하지 않았다.
+
+# Recommended Next Experiment
+
+다음 deep 계획에서 현재 방법 개선, 질문 범위와 evidence의 불일치에 대한 최소 독립 진단, 다른 중요한 의료 VLM 질문을 비교한다. 현재 관찰을 택한다면 direct M0와 단순 B/K를 유지하고 문구에만 의존하는 현상인지, 독립 자료에서도 정답이 보장되는 중요한 실패인지 구분해야 한다.
+
+재현되는 잔여 실패와 명확한 비교 방법이 확인되면 후속 방법 개발과 충분한 확대를 설계한다. 단순 문구로 해결되거나 좁은 RSNA 현상에 그치면 다른 질문으로 전환한다. 새 loss, reserve 사용, 다중 seed 또는 X 실행을 이미 결정된 후속 작업으로 두지 않는다.

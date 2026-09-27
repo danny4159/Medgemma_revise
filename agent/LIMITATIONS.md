@@ -69,18 +69,23 @@ MedGemma 1.5에는 좌표 출력/grounding 능력 자체가 없다는 과거 주
 
 ## rsna-evidence-interface-sensitivity — observed
 
-고정 RSNA P180에서 원본 영상과 B0 예측 bbox를 받은 M0 reader는 unavailable 안내 조건보다 S_scope가 0.1278 높았다. 그러나 Normal과 NoOpacity/NotNormal에서 효과 방향이 반대이고, oracle 조건의 Normal 정답 쌍 정확도는 0/60이었다. 현재 evidence 구성에 따른 답변 변화는 관찰됐지만, bbox 정보와 안내 문구의 인과 효과는 분리되지 않았다.
+고정 RSNA 개발 집단 E600에서 공통 문구의 검출 정보 B는 정보 미제공 U보다 S_scope가 0.0533 높았고, 개수 K의 추가 차이는 0.0150이었다. 좌표 L과 K의 정답 쌍 정확도는 600명 모두 같았지만 개별 질문 답변은 1/1,200건 달랐다. L−direct M0는 0.0117로 불확정이며, NoOpacity/NotNormal 정답 쌍 정확도는 direct 40/200에서 L 4/200으로 낮아졌다. 기존 모듈형 이득은 인터페이스에 의존하며, 현재 과제에서 좌표의 추가 성능 이득은 관찰되지 않았다. 일반적인 좌표 활용 능력이나 시각 정보 무사용을 입증하지 않는다.
 
 - 적용 목표 시작: iter_003
-- 최신 리뷰: agent/runs/iter_016/review.json
-- 근거: research/results/iter_016/gen/{p60_ev,p180x_ev}__M0/gen_worker*.jsonl: evidence QA 1,080건.
-- 근거: research/results/iter_016/e600/report.json: predicted/unavailable/oracle S_scope=0.7000/0.5722/0.6444.
-- 근거: 리뷰 독립 재계산: predicted−unavailable 95% CI [0.0556, 0.2000], 동일 P180 direct M0 대비 +0.0778 [0.0278, 0.1333].
-- 사용·평가 검증: 세 evidence 조건 모두 원본 영상을 유지하고 동일 target·parser를 사용한다.
-- 사용·평가 검증: evidence 1,080건 모두 의미 해석 가능하며 strict와 semantic 점수가 같다.
-- 사용·평가 검증: oracle는 GT 정보가 포함된 원인 분리용 조건으로 실용 baseline과 구분한다.
-- 사용·평가 검증: 원시 답변과 요청을 연결해 category별 정답 수 및 paired CI를 재계산했다.
-- 미해결: 문구를 맞춘 조건에서도 예측 bbox의 이득이 유지되는가?
-- 미해결: 좌표 없이 검출 유무만 전달해도 같은 이득이 발생하는가?
-- 미해결: 정확한 좌표, 교란 좌표, 안내 문구가 각각 답변에 미치는 효과는 무엇인가?
+- 최신 리뷰: agent/runs/iter_017/review.json
+- 근거: research/results/iter_017/gen/{p180_ev17,e600x_ev17}__M0/gen_worker*.jsonl: 신규 본평가 4,800건, 600명.
+- 근거: research/results/iter_017/e600/analysis_e600.json 및 리뷰 독립 재계산: U/B/K/L S_scope=0.553333/0.606667/0.621667/0.621667.
+- 근거: B−U 97.5% CI [0.031667, 0.076667], K−B 95% CI [0.006667, 0.025000], L−direct M0 95% CI [−0.015000, 0.040000].
+- 근거: 동일 P180의 L−기존 predicted 차이 −0.066667, 저장 95% CI [−0.105556, −0.033333]. 기존 조건의 성과는 보존하되 문구 변경에 대한 안정성은 지지되지 않는다.
+- 근거: nonempty 236명의 L−K 정답 쌍 차이도 0이다. 개별 답변 차이는 con_00020008의 Q_A에서 확인됐다.
+- 사용·평가 검증: 리뷰에서 신규 4,800개 요청을 B0 원본 bbox와 고정 template으로 재구성해 저장 요청과 완전히 일치함을 확인했다.
+- 사용·평가 검증: 별도 parser와 category 내 환자 paired bootstrap 10,000회로 주지표·주요 CI를 재현했다.
+- 사용·평가 검증: 신규 요청의 누락·중복·잉여, 주요 provenance 불일치와 비EOS 종료는 0이었다.
+- 사용·평가 검증: 현재 영상 636개의 file/raw pixel hash와 신규 출력의 padded pixel hash 불일치 0을 확인했다.
+- 사용·평가 검증: 세 protocol의 잠긴 파일 각 32개와 현재 파일이 일치하고, tracked 파일은 리뷰 SHA와 일치했다.
+- 사용·평가 검증: E600은 기존 개발 집단이며 새 독립 확인이 아니다. X는 사전 실행 조건을 충족하지 않아 미실행했다.
+- 미해결: NoOpacity/NotNormal 손실이 독립 환자와 다른 데이터에서도 재현되는가?
+- 미해결: 손실은 질문 범위 해석, 문구에 따른 답변 prior, 검출 신호의 과도한 일반화 중 무엇으로 설명되는가?
+- 미해결: 좌표가 필요한 다른 과제에서도 추가 이득이 없는가? 이번 결과로는 판단할 수 없다.
+- 미해결: 현재 bootstrap의 [0,0]은 관찰된 정답 쌍 차이가 모두 0이어서 생긴 결과이며 모집단 효과의 정확한 영점을 의미하지 않는다.
 

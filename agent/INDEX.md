@@ -22,6 +22,7 @@
 - iter_014 [CONTINUE] (deep/standard/normal) <영상 조건부 집합 grounding: abandon> 💾698c161f51ec098b1263ea8a5acf4d2870930e0b GIoU 가중 학습의 추가 이득은 full-train에서도 입증되지 않아 현재 설계의 투자를 중단한다. 실제 생성 비교는 유효하지만 수치 검사 실패와 능력 전이·신규 기여의 미확인은 남아 있어 다음 계획에서 연구 방향을 재검토한다. → 다음: 새 loss 학습을 예약하지 말고 연구 방향을 재검토한다. 현재 방법 개선, 기존 base·SFT·추가 SFT checkpoint의 능력 전이·원인 진단, 다른 중요한 의료 VLM 질문으로의 전환을 정보 이득·비용·기여 가능성으로 비교한다. 기존 checkpoint 진단을 우선 후보로 검토하되 확정된 목표로 만들지 않는다. 내부 위치 학습을 유지한다면 강한 직접 SFT와 detector+VLM 또는 encoder+head 대안을 공정한 입력·학습량·비용 조건에서 비교할 경로를 제시한다. 기존 자산으로 다음 선택을 구분할 최소 진단을 고정하고, 양성·음성·불확정 결과에 따른 행동을 사전에 정한다. 현재 결과·reserve는 보존하고 실제 사용할 모듈의 재사용 결함만 우선 해결한다.
 - iter_015 [CONTINUE] (deep/standard/normal) <질문 대상과 음성 의미 보존 진단: inconclusive> 💾3265f117bf3f4de99ba084f2c9b4e476568f24bd D36 QA 432건에서 plain·JSON 형식 gate 실패를 재확인해 본 QA 평가는 보류했다. 의미 구분 능력 저하는 아직 미확인이며, 제한된 형식 보정 후 진단할 가치와 다른 질문으로 전환할 조건을 정해야 한다. → 다음: 진단을 우선 권고한다. iter_015의 전략 비교를 이어받아 새 loss 학습보다 형식 보정으로 의미 차이를 판별하는 정보 이득을 평가한다. D36에서 Q_A의 정확한 Normal→no·Abnormal→yes 같은 제한된 규칙을 검토하고, 질문별 허용 응답과 invalid 처리를 결과 확인 전에 고정한다. strict 형식 지표는 별도로 유지하며 모순·설명문·bbox를 임의 구제하지 않는다. 필요한 실행기·평가 입력 결함만 수정한 뒤 E180 QA와 계획된 대조로 진행한다. 보정 후에도 target별 차이가 남으면 의미 보존 진단을 확대하고, 차이가 사라지거나 좁은 형식 현상만 남으면 다른 중요한 의료 VLM 질문으로 전환한다. E600·seed 확대는 정보 이득과 사전 기준으로 결정하고 reserve는 보존한다.
 - iter_016 [CONTINUE] (deep/standard/normal) <질문 대상과 음성 의미 보존 진단: success> 💾6a4fb41d490305061028de9cab863c0b5e9747ad 6,180건의 유효한 진단에서 SFT의 strict 저하 대부분이 형식 효과로 설명됐고, 예측 bbox reader는 direct M0보다 S_scope가 0.078 높았다. 문구·검출 정보·좌표의 기여는 아직 분리되지 않았다. → 다음: 진단을 우선 권고한다. 다음 deep 계획에서 현재 방법 개선·evidence 인터페이스 원인 진단·다른 의료 VLM 질문으로 전환을 비교하되, 이번에 실제 이득이 확인된 모듈형 조건을 단순히 기각하지 않는다. 기존 개발 panel과 checkpoint를 활용해 문구를 맞춘 predicted/unavailable 대조, 좌표 없는 검출 유무 전달, 필요한 좌표 교란 대조 중 다음 결정을 구분할 최소 실험을 선택한다. direct M0를 유지하고 category별 손익을 평가한다. 이득이 단순 검출 유무나 문구로 설명되면 이를 강한 baseline으로 보존하고 새 loss 투자 없이 전환을 검토한다. 의미 있는 잔여 이득이나 일반적 실패 조건이 남을 때만 추가 환자·데이터로 확대한다. 필요한 provenance 수정만 먼저 수행하고 reserve·새 학습은 자동 투입하지 않는다.
+- iter_017 [CONTINUE] (deep/standard/normal) <질문 대상과 음성 의미 보존 진단: success> 💾d12ef5ccea60d05b9163519980cdb1624b3fa682 E600 통제 진단에서 B−U +0.0533과 K−B +0.0150을 재현했고 좌표의 정답 쌍 추가 이득은 없었다. direct 대비 이득과 일반화는 미확인이며, NoOpacity/NotNormal 손실을 포함해 다음 연구 질문으로의 전환을 검토한다. → 다음: 전환을 우선 검토한다. iter_017에서 예정한 정보 수준 진단은 종료하고 새 loss·좌표 교란·reserve 확대를 자동 예약하지 않는다. 다음 deep 계획에서 현재 grounding 개선, 질문 범위가 다른 evidence를 과도하게 일반화하는 현상의 최소 독립 진단, 다른 중요한 의료 VLM 질문을 중요성·정보 이득·선행 대비 차별성·두 GPU 비용으로 비교한다. 현재 실패 현상을 후보로 택한다면 direct M0와 B/K baseline을 유지하고, 단순 문구 변경으로 해결되는지와 정답이 보장되는 다른 finding·독립 환자에서도 남는지를 구분한다. 재현되는 중요한 잔여 실패가 확인될 때만 방법 개발과 충분한 확대를 계획하고, 좁은 RSNA 문구 현상으로 설명되면 다른 질문으로 이동한다. 재사용 수정은 실제 선택한 경로에 필요한 것만 수행한다.
 
 ## 이전 목표들의 접근법 (참고용, 현재 목표의 재평가 횟수에는 안 들어감)
 
@@ -36,12 +37,12 @@
 - 해부구조에서 병변으로 grounding 전이 [approach/anatomy-lesion-transfer]: 1회 (iter_008), 유효한 실험 0회, 미분류 0회, 최근 판정: 사용자 보완으로 전환 (검증 미완료), 커밋: 없음
 - 정상 사용 조건의 병변 grounding 검증 [approach/grounding-usage-diagnostic]: 1회 (iter_009), 유효한 실험 1회, 미분류 0회, 최근 판정: success, 커밋: 39aa49a6fa5943ca0d3e0327a7874e68a2c878cb
 - 영상 조건부 집합 grounding [approach/conditional-set-grounding]: 5회 (iter_010, iter_011, iter_012, iter_013, iter_014), 유효한 실험 3회, 미분류 0회, 최근 판정: abandon, 커밋: 5581ed255a350e42a0ad422065edf13c56a33bf6, 8b030717b813bcbff85a2ffc5f52c9561a73f452, 783d2d04671ae296f3dc0c700e575f8af8e021c9, d68840e0f9317700a8b585bcf6edbb8ef73703a0, 698c161f51ec098b1263ea8a5acf4d2870930e0b
-- 질문 대상과 음성 의미 보존 진단 [approach/target-scope-diagnostic]: 2회 (iter_015, iter_016), 유효한 실험 1회, 미분류 0회, 최근 판정: success, 커밋: 3265f117bf3f4de99ba084f2c9b4e476568f24bd, 6a4fb41d490305061028de9cab863c0b5e9747ad
+- 질문 대상과 음성 의미 보존 진단 [approach/target-scope-diagnostic]: 3회 (iter_015, iter_016, iter_017), 유효한 실험 2회, 미분류 0회, 최근 판정: success, 커밋: 3265f117bf3f4de99ba084f2c9b4e476568f24bd, 6a4fb41d490305061028de9cab863c0b5e9747ad, d12ef5ccea60d05b9163519980cdb1624b3fa682
 
 현재 연구 브랜치: approach/target-scope-diagnostic (코드 위치: /SSD1_1TB/home/milab/daniel/08_medgemma/research)
 
 ### 최근 계획의 대안 순위
 
-1. 질문 대상과 음성 의미 보존 진단: 제한된 형식 정규화로 기존 checkpoint의 실제 target별 변화와 모듈형 활용 가능성을 구분한다.
-2. 다른 의료 VLM 질문으로 전환: 이번 진단에서 의미 있는 변화가 배제되거나 형식 현상만 남으면 영상–언어 충돌 등 다른 중요한 질문의 정답·선행 차이를 검토한다.
-3. 현재 grounding 방법 개선: 새로운 원인·효율 근거가 확보될 때 강한 직접 SFT와 detector/encoder+head를 포함해 다시 비교하며 후속 loss는 예약하지 않는다.
+1. 질문 대상과 음성 의미 보존 진단: 기존 모듈형 이득에서 문구·검출 유무·개수·좌표를 구분해 다음 투자를 판단한다.
+2. 다른 의료 VLM 질문으로 전환: 단순 정보 전달로 현재 효과가 설명되면 정답이 보장되는 영상–언어 충돌 등 다른 중요한 실패 조건을 검토한다.
+3. 현재 grounding 방법 개선: 새로운 원인·일반화·효율 근거가 확보될 때 직접 SFT와 detector/encoder+head를 포함해 재검토한다.
