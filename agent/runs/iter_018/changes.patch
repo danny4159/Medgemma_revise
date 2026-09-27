@@ -1,0 +1,1037 @@
+diff --git a/rsna_diag/cx18_analysis.py b/rsna_diag/cx18_analysis.py
+new file mode 100644
+index 0000000..91bc135
+--- /dev/null
++++ b/rsna_diag/cx18_analysis.py
+@@ -0,0 +1,367 @@
++"""iter_018 target-scope 진단(CheXpert) 평가: raw generation record -> 답 표 -> 주효과 H(macro accuracy(D)-accuracy(Tscope), 주방향
++main=Cardiomegaly reference-> Pleural Effusion 판단) -> 환자 paired bootstrap -> 확대 결정(E48) -> 최종 보고(F).
++
++점수는 qa_run.verify_job/verify_completion으로 검증을 통과한(요청 집합과 정확히 일치, 완료된) stage에서만 계산한다.
++사용:
++  python -m rsna_diag.cx18_analysis gate --stage d16_plain --protocol P --out results/iter_018/d16/gate.json
++  python -m rsna_diag.cx18_analysis expand-decision --stage e48_plain --protocol P --out results/iter_018/e48/decision.json
++  python -m rsna_diag.cx18_analysis report --stage f_plain --protocol P --out results/iter_018/f/report.json
++"""
++import argparse
++import json
++import math
++import os
++
++import numpy as np
++
++from . import cx18_spec as CX, generate, qa_protocol, qa_requests as Q
++
++OUT = "results/iter_018"
++CKPT = "M0"
++BOOT_N, BOOT_SEED = 10000, 20260928
++Z975 = 1.9599639845400545
++
++
++class AnalysisError(RuntimeError):
++    pass
++
++
++# ---------- 원시 결과 로딩과 답 표 ----------
++
++def load_stage(stage, protocol, gen_root="gen"):
++    from . import qa_gen, qa_run
++    pdig = qa_protocol.verify(protocol)
++    rp = f"{OUT}/requests/{stage}__{CKPT}.jsonl"
++    cfg, _ = qa_protocol.static_cfg()
++    rows = Q.load_rows(rp, cfg)
++    if json.load(open(protocol))["locked"]["files"].get(rp) != generate.sha(open(rp, "rb").read()):
++        raise AnalysisError(f"{rp} not locked in {protocol}")
++    d = f"{OUT}/{gen_root}/{stage}__{CKPT}"
++    if not os.path.exists(f"{d}/completion.json"):
++        raise qa_gen.QAError(f"completion.json missing in {d}")
++    done, missing = qa_run.verify_job(d, rows, cfg, pdig, None)
++    if missing:
++        raise qa_gen.QAError(f"{len(missing)} requests missing in {d}")
++    qa_run.verify_completion(d, rows, cfg, pdig, rp, len(done))
++    by = {r["request_id"]: r for r in rows}
++    return [(by[k], v) for k, v in done.items()]
++
++
++def answer_table(pairs):
++    """{(direction, cond, fmt, patient_id): {status, answer, ended_eos, n_out}}. 중복은 예외."""
++    t = {}
++    for row, rec in pairs:
++        st, ans = CX.parse_answer(row["fmt"], rec["suffix_text_raw"], rec["ended_eos"])
++        key = (row["target"], row["condition"], row["fmt"], row["id"])
++        if key in t:
++            raise AnalysisError(f"duplicate answer for {key}")
++        t[key] = {"status": st, "answer": ans, "ended_eos": rec["ended_eos"], "n_out": rec["n_output_tokens"]}
++    return t
++
++
++def require_complete(tab, directions, conds, fmt, ids):
++    want = {(d, c, fmt, i) for d in directions for c in conds for i in ids}
++    have = {k for k in tab if k[0] in set(directions) and k[1] in set(conds) and k[2] == fmt}
++    miss, extra = want - have, have - want
++    if miss or extra:
++        raise AnalysisError(f"answer table incomplete: missing {len(miss)} extra {len(extra)} e.g. {sorted(miss)[:3]}")
++    return True
++
++
++# ---------- 정답·flip ----------
++
++def is_correct(tab, direction, cond, fmt, pid, cat):
++    e = tab[(direction, cond, fmt, pid)]
++    return e["status"] == "valid" and e["answer"] == CX.gt_answer(direction, cat)
++
++
++def cat_ids(labels, ids):
++    out = {c: [] for c in CX.CATEGORIES}
++    for i in ids:
++        out[labels[i]["category"]].append(i)
++    return out
++
++
++def correctness_vectors(tab, direction, cond, fmt, ids_by_cat, labels):
++    return {c: np.array([float(is_correct(tab, direction, cond, fmt, i, labels[i]["category"])) for i in ids], dtype=float)
++            for c, ids in ids_by_cat.items()}
++
++
++def macro_accuracy(vec_by_cat):
++    per = {c: float(v.mean()) for c, v in vec_by_cat.items()}
++    return float(np.mean(list(per.values()))), per
++
++
++def flips(tab, direction, cond_a, cond_b, fmt, ids, labels):
++    """cond_a(예: D) -> cond_b(예: Tscope) 전이. negative: a 정답, b 오답(또는 invalid). positive: a 오답, b 정답."""
++    neg, pos = [], []
++    for i in ids:
++        cat = labels[i]["category"]
++        ca, cb = is_correct(tab, direction, cond_a, fmt, i, cat), is_correct(tab, direction, cond_b, fmt, i, cat)
++        if ca and not cb:
++            neg.append(i)
++        elif not ca and cb:
++            pos.append(i)
++    return neg, pos
++
++
++def valid_both(tab, direction, cond_a, cond_b, fmt, ids):
++    return [i for i in ids if tab[(direction, cond_a, fmt, i)]["status"] == "valid"
++            and tab[(direction, cond_b, fmt, i)]["status"] == "valid"]
++
++
++# ---------- bootstrap ----------
++
++def paired_diff_bootstrap(vec_a, vec_b, n=BOOT_N, seed=BOOT_SEED, ci=0.95):
++    """category별 (a-b) paired 환자 bootstrap 후 4 category 동일 가중치 macro. returns dict(point, ci, per_category)."""
++    rng = np.random.default_rng(seed)
++    cats = list(vec_a)
++    diffs = {}
++    for c in cats:
++        m = len(vec_a[c])
++        idx = rng.integers(0, m, size=(n, m))
++        diffs[c] = vec_a[c][idx].mean(1) - vec_b[c][idx].mean(1)
++    tot = np.mean([diffs[c] for c in cats], axis=0)
++    lo, hi = (1 - ci) / 2 * 100, (1 + ci) / 2 * 100
++    point = float(np.mean([vec_a[c].mean() - vec_b[c].mean() for c in cats]))
++    per_cat = {c: {"point": float(vec_a[c].mean() - vec_b[c].mean()),
++                   "ci": [float(np.percentile(diffs[c], lo)), float(np.percentile(diffs[c], hi))]} for c in cats}
++    return {"point": point, "ci": [float(np.percentile(tot, lo)), float(np.percentile(tot, hi))], "per_category": per_cat,
++            "n_boot": n, "seed": seed}
++
++
++# ---------- exact binomial (Clopper-Pearson) 보수적 구간: bootstrap 퇴화(discordant 0) 대비 ----------
++
++def _binom_sf(k, n, p):
++    if k <= 0:
++        return 1.0
++    if k > n:
++        return 0.0
++    return float(sum(math.comb(n, i) * p ** i * (1 - p) ** (n - i) for i in range(k, n + 1)))
++
++
++def clopper_pearson(k, n, alpha=0.05, iters=100):
++    """returns (lo, hi) exact binomial CI for a proportion k/n."""
++    if n <= 0:
++        raise AnalysisError("clopper_pearson needs n > 0")
++    if k == 0:
++        lo = 0.0
++    else:
++        a, b, target = 0.0, 1.0, alpha / 2
++        for _ in range(iters):
++            mid = (a + b) / 2
++            if _binom_sf(k, n, mid) < target:
++                a = mid
++            else:
++                b = mid
++        lo = (a + b) / 2
++    if k == n:
++        hi = 1.0
++    else:
++        # P(X<=k|p_U) = alpha/2  <=>  P(X>=k+1|p_U) = 1-alpha/2 (survival function is increasing in p)
++        a, b, target = 0.0, 1.0, 1 - alpha / 2
++        for _ in range(iters):
++            mid = (a + b) / 2
++            if _binom_sf(k + 1, n, mid) < target:
++                a = mid
++            else:
++                b = mid
++        hi = (a + b) / 2
++    return lo, hi
++
++
++def conservative_macro_diff_bound(neg_by_cat, pos_by_cat, n_by_cat, alpha_total=0.05):
++    """discordant(negative/positive flip) 빈도의 category별 exact binomial CI를 Bonferroni로 동시 보장하고,
++    각 category의 최악/최선 (neg_hi - pos_lo, neg_lo - pos_hi)로 macro 차이의 보수적 [lo, hi]를 만든다.
++    bootstrap이 퇴화(전부 0)일 때도 표본 크기에 근거한 비퇴화 구간을 제공하기 위한 것이다."""
++    cats = list(n_by_cat)
++    k = len(cats) * 2  # category마다 neg, pos 두 구간 -> Bonferroni로 alpha 분배
++    per_alpha = alpha_total / k
++    per_cat = {}
++    los, his = [], []
++    for c in cats:
++        n = n_by_cat[c]
++        neg_lo, neg_hi = clopper_pearson(neg_by_cat[c], n, per_alpha)
++        pos_lo, pos_hi = clopper_pearson(pos_by_cat[c], n, per_alpha)
++        d_lo, d_hi = neg_lo - pos_hi, neg_hi - pos_lo
++        per_cat[c] = {"n": n, "neg": neg_by_cat[c], "pos": pos_by_cat[c], "neg_ci": [neg_lo, neg_hi], "pos_ci": [pos_lo, pos_hi],
++                      "diff_bound": [d_lo, d_hi]}
++        los.append(d_lo)
++        his.append(d_hi)
++    return {"macro_bound": [float(np.mean(los)), float(np.mean(his))], "per_category": per_cat,
++            "note": "Bonferroni-adjusted Clopper-Pearson bound on macro(neg-pos) rate; conservative, not a bootstrap CI",
++            "alpha_total": alpha_total, "per_interval_alpha": per_alpha}
++
++
++# ---------- 확대 판단(E48 -> F) ----------
++
++def expected_half_width(disc_by_cat, n_e_by_cat, n_f_by_cat, z=Z975):
++    """category별 (discordant+1)/(n_e+2) smoothed rate로 Var(diff)~=p, macro(등가중 1/4)의 SE를 F 실제 표본 수로 계산."""
++    var_terms = []
++    per_cat = {}
++    for c in disc_by_cat:
++        p = (disc_by_cat[c] + 1) / (n_e_by_cat[c] + 2)
++        nf = n_f_by_cat[c]
++        v = p / nf if nf > 0 else float("inf")
++        var_terms.append(v)
++        per_cat[c] = {"smoothed_discordant_rate": p, "n_f": nf, "var_contribution": v}
++    var_macro = sum(var_terms) / (len(var_terms) ** 2)
++    hw = float(z * math.sqrt(var_macro))
++    return hw, per_cat
++
++
++def expand_decision(stage, protocol, out, f_counts_by_cat=None):
++    from . import qa_gen
++    labels = json.load(open(f"{OUT}/manifests/labels.json"))
++    sets = json.load(open(f"{OUT}/manifests/sets.json"))
++    fmt = "plain"
++    pairs = load_stage(stage, protocol)
++    tab = answer_table(pairs)
++    ids = sorted({r["id"] for r, _ in pairs})
++    require_complete(tab, list(CX.DIRECTIONS), list(CX.CONDITIONS), fmt, ids)
++    ids_by_cat = cat_ids(labels, ids)
++    vec_d = correctness_vectors(tab, "main", "D", fmt, ids_by_cat, labels)
++    vec_ts = correctness_vectors(tab, "main", "Tscope", fmt, ids_by_cat, labels)
++    h_boot = paired_diff_bootstrap(vec_d, vec_ts)
++    h_point, h_per_cat = h_boot["point"], h_boot["per_category"]
++    neg_ids, pos_ids = flips(tab, "main", "D", "Tscope", fmt, ids, labels)
++    neg_by_cat, pos_by_cat, disc_by_cat, n_by_cat = {}, {}, {}, {}
++    for c, cids in ids_by_cat.items():
++        neg_by_cat[c] = sum(1 for i in cids if i in neg_ids)
++        pos_by_cat[c] = sum(1 for i in cids if i in pos_ids)
++        disc_by_cat[c] = neg_by_cat[c] + pos_by_cat[c]
++        n_by_cat[c] = len(cids)
++    if f_counts_by_cat is None:
++        f_counts_by_cat = {c: len(sets["F"][c]) for c in CX.CATEGORIES}
++    hw, hw_detail = expected_half_width(disc_by_cat, n_by_cat, f_counts_by_cat)
++    rule_a = h_point >= 0.10 and len(neg_ids) >= 4
++    rule_b = h_point >= 0.0 and h_boot["ci"][0] <= 0.10 <= h_boot["ci"][1] and len(neg_ids) >= 4 and hw <= 0.10
++    expand = bool(rule_a or rule_b)
++    d = {"stage": stage, "estimand": "H = macro_accuracy(D) - macro_accuracy(Tscope), direction=main", "H_point": h_point,
++         "H_ci95": h_boot["ci"], "H_per_category": h_per_cat, "n_negative_flip": len(neg_ids), "n_positive_flip": len(pos_ids),
++         "negative_flip_ids": neg_ids, "positive_flip_ids": pos_ids, "neg_by_category": neg_by_cat, "pos_by_category": pos_by_cat,
++         "expected_F_half_width": hw, "expected_F_half_width_detail": hw_detail, "f_counts_by_category": f_counts_by_cat,
++         "rule_a_pass": rule_a, "rule_b_pass": rule_b, "expand_to_F": expand}
++    os.makedirs(os.path.dirname(out), exist_ok=True)
++    json.dump(d, open(out, "w"), indent=1, sort_keys=True)
++    return d
++
++
++# ---------- 최종 보고 ----------
++
++def full_report(stage, protocol, out):
++    labels = json.load(open(f"{OUT}/manifests/labels.json"))
++    fmt = "plain"
++    pairs = load_stage(stage, protocol)
++    tab = answer_table(pairs)
++    ids = sorted({r["id"] for r, _ in pairs})
++    require_complete(tab, list(CX.DIRECTIONS), list(CX.CONDITIONS), fmt, ids)
++    ids_by_cat = cat_ids(labels, ids)
++    n_by_cat = {c: len(v) for c, v in ids_by_cat.items()}
++
++    per_condition = {}
++    for direction in CX.DIRECTIONS:
++        per_condition[direction] = {}
++        for cond in CX.CONDITIONS:
++            vec = correctness_vectors(tab, direction, cond, fmt, ids_by_cat, labels)
++            acc, acc_per_cat = macro_accuracy(vec)
++            valid = {c: float(np.mean([tab[(direction, cond, fmt, i)]["status"] == "valid" for i in ids_by_cat[c]])) for c in CX.CATEGORIES}
++            trunc = {c: float(np.mean([tab[(direction, cond, fmt, i)]["status"] == "truncated" for i in ids_by_cat[c]])) for c in CX.CATEGORIES}
++            per_condition[direction][cond] = {"macro_accuracy": acc, "per_category_accuracy": acc_per_cat,
++                                              "valid_rate_per_category": valid, "truncated_rate_per_category": trunc}
++
++    vec_d = correctness_vectors(tab, "main", "D", fmt, ids_by_cat, labels)
++    vec_ts = correctness_vectors(tab, "main", "Tscope", fmt, ids_by_cat, labels)
++    h_boot = paired_diff_bootstrap(vec_d, vec_ts)
++    neg_ids, pos_ids = flips(tab, "main", "D", "Tscope", fmt, ids, labels)
++    neg_by_cat = {c: sum(1 for i in cids if i in neg_ids) for c, cids in ids_by_cat.items()}
++    pos_by_cat = {c: sum(1 for i in cids if i in pos_ids) for c, cids in ids_by_cat.items()}
++    degenerate = all(v == 0 for v in h_boot["ci"]) and h_boot["point"] == 0.0
++    conservative = conservative_macro_diff_bound(neg_by_cat, pos_by_cat, n_by_cat) if degenerate else None
++
++    both_valid = valid_both(tab, "main", "D", "Tscope", fmt, ids)
++    valid_neg = [i for i in neg_ids if i in both_valid]
++    valid_pos = [i for i in pos_ids if i in both_valid]
++    content_only_diff = (len(valid_neg) - len(valid_pos)) / len(both_valid) if both_valid else None
++
++    secondary = {}
++    for direction in CX.DIRECTIONS:
++        for a, b in (("U", "D"), ("T", "D"), ("Tscope", "T")):
++            va = correctness_vectors(tab, direction, a, fmt, ids_by_cat, labels)
++            vb = correctness_vectors(tab, direction, b, fmt, ids_by_cat, labels)
++            secondary[f"{direction}:{a}-{b}"] = paired_diff_bootstrap(va, vb)
++    va = correctness_vectors(tab, "aux", "D", fmt, ids_by_cat, labels)
++    vb = correctness_vectors(tab, "aux", "Tscope", fmt, ids_by_cat, labels)
++    secondary["aux:D-Tscope"] = paired_diff_bootstrap(va, vb)
++
++    d = {"stage": stage, "n_patients": len(ids), "n_by_category": n_by_cat, "per_condition": per_condition,
++         "primary": {"estimand": "H = macro_accuracy(D) - macro_accuracy(Tscope), direction=main", "bootstrap": h_boot,
++                     "n_negative_flip": len(neg_ids), "n_positive_flip": len(pos_ids), "negative_flip_ids": neg_ids,
++                     "positive_flip_ids": pos_ids, "neg_by_category": neg_by_cat, "pos_by_category": pos_by_cat,
++                     "n_both_valid": len(both_valid), "content_only_net_harm_rate": content_only_diff,
++                     "bootstrap_degenerate": degenerate, "conservative_bound": conservative},
++         "secondary": secondary}
++    os.makedirs(os.path.dirname(out), exist_ok=True)
++    json.dump(d, open(out, "w"), indent=1, sort_keys=True, default=str)
++    return d
++
++
++# ---------- D16 형식 gate ----------
++
++def format_gate(stage, protocol, out):
++    labels = json.load(open(f"{OUT}/manifests/labels.json"))
++    fmt = "plain" if "plain" in stage else "json"
++    pairs = load_stage(stage, protocol)
++    tab = answer_table(pairs)
++    ids = sorted({r["id"] for r, _ in pairs})
++    require_complete(tab, list(CX.DIRECTIONS), list(CX.CONDITIONS), fmt, ids)
++    per = {}
++    cond_totals = {}
++    for cond in CX.CONDITIONS:
++        cond_valid, cond_n = 0, 0
++        for direction in CX.DIRECTIONS:
++            st = [tab[(direction, cond, fmt, i)]["status"] for i in ids]
++            v = sum(s == "valid" for s in st)
++            per[f"{direction}:{cond}"] = {"n": len(st), "valid": v, "valid_rate": v / len(st), "status": {s: st.count(s) for s in sorted(set(st))}}
++            cond_valid += v
++            cond_n += len(st)
++        cond_totals[cond] = {"n": cond_n, "valid": cond_valid, "valid_rate": cond_valid / cond_n}
++    gate_direction = all(v["valid"] >= 15 for v in per.values())
++    gate_condition = all(v["valid"] >= 31 for v in cond_totals.values())
++    d = {"stage": stage, "fmt": fmt, "per_direction_condition": per, "per_condition_total": cond_totals,
++         "gate_direction_pass_15_of_16": gate_direction, "gate_condition_pass_31_of_32": gate_condition,
++         "gate_pass": bool(gate_direction and gate_condition), "n_patients": len(ids)}
++    os.makedirs(os.path.dirname(out), exist_ok=True)
++    json.dump(d, open(out, "w"), indent=1, sort_keys=True)
++    return d
++
++
++def main():
++    ap = argparse.ArgumentParser()
++    sp = ap.add_subparsers(dest="cmd", required=True)
++    g = sp.add_parser("gate")
++    g.add_argument("--stage", required=True)
++    g.add_argument("--protocol", required=True)
++    g.add_argument("--out", required=True)
++    e = sp.add_parser("expand-decision")
++    e.add_argument("--stage", required=True)
++    e.add_argument("--protocol", required=True)
++    e.add_argument("--out", required=True)
++    r = sp.add_parser("report")
++    r.add_argument("--stage", required=True)
++    r.add_argument("--protocol", required=True)
++    r.add_argument("--out", required=True)
++    a = ap.parse_args()
++    if a.cmd == "gate":
++        d = format_gate(a.stage, a.protocol, a.out)
++        print(json.dumps({"gate_pass": d["gate_pass"]}))
++    elif a.cmd == "expand-decision":
++        d = expand_decision(a.stage, a.protocol, a.out)
++        print(json.dumps({"expand_to_F": d["expand_to_F"], "H_point": d["H_point"], "H_ci95": d["H_ci95"]}))
++    elif a.cmd == "report":
++        d = full_report(a.stage, a.protocol, a.out)
++        print(json.dumps({"primary_bootstrap": d["primary"]["bootstrap"], "n_negative_flip": d["primary"]["n_negative_flip"]}))
++
++
++if __name__ == "__main__":
++    main()
+diff --git a/rsna_diag/cx18_data.py b/rsna_diag/cx18_data.py
+new file mode 100644
+index 0000000..3e5b07c
+--- /dev/null
++++ b/rsna_diag/cx18_data.py
+@@ -0,0 +1,206 @@
++"""iter_018 자료 gate: CheXpert validation HF parquet + MedAug valid.csv 연결, 단일 frontal 환자 선택, 4조합 층화, legacy dedup 점검.
++
++- HF danjacobellis/chexpert validation parquet의 bytes sha256을 사전에 확인한 값과 대조한다 (변경되면 중단).
++- MedAug Path(연구진 공개 CSV)를 정규화해 HF와 정확히 일대일 대응시키고, 최소 다섯 competition finding에 대해
++  HF 2/3(absent/present) <-> CSV 0.0/1.0 대응을 전수 검증한다 (하나라도 불일치면 중단).
++- 영상이 정확히 하나이고 frontal인 study만 선택한다. 동일 환자의 study가 둘 이상이면 study 이름으로 정렬해 첫 study만 쓴다.
++- legacy/eval_samples의 chexpert 익명 샘플과 average-hash 거리로 근접 중복 후보를 점검한다 (임계 미만이면 중단; 값이 크면 통과).
++사용: python -m rsna_diag.cx18_data build
++"""
++import argparse
++import csv
++import glob
++import hashlib
++import io
++import json
++import os
++import re
++
++import numpy as np
++from PIL import Image
++
++HF_PARQUET = "results/iter_018/source/chexpert_validation.parquet"
++MEDAUG_CSV = "results/iter_018/source/medaug_valid.csv"
++HF_PARQUET_SHA256 = "78a544b5bf0c98de2a1293e9de908e8f8857aebcad4819692314110472acf5b4"
++HF_REVISION = "ca5a840e438b5d2d0fa07f560782f196b38a84aa"
++IMG_DIR = "results/iter_018/manifests/images"
++MANIFEST_PATH = "results/iter_018/manifests/infer_manifest.jsonl"
++LABELS_PATH = "results/iter_018/manifests/labels.json"
++SETS_PATH = "results/iter_018/manifests/sets.json"
++PROVENANCE_PATH = "results/iter_018/manifests/provenance.json"
++FINDINGS_CHECKED = ["Cardiomegaly", "Pleural Effusion", "Lung Opacity", "Edema", "Atelectasis", "Consolidation", "Pneumothorax"]
++LEGACY_DIR = "/SSD1_1TB/home/milab/daniel/08_medgemma/legacy/eval_samples/not_in_training/chexpert"
++DEDUP_HAMMING_THRESHOLD = 10  # 16x16 average hash = 256 bit; 관찰된 최소 실측 거리(29)보다 충분히 낮은 보수적 경보선
++MIN_PER_CATEGORY = 24
++
++
++class DataGateError(RuntimeError):
++    pass
++
++
++def sha(b):
++    return hashlib.sha256(b).hexdigest()
++
++
++def _norm_path(p):
++    m = re.search(r"(CheXpert-v1\.0-small/.*)$", p)
++    if not m:
++        raise DataGateError(f"cannot normalize MedAug Path {p!r}")
++    return m.group(1)
++
++
++def load_sources():
++    parq_sha = sha(open(HF_PARQUET, "rb").read())
++    if parq_sha != HF_PARQUET_SHA256:
++        raise DataGateError(f"HF validation parquet sha256 {parq_sha} differs from pinned {HF_PARQUET_SHA256}")
++    import pandas as pd
++    hf = pd.read_parquet(HF_PARQUET)
++    rows = list(csv.DictReader(open(MEDAUG_CSV)))
++    csv_by_path = {}
++    for r in rows:
++        norm = _norm_path(r["Path"])
++        if norm in csv_by_path:
++            raise DataGateError(f"duplicate Path in MedAug csv: {norm}")
++        csv_by_path[norm] = r
++    return hf, csv_by_path
++
++
++def cross_check(hf, csv_by_path):
++    """Path 전수 연결과 finding 값 대응(HF 2<->CSV 0.0=absent, HF 3<->CSV 1.0=present) 검증. validation에는 uncertain/unlabeled가 없어야 한다."""
++    hf_paths = set(hf["Path"])
++    missing_in_csv = sorted(hf_paths - set(csv_by_path))
++    extra_in_csv = sorted(set(csv_by_path) - hf_paths)
++    if missing_in_csv or extra_in_csv:
++        raise DataGateError(f"Path mismatch: missing_in_csv={missing_in_csv[:5]} extra_in_csv={extra_in_csv[:5]}")
++    for _, r in hf.iterrows():
++        cr = csv_by_path[r["Path"]]
++        for f in FINDINGS_CHECKED:
++            hval = int(r[f])
++            cval = float(cr[f])
++            if hval not in (2, 3):
++                raise DataGateError(f"{r['Path']} {f}: HF label {hval} not absent(2)/present(3) in validation")
++            if (hval == 2 and cval != 0.0) or (hval == 3 and cval != 1.0):
++                raise DataGateError(f"{r['Path']} {f}: HF={hval} CSV={cval} mismatch")
++    return {"n_images": int(len(hf)), "findings_checked": FINDINGS_CHECKED}
++
++
++def group_studies(hf):
++    studies = {}
++    for _, r in hf.iterrows():
++        m = re.match(r"CheXpert-v1\.0-small/valid/(patient\d+)/(study\d+)/(view\d+_(frontal|lateral))\.jpg$", r["Path"])
++        if not m:
++            raise DataGateError(f"unexpected Path format: {r['Path']}")
++        pid, study, view = m.group(1), m.group(2), m.group(3)
++        studies.setdefault((pid, study), []).append((view, r))
++    return studies
++
++
++def select_single_frontal(studies):
++    """정확히 영상 하나이고 frontal인 study만 선택한다. 동일 환자에 그런 study가 둘 이상이면 study명으로 정렬한 첫 study만 쓴다."""
++    single_by_patient = {}
++    for (pid, study), views in studies.items():
++        if len(views) != 1:
++            continue
++        vname, r = views[0]
++        if "frontal" not in vname:
++            continue
++        single_by_patient.setdefault(pid, []).append((study, vname, r))
++    out, dropped_multi_study = {}, []
++    for pid, items in single_by_patient.items():
++        if len(items) > 1:
++            dropped_multi_study.append(pid)
++            items = sorted(items, key=lambda t: t[0])
++        out[pid] = items[0]
++    return out, dropped_multi_study
++
++
++def ahash(im, size=16):
++    im = im.convert("L").resize((size, size), Image.LANCZOS)
++    arr = np.asarray(im, dtype=np.float64)
++    return (arr > arr.mean()).astype(np.uint8)
++
++
++def legacy_dedup_check(patient_images):
++    """patient_images: {patient_id: jpeg bytes}. legacy chexpert 샘플과 average-hash 거리를 계산한다."""
++    legacy_files = sorted(glob.glob(os.path.join(LEGACY_DIR, "*.jpg")))
++    if not legacy_files:
++        raise DataGateError(f"no legacy chexpert files found in {LEGACY_DIR}")
++    hashes = {pid: ahash(Image.open(io.BytesIO(b))) for pid, b in patient_images.items()}
++    out = []
++    for lf in legacy_files:
++        lh = ahash(Image.open(lf))
++        best_pid, best_dist = None, None
++        for pid, h in hashes.items():
++            d = int((h != lh).sum())
++            if best_dist is None or d < best_dist:
++                best_pid, best_dist = pid, d
++        out.append({"legacy_file": os.path.basename(lf), "best_match_patient": best_pid, "hamming_dist_256": best_dist,
++                    "near_duplicate": best_dist < DEDUP_HAMMING_THRESHOLD})
++    return out
++
++
++def build(a):
++    os.makedirs(IMG_DIR, exist_ok=True)
++    if os.path.exists(MANIFEST_PATH):
++        raise DataGateError(f"{MANIFEST_PATH} exists (not overwriting; delete manually if a rebuild is intended)")
++    hf, csv_by_path = load_sources()
++    cross = cross_check(hf, csv_by_path)
++    studies = group_studies(hf)
++    view_counts = {}
++    for v in studies.values():
++        view_counts[len(v)] = view_counts.get(len(v), 0) + 1
++    single, dropped_multi_study = select_single_frontal(studies)
++    patient_images, labels = {}, {}
++    for pid, (study, vname, r) in single.items():
++        img_bytes = r["image"]["bytes"]
++        patient_images[pid] = img_bytes
++        img_path = os.path.join(IMG_DIR, f"{pid}.jpg")
++        with open(img_path, "wb") as f:
++            f.write(img_bytes)
++        arr = np.asarray(Image.open(io.BytesIO(img_bytes)))
++        cm = "present" if int(r["Cardiomegaly"]) == 3 else "absent"
++        pe = "present" if int(r["Pleural Effusion"]) == 3 else "absent"
++        labels[pid] = {"path": r["Path"], "study": study, "view": vname, "ap_pa": int(r["AP/PA"]),
++                       "cardiomegaly": cm, "pleural_effusion": pe, "category": f"{cm}_{pe}",
++                       "file_sha256": sha(img_bytes), "pixel_sha256": sha(arr.tobytes())}
++    dedup = legacy_dedup_check(patient_images)
++    near_dupes = [d for d in dedup if d["near_duplicate"]]
++    if near_dupes:
++        raise DataGateError(f"legacy near-duplicate candidates found (manual review needed): {near_dupes}")
++    cats = {}
++    for pid, l in labels.items():
++        cats.setdefault(l["category"], []).append(pid)
++    counts = {c: len(v) for c, v in cats.items()}
++    short = {c: counts.get(c, 0) for c in ("absent_absent", "present_absent", "absent_present", "present_present")
++             if counts.get(c, 0) < MIN_PER_CATEGORY}
++    if short:
++        raise DataGateError(f"category below minimum {MIN_PER_CATEGORY}: {short}")
++    from . import cx18_spec as CX
++    splits = CX.split_patients(cats)
++    with open(MANIFEST_PATH, "w") as f:
++        for pid in sorted(labels):
++            l = labels[pid]
++            f.write(json.dumps({"id": pid, "split": l["category"], "image": os.path.join(IMG_DIR, f"{pid}.jpg"),
++                                "file_sha256": l["file_sha256"], "pixel_sha256": l["pixel_sha256"]}) + "\n")
++    json.dump(labels, open(LABELS_PATH, "w"), indent=1, sort_keys=True)
++    json.dump(splits, open(SETS_PATH, "w"), indent=1, sort_keys=True)
++    prov = {"hf_revision": HF_REVISION, "hf_parquet_sha256": HF_PARQUET_SHA256, "medaug_csv_sha256": sha(open(MEDAUG_CSV, "rb").read()),
++            "cross_check": cross, "view_count_per_study": view_counts, "n_single_frontal": len(single),
++            "dropped_multi_study_patients": dropped_multi_study, "category_counts": counts, "legacy_dedup": dedup,
++            "n_patients_total": len(labels), "split_counts": {k: {c: len(v) for c, v in splits[k].items()} for k in splits}}
++    json.dump(prov, open(PROVENANCE_PATH, "w"), indent=1, sort_keys=True, default=str)
++    print(json.dumps({"n_patients": len(labels), "category_counts": counts, "view_count_per_study": view_counts,
++                      "split_counts": prov["split_counts"]}))
++
++
++def main():
++    ap = argparse.ArgumentParser()
++    sp = ap.add_subparsers(dest="cmd", required=True)
++    sp.add_parser("build")
++    a = ap.parse_args()
++    if a.cmd == "build":
++        build(a)
++
++
++if __name__ == "__main__":
++    main()
+diff --git a/rsna_diag/cx18_requests.py b/rsna_diag/cx18_requests.py
+new file mode 100644
+index 0000000..026c03f
+--- /dev/null
++++ b/rsna_diag/cx18_requests.py
+@@ -0,0 +1,91 @@
++"""iter_018 target-scope 진단(CheXpert) 요청 행렬. qa_requests.make_row/load_rows/RequestError를 그대로 재사용해
++request_id 계산·검증(qa_gen이 내부에서 호출하는 qa_requests.verify_row)을 RSNA 요청과 동일한 방식으로 공유한다.
++
++환자당 방향(main/aux) x 조건(D/U/T/Tscope) = 8개 요청. target 필드에는 방향 이름(main/aux)을 쓴다(질문 finding은
++cx18_spec.DIRECTIONS로 방향에서 유도되므로 별도 인코딩이 필요 없다). checkpoint는 항상 M0(base, adapter 없음)다.
++사용: python -m rsna_diag.cx18_requests build --stage d16 --set D16 --fmt plain
++"""
++import argparse
++import json
++import os
++
++from . import cx18_spec as CX, qa_protocol, qa_requests as Q
++
++OUT = "results/iter_018"
++CKPT = "M0"
++
++
++def load_manifest():
++    man = {}
++    for ln in open(f"{OUT}/manifests/infer_manifest.jsonl"):
++        r = json.loads(ln)
++        if r["id"] in man:
++            raise Q.RequestError(f"duplicate id in infer_manifest: {r['id']}")
++        man[r["id"]] = r
++    return man
++
++
++def load_sets():
++    return json.load(open(f"{OUT}/manifests/sets.json"))
++
++
++def load_labels():
++    return json.load(open(f"{OUT}/manifests/labels.json"))
++
++
++def patient_ids(sets, set_name):
++    s = sets[set_name]
++    ids = [pid for cat in CX.CATEGORIES for pid in s[cat]]
++    if len(set(ids)) != len(ids):
++        raise Q.RequestError(f"duplicate patient id across categories in set {set_name}")
++    return sorted(ids)
++
++
++def build_rows(pids, labels, man, fmt, stage, cfg_digest):
++    rows = []
++    for pid in pids:
++        item = man[pid]
++        cat = labels[pid]["category"]
++        if item["split"] != cat:
++            raise Q.RequestError(f"manifest split {item['split']} != label category {cat} for {pid}")
++        for direction in CX.DIRECTIONS:
++            for cond in CX.CONDITIONS:
++                prompt, ev_digest = CX.prompt_and_evidence(direction, cond, fmt, cat)
++                extra = {"direction": direction, "category": cat, "cond": cond}
++                row = Q.make_row(item, CKPT, None, direction, fmt, cond, prompt, ev_digest, cfg_digest, stage, extra=extra)
++                rows.append(row)
++    return rows
++
++
++def build(a):
++    sets, labels, man = load_sets(), load_labels(), load_manifest()
++    cfg, _ = qa_protocol.static_cfg()
++    pids = patient_ids(sets, a.set)
++    rows = build_rows(pids, labels, man, a.fmt, a.stage, cfg)
++    ids = [r["request_id"] for r in rows]
++    if len(set(ids)) != len(ids):
++        raise Q.RequestError("duplicate request_id in freshly built rows")
++    os.makedirs(f"{OUT}/requests", exist_ok=True)
++    p = f"{OUT}/requests/{a.stage}__{CKPT}.jsonl"
++    if os.path.exists(p):
++        raise Q.RequestError(f"{p} exists (not overwriting)")
++    with open(p, "w") as f:
++        for r in rows:
++            f.write(json.dumps(r) + "\n")
++    print(json.dumps({"stage": a.stage, "set": a.set, "n_patients": len(pids), "n_rows": len(rows)}))
++
++
++def main():
++    ap = argparse.ArgumentParser()
++    sp = ap.add_subparsers(dest="cmd", required=True)
++    b = sp.add_parser("build")
++    b.add_argument("--stage", required=True)
++    b.add_argument("--set", required=True)
++    b.add_argument("--fmt", default="plain")
++    a = ap.parse_args()
++    if a.cmd == "build":
++        build(a)
++
++
++if __name__ == "__main__":
++    main()
+diff --git a/rsna_diag/cx18_run.py b/rsna_diag/cx18_run.py
+new file mode 100644
+index 0000000..64398c4
+--- /dev/null
++++ b/rsna_diag/cx18_run.py
+@@ -0,0 +1,13 @@
++"""iter_018 실행 진입점: qa_run.OUT(=qa_requests.OUT)이 모듈 import 시 QA_RUN_ROOT 환경변수로 정해지므로,
++그 값을 이번 실행 경로(results/iter_018)로 고정한 뒤 qa_run.main()에 위임한다. qa_run/qa_gen 자체는 수정하지 않는다.
++사용: python -m rsna_diag.cx18_run --stage d16_plain --ckpts M0 --protocol P --workers 1 --gpus 0 --peak-gb 12 ...
++     (인자는 qa_run과 동일하게 그대로 전달된다)
++"""
++import os
++
++os.environ["QA_RUN_ROOT"] = "results/iter_018"
++
++from . import qa_run  # noqa: E402  (환경변수 설정 이후에 import해야 qa_requests.OUT이 올바르게 바인딩된다)
++
++if __name__ == "__main__":
++    qa_run.main()
+diff --git a/rsna_diag/cx18_spec.py b/rsna_diag/cx18_spec.py
+new file mode 100644
+index 0000000..d591c00
+--- /dev/null
++++ b/rsna_diag/cx18_spec.py
+@@ -0,0 +1,101 @@
++"""iter_018 target-scope 진단(CheXpert) 질문·evidence 문장·분할 규칙 (결과를 보기 전에 고정).
++
++- 주방향 main: Cardiomegaly reference -> Pleural Effusion 질문. 보조 방향 aux: Pleural Effusion reference -> Cardiomegaly 질문.
++- 조건: D(무관 evidence 없음) < U(reference 있으나 결과 unavailable) < T(실제 값) < Tscope(T + 범위 한정 문장).
++- category는 (Cardiomegaly, Pleural Effusion) absent/present 4조합이며 이름은 f"{cardiomegaly}_{pleural_effusion}"이다.
++- parser·출력 형식(plain/json)은 qa_spec을 그대로 재사용한다 (target 이름에 의존하지 않는 whole-string yes/no 규칙).
++"""
++import hashlib
++
++from . import qa_spec as QS
++
++FINDINGS = {"CM": "cardiomegaly", "PE": "pleural effusion"}
++DIRECTIONS = {"main": {"target": "PE", "ref": "CM"}, "aux": {"target": "CM", "ref": "PE"}}
++CONDITIONS = ("D", "U", "T", "Tscope")
++CATEGORIES = ("absent_absent", "present_absent", "absent_present", "present_present")  # (Cardiomegaly, Pleural Effusion)
++
++FORMATS = QS.FORMATS
++parse_plain = QS.parse_plain
++parse_json = QS.parse_json
++parse_answer = QS.parse_answer
++
++
++def sha(b):
++    return hashlib.sha256(b if isinstance(b, bytes) else b.encode()).hexdigest()
++
++
++def cat_of(cm, pe):
++    return f"{cm}_{pe}"
++
++
++def cat_values(cat):
++    cm, pe = cat.split("_")
++    if cm not in ("absent", "present") or pe not in ("absent", "present"):
++        raise ValueError(f"bad category {cat!r}")
++    return cm, pe
++
++
++def gt_answer(direction, cat):
++    """direction의 target finding에 대한 정답 yes/no (reference와 무관, 실제 label만 본다)."""
++    cm, pe = cat_values(cat)
++    val = pe if direction == "main" else cm
++    return "yes" if val == "present" else "no"
++
++
++def ref_value(direction, cat):
++    """direction의 reference finding 실제 값 ('present'|'absent')."""
++    cm, pe = cat_values(cat)
++    return cm if direction == "main" else pe
++
++
++def question(target_key, fmt):
++    disp = FINDINGS[target_key]
++    return f"Is {disp} present in this chest radiograph? {FORMATS[fmt]}"
++
++
++def evidence_sentence(cond, ref_key, tgt_key, ref_val):
++    """cond: U|T|Tscope. ref_val: T/Tscope에서만 사용('present'|'absent'), U에서는 무시된다."""
++    ref_disp, tgt_disp = FINDINGS[ref_key], FINDINGS[tgt_key]
++    if cond == "U":
++        result = "unavailable"
++    elif cond in ("T", "Tscope"):
++        if ref_val not in ("present", "absent"):
++            raise ValueError(f"bad ref_val {ref_val!r} for condition {cond!r}")
++        result = ref_val
++    else:
++        raise ValueError(f"no evidence sentence for condition {cond!r}")
++    sent = f"A separate assessment of this same chest radiograph considered {ref_disp}. Result: {result}."
++    if cond == "Tscope":
++        sent += (f" This assessment concerns only {ref_disp}; it does not determine whether {tgt_disp} is present or absent. "
++                 f"Assess {tgt_disp} from the image.")
++    return sent
++
++
++def prompt_and_evidence(direction, cond, fmt, cat):
++    """returns (prompt, evidence_digest_or_None). D는 evidence 없음(=R과 공유); U/T/Tscope는 evidence 문장을 질문 앞에 붙인다."""
++    if direction not in DIRECTIONS:
++        raise ValueError(f"unknown direction {direction!r}")
++    if cond not in CONDITIONS:
++        raise ValueError(f"unknown condition {cond!r}")
++    d = DIRECTIONS[direction]
++    tgt, ref = d["target"], d["ref"]
++    q = question(tgt, fmt)
++    if cond == "D":
++        return q, None
++    ev = evidence_sentence(cond, ref, tgt, ref_value(direction, cat))
++    return f"{ev}\n\n{q}", sha(ev)
++
++
++def split_patients(cat_patient_ids, salt="iter018-v1", n_d=4, n_e=12):
++    """cat_patient_ids: {category: [patient_id,...]}. returns sets.json 형식 {"D16": {cat: [...]}, "E48": {...}, "F": {...}}.
++
++    각 category 안에서 sha256(salt + '|' + patient_id)로 정렬해 앞 n_d명을 D16, 다음 n_e명을 E48, 나머지를 F로 잠근다."""
++    out = {"D16": {}, "E48": {}, "F": {}}
++    for cat, ids in cat_patient_ids.items():
++        if len(set(ids)) != len(ids):
++            raise ValueError(f"duplicate patient id in category {cat}")
++        order = sorted(ids, key=lambda pid: sha(f"{salt}|{pid}"))
++        out["D16"][cat] = order[:n_d]
++        out["E48"][cat] = order[n_d:n_d + n_e]
++        out["F"][cat] = order[n_d + n_e:]
++    return out
+diff --git a/rsna_diag/qa_protocol.py b/rsna_diag/qa_protocol.py
+index 00d14f5..1886c04 100644
+--- a/rsna_diag/qa_protocol.py
++++ b/rsna_diag/qa_protocol.py
+@@ -25,6 +25,12 @@ REQUIRED_CODE = [
+     "rsna_diag/ev17_spec.py", "rsna_diag/ev17_requests.py", "rsna_diag/ev17_analysis.py", "rsna_diag/ev17_reuse.py",
+     # iter_016: semantic parser(qa_spec)·평가·보고·재사용 검증·확대 결정 코드
+     "rsna_diag/qa_eval.py", "rsna_diag/qa_report.py", "rsna_diag/qa_reuse.py", "rsna_diag/qa_scope.py", "rsna_diag/qa_pilot.py",
++    # iter_018: CheXpert target-scope 진단(질문 대상 범위 문구 이후의 다른 finding 손상). 과거(iter_015~017) protocol은
++    # 이 파일들이 존재하지 않던 시점의 REQUIRED_CODE로 잠겼으므로, 이 추가 이후에는 현재 qa_protocol.py로 재검증되지
++    # 않는다(이미 ev17_* 추가 때도 iter_016 protocol에 동일하게 발생한 기존 관례). 과거 반복은 해당 시점의 코드
++    # 커밋에서만 재검증한다.
++    "rsna_diag/cx18_spec.py", "rsna_diag/cx18_data.py", "rsna_diag/cx18_requests.py", "rsna_diag/cx18_analysis.py",
++    "rsna_diag/cx18_run.py",
+ ]
+ 
+ 
+diff --git a/test_rsna_iter018.py b/test_rsna_iter018.py
+new file mode 100644
+index 0000000..7b73528
+--- /dev/null
++++ b/test_rsna_iter018.py
+@@ -0,0 +1,206 @@
++"""iter_018 CPU 회귀 검사. 사용: python test_rsna_iter018.py results/iter_018/tests/fixtures_iter018.json"""
++import hashlib
++import json
++import math
++import os
++import sys
++import tempfile
++
++import numpy as np
++import pandas as pd
++from PIL import Image
++
++from rsna_diag import cx18_analysis as A, cx18_data as D, cx18_spec as CX, qa_requests as Q
++
++RES = []
++
++
++def check(name, cond, detail=""):
++    RES.append({"name": name, "pass": bool(cond), "detail": str(detail)[:400]})
++
++
++def raises(fn, exc=Exception):
++    try:
++        fn()
++    except exc as e:
++        return True, str(e)[:200]
++    return False, ""
++
++
++# --- cx18_spec: 질문·evidence·정답
++check("question text", CX.question("PE", "plain") == "Is pleural effusion present in this chest radiograph? Answer only yes or no.")
++q, ev = CX.prompt_and_evidence("main", "D", "plain", "absent_absent")
++check("D has no evidence digest", ev is None)
++check("D prompt is bare question", q == CX.question("PE", "plain"))
++q, ev = CX.prompt_and_evidence("main", "U", "plain", "present_present")
++check("U mentions unavailable", "Result: unavailable." in q and ev is not None)
++check("U prompt ends with question", q.endswith(CX.question("PE", "plain")))
++q, ev = CX.prompt_and_evidence("main", "T", "plain", "present_absent")
++check("T uses actual cardiomegaly value (present)", "considered cardiomegaly. Result: present." in q)
++q2, ev2 = CX.prompt_and_evidence("main", "T", "plain", "absent_present")
++check("T uses actual cardiomegaly value (absent)", "considered cardiomegaly. Result: absent." in q2)
++check("T evidence digest differs by ref value", ev != ev2)
++q, ev = CX.prompt_and_evidence("main", "Tscope", "plain", "present_absent")
++check("Tscope adds scope sentence", "concerns only cardiomegaly" in q and "Assess pleural effusion from the image." in q)
++check("Tscope does not leak pleural effusion truth", "considered pleural effusion" not in q)
++# 역방향: 이름 교환
++q, ev = CX.prompt_and_evidence("aux", "Tscope", "plain", "present_absent")
++check("aux question asks cardiomegaly", q.strip().startswith("A separate assessment") and "Is cardiomegaly present" in q)
++check("aux Tscope references pleural effusion (swapped)", "considered pleural effusion" in q and "concerns only pleural effusion" in q)
++check("aux does not leak cardiomegaly truth text via ref", "considered cardiomegaly" not in q)
++
++check("gt_answer main uses PE", CX.gt_answer("main", "present_present") == "yes" and CX.gt_answer("main", "absent_present") == "yes"
++      and CX.gt_answer("main", "present_absent") == "no" and CX.gt_answer("main", "absent_absent") == "no")
++check("gt_answer aux uses CM", CX.gt_answer("aux", "present_absent") == "yes" and CX.gt_answer("aux", "absent_absent") == "no")
++check("ref_value main uses CM", CX.ref_value("main", "present_absent") == "present" and CX.ref_value("main", "absent_present") == "absent")
++check("ref_value aux uses PE", CX.ref_value("aux", "present_absent") == "absent" and CX.ref_value("aux", "absent_present") == "present")
++check("bad category rejected", raises(lambda: CX.cat_values("weird"), ValueError)[0])
++check("bad ref_val rejected for T", raises(lambda: CX.evidence_sentence("T", "CM", "PE", "maybe"), ValueError)[0])
++
++# --- split_patients: 결정적, 중복 없음, D<E<F, 정확한 개수
++cats = {"absent_absent": [f"p{i}" for i in range(30)], "present_absent": [f"q{i}" for i in range(24)]}
++s1 = CX.split_patients(cats)
++s2 = CX.split_patients(cats)
++check("split deterministic", s1 == s2)
++for c in cats:
++    d16, e48, f = set(s1["D16"][c]), set(s1["E48"][c]), set(s1["F"][c])
++    check(f"split sizes {c}", len(d16) == 4 and len(e48) == 12)
++    check(f"split disjoint {c}", not (d16 & e48) and not (d16 & f) and not (e48 & f))
++    check(f"split covers all {c}", d16 | e48 | f == set(cats[c]))
++check("split rejects duplicate id", raises(lambda: CX.split_patients({"absent_absent": ["p1", "p1"]}), ValueError)[0])
++
++# --- cx18_data: cross_check, study grouping, dedup, label encoding gate
++def mkrow(path, cm, pe, ap_pa=0, extra=None):
++    base = {"Path": path, "AP/PA": ap_pa, "Cardiomegaly": cm, "Pleural Effusion": pe, "Lung Opacity": 2, "Edema": 2,
++            "Atelectasis": 2, "Consolidation": 2, "Pneumothorax": 2}
++    if extra:
++        base.update(extra)
++    return base
++
++
++hf_rows = [
++    mkrow("CheXpert-v1.0-small/valid/patient00001/study1/view1_frontal.jpg", 3, 2),
++    mkrow("CheXpert-v1.0-small/valid/patient00002/study1/view1_frontal.jpg", 2, 3),
++    mkrow("CheXpert-v1.0-small/valid/patient00003/study1/view1_frontal.jpg", 3, 3),
++    mkrow("CheXpert-v1.0-small/valid/patient00004/study1/view1_lateral.jpg", 2, 2),   # lateral-only study -> excluded
++    mkrow("CheXpert-v1.0-small/valid/patient00005/study1/view1_frontal.jpg", 2, 2),
++    mkrow("CheXpert-v1.0-small/valid/patient00005/study1/view2_lateral.jpg", 2, 2),   # 2-view study -> excluded
++]
++hf = pd.DataFrame(hf_rows)
++csv_by_path = {r["Path"]: {"Path": r["Path"], "Cardiomegaly": 1.0 if r["Cardiomegaly"] == 3 else 0.0,
++                            "Pleural Effusion": 1.0 if r["Pleural Effusion"] == 3 else 0.0, "Lung Opacity": 0.0,
++                            "Edema": 0.0, "Atelectasis": 0.0, "Consolidation": 0.0, "Pneumothorax": 0.0} for r in hf_rows}
++cross = D.cross_check(hf, csv_by_path)
++check("cross_check ok on consistent synthetic data", cross["n_images"] == 6)
++bad_csv = dict(csv_by_path)
++p0 = hf_rows[0]["Path"]
++bad_csv[p0] = dict(bad_csv[p0], Cardiomegaly=0.0)   # HF present(3) vs CSV absent(0.0) mismatch
++check("cross_check rejects label mismatch", raises(lambda: D.cross_check(hf, bad_csv), D.DataGateError)[0])
++missing_csv = {k: v for k, v in csv_by_path.items() if k != p0}
++check("cross_check rejects missing Path", raises(lambda: D.cross_check(hf, missing_csv), D.DataGateError)[0])
++uncertain_csv = dict(csv_by_path)
++hf2 = hf.copy()
++hf2.loc[hf2["Path"] == p0, "Cardiomegaly"] = 1  # uncertain code, not absent/present
++check("cross_check rejects non-absent/present HF code", raises(lambda: D.cross_check(hf2, csv_by_path), D.DataGateError)[0])
++
++studies = D.group_studies(hf)
++check("group_studies count", len(studies) == 5)
++single, dropped = D.select_single_frontal(studies)
++check("select_single_frontal picks frontal-only single-view studies", set(single) == {"patient00001", "patient00002", "patient00003"})
++check("select_single_frontal drops lateral-only and multi-view", "patient00004" not in single and "patient00005" not in single)
++check("select_single_frontal no dropped-multi-study in this fixture", dropped == [])
++
++# 동일 환자 두 study(둘 다 single frontal) -> study명 정렬로 첫 study만
++hf3 = pd.DataFrame(hf_rows[:3] + [mkrow("CheXpert-v1.0-small/valid/patient00001/study2/view1_frontal.jpg", 2, 2)])
++studies3 = D.group_studies(hf3)
++single3, dropped3 = D.select_single_frontal(studies3)
++check("multi-study patient picks first study by name", single3["patient00001"][0] == "study1")
++check("multi-study patient flagged", dropped3 == ["patient00001"])
++check("bad path format rejected", raises(lambda: D.group_studies(pd.DataFrame([mkrow("weird/path.jpg", 2, 2)])), D.DataGateError)[0])
++
++# ahash dedup: 동일 영상은 거리 0(중복 경보), 완전히 다른 노이즈 영상은 먼 거리
++rng = np.random.default_rng(0)
++im_a = Image.fromarray((rng.random((64, 64)) * 255).astype("uint8"), mode="L")
++buf = tempfile.NamedTemporaryFile(suffix=".jpg", delete=False)
++im_a.save(buf.name)
++im_b = Image.fromarray(np.zeros((64, 64), dtype="uint8"), mode="L")   # 전혀 다른 영상(상수 검정)
++h_a, h_b = D.ahash(im_a), D.ahash(im_b)
++check("ahash same image distance 0", int((h_a != h_a).sum()) == 0)
++check("ahash different image distance > threshold", int((h_a != h_b).sum()) >= D.DEDUP_HAMMING_THRESHOLD)
++os.unlink(buf.name)
++
++# --- cx18_requests: row 생성·재검증·oracle 누출 방지
++labels = {"p1": {"category": "present_absent", "path": "x", "study": "s", "view": "v", "ap_pa": 0,
++                 "cardiomegaly": "present", "pleural_effusion": "absent", "file_sha256": "f" * 64, "pixel_sha256": "g" * 64}}
++man = {"p1": {"id": "p1", "split": "present_absent", "image": "img.jpg", "file_sha256": "f" * 64, "pixel_sha256": "g" * 64}}
++from rsna_diag import qa_protocol as QP
++cfg, _ = QP.static_cfg()
++from rsna_diag import cx18_requests as CR
++rows = CR.build_rows(["p1"], labels, man, "plain", "test_stage", cfg)
++check("8 rows per patient", len(rows) == 8)
++ids = {r["request_id"] for r in rows}
++check("8 unique request ids", len(ids) == 8)
++for r in rows:
++    ok = Q.verify_row(r, cfg)
++    check(f"verify_row ok {r['target']}:{r['condition']}", ok)
++d_rows = [r for r in rows if r["condition"] == "D"]
++check("D rows have no evidence digest", all(r["evidence_digest"] is None for r in d_rows))
++tscope_main = [r for r in rows if r["target"] == "main" and r["condition"] == "Tscope"][0]
++check("Tscope(main) prompt reveals only cardiomegaly (present), not pleural effusion", "considered cardiomegaly. Result: present." in tscope_main["prompt"]
++      and "considered pleural effusion" not in tscope_main["prompt"].lower())
++check("Tscope(main) prompt does not assert a pleural effusion result (only the generic scope caveat)",
++      "pleural effusion. result:" not in tscope_main["prompt"].lower())
++check("mismatched split rejected", raises(lambda: CR.build_rows(["p1"], {"p1": dict(labels["p1"], category="absent_absent")}, man, "plain", "s2", cfg),
++                                           Q.RequestError)[0])
++
++# --- cx18_analysis: clopper_pearson·exp_half_width·bootstrap·flips
++lo, hi = A.clopper_pearson(0, 10)
++check("clopper_pearson k=0 lower is 0", lo == 0.0 and hi > 0)
++lo, hi = A.clopper_pearson(10, 10)
++check("clopper_pearson k=n upper is 1", hi == 1.0 and lo < 1.0)
++lo, hi = A.clopper_pearson(5, 10)
++check("clopper_pearson symmetric case brackets 0.5", lo < 0.5 < hi)
++# 알려진 값 대조 (Clopper-Pearson 95% CI for 5/10 는 대략 [0.1871, 0.8129])
++check("clopper_pearson 5/10 matches known reference", abs(lo - 0.1871) < 0.01 and abs(hi - 0.8129) < 0.01, (lo, hi))
++
++hw, detail = A.expected_half_width({"c": 0}, {"c": 12}, {"c": 56})
++check("expected_half_width zero-discordant still positive (smoothing)", hw > 0)
++hw2, _ = A.expected_half_width({"c": 6}, {"c": 12}, {"c": 56})
++check("expected_half_width increases with discordant rate", hw2 > hw)
++
++vec_a = {"c1": np.array([1.0, 1.0, 1.0, 1.0]), "c2": np.array([1.0, 1.0, 1.0, 1.0])}
++vec_b = {"c1": np.array([1.0, 1.0, 1.0, 1.0]), "c2": np.array([1.0, 1.0, 1.0, 1.0])}
++boot = A.paired_diff_bootstrap(vec_a, vec_b, n=200, seed=1)
++check("degenerate bootstrap all zero", boot["point"] == 0.0 and boot["ci"] == [0.0, 0.0])
++vec_c = {"c1": np.array([1.0, 1.0, 0.0, 0.0])}
++boot2 = A.paired_diff_bootstrap(vec_c, {"c1": np.array([0.0, 0.0, 0.0, 0.0])}, n=200, seed=1)
++check("nonzero paired diff bootstrap point", abs(boot2["point"] - 0.5) < 1e-9)
++
++cbound = A.conservative_macro_diff_bound({"c1": 0, "c2": 0}, {"c1": 0, "c2": 0}, {"c1": 12, "c2": 12})
++check("conservative bound is non-degenerate (not exactly [0,0])", cbound["macro_bound"][0] != 0.0 or cbound["macro_bound"][1] != 0.0, cbound["macro_bound"])
++check("conservative bound centered near 0", abs((cbound["macro_bound"][0] + cbound["macro_bound"][1]) / 2) < 0.2)
++
++tab = {("main", "D", "plain", "p1"): {"status": "valid", "answer": "yes", "ended_eos": True, "n_out": 1},
++       ("main", "Tscope", "plain", "p1"): {"status": "valid", "answer": "no", "ended_eos": True, "n_out": 1},
++       ("main", "D", "plain", "p2"): {"status": "valid", "answer": "no", "ended_eos": True, "n_out": 1},
++       ("main", "Tscope", "plain", "p2"): {"status": "truncated", "answer": None, "ended_eos": False, "n_out": 999}}
++labels2 = {"p1": {"category": "absent_present"}, "p2": {"category": "absent_absent"}}
++neg, pos = A.flips(tab, "main", "D", "Tscope", "plain", ["p1", "p2"], labels2)
++check("negative flip detected (correct->wrong, incl. correct->truncated)", neg == ["p1", "p2"] and pos == [])
++vb = A.valid_both(tab, "main", "D", "Tscope", "plain", ["p1", "p2"])
++check("valid_both excludes truncated", vb == ["p1"])
++
++want = {("main", "D", "plain", "p1"), ("main", "Tscope", "plain", "p1")}
++check("require_complete passes on exact set", A.require_complete({k: v for k, v in tab.items() if k in want}, ["main"], ["D", "Tscope"], "plain", ["p1"]))
++check("require_complete rejects missing", raises(lambda: A.require_complete({}, ["main"], ["D"], "plain", ["p1"]), A.AnalysisError)[0])
++dup_pairs = [({"target": "main", "condition": "D", "fmt": "plain", "id": "p1"}, {"suffix_text_raw": "yes<end_of_turn>", "ended_eos": True, "n_output_tokens": 1})] * 2
++check("answer_table rejects duplicate request", raises(lambda: A.answer_table(dup_pairs), A.AnalysisError)[0])
++
++n_pass = sum(r["pass"] for r in RES)
++out = {"n": len(RES), "passed": n_pass, "results": RES}
++json.dump(out, open(sys.argv[1], "w"), indent=1)
++print(f"{n_pass}/{len(RES)} passed")
++for r in RES:
++    if not r["pass"]:
++        print("FAIL", r["name"], r["detail"])
++sys.exit(0 if n_pass == len(RES) else 1)
