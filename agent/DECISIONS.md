@@ -372,5 +372,22 @@ MedGemma 1.5로 연구하는 것 자체가 큰 제약이라고 판단되면, 근
   - 1순위 선택 근거: 기존 자료의 정답 의미와 checkpoint가 확인돼 새 학습 없이도 중요한 경쟁 설명을 구분할 수 있다. 권한이나 연구 목표 변경이 필요하지 않으며, 진단 결과가 후속 내부 적응·모듈형 구성·다른 질문의 선택을 바꾼다.
 - ▶ **결정**: 자동 진행 (smart) — 1순위로 진행
 - ⏹ 중단: 오류: 브랜치 전환 보류: 자동 보관에서 제외되는 파일이 있습니다. stash에 비밀정보·데이터를 넣지 않고 원본을 유지합니다: test_rsna_iter010_gpu.py (Claude 구현/실험 중)
+- ↻ 재실행: '계획 확인' 단계부터 이어서 (orchestrator 31c5d84)
+- ▶ **결정**: 자동 진행 (smart) — 1순위로 진행
+- 💾 **개발 이력 체크포인트** `3265f117bf3f4de99ba084f2c9b4e476568f24bd`: implementation_finished (검증 승인 아님)
+- 🔧 **Claude** (standard): 새 QA 요청·재개·GPU 검증 경로를 구현·검증했고(CPU 57/57, GPU 재개 7/7), D36 형식 gate가 plain·JSON 모두 실패해 사전 규칙대로 E180 QA·E600은 실행하지 않았다(본 가설 H1–H4 미검증, E180 C bbox와 D12 evidence 구현 확인만 실행). [자체 검증 FAIL, 파일 1489개 변경]
+  - 새 브랜치 `approach/target-scope-diagnostic` ← 68117cf (68117cf); 이전 브랜치 미커밋 작업은 stash와 `stashed.patch`로 보관
+- 🔍 **리뷰** (GPT normal): [CONTINUE / inconclusive] D36 QA 432건에서 plain·JSON 형식 gate 실패를 재확인해 본 QA 평가는 보류했다. 의미 구분 능력 저하는 아직 미확인이며, 제한된 형식 보정 후 진단할 가치와 다른 질문으로 전환할 조건을 정해야 한다.
+  - 접근법 판단: 사전 형식 gate 실패로 본 QA 가설 검증에 도달하지 못했다. 제한된 형식 보정을 개발 자료에서 고정한 뒤 의미 차이를 판별할 가치가 있다.
+  - 목표 진전: 실제 GPU 생성과 형식 gate 실패는 확인했다. 그러나 도달 단계는 동작·형식 확인이며, 계획의 target 의미 가설을 해석 가능한 본실험으로 검증하지 못해 valid_experiment=false다. E180 bbox는 기존 직접 SFT 이득을 개발 자료에서 재확인했으나 새로운 성능 개선이나 contribution은 아니다. 형식 문제를 통제한 뒤 의미 구분 차이가 남는지는 미검증이다.
+  - 판정 범위: 이번 RSNA 개발 진단의 고정 Q_O/Q_A, plain·JSON 출력 지시, 엄격 parser, M0/B0/C 조건에서 형식 gate가 실패했다. E180 QA, E600 확대, seed 재현 및 H1–H4의 본 검증은 미실행이다. 전체 localization·경량 적응·의미 구분 능력의 실패로 일반화하지 않는다.
+  - 재사용 전 수정: qa_gen의 시작 시 read_all(--repair-tail)은 자신의 worker lock만 보유한 상태에서 모든 worker JSONL을 수정할 수 있다. 다른 살아 있는 worker의 부분 줄을 격리·덮어쓸 위험이 있다. qa_run 중단 시에도 자식을 회수하지 않고 run lock을 해제하므로, 소유권을 확인한 단일 복구 단계와 부모 중단 검사가 필요하다.
+  - 재사용 전 수정: test_rsna_iter015_gpu.py의 '기존 record 유지' 검사는 재개 후 동일 목록을 자기 자신과 비교한다. 중단 전 record snapshot을 보존해 비교하고, 재개 후 생성 수를 별도로 검사해야 한다. 현재 7/7을 다중 worker 안전 재개의 증명으로 쓰지 않는다.
+  - 재사용 전 수정: qa_run.verify_job은 현재 원본 file hash를 다시 계산하는 check_inputs를 호출하지 않는다. 완료 건 skip·평가 경로에서도 원본 file/pixel hash를 모두 검사해야 한다.
+  - 재사용 전 수정: labels.json과 qa_report.py는 stage2 protocol에 잠기지 않았고 qa_eval.py는 D36 protocol에 잠기지 않았다. qa_requests.bbox_records는 glob 결과를 환자 ID로 덮어쓰며 완료·중복·출처를 강제하지 않는다. 실제 평가 입력과 source adapter/record digest를 명시적으로 연결해야 한다.
+  - 재사용 전 수정: qa_pilot의 대표 표본 선택과 처리량 보고를 수정해야 한다. GPU 배정도 현재 목록 순서 대신 조회한 여유 메모리 순서를 반영해야 한다.
+  - 추후 개선: 긴 생성 조건의 지연·메모리와 CPU/RAM/I/O 경합은 후속 본실험 입력에서 필요한 범위로 보완한다. 이번 낮은 처리량 이득이나 GPU utilization은 현재 형식 관찰을 무효화하지 않는다.
+  - 추후 개선: 외부 데이터 일반화, 사전학습 노출, 다른 seed 및 독립 환자 확인은 후속 과제다. E600의 미사용 부분도 과거 confirm 이력이 있는 개발 자산이므로 자동으로 새로운 독립 test가 되지 않는다.
+  - 다음: 진단을 우선 권고한다. iter_015의 전략 비교를 이어받아 새 loss 학습보다 형식 보정으로 의미 차이를 판별하는 정보 이득을 평가한다. D36에서 Q_A의 정확한 Normal→no·Abnormal→yes 같은 제한된 규칙을 검토하고, 질문별 허용 응답과 invalid 처리를 결과 확인 전에 고정한다. strict 형식 지표는 별도로 유지하며 모순·설명문·bbox를 임의 구제하지 않는다. 필요한 실행기·평가 입력 결함만 수정한 뒤 E180 QA와 계획된 대조로 진행한다. 보정 후에도 target별 차이가 남으면 의미 보존 진단을 확대하고, 차이가 사라지거나 좁은 형식 현상만 남으면 다른 중요한 의료 VLM 질문으로 전환한다. E600·seed 확대는 정보 이득과 사전 기준으로 결정하고 reserve는 보존한다.
 - 📁 원본: `agent/runs/iter_015/`
 

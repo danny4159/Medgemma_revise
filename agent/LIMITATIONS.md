@@ -50,3 +50,20 @@ MedGemma 1.5에는 좌표 출력/grounding 능력 자체가 없다는 과거 주
 - 근거: agent/runs/iter_003/think/round_03.md
 - 사용·평가 검증: 공식 anatomy notebook 확인 기록: agent/runs/iter_003/think/round_03.md. 후속 계획은 이 출처를 다시 읽고 버전·사용 조건을 확인할 것.
 
+## qa-format-compliance-after-grounding-sft — observed
+
+在本次固定 RSNA D36 开发样本中，MedGemma 1.5 的 grounding SFT checkpoint B0/C 对 Q_A 的 plain yes/no 格式遵循率为 29/36、26/36，低于 base 的 35/36；JSON 格式也未通过预设 gate。这是特定问题、checkpoint 和严格 parser 条件下的有限观察，不能据此认定视觉能力或 target 语义区分能力下降。
+
+- 적용 목표 시작: iter_003
+- 최신 리뷰: agent/runs/iter_015/review.json
+- 근거: research/results/iter_015/gen/d36_{plain,json}__{M0,B0,C}/gen_worker*.jsonl：432 个实际 QA 输出。
+- 근거: research/results/iter_015/d36/format_decision.json：两种格式均未通过所有 checkpoint×target 的 valid rate≥0.95 条件。
+- 근거: 独立原始输出复核：B0/C 的 plain Q_A 分别有 7/10 个回答为 Normal；JSON 条件下大量回答为 bare yes/no。
+- 사용·평가 검증: 实际问题和 parser 与计划固定规则一致；未将 [] 解释为 no。
+- 사용·평가 검증: 432 个 QA 输出均以 EOS 结束，独立格式计数与保存结果一致。
+- 사용·평가 검증: 当前 636 张图像的 file/pixel hash 与 manifest 一致，labels 与原始 gt_manifest 的 category、patient、boxes 一致。
+- 사용·평가 검증: 官方使用方式采用 iter_009 已验证范围；本次未重新运行官方 GPU 示例。
+- 미해결: 在开发资料上固定仅适用于 Q_A 的精确 Normal/Abnormal 映射后，target 别性能差异是否仍然存在？
+- 미해결: 独立患者和其他训练 seed 是否复现该现象？
+- 미해결: 格式变化是否足以解释表面性能下降，尚未验证。
+

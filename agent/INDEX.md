@@ -20,7 +20,7 @@
 - iter_012 [CONTINUE] (normal/heavy/normal) <영상 조건부 집합 grounding: success> 💾783d2d04671ae296f3dc0c700e575f8af8e021c9 직접 LoRA SFT가 확인 양성 400명에서 prior_set보다 F1@0.3을 평균 0.216 높였고 독립 재계산도 일치했다. baseline은 검증됐지만 새 방법의 기여와 코드 전체 재사용 승인은 남아 있다. → 다음: 검증된 SFT baseline과 결과를 보존하고 실행기 재사용 결함을 필요한 범위에서 수정한다. 이번 confirm은 후속 개발에 사용하면 개발 자료로 전환하고 새로운 확인 집단을 보존한다. train/validation에서 직접 SFT의 학습량 부족 여부와 위치 정밀도·작은 병변·미검출 오류를 구분한 뒤, 기존 조사와 가까운 선행 방법을 대조해 추가 기여가 명확한 후보 하나를 선정한다. 충분한 직접 SFT 및 관련 방법 baseline을 포함하고, 고정된 대표 subset·1개 seed의 실제 생성 탐색에서 확대 기준을 충족하면 다중 seed와 두 번째 데이터셋으로 확장한다.
 - iter_013 [CONTINUE] (deep/standard/normal) <영상 조건부 집합 grounding: inconclusive> 💾d68840e0f9317700a8b585bcf6edbb8ef73703a0 실제 생성 비교에서 D−C의 최종 S_loc 차이는 +0.0032였고 V200 선택 조건을 충족하지 못해 확대를 보류했다. 결과는 유효하지만 전체 방법의 기각이나 코드 전체 재사용 승인을 뜻하지 않는다. → 다음: 현재 baseline·원시 응답을 보존하고 multi 집계와 선택 부재 표시를 보완한다. 수정된 잔여 오류 분석으로 자리별 loss의 추가 탐색과 box 기하 supervision 후보를 비교해 다음 의사결정을 바꿀 실험 하나를 선정한다. 새 방법의 차별성과 강한 직접 SFT 비교를 명시하고, 기존 guardrail을 현재 결과에 맞춰 완화하지 않는다. 후속 GPU 실행 전에 사용하는 실행 경로의 허용 GPU·메모리·완료 검증을 보완하며 reserve는 보존한다.
 - iter_014 [CONTINUE] (deep/standard/normal) <영상 조건부 집합 grounding: abandon> 💾698c161f51ec098b1263ea8a5acf4d2870930e0b GIoU 가중 학습의 추가 이득은 full-train에서도 입증되지 않아 현재 설계의 투자를 중단한다. 실제 생성 비교는 유효하지만 수치 검사 실패와 능력 전이·신규 기여의 미확인은 남아 있어 다음 계획에서 연구 방향을 재검토한다. → 다음: 새 loss 학습을 예약하지 말고 연구 방향을 재검토한다. 현재 방법 개선, 기존 base·SFT·추가 SFT checkpoint의 능력 전이·원인 진단, 다른 중요한 의료 VLM 질문으로의 전환을 정보 이득·비용·기여 가능성으로 비교한다. 기존 checkpoint 진단을 우선 후보로 검토하되 확정된 목표로 만들지 않는다. 내부 위치 학습을 유지한다면 강한 직접 SFT와 detector+VLM 또는 encoder+head 대안을 공정한 입력·학습량·비용 조건에서 비교할 경로를 제시한다. 기존 자산으로 다음 선택을 구분할 최소 진단을 고정하고, 양성·음성·불확정 결과에 따른 행동을 사전에 정한다. 현재 결과·reserve는 보존하고 실제 사용할 모듈의 재사용 결함만 우선 해결한다.
-- iter_015 [진행 중]
+- iter_015 [CONTINUE] (deep/standard/normal) <질문 대상과 음성 의미 보존 진단: inconclusive> 💾3265f117bf3f4de99ba084f2c9b4e476568f24bd D36 QA 432건에서 plain·JSON 형식 gate 실패를 재확인해 본 QA 평가는 보류했다. 의미 구분 능력 저하는 아직 미확인이며, 제한된 형식 보정 후 진단할 가치와 다른 질문으로 전환할 조건을 정해야 한다. → 다음: 진단을 우선 권고한다. iter_015의 전략 비교를 이어받아 새 loss 학습보다 형식 보정으로 의미 차이를 판별하는 정보 이득을 평가한다. D36에서 Q_A의 정확한 Normal→no·Abnormal→yes 같은 제한된 규칙을 검토하고, 질문별 허용 응답과 invalid 처리를 결과 확인 전에 고정한다. strict 형식 지표는 별도로 유지하며 모순·설명문·bbox를 임의 구제하지 않는다. 필요한 실행기·평가 입력 결함만 수정한 뒤 E180 QA와 계획된 대조로 진행한다. 보정 후에도 target별 차이가 남으면 의미 보존 진단을 확대하고, 차이가 사라지거나 좁은 형식 현상만 남으면 다른 중요한 의료 VLM 질문으로 전환한다. E600·seed 확대는 정보 이득과 사전 기준으로 결정하고 reserve는 보존한다.
 
 ## 이전 목표들의 접근법 (참고용, 현재 목표의 재평가 횟수에는 안 들어감)
 
@@ -35,9 +35,9 @@
 - 해부구조에서 병변으로 grounding 전이 [approach/anatomy-lesion-transfer]: 1회 (iter_008), 유효한 실험 0회, 미분류 0회, 최근 판정: 사용자 보완으로 전환 (검증 미완료), 커밋: 없음
 - 정상 사용 조건의 병변 grounding 검증 [approach/grounding-usage-diagnostic]: 1회 (iter_009), 유효한 실험 1회, 미분류 0회, 최근 판정: success, 커밋: 39aa49a6fa5943ca0d3e0327a7874e68a2c878cb
 - 영상 조건부 집합 grounding [approach/conditional-set-grounding]: 5회 (iter_010, iter_011, iter_012, iter_013, iter_014), 유효한 실험 3회, 미분류 0회, 최근 판정: abandon, 커밋: 5581ed255a350e42a0ad422065edf13c56a33bf6, 8b030717b813bcbff85a2ffc5f52c9561a73f452, 783d2d04671ae296f3dc0c700e575f8af8e021c9, d68840e0f9317700a8b585bcf6edbb8ef73703a0, 698c161f51ec098b1263ea8a5acf4d2870930e0b
-- 질문 대상과 음성 의미 보존 진단 [approach/target-scope-diagnostic]: 1회 (iter_015), 유효한 실험 0회, 미분류 0회, 최근 판정: 진행 중, 커밋: 없음
+- 질문 대상과 음성 의미 보존 진단 [approach/target-scope-diagnostic]: 1회 (iter_015), 유효한 실험 0회, 미분류 0회, 최근 판정: inconclusive, 커밋: 3265f117bf3f4de99ba084f2c9b4e476568f24bd
 
-현재 연구 브랜치: approach/conditional-set-grounding (코드 위치: /SSD1_1TB/home/milab/daniel/08_medgemma/research)
+현재 연구 브랜치: approach/target-scope-diagnostic (코드 위치: /SSD1_1TB/home/milab/daniel/08_medgemma/research)
 
 ### 최근 계획의 대안 순위
 

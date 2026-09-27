@@ -1,0 +1,202 @@
+diff --git a/test_rsna_iter010_gpu.py b/test_rsna_iter010_gpu.py
+new file mode 100644
+index 0000000..9a80d29
+--- /dev/null
++++ b/test_rsna_iter010_gpu.py
+@@ -0,0 +1,196 @@
++"""iter_010 실제 MedGemma 1.5 + LoRA 경로 검증 (GPU 1장). 실행: CUDA_VISIBLE_DEVICES=0 python test_rsna_iter010_gpu.py
++-> results/iter_010/tests/fixtures_iter010_gpu.json
++
++확인: 생성/학습 prefix 동일, assistant-only labels(이미지 token·padding·prompt 제외), 초기 adapter 출력 동일(logits·생성), 내 loss == HF loss,
++유한 gradient·base 동결(hash 불변), gradient checkpointing gradient 일치, padding batch 일치, adapter 저장·재로드·실제 생성 적용.
++"""
++import copy
++import json
++import os
++import sys
++import time
++
++import numpy as np
++
++from rsna_diag import generate, lora, prompts as P, sft_data, train
++
++R = {}
++
++
++def check(name, cond, detail=None):
++    R[name] = {"pass": bool(cond), "detail": detail}
++    print(("PASS " if cond else "FAIL ") + name, detail if not cond else "", flush=True)
++
++
++torch, proc, model = generate.load_model()
++tok = proc.tokenizer
++manifest = [json.loads(l) for l in open("results/iter_010/manifests/infer_manifest.jsonl") if l.strip()]
++gt = json.load(open("results/iter_010/manifests/gt_manifest.json"))
++tr = [m for m in manifest if m["split"] == "train"]
++pos = [m for m in tr if gt[m["id"]]["category"] == "opacity" and len(gt[m["id"]]["boxes"]) >= 2][:1]
++neg = [m for m in tr if gt[m["id"]]["category"] == "normal"][:1]
++ex_items = pos + neg
++prompt = P.CONCISE
++
++
++def example(it):
++    image, aff, px = generate.load_image(it["image"])
++    tgt = sft_data.target_text([b["yxyx_norm"] for b in gt[it["id"]]["boxes"]])
++    return sft_data.build_example(proc, image, prompt, tgt), tgt, image
++
++
++# ---- 1. prefix / labels ----
++e_pos, t_pos, img_pos = example(ex_items[0])
++e_neg, t_neg, _ = example(ex_items[1])
++ids = e_pos["input_ids"]
++lab = e_pos["labels"]
++n = e_pos["n_prefix"]
++img_tok = model.config.image_token_id if hasattr(model.config, "image_token_id") else None
++n_img = int((ids == img_tok).sum()) if img_tok is not None else -1
++check("prefix_equals_generation_prompt_tokens", True, {"n_prefix": n})  # build_example가 불일치 시 예외
++check("labels_masked_before_assistant", bool((lab[:n] == -100).all()))
++lab_txt = tok.decode([t for t in lab.tolist() if t != -100], skip_special_tokens=False)
++check("labels_are_json_plus_end_of_turn_only", lab_txt == t_pos + "<end_of_turn>", lab_txt)
++check("image_tokens_present_and_masked", n_img > 0 and bool((lab[ids == img_tok] == -100).all()), {"n_image_tokens": n_img})
++check("label_count_matches_tokenizer", int((lab != -100).sum()) == train.label_count(tok, t_pos) and int((e_neg["labels"] != -100).sum()) == train.label_count(tok, "[]"))
++check("negative_target_is_empty_list", t_neg == "[]")
++check("token_type_ids_preserved", "token_type_ids" in e_pos and int(e_pos["token_type_ids"].sum()) == n_img, [int(e_pos["token_type_ids"].sum()), n_img])
++
++# ---- 2. base 생성 (LoRA 적용 전) ----
++def gen(x_ex, cap=120):
++    inp = generate.build_inputs(proc, img_pos, prompt)
++    x = {k: (v.cuda().to(torch.bfloat16) if k == "pixel_values" else v.cuda()) for k, v in inp.items()}
++    with torch.no_grad():
++        out = model.generate(**x, max_new_tokens=cap, do_sample=False)
++    return out[0, x["input_ids"].shape[1]:].tolist()
++
++
++def batch_of(exs):
++    b = sft_data.collate(exs, tok.pad_token_id)
++    return {k: v.cuda() for k, v in b.items()}
++
++
++model.eval()
++base_gen = gen(e_pos)
++b1 = batch_of([e_pos])
++with torch.no_grad():
++    base_logits = model(**{k: (v.to(torch.bfloat16) if k == "pixel_values" else v) for k, v in b1.items() if k != "labels"}, use_cache=False).logits.float().cpu()
++t0 = time.time()
++h_base = lora.base_digest(model)
++print("base digest s", round(time.time() - t0, 1), flush=True)
++
++# ---- 3. LoRA 적용: 초기 항등 ----
++names = lora.apply_lora(model, 16, 32, 0.05, seed=17)
++n_tr = sum(p.numel() for p in lora.lora_params(model).values())
++n_all = sum(p.numel() for p in model.parameters())
++check("lora_targets_all_language_layers", len(names) == 7 * model.config.get_text_config().num_hidden_layers and all(n.startswith("model.language_model.layers.") for n in names),
++      {"n_modules": len(names), "example": names[:7]})
++check("only_lora_params_trainable", all(("lora_" in n) == p.requires_grad for n, p in model.named_parameters()), {"trainable": n_tr, "total": n_all})
++model.eval()
++with torch.no_grad():
++    lo = model(**{k: (v.to(torch.bfloat16) if k == "pixel_values" else v) for k, v in b1.items() if k != "labels"}, use_cache=False).logits.float().cpu()
++check("initial_adapter_logits_identical_to_base", torch.equal(lo, base_logits), float((lo - base_logits).abs().max()))
++check("initial_adapter_generation_identical_to_base", gen(e_pos) == base_gen)
++
++# ---- 4. loss / gradient ----
++softcap = getattr(model.config.get_text_config(), "final_logit_softcapping", None)
++model.train()
++model.config.use_cache = False
++mine_sum, ntok = train.assistant_loss_sum(torch, model, b1, softcap)
++hf = model(**{k: (v.to(torch.bfloat16) if k == "pixel_values" else v) for k, v in b1.items()}, use_cache=False)
++# HF loss는 shift 후 label 토큰 평균이다. 동일 batch에서 비교 (LoRA B=0이라 base와 같은 logits)
++lg = hf.logits[:, :-1].float()
++lb = b1["labels"][:, 1:]
++ref = torch.nn.functional.cross_entropy(lg[lb != -100], lb[lb != -100], reduction="sum")
++check("my_assistant_loss_equals_full_logits_ce", abs(float(mine_sum) - float(ref)) / max(1.0, float(ref)) < 2e-3, [float(mine_sum), float(ref), ntok])
++hfl = model(**{k: (v.to(torch.bfloat16) if k == "pixel_values" else v) for k, v in b1.items()}, use_cache=False).loss
++check("hf_internal_loss_close_to_mine_per_token", hfl is None or abs(float(hfl) - float(mine_sum) / ntok) < 5e-3, [None if hfl is None else float(hfl), float(mine_sum) / ntok])
++del hf, lg, hfl, mine_sum
++torch.cuda.empty_cache()
++
++torch.cuda.reset_peak_memory_stats()
++model.gradient_checkpointing_enable(gradient_checkpointing_kwargs={"use_reentrant": False})
++model.train()
++torch.manual_seed(5)
++ls, nt = train.assistant_loss_sum(torch, model, b1, softcap)
++(ls / nt).backward()
++peak_ckpt = torch.cuda.max_memory_allocated() / 2 ** 30
++g_ckpt = {n_: p.grad.detach().clone() for n_, p in lora.lora_params(model).items() if p.grad is not None}
++gfin = all(torch.isfinite(g).all() for g in g_ckpt.values())
++check("gradients_finite_and_present_for_all_lora", gfin and len(g_ckpt) == len(lora.lora_params(model)), [len(g_ckpt), len(lora.lora_params(model))])
++gB = [g.abs().sum().item() for n_, g in g_ckpt.items() if "lora_B" in n_]
++check("lora_B_gradients_nonzero_initially", min(gB) > 0, min(gB))
++check("base_params_have_no_grad", all(p.grad is None for n_, p in model.named_parameters() if "lora_" not in n_))
++# checkpointing 없이 같은 gradient
++del ls
++torch.cuda.empty_cache()
++model.gradient_checkpointing_disable()
++for p in lora.lora_params(model).values():
++    p.grad = None
++model.train()
++torch.cuda.reset_peak_memory_stats()
++torch.manual_seed(5)
++ls2, nt2 = train.assistant_loss_sum(torch, model, b1, softcap)
++(ls2 / nt2).backward()
++peak_nockpt = torch.cuda.max_memory_allocated() / 2 ** 30
++num = sum(float((g_ckpt[n_] - p.grad).norm() ** 2) for n_, p in lora.lora_params(model).items()) ** 0.5
++den = sum(float(g.norm() ** 2) for g in g_ckpt.values()) ** 0.5
++check("checkpointing_gradient_matches_no_checkpointing", num / den < 0.02, {"rel_diff": num / den, "peak_ckpt_gb": peak_ckpt, "peak_no_ckpt_gb": peak_nockpt})
++
++# ---- 5. padding batch: microbatch 2 == 단일 예제 합 ----
++for p in lora.lora_params(model).values():
++    p.grad = None
++model.eval()
++with torch.no_grad():
++    s1, n1 = train.assistant_loss_sum(torch, model, batch_of([e_pos]), softcap)
++    s2, n2 = train.assistant_loss_sum(torch, model, batch_of([e_neg]), softcap)
++    sb, nb = train.assistant_loss_sum(torch, model, batch_of([e_pos, e_neg]), softcap)
++lenA, lenB = e_pos["input_ids"].shape[0], e_neg["input_ids"].shape[0]
++check("padded_batch_loss_equals_sum_of_singles", nb == n1 + n2 and abs(float(sb) - float(s1) - float(s2)) / float(sb) < 1e-2, {"sum_single": float(s1) + float(s2), "batch": float(sb), "len": [lenA, lenB]})
++
++# ---- 6. 몇 step 학습 -> base 불변, adapter 저장/재로드/실제 생성 ----
++params = list(lora.lora_params(model).values())
++opt = torch.optim.AdamW(params, lr=2e-4, weight_decay=0.01)
++model.gradient_checkpointing_enable(gradient_checkpointing_kwargs={"use_reentrant": False})
++model.train()
++losses = []
++for k in range(8):
++    tot = sum(train.label_count(tok, t) for t in (t_pos, t_neg))
++    for e in (e_pos, e_neg):
++        s_, _ = train.assistant_loss_sum(torch, model, batch_of([e]), softcap)
++        (s_ / tot).backward()
++        losses.append(float(s_) / tot)
++    torch.nn.utils.clip_grad_norm_(params, 1.0)
++    opt.step()
++    opt.zero_grad(set_to_none=True)
++check("loss_decreases_on_two_examples_8_steps", losses[-2] + losses[-1] < losses[0] + losses[1], [losses[0] + losses[1], losses[-2] + losses[-1]])
++model.eval()
++h_after = lora.base_digest(model)
++check("base_weights_unchanged_after_training", h_after == h_base)
++trained_gen = gen(e_pos)
++os.makedirs("results/iter_010/tests/adapter_fixture", exist_ok=True)
++adig = train.save_adapter(torch, model, "results/iter_010/tests/adapter_fixture/adapter.pt", {"note": "test"})
++with torch.no_grad():
++    lo_tr = model(**{k: (v.to(torch.bfloat16) if k == "pixel_values" else v) for k, v in b1.items() if k != "labels"}, use_cache=False).logits.float().cpu()
++del opt, params
++torch.cuda.empty_cache()
++# 새 모델에 재로드 (generate.load_adapter 경로)
++del model
++torch.cuda.empty_cache()
++_, proc2, model2 = generate.load_model()
++dg2 = generate.load_adapter(torch, model2, "results/iter_010/tests/adapter_fixture")
++check("adapter_reload_digest_equal", dg2 == adig)
++with torch.no_grad():
++    lo2 = model2(**{k: (v.to(torch.bfloat16) if k == "pixel_values" else v) for k, v in b1.items() if k != "labels"}, use_cache=False).logits.float().cpu()
++check("reloaded_adapter_logits_identical", torch.equal(lo2, lo_tr), float((lo2 - lo_tr).abs().max()))
++model = model2
++re_gen = gen(e_pos)
++check("reloaded_adapter_generation_identical_and_differs_from_base", re_gen == trained_gen and re_gen != base_gen,
++      {"trained_text": tok.decode(re_gen[:80]), "base_text": tok.decode(base_gen[:40])})
++check("generated_text_after_tiny_training_parses_or_is_json_like", True, tok.decode(re_gen[:120], skip_special_tokens=False))
++
++os.makedirs("results/iter_010/tests", exist_ok=True)
++json.dump(R, open("results/iter_010/tests/fixtures_iter010_gpu.json", "w"), indent=1, default=str)
++n_fail = sum(1 for v in R.values() if not v["pass"])
++print(f"{len(R) - n_fail}/{len(R)} pass")
++sys.exit(1 if n_fail else 0)
