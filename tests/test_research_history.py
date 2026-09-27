@@ -10,6 +10,48 @@ import research_history as history
 import test_orchestrator_workflow as fixtures
 
 
+class SecretDetectionTests(unittest.TestCase):
+    label = b"hf_" + b"internal_loss_close_to_mine_per_token"
+
+    def test_reviewed_check_label_is_allowed_without_renaming(self):
+        for quote in (b'"', b"'"):
+            data = b"    check(" + quote + self.label + quote + b", True)\n"
+            with self.subTest(quote=quote):
+                self.assertIsNotNone(history.SECRET.search(data))
+                self.assertEqual(history.content_reason(data), "")
+
+    def test_reviewed_label_is_not_a_file_wide_exception(self):
+        prefix = b'check("' + self.label + b'", True)\n'
+        for secret in (b"hf_" + b"a" * 30, b"sk-ant-" + b"a" * 30,
+                       b"-----BEGIN PRIVATE KEY-----", b'password="' + b"a" * 20 + b'"'):
+            with self.subTest(prefix=secret[:7]):
+                self.assertEqual(history.content_reason(prefix + secret), "비밀정보 패턴 감지")
+
+    def test_unknown_check_labels_still_fail_closed(self):
+        for label in (b"hf_" + b"a" * 30, b"hf_" + b"another_long_identifier_for_review",
+                      self.label + b"_extra"):
+            with self.subTest(label=label):
+                self.assertEqual(history.content_reason(b'check("' + label + b'", True)'),
+                                 "비밀정보 패턴 감지")
+
+    def test_reviewed_label_requires_exact_check_argument_context(self):
+        for data in (b'password="' + self.label + b'"',
+                     b'KEY="' + self.label + b'"',
+                     b'other("' + self.label + b'", True)',
+                     b'check("other", "' + self.label + b'")'):
+            with self.subTest(data=data):
+                self.assertEqual(history.content_reason(data), "비밀정보 패턴 감지")
+
+    def test_second_argument_token_in_same_call_remains_blocked(self):
+        data = b'check("' + self.label + b'", "hf_' + b"a" * 30 + b'")'
+        self.assertEqual(history.content_reason(data), "비밀정보 패턴 감지")
+
+    def test_binary_and_size_guards_are_not_bypassed(self):
+        data = b'check("' + self.label + b'", True)\n'
+        self.assertEqual(history.content_reason(data + b"\0"), "바이너리")
+        self.assertEqual(history.content_reason(data + b"a" * history.MAX_BYTES), "5MB 초과")
+
+
 class HistoryTests(unittest.TestCase):
     setUp = fixtures.WorkflowTests.setUp
     git = fixtures.WorkflowTests.git
@@ -284,6 +326,34 @@ class HistoryTests(unittest.TestCase):
         self.assertEqual(self.git("stash", "list"), "")
         self.assertEqual(self.git("branch", "--show-current"), "approach/old")
         self.assertEqual((self.repo / ".env").read_text(), "SECRET=private\n")
+
+    def test_reviewed_label_file_is_preserved_exactly_on_branch_switch(self):
+        self.git("checkout", "-b", "approach/old")
+        name = "test_rsna_iter010_gpu.py"
+        data = b'check("' + SecretDetectionTests.label + b'", True)\n'
+        (self.repo / name).write_bytes(data)
+        self.plan(2, approach_id="new")
+        files, excluded = history.source_state(self.repo)
+        self.assertIn(name, files)
+        self.assertNotIn(name, excluded)
+        loop.ensure_branch(2)
+        archive = history.load(loop.iter_dir(2) / "code_archive.json")
+        self.assertEqual(history.git(self.repo, "show", archive["ref"] + "^3:" + name), data)
+        self.assertEqual(self.git("branch", "--show-current"), "approach/new")
+        self.assertIn(name, (loop.iter_dir(2) / "stashed.patch").read_text())
+
+    def test_real_token_alongside_reviewed_label_still_blocks_branch_switch(self):
+        self.git("checkout", "-b", "approach/old")
+        name = "test_rsna_iter010_gpu.py"
+        data = (b'check("' + SecretDetectionTests.label + b'", True)\n'
+                + b'KEY="hf_' + b"a" * 30 + b'"\n')
+        (self.repo / name).write_bytes(data)
+        self.plan(2, approach_id="new")
+        with self.assertRaisesRegex(loop.AgentError, "자동 보관에서 제외"):
+            loop.ensure_branch(2)
+        self.assertEqual(self.git("stash", "list"), "")
+        self.assertEqual(self.git("branch", "--show-current"), "approach/old")
+        self.assertEqual((self.repo / name).read_bytes(), data)
 
 
 if __name__ == "__main__":

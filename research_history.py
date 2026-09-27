@@ -19,6 +19,13 @@ EXCLUDED_DIRS = {".git", ".claude", ".codex", "results", "data", "datasets", "hf
                  "eval_samples", "eval_results", "__pycache__", ".venv"}
 SECRET = re.compile(rb"-----BEGIN [A-Z ]*PRIVATE KEY-----|\b(?:sk-ant-|hf_)[A-Za-z0-9_-]{20,}"
                     rb"|(?i:api[_-]?key|access[_-]?token|password|secret)\s*[:=]\s*[\"'][A-Za-z0-9_/-]{16,}[\"']")
+# 검토된 비밀정보 오탐: iter_010의 HF loss 비교 항목명이다. hf_ 접두사 전체나 파일을
+# 허용하지 않고, check() 첫 인자에 있는 이 정확한 식별자만 예외로 둔다.
+_REVIEWED_CHECK_LABEL = b"hf_" + b"internal_loss_close_to_mine_per_token"
+_REVIEWED_CHECK_CALL = re.compile(
+    rb"(?m)^[ \t]*check\([ \t]*([\"'])(?P<label>"
+    + re.escape(_REVIEWED_CHECK_LABEL) + rb")\1[ \t]*,"
+)
 
 
 def git(repo, *args, env=None, data=None):
@@ -62,7 +69,9 @@ def content_reason(data):
         return "5MB 초과"
     if b"\0" in data:
         return "바이너리"
-    if SECRET.search(data):
+    reviewed_spans = {m.span("label") for m in _REVIEWED_CHECK_CALL.finditer(data)}
+    # 동일 파일의 다른 토큰·민감 값 대입은 계속 차단한다. 파일 단위 예외는 금지한다.
+    if any(m.span() not in reviewed_spans for m in SECRET.finditer(data)):
         return "비밀정보 패턴 감지"
     return ""
 
