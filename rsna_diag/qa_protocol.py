@@ -25,6 +25,12 @@ REQUIRED_CODE = [
     "rsna_diag/ev17_spec.py", "rsna_diag/ev17_requests.py", "rsna_diag/ev17_analysis.py", "rsna_diag/ev17_reuse.py",
     # iter_016: semantic parser(qa_spec)·평가·보고·재사용 검증·확대 결정 코드
     "rsna_diag/qa_eval.py", "rsna_diag/qa_report.py", "rsna_diag/qa_reuse.py", "rsna_diag/qa_scope.py", "rsna_diag/qa_pilot.py",
+    # iter_018: CheXpert target-scope 진단(질문 대상 범위 문구 이후의 다른 finding 손상). 과거(iter_015~017) protocol은
+    # 이 파일들이 존재하지 않던 시점의 REQUIRED_CODE로 잠겼으므로, 이 추가 이후에는 현재 qa_protocol.py로 재검증되지
+    # 않는다(이미 ev17_* 추가 때도 iter_016 protocol에 동일하게 발생한 기존 관례). 과거 반복은 해당 시점의 코드
+    # 커밋에서만 재검증한다.
+    "rsna_diag/cx18_spec.py", "rsna_diag/cx18_data.py", "rsna_diag/cx18_requests.py", "rsna_diag/cx18_analysis.py",
+    "rsna_diag/cx18_run.py",
 ]
 
 
