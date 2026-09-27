@@ -1,0 +1,747 @@
+diff --git a/rsna_diag/geometry.py b/rsna_diag/geometry.py
+index 3d65211..4a7c634 100644
+--- a/rsna_diag/geometry.py
++++ b/rsna_diag/geometry.py
+@@ -83,5 +83,18 @@ def norm_to_canvas(box_yxyx, top, left, side):
+             x1 * side / 1000.0 - left, y1 * side / 1000.0 - top]
+ 
+ 
++def norm_to_padded(box_yxyx, side):
++    """padding canvas 기준 [y0,x0,y1,x1] (0-1000) -> padding된 정사각 이미지 자체의 pixel xyxy
++    (top/left를 빼지 않는다; norm_to_canvas와 달리 padded 이미지 파일에 직접 적용하기 위한 함수)."""
++    y0, x0, y1, x1 = box_yxyx
++    return [x0 * side / 1000.0, y0 * side / 1000.0, x1 * side / 1000.0, y1 * side / 1000.0]
++
++
++def padded_to_norm(box_xyxy, side):
++    """padded 정사각 이미지 pixel xyxy -> normalized [y0,x0,y1,x1] (0-1000) (top/left를 더하지 않는다)."""
++    x0, y0, x1, y1 = box_xyxy
++    return [y0 * 1000.0 / side, x0 * 1000.0 / side, y1 * 1000.0 / side, x1 * 1000.0 / side]
++
++
+ def to_pil(rgb):
+     return Image.fromarray(rgb)
+diff --git a/rsna_diag/mi19_baseline.py b/rsna_diag/mi19_baseline.py
+index 2e26a5a..91162fc 100644
+--- a/rsna_diag/mi19_baseline.py
++++ b/rsna_diag/mi19_baseline.py
+@@ -48,11 +48,15 @@ def _ncc_map(image, template):
+ 
+ 
+ def condition_N(ref_path, target_path, ref_box_norm, pad_top_left_side):
+-    """returns (pred_box_norm, meta). ref_box_norm: R padding canvas [y0,x0,y1,x1] (0-1000)."""
++    """returns (pred_box_norm, meta). ref_box_norm: R padding canvas [y0,x0,y1,x1] (0-1000).
++
++    ref_path/target_path는 이미 padding된 정사각 PNG이므로, 좌표는 padded 이미지 pixel 공간에서
++    직접 다뤄야 한다 (geometry.norm_to_canvas/canvas_to_norm은 padding을 빼거나 더해 '원본'(비padded)
++    pixel 공간으로 변환하므로 여기서 쓰면 top/left만큼 어긋난다: norm_to_padded/padded_to_norm 사용)."""
+     top, left, side = pad_top_left_side
+     ref_img = torch.from_numpy(_gray_padded(ref_path))
+     tgt_img = torch.from_numpy(_gray_padded(target_path))
+-    x0, y0, x1, y1 = geometry.norm_to_canvas(ref_box_norm, top, left, side)
++    x0, y0, x1, y1 = geometry.norm_to_padded(ref_box_norm, side)
+     x0i, y0i, x1i, y1i = int(round(x0)), int(round(y0)), int(round(x1)), int(round(y1))
+     x0i, y0i = max(0, x0i), max(0, y0i)
+     x1i, y1i = max(x0i + 1, min(ref_img.shape[1], x1i)), max(y0i + 1, min(ref_img.shape[0], y1i))
+@@ -91,5 +95,5 @@ def condition_N(ref_path, target_path, ref_box_norm, pad_top_left_side):
+         return None, {"status": "no_valid_scale"}
+     x0p, y0p = best["col0"], best["row0"]
+     x1p, y1p = x0p + best["tw"], y0p + best["th"]
+-    box_norm = geometry.canvas_to_norm([x0p, y0p, x1p, y1p], top, left, side)
++    box_norm = geometry.padded_to_norm([x0p, y0p, x1p, y1p], side)
+     return box_norm, {"status": "ok", **best}
+diff --git a/rsna_diag/mi19_data.py b/rsna_diag/mi19_data.py
+index 702f658..dd4ff92 100644
+--- a/rsna_diag/mi19_data.py
++++ b/rsna_diag/mi19_data.py
+@@ -17,8 +17,8 @@ from PIL import Image
+ 
+ from . import geometry, mi19_mha as M
+ 
+-SOURCE = "results/iter_019/source"
+-DATA_DIR = "results/iter_019/data"
++SOURCE = "results/iter_020/source"
++DATA_DIR = "results/iter_020/data"
+ VERT_MAX_LABEL = 99  # 0 < label < 100
+ SLICE_SPACING_MIN_MM = 6.0
+ SLICE_SPACING_MAX_MM = 15.0
+@@ -65,17 +65,18 @@ class ZipCache:
+         return data, sha_bytes(data)
+ 
+ 
+-def instance_bboxes_per_slice(mask_vol):
+-    """mask_vol: (nz,ny,nx). returns {x_idx: {label: (row0,col0,row1,col1,area_px)}} for 0<label<=VERT_MAX_LABEL only.
++def instance_bboxes_per_slice(mask_vol, axes, n_sag):
++    """mask_vol: (nz,ny,nx). axes=(array_axis_sag,array_axis_row,array_axis_col) from mi19_mha.axis_layout.
++    returns {sag_idx: {label: (row0,col0,row1,col1,area_px)}} for 0<label<=VERT_MAX_LABEL only.
+     half-open bbox convention (row1,col1 = max index + 1)."""
+-    nz, ny, nx = mask_vol.shape
++    array_axis_sag, array_axis_row, array_axis_col = axes
+     labels = [int(v) for v in np.unique(mask_vol) if 0 < v <= VERT_MAX_LABEL]
+-    out = {x: {} for x in range(nx)}
++    out = {x: {} for x in range(n_sag)}
+     max_area = {}
+     for lab in labels:
+         lab_mask = mask_vol == lab
+-        for x in range(nx):
+-            sl = lab_mask[:, :, x]
++        for x in range(n_sag):
++            sl = M.take_slice(lab_mask, array_axis_sag, array_axis_row, array_axis_col, x)
+             if not sl.any():
+                 continue
+             rows = np.where(sl.any(axis=1))[0]
+@@ -122,15 +123,16 @@ def candidate_pairs(per_slice_x, max_area, spacing_x, nx):
+     return pairs
+ 
+ 
+-def select_patient_pair(pid, mask_vol, spacing_x):
+-    nz, ny, nx = mask_vol.shape
+-    per_slice_x, max_area = instance_bboxes_per_slice(mask_vol)
+-    pairs = candidate_pairs(per_slice_x, max_area, spacing_x, nx)
++def select_patient_pair(pid, mask_vol, spacing_sag, axes, n_sag):
++    """axes=(array_axis_sag,array_axis_row,array_axis_col). candidate/pair enumeration order is fixed
++    (ascending x1, then ascending x2, then ascending label) so selection is independent of any
++    incidental dict/set iteration order; only the SHA256(salt|...) values decide the pick."""
++    per_slice_x, max_area = instance_bboxes_per_slice(mask_vol, axes, n_sag)
++    pairs = candidate_pairs(per_slice_x, max_area, spacing_sag, n_sag)
+     if not pairs:
+         return None, {"n_candidate_pairs": 0}
+-    # 결정적 선택: (x1,x2) 쌍 -> salt로 하나 선택, 그 다음 공통 instance 중 2개를 salt로 선택
+-    pair_keys = [f"{pid}|pair|{x1}|{x2}" for x1, x2, _, _ in pairs]
+-    idx = int(hashlib.sha256(f"{pid}|pairsel".encode()).hexdigest(), 16) % len(pairs)
++    # 결정적 선택: (x1,x2) 쌍 -> SALT+pid로 하나 선택, 그 다음 공통 instance 중 2개를 SALT로 선택
++    idx = int(hashlib.sha256(f"{SALT}|{pid}|pairsel".encode()).hexdigest(), 16) % len(pairs)
+     x1, x2, common, dist_mm = pairs[idx]
+     if len(common) > 2:
+         # 두 인스턴스를 salt 순서로 선택 (SHA256(salt|label) 오름차순 상위 2개)
+@@ -138,8 +140,8 @@ def select_patient_pair(pid, mask_vol, spacing_x):
+         inst2 = sorted(common_sorted[:2])
+     else:
+         inst2 = common
+-    # R/T 역할: salt로 x1/x2 중 하나를 R로
+-    r_is_x1 = int(hashlib.sha256(f"{pid}|rrole".encode()).hexdigest(), 16) % 2 == 0
++    # R/T 역할: SALT+pid로 x1/x2 중 하나를 R로
++    r_is_x1 = int(hashlib.sha256(f"{SALT}|{pid}|rrole".encode()).hexdigest(), 16) % 2 == 0
+     r_idx, t_idx = (x1, x2) if r_is_x1 else (x2, x1)
+     info = {"n_candidate_pairs": len(pairs), "chosen_pair": [x1, x2], "dist_mm": dist_mm,
+             "common_instances_all": common, "chosen_instances": inst2, "r_idx": r_idx, "t_idx": t_idx}
+@@ -163,15 +165,24 @@ def gate_patients(overview_rows, out_dir=DATA_DIR):
+         except M.MhaError as e:
+             excluded.append({"patient": pid, "reason": f"mha_parse_error: {e}"})
+             continue
++        try:
++            j_sag, sag_sign = M.sagittal_axis(m["direction"], m["anatomical_orientation"])
++        except M.MhaError as e:
++            excluded.append({"patient": pid, "reason": f"unsupported_orientation: {e}"})
++            continue
++        axes = M.axis_layout(j_sag)
+         vol = m["array"]
+-        nz, ny, nx = vol.shape
+-        sx, sy, sz = m["spacing_xyz"]
+-        if nx < 2:
++        dim_xyz = m["dim_size_xyz"]
++        n_sag = dim_xyz[j_sag]
++        spacing_sag = m["spacing_xyz"][j_sag]
++        if n_sag < 2:
+             excluded.append({"patient": pid, "reason": "single_slice_volume"})
+             continue
+-        sel, info = select_patient_pair(pid, vol, sx)
++        sel, info = select_patient_pair(pid, vol, spacing_sag, axes, n_sag)
+         info.update({"patient": pid, "mask_file_sha256": filesha, "dim_size_xyz": m["dim_size_xyz"],
+-                     "spacing_xyz": m["spacing_xyz"], "offset_xyz": m["offset_xyz"], "direction": m["direction"]})
++                     "spacing_xyz": m["spacing_xyz"], "offset_xyz": m["offset_xyz"], "direction": m["direction"],
++                     "anatomical_orientation": m["anatomical_orientation"], "j_sag": j_sag, "sag_sign": sag_sign,
++                     "axes_sag_row_col": list(axes)})
+         if sel is None:
+             excluded.append({**info, "reason": "no_candidate_slice_pair"})
+             continue
+diff --git a/rsna_diag/mi19_eval.py b/rsna_diag/mi19_eval.py
+index 0ddc861..99b9c25 100644
+--- a/rsna_diag/mi19_eval.py
++++ b/rsna_diag/mi19_eval.py
+@@ -147,5 +147,10 @@ def paired_diff(rate_a_per_patient, rate_b_per_patient, patients, seed=19019, B=
+     idx = metrics.bootstrap_indices(len(patients), B=B, seed=seed)
+     mean_diff, lo, hi = metrics.paired_boot_ci(a, b, idx)
+     discordant = int(np.sum(a != b))
+-    return {"mean_diff": mean_diff, "ci95": [lo, hi], "n": len(patients), "discordant_n": discordant,
++    n = len(patients)
++    # discordant 비율의 95% 이항구간: paired 효과 차이의 CI가 아니라, discordance=0일 때
++    # bootstrap CI가 [0,0]이 되는 것을 "모집단 효과 영점"으로 오독하지 않기 위한 별도 지표다.
++    discordant_wilson_95 = metrics.wilson(discordant, n) if n else [float("nan"), float("nan")]
++    return {"mean_diff": mean_diff, "ci95": [lo, hi], "n": n, "discordant_n": discordant,
++           "discordant_rate": discordant / n if n else float("nan"), "discordant_wilson_95": discordant_wilson_95,
+            "a_pos": int(a.sum()), "b_pos": int(b.sum())}
+diff --git a/rsna_diag/mi19_fetch.py b/rsna_diag/mi19_fetch.py
+new file mode 100644
+index 0000000..8807a3f
+--- /dev/null
++++ b/rsna_diag/mi19_fetch.py
+@@ -0,0 +1,137 @@
++"""Parallel chunked HTTPS download with resume, for SPIDER Zenodo assets.
++
++Uses Range requests via urllib (no external binaries). Each worker writes
++disjoint byte ranges to the target file with os.pwrite, so partial progress
++survives interruption: a JSON sidecar records which chunks are confirmed
++written, and re-running skips those chunks after verifying the file's
++current size matches the expected total.
++"""
++import concurrent.futures as cf
++import hashlib
++import json
++import os
++import time
++import urllib.request
++
++CHUNK = 64 * 1024 * 1024
++
++
++def _progress_path(dest):
++    return dest + ".progress.json"
++
++
++def _load_progress(dest, total_size):
++    p = _progress_path(dest)
++    if not os.path.exists(p):
++        return set()
++    try:
++        with open(p) as f:
++            d = json.load(f)
++    except Exception:
++        return set()
++    if d.get("total_size") != total_size:
++        return set()
++    return set(tuple(x) for x in d.get("done", []))
++
++
++def _save_progress(dest, total_size, done):
++    p = _progress_path(dest)
++    tmp = p + ".tmp"
++    with open(tmp, "w") as f:
++        json.dump({"total_size": total_size, "done": sorted(list(done))}, f)
++    os.replace(tmp, p)
++
++
++def _fetch_chunk(url, start, end, max_retries=6):
++    last_err = None
++    for attempt in range(max_retries):
++        try:
++            req = urllib.request.Request(url, headers={"Range": f"bytes={start}-{end}"})
++            with urllib.request.urlopen(req, timeout=120) as r:
++                if r.status not in (200, 206):
++                    raise RuntimeError(f"unexpected status {r.status}")
++                data = r.read()
++            if len(data) != (end - start + 1):
++                raise RuntimeError(f"short read {len(data)} != {end - start + 1}")
++            return data
++        except Exception as e:
++            last_err = e
++            time.sleep(min(2 ** attempt, 30))
++    raise RuntimeError(f"chunk {start}-{end} failed after {max_retries} attempts: {last_err}")
++
++
++def download(url, dest, total_size, workers=8, chunk_size=CHUNK, log_every=10):
++    """Download url to dest (exactly total_size bytes) using parallel Range GETs.
++
++    Resumable: chunks already recorded as done in the progress sidecar are
++    skipped, provided dest already has the correct total_size on disk.
++    """
++    os.makedirs(os.path.dirname(dest), exist_ok=True)
++    fd = os.open(dest, os.O_RDWR | os.O_CREAT, 0o644)
++    try:
++        cur_size = os.fstat(fd).st_size
++        if cur_size != total_size:
++            os.ftruncate(fd, total_size)
++
++        chunks = []
++        start = 0
++        while start < total_size:
++            end = min(start + chunk_size, total_size) - 1
++            chunks.append((start, end))
++            start = end + 1
++
++        done = _load_progress(dest, total_size) if cur_size == total_size else set()
++        remaining = [c for c in chunks if c not in done]
++        t0 = time.time()
++        completed = len(done)
++
++        def work(c):
++            s, e = c
++            data = _fetch_chunk(url, s, e)
++            os.pwrite(fd, data, s)
++            return c
++
++        with cf.ThreadPoolExecutor(max_workers=workers) as ex:
++            futs = {ex.submit(work, c): c for c in remaining}
++            for fut in cf.as_completed(futs):
++                c = fut.result()
++                done.add(c)
++                completed += 1
++                if completed % log_every == 0 or completed == len(chunks):
++                    elapsed = time.time() - t0
++                    print(
++                        f"[mi19_fetch] {completed}/{len(chunks)} chunks, "
++                        f"{elapsed:.1f}s elapsed",
++                        flush=True,
++                    )
++                    _save_progress(dest, total_size, done)
++        _save_progress(dest, total_size, done)
++    finally:
++        os.close(fd)
++
++    final_size = os.path.getsize(dest)
++    if final_size != total_size:
++        raise RuntimeError(f"final size mismatch: {final_size} != {total_size}")
++    return final_size
++
++
++def sha256_of(path):
++    h = hashlib.sha256()
++    with open(path, "rb") as f:
++        while True:
++            b = f.read(1024 * 1024)
++            if not b:
++                break
++            h.update(b)
++    return h.hexdigest()
++
++
++def md5_of(path):
++    h = hashlib.md5()
++    with open(path, "rb") as f:
++        while True:
++            b = f.read(1024 * 1024)
++            if not b:
++                break
++            h.update(b)
++    return h.hexdigest()
+diff --git a/rsna_diag/mi19_manifest.py b/rsna_diag/mi19_manifest.py
+index 9fcaa08..04dd961 100644
+--- a/rsna_diag/mi19_manifest.py
++++ b/rsna_diag/mi19_manifest.py
+@@ -34,9 +34,10 @@ def check_coregistration(mask_hdr, img_meta, patient):
+         raise RuntimeError(f"{patient}: mask/image direction differ: {mask_hdr['direction']} != {img_meta['direction']}")
+ 
+ 
+-def instance_point_native(mask_vol, x_idx, label):
++def instance_point_native(mask_vol, sag_idx, axes, label):
+     """centroid에 가장 가까운 foreground pixel (row,col), half-open bbox 아님, 정확한 pixel 좌표."""
+-    sl = mask_vol[:, :, x_idx] == label
++    array_axis_sag, array_axis_row, array_axis_col = axes
++    sl = M.take_slice(mask_vol, array_axis_sag, array_axis_row, array_axis_col, sag_idx) == label
+     rows, cols = np.where(sl)
+     if rows.size == 0:
+         raise RuntimeError("empty instance slice (should not happen for eligible instance)")
+@@ -58,11 +59,14 @@ def build_one(pid, gate_entry, images_zc, masks_zc):
+                 "offset_xyz": img_m["offset_xyz"], "direction": img_m["direction"]}
+     check_coregistration(gate_entry, img_meta, pid)
+     img_vol = img_m["array"]
+-    sx, sy, sz = gate_entry["spacing_xyz"]
++    axes = tuple(gate_entry["axes_sag_row_col"])
++    array_axis_sag, array_axis_row, array_axis_col = axes
++    idx_row, idx_col = 2 - array_axis_row, 2 - array_axis_col
++    spacing_row, spacing_col = gate_entry["spacing_xyz"][idx_row], gate_entry["spacing_xyz"][idx_col]
+     lo, hi = R.volume_window(img_vol)
+     r_idx, t_idx = gate_entry["r_idx"], gate_entry["t_idx"]
+-    rgb_r, sr, sc, shape = R.render_slice(img_vol, r_idx, sy, sz, lo, hi)
+-    rgb_t, sr_t, sc_t, shape_t = R.render_slice(img_vol, t_idx, sy, sz, lo, hi)
++    rgb_r, sr, sc, shape = R.render_slice(img_vol, r_idx, axes, spacing_row, spacing_col, lo, hi)
++    rgb_t, sr_t, sc_t, shape_t = R.render_slice(img_vol, t_idx, axes, spacing_row, spacing_col, lo, hi)
+     if shape != shape_t:
+         raise RuntimeError(f"{pid}: R/T rendered shape differ {shape} vs {shape_t} (same volume expected identical)")
+     top, left, side = geometry.pad_offsets(*shape)
+@@ -87,7 +91,7 @@ def build_one(pid, gate_entry, images_zc, masks_zc):
+         t_box_native = gate_entry["per_slice_boxes"]["t"][str(lab)]
+         ref_norm = R.native_bbox_to_norm(r_box_native, sr, sc, shape, (top, left, side))
+         target_gt_norm = R.native_bbox_to_norm(t_box_native, sr, sc, shape, (top, left, side))
+-        pr, pc = instance_point_native(mask_vol, t_idx, lab)
++        pr, pc = instance_point_native(mask_vol, t_idx, axes, lab)
+         point_norm = R.native_point_to_norm((pr, pc), sr, sc, shape, (top, left, side))
+         instances.append({"label": lab, "ref_box_norm": ref_norm, "target_gt_norm": target_gt_norm,
+                           "point_norm": point_norm})
+@@ -125,7 +129,6 @@ def main():
+         return
+     images_zc = D.ZipCache(f"{SOURCE}/images.zip")
+     masks_zc = D.ZipCache(f"{SOURCE}/masks.zip")
+-    split = assign_split(sorted(eligible))
+     manifest = {}
+     errors = {}
+     for pid in sorted(eligible):
+@@ -133,6 +136,16 @@ def main():
+             manifest[pid] = build_one(pid, eligible[pid], images_zc, masks_zc)
+         except Exception as e:
+             errors[pid] = str(e)
++    # split은 build 성공 환자에서만 배정한다: gate-eligible이어도 build_one이 실패하면
++    # 조용히 제외하는 것이 아니라 errors.json에 남기고 split 대상에서 빠지게 한다.
++    if len(manifest) < 56:
++        json.dump({"status": "insufficient_built", "n_eligible": n, "n_built": len(manifest), "n_errors": len(errors)},
++                  open(f"{DATA_DIR}/manifest_status.json", "w"), indent=1)
++        json.dump(manifest, open(f"{DATA_DIR}/manifest.json", "w"), indent=1, default=str)
++        json.dump(errors, open(f"{DATA_DIR}/manifest_errors.json", "w"), indent=1)
++        print(json.dumps({"status": "insufficient_built", "n_eligible": n, "n_built": len(manifest)}))
++        return
++    split = assign_split(sorted(manifest))
+     json.dump(split, open(f"{DATA_DIR}/split.json", "w"), indent=1)
+     json.dump(manifest, open(f"{DATA_DIR}/manifest.json", "w"), indent=1, default=str)
+     json.dump(errors, open(f"{DATA_DIR}/manifest_errors.json", "w"), indent=1)
+diff --git a/rsna_diag/mi19_mha.py b/rsna_diag/mi19_mha.py
+index 0843edf..6af577e 100644
+--- a/rsna_diag/mi19_mha.py
++++ b/rsna_diag/mi19_mha.py
+@@ -110,4 +110,59 @@ def read_mha(path_or_bytes):
+     tm = hdr.get("TransformMatrix", [1, 0, 0, 0, 1, 0, 0, 0, 1])
+     direction = [tm[0:3], tm[3:6], tm[6:9]]
+     return {"array": arr, "dim_size_xyz": dim, "spacing_xyz": spacing, "offset_xyz": offset,
+-            "direction": direction, "element_type": etype, "header": hdr}
++            "direction": direction, "element_type": etype, "header": hdr,
++            "anatomical_orientation": hdr.get("AnatomicalOrientation")}
++
++
++def sagittal_axis(direction, anatomical_orientation, tol=0.5):
++    """index axis (0=x,1=y,2=z in DimSize order) that is dominantly aligned with the R/L physical
++    coordinate. `direction[j]` = index axis j's direction cosines in the file's physical frame
++    (MetaIO TransformMatrix row j, per https://docs.itk.org/en/latest/learn/metaio.html); by ITK/MetaIO
++    convention physical component 0 is the L-R axis. Cross-checked against AnatomicalOrientation
++    (index j must be labelled 'R' or 'L') so a single source is never trusted alone. Ambiguous
++    (no axis dominant, or two axes both dominant) or missing/invalid AnatomicalOrientation -> MhaError;
++    callers must treat that as an unsupported orientation, not guess.
++    """
++    if len(direction) != 3 or any(len(row) != 3 for row in direction):
++        raise MhaError(f"invalid direction matrix shape: {direction!r}")
++    col0 = [float(row[0]) for row in direction]
++    absvals = [abs(v) for v in col0]
++    order = sorted(range(3), key=lambda i: -absvals[i])
++    j_best, j_second = order[0], order[1]
++    if absvals[j_best] < tol:
++        raise MhaError(f"no axis dominantly aligned with R-L physical axis: direction column-0 {col0!r}")
++    if absvals[j_second] >= tol:
++        raise MhaError(f"ambiguous sagittal axis (two axes >= {tol} on R-L column): direction column-0 {col0!r}")
++    ao = anatomical_orientation
++    if not ao or not isinstance(ao, str) or len(ao.strip()) != 3:
++        raise MhaError(f"missing/invalid AnatomicalOrientation {ao!r}")
++    ao = ao.strip()
++    if any(ch not in "RLAPSI?" for ch in ao):
++        raise MhaError(f"unsupported AnatomicalOrientation characters {ao!r}")
++    if ao[j_best] not in "RL":
++        raise MhaError(f"direction column-0 dominant axis {j_best} not confirmed R/L by AnatomicalOrientation {ao!r}")
++    sign = 1.0 if col0[j_best] > 0 else -1.0
++    return j_best, sign
++
++
++def axis_layout(j_sag):
++    """returns (array_axis_sag, array_axis_row, array_axis_col) for slicing a (z,y,x) array along
++    index axis j_sag (0=x,1=y,2=z). array axis for index axis i is (2-i) since array shape is (z,y,x).
++    row/col follow the legacy x-sagittal convention (row from the higher remaining index axis,
++    col from the lower one), so j_sag=0 reproduces the original row=z, col=y layout exactly."""
++    remaining = sorted(a for a in range(3) if a != j_sag)
++    idx_col, idx_row = remaining[0], remaining[1]
++    return 2 - j_sag, 2 - idx_row, 2 - idx_col
++
++
++def take_slice(vol, array_axis_sag, array_axis_row, array_axis_col, idx):
++    """2D slice of a 3D array at index `idx` along array_axis_sag, oriented (row=array_axis_row,
++    col=array_axis_col). With 3 axes total, the two remaining axes after removing array_axis_sag
++    are already exactly {array_axis_row, array_axis_col}; only their order can need a transpose."""
++    sl = [slice(None)] * 3
++    sl[array_axis_sag] = idx
++    raw = vol[tuple(sl)]
++    remaining_axes_in_order = [a for a in range(3) if a != array_axis_sag]
++    if remaining_axes_in_order == [array_axis_row, array_axis_col]:
++        return raw
++    return raw.T
+diff --git a/rsna_diag/mi19_pipeline.py b/rsna_diag/mi19_pipeline.py
+index 735beb4..223676e 100644
+--- a/rsna_diag/mi19_pipeline.py
++++ b/rsna_diag/mi19_pipeline.py
+@@ -13,8 +13,8 @@ from . import mi19_protocol as P
+ from . import mi19_requests as Q
+ from . import mi19_run as RUN
+ 
+-DATA_DIR = "results/iter_019/data"
+-RUN_ROOT = "results/iter_019"
++DATA_DIR = "results/iter_020/data"
++RUN_ROOT = "results/iter_020"
+ 
+ 
+ def run_split(split, workers, peak_gb, gpus, out_root=RUN_ROOT, time_limit=None, max_requests=None):
+@@ -39,7 +39,12 @@ def run_split(split, workers, peak_gb, gpus, out_root=RUN_ROOT, time_limit=None,
+     rc1 = RUN.main_run(requests=phase1_path, out_dir=out_dir1, protocol=proto_path, workers=workers, gpus=gpus,
+                        peak_gb=peak_gb, time_limit=time_limit, max_requests=max_requests)
+     results_phase1 = {"phase1": {"out_dir": out_dir1, "rc": rc1}}
+-    # phase 2: S2 (S1 완료 record 필요)
++    if rc1 != 0:
++        # phase1이 완료되지 않으면 S1 record가 불완전할 수 있다(중단된 attempt의 부분 출력).
++        # S2를 구성하지 않고 여기서 멈춘다: phase1 실패 시 S2를 시작하지 않는다.
++        results_phase1["S2"] = {"out_dir": None, "rc": None, "skipped_reason": "phase1_incomplete"}
++        return results_phase1, phase1_path, None, manifest, pids
++    # phase 2: S2 (검증된 S1 완료 record 필요)
+     s1_records = {rid: r for rid, r in E.load_records(out_dir1).items() if r.get("condition") == "S1"}
+     s2_rows = Q.build_s2(manifest, pids, cfg, s1_records)
+     s2_path = f"{out_root}/requests/{split}__S2.jsonl"
+diff --git a/rsna_diag/mi19_protocol.py b/rsna_diag/mi19_protocol.py
+index 6317104..3311ec3 100644
+--- a/rsna_diag/mi19_protocol.py
++++ b/rsna_diag/mi19_protocol.py
+@@ -15,7 +15,7 @@ REQUIRED_CODE = [
+     "rsna_diag/generate.py", "rsna_diag/prompts.py", "rsna_diag/queue_lock.py", "rsna_diag/lock_protocol.py",
+     "rsna_diag/mi19_mha.py", "rsna_diag/mi19_render.py", "rsna_diag/mi19_data.py", "rsna_diag/mi19_manifest.py",
+     "rsna_diag/mi19_spec.py", "rsna_diag/mi19_requests.py", "rsna_diag/mi19_protocol.py", "rsna_diag/mi19_gen.py",
+-    "rsna_diag/mi19_run.py", "rsna_diag/mi19_baseline.py", "rsna_diag/mi19_eval.py",
++    "rsna_diag/mi19_run.py", "rsna_diag/mi19_baseline.py", "rsna_diag/mi19_eval.py", "rsna_diag/mi19_pipeline.py",
+ ]
+ 
+ 
+diff --git a/rsna_diag/mi19_render.py b/rsna_diag/mi19_render.py
+index dce67e6..c357425 100644
+--- a/rsna_diag/mi19_render.py
++++ b/rsna_diag/mi19_render.py
+@@ -10,6 +10,7 @@ import numpy as np
+ from PIL import Image
+ 
+ from . import geometry
++from . import mi19_mha as M
+ 
+ 
+ def volume_window(img_vol):
+@@ -31,22 +32,27 @@ def to_uint8(slice2d, lo, hi):
+     return np.round(a * 255.0).astype(np.uint8)
+ 
+ 
+-def resize_scale(spacing_y, spacing_z):
+-    """returns (scale_row, scale_col) so that physical pixel spacing becomes isotropic (= min(spacing_y,spacing_z))."""
+-    target = min(spacing_y, spacing_z)
+-    return spacing_z / target, spacing_y / target  # (row scale from z, col scale from y)
++def resize_scale(spacing_row, spacing_col):
++    """returns (scale_row, scale_col) so that physical in-plane pixel spacing becomes isotropic
++    (= min(spacing_row, spacing_col))."""
++    target = min(spacing_row, spacing_col)
++    return spacing_row / target, spacing_col / target
+ 
+ 
+-def render_slice(img_vol, x_idx, spacing_y, spacing_z, lo, hi):
+-    """img_vol: (nz,ny,nx). returns (uint8 RGB resized array, scale_row, scale_col, new_shape(h,w))."""
+-    native = img_vol[:, :, x_idx]  # (nz, ny) = (row=z, col=y)
++def render_slice(img_vol, sag_idx, axes, spacing_row, spacing_col, lo, hi):
++    """img_vol: (nz,ny,nx). axes=(array_axis_sag,array_axis_row,array_axis_col) from mi19_mha.axis_layout.
++    spacing_row/spacing_col are the physical ElementSpacing values for the row/col index axes
++    (i.e. spacing_xyz[idx_row], spacing_xyz[idx_col] with the same idx_row/idx_col used to build axes).
++    returns (uint8 RGB resized array, scale_row, scale_col, new_shape(h,w))."""
++    array_axis_sag, array_axis_row, array_axis_col = axes
++    native = M.take_slice(img_vol, array_axis_sag, array_axis_row, array_axis_col, sag_idx)
+     u8 = to_uint8(native, lo, hi)
+-    nz, ny = u8.shape
+-    scale_row, scale_col = resize_scale(spacing_y, spacing_z)
+-    new_h, new_w = max(1, round(nz * scale_row)), max(1, round(ny * scale_col))
++    nrow, ncol = u8.shape
++    scale_row, scale_col = resize_scale(spacing_row, spacing_col)
++    new_h, new_w = max(1, round(nrow * scale_row)), max(1, round(ncol * scale_col))
+     im = Image.fromarray(u8, mode="L").resize((new_w, new_h), resample=Image.BILINEAR)
+     rgb = np.repeat(np.asarray(im)[:, :, None], 3, axis=2)
+-    return rgb, new_h / nz, new_w / ny, (new_h, new_w)
++    return rgb, new_h / nrow, new_w / ncol, (new_h, new_w)
+ 
+ 
+ def native_bbox_to_norm(bbox_rc, scale_row, scale_col, new_shape, pad_top_left_side=None):
+diff --git a/rsna_diag/mi19_requests.py b/rsna_diag/mi19_requests.py
+index 83943d0..6179a5e 100644
+--- a/rsna_diag/mi19_requests.py
++++ b/rsna_diag/mi19_requests.py
+@@ -9,7 +9,7 @@ import os
+ 
+ from . import generate, mi19_spec as S
+ 
+-DATA_DIR = "results/iter_019/data"
++DATA_DIR = "results/iter_020/data"
+ 
+ 
+ def sha(b):
+diff --git a/rsna_diag/mi19_run.py b/rsna_diag/mi19_run.py
+index 0d07392..c527089 100644
+--- a/rsna_diag/mi19_run.py
++++ b/rsna_diag/mi19_run.py
+@@ -158,6 +158,16 @@ def main():
+ 
+ 
+ def run_stage(a):
++    # SIGTERM 처리를 run_stage 자체에 건다: main()의 CLI 진입 경로뿐 아니라 mi19_pipeline처럼
++    # main_run()을 같은 프로세스에서 직접 호출하는 경로에서도 부모가 죽을 때 자식을 정리한다.
++    prev_handler = signal.signal(signal.SIGTERM, _on_term)
++    try:
++        return _run_stage_inner(a)
++    finally:
++        signal.signal(signal.SIGTERM, prev_handler)
++
++
++def _run_stage_inner(a):
+     pdig = mi19_protocol.verify(a.protocol)
+     cfg, _ = mi19_protocol.static_cfg()
+     rows = Q.load_rows(a.requests, cfg)
+diff --git a/test_rsna_iter020_mri.py b/test_rsna_iter020_mri.py
+new file mode 100644
+index 0000000..96c5312
+--- /dev/null
++++ b/test_rsna_iter020_mri.py
+@@ -0,0 +1,164 @@
++"""iter_020 회귀 검사: MHA 방향/sagittal 축 결정, 일반화된 render_slice, NCC padding 좌표 수정.
++
++iter_019 리뷰에서 확인된 결함(needs_fix)에 대한 독립 fixture:
++- mi19_data/mi19_manifest가 항상 DimSize[0](x)를 sagittal 축으로 가정하던 버그
++  (실제 SPIDER masks/107_t2.mha처럼 z가 sagittal인 비항등 방향에서 잘못됨).
++- mi19_baseline.condition_N이 padded PNG를 norm_to_canvas(비padded 좌표)로 잘라 위치가 어긋나던 버그.
++결과: results/iter_020/tests/fixtures_mri.json
++"""
++import json
++import sys
++import zipfile
++
++import numpy as np
++from PIL import Image
++
++sys.path.insert(0, "/SSD1_1TB/home/milab/daniel/08_medgemma/research")
++from rsna_diag import mi19_mha as M
++from rsna_diag import mi19_render as R
++from rsna_diag import mi19_baseline as B
++from rsna_diag import geometry
++
++results = []
++
++
++def check(name, cond, detail=None):
++    results.append({"name": name, "pass": bool(cond), "detail": detail})
++
++
++def test_sagittal_axis_identity():
++    # x축(index0)이 R/L, 부호 양수 (원래 가정과 동일한 케이스)
++    direction = [[1, 0, 0], [0, 1, 0], [0, 0, 1]]
++    j, sign = M.sagittal_axis(direction, "RAI")
++    check("identity_j_sag", j == 0, j)
++    check("identity_sign", sign == 1.0, sign)
++    axes = M.axis_layout(j)
++    check("identity_axes", axes == (2, 0, 1), axes)  # array_axis_sag=2(x last axis), row=0(z),col=1(y)
++
++
++def test_sagittal_axis_permuted_z_is_sagittal():
++    # z(index2)가 R/L, 음의 부호 (실제 107_t2.mha와 유사한 패턴)
++    direction = [[0.0, 1.0, 0.0], [0.0, 0.0, -1.0], [-1.0, 0.0, 0.0]]
++    j, sign = M.sagittal_axis(direction, "ASL")
++    check("permuted_j_sag", j == 2, j)
++    check("permuted_sign", sign == -1.0, sign)
++    axes = M.axis_layout(j)
++    # remaining index axes = [0,1] -> idx_col=0,idx_row=1 -> array_axis_row=2-1=1, array_axis_col=2-0=2
++    check("permuted_axes", axes == (0, 1, 2), axes)
++
++
++def test_sagittal_axis_ambiguous_rejected():
++    # 두 축 모두 0.5 이상 -> ambiguous, 반드시 실패해야 함
++    direction = [[0.7, 0.7, 0.0], [0.7, -0.7, 0.0], [0.0, 0.0, 1.0]]
++    try:
++        M.sagittal_axis(direction, "R?S")
++        check("ambiguous_rejected", False)
++    except M.MhaError:
++        check("ambiguous_rejected", True)
++
++
++def test_sagittal_axis_string_mismatch_rejected():
++    # 행렬은 axis0이 R/L이라 하는데 문자열이 동의하지 않음 -> 교차검증 실패로 거부
++    direction = [[1, 0, 0], [0, 1, 0], [0, 0, 1]]
++    try:
++        M.sagittal_axis(direction, "ASI")  # ao[0]='A' not R/L
++        check("string_mismatch_rejected", False)
++    except M.MhaError:
++        check("string_mismatch_rejected", True)
++
++
++def test_real_107_t2_mask_orientation():
++    z = zipfile.ZipFile("/SSD1_1TB/home/milab/daniel/08_medgemma/research/results/iter_020/source/masks.zip")
++    data = z.read("masks/107_t2.mha")
++    m = M.read_mha(data)
++    check("107_dimsize", m["dim_size_xyz"] == [512, 512, 17], m["dim_size_xyz"])
++    j, sign = M.sagittal_axis(m["direction"], m["anatomical_orientation"])
++    check("107_j_sag_is_z", j == 2, j)  # only 17 sagittal slices -> must be index axis 2 (z), not x
++    axes = M.axis_layout(j)
++    array_axis_sag, array_axis_row, array_axis_col = axes
++    check("107_array_axis_sag", array_axis_sag == 0, array_axis_sag)  # array shape (17,512,512) -> axis0 has size 17
++    check("107_slice_count", m["array"].shape[array_axis_sag] == 17, m["array"].shape)
++
++
++def test_take_slice_matches_naive_for_identity():
++    vol = np.arange(2 * 3 * 4).reshape(2, 3, 4)  # (z,y,x) nz=2,ny=3,nx=4
++    axes = M.axis_layout(0)  # x sagittal, legacy case
++    for x in range(4):
++        got = M.take_slice(vol, *axes, x)
++        want = vol[:, :, x]  # legacy row=z,col=y
++        check(f"take_slice_identity_x{x}", np.array_equal(got, want))
++
++
++def test_take_slice_matches_naive_for_z_sagittal():
++    vol = np.arange(2 * 3 * 4).reshape(2, 3, 4)  # nz=2 (index axis2=z), ny=3(index1=y), nx=4(index0=x)
++    axes = M.axis_layout(2)  # z sagittal (index axis 2)
++    array_axis_sag, array_axis_row, array_axis_col = axes
++    check("z_sagittal_array_axis_sag", array_axis_sag == 0)  # array axis0 = z(idx2), size 2
++    for zi in range(2):
++        got = M.take_slice(vol, *axes, zi)
++        # remaining index axes = [0(x),1(y)]; idx_col=0(x), idx_row=1(y)
++        # array_axis_row = 2-1=1(y), array_axis_col=2-0=2(x) -> raw = vol[zi,:,:] already (y,x) = (row,col)
++        want = vol[zi, :, :]
++        check(f"z_sagittal_slice_{zi}", np.array_equal(got, want))
++
++
++def test_render_slice_generic_matches_legacy_shape():
++    nz, ny, nx = 6, 8, 3
++    vol = np.random.RandomState(0).rand(nz, ny, nx).astype(np.float32) * 100 + 1
++    lo, hi = R.volume_window(vol)
++    axes = M.axis_layout(0)
++    rgb, sr, sc, shape = R.render_slice(vol, 1, axes, spacing_row=2.0, spacing_col=1.0, lo=lo, hi=hi)
++    expect_h = round(nz * 2.0)
++    check("render_new_h", shape[0] == expect_h, (shape, expect_h))
++    check("render_new_w", shape[1] == ny, shape)
++    check("render_shape_matches_array", rgb.shape[:2] == shape)
++
++
++def test_ncc_finds_exact_patch_nonsquare_padding():
++    """비정사각(가로>세로) 원본에서 top=0, left>0이 되는 padding으로 NCC의 padded-좌표 처리를 검사한다.
++    수정 전 버그: norm_to_canvas가 원본(비padded) 좌표를 반환하는데 이를 그대로 padded PNG 크롭에
++    사용해 template이 left만큼 어긋났다."""
++    rng = np.random.RandomState(11)
++    h, w = 150, 220  # w > h -> left padding > 0, top == 0
++    img = (rng.rand(h, w) * 50 + 30).astype(np.uint8)
++    patch = (rng.rand(20, 30) * 255).astype(np.uint8)
++    r0, c0 = 80, 40
++    img[r0:r0 + 20, c0:c0 + 30] = patch
++    tgt = img.copy()
++    r1, c1 = 10, 150
++    tgt[r1:r1 + 20, c1:c1 + 30] = patch
++    top, left, side = geometry.pad_offsets(h, w)
++    check("padding_is_nonzero_top", top > 0 and left == 0, (top, left, side))
++    ref_padded, _ = geometry.pad_square(np.repeat(img[:, :, None], 3, axis=2))
++    tgt_padded, _ = geometry.pad_square(np.repeat(tgt[:, :, None], 3, axis=2))
++    ref_path, tgt_path = "/tmp/iter020_ncc_ref.png", "/tmp/iter020_ncc_tgt.png"
++    Image.fromarray(ref_padded).save(ref_path)
++    Image.fromarray(tgt_padded).save(tgt_path)
++    ref_box_norm = geometry.canvas_to_norm([c0, r0, c0 + 30, r0 + 20], top, left, side)
++    pred, meta = B.condition_N(ref_path, tgt_path, ref_box_norm, (top, left, side))
++    check("ncc_nonsquare_meta_ok", meta.get("status") == "ok", meta)
++    if pred is not None:
++        x0, y0, x1, y1 = geometry.norm_to_canvas(pred, top, left, side)
++        check("ncc_nonsquare_finds_row", abs(y0 - r1) <= 1, (y0, r1))
++        check("ncc_nonsquare_finds_col", abs(x0 - c1) <= 1, (x0, c1))
++        check("ncc_nonsquare_scale_near_1", abs(meta["scale"] - 1.0) < 1e-6, meta["scale"])
++    else:
++        check("ncc_nonsquare_finds_row", False)
++        check("ncc_nonsquare_finds_col", False)
++        check("ncc_nonsquare_scale_near_1", False)
++
++
++for fn in [test_sagittal_axis_identity, test_sagittal_axis_permuted_z_is_sagittal,
++           test_sagittal_axis_ambiguous_rejected, test_sagittal_axis_string_mismatch_rejected,
++           test_real_107_t2_mask_orientation, test_take_slice_matches_naive_for_identity,
++           test_take_slice_matches_naive_for_z_sagittal, test_render_slice_generic_matches_legacy_shape,
++           test_ncc_finds_exact_patch_nonsquare_padding]:
++    fn()
++
++n_pass = sum(1 for r in results if r["pass"])
++print(json.dumps({"n": len(results), "n_pass": n_pass, "results": results}, indent=1, default=str))
++import os
++os.makedirs("/SSD1_1TB/home/milab/daniel/08_medgemma/research/results/iter_020/tests", exist_ok=True)
++json.dump({"n": len(results), "n_pass": n_pass, "results": results},
++          open("/SSD1_1TB/home/milab/daniel/08_medgemma/research/results/iter_020/tests/fixtures_mri.json", "w"), indent=1, default=str)
++assert n_pass == len(results), "some fixtures failed"
