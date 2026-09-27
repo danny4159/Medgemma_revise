@@ -71,7 +71,8 @@ class ResearchStrategyTests(unittest.TestCase):
             prompts = []
 
             def run(cmd, *unused, **kwargs):
-                prompts.append(cmd[-1])
+                self.assertEqual(cmd[-1], "-")
+                prompts.append(kwargs["stdin_text"])
                 output.write_text("{}", encoding="utf-8")
 
             with patch.object(loop, "RESEARCH_POLICY_FILE", policy), \

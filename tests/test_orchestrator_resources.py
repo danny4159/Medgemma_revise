@@ -44,11 +44,13 @@ class ResourcePolicyTests(unittest.TestCase):
         output = self.root / "plan.json"
 
         def run(cmd, *args, **kwargs):
-            self.assertIn("현재 허용된 두 GPU", cmd[-1])
-            self.assertIn("가설 실패와 코드 보존", cmd[-1])
-            self.assertIn("일반 구현은 standard", cmd[-1])
-            self.assertIn("핵심 먼저, 상세 검증 유지", cmd[-1])
-            self.assertTrue(cmd[-1].endswith("실험 계획"))
+            self.assertEqual(cmd[-1], "-")
+            payload = kwargs["stdin_text"]
+            self.assertIn("현재 허용된 두 GPU", payload)
+            self.assertIn("가설 실패와 코드 보존", payload)
+            self.assertIn("일반 구현은 standard", payload)
+            self.assertIn("핵심 먼저, 상세 검증 유지", payload)
+            self.assertTrue(payload.endswith("실험 계획"))
             self.assertEqual(cmd[cmd.index("-s") + 1], "read-only")
             output.write_text("{}", encoding="utf-8")
 

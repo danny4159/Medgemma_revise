@@ -82,6 +82,7 @@ import argparse
 import datetime
 import contextlib
 import fcntl
+import hashlib
 import json
 import os
 import re
@@ -89,7 +90,9 @@ import signal
 import shutil
 import subprocess
 import sys
+import tempfile
 import threading
+import traceback
 import urllib.request
 import uuid
 
@@ -466,23 +469,47 @@ def agent_env(gpus):
     return env
 
 
-def run_streaming(cmd, log_path, timeout, env, on_line, cwd=PROJECT_DIR):
-    """명령을 실행하며 출력을 on_line으로 넘기고 log_path에 그대로 저장한다."""
+def run_streaming(cmd, log_path, timeout, env, on_line, cwd=PROJECT_DIR, *, stdin_text=None):
+    """출력은 실시간 기록하고, 긴 입력은 UTF-8 원문 그대로 임시 파일 stdin으로 전달한다."""
     timed_out = threading.Event()
     tail = []
 
-    with log_path.open("a", encoding="utf-8") as log_f:
-        proc = subprocess.Popen(
-            cmd,
-            cwd=cwd,
-            env=env,
-            text=True,
-            stdin=subprocess.DEVNULL,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.STDOUT,
-            bufsize=1,
-            start_new_session=True,
-        )
+    with contextlib.ExitStack() as stack:
+        log_f = None
+        try:
+            log_f = stack.enter_context(log_path.open("a", encoding="utf-8"))
+            input_source = subprocess.DEVNULL
+            if stdin_text is not None:
+                # PIPE에 큰 입력을 동기 write하면 stdout과 서로 막힐 수 있다. 닫으면 제거되는
+                # 비공개 임시 파일을 이용하며, 원문을 축약하거나 영구 로그에 복제하지 않는다.
+                payload = stdin_text.encode("utf-8")
+                input_source = stack.enter_context(tempfile.TemporaryFile(mode="w+b"))
+                input_source.write(payload)
+                input_source.seek(0)
+                log_f.write(f"[input] transport=stdin bytes={len(payload)} "
+                            f"sha256={hashlib.sha256(payload).hexdigest()}\n")
+                log_f.flush()
+            proc = subprocess.Popen(
+                cmd,
+                cwd=cwd,
+                env=env,
+                text=True,
+                encoding="utf-8",
+                stdin=input_source,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.STDOUT,
+                bufsize=1,
+                start_new_session=True,
+            )
+        except OSError as e:
+            # E2BIG·실행 파일 누락·권한·임시 파일 오류도 기록/Telegram 경로로 전달한다.
+            # 전체 cmd/env에는 프롬프트·민감 값이 들어갈 수 있으므로 오류에 넣지 않는다.
+            message = (f"{Path(cmd[0]).name} 실행 준비 실패 (errno={e.errno}): {e.strerror}. "
+                       f"로그: {log_path}")
+            if log_f is not None:
+                with contextlib.suppress(OSError):
+                    log_f.write(f"[launch_error] {message}\n")
+            raise AgentError(message) from e
         STATE["proc"] = proc
 
         def kill():
@@ -583,13 +610,15 @@ def run_codex(args, prompt, out_file, log_path, tier, schema=None):
     ]
     if schema:
         cmd += ["--output-schema", str(schema)]
-    cmd.append(resource_context(args) + prompt)
+    input_text = resource_context(args) + prompt
+    cmd.append("-")  # 전체 지시문은 stdin으로. 인자 크기 제한 때문에 내용을 자르지 않는다.
 
     out_file.unlink(missing_ok=True)
     try:
         run_streaming(
             cmd, log_path, args.gpt_timeout, agent_env(args.gpus),
             on_line=lambda line: print(f"  [gpt] {line}", end="", flush=True),
+            stdin_text=input_text,
         )
     finally:
         if log_path.exists():
@@ -2522,14 +2551,15 @@ def run_loop(args):
     print(f"기록: {RUNS_DIR}")
 
 
-if __name__ == "__main__":
+def cli_main():
+    """CLI 종료 경로를 한곳에 둬 예기치 않은 예외도 조용히 종료되지 않게 한다."""
     try:
         main()
     except StopRequested as e:
         record_stop(str(e))
         print(f"\n멈췄습니다 ({e}). 다시 실행하면 완료되지 않은 단계부터 이어서 진행합니다.")
         notify(f"⏹ 멈췄습니다 ({e}, {STATE['stage']} 중). 다시 실행하면 이어서 진행합니다.")
-        sys.exit(0)
+        return 0
     except AgentError as e:
         record_stop(f"오류: {e}")
         print(f"\n[ERROR] {e}")
@@ -2538,8 +2568,24 @@ if __name__ == "__main__":
             ("다음", "오류 내용을 확인하세요. 다시 실행하면 미완료 단계부터 이어갑니다."),
         ]))
         print("다시 실행하면 완료되지 않은 단계부터 이어서 진행합니다.")
-        sys.exit(1)
+        return 1
     except KeyboardInterrupt:
         record_stop("Ctrl+C")
         print("\n중단됨. 다시 실행하면 완료되지 않은 단계부터 이어서 진행합니다.")
-        sys.exit(130)
+        return 130
+    except Exception as e:
+        # 알림에는 종류만 표시한다. 상세 traceback은 실행 로그(stderr)에 보존한다.
+        traceback.print_exc()
+        reason = f"예기치 않은 오류: {type(e).__name__}"
+        record_stop(reason)
+        notify(notice("❌ 예기치 않은 오류로 중단", [
+            ("현재", f"iter_{STATE['n']:03d} / {STATE['stage']}" if STATE["n"] is not None else "시작 전"),
+            ("오류", type(e).__name__),
+            ("다음", "실행 로그의 traceback을 확인하세요. 완료 기록은 유지되며 수정 후 미완료 단계부터 재개합니다."),
+        ]))
+        return 1
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(cli_main())
