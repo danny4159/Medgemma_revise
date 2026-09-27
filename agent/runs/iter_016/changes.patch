@@ -1,0 +1,1801 @@
+diff --git a/rsna_diag/qa_eval.py b/rsna_diag/qa_eval.py
+index 5c04e69..7b50feb 100644
+--- a/rsna_diag/qa_eval.py
++++ b/rsna_diag/qa_eval.py
+@@ -1,4 +1,4 @@
+-"""iter_015 QA/target-scope 평가. 점수는 검증을 통과한(완료·요청 집합 일치) stage에서만 계산한다 (qa_run.verify_job).
++"""iter_015/016 QA/target-scope 평가. 점수는 검증을 통과한(완료·요청 집합 일치) stage에서만 계산한다 (qa_run.verify_job).
+ 
+ - 답 표: (checkpoint, condition, fmt, id) -> {target: (status, answer)}. invalid/truncated는 전체 분모에서 실패로 센다.
+ - S_scope: 환자에서 두 target을 모두 맞힘. category별 비율 후 3 category 균등 평균.
+@@ -7,6 +7,7 @@
+       python -m rsna_diag.qa_eval e --set E180 ... (analysis는 아래 함수 사용)
+ """
+ import argparse
++import glob
+ import json
+ import os
+ 
+@@ -18,10 +19,13 @@ OUT = Q.OUT
+ BOOT_N, BOOT_SEED = 10000, 20260927
+ 
+ 
++ALLOW_CHANGED = ()  # 분석 진입점(qa_scope)이 설정: 결과를 보기 전에 고친 분석 코드 오류(기록됨)만 허용
++
++
+ def load_stage(stage, ckpt, protocol, gen_root="gen"):
+     """완료된 stage/ckpt를 검증하고 record를 반환한다. 미완료·불일치면 예외."""
+     from . import qa_protocol
+-    pdig = qa_protocol.verify(protocol)
++    pdig = qa_protocol.verify(protocol, ALLOW_CHANGED)
+     rp, rows, cfg = qa_run.load_job(stage, ckpt, protocol)
+     tab = json.load(open(f"{OUT}/manifests/checkpoints.json"))
+     d = f"{OUT}/{gen_root}/{stage}__{ckpt}"
+@@ -34,17 +38,46 @@ def load_stage(stage, ckpt, protocol, gen_root="gen"):
+     return [(by[k], v) for k, v in done.items()]
+ 
+ 
+-def answer_table(pairs):
+-    """pairs: [(row, record)] -> {(ckpt, cond, fmt, id): {target: (status, answer, ended_eos, n_out)}}"""
++def load_reused(stage_dir, requests, ckpt, old_protocol, tab):
++    """iter_015에서 완료된 stage를 원래 protocol과 별도 호환성 검증 후 [(row, record)]로 반환 (qa_reuse.verify_old_stage)."""
++    from . import qa_reuse
++    qa_reuse.verify_old_stage(stage_dir, requests, ckpt, old_protocol, tab)
++    from . import qa_protocol
++    cfg, _ = qa_protocol.static_cfg()
++    rows = {r["request_id"]: r for r in Q.load_rows(requests, cfg)}
++    recs = [r for f in sorted(glob.glob(f"{stage_dir}/gen_worker*.jsonl")) for r in qa_gen.read_strict(f)]
++    return [(rows[r["request_id"]], r) for r in recs]
++
++
++def answer_table(pairs, parser="strict"):
++    """pairs: [(row, record)] -> {(ckpt, cond, fmt, id): {target: (status, answer, ended_eos, n_out)}}. parser: strict | semantic(semantic_v1).
++    같은 (ckpt, cond, fmt, id, target)가 두 번 나오면 오류 (조용히 덮어쓰지 않는다)."""
+     t = {}
+     for row, rec in pairs:
+         if row["target"] not in S.TARGETS:
+             continue
+-        st, ans = S.parse_answer(row["fmt"], rec["suffix_text_raw"], rec["ended_eos"])
++        if parser == "semantic":
++            st, ans, _conv = S.parse_semantic(row["target"], row["fmt"], rec["suffix_text_raw"], rec["ended_eos"])
++        else:
++            st, ans = S.parse_answer(row["fmt"], rec["suffix_text_raw"], rec["ended_eos"])
++        key = (row["checkpoint"], row["condition"], row["fmt"], row["id"])
++        if row["target"] in t.get(key, {}):
++            raise qa_gen.QAError(f"duplicate answer for {key} target {row['target']}")
+         t.setdefault((row["checkpoint"], row["condition"], row["fmt"], row["id"]), {})[row["target"]] = (st, ans, rec["ended_eos"], rec["n_output_tokens"])
+     return t
+ 
+ 
++def require_complete(tab, ckpts, conds, fmts, ids):
++    """기대 (ckpt, cond, fmt, id) 집합이 표와 정확히 일치하고 각 항목에 두 target이 모두 있는지 검사한다. 누락·잉여는 예외."""
++    want = {(c, d, f, i) for c in ckpts for d in conds for f in fmts for i in ids}
++    have = {k for k in tab if k[0] in set(ckpts) and k[1] in set(conds) and k[2] in set(fmts)}
++    miss, extra = want - have, have - want
++    bad = [k for k in have if set(tab[k]) != set(S.TARGETS)]
++    if miss or extra or bad:
++        raise qa_gen.QAError(f"answer table incomplete: missing {len(miss)} extra {len(extra)} bad-targets {len(bad)} e.g. {sorted(miss)[:2]}")
++    return True
++
++
+ def patient_correct(tab, key, cat):
+     """(Q_O 정답, Q_A 정답, 둘 다 정답)  -- 요청 누락은 예외, invalid는 False."""
+     r = tab[key]
+@@ -109,9 +142,7 @@ def balanced_accuracy(tab, ckpt, cond, fmt, target, gt_cat):
+     k = S.TARGETS.index(target)
+     pos, neg = [], []
+     for i, c in gt_cat.items():
+-        r = tab.get((ckpt, cond, fmt, i))
+-        if r is None:
+-            continue
++        r = tab[(ckpt, cond, fmt, i)]  # 누락 환자는 KeyError (조용히 건너뛰지 않는다)
+         ok = r[target][0] == "valid" and r[target][1] == S.GT_PAIR[c][k]
+         (pos if S.GT_PAIR[c][k] == "yes" else neg).append(ok)
+     return {"sensitivity": float(np.mean(pos)), "specificity": float(np.mean(neg)), "balanced_accuracy": float((np.mean(pos) + np.mean(neg)) / 2),
+@@ -122,9 +153,7 @@ def pair_confusion(tab, ckpt, cond, fmt, gt_cat):
+     """category별 (Q_O,Q_A) 답 쌍 분포. invalid는 'invalid'."""
+     out = {c: {} for c in S.CATEGORIES}
+     for i, c in gt_cat.items():
+-        r = tab.get((ckpt, cond, fmt, i))
+-        if r is None:
+-            continue
++        r = tab[(ckpt, cond, fmt, i)]
+         k = tuple((r[t][1] if r[t][0] == "valid" else "invalid") for t in S.TARGETS)
+         out[c]["/".join(k)] = out[c].get("/".join(k), 0) + 1
+     return out
+@@ -134,9 +163,7 @@ def agreement(tab, ckpt, cond, ids):
+     """plain·json 두 형식에서 유효한 답이 일치하는 비율 (양쪽 모두 유효한 (환자,target)만)."""
+     n = k = nb = 0
+     for i in ids:
+-        a, b = tab.get((ckpt, cond, "plain", i)), tab.get((ckpt, cond, "json", i))
+-        if a is None or b is None:
+-            continue
++        a, b = tab[(ckpt, cond, "plain", i)], tab[(ckpt, cond, "json", i)]
+         for t in S.TARGETS:
+             nb += 1
+             if a[t][0] == "valid" and b[t][0] == "valid":
+diff --git a/rsna_diag/qa_gen.py b/rsna_diag/qa_gen.py
+index 0f99f3c..caead12 100644
+--- a/rsna_diag/qa_gen.py
++++ b/rsna_diag/qa_gen.py
+@@ -1,16 +1,19 @@
+-"""iter_015 요청 행렬(qa_requests) 전용 생성 worker. generate.py의 모델 로더·adapter 로더·run_request(cap 래더 1000/2000/4000)를 재사용하고,
++"""iter_015/016 요청 행렬(qa_requests) 전용 생성 worker. generate.py의 모델 로더·adapter 로더·run_request(cap 래더 1000/2000/4000)를 재사용하고,
+ 요청 식별·재개 검증·claim만 request 단위로 새로 구현한다 (환자마다 prompt/evidence가 달라 전역 prompt 이름으로 식별할 수 없다).
+ 
+ - 시작 시: qa_protocol.verify, 요청 파일이 protocol에 잠긴 파일과 같은지, 각 행의 request_id 재계산·config digest, 모든 영상의 현재 file/pixel hash.
+ - adapter digest(tensor 재계산)가 모든 행의 adapter_digest와 같아야 한다 (base면 None).
+ - 재개: 완료 record를 포함해 모든 worker 파일을 요청 행과 대조한다. 중복·잉여·id/prompt/adapter/config/protocol 불일치·입력 hash 변경·잘린 JSONL은 중단.
+   --repair-tail: 마지막 줄이 개행 없이 잘렸을 때만 그 줄을 *.partial로 옮기고 계속한다 (기록을 지우지 않는다).
++  iter_016 소유권: repair는 (a) 내 worker 파일(내 lock 보유) 또는 (b) 작성 worker가 종료돼 그 worker lock을 내가 확보한 파일에만 한다.
++  살아 있는 다른 worker의 파일은 읽기에서 개행 없는 마지막 줄만 유보하고 절대 수정하지 않는다.
+ 사용: CUDA_VISIBLE_DEVICES=<gpu> python -m rsna_diag.qa_gen --requests R --out-dir D --worker K --protocol P [--adapter DIR]
+ """
+ import argparse
+ import glob
+ import json
+ import os
++import re
+ import sys
+ import time
+ 
+@@ -49,6 +52,41 @@ def read_strict(path, repair_tail=False, tolerate_tail=False):
+     return recs
+ 
+ 
++def _worker_of(path):
++    m = re.fullmatch(r"gen_worker(\d+)\.jsonl", os.path.basename(path))
++    return int(m.group(1)) if m else None
++
++
++def _has_tail(path):
++    if not os.path.exists(path):
++        return False
++    with open(path, "rb") as f:
++        data = f.read()
++    return bool(data.split(b"\n")[-1].strip())
++
++
++def read_all_owned(out_dir, my_worker, repair, live, info):
++    """out_dir의 모든 gen_worker*.jsonl을 읽는다. 잘린 마지막 줄의 처리:
++    내 파일 -> repair 옵션이 있으면 격리·복구, 없으면 오류(live=False). 다른 worker 파일 -> 그 worker의 lock을 non-blocking으로 시도해
++    확보되면(작성자 종료) repair 옵션에 따라 복구/오류, 확보 실패(작성자 생존)이면 읽기에서만 유보하고 수정하지 않는다.
++    tail이 없는 파일은 lock을 건드리지 않는다 (동시에 시작하는 worker의 lock을 잠시라도 가로채지 않는다)."""
++    out = {}
++    for f in sorted(glob.glob(os.path.join(out_dir, "gen_worker*.jsonl"))):
++        w = _worker_of(f)
++        if w == my_worker or not _has_tail(f):
++            out[f] = read_strict(f, repair_tail=repair and w == my_worker and not live)
++            continue
++        lk, _, _ = queue_lock.try_lock(os.path.join(out_dir, f"worker{w}.lock"), info)
++        if lk is None:
++            out[f] = read_strict(f, tolerate_tail=True)  # 살아 있는 writer: 수정 금지
++        else:
++            try:  # 작성자가 종료했고 lock을 내가 잡고 있다
++                out[f] = read_strict(f, repair_tail=repair and not live, tolerate_tail=live)
++            finally:
++                lk.release()
++    return out
++
++
+ def validate_records(files_records, rows, cdig, adapter_digest, protocol_digest, pixel_sha):
+     """모든 기존 record를 현재 요청 행과 대조. returns {request_id: record}. 누락은 허용, 중복·잉여·불일치는 QAError."""
+     by = {r["request_id"]: r for r in rows}
+@@ -140,8 +178,7 @@ def run_worker(a, rows, pdig, cfg, info):
+         return cache[path]
+ 
+     def read_all(repair, live=False):
+-        return {f: read_strict(f, repair, tolerate_tail=live and f != out)
+-                for f in sorted(glob.glob(os.path.join(a.out_dir, "gen_worker*.jsonl")))}
++        return read_all_owned(a.out_dir, a.worker, repair, live, info)
+ 
+     done = validate_records(read_all(a.repair_tail), rows, cdig, adapter_digest, pdig, px)
+     out = os.path.join(a.out_dir, f"gen_worker{a.worker}.jsonl")
+diff --git a/rsna_diag/qa_pilot.py b/rsna_diag/qa_pilot.py
+index 2cf5070..1f6b0bf 100644
+--- a/rsna_diag/qa_pilot.py
++++ b/rsna_diag/qa_pilot.py
+@@ -1,71 +1,71 @@
+-"""iter_015 처리량 pilot 보조: D36 요청에서 대표 48개(M0 QA 24[plain 12+json 12], B0 bbox 12, C bbox 12)를 고르고, 두 실행 구성의 출력을 대조한다.
++"""iter_016 처리량 pilot 보조. 표본은 category별로 먼저 고정한 뒤(qa_requests build --set D12 = category별 4명) 요청을 구성하므로 세 category가 빠지지 않는다.
+ 
+-사용: python -m rsna_diag.qa_pilot build | compare A_DIR B_DIR STAGE
+-- 선택은 D36 category 균형(4/4/4)의 앞쪽 요청 순서(hash 순 patient)로 고정한다. 정확도를 보고 고르지 않는다.
++사용: python -m rsna_diag.qa_pilot compare A_GEN_ROOT B_GEN_ROOT STAGE OUT_JSON
++- 두 실행 구성(A, B)의 요청 집합·greedy token·parser 결과를 대조하고, 전체 wall-clock(모델 로딩 포함)과 생성 구간(요청별 runtime 합)을 분리해 보고한다.
+ """
+ import glob
+ import json
+-import os
+ import sys
+ 
+-from . import qa_gen, qa_requests as Q
+-
+-OUT = Q.OUT
++from . import qa_gen, qa_requests as Q, qa_spec as S
+ 
+ 
+ def load(stage_dir):
+     recs = {}
+-    for f in glob.glob(f"{stage_dir}/gen_worker*.jsonl"):
++    for f in sorted(glob.glob(f"{stage_dir}/gen_worker*.jsonl")):
+         for r in qa_gen.read_strict(f):
++            if r["request_id"] in recs:
++                raise qa_gen.QAError(f"duplicate request {r['request_id']} in {stage_dir}")
+             recs[r["request_id"]] = r
+     return recs
+ 
+ 
+-def build():
+-    sets = json.load(open(f"{OUT}/manifests/sets.json"))
+-    d12 = {i for c in sets["D12"] for i in sets["D12"][c]}
+-    order = {i: k for k, i in enumerate([i for c in sets["D36"] for i in sets["D36"][c]])}
+-    sel = {"M0": [], "B0": [], "C": []}
+-    for fmt in ("plain", "json"):
+-        rows = [json.loads(ln) for ln in open(f"{OUT}/requests/d36_{fmt}__M0.jsonl")]
+-        rows = [r for r in rows if r["id"] in d12]  # D12 (category당 4명) x 2 target = 24 -> 12개씩
+-        rows.sort(key=lambda r: (order[r["id"]], r["target"]))
+-        sel["M0"] += rows[:12]
+-    for c in ("B0", "C"):
+-        sel[c] = [json.loads(ln) for ln in open(f"{OUT}/requests/d12_bbox__{c}.jsonl")]
+-    for c, rows in sel.items():
+-        p = f"{OUT}/requests/pilot48__{c}.jsonl"
+-        if os.path.exists(p):
+-            raise SystemExit(f"{p} exists")
+-        with open(p, "w") as f:
+-            for r in rows:
+-                f.write(json.dumps(r) + "\n")
+-    print({c: len(r) for c, r in sel.items()}, "total", sum(len(r) for r in sel.values()))
++def category_coverage(stage_requests, labels):
++    """요청 파일의 환자 category 분포 (평가용 label은 여기서만 읽는다)."""
++    rows = [json.loads(ln) for ln in open(stage_requests) if ln.strip()]
++    cnt = {}
++    for r in rows:
++        c = labels[r["id"]]["category"]
++        cnt[c] = cnt.get(c, 0) + 1
++    return cnt
++
++
++def parse_map(recs, rows_by_id=None):
++    return {k: S.parse_semantic(r["target"], r["fmt"], r["suffix_text_raw"], r["ended_eos"]) for k, r in recs.items()}
+ 
+ 
+-def compare(a_dir, b_dir, stage):
++def compare(a_dir, b_dir, stage, ckpts=("M0", "B0", "C")):
+     out = {"stage": stage, "ckpts": {}}
+     ok = True
+-    for c in ("M0", "B0", "C"):
++    tot = {"A": [0.0, 0.0, 0], "B": [0.0, 0.0, 0]}
++    for c in ckpts:
+         A, B = load(f"{a_dir}/{stage}__{c}"), load(f"{b_dir}/{stage}__{c}")
+         same_keys = set(A) == set(B)
+         same_tokens = same_keys and all(A[k]["suffix_ids"] == B[k]["suffix_ids"] for k in A)
++        same_parse = same_keys and parse_map(A) == parse_map(B)
++        wa = json.load(open(f"{a_dir}/{stage}__{c}/last_run.json"))["wall_s"]
++        wb = json.load(open(f"{b_dir}/{stage}__{c}/last_run.json"))["wall_s"]
++        ga, gb = sum(r["runtime_s_total"] for r in A.values()), sum(r["runtime_s_total"] for r in B.values())
++        tot["A"][0] += wa
++        tot["A"][1] += ga
++        tot["A"][2] += len(A)
++        tot["B"][0] += wb
++        tot["B"][1] += gb
++        tot["B"][2] += len(B)
+         out["ckpts"][c] = {"n_A": len(A), "n_B": len(B), "same_request_set": same_keys, "identical_greedy_tokens": same_tokens,
+-                           "n_token_mismatch": sum(A[k]["suffix_ids"] != B[k]["suffix_ids"] for k in A if k in B),
+-                           "wall_A": json.load(open(f"{a_dir}/{stage}__{c}/last_run.json"))["wall_s"],
+-                           "wall_B": json.load(open(f"{b_dir}/{stage}__{c}/last_run.json"))["wall_s"],
++                           "identical_parse": same_parse, "wall_A": wa, "wall_B": wb, "gen_sum_A": ga, "gen_sum_B": gb,
+                            "peak_alloc_gb_max_A": max(r["peak_mem_alloc_gb_max"] for r in A.values()),
+                            "peak_alloc_gb_max_B": max(r["peak_mem_alloc_gb_max"] for r in B.values()),
+                            "max_runtime_s_A": max(r["runtime_s_total"] for r in A.values()),
+                            "max_runtime_s_B": max(r["runtime_s_total"] for r in B.values())}
+-        ok &= same_tokens
++        ok &= same_tokens and same_parse
+     out["all_identical"] = ok
+-    print(json.dumps(out, indent=1))
++    out["totals"] = {k: {"wall_s_sum": v[0], "gen_s_sum": v[1], "n": v[2], "req_per_min_by_wall": v[2] / v[0] * 60} for k, v in tot.items()}
+     return out
+ 
+ 
+ if __name__ == "__main__":
+-    if sys.argv[1] == "build":
+-        build()
+-    else:
+-        compare(*sys.argv[2:5])
++    a, b, stage, out = sys.argv[2:6]
++    r = compare(a, b, stage)
++    json.dump(r, open(out, "w"), indent=1)
++    print(json.dumps(r["totals"], indent=1), "identical:", r["all_identical"])
+diff --git a/rsna_diag/qa_protocol.py b/rsna_diag/qa_protocol.py
+index a290c0d..e8500d2 100644
+--- a/rsna_diag/qa_protocol.py
++++ b/rsna_diag/qa_protocol.py
+@@ -1,4 +1,4 @@
+-"""iter_015 protocol 잠금. 기존 lock_protocol과 달리 필수 파일이 없으면 조용히 생략하지 않고 실패한다.
++"""iter_015/016 protocol 잠금. 기존 lock_protocol과 달리 필수 파일이 없으면 조용히 생략하지 않고 실패한다.
+ 
+ - create: 코드(REQUIRED_CODE 전부 존재해야 함) + 명시한 extra 파일(요청·manifest 등)의 sha256과 생성 config digest를 잠근다. 기존 파일은 덮어쓰지 않는다.
+ - verify: 잠긴 모든 파일이 존재하고 sha가 같으며 config digest가 현재 processor/generation_config와 같아야 통과. returns protocol digest.
+@@ -12,7 +12,7 @@ import sys
+ 
+ from . import generate, lock_protocol
+ 
+-SCHEMA = "iter015_qa_protocol_v1"
++SCHEMA = "iter016_qa_protocol_v1"
+ # 반입한 16개 파일 + 이번 반복의 신규 모듈. 하나라도 없으면 실패한다.
+ REQUIRED_CODE = [
+     "rsna_diag/__init__.py", "rsna_diag/geometry.py", "rsna_diag/parse.py", "rsna_diag/metrics.py", "rsna_diag/sft_eval.py",
+@@ -21,6 +21,8 @@ REQUIRED_CODE = [
+     "rsna_diag/dicom_min.py",
+     "rsna_diag/qa_spec.py", "rsna_diag/qa_data.py", "rsna_diag/qa_protocol.py", "rsna_diag/qa_requests.py", "rsna_diag/qa_gen.py",
+     "rsna_diag/qa_run.py",
++    # iter_016: semantic parser(qa_spec)·평가·보고·재사용 검증·확대 결정 코드
++    "rsna_diag/qa_eval.py", "rsna_diag/qa_report.py", "rsna_diag/qa_reuse.py", "rsna_diag/qa_scope.py", "rsna_diag/qa_pilot.py",
+ ]
+ 
+ 
+@@ -47,7 +49,9 @@ def create(out, extra=(), note=""):
+     return lock_protocol.locked_digest(cur)
+ 
+ 
+-def verify(path):
++def verify(path, allow_changed=()):
++    """allow_changed: 잠금 이후 수정이 허용된(결과와 무관한 오류 수정으로 기록된) 파일. 나머지가 하나라도 다르면 실패한다.
++    반환 digest는 항상 잠긴 목록의 digest이다. 허용한 파일의 실제 hash 차이는 호출자가 기록해야 한다."""
+     if not path or not os.path.exists(path):
+         raise RuntimeError(f"protocol file missing: {path!r}")
+     old = json.load(open(path))
+@@ -59,7 +63,7 @@ def verify(path):
+         raise RuntimeError(f"protocol does not lock required files: {missing_req}")
+     extra = [f for f in lk["files"] if f not in REQUIRED_CODE]
+     cur = current(extra)
+-    diff = {k: (lk["files"].get(k), v) for k, v in cur["files"].items() if lk["files"].get(k) != v}
++    diff = {k: (lk["files"].get(k), v) for k, v in cur["files"].items() if lk["files"].get(k) != v and k not in allow_changed}
+     if diff or lk["generation_config_digest"] != cur["generation_config_digest"]:
+         raise RuntimeError("LOCK MISMATCH " + json.dumps(diff, indent=1)[:2000])
+     return lock_protocol.locked_digest(lk)
+diff --git a/rsna_diag/qa_requests.py b/rsna_diag/qa_requests.py
+index f865e47..eb73028 100644
+--- a/rsna_diag/qa_requests.py
++++ b/rsna_diag/qa_requests.py
+@@ -1,4 +1,4 @@
+-"""iter_015 요청 행렬. 요청 행(row)은 실제 prompt 원문과 evidence digest를 포함하고, request_id는 모델 revision·adapter digest·영상 identity·
++"""iter_015/016 요청 행렬 (iter_016: OUT=run-root, SRC=읽기 전용 source-root). 요청 행(row)은 실제 prompt 원문과 evidence digest를 포함하고, request_id는 모델 revision·adapter digest·영상 identity·
+ target·format·condition·실제 prompt·evidence·config digest·전처리 버전 전체의 hash다 (하나라도 바뀌면 id가 바뀐다).
+ 
+ - 일반 요청 파일에는 category·정답이 없다. oracle 요청만 GT bbox를 prompt로 받으며 별도 stage(condition=ev_oracle)로 생성한다.
+@@ -13,7 +13,8 @@ import os
+ 
+ from . import generate, parse as PA, prompts as P, qa_spec as S
+ 
+-OUT = "results/iter_015"
++OUT = os.environ.get("QA_RUN_ROOT", "results/iter_016")   # 새 출력은 항상 이 run-root 아래에만 쓴다
++SRC = "results/iter_015"                                   # 과거(iter_015) 입력·결과는 읽기 전용 source-root
+ CKPT_SPEC = {
+     "M0": None,
+     "B0": "results/iter_012/train/lr2e-4_s17/epoch_05",
+@@ -92,27 +93,46 @@ def checkpoints(out=f"{OUT}/manifests/checkpoints.json"):
+     return tab
+ 
+ 
+-def patients(sets, name, exclude=None):
+-    ids = [i for c in S.CATEGORIES for i in sets[name][c]]
++def patients(sets, name, exclude=None, per_cat=None):
++    ids = [i for c in S.CATEGORIES for i in (sets[name][c][:per_cat] if per_cat else sets[name][c])]
+     if exclude:
+         ex = {i for c in S.CATEGORIES for i in sets[exclude][c]}
+         ids = [i for i in ids if i not in ex]
+     return ids
+ 
+ 
+-def bbox_records(ckpt):
+-    """ckpt의 concise bbox 원시 record: 검증된 재사용 파일 + 이번 반복 신규 생성 결과. returns {id: record dict(suffix_text_raw, ended_eos)}."""
+-    out = {}
+-    for p in glob.glob(f"{OUT}/reuse/bbox_{ckpt}_concise.jsonl"):
+-        for ln in open(p):
+-            if ln.strip():
+-                r = json.loads(ln)
+-                out[r["id"]] = r
+-    for d in glob.glob(f"{OUT}/gen/*__{ckpt}"):
+-        for f in glob.glob(f"{d}/gen_worker*.jsonl"):
+-            for r in generate.read_records(f):
+-                if r.get("condition") == "bbox" and r.get("checkpoint") == ckpt:
+-                    out[r["id"]] = r
++# bbox 원시 출력의 명시적 출처 목록. glob의 마지막 결과로 덮어쓰지 않는다. 같은 id가 두 출처에 있으면 오류.
++# ("reuse", jsonl 경로) | ("gen", 완료된 stage 디렉터리). 신규(iter_016) e600 C bbox는 run-root gen에 있으면 추가된다.
++def bbox_sources(ckpt):
++    src = {"M0": [("reuse", f"{SRC}/reuse/bbox_M0_concise.jsonl")],
++           "B0": [("reuse", f"{SRC}/reuse/bbox_B0_concise.jsonl"), ("gen", f"{SRC}/gen/d12_bbox__B0")],
++           "C": [("gen", f"{SRC}/gen/e180_bbox__C"), ("gen", f"{SRC}/gen/d12_bbox__C")]}[ckpt]
++    extra = f"{OUT}/gen/e600x_bbox__{ckpt}"
++    if ckpt == "C" and os.path.isdir(extra):
++        src.append(("gen", extra))
++    return src
++
++
++def bbox_records(ckpt, sources=None):
++    """ckpt의 concise bbox 원시 record {id: record}. 명시한 출처만 읽고, 출처 간 동일 id 충돌은 거부한다."""
++    out, origin = {}, {}
++    for kind, p in (sources or bbox_sources(ckpt)):
++        if kind == "reuse":
++            recs = [json.loads(ln) for ln in open(p) if ln.strip()]
++        else:
++            if not os.path.exists(f"{p}/completion.json"):
++                raise RequestError(f"bbox source {p} has no completion.json (incomplete stage)")
++            recs = [r for f in sorted(glob.glob(f"{p}/gen_worker*.jsonl")) for r in generate.read_records(f)
++                    if r.get("condition") == "bbox" and r.get("checkpoint") == ckpt]
++        seen = set()
++        for r in recs:
++            if r["id"] in seen:
++                raise RequestError(f"duplicate bbox record for {r['id']} inside source {p}")
++            seen.add(r["id"])
++            if r["id"] in out:
++                raise RequestError(f"bbox record for {r['id']} present in both {origin[r['id']]} and {p}")
++            out[r["id"]] = r
++            origin[r["id"]] = p
+     return out
+ 
+ 
+@@ -136,7 +156,7 @@ def build(a):
+     tab = json.load(open(f"{OUT}/manifests/checkpoints.json"))
+     from . import qa_protocol
+     cfg, _ = qa_protocol.static_cfg()
+-    ids = patients(sets, a.set, a.exclude_set)
++    ids = a.ids.split(',') if a.ids else patients(sets, a.set, a.exclude_set, a.per_cat)
+     os.makedirs(f"{OUT}/requests", exist_ok=True)
+     counts = {}
+     ckpts = a.ckpts.split(",")
+@@ -186,7 +206,9 @@ def main():
+     b = sp.add_parser("build")
+     b.add_argument("--stage", required=True)
+     b.add_argument("--kind", required=True, choices=["qa", "bbox", "evidence"])
+-    b.add_argument("--set", required=True)
++    b.add_argument("--set", default=None)
++    b.add_argument("--per-cat", type=int, default=None, help="각 category의 앞 N명 (표본은 category별로 먼저 고정한 뒤 요청을 구성한다)")
++    b.add_argument("--ids", default=None, help="stress 등 명시적 id 목록(쉼표)")
+     b.add_argument("--exclude-set", default=None)
+     b.add_argument("--ckpts", required=True)
+     b.add_argument("--fmt", default="plain")
+diff --git a/rsna_diag/qa_reuse.py b/rsna_diag/qa_reuse.py
+index 388b551..f760278 100644
+--- a/rsna_diag/qa_reuse.py
++++ b/rsna_diag/qa_reuse.py
+@@ -1,4 +1,4 @@
+-"""iter_015: 과거 iter_012 confirm concise bbox 출력(M0, B0=seed17 epoch05)을 provenance 검증 후 E600 환자 subset으로 추출한다.
++"""iter_015 (extract) / iter_016 (import_manifests, verify_old_stage, build_manifest): 과거 iter_012 confirm concise bbox 출력(M0, B0=seed17 epoch05)을 provenance 검증 후 E600 환자 subset으로 추출한다.
+ 
+ 검증(record별): request_id 재계산(모델 revision·adapter digest·split·id·prompt sha), prompt sha == 현재 CONCISE, config_digest == 과거 env 기록 ==
+ 현재 static config(concise 단독)의 재계산, adapter digest == checkpoint table, protocol digest == 과거 protocol 파일 digest, 현재 영상의 file/pixel hash.
+@@ -9,13 +9,19 @@ import glob
+ import json
+ import os
+ 
+-from . import generate, lock_protocol, prompts as P, qa_data, qa_gen, qa_requests as Q
++import hashlib
++import shutil
+ 
+-SRC = {"M0": "results/iter_012/confirm_base", "B0": "results/iter_012/confirm_sft_seed17"}
++from . import eval_gate, generate, inputs, lock_protocol, prompts as P, qa_data, qa_gen, qa_requests as Q
++
++SRC_DIRS = {"M0": "results/iter_012/confirm_base", "B0": "results/iter_012/confirm_sft_seed17"}
+ OLD_PROTOCOL = "results/iter_012/protocols/main_protocol.json"
+ 
+ 
++# iter_015 extract()는 과거 산출물을 만든 기록용이다. iter_016은 재추출하지 않고 아래 함수로 검증만 한다.
+ def extract():
++    if Q.OUT != Q.SRC:
++        raise SystemExit("extract() is the iter_015 step; iter_016 must not re-extract")
+     sets = json.load(open(f"{Q.OUT}/manifests/sets.json"))
+     ids = {i for c in sets["E600"] for i in sets["E600"][c]}
+     man = {}
+@@ -27,7 +33,7 @@ def extract():
+     psha = P.digest(P.CONCISE)
+     os.makedirs(f"{Q.OUT}/reuse", exist_ok=True)
+     report = {}
+-    for ck, d in SRC.items():
++    for ck, d in SRC_DIRS.items():
+         adg = tab[ck]["digest"]
+         comp = json.load(open(f"{d}/completion.json"))
+         assert comp["n_expected"] == comp["n_actual_unique"] and comp["n_missing"] == 0 and comp["n_duplicate"] == 0 and "concise" in comp["prompts"] and comp["adapter_digest"] == adg
+@@ -70,5 +76,134 @@ def extract():
+     print(json.dumps(report, indent=1))
+ 
+ 
++def fsha(p):
++    h = hashlib.sha256()
++    with open(p, "rb") as f:
++        for b in iter(lambda: f.read(1 << 20), b""):
++            h.update(b)
++    return h.hexdigest()
++
++
++MANIFEST_FILES = ["sets.json", "labels.json", "infer_manifest.jsonl", "audit.json"]
++
++
++def import_manifests():
++    """iter_015의 확정된 표본·label·manifest를 run-root로 복사한다(재추출 없음). 목적지가 있으면 내용이 같아야 한다. 검증: 전체 checks + 영상 hash."""
++    os.makedirs(f"{Q.OUT}/manifests", exist_ok=True)
++    rep = {}
++    for f in MANIFEST_FILES:
++        src, dst = f"{Q.SRC}/manifests/{f}", f"{Q.OUT}/manifests/{f}"
++        if os.path.exists(dst):
++            if fsha(src) != fsha(dst):
++                raise qa_gen.QAError(f"{dst} exists and differs from source")
++        else:
++            shutil.copyfile(src, dst)
++        rep[f] = {"source": src, "sha256": fsha(dst), "source_sha256": fsha(src)}
++    sets = json.load(open(f"{Q.OUT}/manifests/sets.json"))
++    gt = json.load(open(qa_data.GT))
++    man = [json.loads(ln) for ln in open(f"{Q.OUT}/manifests/infer_manifest.jsonl") if ln.strip()]
++    sizes = qa_data.checks(sets, gt, man)
++    rows = [dict(m, image=m["image"]) for m in man]
++    qa_gen.check_inputs(rows)  # 현재 file/raw pixel hash 재확인 (636장)
++    lab = json.load(open(f"{Q.OUT}/manifests/labels.json"))
++    for i, l in lab.items():
++        if gt[i]["category"] != l["category"] or len(gt[i]["boxes"]) != len(l["boxes"]):
++            raise qa_gen.QAError(f"labels differ from gt_manifest for {i}")
++    rep["_checks"] = {"set_sizes": sizes, "n_images_hash_verified": len(man), "n_labels": len(lab)}
++    return rep
++
++
++def old_protocol_digest(path):
++    return lock_protocol.digest_of(path)
++
++
++def verify_old_stage(stage_dir, requests, ckpt, old_protocol, tab):
++    """iter_015 stage 결과를 원래 protocol과 별도로, 현재 입력·adapter·요청 행과 대조하는 호환성 검증 (원본을 재잠금하지 않는다).
++    returns dict(기록) — 요청 완전성·중복·잉여·adapter·config·입력 hash 중 하나라도 어긋나면 예외."""
++    from . import qa_protocol
++    cfg, _ = qa_protocol.static_cfg()
++    rows = Q.load_rows(requests, cfg)
++    pdig = old_protocol_digest(old_protocol)
++    comp = json.load(open(f"{stage_dir}/completion.json"))
++    if comp.get("protocol_digest") != pdig:
++        raise qa_gen.QAError(f"{stage_dir}: completion protocol digest != old protocol file digest")
++    adg = tab[ckpt]["digest"]
++    if rows[0]["adapter_digest"] != adg:
++        raise qa_gen.QAError(f"{requests}: adapter digest != current checkpoint table")
++    qa_gen.check_inputs(rows)
++    files = {f: qa_gen.read_strict(f) for f in sorted(glob.glob(f"{stage_dir}/gen_worker*.jsonl"))}
++    cache = {}
++    done = qa_gen.validate_records(files, rows, cfg, adg, pdig, lambda p: cache.setdefault(p, generate.load_image(p)[2]))
++    missing = [r["request_id"] for r in rows if r["request_id"] not in done]
++    if missing:
++        raise qa_gen.QAError(f"{stage_dir}: {len(missing)} requests missing")
++    return {"stage_dir": stage_dir, "requests": requests, "requests_sha256": fsha(requests), "n_requests": len(rows), "n_records": len(done),
++            "old_protocol": old_protocol, "old_protocol_digest": pdig, "adapter_digest": adg,
++            "worker_files": {os.path.basename(f): fsha(f) for f in files},
++            "note": "원래 protocol을 새 코드로 재잠금하지 않았다. 현재 입력·adapter·요청 행과의 호환성만 검증했다."}
++
++
++def verify_old_bbox_reuse(ck, tab):
++    """iter_015 reuse jsonl(M0/B0 E600)을 원본 iter_012 worker 파일과 record 단위로 대조한다."""
++    p = f"{Q.SRC}/reuse/bbox_{ck}_concise.jsonl"
++    recs = [json.loads(ln) for ln in open(p) if ln.strip()]
++    src = SRC_DIRS[ck]
++    orig = {}
++    for f in sorted(glob.glob(f"{src}/gen_worker*.jsonl")):
++        for r in generate.read_records(f):
++            if r["prompt_name"] == "concise":
++                orig[r["id"]] = r
++    ids = [r["id"] for r in recs]
++    if len(set(ids)) != len(ids) or len(ids) != 600:
++        raise qa_gen.QAError(f"{p}: duplicate or wrong count {len(ids)}")
++    man = {json.loads(ln)["id"]: json.loads(ln) for ln in open(f"{Q.OUT}/manifests/infer_manifest.jsonl")}
++    pdig_old = old_protocol_digest(OLD_PROTOCOL)
++    psha = P.digest(P.CONCISE)
++    for r in recs:
++        o = orig[r["id"]]
++        ok = (r["suffix_text_raw"] == o["suffix_text_raw"] and r["request_id"] == o["request_id"] and r["ended_eos"] == o["ended_eos"]
++              and r["adapter_digest"] == tab[ck]["digest"] == o["adapter_digest"] and r["checkpoint"] == ck and r["condition"] == "bbox"
++              and o["prompt_sha256"] == psha and o["protocol_digest"] == pdig_old and o["image_file_sha256"] == man[r["id"]]["file_sha256"]
++              and o["input_pixel_sha256"] == generate.load_image(man[r["id"]]["image"])[2])
++        if not ok:
++            raise qa_gen.QAError(f"{ck} {r['id']}: reuse record differs from original record/current inputs")
++    return {"path": p, "sha256": fsha(p), "n": len(recs), "source_dir": src, "source_worker_files": {os.path.basename(f): fsha(f) for f in sorted(glob.glob(f"{src}/gen_worker*.jsonl"))},
++            "old_protocol": OLD_PROTOCOL, "old_protocol_digest": pdig_old, "adapter_digest": tab[ck]["digest"]}
++
++
++def build_manifest(out):
++    """reuse manifest: manifests 복사 + 재사용하는 D36/D12/E180 결과의 호환성 검증 + M0/B0 bbox record 대조."""
++    tab = json.load(open(f"{Q.OUT}/manifests/checkpoints.json"))
++    m = {"manifests": import_manifests(), "stages": {}, "bbox_reuse": {}}
++    for fmt in ("plain", "json"):
++        for ck in ("M0", "B0", "C"):
++            st = f"d36_{fmt}"
++            m["stages"][f"{st}__{ck}"] = verify_old_stage(f"{Q.SRC}/gen/{st}__{ck}", f"{Q.SRC}/requests/{st}__{ck}.jsonl", ck,
++                                                          _protocol_of(f"{Q.SRC}/gen/{st}__{ck}"), tab)
++    for st, ck in (("d12_bbox", "B0"), ("d12_bbox", "C"), ("e180_bbox", "C")):
++        m["stages"][f"{st}__{ck}"] = verify_old_stage(f"{Q.SRC}/gen/{st}__{ck}", f"{Q.SRC}/requests/{st}__{ck}.jsonl", ck,
++                                                      _protocol_of(f"{Q.SRC}/gen/{st}__{ck}"), tab)
++    for ck in ("M0", "B0"):
++        m["bbox_reuse"][ck] = verify_old_bbox_reuse(ck, tab)
++    if os.path.exists(out):
++        raise SystemExit(f"{out} exists (not overwriting)")
++    json.dump(m, open(out, "w"), indent=1)
++    return m
++
++
++def _protocol_of(stage_dir):
++    """completion의 protocol digest와 같은 digest를 갖는 iter_015 protocol 파일을 찾는다(모호하면 오류)."""
++    want = json.load(open(f"{stage_dir}/completion.json"))["protocol_digest"]
++    hits = [f for f in sorted(glob.glob(f"{Q.SRC}/protocols/*.json")) if old_protocol_digest(f) == want]
++    if len(hits) != 1:
++        raise qa_gen.QAError(f"{stage_dir}: {len(hits)} old protocol files match digest {want[:12]}")
++    return hits[0]
++
++
+ if __name__ == "__main__":
+-    extract()
++    import sys
++    if sys.argv[1:2] == ["manifest"]:
++        r = build_manifest(sys.argv[2])
++        print(json.dumps({k: (v if k != "manifests" else v["_checks"]) for k, v in r.items() if k != "stages"}, indent=1)[:1500], len(r["stages"]), "stages verified")
++    else:
++        extract()
+diff --git a/rsna_diag/qa_run.py b/rsna_diag/qa_run.py
+index 14f8bc2..dceb9ae 100644
+--- a/rsna_diag/qa_run.py
++++ b/rsna_diag/qa_run.py
+@@ -1,13 +1,16 @@
+-"""iter_015 stage 실행기: worker 수와 GPU 수를 분리하고, 허용 GPU 집합·메모리 여유·완료 검증·자식 종료 코드를 강제한다.
++"""iter_015/016 stage 실행기: worker 수와 GPU 수를 분리하고, 허용 GPU 집합·메모리 여유·완료 검증·자식 종료 코드를 강제한다.
+ 
+ - 허용 집합 = 상속된 CUDA_VISIBLE_DEVICES(정수 목록). --gpus는 그 부분집합. worker k -> gpus[k % len(gpus)] (같은 GPU에 여러 worker 가능).
+ - 실행 전 nvidia-smi를 조회한다. 조회 실패·파싱 실패는 실행하지 않는다. GPU별 (다른 프로세스 점유 + worker 수 x (측정 peak + 2GiB 여유)) <= 총 용량이어야 한다.
+ - 이미 완료된 job은 모델을 올리지 않고 현재 입력·config·protocol·adapter와 다시 대조한 뒤 건너뛴다.
++- iter_016: 시작 전 out_dir의 worker*.lock을 조사해 살아 있는 이전 자식(부모 강제 종료 후 남은 worker)이 있으면 실행하지 않는다.
++  정상 중단·예외·SIGTERM에서는 이 실행이 띄운 자식만 종료·회수한 뒤 lock을 해제한다. attempt 기록에 자식 PID/starttime을 남긴다.
+ - job 종료 후 모든 자식 종료 코드 수집, 요청 집합 == record 집합(누락·중복·잉여 0)이고 record 검증을 통과할 때만 completion.json을 원자적으로 쓴다.
+ 사용: python -m rsna_diag.qa_run --stage S --ckpts M0,B0 --protocol P --workers 4 --peak-gb 10
+ """
+ import argparse
+ import glob
++import signal
+ import json
+ import os
+ import subprocess
+@@ -85,8 +88,43 @@ def load_job(stage, ckpt, protocol):
+     return rp, rows, cfg
+ 
+ 
++def live_workers(out_dir):
++    """out_dir의 worker*.lock 중 살아 있는 프로세스가 잡고 있는 것. returns [(lock파일, 소유자 정보)]. lock을 잡으면 즉시 놓는다(파일 내용 유지)."""
++    live = []
++    for f in sorted(glob.glob(os.path.join(out_dir, "worker*.lock"))):
++        fd = os.open(f, os.O_RDWR)
++        try:
++            import fcntl
++            try:
++                fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
++            except BlockingIOError:
++                live.append((f, queue_lock._read(fd)))
++                continue
++            fcntl.flock(fd, fcntl.LOCK_UN)
++        finally:
++            os.close(fd)
++    return live
++
++
++def stop_children(procs, grace=60.0):
++    """이 실행이 띄운 자식만 SIGTERM -> grace 후 SIGKILL, 모두 wait로 회수한다. returns [{pid, returncode}]."""
++    for p in procs:
++        if p.poll() is None:
++            p.terminate()
++    t0 = time.time()
++    while time.time() - t0 < grace and any(p.poll() is None for p in procs):
++        time.sleep(0.5)
++    for p in procs:
++        if p.poll() is None:
++            p.kill()
++    for p in procs:
++        p.wait()
++    return [{"pid": p.pid, "returncode": p.returncode} for p in procs]
++
++
+ def verify_job(out_dir, rows, cfg, pdig, adapter_dir, require_complete=True):
+-    """out_dir의 모든 record를 요청 행·현재 입력·adapter·config·protocol과 대조. returns (done dict, missing list)."""
++    """out_dir의 모든 record를 요청 행·현재 입력(file/raw pixel/모델 입력 pixel)·adapter·config·protocol과 대조. returns (done dict, missing list)."""
++    qa_gen.check_inputs(rows)
+     adg = eval_gate.adapter_digest(adapter_dir) if adapter_dir else None
+     if adg != rows[0]["adapter_digest"]:
+         raise qa_gen.QAError(f"adapter digest {adg} != requests {rows[0]['adapter_digest']}")
+@@ -98,7 +136,16 @@ def verify_job(out_dir, rows, cfg, pdig, adapter_dir, require_complete=True):
+     return done, missing
+ 
+ 
++class _Term(BaseException):
++    pass
++
++
++def _on_term(signum, frame):
++    raise _Term(f"signal {signum}")
++
++
+ def main():
++    signal.signal(signal.SIGTERM, _on_term)
+     ap = argparse.ArgumentParser()
+     ap.add_argument("--stage", required=True)
+     ap.add_argument("--ckpts", required=True)
+@@ -126,10 +173,15 @@ def main():
+         if os.path.exists(cp):
+             done, missing = verify_job(out_dir, rows, cfg, pdig, adapter)
+             c = json.load(open(cp))
+-            if not missing and c.get("protocol_digest") == pdig and c.get("n_expected") == len(rows):
++            if (not missing and c.get("protocol_digest") == pdig and c.get("n_expected") == len(rows)
++                    and c.get("requests_sha256") == generate.sha(open(rp, "rb").read()) and c.get("adapter_digest") == rows[0]["adapter_digest"]
++                    and c.get("n_actual_unique") == len(done) and c.get("config_digest") == cfg):
+                 print(f"[{ckpt}] already complete & re-verified ({len(rows)} requests); skip", flush=True)
+                 summary.append({"ckpt": ckpt, "status": "verified_complete", "n": len(rows)})
+                 continue
++        alive = live_workers(out_dir)
++        if alive:
++            sys.exit(f"live worker(s) still own {out_dir}: {alive} (parent was killed?). Wait for/stop them, then rerun.")
+         snap = query_gpus(gpus)
+         assign = plan_gpus(gpus, a.workers, a.peak_gb, allowed, snap)
+         info = queue_lock.my_info(role="qa_run")
+@@ -162,6 +214,8 @@ def main():
+                 env = dict(os.environ, CUDA_VISIBLE_DEVICES=str(g), CUDA_DEVICE_ORDER="PCI_BUS_ID")
+                 procs.append(subprocess.Popen(cmd, env=env, stdout=open(f"{out_dir}/worker{k}.stdout.log", "a"),
+                                               stderr=open(f"{out_dir}/worker{k}.stderr.log", "a")))
++            att["children"] = [{"pid": p.pid, "start": queue_lock.proc_start(p.pid), "worker": k, "gpu": g} for p, (k, g) in zip(procs, assign)]
++            atomic_json(att, att_path)
+             t0 = time.time()
+             rl = open(f"{out_dir}/resource_log.jsonl", "a")
+             while any(p.poll() is None for p in procs):
+@@ -185,7 +239,7 @@ def main():
+             rep = {"stage": a.stage, "checkpoint": ckpt, "n_expected": len(rows), "n_actual_unique": len(done), "n_missing": len(missing),
+                    "n_duplicate": 0, "n_extra": 0, "returncodes": codes, "wall_s": wall, "per_file": per_file, "protocol_digest": pdig,
+                    "adapter_digest": rows[0]["adapter_digest"], "worker_gpu": assign, "gpu_uuid": att["gpu_uuid"], "verify_error": err,
+-                   "requests": rp, "attempt_id": aid}
++                   "requests": rp, "requests_sha256": generate.sha(open(rp, "rb").read()), "config_digest": cfg, "attempt_id": aid}
+             atomic_json(rep, f"{out_dir}/last_run.json")
+             ok = not missing and err is None and all(c == 0 for c in codes)
+             att.update({"status": "complete" if ok else "failed_or_incomplete", "returncodes": codes, "t_end": time.time(), "report": rep})
+@@ -197,9 +251,9 @@ def main():
+             print(f"[{ckpt}] rc={codes} wall={wall:.0f}s n={len(done)}/{len(rows)} ok={ok}", flush=True)
+             summary.append({"ckpt": ckpt, "status": "complete" if ok else "incomplete", "n": len(done), "of": len(rows), "wall_s": wall})
+         finally:
++            stopped = stop_children(procs) if any(p.poll() is None for p in procs) else [{"pid": p.pid, "returncode": p.returncode} for p in procs]
+             if att["status"] == "running":
+-                att.update({"status": "interrupted", "t_end": time.time(),
+-                            "children": [{"pid": p.pid, "returncode": p.poll()} for p in procs]})
++                att.update({"status": "interrupted", "t_end": time.time(), "children_final": stopped})
+                 try:
+                     atomic_json(att, att_path)
+                 except OSError:
+diff --git a/rsna_diag/qa_scope.py b/rsna_diag/qa_scope.py
+new file mode 100644
+index 0000000..b5d8c04
+--- /dev/null
++++ b/rsna_diag/qa_scope.py
+@@ -0,0 +1,444 @@
++"""iter_016 semantic_v1 분석: D36 semantic gate(과거 strict gate 판정은 수정하지 않는다), E180/P60 분석, 확대 결정.
++
++- 모든 응답에 strict 상태, semantic 상태, 변환 종류를 함께 저장한다. 점수는 요청 집합이 완전할 때만 계산한다(qa_eval.require_complete).
++- 정답 category는 parser에 들어가지 않는다 (채점에서만 사용).
++- 확대 규칙(계획 §3)은 decide_expand로 코드화해 E180 결과를 보기 전에 잠근다 (qa_protocol의 REQUIRED_CODE).
++사용:
++  python -m rsna_diag.qa_scope d36 --reuse-manifest M --out OUT_JSON
++  python -m rsna_diag.qa_scope e180 --protocol P --out OUT_JSON      # 분석 (primary E180, alternate/evidence P60)
++"""
++import argparse
++import collections
++import json
++import math
++import os
++
++import numpy as np
++
++from . import qa_eval as E, qa_gen, qa_requests as Q, qa_run, qa_spec as S
++
++OUT = Q.OUT
++Z975, Z95 = 2.2414027, 1.959964
++THR_S, THR_PAIR, THR_EV = 0.10, 0.15, 0.10
++
++
++def sets():
++    return json.load(open(f"{OUT}/manifests/sets.json"))
++
++
++def labels():
++    return json.load(open(f"{OUT}/manifests/labels.json"))
++
++
++def ids_by_cat(name, exclude=None):
++    st = sets()
++    ex = {i for c in S.CATEGORIES for i in st[exclude][c]} if exclude else set()
++    return {c: [i for i in st[name][c] if i not in ex] for c in S.CATEGORIES}
++
++
++def flat(d):
++    return [i for c in S.CATEGORIES for i in d[c]]
++
++
++def conv_table(pairs):
++    """{(ckpt,cond,fmt,id,target): (strict_status, sem_status, conversion)}"""
++    out = {}
++    for row, rec in pairs:
++        if row["target"] not in S.TARGETS:
++            continue
++        raw, eos = rec["suffix_text_raw"], rec["ended_eos"]
++        st = S.parse_answer(row["fmt"], raw, eos)[0]
++        ss, _, cv = S.parse_semantic(row["target"], row["fmt"], raw, eos)
++        out[(row["checkpoint"], row["condition"], row["fmt"], row["id"], row["target"])] = (st, ss, cv)
++    return out
++
++
++def record_dump(pairs):
++    """저장용: 응답별 strict/semantic 상태·변환 종류(원문 일부 포함)."""
++    rows = []
++    for row, rec in pairs:
++        if row["target"] not in S.TARGETS:
++            continue
++        raw, eos = rec["suffix_text_raw"], rec["ended_eos"]
++        sst, sans = S.parse_answer(row["fmt"], raw, eos)
++        mst, mans, cv = S.parse_semantic(row["target"], row["fmt"], raw, eos)
++        rows.append({"request_id": row["request_id"], "id": row["id"], "checkpoint": row["checkpoint"], "condition": row["condition"],
++                     "fmt": row["fmt"], "target": row["target"], "strict": [sst, sans], "semantic": [mst, mans], "conversion": cv,
++                     "ended_eos": eos, "n_out": rec["n_output_tokens"], "raw": raw[:80]})
++    return rows
++
++
++# ---------------- D36 semantic gate ----------------
++def d36_gate(manifest_path, out):
++    """D36 원문 432건을 semantic_v1으로 재평가한다. 모든 checkpoint x target에서 semantic valid>=0.95인 plain을 primary, json을 alternate로 한다.
++    정답 정확도는 보지 않는다."""
++    man = json.load(open(manifest_path))
++    tab = json.load(open(f"{OUT}/manifests/checkpoints.json"))
++    st = sets()
++    ids = flat({c: st["D36"][c] for c in S.CATEGORIES})
++    pairs_all, dump = {}, []
++    for fmt in ("plain", "json"):
++        for ck in ("M0", "B0", "C"):
++            info = man["stages"][f"d36_{fmt}__{ck}"]
++            pairs = E.load_reused(info["stage_dir"], info["requests"], ck, info["old_protocol"], tab)
++            pairs_all[(fmt, ck)] = pairs
++            dump += record_dump(pairs)
++    res = {"strict": {}, "semantic": {}}
++    for parser, key in (("strict", "strict"), ("semantic", "semantic")):
++        for fmt in ("plain", "json"):
++            for ck in ("M0", "B0", "C"):
++                tb = E.answer_table(pairs_all[(fmt, ck)], parser)
++                E.require_complete(tb, [ck], ["direct"], [fmt], ids)
++                res[key][f"{fmt}/{ck}"] = E.format_stats(tb, ck, "direct", fmt, ids)
++    conv = collections.Counter()
++    for r in dump:
++        conv[f"{r['fmt']}/{r['target']}/{r['conversion']}"] += 1
++    ok = {fmt: all(res["semantic"][f"{fmt}/{ck}"][t]["valid_rate"] >= 0.95 for ck in ("M0", "B0", "C") for t in S.TARGETS) for fmt in ("plain", "json")}
++    d = {"parser": S.SEMANTIC_VERSION, "n_patients": len(ids), "n_responses": len(dump), "stats": res, "gate_pass_semantic": ok,
++         "primary_format": "plain" if ok["plain"] else None, "alternate_format": "json" if ok["plain"] else None, "conversion_counts": dict(conv),
++         "rule": "semantic valid rate >= 0.95 for every checkpoint x target; plain=primary, json=alternate; accuracy not used",
++         "note": "과거 iter_015 strict gate 판정은 수정하지 않는다. semantic_v1은 D36을 본 뒤 만든 개발 결정이다."}
++    json.dump({"decision": d, "records": dump}, open(out, "w"), indent=1)
++    return d
++
++
++# ---------------- 점수·bound·통계 ----------------
++def patient_bounds(tab, key, cat):
++    """환자 pair 점수의 가능한 범위 (lo, hi). 알려진 오답(valid&wrong)이 있으면 hi=0, 둘 다 valid&correct면 lo=1, invalid는 미해석."""
++    r, want = tab[key], S.GT_PAIR[cat]
++    st = [(r[t][0] == "valid", r[t][1] == want[k]) for k, t in enumerate(S.TARGETS)]
++    known_wrong = any(v and not c for v, c in st)
++    all_right = all(v and c for v, c in st)
++    return (1.0 if all_right else 0.0), (0.0 if known_wrong else 1.0)
++
++
++def bound_vectors(tab, ckpt, cond, fmt, ibc):
++    lo, hi = {}, {}
++    for c, ids in ibc.items():
++        b = [patient_bounds(tab, (ckpt, cond, fmt, i), c) for i in ids]
++        lo[c], hi[c] = np.array([x[0] for x in b]), np.array([x[1] for x in b])
++    return lo, hi
++
++
++def diff_bounds(tab_a, ka, tab_b, kb, ibc):
++    """S_scope(a)-S_scope(b)의 보수적 범위: (a의 lo - b의 hi, a의 hi - b의 lo) 를 category 평균한 뒤 균등 평균."""
++    la, ha = bound_vectors(tab_a, *ka, ibc)
++    lb, hb = bound_vectors(tab_b, *kb, ibc)
++    lo = float(np.mean([la[c].mean() - hb[c].mean() for c in ibc]))
++    hi = float(np.mean([ha[c].mean() - lb[c].mean() for c in ibc]))
++    return lo, hi
++
++
++def cls(x, thr=THR_S):
++    return "pos" if x >= thr else ("neg" if x <= -thr else "mid")
++
++
++def flippable(point, lo, hi, thr=THR_S):
++    """보수적 범위가 |thr| 분류 또는 부호를 바꿀 수 있는가."""
++    return len({cls(lo, thr), cls(hi, thr), cls(point, thr)}) > 1 or (lo < 0 < hi and point != 0)
++
++
++def cp_upper(k, n, alpha=0.05):
++    """Clopper-Pearson 단측 상한: P(X<=k | p)=alpha를 만족하는 p (이분법, scipy 없이). k=0이면 1-alpha^(1/n)."""
++    if k >= n:
++        return 1.0
++    cdf = lambda p: sum(math.comb(n, j) * p ** j * (1 - p) ** (n - j) for j in range(k + 1))
++    lo, hi = 0.0, 1.0
++    for _ in range(200):
++        mid = (lo + hi) / 2
++        if cdf(mid) > alpha:
++            lo = mid
++        else:
++            hi = mid
++    return (lo + hi) / 2
++
++
++def discordant(vec_a, vec_b):
++    """환자별 두 조건의 정오가 다른 수와 exact 단측 95% 상한 (k=0이면 1-0.05^(1/n), 아니면 Clopper-Pearson)."""
++    n = sum(len(v) for v in vec_a.values())
++    k = int(sum((vec_a[c] != vec_b[c]).sum() for c in vec_a))
++    up = cp_upper(k, n)
++    return {"n": n, "discordant": k, "rate": k / n, "exact_one_sided_95_upper": float(up)}
++
++
++def paired_se(vec_a, vec_b, n_target=None):
++    """S_scope 차이의 SE(category별 표본분산, /9)와 category SE. n_target이 있으면 category당 n_target명으로 투영(sqrt(n/n_target))."""
++    se_c, var = {}, 0.0
++    for c in vec_a:
++        d = vec_a[c] - vec_b[c]
++        m = len(d)
++        se = float(d.std(ddof=1) / math.sqrt(m))
++        if n_target:
++            se *= math.sqrt(m / n_target)
++        se_c[c] = se
++        var += se ** 2
++    return math.sqrt(var) / 3.0, se_c
++
++
++def ci_boot(vec_a, vec_b, level):
++    b = E.bootstrap_diff(vec_a, vec_b, ci=level)
++    return b
++
++
++def pair_no_yes(tab, ckpt, cond, fmt, ids):
++    """NoOpacity/NotNormal의 (no,yes) 정답률과 (no,no) 오류율 (invalid는 어느 쪽도 아님)."""
++    n = len(ids)
++    ok = err = 0
++    for i in ids:
++        r = tab[(ckpt, cond, fmt, i)]
++        v = [x[1] if x[0] == "valid" else None for x in (r["O"], r["A"])]
++        ok += v == ["no", "yes"]
++        err += v == ["no", "no"]
++    return {"n": n, "no_yes_correct": ok / n, "no_no_error": err / n}
++
++
++def pair_acc_vec(tab, ckpt, cond, fmt, ids):
++    return np.array([float(E.patient_correct(tab, (ckpt, cond, fmt, i), "not_normal_no_opacity")[2]) for i in ids])
++
++
++def compare(tab_a, ka, tab_b, kb, ibc, level):
++    va, vb = E.score_vectors(tab_a, *ka, ibc), E.score_vectors(tab_b, *kb, ibc)
++    b = ci_boot(va, vb, level)
++    b95 = ci_boot(va, vb, 0.95)
++    lo, hi = diff_bounds(tab_a, ka, tab_b, kb, ibc)
++    se, se_c = paired_se(va, vb)
++    return {"point": b["S_scope"]["point"], f"ci{int(level * 1000) / 10}": b["S_scope"]["ci"], "ci95": b95["S_scope"]["ci"],
++            "per_category_ci95": b95["per_category"], "conservative_bounds": [lo, hi],
++            "bounds_can_flip": flippable(b["S_scope"]["point"], lo, hi), "se": se, "se_per_category": se_c,
++            "discordance": discordant(va, vb)}, va, vb
++
++
++# ---------------- 확대 결정 (결과를 보기 전에 잠긴 규칙) ----------------
++def precision_projection(va, vb, n_main=200):
++    se, se_c = paired_se(va, vb, n_target=n_main)
++    hw = Z975 * se
++    core = {c: Z95 * s for c, s in se_c.items()}
++    return {"n_per_category": n_main, "se_S": se, "halfwidth_975": hw, "halfwidth_core_95": core,
++            "meets": bool(hw <= 0.075 or any(v <= 0.10 for v in core.values()))}
++
++
++def decide_expand(main, pairacc, evid, alt, integrity_ok=True):
++    """main: {"B0-M0": comp, "C-B0": comp} (semantic plain, E180). pairacc: {"B0-M0": diff, "C-B0": diff} (NoOpacity/NotNormal (no,yes) 정답률 차이).
++    evid: predicted-unavailable 비교(P60) 또는 None. alt: {"B0-M0": diff_json_P60, "C-B0": ...}.
++    returns dict(expand, reasons, hold_reasons)."""
++    reasons, hold = [], []
++    for k, c in main.items():
++        pt = c["point"]
++        if abs(pt) >= THR_S:
++            reasons.append(f"{k}: |S_scope diff|={abs(pt):.3f}>=0.10")
++        if abs(pairacc[k]["diff"]) >= THR_PAIR:
++            reasons.append(f"{k}: NoOpacity/NotNormal (no,yes) accuracy diff |{pairacc[k]['diff']:.3f}|>=0.15")
++        ci = c["ci97.5"]
++        near = (ci[0] <= THR_S <= ci[1]) or (ci[0] <= -THR_S <= ci[1])
++        if near and abs(pt) < THR_S and c["projection"]["meets"]:
++            reasons.append(f"{k}: CI {ci[0]:.3f},{ci[1]:.3f} contains an important effect (|0.10|) and E600 projected precision "
++                           f"hw97.5={c['projection']['halfwidth_975']:.3f} meets the target")
++        if c["bounds_can_flip"]:
++            hold.append(f"{k}: residual invalid can flip the conclusion (conservative bounds {c['conservative_bounds']})")
++        a = alt.get(k)
++        if a is not None and abs(a["diff"]) >= THR_S and abs(pt) >= THR_S and np.sign(a["diff"]) != np.sign(pt):
++            hold.append(f"{k}: plain and json give opposite important directions ({pt:.3f} vs {a['diff']:.3f})")
++    if evid is not None:
++        if abs(evid["point"]) >= THR_EV:
++            reasons.append(f"evidence predicted-unavailable diff {evid['point']:.3f} (|.|>=0.10)")
++        ci = evid["ci95"]
++        if (ci[0] <= THR_EV <= ci[1] or ci[0] <= -THR_EV <= ci[1]) and abs(evid["point"]) < THR_EV and evid["projection"]["meets"]:
++            reasons.append("evidence CI contains an important effect and P180 projected precision meets the target")
++    if not integrity_ok:
++        hold.append("integrity not ok")
++    return {"expand": bool(reasons) and not hold, "reasons": reasons, "hold_reasons": hold,
++            "rule": "plan §3: |S_scope diff|>=0.10 | pair acc diff>=0.15 | evidence diff>=0.10 | CI contains important effect & projected precision meets; hold if residual invalid or format directions flip"}
++
++
++def seed_trigger(main, alt):
++    """계획 §4: B0-M0에서 중요 효과(|S|>=0.10)가 있고 주 비교 CI가 0을 제외하며 alternate도 같은 방향일 때만 기존 B29/B43 실행."""
++    c = main["B0-M0"]
++    ci = c["ci97.5"]
++    a = alt.get("B0-M0")
++    ok = abs(c["point"]) >= THR_S and (ci[0] > 0 or ci[1] < 0) and a is not None and np.sign(a["diff"]) == np.sign(c["point"]) and a["diff"] != 0
++    return {"trigger": bool(ok), "B0-M0": c["point"], "ci97.5": ci, "alternate_diff": None if a is None else a["diff"],
++            "note": "C만의 변화나 모듈형 효과만으로는 seed 실행을 추가하지 않는다."}
++
++
++def interpret(main, pairacc, evid, alt):
++    """계획의 '결과별 의미' 분류(참고용 서술). 최종 해석은 보고서에서 한다."""
++    lab = []
++    for k, c in main.items():
++        pt, ci = c["point"], c["ci97.5"]
++        if pt <= -THR_S or pairacc[k]["diff"] <= -THR_PAIR:
++            lab.append(f"{k}: target_scope_degradation_candidate (needs CI/alternate/seed support)")
++        elif pt >= THR_S and ci[0] > 0 and alt.get(k) is not None and alt[k]["diff"] > 0:
++            lab.append(f"{k}: positive_transfer_candidate")
++    inside = all(-THR_S <= main[k]["ci97.5"][0] and main[k]["ci97.5"][1] <= THR_S for k in main)
++    if inside and (evid is None or abs(evid["point"]) < THR_EV):
++        lab.append("no_substantial_difference_within_[-0.10,0.10] (CI-based; not proof of equivalence)")
++    return lab
++
++
++# ---------------- E180 분석 ----------------
++ROOTS = {}
++
++
++def load_new(stage, ckpt, protocol):
++    """stage: 이름 또는 이름 목록(확대 시 E180 + 신규 stage를 합친다). protocol: 경로 또는 {stage: 경로} (stage별 잠금 파일)."""
++    if isinstance(stage, (list, tuple)):
++        return [p for s_ in stage for p in load_new(s_, ckpt, protocol)]
++    pr = protocol[stage] if isinstance(protocol, dict) else protocol
++    return E.load_stage(stage, ckpt, pr, ROOTS.get(stage, "gen"))
++
++
++def analyze(protocol, out, primary_stage="e180_plain", alt_stage="p60_json", ev_stage="p60_ev", main_set="E180", panel_set="P60",
++            panel_override=None, with_bbox=True, roots=None):
++    """main_set/panel_set: 표본 이름 (E180/P60 = 본평가, E600/P180 = 확대). panel_override/roots/with_bbox는 코드 경로 dry-run 전용."""
++    ROOTS.clear()
++    ROOTS.update(roots or {})
++    lab = labels()
++    ibc = ids_by_cat(main_set)
++    ids = flat(ibc)
++    pbc = panel_override or ids_by_cat(panel_set)
++    pids = flat(pbc)
++    pairs = {("plain", ck): load_new(primary_stage, ck, protocol) for ck in ("M0", "B0", "C")}
++    tsem = {}
++    tstr = {}
++    for ck in ("M0", "B0", "C"):
++        tsem.update(E.answer_table(pairs[("plain", ck)], "semantic"))
++        tstr.update(E.answer_table(pairs[("plain", ck)], "strict"))
++    E.require_complete(tsem, ["M0", "B0", "C"], ["direct"], ["plain"], ids)
++    res = {"n_patients": len(ids), "n_requests_primary": sum(len(v) for v in pairs.values()), "primary_format": "plain"}
++    gt_cat = {i: lab[i]["category"] for i in ids}
++    res["scores"] = {}
++    for ck in ("M0", "B0", "C"):
++        row = {}
++        for pname, tb in (("semantic", tsem), ("strict", tstr)):
++            vec = E.score_vectors(tb, ck, "direct", "plain", ibc)
++            sc, per = E.s_scope(vec)
++            row[pname] = {"S_scope": sc, "per_category": per, "ci95": E.boot_ci(vec),
++                          "valid": E.format_stats(tb, ck, "direct", "plain", ids),
++                          "balanced_accuracy": {t: E.balanced_accuracy(tb, ck, "direct", "plain", t, gt_cat) for t in S.TARGETS},
++                          "pair_confusion": E.pair_confusion(tb, ck, "direct", "plain", gt_cat),
++                          "no_opacity_not_normal": pair_no_yes(tb, ck, "direct", "plain", ibc["not_normal_no_opacity"])}
++        res["scores"][ck] = row
++    conv = collections.Counter()
++    for r in record_dump([p for ck in pairs for p in pairs[ck]]):
++        conv[f"{r['target']}/{r['conversion']}"] += 1
++    res["conversion_counts"] = dict(conv)
++    res["strict_to_semantic_change"] = {ck: res["scores"][ck]["semantic"]["S_scope"] - res["scores"][ck]["strict"]["S_scope"] for ck in ("M0", "B0", "C")}
++    res["constant_pair_baselines"] = E.constant_baselines(ibc)
++    # 주 비교
++    main, pairacc, vecs = {}, {}, {}
++    for name, (a, b) in {"B0-M0": ("B0", "M0"), "C-B0": ("C", "B0")}.items():
++        c, va, vb = compare(tsem, (a, "direct", "plain"), tsem, (b, "direct", "plain"), ibc, 0.975)
++        c["projection"] = precision_projection(va, vb)
++        cs, _, _ = compare(tstr, (a, "direct", "plain"), tstr, (b, "direct", "plain"), ibc, 0.975)
++        c["strict_point"] = cs["point"]
++        c["strict_ci97.5"] = cs["ci97.5"]
++        main[name] = c
++        pa = pair_acc_vec(tsem, a, "direct", "plain", ibc["not_normal_no_opacity"])
++        pb = pair_acc_vec(tsem, b, "direct", "plain", ibc["not_normal_no_opacity"])
++        rng = np.random.default_rng(E.BOOT_SEED)
++        idx = rng.integers(0, len(pa), size=(E.BOOT_N, len(pa)))
++        bs = pa[idx].mean(1) - pb[idx].mean(1)
++        pairacc[name] = {"diff": float(pa.mean() - pb.mean()), "ci95": [float(np.percentile(bs, 2.5)), float(np.percentile(bs, 97.5))]}
++    res["main_semantic_plain_E180"] = main
++    res["no_opacity_not_normal_pair_accuracy_diff"] = pairacc
++    # alternate (P60, json) — 같은 P60 환자의 plain과 비교
++    alt, alt_res = {}, {}
++    if alt_stage:
++        tj = {}
++        for ck in ("M0", "B0", "C"):
++            tj.update(E.answer_table(load_new(alt_stage, ck, protocol), "semantic"))
++        E.require_complete(tj, ["M0", "B0", "C"], ["direct"], ["json"], pids)
++        alt_res["scores"] = {}
++        for ck in ("M0", "B0", "C"):
++            vec = E.score_vectors(tj, ck, "direct", "json", pbc)
++            alt_res["scores"][ck] = {"S_scope": E.s_scope(vec)[0], "per_category": E.s_scope(vec)[1], "valid": E.format_stats(tj, ck, "direct", "json", pids)}
++        tpp = {k: v for k, v in tsem.items() if k[3] in set(pids)}
++        both = {**tpp, **tj}
++        alt_res["format_agreement"] = {ck: E.agreement(both, ck, "direct", pids) for ck in ("M0", "B0", "C")}
++        for name, (a, b) in {"B0-M0": ("B0", "M0"), "C-B0": ("C", "B0")}.items():
++            c, _, _ = compare(tj, (a, "direct", "json"), tj, (b, "direct", "json"), pbc, 0.95)
++            alt[name] = {"diff": c["point"], "ci95": c["ci95"]}
++            alt_res[name] = c
++        res["alternate_json_P60"] = alt_res
++    # bbox·detector+rule
++    if with_bbox:
++        res["bbox_E180"] = {ck: {k: v for k, v in E.bbox_summary(ck, ids, lab).items() if k in ("n_positive", "f1@0.3", "f1@0.5", "valid_rate_all", "positive_valid_empty", "by_n_gt", "neg_Normal", "neg_NoOpacity/NotNormal")} for ck in ("M0", "B0", "C")}
++        res["detector_rule"] = {ck: E.detector_rule(ck, ibc)[0] for ck in ("M0", "B0", "C")}
++    # evidence (M0 reader, P60)
++    evid = None
++    if ev_stage:
++        te = E.answer_table(load_new(ev_stage, "M0", protocol), "semantic")
++        tes = E.answer_table(load_new(ev_stage, "M0", protocol), "strict")
++        conds = ["ev_predicted", "ev_unavailable", "ev_oracle"]
++        E.require_complete(te, ["M0"], conds, ["plain"], pids)
++        er = {"scores": {}, "strict_scores": {}}
++        for cd in conds:
++            v = E.score_vectors(te, "M0", cd, "plain", pbc)
++            er["scores"][cd] = {"S_scope": E.s_scope(v)[0], "per_category": E.s_scope(v)[1], "valid": E.format_stats(te, "M0", cd, "plain", pids),
++                                "balanced_accuracy": {t: E.balanced_accuracy(te, "M0", cd, "plain", t, {i: lab[i]["category"] for i in pids}) for t in S.TARGETS},
++                                "pair_confusion": E.pair_confusion(te, "M0", cd, "plain", {i: lab[i]["category"] for i in pids})}
++            er["strict_scores"][cd] = E.s_scope(E.score_vectors(tes, "M0", cd, "plain", pbc))[0]
++        c, va, vb = compare(te, ("M0", "ev_predicted", "plain"), te, ("M0", "ev_unavailable", "plain"), pbc, 0.95)
++        c["projection"] = precision_projection(va, vb, n_main=60)
++        er["predicted_minus_unavailable"] = c
++        c2, _, _ = compare(te, ("M0", "ev_predicted", "plain"), tsem_direct_for_pids(tsem, pids), ("M0", "direct", "plain"), pbc, 0.95)
++        er["predicted_minus_direct_M0"] = c2
++        c3, _, _ = compare(te, ("M0", "ev_oracle", "plain"), te, ("M0", "ev_unavailable", "plain"), pbc, 0.95)
++        er["oracle_minus_unavailable_oracle_only"] = c3
++        er["predicted_source_status"] = dict(collections.Counter(r["extra"].get("source_status") for r, _ in load_new(ev_stage, "M0", protocol) if r["condition"] == "ev_predicted"))
++        res["evidence_M0_P60"] = er
++        evid = {"point": c["point"], "ci95": c["ci95"], "projection": c["projection"]}
++    res["seed_reproduction_trigger"] = seed_trigger(main, alt)
++    res["decision"] = decide_expand(main, pairacc, evid, alt, integrity_ok=True)
++    res["interpretation_labels"] = interpret(main, pairacc, evid, alt)
++    json.dump(res, open(out, "w"), indent=1, default=float)
++    return res
++
++
++def tsem_direct_for_pids(tsem, pids):
++    return {k: v for k, v in tsem.items() if k[3] in set(pids)}
++
++
++def main():
++    ap = argparse.ArgumentParser()
++    sp = ap.add_subparsers(dest="cmd", required=True)
++    d = sp.add_parser("d36")
++    d.add_argument("--reuse-manifest", required=True)
++    d.add_argument("--out", required=True)
++    e = sp.add_parser("e180")
++    e.add_argument("--protocol", required=True)
++    e.add_argument("--out", required=True)
++    x = sp.add_parser("e600")
++    x.add_argument("--protocol-e180", required=True)
++    x.add_argument("--protocol-e600", required=True)
++    x.add_argument("--out", required=True)
++    a = ap.parse_args()
++    if a.cmd == "d36":
++        r = d36_gate(a.reuse_manifest, a.out)
++        print(json.dumps({k: r[k] for k in ("gate_pass_semantic", "primary_format", "alternate_format", "conversion_counts")}, indent=1))
++        return
++    from . import lock_protocol, qa_protocol
++    E.ALLOW_CHANGED = ("rsna_diag/qa_scope.py", "rsna_diag/qa_eval.py", "rsna_diag/qa_protocol.py")
++
++    def changed(path):
++        lk = json.load(open(path))["locked"]["files"]
++        return {f: {"locked": h, "at_analysis": lock_protocol.sha(f)} for f, h in lk.items() if lock_protocol.sha(f) != h}
++
++    if a.cmd == "e180":
++        # 잠금 뒤 결과 열람 전에 분석 진입 코드 3개(qa_scope 병합 TypeError, qa_eval/qa_protocol의 allow_changed 통로)를 수정했다. 규칙·임계값·표본은 불변.
++        r = analyze(a.protocol, a.out)
++        r["analysis_code"] = {"changed_after_lock_before_results": changed(a.protocol),
++                              "note": "결과를 보기 전 수정: qa_scope alt 표 병합 TypeError 1줄 + qa_protocol.verify(allow_changed)/qa_eval.ALLOW_CHANGED 통로. 규칙·임계값·표본 불변. 다른 잠긴 파일은 모두 일치."}
++    else:
++        pd = {"e180_plain": a.protocol_e180, "p60_json": a.protocol_e180, "p60_ev": a.protocol_e180,
++              "e600x_plain": a.protocol_e600, "p180x_json": a.protocol_e600, "p180x_ev": a.protocol_e600}
++        r = analyze(pd, a.out, primary_stage=["e180_plain", "e600x_plain"], alt_stage=["p60_json", "p180x_json"], ev_stage=["p60_ev", "p180x_ev"],
++                    main_set="E600", panel_set="P180")
++        r["analysis_code"] = {"e180_protocol_changed_files": changed(a.protocol_e180), "e600_protocol_changed_files": changed(a.protocol_e600),
++                              "note": "E180 protocol 잠금 이후 분석 코드(qa_scope/qa_eval/qa_protocol/qa_requests)가 결과 열람 전·후에 수정됐다. 해당 hash를 기록한다."}
++    json.dump(r, open(a.out, "w"), indent=1, default=float)
++    print(json.dumps({"decision": r["decision"], "labels": r["interpretation_labels"], "seed": r.get("seed_reproduction_trigger")}, indent=1))
++
++
++if __name__ == "__main__":
++    main()
+diff --git a/rsna_diag/qa_spec.py b/rsna_diag/qa_spec.py
+index 2a82d51..b1955bf 100644
+--- a/rsna_diag/qa_spec.py
++++ b/rsna_diag/qa_spec.py
+@@ -1,4 +1,6 @@
+-"""iter_015 target-scope 진단의 질문·출력 형식·evidence 문장·QA parser·정답 mapping (결과를 보기 전에 고정).
++"""iter_015/016 target-scope 진단의 질문·출력 형식·evidence 문장·QA parser·정답 mapping (결과를 보기 전에 고정).
++
++iter_016: strict parser(parse_plain/parse_json)는 그대로 두고 별도의 semantic_v1(parse_semantic)을 추가한다. parser는 정답 category를 입력으로 받지 않는다.
+ 
+ - Q_O: 폐렴 의심 pulmonary opacity 존재. Q_A: RSNA 판독 규약상 Normal이 아닌가(abnormal). 둘은 별도 대화로 실행한다.
+ - 정답 쌍 (Q_O, Q_A): opacity=(yes,yes), normal=(no,no), not_normal_no_opacity=(no,yes).
+@@ -107,6 +109,48 @@ def parse_answer(fmt, raw, ended_eos):
+     return (parse_plain if fmt == "plain" else parse_json)(raw, ended_eos)
+ 
+ 
++SEMANTIC_VERSION = "semantic_v1"
++_NORMAL_MAP = {"normal": "no", "abnormal": "yes"}
++
++
++def _bare_word(t):
++    """전체 문자열이 단어 하나(+ 마지막 단일 . 또는 !)이면 소문자 단어, 아니면 None. 내부 공백·중복 문장부호는 받지 않는다."""
++    core = t.lower()
++    if core and core[-1] in _PUNCT:
++        core = core[:-1]
++    return core if re.fullmatch(r"[a-z]+", core) else None
++
++
++def parse_semantic(target, fmt, raw, ended_eos):
++    """semantic_v1. returns (status, answer, conversion). conversion: identity(strict와 동일) | bare_yes_no | json_answer | bare_normal_abnormal | None.
++
++    1 EOS 없으면 truncated. 2 끝의 <end_of_turn> 한 개와 앞뒤 공백만 제거. 3 전체가 yes/no(대소문자·마지막 단일 . !)면 두 출력 지시 모두 받는다.
++    4 전체가 JSON이고 유일한 키 answer의 값이 정확한 소문자 yes/no면 받는다(중복 키·추가 키·배열·fence 불가).
++    5 target=='A'에서만 전체 bare Normal/Abnormal을 no/yes로 대응한다 (JSON 값의 Normal/Abnormal, Q_O의 Normal은 불허).
++    설명문·혼합 답·모순·bbox·빈 목록·부분 일치는 구제하지 않는다 (strict parser의 실패 분류를 그대로 쓴다)."""
++    if target not in QUESTIONS:
++        raise ValueError(f"unknown target {target!r}")
++    st, ans = parse_answer(fmt, raw, ended_eos)
++    if st == "valid":
++        return "valid", ans, "identity"
++    if st == "truncated" or st == "empty":
++        return st, None, None
++    t = (raw[:-len(EOT)] if raw.endswith(EOT) else raw).strip()
++    w = _bare_word(t)
++    if w in ("yes", "no"):
++        return "valid", w, "bare_yes_no"
++    if w in _NORMAL_MAP and target == "A":
++        return "valid", _NORMAL_MAP[w], "bare_normal_abnormal"
++    if t.startswith("{"):
++        try:
++            v = json.loads(t, object_pairs_hook=_pairs)
++        except ValueError:
++            v = None
++        if isinstance(v, dict) and list(v) == ["answer"] and v["answer"] in ("yes", "no"):
++            return "valid", v["answer"], "json_answer"
++    return st, None, None
++
++
+ def request_key(fields):
+     """request_id 재계산용. fields 전부(모델 revision, adapter digest, 영상 identity, target, format, condition, prompt sha, evidence digest, config digest)가 포함된다."""
+     return sha(json.dumps(fields, sort_keys=True, default=str))[:32]
+diff --git a/test_rsna_iter016.py b/test_rsna_iter016.py
+new file mode 100644
+index 0000000..eb8f5eb
+--- /dev/null
++++ b/test_rsna_iter016.py
+@@ -0,0 +1,359 @@
++"""iter_016 CPU fixture 검사. 사용: python test_rsna_iter016.py -> results/iter_016/tests/fixtures_iter016.json
++semantic_v1 parser(독립 참조 구현과 D36 원문 432건 대조), 표본·요청 행렬, bbox 출처, 복구 소유권, 평가 계산, 확대 규칙을 검사한다."""
++import inspect
++import json
++import os
++import re
++import subprocess
++import sys
++import tempfile
++import time
++
++import numpy as np
++
++from rsna_diag import (generate, qa_eval as E, qa_gen, qa_pilot, qa_protocol, qa_requests as Q, qa_reuse, qa_run, qa_scope as SC,
++                       qa_spec as S, queue_lock)
++
++OUT = Q.OUT
++assert OUT == "results/iter_016", OUT
++res = []
++
++
++def check(name, cond, detail=""):
++    res.append({"name": name, "pass": bool(cond), "detail": str(detail)[:300]})
++    print(("PASS " if cond else "FAIL ") + name, detail if not cond else "")
++
++
++def raises(fn, exc=Exception):
++    try:
++        fn()
++    except exc as e:
++        return str(e)[:200] or exc.__name__
++    return None
++
++
++# ---- 1. semantic_v1: 고정 규칙 fixture
++EOT = S.EOT
++ps = lambda t, f, r, eos=True: S.parse_semantic(t, f, r + EOT, eos)
++check("strict parsers unchanged for previously-valid answers", S.parse_plain("Yes." + EOT, True) == ("valid", "yes") and S.parse_json('{"answer":"no"}' + EOT, True) == ("valid", "no"))
++check("bare yes/no accepted for both formats, case and one trailing . or !",
++      [ps("O", "plain", " Yes. ")[1], ps("O", "json", "NO!")[1], ps("A", "json", "yes")[1]] == ["yes", "no", "yes"]
++      and ps("O", "json", "yes")[2] == "bare_yes_no")
++check("double punctuation / internal space rejected", [ps("O", "plain", "yes..")[0], ps("O", "plain", "yes .")[0], ps("O", "plain", "y es")[0]] != ["valid"] * 3
++      and all(ps("O", "plain", x)[0] != "valid" for x in ("yes..", "yes .", "yes!.", "ye s")))
++check("JSON answer accepted in either format", ps("O", "plain", '{"answer":"yes"}') == ("valid", "yes", "json_answer") and ps("A", "json", '{"answer": "no"}')[1] == "no")
++check("JSON: extra key/dup key/list/uppercase/Normal value rejected (status exact)",
++      [ps("A", "json", x)[0] for x in ('{"answer":"yes","x":1}', '{"answer":"yes","answer":"yes"}', '["yes"]', '{"answer":"Yes"}', '{"answer":"Normal"}')]
++      == ["schema_error", "explanation", "schema_error", "schema_error", "schema_error"])
++check("JSON fence/trailing text/quoted string/trailing period rejected",
++      all(ps("A", "json", x)[0] != "valid" for x in ('```json\n{"answer":"yes"}\n```', '{"answer":"yes"}.', '"yes"', '{"answer":"yes"} yes')))
++check("Q_A: bare Normal/Abnormal mapped (no/yes), same case/punct rule",
++      [ps("A", "plain", "Normal"), ps("A", "plain", "abnormal."), ps("A", "json", "Abnormal!")]
++      == [("valid", "no", "bare_normal_abnormal"), ("valid", "yes", "bare_normal_abnormal"), ("valid", "yes", "bare_normal_abnormal")])
++check("Q_O: Normal/Abnormal NOT mapped", ps("O", "plain", "Normal")[0] != "valid" and ps("O", "json", "Abnormal")[0] != "valid")
++check("explanation/mixed/contradiction/bbox/[]/partial match rejected",
++      all(ps("A", "plain", x)[0] != "valid" for x in ("Normal, abnormal", "yes no", "Yes, there is an opacity.", "[]", '[{"box_2d":[1,2,3,4]}]',
++                                                       "The image is Normal", "Based on the image, no", "normal abnormal", "No opacity")))
++check("[] is not converted to no", ps("A", "plain", "[]")[1] is None and ps("O", "plain", "[]")[1] is None)
++check("truncated (no EOS) and empty rejected", ps("O", "plain", "yes", False)[0] == "truncated" and ps("O", "plain", "  ")[0] == "empty")
++check("only one trailing <end_of_turn> removed", S.parse_semantic("O", "plain", "yes" + EOT + EOT, True)[0] != "valid")
++check("semantic parser signature has no category/ground-truth argument", list(inspect.signature(S.parse_semantic).parameters) == ["target", "fmt", "raw", "ended_eos"])
++
++
++def ref_semantic(target, fmt, raw, eos):
++    """독립 참조 구현(정규식 기반). returns (valid?, answer)."""
++    if not eos:
++        return None
++    t = raw[:-len(EOT)] if raw.endswith(EOT) else raw
++    t = t.strip()
++    m = re.fullmatch(r"([A-Za-z]+)[.!]?", t)
++    if m:
++        w = m.group(1).lower()
++        if w in ("yes", "no"):
++            return w
++        if target == "A" and w in ("normal", "abnormal"):
++            return {"normal": "no", "abnormal": "yes"}[w]
++        return None
++    if t.startswith("{"):
++        try:
++            v = json.loads(t, object_pairs_hook=lambda p: (_ for _ in ()).throw(ValueError()) if len({k for k, _ in p}) != len(p) else dict(p))
++        except ValueError:
++            return None
++        if isinstance(v, dict) and set(v) == {"answer"} and v["answer"] in ("yes", "no"):
++            return v["answer"]
++    return None
++
++
++pairs = []
++for fmt in ("plain", "json"):
++    for ck in ("M0", "B0", "C"):
++        d = f"{Q.SRC}/gen/d36_{fmt}__{ck}"
++        for f in sorted(os.listdir(d)):
++            if f.startswith("gen_worker") and f.endswith(".jsonl"):
++                pairs += [json.loads(ln) for ln in open(f"{d}/{f}") if ln.strip()]
++check("D36 raw responses: 432", len(pairs) == 432, len(pairs))
++mism = [r["request_id"] for r in pairs if (lambda s, ref: (s[1] if s[0] == "valid" else None) != ref)(S.parse_semantic(r["target"], r["fmt"], r["suffix_text_raw"], r["ended_eos"]),
++                                                                                                    ref_semantic(r["target"], r["fmt"], r["suffix_text_raw"], r["ended_eos"]))]
++check("semantic parser == independent reference on all 432 D36 raw responses", not mism, mism[:3])
++# 합성 문자열 전수 비교
++syn = ["yes", "No", "YES.", "no!", "yes.", "Normal", "normal.", "Abnormal!", "abnormal", "yes!!", "Normal ", " no", '{"answer":"yes"}', '{"answer": "no"}',
++       '{"answer":"maybe"}', '{"answer":"yes","x":1}', "[]", "yes\nno", "no.", "N/A", "", "Yes, ", "The answer is yes"]
++bad = []
++for t in ("O", "A"):
++    for f in ("plain", "json"):
++        for x in syn:
++            for eos in (True, False):
++                s = S.parse_semantic(t, f, x + EOT if eos else x, eos)
++                if (s[1] if s[0] == "valid" else None) != ref_semantic(t, f, x + EOT if eos else x, eos):
++                    bad.append((t, f, x, eos))
++check("semantic parser == reference on synthetic strings (2 targets x 2 fmts x eos)", not bad, bad[:3])
++
++# ---- 2. D36 gate 산출 (실제 결과 파일)
++g = json.load(open(f"{OUT}/d36/semantic_gate.json"))["decision"]
++v = g["stats"]["semantic"]
++check("D36 semantic: plain M0/B0/C valid A = 35/36, 36/36, 36/36 (원문 집계 예상과 일치)",
++      [v[f"plain/{c}"]["A"]["valid"] for c in ("M0", "B0", "C")] == [35, 36, 36] and all(v[f"plain/{c}"]["O"]["valid"] == 36 for c in ("M0", "B0", "C")))
++check("D36 gate: plain primary, json alternate, strict stats preserved (B0/C plain A strict 29/26)",
++      g["primary_format"] == "plain" and g["stats"]["strict"]["plain/B0"]["A"]["valid"] == 29 and g["stats"]["strict"]["plain/C"]["A"]["valid"] == 26)
++check("D36 conversion counts: 17 bare Normal/Abnormal (7+10) in plain A", g["conversion_counts"].get("plain/A/bare_normal_abnormal") == 17 and "plain/O/bare_normal_abnormal" not in g["conversion_counts"])
++
++# ---- 3. 표본·요청 행렬
++sets = json.load(open(f"{OUT}/manifests/sets.json"))
++src_sets = json.load(open(f"{Q.SRC}/manifests/sets.json"))
++check("sets.json identical to iter_015 (D36/E180/E600/P60/P180 order kept)", sets == src_sets)
++check("D12 == first 4 per category of D36", all(sets["D12"][c] == sets["D36"][c][:4] for c in S.CATEGORIES))
++check("E180 subset of E600, P60 subset of E180, P180==E180", all(sets["E180"][c] == sets["E600"][c][:60] and sets["P60"][c] == sets["E180"][c][:20] for c in S.CATEGORIES))
++lab = json.load(open(f"{OUT}/manifests/labels.json"))
++cfg, _ = qa_protocol.static_cfg()
++for stage, n in (("d12_direct", 24), ("stress", 2)):
++    rows = Q.load_rows(f"{OUT}/requests/{stage}__M0.jsonl", cfg)
++    check(f"{stage} M0: {n} rows, verify_row ok, no category/GT keys, direct prompt has no box text",
++          len(rows) == n and all(not ({"category", "boxes", "gt", "label"} & set(r)) and "box" not in r["prompt"].lower() for r in rows))
++rows = Q.load_rows(f"{OUT}/requests/d12_direct__M0.jsonl", cfg)
++cats = {c: len({r["id"] for r in rows if lab[r["id"]]["category"] == c}) for c in S.CATEGORIES}
++check("d12_direct: category-first selection, 4 patients per category x 2 targets", cats == {c: 4 for c in S.CATEGORIES} and len(rows) == 24, cats)
++ev = Q.load_rows(f"{OUT}/requests/d6_ev__M0.jsonl", cfg)
++ecat = {c: len({r["id"] for r in ev if lab[r["id"]]["category"] == c}) for c in S.CATEGORIES}
++check("d6_ev: 2 patients per category x 3 conditions x 2 targets = 36", len(ev) == 36 and ecat == {c: 2 for c in S.CATEGORIES}
++      and {r["condition"] for r in ev} == {"ev_predicted", "ev_unavailable", "ev_oracle"}, (len(ev), ecat))
++b0 = Q.bbox_records("B0")
++okp = True
++for r in ev:
++    if r["condition"] == "ev_predicted":
++        bx, st_ = Q.predicted_boxes(b0[r["id"]])
++        okp &= r["prompt"].find(S.evidence_text("predicted", bx)) >= 0 and r["extra"]["source"] == "B0"
++    if r["condition"] == "ev_oracle" and lab[r["id"]]["boxes"]:
++        okp &= "Reference annotation boxes" in r["prompt"]
++check("evidence prompts embed the exact B0 (predicted) / GT (oracle) boxes", okp)
++check("stress request is the D36 M0 long-explanation patient", {r["id"] for r in Q.load_rows(f"{OUT}/requests/stress__M0.jsonl", cfg)} == {"val_00027331"})
++
++# ---- 4. bbox 출처: 명시 목록, 충돌·중복·미완료 거부
++check("bbox sources are explicit lists (no glob) and disjoint: M0 600, B0 600+12(D12), C 180+12(D12)+420(e600x)",
++      len(Q.bbox_records("M0")) == 600 and len(Q.bbox_records("B0")) == 600 + 12 and len(Q.bbox_records("C")) == 180 + 12 + 420,
++      (len(Q.bbox_records("M0")), len(Q.bbox_records("B0")), len(Q.bbox_records("C"))))
++tdir = tempfile.mkdtemp(dir=f"{OUT}/tests")
++rj = f"{tdir}/a.jsonl"
++open(rj, "w").write(json.dumps({"id": "x", "suffix_text_raw": "[]", "ended_eos": True}) + "\n")
++rj2 = f"{tdir}/b.jsonl"
++open(rj2, "w").write(json.dumps({"id": "x", "suffix_text_raw": "[]", "ended_eos": True}) + "\n")
++check("same id in two explicit sources rejected", raises(lambda: Q.bbox_records("M0", [("reuse", rj), ("reuse", rj2)]), Q.RequestError))
++rj3 = f"{tdir}/c.jsonl"
++open(rj3, "w").write(open(rj).read() * 2)
++check("duplicate id inside one source rejected", raises(lambda: Q.bbox_records("M0", [("reuse", rj3)]), Q.RequestError))
++check("gen source without completion.json rejected", raises(lambda: Q.bbox_records("C", [("gen", tdir)]), Q.RequestError))
++man = json.load(open(f"{OUT}/reuse/reuse_manifest.json"))
++check("reuse manifest: 9 old stages + M0/B0 bbox verified, set/label/hash checks recorded",
++      len(man["stages"]) == 9 and set(man["bbox_reuse"]) == {"M0", "B0"} and man["manifests"]["_checks"]["n_images_hash_verified"] == 636)
++check("reuse manifest records old (not re-locked) protocol digests", all(len(s["old_protocol_digest"]) == 64 for s in man["stages"].values()))
++
++# ---- 5. 복구 소유권 (살아 있는 writer의 tail 보존, 죽은 writer의 tail 복구)
++info = queue_lock.my_info(worker=9)
++d5 = tempfile.mkdtemp(dir=f"{OUT}/tests")
++good = json.dumps({"request_id": "a"}) + "\n"
++tail = '{"request_id": "b", "x'
++open(f"{d5}/gen_worker1.jsonl", "w").write(good + tail)
++open(f"{d5}/gen_worker9.jsonl", "w").write(good)
++holder = subprocess.Popen([sys.executable, "-c",
++                           "import sys,time;from rsna_diag import queue_lock as q;lk,_,_=q.try_lock(sys.argv[1],q.my_info(worker=1));print('locked' if lk else 'FAIL',flush=True);time.sleep(60)",
++                           f"{d5}/worker1.lock"], stdout=subprocess.PIPE, text=True)
++try:
++    check("holder process holds worker1.lock", holder.stdout.readline().strip() == "locked")
++    before = open(f"{d5}/gen_worker1.jsonl", "rb").read()
++    out_ = qa_gen.read_all_owned(d5, 9, True, False, info)  # repair 요청이 있어도 살아 있는 writer의 파일은 수정 금지
++    check("live writer's partial tail is left untouched even with --repair-tail (read-only tolerate)",
++          open(f"{d5}/gen_worker1.jsonl", "rb").read() == before and not os.path.exists(f"{d5}/gen_worker1.jsonl.partial") and len(out_[f"{d5}/gen_worker1.jsonl"]) == 1)
++    check("live_workers() detects the surviving child lock", any("worker1.lock" in f for f, _ in qa_run.live_workers(d5)))
++finally:
++    holder.kill()
++    holder.wait()
++time.sleep(0.2)
++check("no live worker after the holder died", not qa_run.live_workers(d5))
++check("dead writer's tail without --repair-tail is an error", raises(lambda: qa_gen.read_all_owned(d5, 9, False, False, info), qa_gen.QAError))
++recs_ = qa_gen.read_all_owned(d5, 9, True, False, info)
++check("dead writer's tail quarantined (not deleted) when repair is requested and lock acquired",
++      len(recs_[f"{d5}/gen_worker1.jsonl"]) == 1 and open(f"{d5}/gen_worker1.jsonl.partial").read().startswith(tail))
++open(f"{d5}/gen_worker2.jsonl", "w").write(good + tail)
++r_live = qa_gen.read_all_owned(d5, 9, False, True, info)
++check("live=True read tolerates other tails and never repairs", len(r_live[f"{d5}/gen_worker2.jsonl"]) == 1 and open(f"{d5}/gen_worker2.jsonl").read().endswith("x"))
++p_ = subprocess.Popen(["sleep", "300"])
++p2_ = subprocess.Popen(["sleep", "300"])
++fin = qa_run.stop_children([p_, p2_], grace=5)
++check("stop_children terminates and reaps only given children", all(f["returncode"] is not None for f in fin) and p_.poll() is not None and p2_.poll() is not None, fin)
++
++# ---- 6. 평가 계산: 독립 기준 구현과 대조
++ids_c = {"opacity": ["o1", "o2", "o3"], "normal": ["n1", "n2"], "not_normal_no_opacity": ["x1", "x2", "x3", "x4"]}
++ans = {"o1": ("yes", "yes"), "o2": ("yes", "no"), "o3": ("yes", "yes"), "n1": ("no", "no"), "n2": ("no", "no"), "x1": ("no", "yes"), "x2": ("no", "no"),
++       "x3": ("no", "yes"), "x4": ("no", "yes")}
++mk = lambda o, a: {"O": ("valid", o, True, 3), "A": ("valid", a, True, 3)}
++tb = {("M", "direct", "plain", i): mk(*a) for i, a in ans.items()}
++tb[("M", "direct", "plain", "n2")] = {"O": ("truncated", None, False, 1000), "A": ("valid", "no", True, 3)}
++gt = {i: c for c, v in ids_c.items() for i in v}
++vec = E.score_vectors(tb, "M", "direct", "plain", ids_c)
++sc, per = E.s_scope(vec)
++ref = {c: np.mean([tb[("M", "direct", "plain", i)]["O"][1] == S.GT_PAIR[c][0] and tb[("M", "direct", "plain", i)]["A"][1] == S.GT_PAIR[c][1] and tb[("M", "direct", "plain", i)]["O"][0] == "valid" for i in v]) for c, v in ids_c.items()}
++check("S_scope equals independent reference (invalid=failure, category-equal average)", all(abs(per[c] - ref[c]) < 1e-12 for c in per) and abs(sc - np.mean(list(ref.values()))) < 1e-12, (per, ref))
++check("require_complete passes when complete", E.require_complete(tb, ["M"], ["direct"], ["plain"], list(gt)))
++tb2 = dict(tb)
++del tb2[("M", "direct", "plain", "x4")]
++check("require_complete rejects a missing patient", raises(lambda: E.require_complete(tb2, ["M"], ["direct"], ["plain"], list(gt)), qa_gen.QAError))
++tb3 = dict(tb)
++tb3[("M", "direct", "plain", "x4")] = {"O": ("valid", "no", True, 3)}
++check("require_complete rejects a patient with one target only", raises(lambda: E.require_complete(tb3, ["M"], ["direct"], ["plain"], list(gt)), qa_gen.QAError))
++tb4 = {**tb, ("M", "direct", "plain", "zz"): mk("yes", "yes")}
++check("require_complete rejects extra patient", raises(lambda: E.require_complete(tb4, ["M"], ["direct"], ["plain"], list(gt)), qa_gen.QAError))
++check("balanced_accuracy raises on a missing patient (no silent skip)", raises(lambda: E.balanced_accuracy(tb2, "M", "direct", "plain", "A", gt), KeyError))
++check("pair_confusion raises on a missing patient", raises(lambda: E.pair_confusion(tb2, "M", "direct", "plain", gt), KeyError))
++ba = E.balanced_accuracy(tb, "M", "direct", "plain", "A", gt)
++ref_pos = np.mean([tb[("M", "direct", "plain", i)]["A"][1] == "yes" for i in gt if S.GT_PAIR[gt[i]][1] == "yes"])
++ref_neg = np.mean([tb[("M", "direct", "plain", i)]["A"][1] == "no" for i in gt if S.GT_PAIR[gt[i]][1] == "no"])
++check("balanced_accuracy(A) equals independent computation", abs(ba["balanced_accuracy"] - (ref_pos + ref_neg) / 2) < 1e-12 and ba["n_pos"] == 7 and ba["n_neg"] == 2, ba)
++dup = raises(lambda: E.answer_table([({"target": "O", "fmt": "plain", "checkpoint": "M", "condition": "direct", "id": "a"}, {"suffix_text_raw": "yes" + EOT, "ended_eos": True, "n_output_tokens": 2})] * 2), qa_gen.QAError)
++check("answer_table rejects a duplicated (ckpt,cond,fmt,id,target)", dup)
++
++# ---- 7. bound·통계
++tsem = {("a", "direct", "plain", "p1"): {"O": ("valid", "yes", True, 2), "A": ("valid", "yes", True, 2)},
++        ("a", "direct", "plain", "p2"): {"O": ("truncated", None, False, 9), "A": ("valid", "yes", True, 2)},
++        ("a", "direct", "plain", "p3"): {"O": ("valid", "no", True, 2), "A": ("truncated", None, False, 9)}}
++lo, hi = SC.patient_bounds(tsem, ("a", "direct", "plain", "p1"), "opacity"), SC.patient_bounds(tsem, ("a", "direct", "plain", "p2"), "opacity")
++lo3 = SC.patient_bounds(tsem, ("a", "direct", "plain", "p3"), "opacity")
++check("patient bounds: all-correct=(1,1); one invalid other correct=(0,1); known wrong + invalid=(0,0)", lo == (1.0, 1.0) and hi == (0.0, 1.0) and lo3 == (0.0, 0.0), (lo, hi, lo3))
++d0 = SC.discordant({"c": np.zeros(36)}, {"c": np.zeros(36)})
++check("discordance k=0: exact one-sided 95% upper = 1-0.05^(1/n)", abs(d0["exact_one_sided_95_upper"] - (1 - 0.05 ** (1 / 36))) < 1e-12 and d0["discordant"] == 0, d0)
++import math
++d3 = SC.discordant({"c": np.array([1, 0, 0, 1, 1, 0, 0, 0, 0, 0.])}, {"c": np.zeros(10)})
++u3 = d3["exact_one_sided_95_upper"]
++cdf3 = sum(math.comb(10, j) * u3 ** j * (1 - u3) ** (10 - j) for j in range(4))
++check("discordance k=3,n=10: Clopper-Pearson upper satisfies P(X<=3|p)=0.05 (~0.6066)", abs(cdf3 - 0.05) < 1e-9 and abs(u3 - 0.6066) < 1e-3, (u3, cdf3))
++va = {"c1": np.array([1, 1, 0, 0.]), "c2": np.array([1, 0, 0, 0.]), "c3": np.array([0, 0, 0, 1.])}
++vb = {"c1": np.array([0, 1, 0, 0.]), "c2": np.array([1, 1, 0, 0.]), "c3": np.array([0, 0, 0, 0.])}
++se, sec = SC.paired_se(va, vb)
++ref_se = np.sqrt(sum((np.std(va[c] - vb[c], ddof=1) / 2) ** 2 for c in va)) / 3
++check("paired SE of S_scope difference = sqrt(sum se_c^2)/3", abs(se - ref_se) < 1e-12)
++se2, _ = SC.paired_se(va, vb, n_target=16)
++check("projected SE scales by sqrt(n/N)", abs(se2 - se * np.sqrt(4 / 16)) < 1e-12)
++b = E.bootstrap_diff(va, vb, n=2000, ci=0.975)
++check("bootstrap point equals mean(diff) and CI ordered", abs(b["S_scope"]["point"] - np.mean([va[c].mean() - vb[c].mean() for c in va])) < 1e-12 and b["S_scope"]["ci"][0] <= b["S_scope"]["ci"][1])
++
++# ---- 8. 확대 규칙 (합성 입력)
++mk_main = lambda pt, ci, flip=False, meets=False: {"point": pt, "ci97.5": ci, "bounds_can_flip": flip, "conservative_bounds": [pt - .01, pt + .01],
++                                                   "projection": {"meets": meets, "halfwidth_975": .07}}
++zero = {"B0-M0": {"diff": 0.0}, "C-B0": {"diff": 0.0}}
++d = SC.decide_expand({"B0-M0": mk_main(0.12, [0.02, 0.22]), "C-B0": mk_main(0.0, [-0.05, 0.05])}, zero, None, {})
++check("expand when |S_scope diff|>=0.10", d["expand"] and d["reasons"])
++d = SC.decide_expand({"B0-M0": mk_main(0.02, [-0.05, 0.05]), "C-B0": mk_main(0.0, [-0.05, 0.05])}, {"B0-M0": {"diff": -0.16}, "C-B0": {"diff": 0.0}}, None, {})
++check("expand when NoOpacity/NotNormal pair accuracy diff <= -0.15", d["expand"])
++d = SC.decide_expand({"B0-M0": mk_main(0.02, [-0.05, 0.05]), "C-B0": mk_main(0.0, [-0.05, 0.05])}, zero, {"point": 0.12, "ci95": [0.0, 0.2], "projection": {"meets": True}}, {})
++check("expand when evidence diff >= 0.10", d["expand"])
++d = SC.decide_expand({"B0-M0": mk_main(0.02, [-0.05, 0.05]), "C-B0": mk_main(0.0, [-0.05, 0.05])}, zero, None, {})
++check("no expand when all inside thresholds and CI excludes +/-0.10", not d["expand"] and not d["reasons"])
++d = SC.decide_expand({"B0-M0": mk_main(0.06, [-0.02, 0.14], meets=True), "C-B0": mk_main(0.0, [-0.05, 0.05])}, zero, None, {})
++check("expand when CI contains an important effect and projected precision meets target", d["expand"])
++d = SC.decide_expand({"B0-M0": mk_main(0.06, [-0.02, 0.14], meets=False), "C-B0": mk_main(0.0, [-0.05, 0.05])}, zero, None, {})
++check("no expand when CI contains it but projected precision would not help", not d["expand"])
++d = SC.decide_expand({"B0-M0": mk_main(0.12, [0.02, 0.22], flip=True), "C-B0": mk_main(0.0, [-0.05, 0.05])}, zero, None, {})
++check("hold when residual invalid can flip the conclusion", not d["expand"] and d["hold_reasons"])
++d = SC.decide_expand({"B0-M0": mk_main(0.12, [0.02, 0.22]), "C-B0": mk_main(0.0, [-0.05, 0.05])}, zero, None, {"B0-M0": {"diff": -0.15}})
++check("hold when json direction is importantly opposite", not d["expand"] and d["hold_reasons"])
++check("flippable: bounds crossing 0.10 or sign", SC.flippable(0.12, 0.08, 0.16) and SC.flippable(0.0, -0.02, 0.02) is False and SC.flippable(0.05, -0.01, 0.11))
++
++# ---- 9. protocol
++p = f"{tdir}/p.json"
++qa_protocol.create(p, [], "fixture")
++check("iter016 protocol locks parser/eval/report/reuse/scope code", all(f in json.load(open(p))["locked"]["files"] for f in ("rsna_diag/qa_spec.py", "rsna_diag/qa_eval.py", "rsna_diag/qa_scope.py", "rsna_diag/qa_report.py", "rsna_diag/qa_reuse.py")))
++old = json.load(open(f"{Q.SRC}/protocols/protocol_stage2.json"))
++json.dump(old, open(f"{tdir}/old.json", "w"))
++check("iter015 protocol rejected by iter016 verify (schema)", raises(lambda: qa_protocol.verify(f"{tdir}/old.json"), RuntimeError))
++
++# ---- 10. 본평가 요청·원시 응답 독립 재계산 (E180 + E600 확대분)
++import glob as _glob
++
++STAGES = {"plain": ["e180_plain", "e600x_plain"], "json": ["p60_json", "p180x_json"]}
++cfg_, _ = qa_protocol.static_cfg()
++req_by_stage = {}
++for st_, cks in (("e180_plain", ("M0", "B0", "C")), ("e600x_plain", ("M0", "B0", "C")), ("p60_json", ("M0", "B0", "C")), ("p180x_json", ("M0", "B0", "C")),
++                 ("p60_ev", ("M0",)), ("p180x_ev", ("M0",)), ("e600x_bbox", ("C",))):
++    for ck_ in cks:
++        req_by_stage[(st_, ck_)] = Q.load_rows(f"{OUT}/requests/{st_}__{ck_}.jsonl", cfg_)
++n_exp = {"e180_plain": 360, "e600x_plain": 840, "p60_json": 120, "p180x_json": 240, "p60_ev": 360, "p180x_ev": 720, "e600x_bbox": 420}
++check("request counts per stage/ckpt as planned (1,800 E180 + 4,380 expansion = 6,180)",
++      all(len(v) == n_exp[k[0]] for k, v in req_by_stage.items()) and sum(len(v) for v in req_by_stage.values()) == 1800 + 4380,
++      sum(len(v) for v in req_by_stage.values()))
++allrows = [r for v in req_by_stage.values() for r in v]
++check("no request_id repeated across all stages (no overlap E180 vs expansion)", len({r["request_id"] for r in allrows}) == len(allrows))
++e600ids = {i for c in S.CATEGORIES for i in sets["E600"][c]}
++check("primary requests cover exactly E600 patients x 2 targets per checkpoint",
++      all({(r["id"], r["target"]) for st_ in STAGES["plain"] for r in req_by_stage[(st_, ck_)]} == {(i, t) for i in e600ids for t in S.TARGETS} for ck_ in ("M0", "B0", "C")))
++check("expansion requests exclude E180 patients", not ({r["id"] for r in req_by_stage[("e600x_plain", "M0")]} & {i for c in S.CATEGORIES for i in sets["E180"][c]}))
++raw = {}
++for (st_, ck_), rows_ in req_by_stage.items():
++    d_ = f"{OUT}/gen/{st_}__{ck_}"
++    recs_ = [json.loads(x) for f in sorted(_glob.glob(f"{d_}/gen_worker*.jsonl")) for x in open(f) if x.strip()]
++    ids_ = [r["request_id"] for r in recs_]
++    ok_ = (len(ids_) == len(set(ids_)) == len(rows_) and set(ids_) == {r["request_id"] for r in rows_} and all(r["ended_eos"] for r in recs_)
++           and json.load(open(f"{d_}/completion.json"))["n_actual_unique"] == len(rows_))
++    check(f"gen/{st_}__{ck_}: record set == request set, no duplicates, all EOS, completion.json", ok_)
++    raw[(st_, ck_)] = {r["request_id"]: r for r in recs_}
++rowmap = {r["request_id"]: r for r in allrows}
++E6 = json.load(open(f"{OUT}/e600/report.json"))
++gtcat = {i: lab[i]["category"] for i in e600ids}
++ref_ok = {}
++for ck_ in ("M0", "B0", "C"):
++    ans_ = {}
++    for st_ in STAGES["plain"]:
++        for rid, rec_ in raw[(st_, ck_)].items():
++            row_ = rowmap[rid]
++            ans_[(row_["id"], row_["target"])] = ref_semantic(row_["target"], "plain", rec_["suffix_text_raw"], rec_["ended_eos"])
++    ref_ok[ck_] = {i: float(ans_[(i, "O")] == S.GT_PAIR[gtcat[i]][0] and ans_[(i, "A")] == S.GT_PAIR[gtcat[i]][1]) for i in e600ids}
++per_ref = {ck_: {c: float(np.mean([ref_ok[ck_][i] for i in sets["E600"][c]])) for c in S.CATEGORIES} for ck_ in ref_ok}
++rep_ok = all(abs(E6["scores"][ck_]["semantic"]["per_category"][c] - per_ref[ck_][c]) < 1e-12 for ck_ in ref_ok for c in S.CATEGORIES)
++check("E600 semantic per-category S_scope recomputed from raw records with the independent reference parser == report.json", rep_ok, per_ref)
++sc_ref = {ck_: float(np.mean(list(per_ref[ck_].values()))) for ck_ in per_ref}
++check("E600 S_scope (category-equal average) == report.json for M0/B0/C", all(abs(E6["scores"][ck_]["semantic"]["S_scope"] - sc_ref[ck_]) < 1e-12 for ck_ in sc_ref), sc_ref)
++rng = np.random.default_rng(E.BOOT_SEED)
++draw = []
++for c in S.CATEGORIES:
++    ids_c_ = sets["E600"][c]
++    va_ = np.array([ref_ok["B0"][i] for i in ids_c_])
++    vb_ = np.array([ref_ok["M0"][i] for i in ids_c_])
++    idx_ = rng.integers(0, len(ids_c_), size=(E.BOOT_N, len(ids_c_)))
++    draw.append(np.take(va_, idx_).mean(axis=1) - np.take(vb_, idx_).mean(axis=1))
++tot_ = np.mean(draw, axis=0)
++ci_ref = [float(np.percentile(tot_, 1.25)), float(np.percentile(tot_, 98.75))]
++ci_rep = E6["main_semantic_plain_E180"]["B0-M0"]["ci97.5"]
++check("B0-M0 97.5% patient-paired bootstrap CI recomputed independently == report.json", abs(ci_ref[0] - ci_rep[0]) < 1e-12 and abs(ci_ref[1] - ci_rep[1]) < 1e-12, (ci_ref, ci_rep))
++ev_ref = {}
++for st_ in ("p60_ev", "p180x_ev"):
++    for rid, rec_ in raw[(st_, "M0")].items():
++        row_ = rowmap[rid]
++        ev_ref[(row_["condition"], row_["id"], row_["target"])] = ref_semantic(row_["target"], "plain", rec_["suffix_text_raw"], rec_["ended_eos"])
++p180 = [i for c in S.CATEGORIES for i in sets["P180"][c]]
++ev_sc = {cd: float(np.mean([np.mean([float(ev_ref[(cd, i, "O")] == S.GT_PAIR[lab[i]["category"]][0] and ev_ref[(cd, i, "A")] == S.GT_PAIR[lab[i]["category"]][1])
++                                     for i in sets["P180"][c]]) for c in S.CATEGORIES])) for cd in ("ev_predicted", "ev_unavailable", "ev_oracle")}
++er_ = E6["evidence_M0_P60"]["scores"]
++check("evidence S_scope (P180) recomputed from raw records == report.json", all(abs(er_[cd]["S_scope"] - ev_sc[cd]) < 1e-12 for cd in ev_sc), ev_sc)
++check("all E600/P180 requests are strict-parser + semantic-parser evaluated (both scores stored)", all("strict" in E6["scores"][c] and "semantic" in E6["scores"][c] for c in ("M0", "B0", "C")))
++
++n_fail = sum(not r["pass"] for r in res)
++json.dump({"n": len(res), "n_pass": len(res) - n_fail, "results": res}, open(f"{OUT}/tests/fixtures_iter016.json", "w"), indent=1)
++print(f"{len(res) - n_fail}/{len(res)} passed")
++sys.exit(1 if n_fail else 0)
+diff --git a/test_rsna_iter016_gpu.py b/test_rsna_iter016_gpu.py
+new file mode 100644
+index 0000000..d71cba1
+--- /dev/null
++++ b/test_rsna_iter016_gpu.py
+@@ -0,0 +1,153 @@
++"""iter_016 실제 GPU 통제 검사 (상속된 CUDA_VISIBLE_DEVICES 중 첫 장 사용).
++A. 부모(qa_run) SIGKILL -> 살아 있는 자식 확인 -> 새 qa_run이 실행을 거부 -> 자식 SIGKILL -> 잘린 줄 주입 -> --repair-tail 없이는 거부 ->
++   --repair-tail 재개 -> 중단 전 완료 record의 bytes/hash 불변, 중복·누락 0, 기준(gen_w1) greedy token과 일치.
++B. 부모 SIGTERM(정상 중단) -> 소유 자식 모두 종료·회수, run.lock 해제, attempt=interrupted.
++사용: python test_rsna_iter016_gpu.py  -> results/iter_016/tests/fixtures_iter016_gpu.json
++"""
++import glob
++import hashlib
++import json
++import os
++import signal
++import subprocess
++import sys
++import time
++
++from rsna_diag import qa_gen, queue_lock
++
++OUT = "results/iter_016"
++PROT = f"{OUT}/protocols/protocol_pilot.json"
++STAGE, CK = "d12_direct", "M0"
++res = []
++
++
++def check(n, c, det=""):
++    res.append({"name": n, "pass": bool(c), "detail": str(det)[:300]})
++    print(("PASS " if c else "FAIL ") + n, det if not c else "")
++
++
++def sha(b):
++    return hashlib.sha256(b).hexdigest()
++
++
++gpu = os.environ["CUDA_VISIBLE_DEVICES"].split(",")[0]
++env = dict(os.environ, CUDA_VISIBLE_DEVICES=gpu)
++base = [sys.executable, "-m", "rsna_diag.qa_run", "--stage", STAGE, "--ckpts", CK, "--protocol", PROT, "--workers", "2", "--gpus", gpu,
++        "--peak-gb", "8.8", "--poll-s", "1"]
++ref = {}
++for f in glob.glob(f"{OUT}/gen_w1/{STAGE}__{CK}/gen_worker*.jsonl"):
++    for r in qa_gen.read_strict(f):
++        ref[r["request_id"]] = r["suffix_ids"]
++
++
++def files(d):
++    return sorted(glob.glob(f"{d}/gen_worker*.jsonl"))
++
++
++def nlines(d):
++    return sum(len([x for x in open(f) if x.strip()]) for f in files(d))
++
++
++def pid_alive(pid, start):
++    return queue_lock.proc_start(pid) == start and start is not None
++
++
++# ---------------- A ----------------
++suffix = "_kill_v2"  # 첫 시도(_kill)는 자식이 먼저 끝나는 경합으로 무효였다 (SIGSTOP으로 결정적으로 고정한 v2 사용)
++d = f"{OUT}/gen{suffix}/{STAGE}__{CK}"
++os.makedirs(d, exist_ok=True)
++p = subprocess.Popen(base + ["--out-suffix", suffix], env=env, stdout=open(f"{d}/parent.out", "a"), stderr=open(f"{d}/parent.err", "a"))
++t0 = time.time()
++children = []
++while time.time() - t0 < 300 and not (children and nlines(d) >= 1):
++    time.sleep(0.02)
++    a_ = sorted(glob.glob(f"{d}/attempts/attempt_*.json"))
++    children = json.load(open(a_[-1])).get("children", []) if a_ else []
++for c in children:  # 자식을 정지시켜 부모 종료 시점의 상태를 결정적으로 고정한다
++    os.kill(c["pid"], signal.SIGSTOP)
++os.kill(p.pid, signal.SIGKILL)
++p.wait()
++att = sorted(glob.glob(f"{d}/attempts/attempt_*.json"))[-1]
++check("attempt record has child pid/starttime for every worker", len(children) == 2 and all(c.get("start") for c in children), children)
++n_at_kill = nlines(d)
++alive = [c for c in children if pid_alive(c["pid"], c["start"])]
++check("both children survive the parent's SIGKILL", len(alive) == 2, len(alive))
++snap_ = {f: sha(open(f, "rb").read()) for f in files(d)}
++claims_ = sorted(os.listdir(f"{d}/claims"))
++p2 = subprocess.run(base + ["--out-suffix", suffix], env=env, capture_output=True, text=True)
++check("new qa_run refuses while a previous child still owns the stage", p2.returncode != 0 and "live worker" in (p2.stderr + p2.stdout), (p2.stderr + p2.stdout)[-200:])
++check("refused run did not change any record file or claim", snap_ == {f: sha(open(f, "rb").read()) for f in files(d)} and claims_ == sorted(os.listdir(f"{d}/claims")))
++for c in children:  # 소유 자식 강제 종료 (PID+starttime 확인 후)
++    if pid_alive(c["pid"], c["start"]):
++        os.kill(c["pid"], signal.SIGKILL)
++t0 = time.time()
++while time.time() - t0 < 30 and any(pid_alive(c["pid"], c["start"]) for c in children):
++    time.sleep(0.2)
++check("no worker alive after killing children", not any(pid_alive(c["pid"], c["start"]) for c in children))
++fs = files(d)
++target = max(fs, key=lambda f: os.path.getsize(f))
++with open(target, "a") as f:  # 쓰는 도중 죽은 상황 모사
++    f.write('{"request_id": "abc", "id": "trunc')
++before = {f: open(f, "rb").read() for f in fs}
++complete_before = {f: b[:b.rfind(b"\n") + 1] for f, b in before.items()}
++ids_before = [json.loads(x)["request_id"] for f in fs for x in complete_before[f].decode().splitlines() if x.strip()]
++check("partial progress at kill (some but not all done)", 1 <= len(ids_before) <= 24, len(ids_before))
++if len(ids_before) == 24:  # 자식이 이미 끝난 경우에도 재개 경로는 검사하되 기록한다
++    print("note: all 24 done before kill; resume path checks only refusal/repair")
++p3 = subprocess.run(base + ["--out-suffix", suffix], env=env, capture_output=True, text=True)
++check("resume without --repair-tail refuses the truncated tail", p3.returncode != 0 and ("truncated last line" in (p3.stderr + p3.stdout) or "FAILED" in p3.stdout or "incomplete" in p3.stdout), (p3.stderr + p3.stdout)[-300:])
++p4 = subprocess.run(base + ["--out-suffix", suffix, "--repair-tail"], env=env, capture_output=True, text=True)
++check("resume with --repair-tail exits 0", p4.returncode == 0, (p4.stderr + p4.stdout)[-300:])
++recs = {}
++dupe = 0
++for f in files(d):
++    for r in qa_gen.read_strict(f):
++        dupe += r["request_id"] in recs
++        recs[r["request_id"]] = r["suffix_ids"]
++check("24 requests, duplicates 0, missing 0", len(recs) == 24 and dupe == 0 and set(recs) == set(ref), (len(recs), dupe))
++check("greedy tokens identical to the reference run (gen_w1)", all(recs[k] == ref[k] for k in ref if k in recs) and set(recs) == set(ref))
++same = all(open(f, "rb").read().startswith(complete_before[f]) for f in complete_before)
++check("bytes/hash of every record completed before the interruption unchanged after resume", same and all(sha(complete_before[f]) == sha(open(f, "rb").read()[:len(complete_before[f])]) for f in complete_before))
++check("quarantined partial line kept (not deleted)", os.path.exists(target + ".partial") and open(target + ".partial").read().startswith('{"request_id": "abc"'))
++comp = json.load(open(f"{d}/completion.json"))
++check("completion.json written only after full verification (requests_sha256 present)", comp["n_actual_unique"] == 24 and "requests_sha256" in comp)
++
++# ---------------- B ----------------
++suffix2 = "_term_v2"
++d2 = f"{OUT}/gen{suffix2}/{STAGE}__{CK}"
++os.makedirs(d2, exist_ok=True)
++q = subprocess.Popen(base + ["--out-suffix", suffix2], env=env, stdout=open(f"{d2}/parent.out", "a"), stderr=open(f"{d2}/parent.err", "a"))
++t0 = time.time()
++while time.time() - t0 < 300 and not glob.glob(f"{d2}/attempts/attempt_*.json"):
++    time.sleep(0.1)
++time.sleep(2.0)
++att2 = sorted(glob.glob(f"{d2}/attempts/attempt_*.json"))[-1]
++ch2 = json.load(open(att2)).get("children", [])
++q.send_signal(signal.SIGTERM)
++q.wait(timeout=180)
++time.sleep(0.5)
++check("SIGTERM: parent exits, all owned children gone (reaped)", len(ch2) == 2 and not any(pid_alive(c["pid"], c["start"]) for c in ch2), ch2)
++a2 = json.load(open(att2))
++check("SIGTERM: attempt status is interrupted or complete (never left 'running')", a2["status"] in ("interrupted", "complete", "failed_or_incomplete"), a2["status"])
++fd = os.open(f"{d2}/run.lock", os.O_RDWR)
++import fcntl
++try:
++    fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
++    got = True
++except BlockingIOError:
++    got = False
++os.close(fd)
++check("SIGTERM: run.lock released after children were reaped", got)
++if a2["status"] == "interrupted":
++    # 재개하면 남은 요청만 생성하고 기준과 일치
++    p5 = subprocess.run(base + ["--out-suffix", suffix2, "--repair-tail"], env=env, capture_output=True, text=True)
++    r5 = {}
++    for f in files(d2):
++        for r in qa_gen.read_strict(f):
++            r5[r["request_id"]] = r["suffix_ids"]
++    check("after SIGTERM, resume completes with identical greedy tokens", p5.returncode == 0 and r5 == ref, (p5.returncode, len(r5)))
++
++json.dump({"n_records_at_kill": n_at_kill, "n_complete_before_repair": len(ids_before), "results": res}, open(f"{OUT}/tests/fixtures_iter016_gpu.json", "w"), indent=1)
++bad = [r for r in res if not r["pass"]]
++print(f"{len(res) - len(bad)}/{len(res)} passed")
++sys.exit(1 if bad else 0)

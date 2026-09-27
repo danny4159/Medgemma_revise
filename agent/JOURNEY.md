@@ -126,3 +126,18 @@ iter_010·011은 실행 복구와 평가 연결 문제로 본실험을 끝내지
 - 접근법: 영상 조건부 집합 grounding (`approach/conditional-set-grounding`), 시도: iter_010, iter_011, iter_012
 - 커밋: 5581ed255a350e42a0ad422065edf13c56a33bf6, 8b030717b813bcbff85a2ffc5f52c9561a73f452, 783d2d04671ae296f3dc0c700e575f8af8e021c9
 - 자세히: DECISIONS.md의 iter_012, `agent/runs/iter_012/review.md`
+
+## 🏁 Grounding 적응의 QA 저하를 형식 효과와 잔여 변화로 분리
+
+*iter_016 · 2026-09-27 12:20 · 판정: CONTINUE / success*
+
+QA 형식 실패를 의미 능력 손실로 오해하지 않도록 실제 출력에서 두 효과를 분리했다.
+**고민:** 직접 SFT로 bbox는 개선됐지만, QA에서도 능력이 유지되는지는 알 수 없었다.
+**시도:** iter_014의 GIoU 추가 이득이 입증되지 않은 뒤 기존 checkpoint 진단으로 전환했고, iter_015에서는 형식 gate가 본평가를 막았다.
+**개발:** 질문별 최소 semantic parser를 고정하고 E180에서 사전 기준에 따라 E600까지 확대했다.
+**결과:** 신규 6,180건에서 B0−M0의 strict 차이 −0.255는 semantic −0.0317로 줄었다. 예측 bbox reader는 동일 P180 direct M0보다 +0.0778 높았다.
+**의미:** 큰 형식 효과를 확인했지만 category별 변화와 evidence 효과는 남았다. 새 loss보다 문구·검출 정보·좌표를 구분하는 진단의 가치가 높아졌으며, 원인과 신규 기여는 아직 미확인이다.
+
+- 접근법: 질문 대상과 음성 의미 보존 진단 (`approach/target-scope-diagnostic`), 시도: iter_015, iter_016
+- 커밋: 3265f117bf3f4de99ba084f2c9b4e476568f24bd, 6a4fb41d490305061028de9cab863c0b5e9747ad
+- 자세히: DECISIONS.md의 iter_016, `agent/runs/iter_016/review.md`

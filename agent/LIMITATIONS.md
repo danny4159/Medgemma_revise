@@ -52,18 +52,35 @@ MedGemma 1.5에는 좌표 출력/grounding 능력 자체가 없다는 과거 주
 
 ## qa-format-compliance-after-grounding-sft — observed
 
-在本次固定 RSNA D36 开发样本中，MedGemma 1.5 的 grounding SFT checkpoint B0/C 对 Q_A 的 plain yes/no 格式遵循率为 29/36、26/36，低于 base 的 35/36；JSON 格式也未通过预设 gate。这是特定问题、checkpoint 和严格 parser 条件下的有限观察，不能据此认定视觉能力或 target 语义区分能力下降。
+고정 RSNA 개발 집단 E600에서 grounding SFT B0의 Q_A strict valid는 418/600으로 M0의 576/600보다 낮지만, 사전 고정한 semantic_v1 적용 후에는 각각 600/600, 584/600이다. B0−M0의 S_scope 차이는 strict −0.255에서 semantic −0.0317로 줄었다. 형식 차이가 평가상 저하의 상당 부분을 설명하지만, category별 잔여 변화까지 사라진 것은 아니다. 시각적 forgetting이나 일반적 의미 구분 능력 손실은 입증되지 않았다.
 
 - 적용 목표 시작: iter_003
-- 최신 리뷰: agent/runs/iter_015/review.json
-- 근거: research/results/iter_015/gen/d36_{plain,json}__{M0,B0,C}/gen_worker*.jsonl：432 个实际 QA 输出。
-- 근거: research/results/iter_015/d36/format_decision.json：两种格式均未通过所有 checkpoint×target 的 valid rate≥0.95 条件。
-- 근거: 独立原始输出复核：B0/C 的 plain Q_A 分别有 7/10 个回答为 Normal；JSON 条件下大量回答为 bare yes/no。
-- 사용·평가 검증: 实际问题和 parser 与计划固定规则一致；未将 [] 解释为 no。
-- 사용·평가 검증: 432 个 QA 输出均以 EOS 结束，独立格式计数与保存结果一致。
-- 사용·평가 검증: 当前 636 张图像的 file/pixel hash 与 manifest 一致，labels 与原始 gt_manifest 的 category、patient、boxes 一致。
-- 사용·평가 검증: 官方使用方式采用 iter_009 已验证范围；本次未重新运行官方 GPU 示例。
-- 미해결: 在开发资料上固定仅适用于 Q_A 的精确 Normal/Abnormal 映射后，target 别性能差异是否仍然存在？
-- 미해결: 独立患者和其他训练 seed 是否复现该现象？
-- 미해결: 格式变化是否足以解释表面性能下降，尚未验证。
+- 최신 리뷰: agent/runs/iter_016/review.json
+- 근거: research/results/iter_016/gen/{e180_plain,e600x_plain}__{M0,B0,C}/gen_worker*.jsonl: primary QA 3,600건.
+- 근거: research/results/iter_016/e600/report.json: semantic S_scope M0/B0/C=0.6100/0.5783/0.5883, B0−M0의 97.5% CI [−0.0667, 0.0050].
+- 근거: 리뷰 독립 재계산: B0−M0의 category별 정답 쌍 정확도 차이는 opacity −0.105, Normal +0.095, NoOpacity/NotNormal −0.085.
+- 사용·평가 검증: semantic_v1은 D36에서 결정한 whole-string 규칙이며 Normal/Abnormal 대응은 Q_A에만 적용한다.
+- 사용·평가 검증: 리뷰에서 원시 응답에 별도 parser와 paired bootstrap을 적용해 주지표와 CI를 재현했다.
+- 사용·평가 검증: 정식 신규 6,180건 모두 EOS 종료, 요청 중복·누락과 주요 provenance 불일치 0.
+- 사용·평가 검증: 현재 영상 636개의 file/raw pixel hash 및 신규 출력의 padded input hash 불일치 0.
+- 미해결: 다른 학습 seed와 독립 환자·기관에서도 category별 변화가 재현되는가?
+- 미해결: 잔여 변화가 답변 prior, 질문 해석, 시각 정보 활용 중 무엇에서 비롯되는가?
+- 미해결: E600은 개발 자료이며 이번 결과를 새 독립 확인으로 해석할 수 없다.
+
+## rsna-evidence-interface-sensitivity — observed
+
+고정 RSNA P180에서 원본 영상과 B0 예측 bbox를 받은 M0 reader는 unavailable 안내 조건보다 S_scope가 0.1278 높았다. 그러나 Normal과 NoOpacity/NotNormal에서 효과 방향이 반대이고, oracle 조건의 Normal 정답 쌍 정확도는 0/60이었다. 현재 evidence 구성에 따른 답변 변화는 관찰됐지만, bbox 정보와 안내 문구의 인과 효과는 분리되지 않았다.
+
+- 적용 목표 시작: iter_003
+- 최신 리뷰: agent/runs/iter_016/review.json
+- 근거: research/results/iter_016/gen/{p60_ev,p180x_ev}__M0/gen_worker*.jsonl: evidence QA 1,080건.
+- 근거: research/results/iter_016/e600/report.json: predicted/unavailable/oracle S_scope=0.7000/0.5722/0.6444.
+- 근거: 리뷰 독립 재계산: predicted−unavailable 95% CI [0.0556, 0.2000], 동일 P180 direct M0 대비 +0.0778 [0.0278, 0.1333].
+- 사용·평가 검증: 세 evidence 조건 모두 원본 영상을 유지하고 동일 target·parser를 사용한다.
+- 사용·평가 검증: evidence 1,080건 모두 의미 해석 가능하며 strict와 semantic 점수가 같다.
+- 사용·평가 검증: oracle는 GT 정보가 포함된 원인 분리용 조건으로 실용 baseline과 구분한다.
+- 사용·평가 검증: 원시 답변과 요청을 연결해 category별 정답 수 및 paired CI를 재계산했다.
+- 미해결: 문구를 맞춘 조건에서도 예측 bbox의 이득이 유지되는가?
+- 미해결: 좌표 없이 검출 유무만 전달해도 같은 이득이 발생하는가?
+- 미해결: 정확한 좌표, 교란 좌표, 안내 문구가 각각 답변에 미치는 효과는 무엇인가?
 

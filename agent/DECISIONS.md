@@ -391,3 +391,29 @@ MedGemma 1.5로 연구하는 것 자체가 큰 제약이라고 판단되면, 근
   - 다음: 진단을 우선 권고한다. iter_015의 전략 비교를 이어받아 새 loss 학습보다 형식 보정으로 의미 차이를 판별하는 정보 이득을 평가한다. D36에서 Q_A의 정확한 Normal→no·Abnormal→yes 같은 제한된 규칙을 검토하고, 질문별 허용 응답과 invalid 처리를 결과 확인 전에 고정한다. strict 형식 지표는 별도로 유지하며 모순·설명문·bbox를 임의 구제하지 않는다. 필요한 실행기·평가 입력 결함만 수정한 뒤 E180 QA와 계획된 대조로 진행한다. 보정 후에도 target별 차이가 남으면 의미 보존 진단을 확대하고, 차이가 사라지거나 좁은 형식 현상만 남으면 다른 중요한 의료 VLM 질문으로 전환한다. E600·seed 확대는 정보 이득과 사전 기준으로 결정하고 reserve는 보존한다.
 - 📁 원본: `agent/runs/iter_015/`
 
+## iter_016 — 질문 대상과 음성 의미 보존 진단 (2번째 시도) · 2026-09-27 10:54
+
+- 🧭 **계획** (GPT deep): 질문별 최소 형식 정규화를 고정하고 E180 실제 QA로 grounding 적응의 의미 변화를 진단한다. 차이가 남을 때만 E600·기존 seed로 확대하며, 형식 차이만 남으면 새 loss 개발을 보류한다.
+  - 대안: 1) 질문 대상과 음성 의미 보존 진단: 제한된 형식 정규화로 기존 checkpoint의 실제 target별 변화와 모듈형 활용 가능성을 구분한다. · 2) 다른 의료 VLM 질문으로 전환: 이번 진단에서 의미 있는 변화가 배제되거나 형식 현상만 남으면 영상–언어 충돌 등 다른 중요한 질문의 정답·선행 차이를 검토한다. · 3) 현재 grounding 방법 개선: 새로운 원인·효율 근거가 확보될 때 강한 직접 SFT와 detector/encoder+head를 포함해 다시 비교하며 후속 loss는 예약하지 않는다.
+  - 1순위 선택 근거: D36 원문에서 제한된 보정의 적용 범위가 명확하고 E180 QA는 미실행이다. 기존 checkpoint와 허용된 두 GPU만으로 형식 차이와 의미 변화를 구분할 수 있어 추가 권한이나 목표 변경이 필요 없다.
+- ▶ **결정**: 자동 진행 (smart) — 1순위로 진행
+- 💾 **개발 이력 체크포인트** `6a4fb41d490305061028de9cab863c0b5e9747ad`: implementation_finished (검증 승인 아님)
+- 🔧 **Claude** (standard): semantic_v1으로 형식을 통제한 E180→E600 QA 진단(신규 6,180건)에서 grounding SFT의 strict 저하(−0.255)는 대부분 형식이었고 총점 차이는 −0.032 [−0.067, +0.005]로 작으나 Normal↑·opacity/NoOpacity↓ 조성 이동과 evidence 문구 민감성이 남아(원인·독립 확인 미검증) 새 loss 학습은 보류를 권고한다. [자체 검증 PASS, 파일 7214개 변경]
+  - 브랜치 `approach/target-scope-diagnostic`에서 계속
+  - ⚠ 권한 거부 4건
+- 🔍 **리뷰** (GPT normal): [CONTINUE / success] 6,180건의 유효한 진단에서 SFT의 strict 저하 대부분이 형식 효과로 설명됐고, 예측 bbox reader는 direct M0보다 S_scope가 0.078 높았다. 문구·검출 정보·좌표의 기여는 아직 분리되지 않았다.
+  - 접근법 판단: 계획한 형식 통제 진단과 조건부 E600 확대를 완료했고 모듈형 효과 기준도 충족했다. 효과의 원인과 신규 기여는 후속 판단 대상이다.
+  - 목표 진전: 실행은 유효하며 형식 효과를 실제 의미 정확도 변화와 분리했다. B0의 strict 저하 −0.255는 정규화 후 −0.0317로 줄었다. 동시에 예측 bbox reader는 unavailable 대비 +0.1278, 동일 환자의 direct M0 대비 +0.0778의 개선을 보였다. 이는 후속 인터페이스 진단의 긍정적 근거지만 공간 reasoning, 시각적 forgetting, 독립 일반화 또는 새로운 contribution을 입증하지 않는다.
+  - 판정 범위: 대규모 의미 능력 저하와 신규 방법의 기여는 MedGemma 1.5의 RSNA E600 개발 환자, seed17 B0 및 단일 추가 SFT 경로 C, 고정 Q_O/Q_A 조건에서 입증되지 않았다. evidence의 기전은 P180의 현재 문구·bbox 구성에서 미분리 상태다. 전체 경량 적응이나 모듈형 접근의 실패를 뜻하지 않는다.
+  - 재사용 전 수정: qa_eval.load_stage는 completion.json의 존재만 확인하고 내용을 검증하지 않는다. 평가에서도 요청 hash·protocol/config/adapter digest·수량·자식 종료 코드를 실제 요청 및 record와 일치시켜야 한다.
+  - 재사용 전 수정: qa_requests.bbox_records는 명시적 출처 충돌은 거부하지만, 읽는 원본 파일을 잠긴 reuse manifest의 hash와 다시 대조하지 않는다. 신규 bbox stage도 completion 존재와 일부 필드 필터에 의존한다. evidence 요청 생성과 bbox 평가 전에 출처·완전성 검증을 강제해야 한다.
+  - 재사용 전 수정: qa_scope의 ALLOW_CHANGED는 파일명만으로 분석 코드 세 개의 모든 변경을 허용한다. 이번 변경은 기록과 재계산으로 확인했지만, 재사용 전에는 허용된 이전·이후 hash와 변경 이유를 명시적으로 연결해야 한다.
+  - 추후 개선: 1→2 worker/GPU의 pilot wall-clock 개선은 1.05배로 작고 polling 간격의 영향도 있다. 향후 더 긴 작업에서는 실제 시작·종료 시간과 CPU/RAM/I/O 경합을 함께 기록한다.
+  - 추후 개선: GPU 배정은 허용 집합을 지켰지만 여유 메모리순 정렬은 구현되지 않았다. 다음 실행에서 여유가 큰 장치부터 배정하도록 반영한다.
+  - 추후 개선: e600/report.json에 E180/P60 이름의 키와 expand=true가 남아 있다. 실제 표본은 E600/P180이며, 이를 추가 확대 명령으로 사용하지 않도록 단계 표시를 명확히 한다.
+  - 추후 개선: 후속 비교에서는 localizer와 reader를 합친 실용 추론 비용을 제시한다. 이번 저장 bbox 재사용 비용으로 전체 시스템 비용을 대신하지 않는다.
+  - 다음: 진단을 우선 권고한다. 다음 deep 계획에서 현재 방법 개선·evidence 인터페이스 원인 진단·다른 의료 VLM 질문으로 전환을 비교하되, 이번에 실제 이득이 확인된 모듈형 조건을 단순히 기각하지 않는다. 기존 개발 panel과 checkpoint를 활용해 문구를 맞춘 predicted/unavailable 대조, 좌표 없는 검출 유무 전달, 필요한 좌표 교란 대조 중 다음 결정을 구분할 최소 실험을 선택한다. direct M0를 유지하고 category별 손익을 평가한다. 이득이 단순 검출 유무나 문구로 설명되면 이를 강한 baseline으로 보존하고 새 loss 투자 없이 전환을 검토한다. 의미 있는 잔여 이득이나 일반적 실패 조건이 남을 때만 추가 환자·데이터로 확대한다. 필요한 provenance 수정만 먼저 수행하고 reserve·새 학습은 자동 투입하지 않는다.
+- 📚 논문 추천: Why Does Grounding Hurt Medical VQA? Benchmarking, Diagnosis, and Fine-Tuning of Vision-Language Models — PAPERS.md
+- 🏁 **마일스톤**: Grounding 적응의 QA 저하를 형식 효과와 잔여 변화로 분리 — JOURNEY.md
+- 📁 원본: `agent/runs/iter_016/`
+
