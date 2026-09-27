@@ -34,9 +34,10 @@ def check_coregistration(mask_hdr, img_meta, patient):
         raise RuntimeError(f"{patient}: mask/image direction differ: {mask_hdr['direction']} != {img_meta['direction']}")
 
 
-def instance_point_native(mask_vol, x_idx, label):
+def instance_point_native(mask_vol, sag_idx, axes, label):
     """centroid에 가장 가까운 foreground pixel (row,col), half-open bbox 아님, 정확한 pixel 좌표."""
-    sl = mask_vol[:, :, x_idx] == label
+    array_axis_sag, array_axis_row, array_axis_col = axes
+    sl = M.take_slice(mask_vol, array_axis_sag, array_axis_row, array_axis_col, sag_idx) == label
     rows, cols = np.where(sl)
     if rows.size == 0:
         raise RuntimeError("empty instance slice (should not happen for eligible instance)")
@@ -58,11 +59,14 @@ def build_one(pid, gate_entry, images_zc, masks_zc):
                 "offset_xyz": img_m["offset_xyz"], "direction": img_m["direction"]}
     check_coregistration(gate_entry, img_meta, pid)
     img_vol = img_m["array"]
-    sx, sy, sz = gate_entry["spacing_xyz"]
+    axes = tuple(gate_entry["axes_sag_row_col"])
+    array_axis_sag, array_axis_row, array_axis_col = axes
+    idx_row, idx_col = 2 - array_axis_row, 2 - array_axis_col
+    spacing_row, spacing_col = gate_entry["spacing_xyz"][idx_row], gate_entry["spacing_xyz"][idx_col]
     lo, hi = R.volume_window(img_vol)
     r_idx, t_idx = gate_entry["r_idx"], gate_entry["t_idx"]
-    rgb_r, sr, sc, shape = R.render_slice(img_vol, r_idx, sy, sz, lo, hi)
-    rgb_t, sr_t, sc_t, shape_t = R.render_slice(img_vol, t_idx, sy, sz, lo, hi)
+    rgb_r, sr, sc, shape = R.render_slice(img_vol, r_idx, axes, spacing_row, spacing_col, lo, hi)
+    rgb_t, sr_t, sc_t, shape_t = R.render_slice(img_vol, t_idx, axes, spacing_row, spacing_col, lo, hi)
     if shape != shape_t:
         raise RuntimeError(f"{pid}: R/T rendered shape differ {shape} vs {shape_t} (same volume expected identical)")
     top, left, side = geometry.pad_offsets(*shape)
@@ -87,7 +91,7 @@ def build_one(pid, gate_entry, images_zc, masks_zc):
         t_box_native = gate_entry["per_slice_boxes"]["t"][str(lab)]
         ref_norm = R.native_bbox_to_norm(r_box_native, sr, sc, shape, (top, left, side))
         target_gt_norm = R.native_bbox_to_norm(t_box_native, sr, sc, shape, (top, left, side))
-        pr, pc = instance_point_native(mask_vol, t_idx, lab)
+        pr, pc = instance_point_native(mask_vol, t_idx, axes, lab)
         point_norm = R.native_point_to_norm((pr, pc), sr, sc, shape, (top, left, side))
         instances.append({"label": lab, "ref_box_norm": ref_norm, "target_gt_norm": target_gt_norm,
                           "point_norm": point_norm})
@@ -125,7 +129,6 @@ def main():
         return
     images_zc = D.ZipCache(f"{SOURCE}/images.zip")
     masks_zc = D.ZipCache(f"{SOURCE}/masks.zip")
-    split = assign_split(sorted(eligible))
     manifest = {}
     errors = {}
     for pid in sorted(eligible):
@@ -133,6 +136,16 @@ def main():
             manifest[pid] = build_one(pid, eligible[pid], images_zc, masks_zc)
         except Exception as e:
             errors[pid] = str(e)
+    # split은 build 성공 환자에서만 배정한다: gate-eligible이어도 build_one이 실패하면
+    # 조용히 제외하는 것이 아니라 errors.json에 남기고 split 대상에서 빠지게 한다.
+    if len(manifest) < 56:
+        json.dump({"status": "insufficient_built", "n_eligible": n, "n_built": len(manifest), "n_errors": len(errors)},
+                  open(f"{DATA_DIR}/manifest_status.json", "w"), indent=1)
+        json.dump(manifest, open(f"{DATA_DIR}/manifest.json", "w"), indent=1, default=str)
+        json.dump(errors, open(f"{DATA_DIR}/manifest_errors.json", "w"), indent=1)
+        print(json.dumps({"status": "insufficient_built", "n_eligible": n, "n_built": len(manifest)}))
+        return
+    split = assign_split(sorted(manifest))
     json.dump(split, open(f"{DATA_DIR}/split.json", "w"), indent=1)
     json.dump(manifest, open(f"{DATA_DIR}/manifest.json", "w"), indent=1, default=str)
     json.dump(errors, open(f"{DATA_DIR}/manifest_errors.json", "w"), indent=1)

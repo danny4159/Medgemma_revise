@@ -147,5 +147,10 @@ def paired_diff(rate_a_per_patient, rate_b_per_patient, patients, seed=19019, B=
     idx = metrics.bootstrap_indices(len(patients), B=B, seed=seed)
     mean_diff, lo, hi = metrics.paired_boot_ci(a, b, idx)
     discordant = int(np.sum(a != b))
-    return {"mean_diff": mean_diff, "ci95": [lo, hi], "n": len(patients), "discordant_n": discordant,
+    n = len(patients)
+    # discordant 비율의 95% 이항구간: paired 효과 차이의 CI가 아니라, discordance=0일 때
+    # bootstrap CI가 [0,0]이 되는 것을 "모집단 효과 영점"으로 오독하지 않기 위한 별도 지표다.
+    discordant_wilson_95 = metrics.wilson(discordant, n) if n else [float("nan"), float("nan")]
+    return {"mean_diff": mean_diff, "ci95": [lo, hi], "n": n, "discordant_n": discordant,
+           "discordant_rate": discordant / n if n else float("nan"), "discordant_wilson_95": discordant_wilson_95,
            "a_pos": int(a.sum()), "b_pos": int(b.sum())}

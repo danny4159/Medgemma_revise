@@ -10,6 +10,7 @@ import numpy as np
 from PIL import Image
 
 from . import geometry
+from . import mi19_mha as M
 
 
 def volume_window(img_vol):
@@ -31,22 +32,27 @@ def to_uint8(slice2d, lo, hi):
     return np.round(a * 255.0).astype(np.uint8)
 
 
-def resize_scale(spacing_y, spacing_z):
-    """returns (scale_row, scale_col) so that physical pixel spacing becomes isotropic (= min(spacing_y,spacing_z))."""
-    target = min(spacing_y, spacing_z)
-    return spacing_z / target, spacing_y / target  # (row scale from z, col scale from y)
+def resize_scale(spacing_row, spacing_col):
+    """returns (scale_row, scale_col) so that physical in-plane pixel spacing becomes isotropic
+    (= min(spacing_row, spacing_col))."""
+    target = min(spacing_row, spacing_col)
+    return spacing_row / target, spacing_col / target
 
 
-def render_slice(img_vol, x_idx, spacing_y, spacing_z, lo, hi):
-    """img_vol: (nz,ny,nx). returns (uint8 RGB resized array, scale_row, scale_col, new_shape(h,w))."""
-    native = img_vol[:, :, x_idx]  # (nz, ny) = (row=z, col=y)
+def render_slice(img_vol, sag_idx, axes, spacing_row, spacing_col, lo, hi):
+    """img_vol: (nz,ny,nx). axes=(array_axis_sag,array_axis_row,array_axis_col) from mi19_mha.axis_layout.
+    spacing_row/spacing_col are the physical ElementSpacing values for the row/col index axes
+    (i.e. spacing_xyz[idx_row], spacing_xyz[idx_col] with the same idx_row/idx_col used to build axes).
+    returns (uint8 RGB resized array, scale_row, scale_col, new_shape(h,w))."""
+    array_axis_sag, array_axis_row, array_axis_col = axes
+    native = M.take_slice(img_vol, array_axis_sag, array_axis_row, array_axis_col, sag_idx)
     u8 = to_uint8(native, lo, hi)
-    nz, ny = u8.shape
-    scale_row, scale_col = resize_scale(spacing_y, spacing_z)
-    new_h, new_w = max(1, round(nz * scale_row)), max(1, round(ny * scale_col))
+    nrow, ncol = u8.shape
+    scale_row, scale_col = resize_scale(spacing_row, spacing_col)
+    new_h, new_w = max(1, round(nrow * scale_row)), max(1, round(ncol * scale_col))
     im = Image.fromarray(u8, mode="L").resize((new_w, new_h), resample=Image.BILINEAR)
     rgb = np.repeat(np.asarray(im)[:, :, None], 3, axis=2)
-    return rgb, new_h / nz, new_w / ny, (new_h, new_w)
+    return rgb, new_h / nrow, new_w / ncol, (new_h, new_w)
 
 
 def native_bbox_to_norm(bbox_rc, scale_row, scale_col, new_shape, pad_top_left_side=None):

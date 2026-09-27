@@ -158,6 +158,16 @@ def main():
 
 
 def run_stage(a):
+    # SIGTERM 처리를 run_stage 자체에 건다: main()의 CLI 진입 경로뿐 아니라 mi19_pipeline처럼
+    # main_run()을 같은 프로세스에서 직접 호출하는 경로에서도 부모가 죽을 때 자식을 정리한다.
+    prev_handler = signal.signal(signal.SIGTERM, _on_term)
+    try:
+        return _run_stage_inner(a)
+    finally:
+        signal.signal(signal.SIGTERM, prev_handler)
+
+
+def _run_stage_inner(a):
     pdig = mi19_protocol.verify(a.protocol)
     cfg, _ = mi19_protocol.static_cfg()
     rows = Q.load_rows(a.requests, cfg)

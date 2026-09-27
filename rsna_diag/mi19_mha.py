@@ -110,4 +110,59 @@ def read_mha(path_or_bytes):
     tm = hdr.get("TransformMatrix", [1, 0, 0, 0, 1, 0, 0, 0, 1])
     direction = [tm[0:3], tm[3:6], tm[6:9]]
     return {"array": arr, "dim_size_xyz": dim, "spacing_xyz": spacing, "offset_xyz": offset,
-            "direction": direction, "element_type": etype, "header": hdr}
+            "direction": direction, "element_type": etype, "header": hdr,
+            "anatomical_orientation": hdr.get("AnatomicalOrientation")}
+
+
+def sagittal_axis(direction, anatomical_orientation, tol=0.5):
+    """index axis (0=x,1=y,2=z in DimSize order) that is dominantly aligned with the R/L physical
+    coordinate. `direction[j]` = index axis j's direction cosines in the file's physical frame
+    (MetaIO TransformMatrix row j, per https://docs.itk.org/en/latest/learn/metaio.html); by ITK/MetaIO
+    convention physical component 0 is the L-R axis. Cross-checked against AnatomicalOrientation
+    (index j must be labelled 'R' or 'L') so a single source is never trusted alone. Ambiguous
+    (no axis dominant, or two axes both dominant) or missing/invalid AnatomicalOrientation -> MhaError;
+    callers must treat that as an unsupported orientation, not guess.
+    """
+    if len(direction) != 3 or any(len(row) != 3 for row in direction):
+        raise MhaError(f"invalid direction matrix shape: {direction!r}")
+    col0 = [float(row[0]) for row in direction]
+    absvals = [abs(v) for v in col0]
+    order = sorted(range(3), key=lambda i: -absvals[i])
+    j_best, j_second = order[0], order[1]
+    if absvals[j_best] < tol:
+        raise MhaError(f"no axis dominantly aligned with R-L physical axis: direction column-0 {col0!r}")
+    if absvals[j_second] >= tol:
+        raise MhaError(f"ambiguous sagittal axis (two axes >= {tol} on R-L column): direction column-0 {col0!r}")
+    ao = anatomical_orientation
+    if not ao or not isinstance(ao, str) or len(ao.strip()) != 3:
+        raise MhaError(f"missing/invalid AnatomicalOrientation {ao!r}")
+    ao = ao.strip()
+    if any(ch not in "RLAPSI?" for ch in ao):
+        raise MhaError(f"unsupported AnatomicalOrientation characters {ao!r}")
+    if ao[j_best] not in "RL":
+        raise MhaError(f"direction column-0 dominant axis {j_best} not confirmed R/L by AnatomicalOrientation {ao!r}")
+    sign = 1.0 if col0[j_best] > 0 else -1.0
+    return j_best, sign
+
+
+def axis_layout(j_sag):
+    """returns (array_axis_sag, array_axis_row, array_axis_col) for slicing a (z,y,x) array along
+    index axis j_sag (0=x,1=y,2=z). array axis for index axis i is (2-i) since array shape is (z,y,x).
+    row/col follow the legacy x-sagittal convention (row from the higher remaining index axis,
+    col from the lower one), so j_sag=0 reproduces the original row=z, col=y layout exactly."""
+    remaining = sorted(a for a in range(3) if a != j_sag)
+    idx_col, idx_row = remaining[0], remaining[1]
+    return 2 - j_sag, 2 - idx_row, 2 - idx_col
+
+
+def take_slice(vol, array_axis_sag, array_axis_row, array_axis_col, idx):
+    """2D slice of a 3D array at index `idx` along array_axis_sag, oriented (row=array_axis_row,
+    col=array_axis_col). With 3 axes total, the two remaining axes after removing array_axis_sag
+    are already exactly {array_axis_row, array_axis_col}; only their order can need a transpose."""
+    sl = [slice(None)] * 3
+    sl[array_axis_sag] = idx
+    raw = vol[tuple(sl)]
+    remaining_axes_in_order = [a for a in range(3) if a != array_axis_sag]
+    if remaining_axes_in_order == [array_axis_row, array_axis_col]:
+        return raw
+    return raw.T

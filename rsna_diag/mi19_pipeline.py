@@ -13,8 +13,8 @@ from . import mi19_protocol as P
 from . import mi19_requests as Q
 from . import mi19_run as RUN
 
-DATA_DIR = "results/iter_019/data"
-RUN_ROOT = "results/iter_019"
+DATA_DIR = "results/iter_020/data"
+RUN_ROOT = "results/iter_020"
 
 
 def run_split(split, workers, peak_gb, gpus, out_root=RUN_ROOT, time_limit=None, max_requests=None):
@@ -39,7 +39,12 @@ def run_split(split, workers, peak_gb, gpus, out_root=RUN_ROOT, time_limit=None,
     rc1 = RUN.main_run(requests=phase1_path, out_dir=out_dir1, protocol=proto_path, workers=workers, gpus=gpus,
                        peak_gb=peak_gb, time_limit=time_limit, max_requests=max_requests)
     results_phase1 = {"phase1": {"out_dir": out_dir1, "rc": rc1}}
-    # phase 2: S2 (S1 완료 record 필요)
+    if rc1 != 0:
+        # phase1이 완료되지 않으면 S1 record가 불완전할 수 있다(중단된 attempt의 부분 출력).
+        # S2를 구성하지 않고 여기서 멈춘다: phase1 실패 시 S2를 시작하지 않는다.
+        results_phase1["S2"] = {"out_dir": None, "rc": None, "skipped_reason": "phase1_incomplete"}
+        return results_phase1, phase1_path, None, manifest, pids
+    # phase 2: S2 (검증된 S1 완료 record 필요)
     s1_records = {rid: r for rid, r in E.load_records(out_dir1).items() if r.get("condition") == "S1"}
     s2_rows = Q.build_s2(manifest, pids, cfg, s1_records)
     s2_path = f"{out_root}/requests/{split}__S2.jsonl"

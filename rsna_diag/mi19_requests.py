@@ -9,7 +9,7 @@ import os
 
 from . import generate, mi19_spec as S
 
-DATA_DIR = "results/iter_019/data"
+DATA_DIR = "results/iter_020/data"
 
 
 def sha(b):

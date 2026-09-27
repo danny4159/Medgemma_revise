@@ -15,7 +15,7 @@ REQUIRED_CODE = [
     "rsna_diag/generate.py", "rsna_diag/prompts.py", "rsna_diag/queue_lock.py", "rsna_diag/lock_protocol.py",
     "rsna_diag/mi19_mha.py", "rsna_diag/mi19_render.py", "rsna_diag/mi19_data.py", "rsna_diag/mi19_manifest.py",
     "rsna_diag/mi19_spec.py", "rsna_diag/mi19_requests.py", "rsna_diag/mi19_protocol.py", "rsna_diag/mi19_gen.py",
-    "rsna_diag/mi19_run.py", "rsna_diag/mi19_baseline.py", "rsna_diag/mi19_eval.py",
+    "rsna_diag/mi19_run.py", "rsna_diag/mi19_baseline.py", "rsna_diag/mi19_eval.py", "rsna_diag/mi19_pipeline.py",
 ]
 
 

@@ -17,8 +17,8 @@ from PIL import Image
 
 from . import geometry, mi19_mha as M
 
-SOURCE = "results/iter_019/source"
-DATA_DIR = "results/iter_019/data"
+SOURCE = "results/iter_020/source"
+DATA_DIR = "results/iter_020/data"
 VERT_MAX_LABEL = 99  # 0 < label < 100
 SLICE_SPACING_MIN_MM = 6.0
 SLICE_SPACING_MAX_MM = 15.0
@@ -65,17 +65,18 @@ class ZipCache:
         return data, sha_bytes(data)
 
 
-def instance_bboxes_per_slice(mask_vol):
-    """mask_vol: (nz,ny,nx). returns {x_idx: {label: (row0,col0,row1,col1,area_px)}} for 0<label<=VERT_MAX_LABEL only.
+def instance_bboxes_per_slice(mask_vol, axes, n_sag):
+    """mask_vol: (nz,ny,nx). axes=(array_axis_sag,array_axis_row,array_axis_col) from mi19_mha.axis_layout.
+    returns {sag_idx: {label: (row0,col0,row1,col1,area_px)}} for 0<label<=VERT_MAX_LABEL only.
     half-open bbox convention (row1,col1 = max index + 1)."""
-    nz, ny, nx = mask_vol.shape
+    array_axis_sag, array_axis_row, array_axis_col = axes
     labels = [int(v) for v in np.unique(mask_vol) if 0 < v <= VERT_MAX_LABEL]
-    out = {x: {} for x in range(nx)}
+    out = {x: {} for x in range(n_sag)}
     max_area = {}
     for lab in labels:
         lab_mask = mask_vol == lab
-        for x in range(nx):
-            sl = lab_mask[:, :, x]
+        for x in range(n_sag):
+            sl = M.take_slice(lab_mask, array_axis_sag, array_axis_row, array_axis_col, x)
             if not sl.any():
                 continue
             rows = np.where(sl.any(axis=1))[0]
@@ -122,15 +123,16 @@ def candidate_pairs(per_slice_x, max_area, spacing_x, nx):
     return pairs
 
 
-def select_patient_pair(pid, mask_vol, spacing_x):
-    nz, ny, nx = mask_vol.shape
-    per_slice_x, max_area = instance_bboxes_per_slice(mask_vol)
-    pairs = candidate_pairs(per_slice_x, max_area, spacing_x, nx)
+def select_patient_pair(pid, mask_vol, spacing_sag, axes, n_sag):
+    """axes=(array_axis_sag,array_axis_row,array_axis_col). candidate/pair enumeration order is fixed
+    (ascending x1, then ascending x2, then ascending label) so selection is independent of any
+    incidental dict/set iteration order; only the SHA256(salt|...) values decide the pick."""
+    per_slice_x, max_area = instance_bboxes_per_slice(mask_vol, axes, n_sag)
+    pairs = candidate_pairs(per_slice_x, max_area, spacing_sag, n_sag)
     if not pairs:
         return None, {"n_candidate_pairs": 0}
-    # 결정적 선택: (x1,x2) 쌍 -> salt로 하나 선택, 그 다음 공통 instance 중 2개를 salt로 선택
-    pair_keys = [f"{pid}|pair|{x1}|{x2}" for x1, x2, _, _ in pairs]
-    idx = int(hashlib.sha256(f"{pid}|pairsel".encode()).hexdigest(), 16) % len(pairs)
+    # 결정적 선택: (x1,x2) 쌍 -> SALT+pid로 하나 선택, 그 다음 공통 instance 중 2개를 SALT로 선택
+    idx = int(hashlib.sha256(f"{SALT}|{pid}|pairsel".encode()).hexdigest(), 16) % len(pairs)
     x1, x2, common, dist_mm = pairs[idx]
     if len(common) > 2:
         # 두 인스턴스를 salt 순서로 선택 (SHA256(salt|label) 오름차순 상위 2개)
@@ -138,8 +140,8 @@ def select_patient_pair(pid, mask_vol, spacing_x):
         inst2 = sorted(common_sorted[:2])
     else:
         inst2 = common
-    # R/T 역할: salt로 x1/x2 중 하나를 R로
-    r_is_x1 = int(hashlib.sha256(f"{pid}|rrole".encode()).hexdigest(), 16) % 2 == 0
+    # R/T 역할: SALT+pid로 x1/x2 중 하나를 R로
+    r_is_x1 = int(hashlib.sha256(f"{SALT}|{pid}|rrole".encode()).hexdigest(), 16) % 2 == 0
     r_idx, t_idx = (x1, x2) if r_is_x1 else (x2, x1)
     info = {"n_candidate_pairs": len(pairs), "chosen_pair": [x1, x2], "dist_mm": dist_mm,
             "common_instances_all": common, "chosen_instances": inst2, "r_idx": r_idx, "t_idx": t_idx}
@@ -163,15 +165,24 @@ def gate_patients(overview_rows, out_dir=DATA_DIR):
         except M.MhaError as e:
             excluded.append({"patient": pid, "reason": f"mha_parse_error: {e}"})
             continue
+        try:
+            j_sag, sag_sign = M.sagittal_axis(m["direction"], m["anatomical_orientation"])
+        except M.MhaError as e:
+            excluded.append({"patient": pid, "reason": f"unsupported_orientation: {e}"})
+            continue
+        axes = M.axis_layout(j_sag)
         vol = m["array"]
-        nz, ny, nx = vol.shape
-        sx, sy, sz = m["spacing_xyz"]
-        if nx < 2:
+        dim_xyz = m["dim_size_xyz"]
+        n_sag = dim_xyz[j_sag]
+        spacing_sag = m["spacing_xyz"][j_sag]
+        if n_sag < 2:
             excluded.append({"patient": pid, "reason": "single_slice_volume"})
             continue
-        sel, info = select_patient_pair(pid, vol, sx)
+        sel, info = select_patient_pair(pid, vol, spacing_sag, axes, n_sag)
         info.update({"patient": pid, "mask_file_sha256": filesha, "dim_size_xyz": m["dim_size_xyz"],
-                     "spacing_xyz": m["spacing_xyz"], "offset_xyz": m["offset_xyz"], "direction": m["direction"]})
+                     "spacing_xyz": m["spacing_xyz"], "offset_xyz": m["offset_xyz"], "direction": m["direction"],
+                     "anatomical_orientation": m["anatomical_orientation"], "j_sag": j_sag, "sag_sign": sag_sign,
+                     "axes_sag_row_col": list(axes)})
         if sel is None:
             excluded.append({**info, "reason": "no_candidate_slice_pair"})
             continue

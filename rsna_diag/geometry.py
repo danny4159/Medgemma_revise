@@ -83,5 +83,18 @@ def norm_to_canvas(box_yxyx, top, left, side):
             x1 * side / 1000.0 - left, y1 * side / 1000.0 - top]
 
 
+def norm_to_padded(box_yxyx, side):
+    """padding canvas 기준 [y0,x0,y1,x1] (0-1000) -> padding된 정사각 이미지 자체의 pixel xyxy
+    (top/left를 빼지 않는다; norm_to_canvas와 달리 padded 이미지 파일에 직접 적용하기 위한 함수)."""
+    y0, x0, y1, x1 = box_yxyx
+    return [x0 * side / 1000.0, y0 * side / 1000.0, x1 * side / 1000.0, y1 * side / 1000.0]
+
+
+def padded_to_norm(box_xyxy, side):
+    """padded 정사각 이미지 pixel xyxy -> normalized [y0,x0,y1,x1] (0-1000) (top/left를 더하지 않는다)."""
+    x0, y0, x1, y1 = box_xyxy
+    return [y0 * 1000.0 / side, x0 * 1000.0 / side, y1 * 1000.0 / side, x1 * 1000.0 / side]
+
+
 def to_pil(rgb):
     return Image.fromarray(rgb)

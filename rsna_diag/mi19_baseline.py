@@ -48,11 +48,15 @@ def _ncc_map(image, template):
 
 
 def condition_N(ref_path, target_path, ref_box_norm, pad_top_left_side):
-    """returns (pred_box_norm, meta). ref_box_norm: R padding canvas [y0,x0,y1,x1] (0-1000)."""
+    """returns (pred_box_norm, meta). ref_box_norm: R padding canvas [y0,x0,y1,x1] (0-1000).
+
+    ref_path/target_path는 이미 padding된 정사각 PNG이므로, 좌표는 padded 이미지 pixel 공간에서
+    직접 다뤄야 한다 (geometry.norm_to_canvas/canvas_to_norm은 padding을 빼거나 더해 '원본'(비padded)
+    pixel 공간으로 변환하므로 여기서 쓰면 top/left만큼 어긋난다: norm_to_padded/padded_to_norm 사용)."""
     top, left, side = pad_top_left_side
     ref_img = torch.from_numpy(_gray_padded(ref_path))
     tgt_img = torch.from_numpy(_gray_padded(target_path))
-    x0, y0, x1, y1 = geometry.norm_to_canvas(ref_box_norm, top, left, side)
+    x0, y0, x1, y1 = geometry.norm_to_padded(ref_box_norm, side)
     x0i, y0i, x1i, y1i = int(round(x0)), int(round(y0)), int(round(x1)), int(round(y1))
     x0i, y0i = max(0, x0i), max(0, y0i)
     x1i, y1i = max(x0i + 1, min(ref_img.shape[1], x1i)), max(y0i + 1, min(ref_img.shape[0], y1i))
@@ -91,5 +95,5 @@ def condition_N(ref_path, target_path, ref_box_norm, pad_top_left_side):
         return None, {"status": "no_valid_scale"}
     x0p, y0p = best["col0"], best["row0"]
     x1p, y1p = x0p + best["tw"], y0p + best["th"]
-    box_norm = geometry.canvas_to_norm([x0p, y0p, x1p, y1p], top, left, side)
+    box_norm = geometry.padded_to_norm([x0p, y0p, x1p, y1p], side)
     return box_norm, {"status": "ok", **best}
