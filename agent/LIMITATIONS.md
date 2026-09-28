@@ -89,3 +89,21 @@ MedGemma 1.5에는 좌표 출력/grounding 능력 자체가 없다는 과거 주
 - 미해결: 좌표가 필요한 다른 과제에서도 추가 이득이 없는가? 이번 결과로는 판단할 수 없다.
 - 미해결: 현재 bootstrap의 [0,0]은 관찰된 정답 쌍 차이가 모두 0이어서 생긴 결과이며 모집단 효과의 정확한 영점을 의미하지 않는다.
 
+## mri-reference-interface-sensitivity — observed
+
+SPIDER T2의 동일 volume slice-pair를 사용하는 iter_021 최종 prompt와 개발 E48에서, 정답 내부점을 텍스트로 제공한 O의 pair success는 0/48, instance success@0.5는 2/96이었다. J_RT/J_TR은 각각 18/48, 34/48이지만 reference 좌표를 그대로 출력한 응답이 각각 57/96, 79/96이어서 영상 간 대상 매칭 능력의 증거로 해석할 수 없다. 정상 사용 대조와 독립 재현이 미완료이므로 일반적인 point grounding 결함이나 내부 원인은 미확인이다.
+
+- 적용 목표 시작: iter_003
+- 최신 리뷰: agent/runs/iter_021/review.json
+- 근거: research/results/iter_021/gen/E__phase1/gen_worker*.jsonl: O·J_RT·J_TR의 원시 응답을 별도 JSON 추출과 IoU 계산으로 재집계했다.
+- 근거: research/results/iter_021/data/manifest.json 및 eval_raw_E.json: O 평균 IoU 0.1070435, J_RT/J_TR pair success 18/48·34/48을 재현했다.
+- 근거: J_TR의 wrong-instance는 0/96이며, report_E.json의 H.detail에서 has_wrong도 0/48이다.
+- 사용·평가 검증: 모델 revision 91850547d9f0b2fdd21aa7c5f4f3d1a8a52c243b와 저장된 processor·chat template 정보를 확인했다.
+- 사용·평가 검증: 최종 672개 요청의 ID·prompt hash·조건·영상 순서 및 현재 영상의 file/pixel hash를 원시 record와 대조했다.
+- 사용·평가 검증: O·J_RT·J_TR은 모두 EOS로 종료했으며 단일 bbox를 반환했다.
+- 사용·평가 검증: 실제 D 입력의 공식 구성과 wrapper 간 input_ids·pixel_values 대조 완료 근거는 확인하지 못했다.
+- 사용·평가 검증: prompt 수정 전에 E 환자 9명의 부분 출력 10건이 존재하므로 E48을 독립 확인 집단으로 취급하지 않는다.
+- 미해결: O 저하가 점 좌표 해석, 대상 범위, prompt 표현 중 무엇으로 설명되는가?
+- 미해결: 좌표 복사가 유리한 현재 동일-grid 과제가 실제 reference 정보 활용을 식별할 수 있는가?
+- 미해결: 정상 사용 대조 후에도 중요한 잔여 실패가 독립 환자에서 재현되는가?
+

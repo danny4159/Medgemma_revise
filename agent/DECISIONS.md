@@ -551,5 +551,27 @@ MedGemma 1.5로 연구하는 것 자체가 큰 제약이라고 판단되면, 근
 - 💾 **개발 이력 체크포인트** `5b68a31db9566ebe6576468fdcdeca97060f3778`: interrupted (검증 승인 아님)
 - ⏹ 중단: 오류: 월간 지출 한도로 중단 (자동 재시도 안 함): claude 종료 코드 1. 로그: /SSD1_1TB/home/milab/daniel/08_medgemma/agent/runs/iter_021/claude_stream.jsonl
 Claude 계정의 /usage 또는 Settings > Usage에서 제한을 확인한 뒤 재실행하세요. 지출 한도는 자동으로 올리지 않습니다. (Claude 구현/실험 중)
+- ↻ 재실행: 'Claude 구현' 단계부터 이어서 (orchestrator bae298d)
+- ▶ **결정**: 자동 진행 (smart) — 1순위로 진행
+- ↻ 끊겼던 Claude 세션을 이어서 진행
+- 💾 **개발 이력 체크포인트** `933eebaba2689d6eb654808ea177d8625ca2ca4c`: implementation_finished (검증 승인 아님)
+- 🔧 **Claude** (standard): D8→E48 진단을 3차례의 prompt 형식 수정 끝에 실제 GPU에서 완료(672회 호출, 독립 재계산 일치)했으나, 오라클 조건 O가 n=48에서 거의 완전히 실패(pair_success 0%, Wilson 상한 0.074)해 원 가설(H) 판정이 막혔고, F 확대는 계획대로 보류됐다 — 다음 투자 방향에 대한 GPT의 전략 판단이 필요하다. [자체 검증 PASS, 파일 1647개 변경]
+  - 브랜치 `approach/reference-instance-diagnostic`에서 계속
+  - ⚠ 권한 거부 2건
+- 🔍 **리뷰** (GPT normal): [CONTINUE / inconclusive] E48에서 O pair success 0/48과 J_TR 34/48을 재현했지만 J_TR 79/96건이 reference 좌표 복사였다. reference 선택 한계·신규 기여는 미판정이며 F는 보존한다.
+  - 접근법 판단: E48 진단은 실제 수행됐지만 O 전제 실패와 높은 좌표 복사율로 reference 선택 능력을 분리하지 못했다. F를 유지하고 정상 사용·과제 식별성을 최소 범위에서 재검토한다.
+  - 목표 진전: 실제 GPU 진단과 원시 출력 검증을 처음 완료했다. 제한된 개발 조건의 점수와 F 보류 결정은 해석 가능하지만 정상 사용 검증은 미완료다. 성능 개선을 시험한 반복은 아니며, 반복 wrong-instance 가설을 지지하는 사건도 없었다. 높은 J_TR 점수에 reference 좌표 복사가 많이 포함됨을 확인해 과제 식별성의 문제를 드러냈다. 새로운 방법의 기여와 독립 일반화는 미검증이다.
+  - 판정 범위: SPIDER T2의 고정 동일-volume slice-pair와 iter_021 최종 prompt를 사용한 개발 E48에 한정한다. O 조건의 낮은 성능 때문에 localization을 통제한 reference 선택 한계는 미판정이다. 일반적인 MRI localization·다중 영상 이해·경량 학습 가능성의 실패로 확대하지 않는다.
+  - 재사용 전 수정: 실제 D 입력에서 공식 chat 구성과 wrapper의 input_ids·pixel_values·영상 순서를 대조한 근거를 확보해야 한다. 현재 결과를 정상 사용이 통제된 validated 한계로 승격할 수 없다.
+  - 재사용 전 수정: 24개 고정 요청의 부모 SIGTERM·worker 중단·JSONL 마지막 record 절단·S1→S2 재개 검사가 미실행이다. 실제 TaskStop과 stale 요청 거부는 이를 대체하지 않는다.
+  - 재사용 전 수정: completion 재사용 시 성공 내용·자식 종료 코드·소유권을 검사하고, 모든 실행 진입점에서 D/E/F 선행 gate와 결과 digest 연결을 강제해야 한다.
+  - 재사용 전 수정: protocol에 source 검증 결과·관련 실행 코드·S1 원시 파일과 선택 record 연결을 추가하고, 요청 로더에서 prompt hash·request ID를 재계산해야 한다.
+  - 재사용 전 수정: downloader의 원자적 소유권, Content-Range 전체 길이·객체 동일성, 최종 checksum 검증을 보완해야 한다.
+  - 재사용 전 수정: 재사용 자료 경로의 독립 index→physical 검증과 source decoded-pixel 중복·비유한 입력 검증을 완료해야 한다.
+  - 재사용 전 수정: 다음 GPU 실행 전 D 자료로 batch 확대 또는 복수 worker의 처리량·실제 메모리·긴 출력 정합성을 비교해야 한다.
+  - 재사용 전 수정: 후속 기록에서 E48을 개발 자료로 표시하고, 최종 672개 요청·674개 생성 attempt 및 S2 truncated 1건을 구분해 보고해야 한다.
+  - 추후 개선: MedSAM2의 기존 설치·checkpoint 존재 여부를 확인하지 않았으므로 조건부 baseline 검토가 완료됐다고 보고하지 않는다. 현재 O/H 해석을 무효화하는 사유는 아니다.
+  - 추후 개선: 기관별 일반화, 사전학습 노출과 익명 legacy 중복은 미확인이다. 현재 방향의 투자 가치가 확인된 뒤 검토한다.
+  - 다음: 진단과 전환을 비교하는 deep 전략 판단을 권고한다. 먼저 기존 D/E 원시 출력으로 좌표 복사, O 점 해석, 대상 범위 및 실제 공식 입력 연결을 점검해 다음 선택을 바꿀 최소 검증을 정한다. E48은 개발 자료로 유지하고 F139를 자동 개방하거나 H에서 O 조건을 사후 제거하지 않는다. 현재 과제 개선, 중요한 reference 의존 과제로의 전환, 다른 임상 다중 영상 질문을 사용 가치·식별성·가까운 선행 방법·두 GPU 비용으로 비교한다. 정상 사용 보정으로 문제가 해소되거나 좌표 복사로 충분한 과제에 머물면 현 설계 투자를 종료한다. 중요한 잔여 실패를 분리할 수 있을 때만 새 계획과 독립 확인을 준비한다. 실제 재사용 경로의 gate·재개·provenance 결함과 처리량 선택 근거를 먼저 보완하되 주변 코드 정비만으로 반복을 소비하지 않는다.
 - 📁 원본: `agent/runs/iter_021/`
 
