@@ -1,0 +1,257 @@
+# 요약
+
+- **이번에 할 일:** 기존 RSNA SFT의 빈 bbox 출력에서 token confidence, seed 불일치, 원본 영상 재질의가 미검출을 구분하는지 비교한다.
+- **필요한 이유:** 검출 성과는 유지되지만 개발 양성 400명 중 53명에서 세 seed 모두 빈 목록을 반환했다. 이것만으로 confidence 실패를 판단할 수는 없다.
+- **확인할 기준:** 출력이 같은 환자들 사이에서 위험 순위를 비교한다. calibration과 평가를 분리하고, 미검출 포착률·AUROC·paired 불확실성을 함께 보고한다.
+- **주의·다음:** 새 actor·head 학습은 하지 않는다. 기존 confirm800은 개발 자료이며 독립 확인으로 부르지 않는다. 단순 방법으로 충분하면 baseline을 보존하고 새 방법 투자를 보류한다.
+
+# Current Understanding
+
+iter_012의 직접 LoRA SFT는 RSNA grounding을 크게 개선했다. 추가 loss의 제한된 음성 결과는 이 성과를 기각하지 않는다. iter_027에서는 현재 사분면 직접 선택의 사전 음성 기준을 충족했지만 oracle 실패와 부분 질의 반응이 남아 일반적인 공간 전이 부재는 미확정이다.
+
+사용자 보완 중 동일 RSNA 성과·checkpoint 우선 활용, 원본 보존, 공정한 비교를 유지한다. 사분면 oracle 보정·E 추가 확대·seed 실행은 종료 또는 보류한다. MRI F139·기존 reserve·iter_022 longitudinal 계획은 열지 않는다.
+
+이번 주대상은 B0=seed17, lr2e-4, epoch05의 유효한 빈 출력이다. C400에서 199명 중 36명, 개발 E800에서 398명 중 70명이 opacity GT를 가진다. 모두 정확히 같은 suffix `[3805,106]`을 출력했다. 이번에는 출력 형식이나 길이로 정답을 구분할 수 없는 조건에서 확률 정보와 별도 영상 판단의 가치를 검사한다.
+
+이미 답한 질문은 직접 SFT의 검출 개선, 전역 QA의 형식 효과, 사분면 규칙 baseline의 우위다. 아직 답하지 못한 질문은 같은 빈 출력에서도 미검출 위험을 구분할 수 있는지다. 이번 비교는 단순 score로 충분한지, 추가 confidence 연구를 검토할 잔여 문제가 있는지를 바꾼다.
+
+# Strategy Check / 연구 방향 판단
+
+유효한 사분면 진단 3회와 E200 종료 후이므로 방향을 재평가한다.
+
+1. 현재 grounding 개선은 validated 위치 오류와 연결되지만 추가 loss가 지금 필요한 이유가 부족하다.
+2. oracle schema×modality 진단은 원인을 좁힐 수 있으나 결과 어느 쪽에서도 현재 선택 과제는 bbox+규칙으로 수행할 수 있다. 추가 내부 적응의 사용 가치를 확보하지 못했다.
+3. 빈 출력 위험은 같은 데이터·target·checkpoint를 유지하면서 규칙이 생성되지 않은 병변을 복원하지 못하는 조건을 다룬다. 기존 확률·재질의 baseline으로 설명되는지를 먼저 확인할 수 있다.
+4. 외부 원천 전이는 중요하지만 annotation 대응과 대표 자료 접근이 미확정이다. 지금 여러 변수를 동시에 바꾸지 않는다.
+
+따라서 3을 선택한다. 이는 confidence 연구가 이미 유망하거나 새 기여라는 판단이 아니다. 영상 재질의가 저비용으로 충분하면 모듈형 baseline을 보존한다. 모든 단순 score가 약하더라도 그것만으로 새 학습을 예약하지 않고 BICR·DualRead 및 영상 기반 학습 baseline과의 차별성을 재검토한다.
+
+# Hypothesis
+
+주질문은 '고정된 B0의 빈 출력에서 실제 미검출 사건을 구분할 score가 있는가'다.
+
+- H1: 동일한 [] 출력이라도 원래 생성 확률과 entropy가 미검출 위험에 관한 정보를 가진다.
+- H2: 원본 영상을 다시 보는 존재 판단 또는 P(True)가 원래 출력 score·seed 불일치보다 유용할 수 있다.
+- 경쟁 설명: 빈 출력의 불확실성이 대부분 seed disagreement로 설명되거나, 모든 score가 약하거나, calibration만 바뀌고 순위는 개선되지 않을 수 있다.
+
+새 방법의 효과를 검정하는 실험이 아니다. 어느 결과에서도 일반적인 시각 능력 손실이나 임상적 안전성을 주장하지 않는다.
+
+# Limitation Evidence / Correct Usage Checks
+
+대상 limitation은 validated인 `lesion-grounding-generalization`이다. iter_009의 정상 사용 위치 불일치와 iter_012의 직접 SFT 개선·잔여 미검출을 근거로 한다. '빈 출력 confidence 실패'는 아직 validated 주장이 아니다.
+
+정답은 `results/iter_010/manifests/gt_manifest.json`의 RSNA target에 한정한다. 유효한 빈 출력에서 GT box가 하나 이상이면 Y=1, 아니면 Y=0이다. NoOpacity/NotNormal을 임상적 정상으로 바꾸지 않는다. invalid·truncated를 정상적인 빈 목록으로 바꾸거나 조용히 제외하지 않는다.
+
+실행 전 다음을 강제한다.
+
+- 모델 revision `91850547d9f0b2fdd21aa7c5f4f3d1a8a52c243b`, processor·tokenizer·chat template·generation config와 실제 라이브러리 버전을 고정한다.
+- 기존 manifest·원시 출력·completion·선택 기록·adapter와 현재 영상의 file/raw/padded pixel hash를 연결한다. 같은 환자의 중복 출력과 split 간 환자·pixel 중복을 거부한다.
+- 공식 구성과 실제 scorer 입력의 전체 tensor key·shape·dtype·값을 대조한다. input_ids는 기존 저장 값과 같아야 한다.
+- B0 파일은 `results/iter_012/train/lr2e-4_s17/epoch_05/adapter.pt`다. 알려진 SHA256은 `5f542af96df705e567bf4cfb000398b09313db2456c577e772bd76481799cf29`, tensor digest는 `e13f3c4461b826a060c90dfe4e4ee4c2ebac36a08f84be1a45a37495816cec11`이다. 실제 로드 후 일치시킨다.
+- 작은 sanity에서 빈 출력뿐 아니라 기존 전체 bbox 출력도 재현한다. 현재 영역 질의 출력 재현으로 이를 대신하지 않는다.
+
+# Contribution Path / Baselines / Reuse
+
+## 비교군
+
+모든 score는 값이 클수록 미검출 위험이 높도록 사전 정의한다.
+
+1. **Random:** 동점 내 무작위 검토의 기대값. 주 검토 비율 20%에서 기대 포착률은 20%다.
+2. **Token-NLL:** 원래 bbox prompt에서 생성한 `[]` token의 negative log probability. EOS를 제외한 주 score다.
+3. **Token-NLL+EOS:** `[]`와 실제 종료 token의 평균 NLL. 종료 확률 효과를 확인하는 보조 score다.
+4. **Entropy:** 원래 bbox prompt의 첫 예측 위치 전체 vocabulary entropy. FP32 log_softmax로 계산한다.
+5. **Seed disagreement:** B0가 빈 환자에서 기존 seed29/43 중 nonempty인 비율. 기존 선택 epoch05 출력만 사용한다. 3개 모델의 총 학습·생성 비용을 별도 표시한다.
+6. **Presence M0/B0:** 원본 영상에 `Is any pulmonary opacity suspicious for pneumonia visible in this chest radiograph? Answer Yes or No.`를 제시한다. 첫 위치의 `Yes`·`No` logit 차이를 위험 score로 사용한다.
+7. **P(True) M0/B0:** 원본 영상, 고정 CONCISE 원문, 실제 답변 `[]`를 제공하고 `Is the proposed answer correct for this medical image? Respond with a single word: Yes or No.`를 묻는다. 위험은 No 대 Yes logit 차이다.
+
+Presence와 P(True)는 첫 token의 조건부 score이며 자유 생성 QA 정확도와 다르다. `Yes`·`No`의 tokenizer 대응과 전체 vocabulary 확률 질량을 기록한다. GT·category·다른 seed의 출력은 이 prompt에 넣지 않는다. 낮은 Yes/No 질량의 환자를 사후 제외하지 않는다.
+
+M0/B0는 같은 원본 영상·prompt·채점 조건을 쓴다. M0는 별도 actor 평가를 위한 신규 bbox 생성을 하지 않고 고정 B0 출력의 위험을 읽는 비교군이다. GT 기반 완벽 순위는 평가 상한으로만 표시한다.
+
+## 가까운 선행과 기여의 경계
+
+[DualRead](https://arxiv.org/html/2609.06419v1)는 MedGemma 1.5를 포함한 의료 VQA에서 frozen actor의 pre/post-answer state를 읽는다. [BICR](https://arxiv.org/abs/2605.10893)은 실제 영상과 blank-image state의 대비를 활용한다. replay·별도 probe·confidence calibration을 새 기여라고 주장하지 않는다. [MedGrounder](https://arxiv.org/abs/2512.01085)의 scored set prediction과 [conformal detection](https://proceedings.mlr.press/v204/andeol23a.html)의 미검출 risk control도 후속 비교 범위에 포함한다.
+
+이번에는 inference 기반 baseline의 진단까지만 수행한다. 이후 방법 개발에는 충분한 직접 SFT, 관련 confidence 방법, 적절한 detector/encoder+head와의 데이터·학습량·추론 비용 비교가 필요하다. 이를 이번에 이미 검증한 것으로 보고하지 않는다.
+
+## 재사용
+
+새 브랜치는 재사용 승인 iter_006 기반으로 요청한다. 현재 브랜치에서 JSON의 reuse_assets에 명시한 9개 공통 파일을 선별 반입한다. 필요한 소스가 보존돼 있으므로 새 입력 구성·LoRA·parser·lock을 중복 구현하지 않는다.
+
+기존 사분면 평가·decision·launcher는 호출하지 않는다. 특히 C_query 확대식과 oracle 없는 seed gate를 새 실험에 연결하지 않는다. 새 scorer의 요청·완료 계약을 필요한 범위로 구현하고 반입된 전체 실행기가 승인됐다고 간주하지 않는다.
+
+# Proposed Experiment
+
+## 1. 데이터와 역할 고정
+
+- train2400: 기존 actor 학습 자료. 이번에 학습하거나 새 confidence head를 적합하지 않는다.
+- C400: 기존 validation400. 빈 출력 199명 전체를 가능성 탐색·score 선택·calibration에 사용한다. 이는 actor 선택에도 사용된 개발 자료다.
+- E800: 기존 confirm800. 빈 출력 398명 전체를 조건부 확대 개발 평가에 사용한다. 이미 본 결과이므로 독립 test가 아니다.
+- 전체 1,200명의 원시 출력은 감사·분모·nonempty 누락 집계에 포함한다. GPU 주대상은 모델 출력으로만 결정되는 빈 출력 전체이며 양성 여부로 선별하지 않는다.
+- seed29/43의 C/E 원시 출력도 고정한다. split 내부에서 같은 환자끼리 연결하며 환자 단위로 평가한다.
+
+데이터·score·prompt·정답·calibration·선택·확대 규칙은 새로운 GPU score를 보기 전에 manifest/config로 잠근다. 모든 새 결과는 `results/iter_028/` 아래에 저장한다.
+
+## 2. 동작 확인
+
+C400에서 hash 순서로 24명 D24를 고정한다. 빈 출력 12명은 세 category에서 4명씩 선택한다. 나머지 12명은 nonempty 집단에서 hash 순서로 선택하되 두 관측 길이 37/71 token과 가능한 모든 category를 포함한다. 선택에는 새 confidence를 사용하지 않는다. D24는 이후 C400에 포함되며 독립 표본이 아니다.
+
+다음을 완료한다.
+
+- 입력·adapter·기존 bbox 출력 재현과 원시 logits 추출.
+- 독립 CPU 수식의 logsumexp/NLL/entropy와 GPU FP32 계산 대조.
+- 실제 generation raw logits를 기준으로 replay의 shift·EOS·mask·cache를 검사한다. 선택 token logprob 최대 절대차 ≤1e-3, entropy 차이 ≤1e-3, greedy token 완전 일치를 기준으로 둔다.
+- 위 수치 기준을 만족하지 못한 병렬 teacher-forced 최적화는 채택하지 않는다. 검증된 동일 generation/cache 경로에서 score를 얻는 방식으로 진행한다. 사후 허용오차 완화로 gate를 통과시키지 않는다.
+- 기존 전체 bbox sanity 중 불일치가 있으면 환경·입력·adapter 원인을 해결하기 전 C를 시작하지 않는다. 새 출력으로 옛 출력을 대체하지 않는다.
+- 24요청의 통제된 중단·재개를 수행한다. uninterrupted와 ID·token·score가 일치하고 완료 중복·누락이 없어야 한다. 본래 종료하지 않은 worker·외부 GPU 프로세스를 건드리지 않는다.
+
+## 3. 가능성 탐색: C400
+
+빈 출력 199명 각각에 B0 원래 출력 scoring 1건과 M0/B0의 Presence·P(True) 4건을 수행한다. 총 995개 논리 요청이다. NLL·EOS·entropy는 같은 원래 출력 요청에서 얻는다. 기존 seed disagreement는 원시 출력으로 계산한다.
+
+C에서 다음을 사전 규칙으로 고정한다.
+
+- token family 대표 T: Token-NLL, Token-NLL+EOS, Entropy 중 raw AUROC가 가장 높은 score. 동점은 나열 순서로 결정한다.
+- 영상 재질의 대표 V: Presence M0, Presence B0, P(True) M0, P(True) B0 중 raw AUROC가 가장 높은 score. 동점은 나열 순서로 결정한다.
+- 각 score의 calibration: C 빈 출력만 사용한 양의 기울기 Platt mapping. 표준화는 C 평균·분산만 사용하고, 평균 logistic loss에 slope L2 계수 0.01을 고정한다. intercept는 벌점 없이 적합한다. 상수 score는 Jeffreys 보정 사건 비율을 사용한다. hyperparameter 탐색은 하지 않는다.
+- 모든 원 score와 대표 선택 근거를 보존한다. E를 본 뒤 방향·score·prompt를 바꾸지 않는다.
+
+확대 전 환자 bootstrap으로 정보 이득을 판단한다. 사전 실용 탐색 목표는 AUROC 0.75 및 상위 20% 검토 포착률 0.50이다. 임상 안전 기준이 아니라 다음 연구 투자 기준이다.
+
+**E 진입:** 실행 gate가 통과했고, 하나 이상의 score에서 AUROC 95% CI 상한이 0.75 이상이거나 포착률 상한이 0.50 이상이면 E로 확대한다. 대표 V−T 또는 V−seed의 AUROC 차이 CI가 0.10을 포함하고 폭이 0.10보다 큰 경우도 비교 정밀도를 높일 가치가 있으므로 확대한다.
+
+**C에서 보류:** 모든 score가 두 실용 목표의 상한에 미달하고 비교 차이의 정밀도 보완 조건도 없으면 E를 열지 않는다. 현재 조건의 단순 estimator에 대한 제한적 음성 결과로 보고한다. 구현·numerical gate 실패는 과학적 음성과 구분한다.
+
+## 4. 규모 확대: E800
+
+진입 조건을 충족하면 고정된 빈 출력 398명 전체에 같은 5개 논리 요청을 수행한다. 총 1,990건이며 C와 합쳐 최대 2,985건이다. 기존 800명 actor 생성은 반복하지 않는다.
+
+C에서 고정한 대표·calibration을 그대로 적용한다. E에서 모든 개별 score의 결과도 보고하되 최상의 score를 사후 주비교군으로 선택하지 않는다. 전체 실행 후 한 번 집계한다. 중간에는 완료 수·오류·자원 상태만 확인한다.
+
+## 5. 독립 확인
+
+이번 반복에는 새 독립 집단을 열지 않는다. E 결과로 후속 투자가 정당화되면 별도 계획에서 미사용 환자와 적절한 외부 원천의 annotation 대응·표본 수·비교군을 고정한다. 기존 reserve 또는 MRI F139를 자동 사용하지 않는다. 이번 단계 완료를 논문 수준 일반화 증명으로 해석하지 않는다.
+
+## 6. GPU 배치·비용·재개
+
+실행 직전 nvidia-smi와 상속된 CUDA_VISIBLE_DEVICES를 확인한다. 허용 GPU 중 여유가 큰 장치부터 배치하고 logical index와 UUID 대응을 기록한다.
+
+두 GPU에 M0/B0 작업을 나누어 시작한다. D의 동일 24요청으로 총 2 worker와 총 4 worker를 비교한다. 메모리가 부족하거나 worker 복제가 불리하면 batch 확대를 비교 후보로 삼는다. 양쪽을 불필요하게 전수 탐색하지 않는다. 결과 수·token·score가 동일한 조건에서 전체 req/min, 모델 로드 포함 wall-clock, GPU별 전체 peak, CPU/RAM/I/O 경합을 비교한다.
+
+B0 과거 생성의 peak는 약 8.24GiB였지만 이번 logits 경로의 예산으로 대체하지 않는다. worker별 실측 peak와 최소 2GiB 여유, 다른 프로세스 점유를 합쳐 GPU 용량 안에 있어야 한다. 긴 sanity 출력 71 token과 채택한 batch를 포함해 검증한다. 전체 vocabulary logits를 모든 요청·step에 누적 저장하지 않고 필요한 scalar를 FP32로 추출한다.
+
+신규 짧은 score 요청의 실제 처리량은 미측정이다. 두 GPU aggregate 10–40 req/min을 가정한 사전 범위는 정식 2,985요청 약 1.25–5시간이며 모델 로드·검증 비용은 별도다. 이는 실행 상한이 아니다. D 실측으로 요청 유형별 비용을 다시 계산하고 C/E 시작 전에 기록한다.
+
+각 요청에 고유 ID를 부여하고 worker별 결과를 append한다. 원자적 claim과 run/worker 소유권을 사용한다. interruption 시 완료 score를 보존하고 재개 때 현재 source·입력·checkpoint·config를 다시 검사한다. 모든 자식 종료 코드와 예상 행렬 완전성을 확인한 뒤에만 immutable completion을 만든다.
+
+# Implementation Tasks for Claude
+
+1. 실행 호스트의 기존 작업·lock·PID/starttime을 먼저 확인한다. 살아 있는 작업을 중복 실행하거나 해당 소스를 변경하지 않는다. 현재 Python이 실제 medgemma 환경인지 확인한다.
+2. 선별 반입 자산과 의존성을 검증한다. 기존 입력 구성·모델 로드·LoRA·parser·원자적 lock을 활용해 새로운 scoring 요청과 실행 경로를 구현한다.
+3. C/E의 기존 source manifest·GT·원시 세 seed 출력·env·completion·선택 기록·checkpoint를 감사하고 새 read-only source manifest를 만든다. GT는 평가 경로에만 연결한다.
+4. FP32 token score 추출과 두 고정 Yes/No prompt를 구현한다. 실제 tokenizer 대응·전체 후보 질량·raw logit margin을 저장한다. optimized replay는 generation 대조를 통과한 경우에만 사용한다.
+5. 데이터 선택, 단계 decision, expected request matrix, 현재 source hash, fitted calibration, completion을 실행·평가 진입점에서 검증한다. 필수 파일을 선택적 extra로 두지 않는다. 이미 완료된 출력도 재검증한다.
+6. 실제 경로의 누락·중복·변조·단계 우회·live worker 소유권·tail 복구 검사와 D24 GPU 대조를 수행한다. tail은 소유권 확보 후 새 경로에 보존하며 과거 원본을 수정하지 않는다.
+7. C를 실행하고 고정 확대식을 적용한다. 조건 충족 시 같은 호출 안에서 E를 완료한다. 새 학습·prompt 탐색·seed actor 생성은 추가하지 않는다.
+8. 평가기와 별도의 작은 집계로 사건 수·AUROC·동점 포착률·paired 차이를 교차 확인한다. 기계 판독 decision과 사람이 읽는 보고서가 같은 근거를 사용하도록 한다.
+9. 이전 E60 report의 hash 불일치와 조사한 복구 범위를 provenance note에 남긴다. 발견된 원본 bytes가 있으면 새 경로에만 보존하며 확인하지 못한 byte 복구를 주장하지 않는다. 이 주변 작업만으로 GPU 진단을 미루지 않는다.
+
+# Evaluation (성공/실패 기준 포함)
+
+## 주지표
+
+평가 집단은 각 split의 B0 유효 빈 출력 전체다. 사건 Y는 opacity GT 존재다.
+
+- AUROC: 동점은 0.5로 계산한다.
+- Capture@20%: 위험 score 상위 20%의 빈 출력을 검토한다고 할 때 포함되는 미검출의 비율. 경계 동점은 그 집단에서 무작위 검토하는 기대값으로 계산한다. 환자 ID 순서로 유리한 tie-breaking을 하지 않는다.
+- 검토 뒤 남는 미검출 수와 비율, 달성 coverage를 함께 보고한다. 평가 batch의 score 순위만으로 정하는 검토 정책이며 온라인 임계값의 안전 보장은 아니다.
+- Brier와 고정 10-bin ECE는 calibration 보조 지표다. raw conditional Yes/No 확률·token probability를 미검출 확률로 직접 해석하지 않는다.
+
+E의 대표 V−T와 V−seed를 사전 주비교로 둔다. 환자 paired bootstrap 10,000회, 고정 seed 28017을 사용한다. 두 비교에는 각각 97.5% CI를 사용하고 나머지는 탐색적 95% CI로 표시한다. calibration·대표 선택은 E bootstrap 중 재선택하지 않는다. 이는 C에서 적합한 절차에 조건부인 불확실성임을 명시한다.
+
+추가로 Normal/NoOpacity-notNormal 구성, 세 seed 공통 빈 출력 집단, 전체 valid/invalid 분모를 보고한다. 하위집단에서 가장 좋은 결과를 새 주가설로 승격하지 않는다. nonempty 부분 누락은 annotation 기준의 별도 기술 통계다.
+
+## 결과별 해석과 다음 행동
+
+**단순 baseline으로 충분한 양성:** E에서 하나 이상의 고정 score가 AUROC≥0.75·95% 하한≥0.65, Capture@20%≥0.50을 만족하면 개발 조건에서 유용한 위험 신호로 기록한다. token 또는 seed score만으로 충분하면 추가 confidence 방법 투자를 보류한다. 별도 영상 재질의가 충분하면 비용을 포함한 모듈형 baseline으로 보존한다.
+
+**인터페이스 간 차이를 지지하는 양성:** 대표 V−T의 AUROC 차이가 ≥0.10이고 97.5% CI 하한>0이며 Capture@20%도 같은 방향이면 영상 재질의의 추가 정보 근거로 기록한다. V−seed 비교를 함께 제시한다. 이는 새로운 방법의 증명이 아니다. 후속 학습의 가치에는 저비용 재질의 대비 이점과 관련 confidence 방법 비교가 추가로 필요하다.
+
+**음성:** 모든 score의 95% CI 상한이 사전 실용 목표에 미달하면 현재 score 집합의 유용성을 지지하지 못한 것으로 기록한다. 미검출 자체, 모든 confidence estimator, 모든 학습 가능성을 기각하지 않는다. 외부 데이터 확대나 새 loss를 자동 추가하지 않고 더 강한 영상 기반 학습 baseline·가까운 선행 재현의 정보 이득을 리뷰에서 비교한다.
+
+**불확정:** 효과가 작거나 CI가 목표·차이 기준을 가로지르면 식별 가능한 범위를 보고한다. E의 사건 수 70명으로 작은 효과를 판단하기 어렵다는 점을 유지한다. 새 독립 표본이 결정을 바꿀 예상 정밀도와 기여 경로가 있을 때만 다음 계획에서 확대한다. reserve는 자동 개방하지 않는다.
+
+**실행 실패:** 입력·adapter·확률 수치·provenance·완전성 gate를 통과하지 못하면 confidence 가설 판정을 하지 않는다. 원시 산출물과 실패 원인을 보존한다.
+
+진단의 성공은 유효한 비교로 위 행동 중 하나를 선택하는 것이다. 새 방법의 성공이나 GOAL 달성과 구분한다.
+
+# Risks / Checks
+
+- 빈 출력의 조건부 표본은 실제 출력 활용에 맞는 대상이지만 모든 grounding 실패를 대표하지 않는다. nonempty 누락과 false positive에 결론을 확장하지 않는다.
+- 양성 비율을 통제한 RSNA 개발 표본의 위험률을 임상 유병률·음성 예측 안전성으로 보고하지 않는다.
+- C는 actor 선택에도 쓰였고 E는 이미 개발에 노출됐다. patient-disjoint 평가와 foundation model 사전학습 미노출을 혼동하지 않는다.
+- 동일한 문자열은 확률의 동일성을 뜻하지 않는다. 반대로 BF16 rounding으로 생긴 동점을 임의 jitter로 깨지 않는다.
+- Platt mapping은 순위를 바꾸지 않는 방향으로 고정한다. calibration 개선을 AUROC·검토 효율 개선으로 설명하지 않는다.
+- P(True)와 Presence의 낮은 답변 token 질량도 결과다. 환자를 사후 제외하거나 prompt를 변경하지 않는다.
+- 과거 결과를 새 protocol에 그대로 승인하지 않는다. 현재 입력과 source 연결을 검증한 범위만 재사용한다.
+- 상위 관리 정책·과거 branch·보고서·원시 출력은 변경하지 않는다. 소스 checkpoint는 구현 종료 후 orchestrator가 보존한다.
+
+## 대규모 GPU 필요 후보
+
+다기관의 image–finding–bbox와 일반 QA를 결합해 검출과 누락 위험을 함께 학습하는 vision encoder–언어 모델 공동 post-training을 보존한다. 충분한 batch·seed·외부 평가를 포함한 전체 규모에는 더 큰 자원이 필요할 수 있다. 이번 결과가 필요성을 입증하기 전에는 실행 후보로 승격하지 않으며, 두 24GB GPU에서 가능한 경량 적응까지 배제하지 않는다.
+
+# 계획의 근거 (GPT 조사 노트)
+
+## 이번 라운드의 결론
+
+기존 RSNA SFT의 빈 출력에 한정한 confidence 진단을 구현할 수 있도록 질문·비교군·표본을 좁혔다. 새 방법의 필요성은 아직 확인되지 않았다. 파일 수정·생성, 모델 로딩, GPU 추론·학습은 수행하지 않았다.
+
+## 이전 질문 1: 위험 정의와 비교군
+
+주대상은 seed17의 유효한 빈 출력이다. 사건 Y는 해당 환자에게 RSNA opacity GT box가 하나 이상 존재하는 경우다. 빈 출력 집단에서는 IoU threshold나 bbox 개수의 차이 없이 완전 미검출 여부를 정의할 수 있다. 임상적 정상 여부를 뜻하지 않는다.
+
+비어 있지 않은 출력의 부분 누락은 별도로 집계한다. GT와 예측의 최대 일대일 matching에서 IoU≥0.3으로 연결되지 않은 GT가 있으면 annotation 기준 누락으로 표시하고 IoU≥0.5를 민감도 분석으로 둔다. 이는 위치 오차도 포함하므로 순수한 병변 인지 실패라고 부르지 않는다. 이번 confidence 주분석과 합치지 않는다.
+
+`research/results/iter_012/train/lr2e-4_s17/epoch_05/val_gen/gen_worker*.jsonl`을 읽어 validation400 중 빈 출력 199명, 그중 opacity 36명·Normal 98명·NoOpacity/NotNormal 65명을 확인했다. `confirm_sft_seed17`의 개발용 800명에서는 빈 출력 398명, opacity 70명·Normal 195명·NoOpacity/NotNormal 133명이다. 두 집단의 빈 출력은 모두 suffix `[3805, 106]`, 즉 `[]`와 `<end_of_turn>`으로 동일하다. 따라서 주분석에서 길이·출력 문구 차이를 통제할 수 있다. 확률까지 같다는 뜻은 아니다.
+
+기존 seed29/43의 불일치도 유용한 baseline이다. seed17 빈 출력 398명을 다른 두 seed의 nonempty 수로 나누면 0개: 376명 중 양성 53명, 1개: 14명 중 양성 10명, 2개: 8명 중 양성 7명이다. 동점 내 무작위 검토의 기대값을 쓰면 상위 20% 검토에서 미검출 포착률은 약 35.88%다. 이는 사후 개발 집계이며 새로운 독립 확인이 아니다. 공통 빈 출력이 많다는 사실만으로 ensemble 전체를 무효라고 결론내릴 수 없음을 보여준다.
+
+GPU 비교군은 원래 bbox 생성의 NLL·entropy, M0/B0의 동일 target 존재 score, M0/B0의 P(True)다. 기존 Q_O 정확도 실험을 새로운 능력 전이 증거로 반복하지 않는다. 이번에는 고정된 빈 출력의 미검출 위험을 순위화하는지를 평가한다.
+
+## 이전 질문 2: confidence 추출의 실제 경로
+
+`generate.py`는 input_ids·suffix_ids를 저장하지만 logprob는 저장하지 않는다. 현재 JSONL만으로 confidence를 복원할 수 없다.
+
+실제 설치 소스 `/home/test/.conda/envs/medgemma/lib/python3.11/site-packages/transformers/models/gemma3/modeling_gemma3.py`와 저장 환경을 확인했다. 설치 버전과 기존 실행 기록은 transformers 5.17.0이다. 현재 shell의 기본 python은 `/home/milab/anaconda3/bin/python`으로 transformers를 찾지 못했다. 이는 GPU 환경 부재의 증거가 아니다. Claude는 실행 호스트에서 orchestrator가 설정한 medgemma Python을 확인해야 하며 설치·환경 변경으로 우회하지 않는다.
+
+실제 Gemma3ForConditionalGeneration은 `logits_to_keep`를 지원하고, generation 후속 step에서는 image token의 bidirectional mask를 재적용하지 않도록 `token_type_ids=None`을 사용한다. 따라서 단순 tensor 이어붙이기만으로 generation과 같은 확률이라고 가정하면 안 된다. 같은 cache·mask 경로의 실제 generation raw logits를 기준으로 짧은 replay를 검증한다. 공식 API의 선택 위치 logits 기능은 메모리 절감 수단이다. [Gemma3 문서](https://huggingface.co/docs/transformers/v4.57.1/en/model_doc/gemma3)
+
+주분석의 답변은 `[]` 한 token이다. 첫 예측 위치의 FP32 log_softmax로 NLL을 계산하고 EOS NLL을 별도 보존한다. EOS 포함 평균과 첫 위치 entropy는 별도 score다. softmax를 bf16에서 계산하거나 반올림된 probability를 저장하지 않는다. bbox 집합이 없다는 확률과 특정 문자열의 확률을 동일시하지 않는다.
+
+현재 tokenizer.json에는 `[]`=3805, `Yes`=10784, `No`=3771이 있다. 실제 processor·tokenizer에서 add_special_tokens=False의 단일 token 대응을 실행 전에 검사한다. Yes/No 조건부 score에는 전체 vocabulary에서 두 token이 차지하는 질량도 함께 기록한다.
+
+## 이전 질문 3: calibration·평가와 정밀도
+
+기존 train2400, validation400, confirm800의 ID 파일 길이와 고유 개수가 일치했다. 세 seed의 epoch_05 validation 출력도 각각 400건 존재한다. validation400은 calibration·비교군 선택 자료 C400으로, 이미 개발에 쓰인 confirm800은 고정 개발 평가 E800으로 구분한다. actor 선택에 사용된 validation이라는 한계와 E800의 기존 노출을 모두 유지한다.
+
+주 GPU 대상은 모델 출력만으로 정해지는 C의 빈 출력 199명과 E의 빈 출력 398명 전체다. 양성 미검출만 골라내지 않는다. 비어 있지 않은 환자도 원시 출력 감사·오류 분모에 포함하되 이번 위험 순위 주분석에는 섞지 않는다. E의 미검출 70명에서 포착률 0.5의 단순 이항 근사 95% 반폭은 약 0.12여서 작은 차이를 확정할 수 없다. 환자 paired bootstrap을 사용하고 불확정이면 reserve를 자동 개방하지 않는다.
+
+## 가까운 선행과 투자 판단
+
+새로 확인한 [DualRead](https://arxiv.org/html/2609.06419v1)는 MedGemma 1.5를 포함해 고정된 actor의 응답을 replay하고 pre/post-answer state로 confidence를 추정한다. 따라서 replay나 내부 state confidence 자체는 새 기여가 아니다. 그 연구의 short-answer VQA와 현재 bbox-only SFT의 동일 빈 출력 조건은 구분해야 한다. [BICR](https://arxiv.org/abs/2605.10893)은 영상과 blank-image state를 대비하는 학습 confidence 방법이다. 이번 진단에서 둘을 재현했다고 주장하지 않는다.
+
+[Calibrated Triage, Not Autonomy](https://arxiv.org/html/2606.15910v1)는 calibration과 선택적 예측을 함께 평가한다. 이번에도 Brier/ECE 개선만으로 위험 순위가 개선됐다고 주장하지 않는다. [MedGrounder](https://arxiv.org/abs/2512.01085)는 zero/one/multiple scored regions를 다룬다. 빈 출력 지원이나 confidence 추가 자체는 차별성이 아니다. [Conformal Object Detection](https://proceedings.mlr.press/v204/andeol23a.html)은 미검출을 포함하는 risk control의 선행이다. 이번 개발 실험에는 분포 독립적인 risk 보장을 부여하지 않는다.
+
+## 자산·보존 확인
+
+현재 HEAD는 `ed966685298f152e194069d4de3d856e065886bc`이며 status/diff는 비어 있었다. 반입 목록 9개 파일의 commit blob과 작업 파일 일치를 확인했다. 새 기반으로 요청한 iter_006의 전체 SHA는 `68117cfd08429ffc3cb9b77e14fb1db3221d86ab`이고 rsna_diag는 없다. 필요한 공통 파일만 선별 반입한다.
+
+B0 adapter 경로·SHA256은 라운드 01의 확인을 유지한다. 이번에는 weight를 로드하지 않았다. 새 scorer는 기존 사분면 decision·평가기·launcher를 호출하지 않는다. 입력 구성과 LoRA·원자적 lock을 재사용하되 새로운 score 요청의 provenance·완료 검증을 명시적으로 구현한다.
+
+과거 E60 report는 조사한 iter_026/027 stream에서 직접 Write한 전체 report blob을 찾지 못했다. 관련 참조는 각각 11개·13개였고 각 stream에는 비JSON 줄 2개가 있었다. 이것만으로 byte 복구 불가능을 확정하지 않는다. 기존 hash 불일치와 확인 범위를 새 provenance 기록에 남기며 과거 report를 수정하지 않는다.
+
+## 대규모 GPU 필요 후보
+
+다기관 image–finding–bbox 자료로 검출·누락 위험·일반 QA를 함께 최적화하는 vision–language 공동 post-training을 보존한다. 전체 모델 적응·다수 seed·외부 확인에는 더 큰 자원이 필요할 수 있다. 이번에는 필요성과 신규성이 미확정이며 경량 학습의 가능성을 배제하지 않는다.
+
+이전 사고 라운드 노트: agent/runs/iter_028/think/

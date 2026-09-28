@@ -1,0 +1,120 @@
+# 사고 라운드 2
+
+## 핵심 판단
+
+사분면 oracle 보정 실험은 이번 구현 후보에서 내린다. 입력 계약의 영향을 더 설명할 수는 있지만, 현재 과제에서 bbox+규칙보다 내부 적응에 투자해야 할 조건을 제시하지 못했다. 대신 기존 RSNA SFT의 **빈 출력과 미검출 위험**을 다음 조사 후보로 좁힌다. 아직 confidence 실패나 새 방법의 필요성이 검증된 것은 아니다.
+
+이번 라운드는 문서·소스·논문 조회와 저장 출력의 읽기 전용 재집계만 수행했다. 파일 생성·수정, 모델 로딩, GPU 추론·학습은 하지 않았다.
+
+## 이전 라운드 질문에 대한 답
+
+### 1. schema와 영상 유무를 분리할 최소 대조는 구성할 수 있지만, 투자 판단의 가치는 낮다
+
+현재 `rsna_diag/roi26_spec.py::O_TMPL`과 `roi26_requests.py::build_o`를 확인했다. 숫자 배열 목록을 제공하면서 원래 `box_2d`·`label`을 그대로 반환하라고 요구하는 불일치가 존재한다. 라운드 01의 분석에 따르면 출력은 192건 모두 유효했고 제공 목록 밖 좌표도 없었다. 따라서 schema 불일치와 실제 선택 실패를 구분해야 한다.
+
+이를 검증하는 최소 factorial은 기존/보정 schema × 영상 있음/없음 × M0/B0다. 영상 유무 사이에는 텍스트를 동일하게 유지하고, 보정 schema에는 동일 좌표를 `box_2d`와 공통 label을 가진 객체 목록으로 제공한다. 사분면 계산 결과는 입력에 넣지 않는다. 기존 D24 전체를 사용하면 24명×4질의×2schema×2modality×2모델=768요청이다. 이는 실행 계획이 아니라 검토한 대조안이다.
+
+가능한 결과의 의미는 다음과 같다.
+
+- 보정 schema가 두 modality에서 모두 개선되면 입력 계약에 대한 민감성을 지지한다. 직접 영상 질의의 공간 전이를 증명하지 않는다.
+- 보정 text-only는 성공하고 영상 조건만 저하되면, 목록으로 풀리는 과제에 영상이 추가될 때의 간섭을 지지한다. 내부 시각 표현 손실을 확정하지 않는다.
+- 두 조건 모두 실패하면 제공 목록 처리·지시 해석의 문제가 남는다. 일반적인 공간 전이 부재의 증거는 아니다.
+- 부분 개선만 있으면 기존 oracle의 불확실성이 남는다. 같은 prompt 후보를 계속 늘릴 근거가 되지는 않는다.
+
+어느 결과에서도 사분면 선택은 기존 검출+규칙으로 수행할 수 있다. 내부 적응이 필요한 추가 사용 조건을 이번 조사에서 확인하지 못했으므로, 위 검사는 후속 학습 투자를 충분히 구분하지 못한다. **oracle 보정·E 추가 확대·seed 실행을 예약하지 않는다.** 이는 모든 능력 전이를 기각하는 판단이 아니라 현재 진단의 기회비용 판단이다.
+
+### 2. 규칙으로 해결되지 않는 가까운 질문은 생성하지 않은 병변의 위험이다
+
+사분면 규칙은 주어진 bbox를 선택할 수 있지만, 빈 목록에 누락된 병변이 있는지는 판단할 수 없다. 기존 SFT의 검출 성과를 유지하면서, 언제 추가 검토가 필요한지 예측하는 질문은 실제 출력 활용과 연결된다. 여기서 추가 검토는 연구상 위험 분류를 뜻하며 임상 자동화의 안전성을 주장하지 않는다.
+
+이를 뒷받침할 현상이 있는지 기존 결과를 재집계했다. 입력은 다음과 같다.
+
+- `research/results/iter_010/manifests/gt_manifest.json`
+- `research/results/iter_012/confirm_sft_seed{17,29,43}/gen_worker*.jsonl`
+
+각 seed에 800개 고유 환자 출력이 있고 세 집합이 동일함을 확인했다. 2,400건 모두 EOS로 끝났으며, 종료 token을 제거한 뒤 표준 JSON 파싱으로 빈 목록을 판정했다. 모델·공통 평가 함수를 실행하지 않았다.
+
+| 저장 출력 분석 | seed17 | seed29 | seed43 |
+|---|---:|---:|---:|
+| 양성 400명 중 빈 출력 | 70 | 74 | 61 |
+| Normal 200명 중 빈 출력 | 195 | 196 | 196 |
+| NoOpacity/NotNormal 200명 중 빈 출력 | 133 | 142 | 144 |
+
+양성 400명의 빈 출력 seed 수는 0개 316명, 1개 16명, 2개 15명, 3개 53명이었다. 즉 **53/400명, 13.25%에서 세 seed 모두 빈 목록을 반환했다.** seed17의 빈 출력 미검출 70명 중 53명, 75.7%가 여기에 해당한다. 공통 미검출 53명은 주석 box 1개인 환자 48명과 2개인 환자 5명이다.
+
+세 seed가 모두 빈 목록인 전체 집단은 376명이다. 양성 53명, Normal 194명, NoOpacity/NotNormal 129명으로 구성된다. 이 집단 안에서는 ‘세 seed가 모두 비었다’는 일치 정보만으로 올바른 빈 출력과 미검출을 구분할 수 없다.
+
+이 수치는 다음을 입증하지 않는다.
+
+- 높은 token confidence 또는 calibration 실패: 기존 출력에 probability·logprob가 없다.
+- ensemble 전반의 무효: 확률 평균, 다른 모델, 다른 학습 방식은 검사하지 않았다.
+- 임상적 음성 예측 위험 14.1%: 53/376은 양성 비율을 50%로 고정한 개발 자료의 수치다.
+- annotation 밖 병변의 누락: 정답 범위는 기존 RSNA opacity 주석이다.
+
+기존 confirm800은 후속 개발에 활용된 자료이며 이번 분석도 사후 개발 분석이다. 독립 확인으로 다시 계산하지 않는다.
+
+### 3. 표본·gate는 위험 정의와 score를 먼저 정해야 고정할 수 있다
+
+사분면 oracle의 D24에는 다중 사분면 환자가 14명뿐이다. 96개 질의를 독립 표본처럼 계산하면 정밀도를 과장한다. 추가 대조를 하더라도 환자 단위 paired 분석과 확대가 필요하지만, 앞의 투자 판단상 이를 진행하지 않는다.
+
+새 후보는 기존 validation400과 개발로 전환된 confirm800을 이용해 정의·추출 경로를 검토할 수 있다. 다만 발견한 공통 미검출 53명만 골라 평가하면 위험 예측 성능을 과장한다. 올바른 빈 출력, 단일 seed 미검출, 비어 있지 않은 출력과 부분 누락을 포함하는 대표 집단이 필요하다.
+
+다음 라운드에서 ‘양성인데 빈 출력’과 ‘일부 병변 누락’을 같은 목표로 묶을지부터 결정한다. calibration과 평가의 환자 분리, 동점 처리, 목표 검토 비율, 정밀도와 확대 조건은 그 뒤에 사전 고정한다. 기존 reserve와 MRI F139는 열지 않는다. 현재까지 새 독립 확인 집단을 확보했다고 주장하지 않는다.
+
+## 가까운 선행 연구와 차별성의 한계
+
+이번 검색은 단순 confidence 평가를 새로운 기여로 오해하지 않도록 비교 범위를 확인하기 위한 것이었다.
+
+- [Generalised Medical Phrase Grounding](https://arxiv.org/html/2512.01085v1)은 MedGrounder의 zero/one/multiple scored boxes, confidence thresholding, 모듈형 report grounding을 다룬다. 빈 출력 지원이나 confidence 추가 자체는 새 기여가 아니다. 해당 방법을 검출·집합 예측의 비교 후보로 검토해야 하며, 논문의 데이터·학습 규모와 현재 RSNA LoRA 조건을 구분해야 한다.
+- [Calibrated Triage, Not Autonomy](https://arxiv.org/html/2606.15910v1)은 의료 VQA에서 여러 confidence estimator와 selective prediction을 비교한다. 따라서 ‘의료 VLM confidence가 충분한가’라는 포괄적 질문만으로는 차별성이 부족하다. 현재 후보는 생성되지 않은 병변의 위험이라는 구체적 출력 조건을 다루되, 이 조건이 기존 estimator로 해결되는지 먼저 확인해야 한다.
+- [Predictive Entropy Links Calibration and Paraphrase Sensitivity](https://arxiv.org/html/2604.08941v1)의 §3.1·Appendix C는 Yes/No logit 기반 분류와 `google/medgemma-4b-it`을 명시한다. 이를 MedGemma 1.5의 bbox 생성 확률이나 실제 미검출 위험에 그대로 대응시키지 않는다. 모델 구조 설명과 구현도 적용 전에 별도 대조해야 한다.
+- [Conformal Object Detection 연구](https://proceedings.mlr.press/v204/andeol23a.html)는 검출에서 false negative와 image-wise risk control을 이미 다룬다. 미검출을 고려한 위험 제어 자체를 미해결 분야라고 주장할 수 없다. box 확장·검출 threshold 조정과 빈 생성 출력의 위험 분류가 어디서 달라지는지 확인해야 한다.
+
+현재 필요한 근거는 일반적인 confidence 저하가 아니라, 강한 단순 estimator와 모듈형 대안으로 설명되지 않는 실패 조건이다. 논문 추천은 보류한다. 이 후보의 실제 confidence 비교 결과는 아직 없다.
+
+## 외부 원천 전이는 즉시 실행할 준비가 되지 않았다
+
+외부 전이는 후보로 유지하지만 같은 opacity의 그대로인 반복 평가라고 간주할 수 없다.
+
+- [VinDr-CXR 공식 자료](https://physionet.org/content/vindr-cxr/1.0.0/)는 Lung opacity·Consolidation 등의 local label과 Pneumonia 같은 global diagnosis를 구분한다. RSNA의 pneumonia-suspicious opacity와 동일한 target이라고 자동 대응할 수 없다. 공식 파일에는 credentialing·교육·DUA 조건도 있다. 이번에 계정 접근 권한을 확인하거나 자료를 내려받지 않았다.
+- 로컬 `legacy/eval_samples/not_in_training/vindr_cxr/meta.json`에는 기존 사용 영상 10개와 Lung Opacity box 2개, Consolidation box 2개가 있다. 대표 외부 표본이나 새 확인 집단으로 충분하지 않다. 폴더 이름은 foundation model의 사전학습 미노출을 입증하지 않는다.
+- NIH는 RSNA의 원천과 연결되므로 외부 기관 일반화 자료로 대체하지 않는다. 이는 `agent/runs/iter_009/plan.md`와 iter_010 계획에 이미 명시된 사실이다.
+- [CURE](https://arxiv.org/html/2601.15408v1)의 기존 외부 평가 근거는 유지한다. 단순히 VinDr 점수를 추가하는 것만으로 contribution이 성립하지 않는다.
+
+따라서 우선 같은 RSNA 영상·target·checkpoint에서 위험 예측 질문의 식별력을 확인한다. 다른 소견·기관·modality를 동시에 바꾸지 않는다.
+
+## Strategy Check / 연구 방향 판단
+
+중요한 사용 과제는 유용해진 grounding 출력을 언제 신뢰하거나 추가 검토해야 하는지 판단하는 것이다.
+
+1. **미검출 위험 진단:** 기존 실제 출력에서 세 seed 공통 미검출 53명을 확인했다. 사분면 규칙이 해결하는 목록 선택과 다른 문제이며, 동일 checkpoint·target으로 조사할 수 있다. 다만 새 방법 필요성과 confidence 실패는 미확인이다.
+2. **현재 인터페이스 추가 진단:** schema×modality 대조는 원인 설명을 좁힐 수 있지만 내부 학습의 추가 사용 가치를 아직 제시하지 못했다. 현 시점에는 실행하지 않는다.
+3. **동일 opacity 외부 전이:** 실용성은 있으나 annotation 대응·접근·대표 표본이 미확정이다. 관련 실패 조건을 먼저 좁힌 후 외부 확인 경로로 검토한다.
+4. **grounding loss 개선:** 기존 GIoU·자리별 loss 결과와 새 위험 질문 사이의 연결이 없으므로 보류한다.
+
+라운드 01의 잠정 1순위를 변경한 이유는 oracle 대조의 결과별 행동을 따져도 학습 투자 조건이 달라지지 않았고, 실제 SFT 출력에서 더 구체적인 잔여 오류를 확인했기 때문이다. 사용자 보완의 RSNA 성과·checkpoint 우선 활용은 유지한다. 사분면 진단에서 확인한 것은 현재 직접 전체 선택의 부족이며, 일반적인 공간 전이 부재는 여전히 미해결로 남긴다.
+
+## 코드·결과 보존과 재사용
+
+현재 research HEAD는 `ed966685298f152e194069d4de3d856e065886bc`이고 status와 diff는 비어 있다. `generate.py`, `lora.py`, `eval_gate.py`, `roi26_*`는 현재 브랜치에 있다. 반면 현재 브랜치에는 `rsna_diag/train.py`가 없다. 보관된 학습 소스의 부재로 해석하거나 새로 재구현하지 않는다.
+
+`generate.py::generate`는 greedy suffix를 저장하지만 probability를 요청·보존하지 않는다. 따라서 현재 JSONL만으로 token confidence를 계산할 수 없다. 새 GPU scoring 경로를 택한다면 기존 입력·출력 token, processor, checkpoint를 연결하고 teacher-forced scoring과 실제 생성 경로의 정합성을 검증해야 한다. token likelihood를 그대로 임상적 무병변 확률로 이름 붙이지 않는다.
+
+B0 경로·SHA256은 라운드 01에서 확인한 값을 유지한다. 이번에는 모델 weight hash나 tensor digest를 다시 계산하지 않았다. 새 접근법 브랜치를 선택하면 현재 브랜치의 파일이 자동 기반에 모두 포함된다고 가정할 수 없다. 실제 필요한 모듈·의존 파일·출처 SHA와 required_checks를 다음 계획에서 확정한 뒤 `reuse_assets`를 작성한다. 현재 빈 배열은 구현 반입 승인 목록이 아니다.
+
+과거 report 보존 문제도 추가 확인했다. iter_026 E60 decision이 기대하는 report SHA256은 `fbc547a5756a534d3103e476e529b5dfee71cc108db02042a3256b639900114a`인데, 현재 파일은 `e53fd842dcb07bd4c4b0142ffcf56ae9170c3516558b9fb5038e0ab57c1b8877`이다. 후자는 iter_027 report와 일치한다. 조사한 결과 경로에서 명시적인 backup은 찾지 못했으며, 두 반복의 `claude_stream.jsonl`은 존재한다. stream에 원본 전체 bytes가 보존됐는지는 아직 확인하지 않았다. 재계산 가능성을 원본의 무손실 복구로 표현하지 않는다.
+
+## 자원과 다음 조사 범위
+
+다음 GPU 계획을 채택하면 두 RTX 3090을 사용한다. scoring은 긴 vocabulary logits 때문에 기존 greedy 추론과 메모리·처리량이 다를 수 있으므로 8–10GB 참고값으로 worker 수를 결정하지 않는다. 동일 development 요청의 2/4 worker 또는 batch 확대를 비교하고, worker당 2GiB 여유·전체 peak·정합성·긴 출력 비용으로 배치를 정한다. 현재 실행 시간은 미측정이며 임의 시간 상한을 두지 않는다.
+
+이번 think_more는 미검출 위험의 정의, 실제 confidence 추출 경로, 강한 단순 baseline과 표본 정밀도를 정하기 위한 것이다. 다음 라운드에서 이들이 고정되면 실제 GPU diagnostic 계획으로 넘어간다. 단순 calibration으로 충분하거나 기존 연구와 구별할 질문이 없으면 새 방법을 만들기 위해 실패를 과장하지 않는다.
+
+### 대규모 GPU 필요 후보
+
+다기관의 image–finding–bbox 자료로 검출·누락 위험·일반 QA를 함께 학습하는 전체 post-training은 보존한다. vision encoder와 언어 모델의 공동 학습 및 충분한 seed·외부 평가에는 더 큰 자원이 필요할 수 있다. 현재 필요성은 미확정이며 두 GPU에서 가능한 LoRA·frozen feature baseline을 배제하지 않는다.
+
+## 다음에 파고들 질문
+- 빈 출력의 미검출 위험과 비어 있지 않은 출력의 부분 누락을 어떤 정답·주지표로 구분해야 하는가? token likelihood, calibration, seed 일치도와 적절한 영상 기반 baseline을 비교했을 때 어떤 결과가 새 방법 투자를 정당화하는가?
+- 기존 input_ids·suffix_ids와 MedGemma 1.5의 실제 추론 구현을 이용해 likelihood·entropy를 정확히 추출할 최소 GPU 경로는 무엇인가? tokenizer·EOS·JSON 길이 효과를 어떻게 통제하고, 필요한 재사용 파일과 전체 출처 SHA는 무엇인가?
+- 기존 validation400·개발 confirm800에서 calibration과 평가를 어떻게 분리하고, 대표 표본·환자 단위 정밀도·확대 및 중단 기준을 어떻게 고정할 것인가? 새 독립 확인과 외부 원천 평가는 어떤 근거가 생길 때 별도로 준비할 것인가?

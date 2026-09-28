@@ -755,3 +755,36 @@ Claude 계정의 /usage 또는 Settings > Usage에서 제한을 확인한 뒤 �
 - 🏁 **마일스톤**: RSNA 위치 학습의 개선만으로는 신뢰할 만한 사분면 전체 선택이 확보되지 않았다 — JOURNEY.md
 - 📁 원본: `agent/runs/iter_027/`
 
+## iter_028 — RSNA 빈 출력의 미검출 위험 진단 (1번째 시도) · 2026-09-29 03:52
+
+- 🔎 **사고 라운드 1** (GPT deep): 기존 oracle에서 SFT의 부분 선택 14/29를 확인해 전체 선택 실패와 구분했다. 입력 계약·영상 효과를 나누는 최소 검사가 후속 투자를 바꿀지 먼저 확정하며, 새 학습과 E200 확대는 보류한다.
+  - 스스로 던진 질문: B0의 진부분집합 정확 선택 14/29를 고려할 때, schema 보정과 영상 유무를 분리하는 최소 대조는 무엇이며 어떤 결과가 추가 학습·진단 종료·전환을 각각 정당화하는가? · 목록 선택 문제가 정상 입력에서도 남는다면 단순 bbox+규칙을 넘어 내부 적응의 가치가 필요한 실제 사용 조건을 제시할 수 있는가? 없다면 동일 opacity의 외부 전이·미검출 신뢰도 질문이 더 큰 정보 이득을 갖는가? · 선택할 최소 대조에 필요한 환자 단위 표본·정밀도·단계 gate와 재사용 수정 범위는 어디까지인가? 기존 D/E 개발 자산과 새 독립 확인을 구분하면서 과거 산출물 보존까지 강제할 수 있는가?
+- 🔎 **사고 라운드 2** (GPT deep): 기존 RSNA SFT의 세 seed가 양성 400명 중 53명을 모두 빈 출력으로 놓쳤다. 사분면 추가 진단은 보류하고 미검출 위험 예측을 다음 후보로 좁힌다. confidence 실패와 새 방법의 필요성은 아직 미확인이다.
+  - 스스로 던진 질문: 빈 출력의 미검출 위험과 비어 있지 않은 출력의 부분 누락을 어떤 정답·주지표로 구분해야 하는가? token likelihood, calibration, seed 일치도와 적절한 영상 기반 baseline을 비교했을 때 어떤 결과가 새 방법 투자를 정당화하는가? · 기존 input_ids·suffix_ids와 MedGemma 1.5의 실제 추론 구현을 이용해 likelihood·entropy를 정확히 추출할 최소 GPU 경로는 무엇인가? tokenizer·EOS·JSON 길이 효과를 어떻게 통제하고, 필요한 재사용 파일과 전체 출처 SHA는 무엇인가? · 기존 validation400·개발 confirm800에서 calibration과 평가를 어떻게 분리하고, 대표 표본·환자 단위 정밀도·확대 및 중단 기준을 어떻게 고정할 것인가? 새 독립 확인과 외부 원천 평가는 어떤 근거가 생길 때 별도로 준비할 것인가?
+- 🧭 **계획** (GPT deep): RSNA SFT의 동일한 빈 출력에서 token 확률·seed 불일치·영상 재질의가 미검출을 구분하는지 비교한다. 사분면 진단 확대는 종료하며, confidence 실패와 새 방법의 필요성은 아직 미확인이다.
+  - 대안: 1) RSNA 빈 출력의 미검출 위험 진단: 기존 SFT·동일 target을 유지하며 길이와 형식이 같은 출력 사이의 위험 식별력을 검사한다. · 2) 현재 인터페이스의 추가 원인 진단: schema×영상 유무 대조는 가능하지만 내부 적응의 투자 판단을 바꿀 사용 조건이 부족해 보류한다. · 3) 동일 opacity의 외부 전이: annotation 대응과 접근 가능한 대표 자료를 확보한 뒤 유망한 실패 조건의 외부 확인으로 검토한다. · 4) 기존 grounding 방법 개선: 추가 loss와 잔여 미검출 사이의 연결 및 강한 단순 대안 대비 이득이 확인되기 전에는 학습하지 않는다.
+  - 1순위 선택 근거: 동일한 [] 출력과 기존 checkpoint를 활용하면 길이·형식 효과를 통제하면서 새로운 위험 신호의 유무를 실제 GPU 결과로 구분할 수 있다. 사용자 보완의 RSNA 성과·자산 우선 활용을 유지하며, 추가 접근 권한이나 목표 변경 없이 실행할 수 있다.
+- ▶ **결정**: 자동 진행 (smart) — 1순위로 진행
+- 💾 **개발 이력 체크포인트** `9d5739203730647fd401caccc3deccd6ecbab317`: implementation_finished (검증 승인 아님)
+- 🔧 **Claude** (standard): RSNA grounding SFT의 빈 bbox 출력에서 추가 비용 없는 token 확률(entropy/NLL)만으로 미검출 위험을 유용하게 구분함을 확인했다(E800 AUROC 0.822, CI[0.759,0.879], Capture@20% 0.614) — 계획 기준상 "단순 baseline으로 충분"하여 새 confidence 방법 투자는 보류를 권고한다. [자체 검증 PASS, 파일 1813개 변경]
+  - 새 브랜치 `approach/rsna-empty-output-risk` ← 68117cf (68117cf)
+  - ⚠ 권한 거부 14건
+- 🔍 **리뷰** (GPT normal): [CONTINUE / improve] RSNA 빈 출력 398명에서 entropy는 미검출 70명 중 43명을 상위 약 20%로 포착했다. Presence 역상관은 부호 오류였으며, 대표 비교를 교정한 뒤 다음 투자를 판단해야 한다.
+  - 접근법 판단: token 위험 신호는 재현됐으나 Presence 부호 오류로 대표 비교가 잘못됐다. 기존 raw logits의 평가·calibration·판정을 교정해 진단을 완결한다.
+  - 목표 진전: 실제 GPU scoring을 완료했고 동일한 []+EOS 출력에서도 entropy가 미검출 위험을 구분함을 독립 재계산했다. E 빈 출력 398명·미검출 70명에서 AUROC 0.8225, 상위 80명 검토 시 43명을 포착했다. 이는 사전 개발 기준을 충족하는 단순 baseline 근거이며 검출 성능 자체의 개선은 아니다. Presence 부호 오류를 교정하면 B0 AUROC는 0.8154로, 보고된 역상관은 모델 현상이 아니다. 새로운 방법의 필요성·독립 일반화·능력 전이의 일반적 원리는 아직 입증되지 않았다.
+  - 판정 범위: seed17 RSNA grounding SFT의 C400/E800 개발 집단 중 유효 빈 출력에 대한 진단이다. token 위험 순위 관찰은 유효하지만 Presence 역상관, 기존 대표 V 선택 및 그에 따른 calibration·주비교는 평가 오류로 정정해야 한다. 다른 seed·외부 데이터·독립 확인·임상 안전성은 미검증이다.
+  - 현재 결론 무효: run_iter028_eval_c.py가 Presence와 P(True)에 모두 No−Yes를 사용했다. Presence 역상관 해석은 무효이며 C 대표 V, 양의 기울기 calibration, E의 대표 비교와 보고서를 교정해야 한다. token 단독 결과까지 무효화하는 오류는 아니다.
+  - 재사용 전 수정: 기존 C protocol을 삭제·재잠금해 C record의 digest와 현재 protocol이 다르다. 과거 bytes의 복구 가능 범위와 실행 당시 코드·설정의 호환성을 새 기록으로 연결하고 원본을 덮어쓰지 않아야 한다.
+  - 재사용 전 수정: existing_done은 현재 manifest의 예상 image/hash·request_id·protocol/config와 완전하게 대조하지 않는다. 새 영상도 expected_pixel_sha256 검증 없이 기록한다. 필수 source·원시 출력·checkpoint·평가 및 calibration provenance를 실행·평가 양쪽에서 강제해야 한다.
+  - 재사용 전 수정: E 진입점은 C decision을 강제하지 않으며 launcher는 종료 코드만 저장한다. 예상 행렬과 provenance를 검증한 immutable completion이 필요하다.
+  - 재사용 전 수정: load_all의 중복 덮어쓰기, 실행 중 다른 worker JSONL을 읽을 때의 부분 행 처리, tail 보존·복구, launcher 중단 시 자식 수명 관리와 중복 실행 차단을 보완해야 한다.
+  - 재사용 전 수정: launcher가 상속 CUDA_VISIBLE_DEVICES의 허용 집합을 검증하지 않고 config 문자열로 덮어쓴다. 논리 index와 실제 허용 GPU의 대응을 강제해야 한다.
+  - 재사용 전 수정: required_checks 전항목 완료 주장은 근거보다 넓다. verify_input_ids.py는 input_ids만 대조하고 pixel_values 전체 동등성은 검사하지 않는다. 저장 adapter_digest 변조 거부만으로 입력·checkpoint·completion 변조와 단계 우회 검사를 대체할 수 없다.
+  - 재사용 전 수정: 다음 GPU 실행 전 전체 GPU peak와 긴 출력의 동시 메모리 여유를 실측해야 한다. output_scores는 processed logits이므로 raw logits 동일성 조건을 확인하거나 output_logits 경로로 명확히 구분해야 한다.
+  - 추후 개선: 미실행한 nonempty 부분 누락 기술 통계와 세 seed 공통 빈 출력 집단의 상세 결과를 보완한다.
+  - 추후 개선: iter_026/027 E60 report 보존·복구 조사 범위를 provenance note에 남기는 작업은 아직 미완료다.
+  - 추후 개선: claim 회수 이벤트 기록과 CPU/RAM/I/O 경합 관측을 보완한다.
+  - 추후 개선: 보고서의 2→4 worker 시간 단축은 약 21.9%이며 처리량 증가는 약 28.0%다. 추가 forward pass 불필요와 추가 비용 0을 구분하고, CI 폭 0.116<0.10이라는 문장도 정정한다.
+  - 다음: 기존 원시 출력으로 Presence 방향과 대표 비교를 교정해 진단을 완결한다. 새 GPU 본실험은 필요하지 않다. Presence=Yes−No, P(True)=No−Yes를 fixture로 고정하고 C에서 대표 V와 calibration을 다시 계산한 뒤 동일 절차로 E의 paired CI·포착률·decision을 새 경로에 저장한다. 기존 protocol·report를 보존하고 C/E 실행 당시 코드·입력·checkpoint 연결 및 평가 완전성을 확인한다. 교정 후에도 단순 token baseline으로 사전 목표가 충족되면 새 confidence head/loss는 보류한다. 이후 외부 확인, 중요한 잔여 미검출 조건의 최소 진단, 다른 연구 질문을 정보 이득·선행 대비 기여·비용으로 비교하며 reserve와 MRI F139는 자동 개방하지 않는다.
+- 📁 원본: `agent/runs/iter_028/`
+
