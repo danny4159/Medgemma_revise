@@ -129,8 +129,12 @@ def paired_ci(a, b, seed=23023, B=10000, bonferroni_m=2):
                        "Clopper-Pearson bounds on improve/worsen proportions as a conservative alternative")
         out["cp_improve_prop_ci"] = [imp_lo, imp_hi]
         out["cp_worsen_prop_ci"] = [wor_lo, wor_hi]
+        # 계획식: [L_improve-U_worsen, U_improve-L_worsen], [-1,1]로 clip. 판정에는 이 구간을 쓴다 (bootstrap 원본은 보존).
+        out["diff_interval_clipped"] = [max(-1.0, imp_lo - wor_hi), min(1.0, imp_hi - wor_lo)]
     else:
         out["degenerate"] = False
+    lo_j, hi_j = (out["diff_interval_clipped"] if out["degenerate"] else (out["ci_lo"], out["ci_hi"]))
+    out["judge_ci_lo"], out["judge_ci_hi"] = lo_j, hi_j
     return out
 
 

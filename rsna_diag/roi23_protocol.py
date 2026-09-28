@@ -20,7 +20,7 @@ REQUIRED_CODE = [
     "rsna_diag/qa_requests.py",
     "rsna_diag/roi23_spec.py", "rsna_diag/roi23_protocol.py", "rsna_diag/roi23_data.py",
     "rsna_diag/roi23_requests.py", "rsna_diag/roi23_gen.py", "rsna_diag/roi23_run.py",
-    "rsna_diag/roi23_eval.py", "rsna_diag/roi23_pipeline.py",
+    "rsna_diag/roi23_eval.py", "rsna_diag/roi23_pipeline.py", "rsna_diag/roi23_decide.py",
 ]
 
 

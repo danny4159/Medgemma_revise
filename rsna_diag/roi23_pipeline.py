@@ -115,12 +115,24 @@ def bbox_pred_for(ckpt, prompt_name, ids, conf_only=True):
     return out, recs
 
 
-def cmd_requests(stage, cfg):
+def _require_decision(stage_needed, field, expect=True):
+    """이전 stage decision 파일이 존재하고, 그 파일이 참조하는 report를 다시 읽어 조건을 재확인한 뒤에만 통과시킨다.
+    파일 존재만으로 통과하지 않는다 (roi23_decide.recheck가 report 원본에서 재계산한다)."""
+    from . import roi23_decide as DEC
+    path = f"{OUT}/decide/{stage_needed}_decision.json"
+    if not os.path.exists(path):
+        raise RuntimeError(f"missing required decision file {path}; run roi23_decide first")
+    rechecked = DEC.recheck(path)
+    if rechecked.get(field) != expect:
+        raise RuntimeError(f"decision {path} field {field!r} != {expect} (recomputed from source report; not just file content)")
+    return rechecked
+
+
+def cmd_requests(stage, cfg, fmt="plain"):
     sets_ = _load_sets()
     labels = _load_labels()
     items = _load_source_items()
     tab = json.load(open(f"{OUT}/manifests/checkpoints.json"))
-    fmt = "plain"
     patients = stage_patients(stage, sets_)
     gts = {i: {"boxes": labels[i]["boxes"]} for i in patients}
     written = []
@@ -134,6 +146,11 @@ def cmd_requests(stage, cfg):
         print(json.dumps({"stage": "D24_bbox", "written": written, "n_m0": len(rows_bbox_m0), "n_b0": len(rows_bbox_b0)}))
         return
 
+    if stage == "E60":
+        _require_decision("D24", "passed", True)
+    elif stage == "E200":
+        _require_decision("E60", "expand", True)
+
     if stage in ("E60", "E200"):
         b0_recs, _ = D.source_bbox_records("B0", "concise")
         bbox_pred_b0 = {i: D.predicted_boxes(b0_recs.get(i)) for i in patients}
@@ -146,16 +163,22 @@ def cmd_requests(stage, cfg):
     raise ValueError(stage)
 
 
-def cmd_qa_requests_d24(cfg):
+def cmd_qa_requests_d24(cfg, fmt="plain"):
     """D24 bbox 완료 후 호출: B0 예측 bbox를 D24 원시 결과에서 읽어 6조건 QA 요청(576)을 만든다."""
     sets_ = _load_sets()
     labels = _load_labels()
     items = _load_source_items()
     tab = json.load(open(f"{OUT}/manifests/checkpoints.json"))
-    fmt = "plain"
     patients = stage_patients("D24", sets_)
     gts = {i: {"boxes": labels[i]["boxes"]} for i in patients}
     b0_dir = f"{OUT}/gen/D24_bbox__B0"
+    cp = os.path.join(b0_dir, "completion.json")
+    if not os.path.exists(cp):
+        raise RuntimeError(f"no completion.json in {b0_dir} (D24_bbox B0 not finished)")
+    c = json.load(open(cp))
+    if (c.get("n_missing") != 0 or c.get("n_duplicate") != 0 or c.get("n_extra") != 0
+            or not c.get("returncodes") or any(x != 0 for x in c["returncodes"])):
+        raise RuntimeError(f"completion.json content invalid in {b0_dir}: {c}")
     recs = {}
     import glob
     for f in sorted(glob.glob(f"{b0_dir}/gen_worker*.jsonl")):
@@ -163,6 +186,8 @@ def cmd_qa_requests_d24(cfg):
             if ln.strip():
                 r = json.loads(ln)
                 if r.get("condition") == "bbox_concise":
+                    if r["id"] in recs:
+                        raise RuntimeError(f"duplicate D24_bbox B0 record for {r['id']}")
                     recs[r["id"]] = r
     bbox_pred_b0 = {i: D.predicted_boxes(recs.get(i)) for i in patients}
     d24_items = {i: items[i] for i in patients}
@@ -220,16 +245,21 @@ def _rule_series(bbox_by_id, gt, patients):
 def cmd_score(stage):
     sets_ = _load_sets()
     labels = _load_labels()
-    fmt = "plain"
     primary = sets_[stage]["primary"]
     boundary = sets_[stage]["boundary"]
     gt = {i: labels[i]["answers"] for i in primary + boundary}
 
-    per_by_key, completion_by_key = {}, {}
+    per_by_key, completion_by_key, fmt_by_key = {}, {}, {}
     for key in ROW_KEYS:
-        rows, per_patient, c = _verify_and_collect(stage, key, fmt)
+        rows0 = _load_rows(stage, key)
+        fmts = {r["fmt"] for r in rows0}
+        if len(fmts) != 1:
+            raise RuntimeError(f"mixed fmt in {stage}__{key} requests: {fmts}")
+        fmt_by_key[key] = next(iter(fmts))
+        rows, per_patient, c = _verify_and_collect(stage, key, fmt_by_key[key])
         per_by_key[key] = per_patient
         completion_by_key[key] = {"n": len(rows), "wall_s": None}
+    fmt = next(iter(set(fmt_by_key.values()))) if len(set(fmt_by_key.values())) == 1 else fmt_by_key
 
     q4 = {}
     for key in ROW_KEYS:
@@ -277,15 +307,17 @@ def cmd_score(stage):
     valid_rates = {key: E.valid_rate(per_by_key[key], primary + boundary) for key in ROW_KEYS}
     oracle_acc = {}
     for key in ("O_M0", "O_B0"):
-        n_correct, n_tot = 0, 0
+        n_correct, n_valid, n_denom = 0, 0, 0
         for i in primary + boundary:
             d = per_by_key[key].get(i, {})
             for t in R.TARGETS:
+                n_denom += 1  # 계획: invalid도 분모에 포함 (전체 질문 기준 정확도)
                 if d.get(t, {}).get("status") == "valid":
-                    n_tot += 1
+                    n_valid += 1
                     n_correct += int(d[t]["answer"] == gt[i][t])
-        oracle_acc[key] = {"n_correct": n_correct, "n_question_valid": n_tot,
-                            "acc_on_valid": (n_correct / n_tot if n_tot else None)}
+        oracle_acc[key] = {"n_correct": n_correct, "n_question_valid": n_valid, "n_total_questions": n_denom,
+                            "acc_on_valid": (n_correct / n_valid if n_valid else None),
+                            "acc_over_all_questions": (n_correct / n_denom if n_denom else None)}
 
     boxcount = {}
     for i in primary:
@@ -318,7 +350,7 @@ def cmd_score(stage):
         gray_report = {"note": "gray control not generated yet"}
 
     report = {
-        "stage": stage, "n_primary": len(primary), "n_boundary": len(boundary),
+        "stage": stage, "fmt": fmt, "n_primary": len(primary), "n_boundary": len(boundary),
         "q4_mean": {k: {"primary": float(np.mean(v["primary"])), "boundary": (float(np.mean(v["boundary"])) if v["boundary"] is not None else None)} for k, v in q4.items()},
         "comparisons": cmp_,
         "rule_coverage": {"R_M0_official_invalid": r_m0_off_inv, "R_M0_concise_invalid": r_m0_con_inv, "R_B0_invalid": r_b0_inv,
@@ -359,17 +391,19 @@ def main():
     r = sp.add_parser("requests")
     r.add_argument("--stage", required=True)
     r.add_argument("--cfg", required=True)
+    r.add_argument("--fmt", default="plain")
     d24r = sp.add_parser("d24-qa-requests")
     d24r.add_argument("--cfg", required=True)
+    d24r.add_argument("--fmt", default="plain")
     s = sp.add_parser("score")
     s.add_argument("--stage", required=True)
     a = ap.parse_args()
     if a.cmd == "manifests":
         build_manifests()
     elif a.cmd == "requests":
-        cmd_requests(a.stage, a.cfg)
+        cmd_requests(a.stage, a.cfg, a.fmt)
     elif a.cmd == "d24-qa-requests":
-        cmd_qa_requests_d24(a.cfg)
+        cmd_qa_requests_d24(a.cfg, a.fmt)
     elif a.cmd == "score":
         cmd_score(a.stage)
 
