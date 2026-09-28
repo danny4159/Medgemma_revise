@@ -131,8 +131,11 @@ def main():
     ap.add_argument("--time-limit", type=float, default=None)
     ap.add_argument("--max-requests", type=int, default=None)
     ap.add_argument("--repair-tail", action="store_true")
+    ap.add_argument("--allowed-edits", default=None,
+                    help="생성과 무관한 코드(예: 평가 전용 파일)의 사전 검토된 hash 변경을 허용하는 JSON 파일 경로")
     a = ap.parse_args()
-    pdig = qa_protocol.verify(a.protocol)
+    allowed_edits = json.load(open(a.allowed_edits)) if a.allowed_edits else None
+    pdig = qa_protocol.verify(a.protocol, allowed_edits=allowed_edits)
     if json.load(open(a.protocol))["locked"]["files"].get(a.requests) != generate.sha(open(a.requests, "rb").read()):
         sys.exit(f"request file {a.requests} is not locked in {a.protocol} (or changed)")
     cfg, _ = qa_protocol.static_cfg()

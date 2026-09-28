@@ -123,8 +123,8 @@ def _on_term(signum, frame):
 
 
 def run_one(rp, protocol, workers, gpus_arg, peak_gb, allowed, out_root, max_requests=None, time_limit=None,
-            repair_tail=False, poll_s=20.0):
-    pdig = qa_protocol.verify(protocol)
+            repair_tail=False, poll_s=20.0, allowed_edits=None, allowed_edits_path=None):
+    pdig = qa_protocol.verify(protocol, allowed_edits=allowed_edits)
     cfg, _ = qa_protocol.static_cfg()
     rows = Q.load_rows(rp, cfg)
     if json.load(open(protocol))["locked"]["files"].get(rp) != generate.sha(open(rp, "rb").read()):
@@ -178,6 +178,8 @@ def run_one(rp, protocol, workers, gpus_arg, peak_gb, allowed, out_root, max_req
                 cmd += ["--time-limit", str(time_limit)]
             if repair_tail:
                 cmd += ["--repair-tail"]
+            if allowed_edits_path:
+                cmd += ["--allowed-edits", allowed_edits_path]
             env = dict(os.environ, CUDA_VISIBLE_DEVICES=str(g), CUDA_DEVICE_ORDER="PCI_BUS_ID")
             procs.append(subprocess.Popen(cmd, env=env, stdout=open(f"{out_dir}/worker{k}.stdout.log", "a"),
                                           stderr=open(f"{out_dir}/worker{k}.stderr.log", "a")))
