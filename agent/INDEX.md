@@ -49,7 +49,7 @@
 - 질문 대상과 음성 의미 보존 진단 [approach/target-scope-diagnostic]: 4회 (iter_015, iter_016, iter_017, iter_018), 유효한 실험 3회, 미분류 0회, 최근 판정: inconclusive, 커밋: 3265f117bf3f4de99ba084f2c9b4e476568f24bd, 6a4fb41d490305061028de9cab863c0b5e9747ad, d12ef5ccea60d05b9163519980cdb1624b3fa682, 4e453bbba4b0e798c0deeb6a940644dd62707fa3
 - 동일 volume의 reference 대상 선택 진단 [approach/reference-instance-diagnostic]: 3회 (iter_019, iter_020, iter_021), 유효한 실험 1회, 미분류 0회, 최근 판정: inconclusive, 커밋: ff16f12f6fca43e62c5e3ff795456db9200220b2, 5720d0c82da88c67af5843554afd1791308c6007, 933eebaba2689d6eb654808ea177d8625ca2ca4c
 - 시간·영상 역할 관계 진단 [approach/temporal-role-diagnostic]: 1회 (iter_022), 유효한 실험 0회, 미분류 0회, 최근 판정: 사용자 보완으로 전환 (검증 미완료), 커밋: 없음
-- RSNA 영역 질의 전이 진단 [approach/rsna-spatial-transfer]: 4회 (iter_023, iter_024, iter_025, iter_026), 유효한 실험 1회, 미분류 0회, 최근 판정: inconclusive, 커밋: 3271c85f34c135081bba28352baa31468125f842, d60460f8be761e11e1dbce306aa571173e4229db, 89b2975a679c6eed3d9a356d2c01d85b7950a1bf
+- RSNA 영역 질의 전이 진단 [approach/rsna-spatial-transfer]: 4회 (iter_023, iter_024, iter_025, iter_026), 유효한 실험 1회, 미분류 0회, 최근 판정: inconclusive, 커밋: 3271c85f34c135081bba28352baa31468125f842, d60460f8be761e11e1dbce306aa571173e4229db, 89b2975a679c6eed3d9a356d2c01d85b7950a1bf, b8be58c9f3c92266e885ca8c3f5384dbe412b4bd
 
 현재 연구 브랜치: approach/rsna-spatial-transfer (코드 위치: /SSD1_1TB/home/milab/daniel/08_medgemma/research)
 

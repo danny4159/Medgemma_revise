@@ -697,5 +697,13 @@ Claude 계정의 /usage 또는 Settings > Usage에서 제한을 확인한 뒤 �
 - 💾 **개발 이력 체크포인트** `2640a2e8c07cf61d4ed907b6a8ec3e1f5b86fc5a`: interrupted (검증 승인 아님)
 - ⏹ 중단: 오류: 월간 지출 한도로 중단 (자동 재시도 안 함): claude 종료 코드 1. 로그: /SSD1_1TB/home/milab/daniel/08_medgemma/agent/runs/iter_026/claude_stream.jsonl
 Claude 계정의 /usage 또는 Settings > Usage에서 제한을 확인한 뒤 재실행하세요. 지출 한도는 자동으로 올리지 않습니다. (Claude 구현/실험 중)
+- ↻ 재실행: 'Claude 구현' 단계부터 이어서 (orchestrator 6f5ba01)
+- ▶ **결정**: 자동 진행 (smart) — 1순위로 진행
+- ↻ 끊겼던 Claude 세션을 이어서 진행
+- 💾 **개발 이력 체크포인트** `b8be58c9f3c92266e885ca8c3f5384dbe412b4bd`: implementation_finished (검증 승인 아님)
+- 🔧 **Claude** (standard): D24(488건)·E60(720건) 실제 GPU 생성·검증을 완료해 "RSNA bbox SFT는 지정 사분면 선택에 전이되지 않고 전체 bbox 복사와 구별되지 않는다"는 일관된 관찰을 얻었고 E200 확대 조건을 충족했으나, E200(1,680건) 생성이 세션 종료 시점까지 미완료(약 368/1,680)여서 계획의 규모 확대·조건부 seed·최종 판정 단계는 다음 세션으로 넘어간다. [자체 검증 FAIL, 파일 2073개 변경]
+  - 브랜치 `approach/rsna-spatial-transfer`에서 계속
+  - ⚠ 권한 거부 4건
+- ⏹ 중단: 정지 요청 (Claude 구현/실험 중)
 - 📁 원본: `agent/runs/iter_026/`
 
