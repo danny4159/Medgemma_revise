@@ -705,5 +705,22 @@ Claude 계정의 /usage 또는 Settings > Usage에서 제한을 확인한 뒤 �
   - 브랜치 `approach/rsna-spatial-transfer`에서 계속
   - ⚠ 권한 거부 4건
 - ⏹ 중단: 정지 요청 (Claude 구현/실험 중)
+- ↻ 재실행: '리뷰' 단계부터 이어서 (orchestrator 3e70c60)
+- 🔍 **리뷰** (GPT normal): [CONTINUE / inconclusive] RSNA E60 primary 48명에서 SFT는 base보다 S가 0.229 높지만 전체 bbox 복사 대비 이득은 불확정이다. 다중 사분면 직접 선택은 0/22로, oracle 실패와 E200 미완료 때문에 전이 부재는 아직 결론낼 수 없다.
+  - 접근법 판단: E60의 제한적 비교는 유효하지만 E200 미완료와 oracle 해석 한계가 남아 있다. 평가·실행 gate를 보완하고 원래 정밀도 확대를 마쳐야 한다.
+  - 목표 진전: D488·E720의 실제 GPU 생성과 해석 가능한 제한적 비교를 확인했다. 독립 재계산에서 primary 48명의 B0−M0 S 개선은 +0.2286이지만 전체 bbox 복사 대비 차이는 +0.0002로 불확정이다. 직접 선택 0/22와 규칙 선택 11/22는 검출 개선과 질의별 선택을 구분해야 한다는 근거다. 다만 oracle도 다중 사분면 선택에 실패하므로 일반적 전이 부재나 시각적 원인을 확정할 수 없다. 신규 방법·독립 일반화·논문 기여는 아직 입증되지 않았다.
+  - 판정 범위: 고정 RSNA 개발 E60, MedGemma 1.5의 현재 사분면 bbox prompt와 seed17 adapter에 한정된 불확정 진단이다. E200·조건부 seed 평가는 미완료이며 oracle 지시·좌표 인터페이스 설명이 남는다. iter_012의 grounding SFT 성과나 모든 공간 전이 가능성의 기각이 아니다.
+  - 현재 결론 무효: 저장 report_E60의 주요 비교와 donor 대조가 계획된 primary/boundary 분리 분석이 아니다. 현재 보고서를 사전 계획의 최종 판정 근거로 그대로 승인할 수 없다.
+  - 현재 결론 무효: 보고서의 'format/실행 오류로 설명되지 않으며 oracle에서 문제없이 목록을 다룬다'는 원인 해석은 성립하지 않는다. oracle Q4_select는 각각 1/24, 다중 사분면에서는 0/14이며 입력 목록 schema도 지시와 다르다.
+  - 현재 결론 무효: E200과 최종 판정은 미완료다. D에서 요구한 통제된 중단·재개·변조 검증을 수행하지 않은 상태에서 형식률만으로 E 진입을 승인했으므로 전체 계획 완료 주장은 불가하다.
+  - 재사용 전 수정: 평가를 primary/boundary별로 분리하고 각 집단 내부 donor pairing을 적용한다. invalid donor를 선택적으로 제외하지 말고 고정한 invalid 규약을 적용한다.
+  - 재사용 전 수정: E60 decision의 C_query 점추정 기준과 reader 차이 부호를 고치고, E200 report·최종 판정·seed decision의 schema를 연결한다. seed 확대에는 oracle 해석 조건을 실제로 검사한다.
+  - 재사용 전 수정: 잠긴 manifest/spec에서 예상 행렬을 독립 구성하고 request·record·completion·stage·split·선행 decision을 평가 및 직접 실행 경로에서 검증한다.
+  - 재사용 전 수정: 실제 평가·launcher·decision·source bbox·completion·checkpoint 출처를 필수 잠금에 포함한다. 기존 결과와 변경된 protocol의 호환성은 원본을 보존한 별도 기록으로 연결한다.
+  - 재사용 전 수정: 실제 worker/부모 중단·재개, 변조 거부, 부분 JSONL tail 및 완료 재사용 검사를 수행한다. launch_iter026_d/e가 roi26_run.main을 거치지 않아 SIGTERM handler가 설치되지 않는 경로를 보완한다.
+  - 재사용 전 수정: M0 concise baseline, IoU@0.5·요청 밖 FP·복사율·영역별 결과 등 계획된 누락 분석을 추가한다. 기존 sanity를 과거 bbox baseline 재현으로 보고하지 않는다.
+  - 추후 개선: 2/4 worker pilot은 M0 24건에 한정됐고 4 worker가 약간 느렸다. 다음 필요한 실행 준비에서 대표성 있는 비교 또는 기존 실측 재사용의 타당성을 보완한다.
+  - 추후 개선: 독립 환자·외부 원천 데이터·다른 seed와 사전학습 노출 불확실성은 후속 연구 범위다. 현재 개발 결과를 독립 확증으로 취급하지 않는다.
+  - 다음: 평가·재개 검증을 보완하고 기존 E200 확대를 완료해 현재 선택 성능의 불확실성을 줄인다. 먼저 실행 호스트에서 기존 launcher·worker의 PID/starttime·lock·종료 상태를 확인하고 살아 있는 작업을 중복 실행하거나 실행 중 소스를 바꾸지 않는다. 원시 출력·claim·protocol·이전 report를 보존하고, primary/boundary 분리·집단 내 donor pairing·invalid 처리·decision 기준과 report schema를 수정한다. 잠긴 예상 행렬·현재 입력·source bbox·checkpoint·completion 연결과 통제된 중단/재개·변조 거부를 검증한 뒤 호환되는 출력은 재사용한다. E60 정밀도 보완 기준은 독립 재계산에서도 유지되므로 prompt·표본·metric을 바꾸지 않고 E200을 마친다. D oracle의 schema 불일치와 0/14 선택 실패를 원인 해석의 한계로 유지하고, 격차만으로 B29/B43을 자동 실행하지 않는다. E200 이후 양성 조건 또는 원 계획의 oracle 해석 조건까지 충족할 때만 seed 재현으로 진행한다. 새 loss·학습·MRI F139·reserve는 열지 않는다.
 - 📁 원본: `agent/runs/iter_026/`
 

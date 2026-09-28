@@ -124,3 +124,21 @@ SPIDER T2의 동일 volume slice-pair를 사용하는 iter_021 최종 prompt와 
 - 미해결: 독립 환자·다른 seed에서의 재현과 직접 시각 질의 전이는 미검증이다.
 - 미해결: 현재 사분면 yes/no 인터페이스보다 학습된 bbox 출력 형식을 유지하는 영역 선택 진단이 더 식별력 있는가?
 
+## rsna-region-selection-transfer — observed
+
+iter_026의 고정 RSNA 개발 E60 중 primary 48명에서 seed17 grounding SFT B0의 지정 사분면 bbox 선택 점수 S는 M0보다 높았지만, 전체 bbox 복사 baseline보다 낫다는 근거는 없었다. 다중 사분면 22명의 Q4_select는 직접 B0 0/22, B0 bbox+규칙 11/22였다. 현재 인터페이스의 제한된 관찰이며, oracle 선택 실패와 E200 미완료 때문에 일반적인 공간 능력 전이 부재나 내부 원인을 확정하지 않는다.
+
+- 적용 목표 시작: iter_003
+- 최신 리뷰: agent/runs/iter_026/review.json
+- 근거: research/results/iter_026/gen/E60_{V__M0,V__B0,RD__M0}/gen_worker*.jsonl: 720건 실제 출력.
+- 근거: 리뷰 독립 parser·matching 재계산: primary 48명의 B0−M0 S=0.228624, 95% CI [0.171281, 0.284445]; B0−Copy_B0=0.000218, CI [-0.030970, 0.032546].
+- 근거: 동일 primary에서 Rule_B0−direct B0=0.403320, CI [0.318012, 0.482821]; 다중 사분면 22명은 직접 0명·규칙 11명 성공.
+- 근거: D24 oracle은 M0/B0 각각 Q4_select 1/24이며, 다중 사분면 14명에서는 두 모델 모두 0/14.
+- 사용·평가 검증: 완료된 D488·E720의 예상 환자×영역 행렬, 요청 중복·누락, 주요 request-record provenance 불일치 0을 독립 확인했다.
+- 사용·평가 검증: 현재 영상 84개의 file/raw pixel/padded input hash 불일치 0, 별도 parser와 기존 parser의 판정·box 불일치 0을 확인했다.
+- 사용·평가 검증: sanity_post.json의 tensor 대조와 adapter digest 및 8건 재생성 일치를 확인했다. tensor 대조는 D의 한 영상·V_TL prompt 범위이며 과거 bbox baseline 재현 검사는 아니다.
+- 사용·평가 검증: 저장 평가의 primary/boundary 혼합을 리뷰에서 분리 재계산했다. 정식 평가기 수정과 재개·변조 검증은 남아 있다.
+- 미해결: E200 primary 160명·다중 사분면 66명에서도 같은 패턴이 유지되는가?
+- 미해결: oracle 실패에 좌표 지시 해석과 제공 목록의 schema 불일치가 얼마나 기여하는가?
+- 미해결: 부분적인 질의 조건화와 신뢰할 만한 전체 선택을 구분해야 하며, 다른 seed·독립 원천 데이터의 재현은 미검증이다.
+
