@@ -819,3 +819,36 @@ Claude 계정의 /usage 또는 Settings > Usage에서 제한을 확인한 뒤 �
   - 다음: 새 confidence 학습을 보류하고, 최소 평가 보완과 함께 다음 연구 투자의 가치를 비교한다. 새 결과 경로에서 E의 97.5% paired CI를 사용하는 decision, token family 누락, 입력·검증 digest 연결과 덮어쓰기 거부를 수정한다. 기존 GPU 출력과 검증된 통계는 재사용하고 본실험을 재생성하지 않는다. 다음 deep 계획에서는 동일 opacity의 외부 확인, 중요한 잔여 미검출 조건의 최소 진단, 다른 GOAL 내 질문을 정보 이득·사용 가치·선행 대비 차별성·두 GPU 비용으로 비교한다. 사분면 진단이나 새 loss를 자동 재개하지 않는다. 선택한 후속 질문이 현재 baseline의 한계를 구분할 때만 추가 실험으로 진행하며, MRI F139·reserve는 자동 개방하지 않는다.
 - 📁 원본: `agent/runs/iter_029/`
 
+## iter_030 — RSNA 부분 누락 위험 진단 (1번째 시도) · 2026-09-29 07:41
+
+- 🔎 **사고 라운드 1** (GPT deep): 빈 출력 entropy 성과를 유지하면서 부분 누락을 다음 후보로 좁혔다. E의 비어 있지 않은 출력 40명에서 주석 미포괄을 확인했지만, 위치 오류와 선행 방법을 구분해야 GPU 진단을 확정할 수 있다.
+  - 스스로 던진 질문: C/E의 비어 있지 않은 출력에서 일대일 matching, 예측–GT 교집합, 대표 원본 영상 검토를 함께 적용하면 위치 정밀도 오류와 구분되는 부분 누락 사건을 얼마나 확보할 수 있는가? 모델 결과에 유리하게 정답 정의를 고르지 않을 규약은 무엇인가? · PatchGate의 클래스별 object inventory, MedGrounder의 scored set, 검출기의 missing-object uncertainty와 비교할 때 동일 opacity의 인스턴스 완전성에 실제로 남는 실패 조건은 무엇인가? 단순히 기존 방법을 의료 영상에 이식하는 수준을 넘을 가능성이 있는가? · 출력 개수·길이 prior, 생성 확률·종료 선택 score, seed 집합 불일치 중 어떤 baseline이 새 진단을 가장 잘 반증하는가? 기존 GPU score의 재사용 범위와 비어 있지 않은 출력에서 추가 추출해야 할 정보는 무엇인가? · 위 사건 정의와 baseline을 고정했을 때 C/E의 사건 수가 다음 투자 판단에 충분한가? 양성·음성·불확정별 행동, 조건부 확대 규모, 실제 재사용 파일을 확정할 수 있는가?
+- 🧭 **계획** (GPT deep): RSNA SFT의 부분 누락 27명을 출발점으로, 목록 닫기 score와 한 번 더 생성하는 대조를 검사한다. 개수·token·seed baseline 및 추가 FP를 함께 비교하며, 새 방법의 필요성과 독립 일반화는 아직 미확정이다.
+  - 대안: 1) RSNA 부분 누락 위험 진단: 같은 SFT·영상·소견에서 종료 신호와 추가 후보의 유무를 구분해 다음 방법 투자의 근거를 만든다. · 2) 동일 opacity의 외부 확인: target 대응과 독립 자료를 확보해 고정 baseline의 일반화를 평가하되, 현재는 구체적인 잔여 실패 조건의 확인을 우선한다. · 3) 다른 의료 VLM 질문으로 전환: 부분 누락이 단순 baseline으로 충분하거나 식별성이 낮으면 검출 적응의 견고성 등과 정보 이득을 비교한다. · 4) RSNA 빈 출력 위험 방법 개선: 평가 결함만 교정하고, 이미 강한 entropy baseline이 있는 조건의 새 confidence 학습은 보류한다.
+  - 1순위 선택 근거: 실제 사건 수와 출력 token 구조를 확인해 GT 없는 최소 대조를 구체화했다. 기존 SFT 성과에 연결되고, 위험 신호가 충분한 경우와 추가 생성 자체가 유용하지 않은 경우를 구분할 수 있다. 추가 권한이나 목표 변경 없이 현재 두 GPU에서 수행할 수 있다.
+- ▶ **결정**: 자동 진행 (smart) — 1순위로 진행
+- 💾 **개발 이력 체크포인트** `5bdcbe2f56b219de1e5319c8a890061ec672a774`: implementation_finished (검증 승인 아님)
+- 🔧 **Claude** (standard): (요약 없음) [자체 검증 없음, 파일 132개 변경]
+  - 새 브랜치 `approach/rsna-partial-omission-risk` ← 68117cf (68117cf)
+  - ⚠ 권한 거부 10건
+- 🔍 **리뷰** (GPT normal): [CONTINUE / execution_failed] D24의 2·4 worker 각 48건은 출력이 일치했지만 재개 검사는 28/48건에서 중단됐고 C201은 미실행이다. RSNA 부분 누락 가설은 미판정이며 평가·재개 보완 후 계속한다.
+  - 접근법 판단: D24 실행 기반은 확인됐지만 재개 검사와 C201 본진단이 미완료이므로, 필요한 평가·실행 검증을 보완한 뒤 원 계획을 이어간다.
+  - 목표 진전: 실행 측면에서는 D24의 O 재현과 F prefix 보존, 두 GPU의 2/4 worker 출력 정합성을 확인했다. iter_029 판정 교정도 기존의 강한 token baseline 결론을 유지했다. 그러나 이번 연구 질문의 성능 개선·가설 지지·신규 기여 가능성은 본진단 미실행으로 미판정이다. 기존 RSNA SFT 개선은 유지되며, 부분 누락의 위험 정보와 후보 회복 가능성을 검증하는 원 계획을 완료할 가치가 남는다.
+  - 판정 범위: iter_030의 seed17 RSNA 부분 누락 진단은 D24 동작·처리량 확인과 부분 재개 검사에 머물렀다. C201의 H1/H2 검증 및 조건부 E402는 미실행이다. 종료 margin이나 단일 continuation 가설의 기각으로 해석하지 않는다.
+  - 현재 결론 무효: C201 본진단과 단계 decision이 없고 D24 재개 검사도 28/48건에서 중단됐다. 해석 가능한 H1/H2 검증을 완료하지 못했다.
+  - 현재 결론 무효: 계획한 실제 공식 입력 tensor 대조, M0 sanity, 선택 step의 float64 독립 계산 및 재개·변조 검사 전체의 완료 근거가 없다.
+  - 재사용 전 수정: risk30_eval.h1_report의 E 주비교를 97.5% CI로 수정하고 C의 95% CI와 구분해야 한다. 단일 class bootstrap은 기록 후 재표집하고 원래 단일 class 층은 null로 처리해야 한다.
+  - 재사용 전 수정: Capture는 ceil(0.2N)을 사용해야 한다. 현재 round는 C201에서 40명, E402에서 80명이며 계획은 각각 41명, 81명이다. 검토 인원과 사건 분모도 보고해야 한다.
+  - 재사용 전 수정: 한 박스 층 Q−B*, category·출력 개수별 결과, 보조 사건 및 민감도 분석, 전체 O/F F1 paired CI·FP·추가 TP/FP·invalid 비용을 구현하고 평가 fixture로 검증해야 한다.
+  - 재사용 전 수정: worker의 protocol을 필수화하고 source/audit·실제 입력·원래 suffix·checkpoint·평가기·decision의 필수 파일 목록을 잠가야 한다. validate_existing은 protocol·source·예상 요청 내용과의 연결을 검사하지 않는다.
+  - 재사용 전 수정: C 동작 gate 및 E 진입 decision을 실행기가 강제해야 한다. E의 B*는 임의 CLI 문자열 대신 잠긴 C 산출물에서 읽어 검증해야 한다.
+  - 재사용 전 수정: F 강제 직전에 원래 prefix를 검사하고 불일치 시 거부해야 한다. 평가에서도 forced_token_applied·prefix_matches_O 불일치를 실행 무효로 거부해야 한다.
+  - 재사용 전 수정: 재개 완료와 손상 tail·동시 쓰기·중복·누락·타 protocol 거부를 실제 경로에서 검증해야 한다. parent/child 수명과 종료 상태를 관리하고 launcher의 로그·launch_result 덮어쓰기를 막아야 한다.
+  - 재사용 전 수정: --gpu가 상속된 허용 집합을 벗어나지 않도록 검증하고 물리·논리 장치 대응을 기록해야 한다. 전체 GPU 점유와 worker당 2GiB 여유를 확인해야 한다.
+  - 재사용 전 수정: 전체 vocabulary score를 모든 step 및 cap attempt에 보관하는 구현을 scalar 중심으로 바꾸거나 긴 출력의 실제 안전성을 먼저 검증해야 한다.
+  - 재사용 전 수정: iter_029 correction은 report hash 기록 외에 raw output·calibration·검증 대상 digest의 일치를 강제해야 한다. 과거 테스트 결과를 덮어쓴 범위와 복구 가능성을 기록하고 이후 테스트는 새 경로를 사용해야 한다.
+  - 추후 개선: C/E는 개발 자료이므로 유망한 신호가 확인된 이후에만 독립 환자·외부 동일 target 자료와 다른 seed의 재현을 설계한다.
+  - 추후 개선: 단일 continuation의 회복이 확인돼도 충분한 직접 SFT와 detector/encoder+head 비교 전에는 방법론적 신규성을 주장하지 않는다.
+  - 다음: 실행 수명과 평가 결함을 보완한 뒤 기존 부분 누락 진단을 완료한다. 먼저 실행 호스트에서 worker·launcher의 PID/starttime·lock·종료 상태를 확인하고 살아 있는 작업은 중복 실행하지 않는다. 기존 attempt·protocol·원시 출력을 보존하고 v2→v3 및 후속 코드의 호환 범위를 명시한다. 공식 입력·adapter·원본 suffix·강제 prefix·float64 score 대조와 실제 중단/재개·변조 거부를 마친다. E 97.5% CI, ceil Capture, bootstrap 및 필수 비용 분석을 수정하고 단계 decision·provenance 연결을 강제한다. D24 처리량 결과를 재사용하되 긴 출력 메모리와 안전 여유를 확인해 구성을 확정한다. 통과 후 C201을 실행하고 사전 기준을 충족할 때만 E402로 확대한다. 작은 D 관찰로 확대 기준을 대체하거나 새 loss·학습·reserve·MRI F139를 투입하지 않는다.
+- 📁 원본: `agent/runs/iter_030/`
+

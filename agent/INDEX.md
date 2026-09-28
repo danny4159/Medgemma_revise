@@ -35,6 +35,7 @@
 - iter_027 [CONTINUE] (normal/standard/normal) <RSNA 영역 질의 전이 진단: success> 💾ed966685298f152e194069d4de3d856e065886bc RSNA E200 다중 사분면 66명에서 직접 선택 0명·bbox+규칙 26명으로 사전 음성 기준을 충족했다. SFT의 검출 개선은 유지되지만 oracle 실패로 일반적인 전이 부재는 미확정이다. → 다음: 현재 사분면 진단의 확대는 종료하고, 남은 인터페이스 원인을 구분할 최소 검사와 다른 연구 질문의 가치를 비교하는 deep 전략 판단을 수행한다. 기존 RSNA SFT 성과와 이번 규칙 baseline을 보존하고, 원인 분리 없이 seed·새 loss·학습을 자동 추가하지 않는다. 현재 개발 출력으로 먼저 설명 가능한 범위를 정리한 뒤, oracle schema·지시 해석을 바로잡는 단일 검사가 후속 방법 투자를 실제로 바꿀 때만 새 계획으로 실행한다. 그렇지 않으면 무엇이 기각됐고 무엇이 미해결인지 명시하며 GOAL 안의 다른 질문으로 전환한다. 선택한 경로에 필요한 gate·재개·출처 검증만 보완하고, 과거 report 덮어쓰기의 복구 가능성과 유실 범위를 기록한다. MRI F139·reserve는 유지한다.
 - iter_028 [CONTINUE] (deep/standard/normal) <RSNA 빈 출력의 미검출 위험 진단: improve> 💾9d5739203730647fd401caccc3deccd6ecbab317 RSNA 빈 출력 398명에서 entropy는 미검출 70명 중 43명을 상위 약 20%로 포착했다. Presence 역상관은 부호 오류였으며, 대표 비교를 교정한 뒤 다음 투자를 판단해야 한다. → 다음: 기존 원시 출력으로 Presence 방향과 대표 비교를 교정해 진단을 완결한다. 새 GPU 본실험은 필요하지 않다. Presence=Yes−No, P(True)=No−Yes를 fixture로 고정하고 C에서 대표 V와 calibration을 다시 계산한 뒤 동일 절차로 E의 paired CI·포착률·decision을 새 경로에 저장한다. 기존 protocol·report를 보존하고 C/E 실행 당시 코드·입력·checkpoint 연결 및 평가 완전성을 확인한다. 교정 후에도 단순 token baseline으로 사전 목표가 충족되면 새 confidence head/loss는 보류한다. 이후 외부 확인, 중요한 잔여 미검출 조건의 최소 진단, 다른 연구 질문을 정보 이득·선행 대비 기여·비용으로 비교하며 reserve와 MRI F139는 자동 개방하지 않는다.
 - iter_029 [CONTINUE] (normal/standard/normal) <RSNA 빈 출력의 미검출 위험 진단: improve> 💾0a47e99642921fb22fa49219e58805381e9eb25f RSNA 빈 출력 398명에서 entropy AUROC 0.8225, 교정 Presence 0.8154로 재질의의 추가 이득 기준은 충족하지 못했다. 주수치는 유효하지만 판정 코드 보완과 독립 일반화 확인이 남는다. → 다음: 새 confidence 학습을 보류하고, 최소 평가 보완과 함께 다음 연구 투자의 가치를 비교한다. 새 결과 경로에서 E의 97.5% paired CI를 사용하는 decision, token family 누락, 입력·검증 digest 연결과 덮어쓰기 거부를 수정한다. 기존 GPU 출력과 검증된 통계는 재사용하고 본실험을 재생성하지 않는다. 다음 deep 계획에서는 동일 opacity의 외부 확인, 중요한 잔여 미검출 조건의 최소 진단, 다른 GOAL 내 질문을 정보 이득·사용 가치·선행 대비 차별성·두 GPU 비용으로 비교한다. 사분면 진단이나 새 loss를 자동 재개하지 않는다. 선택한 후속 질문이 현재 baseline의 한계를 구분할 때만 추가 실험으로 진행하며, MRI F139·reserve는 자동 개방하지 않는다.
+- iter_030 [CONTINUE] (deep/standard/normal) <RSNA 부분 누락 위험 진단: execution_failed> 💾5bdcbe2f56b219de1e5319c8a890061ec672a774 D24의 2·4 worker 각 48건은 출력이 일치했지만 재개 검사는 28/48건에서 중단됐고 C201은 미실행이다. RSNA 부분 누락 가설은 미판정이며 평가·재개 보완 후 계속한다. → 다음: 실행 수명과 평가 결함을 보완한 뒤 기존 부분 누락 진단을 완료한다. 먼저 실행 호스트에서 worker·launcher의 PID/starttime·lock·종료 상태를 확인하고 살아 있는 작업은 중복 실행하지 않는다. 기존 attempt·protocol·원시 출력을 보존하고 v2→v3 및 후속 코드의 호환 범위를 명시한다. 공식 입력·adapter·원본 suffix·강제 prefix·float64 score 대조와 실제 중단/재개·변조 거부를 마친다. E 97.5% CI, ceil Capture, bootstrap 및 필수 비용 분석을 수정하고 단계 decision·provenance 연결을 강제한다. D24 처리량 결과를 재사용하되 긴 출력 메모리와 안전 여유를 확인해 구성을 확정한다. 통과 후 C201을 실행하고 사전 기준을 충족할 때만 E402로 확대한다. 작은 D 관찰로 확대 기준을 대체하거나 새 loss·학습·reserve·MRI F139를 투입하지 않는다.
 
 ## 이전 목표들의 접근법 (참고용, 현재 목표의 재평가 횟수에는 안 들어감)
 
@@ -54,12 +55,13 @@
 - 시간·영상 역할 관계 진단 [approach/temporal-role-diagnostic]: 1회 (iter_022), 유효한 실험 0회, 미분류 0회, 최근 판정: 사용자 보완으로 전환 (검증 미완료), 커밋: 없음
 - RSNA 영역 질의 전이 진단 [approach/rsna-spatial-transfer]: 5회 (iter_023, iter_024, iter_025, iter_026, iter_027), 유효한 실험 3회, 미분류 0회, 최근 판정: success, 커밋: 3271c85f34c135081bba28352baa31468125f842, d60460f8be761e11e1dbce306aa571173e4229db, 89b2975a679c6eed3d9a356d2c01d85b7950a1bf, b8be58c9f3c92266e885ca8c3f5384dbe412b4bd, ed966685298f152e194069d4de3d856e065886bc
 - RSNA 빈 출력의 미검출 위험 진단 [approach/rsna-empty-output-risk]: 2회 (iter_028, iter_029), 유효한 실험 2회, 미분류 0회, 최근 판정: improve, 커밋: 9d5739203730647fd401caccc3deccd6ecbab317, 0a47e99642921fb22fa49219e58805381e9eb25f
+- RSNA 부분 누락 위험 진단 [approach/rsna-partial-omission-risk]: 1회 (iter_030), 유효한 실험 0회, 미분류 0회, 최근 판정: execution_failed, 커밋: 5bdcbe2f56b219de1e5319c8a890061ec672a774
 
-현재 연구 브랜치: approach/rsna-empty-output-risk (코드 위치: /SSD1_1TB/home/milab/daniel/08_medgemma/research)
+현재 연구 브랜치: approach/rsna-partial-omission-risk (코드 위치: /SSD1_1TB/home/milab/daniel/08_medgemma/research)
 
 ### 최근 계획의 대안 순위
 
-1. RSNA 빈 출력의 미검출 위험 진단: 저장된 logits로 평가 오류를 교정해 현재 투자 판단을 완결한다.
-2. 동일 opacity의 외부 확인: 교정된 baseline을 보존한 뒤 사용 가치와 annotation 대응이 확보되면 일반화를 검증한다.
-3. 잔여 미검출 조건의 원인 진단: 단순 baseline이 놓치는 중요한 조건을 구분할 수 있을 때만 추가 실험을 설계한다.
-4. 다른 의료 VLM 질문으로 전환: 현재 방향의 차별성이 부족하면 기존 checkpoint 진단보다 높은 정보 이득을 근거로 비교한다.
+1. RSNA 부분 누락 위험 진단: 같은 SFT·영상·소견에서 종료 신호와 추가 후보의 유무를 구분해 다음 방법 투자의 근거를 만든다.
+2. 동일 opacity의 외부 확인: target 대응과 독립 자료를 확보해 고정 baseline의 일반화를 평가하되, 현재는 구체적인 잔여 실패 조건의 확인을 우선한다.
+3. 다른 의료 VLM 질문으로 전환: 부분 누락이 단순 baseline으로 충분하거나 식별성이 낮으면 검출 적응의 견고성 등과 정보 이득을 비교한다.
+4. RSNA 빈 출력 위험 방법 개선: 평가 결함만 교정하고, 이미 강한 entropy baseline이 있는 조건의 새 confidence 학습은 보류한다.

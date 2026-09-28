@@ -1,0 +1,273 @@
+# 요약
+
+- **이번에 할 일:** RSNA SFT의 비어 있지 않은 출력에서 부분 누락 위험을 측정하고, 목록 닫기 선택을 한 번만 바꾸었을 때 추가 병변 후보가 나오는지 검사한다.
+- **필요한 이유:** E 개발 자료에서 TP를 포함하면서 다른 GT에는 전혀 겹치지 않는 출력이 27명 있다. 출력 개수 baseline도 강하므로 추가 신호의 가치를 직접 비교해야 한다.
+- **확인할 기준:** 종료 분기 score의 추가 정보, 기존 박스를 유지한 추가 TP, FP·중복·invalid 증가를 함께 본다. C201 탐색 후 사전 기준에 따라 E402로 확대한다.
+- **주의·다음:** 기여와 임상적 누락 원인은 미확정이다. 기존 SFT 성과·모든 원본 결과를 유지하고, 새 학습·MRI F139·reserve는 열지 않는다.
+
+# Current Understanding
+
+iter_012의 직접 LoRA SFT 개선은 유효하다. iter_013–014의 제한된 음성 결과는 SFT 전체의 실패가 아니다. iter_015–027에서 전역 QA 형식·evidence 인터페이스·사분면 선택을 조사했으며 일반적인 공간 전이 부재는 확정하지 못했다. 그 진단을 이번에 반복하지 않는다.
+
+iter_029의 빈 출력 E398에서는 entropy AUROC 0.8225, Presence B0 0.8154로 새 confidence 학습의 필요성이 지지되지 않았다. 이 결론을 유지한다. 현재 질문은 적어도 하나의 박스를 반환한 뒤 남은 주석 영역을 놓치는 조건이다.
+
+읽기 전용 재집계에서 C/E의 비어 있지 않은 출력은 201/402명이다. 최대 cardinality 일대일 IoU≥0.3 matching 후 FN 환자는 54/101명이다. TP가 하나 이상이고 별도의 GT가 모든 예측과 교집합 0인 엄격한 부분 누락은 20/27명이다. 이는 새 독립 실험이 아닌 사후 개발 분석이다.
+
+E의 엄격한 사건 27명 중 26명은 한 박스 출력이다. −박스 수의 AUROC는 0.7388이다. seed29/43의 기하 불일치는 0.6596이며, 다른 seed가 빠진 비중첩 영역을 검출한 사건은 8/27이다. 개수 prior와 공통 seed 오류를 반드시 통제한다.
+
+# Strategy Check / 연구 방향 판단
+
+이번 재검토는 강한 빈 출력 baseline을 확보한 뒤 다음 투자를 고르는 단계다. 중요한 사용 과제는 반환된 박스가 그럴듯하더라도 필요한 주석 영역이 더 남았는지 판단하는 것이다.
+
+1. 현재 confidence 방법 개선은 추가 이득 근거가 약하다. 최소 평가 오류만 교정한다.
+2. 부분 누락 진단은 같은 영상·소견·checkpoint를 유지하면서 아직 답하지 못한 집합 완전성을 다룬다. token 구조까지 확인되어 작은 개입으로 정보를 얻을 수 있으므로 선택한다.
+3. 동일 opacity 외부 확인은 가치가 있지만, 현재 어떤 잔여 실패를 검증할지 먼저 정하는 편이 유용하다. 자료 접근 부담만으로 기각하지 않는다.
+4. 다른 질문으로의 전환은 유지한다. 이번 진단이 단순 baseline으로 충분하거나 중요한 실패 조건을 구분하지 못하면, 새 loss를 붙이지 않고 다른 GOAL 내 질문과 비교한다.
+
+유지: RSNA SFT 성과, checkpoint, 원시 자료, 기존 판정. 보류: 사분면 추가 prompt·새 actor/confidence 학습·MRI/longitudinal·reserve. 변경: 빈 출력 존재 판단에서 비어 있지 않은 집합의 주석 미포괄과 종료 선택 진단으로 이동한다.
+
+# Hypothesis
+
+- **H1, 위험 신호:** 마지막 opacity 직후의 목록 계속/닫기 분기 margin이 출력 개수와 통상적인 token·seed uncertainty 이상의 부분 누락 정보를 가진다.
+- **H2, 추가 후보:** 마지막 목록 닫기 선택을 한 번 continuation으로 바꾸면 일부 완전 비중첩 GT에 대응하는 추가 박스가 생성된다.
+- **경쟁 설명:** 개수 prior·희귀 cardinality 학습 부족·위치 오차·주석 범위·단순 후보 수 증가가 결과를 설명할 수 있다. H1/H2는 각각 판정하며 한쪽의 양성으로 다른 쪽을 주장하지 않는다.
+
+H2는 decoder 내부에 완전한 시각 표현이 있다는 인과 증명이 아니다. 강제 생성이 의미 있는 후보를 내는지 확인하는 제한된 개입이다.
+
+# Limitation Evidence / Correct Usage Checks
+
+대상은 validated `lesion-grounding-generalization`의 잔여 오류다. 근거는 iter_009·012 원본 리뷰다. 부분 누락의 원인과 종료 신호는 새로운 미검증 세부 질문이며 기존 validated 상태를 자동 상속하지 않는다.
+
+고정 모델은 MedGemma 1.5 revision `91850547d9f0b2fdd21aa7c5f4f3d1a8a52c243b`다. B0는 `results/iter_012/train/lr2e-4_s17/epoch_05/adapter.pt`를 사용한다. 파일 SHA는 `5f542af96df705e567bf4cfb000398b09313db2456c577e772bd76481799cf29`, 기존 tensor digest는 `e13f3c4461b826a060c90dfe4e4ee4c2ebac36a08f84be1a45a37495816cec11`이다. 실행 때 둘을 확인한다.
+
+실제 D 입력에서 보존된 공식 notebook 구성과 wrapper의 전체 tensor key·shape·dtype·value를 비교한다. 공통 key만 비교하거나 pixel_values 존재만 확인하지 않는다. 전처리·원본 크기·padding·좌표·chat template·generation config·adapter 연결을 기록한다. 기존 normal prompt와 parser를 유지하며 주석을 입력에 넣지 않는다.
+
+기존 비어 있지 않은 출력 603건은 모두 EOS로 끝났으며 마지막 token 구조가 동일하다. 원본 재현 실패를 강제 continuation의 효과로 해석하지 않는다. 같은 실행 조건의 반복 재현과 batch/worker 변화의 영향을 먼저 구분한다.
+
+# Contribution Path / Baselines / Reuse
+
+## 선행과 기여 범위
+
+[PatchGate](https://arxiv.org/html/2608.21819v1)는 내부 클래스 evidence와 누락된 word의 생성을 연결한다. 동일 클래스의 추가 인스턴스는 구분해야 하지만, 이번 실험 없이 기존 방법의 실패를 주장하지 않는다. [MedGrounder](https://arxiv.org/html/2512.01085v3)는 이미 scored multi-region set을 다룬다. [ObjectTransforms](https://arxiv.org/html/2510.16118)의 낮은 threshold와 uncertainty 비교에 대응하여, 단순 continuation 완화를 강한 반증 대조로 둔다.
+
+진단 양성은 새 방법의 기여가 아니다. 후속 방법 투자는 종료/완전성의 중요한 잔여 실패, 충분한 직접 SFT, detector 또는 encoder+head와의 공정한 비교가 필요하다. 더 많은 박스를 생성하거나 score를 하나 추가한 사실만으로 contribution을 주장하지 않는다.
+
+## 비교군
+
+- **O:** 원래 B0 concise greedy 출력. 검출 성능의 직접 SFT 기준선이다.
+- **F:** 동일 입력·prompt·B0에서 마지막 닫기 분기만 한 번 바꾼 출력. 앞의 박스 좌표는 보존한다.
+- **위험 baseline:** −박스 수, −출력 길이, 첫 token entropy, EOS 제외 평균 선택 token NLL, EOS 제외 평균 entropy, EOS NLL, 마지막 닫기 분기에서 실제 선택 token NLL.
+- **seed baseline:** seed29/43의 최대 박스 수−B0 박스 수; 각 seed에서 B0와 IoU≥0.3 최대 matching되지 않은 박스 비율의 평균. 빈 seed 출력의 비율은 0으로 정의한다.
+- **후보 Q:** 원래 마지막 opacity 직후 `logit(23179)−logit(236775)`. 값이 클수록 continuation 쪽 증거가 크다는 방향을 고정한다.
+- **참고 검출 비교:** 같은 C/E 환자의 기존 M0·B29·B43 출력. B0 출력으로 선택한 조건부 모집단에서의 비교임을 명시한다.
+
+C에서 Q를 제외한 baseline 중 엄격한 사건 AUROC가 최대인 B*를 선택한다. 동점 우선순위는 위 목록 순서다. E에서 재선택하지 않고 모든 baseline 결과도 공개한다. 새 calibration이나 학습형 결합 score는 만들지 않는다.
+
+seed 비교군은 추가 checkpoint 학습과 두 번의 추론 비용을 가진다. token score는 B0 원래 생성 중 추출 가능하다. F는 추가 생성 비용이 있다. 저장 출력 재사용에 드는 이번 실행 비용과 실제 배포 비용을 구분한다.
+
+## 재사용
+
+새 브랜치는 재사용 승인 iter_006을 기반으로 하고, reuse_assets의 18개 파일을 명시적으로 반입한다. 원본과 의존 파일이 없으면 새 구현으로 대체하지 않고 시작을 보류한다. results 및 adapter는 source 반입 대상이 아니며 현재 실제 파일과 hash를 별도로 연결한다.
+
+기존 통계·전처리·parser·matching·LoRA 함수는 승인 범위 안에서 사용한다. risk28의 8-token 빈 출력 score 경로와 이전 실행기를 그대로 확장하지 않는다. 현재 사용할 작은 경로에만 필수 gate·provenance·재개 검증을 연결한다. 공통 정책이나 무관한 과거 실행기를 정비하지 않는다.
+
+# Proposed Experiment
+
+## 1. 사건·모집단 고정
+
+C는 기존 validation 400명 중 B0의 유효한 비어 있지 않은 출력 201명, E는 기존 confirm 800명 중 같은 조건의 402명이다. 둘 다 개발 자료다. 환자 ID·파일·decoded pixel 중복과 원본 GT 연결을 재검증한다. train 및 기존 split 정보를 보존하며 사전학습 미노출을 주장하지 않는다.
+
+주사건 Y_partial은 원래 O에 대해 다음을 모두 만족하는 환자다.
+
+1. IoU≥0.3 최대 cardinality 일대일 matching에서 TP≥1.
+2. 적어도 하나의 GT가 모든 O 박스와 교집합 면적 0.
+
+보조 사건은 FN@0.3 존재와 교집합 0 GT 존재다. IoU≥0.5 matching 및 predicted-center-in-GT matching은 고정된 민감도 분석으로만 보고한다. 주사건을 결과에 맞춰 교체하지 않는다. Y_partial=false를 임상적으로 완전한 출력이라는 뜻으로 해석하지 않는다.
+
+전체 비어 있지 않은 모집단을 주분석으로 유지하고, GT 양성·O 한 박스·O 두 박스 층을 보고한다. GT 다중 병변 조건은 해석용이며 inference eligibility에 쓰지 않는다.
+
+## 2. 동작 확인
+
+C에서 O 한 박스 12명·두 박스 12명을 환자 ID SHA 순서로 고정해 D24를 만든다. 모델 효과에 따라 환자를 교체하지 않는다. D는 C에 포함되며 독립 평가로 세지 않는다.
+
+- C 사건 6명·기하 FN 6명·나머지 6명을 각각 hash 순서로 골라 원본/GT/O overlay를 확인한다. 환자가 겹치면 우선순위를 사건→기하 FN→나머지로 고정한다. 좌표 오류를 발견하면 전체 규약을 수정하고 새 protocol을 잠그되 사례별 정답 수정은 하지 않는다.
+- D24의 원래 생성 suffix를 기존 O와 완전히 대조한다. 실제 M0 입력·adapter 비활성 경로도 D의 소수 사례에서 기존 출력과 대조한다.
+- 고정 tokenizer에서 token의 decode와 실제 분기 위치를 확인한다. O의 마지막 `[23131,236775,15947,106]`를 검증하며 inference manifest에는 GT 없이 O suffix와 분기 index만 제공한다.
+- 원래 generation의 FP32 log-softmax 요약을 추출한다. 대표 6명의 선택 step은 CPU float64 독립 계산과 대조한다. 전체 vocabulary score를 모든 step에 보관해 메모리를 키우지 말고 필요한 scalar·token·선택 step 자료를 보존한다.
+- 실제 24요청으로 정상 실행, 중간 중단 후 재개, 완료 입력 변조·중복·누락·타 protocol 연결 거부를 검사한다. 손상 tail과 이전 completion은 삭제하지 않고 실패 attempt의 증거로 보존한다.
+
+원본 suffix 재현·분기 위치·강제 이전 prefix 불변·입력 연결은 100% 통과해야 한다. 실패 시 환자를 제외해 통과시키지 않는다.
+
+## 3. 단일 continuation 개입
+
+F는 O와 동일한 greedy generation을 시작한다. 마지막 opacity 뒤 O가 token 236775를 선택할 index에서, 현재까지의 suffix가 잠긴 O prefix와 정확히 같은지 검사한 뒤 token 23179를 한 번만 강제한다. 이후에는 원래 greedy decoding을 그대로 사용한다.
+
+23179는 `\"},`로 현재 box를 마치고 다음 항목을 열도록 유도한다. 마지막 EOS만 억제하지 않는다. 개입을 반복하거나 GT 개수만큼 계속 생성하지 않는다. 구현은 기존 generation/cache 경로의 단일 logits processor 등을 사용하되 개입 전 원래 logits와 개입 후 값을 혼동하지 않는다.
+
+기존 cap ladder 1000→2000→4000과 EOS 판정을 유지한다. 긴 출력·반복·잘못된 JSON은 별도 결과이며 임의로 유효 응답으로 구제하지 않는다. 원본 O prefix의 좌표 bytes 보존을 검증한다. F가 invalid면 회복 성공은 0, operational 검출 평가는 사전 parser 규칙에 따라 실패로 처리하고 원래 O로 fallback한 결과는 보조 지표로만 보고한다.
+
+Q는 두 관찰 token의 분기 margin이다. tokenization이 서로 다른 두 전체 문자열의 확률비나 보정된 종료 확률이라고 부르지 않는다.
+
+## 4. 가능성 탐색 — C201
+
+학습은 0건, actor seed는 17 하나다. C201 전체에서 O score 추출 201요청과 F 201요청을 수행한다. D에서 동일 config로 완료한 요청은 provenance가 일치하면 재사용한다. seed29/43·M0 bbox는 저장 출력을 사용한다.
+
+C에서 B*와 모든 평가 설정을 고정한다. F 회복은 원래 모든 O 박스와 교집합 0인 GT 중 적어도 하나가 추가 박스와 IoU≥0.3 일대일 matching되는 것으로 정의한다. 기존 박스를 다시 출력한 중복은 추가 TP로 세지 않는다.
+
+E 진입은 동작 gate 통과 후 다음 중 하나일 때 허용한다.
+
+- Q−B* AUROC 점차이≥0.03이고 한 박스 층 Q AUROC≥0.60.
+- 엄격한 사건 회복률≥0.20.
+- 앞의 점기준은 미달하지만, Q−B*의 95% CI 상한≥0.05 및 한 박스 층 Q AUROC 상한≥0.65이거나, 회복이 최소 1건 있고 회복률 95% Wilson 상한≥0.25여서 E의 추가 27사건이 실용 크기의 효과 판단을 보완한다.
+
+마지막 경로는 불확정 보완임을 기록한다. 통계가 퇴화·정의 불가하면 해당 경로로 확대하지 않는다. 모든 조건이 미달하면 E 신규 GPU 실행을 보류한다. C 무개선을 전체 VLM·모든 score·모든 추가 생성의 실패로 일반화하지 않는다.
+
+## 5. 규모 확대 — E402
+
+C decision을 hash로 잠근 뒤 O score 402요청·F 402요청을 실행한다. 추가 표본 선택·prompt 변경·score 부호 반전·threshold 탐색은 하지 않는다. C와 E는 별도 보고하며 둘을 합친 수치는 개발 정밀도 참고로만 제시한다.
+
+본단계까지 신규 정식 generation은 최대 1,206요청이다. 동작·처리량·재개 검사는 별도로 집계한다. E native score를 보기 전 설정을 잠그지만, E의 기존 출력과 사건 수는 이미 조사했으므로 독립 확인이라고 부르지 않는다.
+
+## 6. 독립 확인
+
+이번에는 실행하지 않는다. 강한 잔여 현상과 다음 방법의 구별 조건이 확인될 때 적절한 새 환자 및 동일 target의 외부 자료를 별도 계획한다. 현재 reserve와 MRI F139를 자동 사용하지 않는다. 작은 차이에 대한 유의성을 얻기 위해 개발 자료를 계속 늘리지 않는다.
+
+## 7. 자원·비용·재개
+
+실행 직전 nvidia-smi로 허용 GPU 0,1의 여유와 UUID를 확인하고 여유가 큰 장치부터 사용한다. 상속된 허용 집합과 자식 논리 index 매핑을 기록한다. 타 사용자 프로세스에는 손대지 않는다.
+
+D24의 동일 O/F 48요청을 총 2 worker와 총 4 worker 구성에서 비교한다. 메모리가 4 worker를 허용하지 않으면 batch 확대 후보를 확인하거나 구체적 근거로 2 worker를 유지한다. 전체 요청/분·wall-clock·GPU별 실제 peak·긴 출력 지연·CPU/RAM 경합·오류를 기록한다. suffix 완전 일치와 FP32 scalar 오차 1e-4 이내를 요구한다. 불일치하면 안전한 일치 구성을 선택하고 유리한 평가 점수로 구성을 고르지 않는다.
+
+추론 모델은 과거 약 8.24GiB allocated였지만 새 score·F의 KV cache·긴 출력 peak는 별도로 측정한다. 동시 worker peak 합과 다른 점유에 worker당 2GiB 여유를 더해 용량 내에 있을 때만 배치한다. 긴 출력에서 OOM이면 해당 attempt를 보존하고 동시성을 낮춰 같은 요청·cap으로 재개한다.
+
+기존 native C/E의 누적 요청 시간은 약 81.6분이다. score 추출과 F 길이를 고려한 초기 wall-clock 추정은 1–3시간이며 D 실측으로 갱신한다. 추정은 상한이 아니다. timeout은 두지 않는다.
+
+worker별 결과와 요청별 원자적 claim을 사용한다. parent/child PID·starttime·소유권·종료 코드를 기록하고 모든 종료를 수집한다. 완료 요청도 현재 입력·checkpoint·protocol·source digest를 재검증한다. O와 F의 예상 환자×조건 행렬을 독립적으로 구성해 완료 여부를 판단한다.
+
+# Implementation Tasks for Claude
+
+1. 반입 자산·checkpoint·실행 프로세스를 확인한다. 살아 있는 기존 작업을 중복 실행하거나 실행 중 소스를 바꾸지 않는다.
+2. `results/iter_030/correction_029/`에서 기존 E 97.5% CI 기반 decision과 전체 token family를 교정한다. 기존 C/E report·calibration·raw 출력·검증 digest를 연결하고 실제 반대 판정 fixture로 검사한다. 검증된 GPU 출력과 통계는 재사용한다.
+3. 새 사건 계산·source manifest·O/F request matrix·score 규약·단계 decision을 구현한다. source/audit와 GPU 입력을 분리해 GT가 inference에 들어가지 않게 한다.
+4. 기존 입력·LoRA·parser·통계 함수를 사용해 scalar score 추출과 한 번의 continuation 개입을 구현한다. risk28의 `nll_eos_step1` 등을 비어 있지 않은 출력의 EOS metric으로 사용하지 않는다.
+5. 동작·공식 입력·동일 prefix·matching·동점 처리·재개·변조·덮어쓰기 거부를 실제 실행 경로에서 검사한다. 소스 문자열 존재 검사는 기능 검사의 대체가 아니다.
+6. 처리량 pilot 후 C201을 실행하고 잠긴 decision에 따라 E402로 진행한다. 필요한 원시 token·score·예측·평가 배열·실행 구성·자원 로그를 보존한다.
+7. 새 결과는 `results/iter_030/`의 고유 attempt 경로에 저장한다. 기존 파일이 있으면 검증된 읽기 전용 재사용 또는 새 attempt만 허용한다. 과거 protocol·report를 다시 잠그거나 덮어쓰지 않는다.
+8. 보고서에 도달 단계, 실제 GPU 요청 수·시간, 확대/보류 이유, 코드 검증과 과학적 판정의 차이, 독립 확인 미실행을 적는다.
+
+# Evaluation (성공/실패 기준 포함)
+
+## 지표와 통계
+
+- 위험 주지표: Y_partial AUROC와 Capture@ceil(0.2N). 동점 경계는 기대 포착 수를 쓰고 실제 검토 인원과 분모를 표시한다.
+- H1 주비교: C에서 고정한 Q−B* AUROC. E 10,000회 paired 환자 bootstrap, seed 30017, 97.5% CI를 사용한다. 한 박스 층 Q AUROC와 Q−B*를 필수로 함께 보고한다.
+- H2 주지표: 엄격한 사건 중 F가 비중첩 GT를 하나 이상 회복한 환자 비율과 95% Wilson CI. 0건·전건에도 퇴화 구간을 사용하지 않는다.
+- 비용·부작용: 전체 모집단의 O/F F1@0.3·F1@0.5·recall·FP/환자·추가 TP/FP·중복·invalid·출력 길이·latency. 박스를 늘려 생긴 회복과 precision 손실을 함께 제시한다.
+- 원래 FN@0.3 사건과 교집합 0 사건의 위험 분석, center-hit 및 IoU≥0.5는 보조 분석이다. GT category·O 개수 층의 분모와 사건 수를 항상 표시한다.
+- bootstrap에서 단일 class가 된 resample은 기록하고 재표집하여 유효 10,000회를 확보한다. 원래 층이 단일 class이면 AUROC는 null로 두며 성공 gate에 사용하지 않는다. C 대표 선택의 불확실성 전체를 CI가 포함하지 않음을 적는다.
+
+## 양성
+
+H1의 제한적 양성은 E에서 Q−B*≥0.05, 97.5% CI 하한>0, 한 박스 층 Q AUROC의 95% CI 하한>0.5, Capture 차이≥0일 때다. 이는 종료 분기의 추가 위험 정보이며 새 confidence 방법의 신규성 증명은 아니다.
+
+H2의 제한적 양성은 E 회복률≥0.25이고 95% Wilson 하한>0.10일 때다. 전체 F1·FP가 나쁘면 '후보는 회복되지만 단순 continuation은 실용 개선이 아님'으로 구분한다. 이 경우에만 후보 선택·중단 원리의 후속 연구 가치를 강한 SFT·모듈형 대안과 비교한다.
+
+전체 O 대비 F의 검출 개선 주장은 F1 paired CI와 FP·invalid를 함께 근거로 삼는다. H2 회복률만으로 검출 개선을 선언하지 않는다.
+
+## 음성
+
+Q−B* 97.5% CI 상한<0.05이고 한 박스 층에서도 유용한 분별 근거가 없으면 현재 종료 margin의 추가 투자를 보류한다. H2 회복률 95% Wilson 상한<0.25이면 현재 단일 continuation의 실용 크기 회복 가설을 약화한다.
+
+개수·일반 token·seed baseline만으로 충분하면 이를 보존하고 새 head/loss를 학습하지 않는다. 둘 다 정보 이득이 낮으면 이번 부분 누락 설계를 종료하고 외부 확인 또는 다른 GOAL 내 질문과 비교한다. 모든 공간 이해·시각 표현·경량 학습의 실패로 확대하지 않는다.
+
+## 불확정
+
+CI가 기준을 가로지르면 효과와 필요한 정밀도를 보고한다. C에서는 명시한 보완 조건으로 E를 사용할 수 있다. E 이후에는 새 seed·reserve·추가 prompt를 자동 투입하지 않는다. 의미 있는 후보 회복·위험 신호와 가까운 선행 대비 구별 조건이 있어야 새 독립 표본의 가치가 생긴다. 작은 효과만 남으면 추가 학습보다 보류·전환을 우선 비교한다.
+
+## 실행 무효
+
+입력·adapter·원래 suffix 재현·강제 prefix·예상 행렬·provenance가 맞지 않으면 해당 실험은 execution_failed이며 가설을 판정하지 않는다. 반면 정상 실행한 F의 invalid·중복·FP 증가는 방법 행동의 음성 결과다. 준비 코드 통과만으로 valid_experiment 또는 목표 달성을 주장하지 않는다.
+
+# Risks / Checks
+
+- 주사건은 annotation에 대한 기하학적 부분 미포괄이다. 주석 경계와 불완전성이 남고, 임상적으로 정상이라는 음성 정답을 만들지 않는다.
+- 엄격한 사건은 GT가 둘 이상이어야 하므로 개수 confound가 크다. 전체 모집단과 동일 출력 개수 층을 모두 유지한다.
+- Q의 두 token은 직렬화 길이가 다르다. Q를 보정된 probability나 유일한 종료 원인으로 표현하지 않는다. F의 실제 추가 출력이 별도의 근거다.
+- 강제 continuation은 단순 threshold 완화에 가까운 대조다. 성공해도 새로운 방법으로 포장하지 않는다.
+- C/E는 반복 사용한 개발 자료다. 독립 환자 분리와 사전학습 비노출을 혼동하지 않는다.
+- 전체 vocabulary score 보관과 긴 출력은 메모리를 증가시킬 수 있다. scalar 추출을 우선하고 실제 peak로 동시성을 정한다.
+- 원본 보존과 코드 재사용 승인은 별개다. 지정 파일의 needs_fix를 해결한 실제 호출 경로만 검토하며 전체 스냅샷 승인으로 확대하지 않는다.
+
+## 대규모 GPU 필요 후보
+
+다기관 다중 병변 자료를 이용해 영상 encoder·집합 완전성·decoder 종료를 공동 학습하는 post-training은 후보로 보존한다. 현재 필요성과 기여는 미확정이다. 이번 진단 후 충분한 직접 SFT·경량 적응·모듈형 detector가 설명하지 못하는 조건이 남을 때 검토한다.
+
+# 계획의 근거 (GPT 조사 노트)
+
+## 핵심 판단
+
+부분 누락의 위험 신호와 생성 종료의 역할을 함께 확인하는 제한된 GPU 진단으로 진행한다. 단순 confidence score 확장만으로 새 방법을 주장하지 않는다. 이번 라운드는 문서·코드·논문 조회, 저장 결과 재집계, 원본 영상 열람만 수행했다. 파일 변경·모델 로딩·GPU 실험은 하지 않았다.
+
+## 질문 1 — 사건의 크기와 위치 오류 구분
+
+`results/iter_010/manifests/gt_manifest.json`과 iter_012의 seed17 C/E concise 원시 출력을 읽고, 별도의 사각형 교집합·IoU·최대 cardinality 일대일 matching으로 계산했다.
+
+| 범위 | C | E |
+|---|---:|---:|
+| 비어 있지 않은 출력 | 201 | 402 |
+| 그중 GT 양성 | 164 | 330 |
+| 일대일 IoU≥0.3 matching 후 GT 미대응 환자 | 54 | 101 |
+| 어떤 GT가 모든 예측과 교집합 0 | 23 | 40 |
+| TP가 하나 이상이고, 별도 GT가 모든 예측과 교집합 0 | 20 | 27 |
+
+마지막 행을 엄격한 부분 누락 사건으로 고정한다. 이는 주석에 대한 기하학적 사건이며 인지적 누락·임상적 누락의 확정이 아니다. 광범위한 FN과 교집합 0 사건도 별도 보고해 유리한 정의만 남기지 않는다.
+
+엄격한 사건의 출력/GT 개수는 C에서 (1,2) 16명·(2,3) 3명·(1,3) 1명, E에서 (1,2) 24명·(1,3) 2명·(2,2) 1명이다. 따라서 개수 통제가 필수다. GT 다중 병변 환자만 골라 평가하면 출력 개수 baseline이 E AUROC 0.9523으로 올라간다. 이 조건은 GT를 알아야 정할 수 있으므로 실용 평가 모집단으로 사용하지 않는다.
+
+해시 순서로 선택한 `val_00006084`, `val_00008824`, `con_00010319`의 원본 PNG를 직접 열고 정규화 좌표를 대조했다. 큰 좌우 영역 구분과 원본 연결을 살펴본 수준이며 임상 재판독이나 overlay 검증을 완료한 것은 아니다. 구현 단계에서 사건·비사건·경계 오류를 함께 표시한 overlay를 검증한다. 육안 인상에 따라 평가 정답을 변경하지 않는다.
+
+## 질문 2 — 선행 방법과 남는 구분
+
+[PatchGate §3.1–3.2](https://arxiv.org/html/2608.21819v1)는 object word별 patch/layer 최대 evidence로 inventory를 만들며, 해당 word가 생성되면 inclusion 촉진을 멈춘다. 클래스가 이미 언급된 뒤 같은 클래스의 추가 영역이 빠지는 조건은 별도로 검증할 가치가 있다. 그러나 PatchGate가 이 조건에서 실패한다는 실험은 아직 없다.
+
+[MedGrounder §III-C–D](https://arxiv.org/html/2512.01085v3)는 5개 query의 box/confidence, Hungarian matching, 집합 정확도와 center-hit 평가를 다룬다. 따라서 다중 영역·confidence·완전성이라는 이름 자체는 차별점이 아니다. 이번에는 전체 버전 차이를 조사한 것이 아니라 이전 라운드에서 미확인했던 구조·평가를 확인했다.
+
+[ObjectTransforms §4–5](https://arxiv.org/html/2510.16118)는 낮은 검출 threshold로 후보를 늘린 뒤 uncertainty로 FP를 걸러 FN을 회복한다. 이와 대응하는 단순 대조가 생성 목록의 닫기 선택을 한 번 완화하는 것이다. 이것이 충분하면 새로운 종료 학습이나 confidence head를 추가할 이유가 없다. 문헌은 조사 근거이며 이번 사용자 논문 추천은 아니다.
+
+## 질문 3 — 강한 baseline과 실제 token 구조
+
+저장 출력만으로 계산한 엄격한 사건 AUROC는 다음과 같다. 아직 CI 없는 사후 개발 분석이다.
+
+| score | C 201명/20사건 | E 402명/27사건 |
+|---|---:|---:|
+| −출력 박스 수 | 0.7151 | 0.7388 |
+| 다른 seed의 최대 박스 수−B0 박스 수 | 0.5356 | 0.6589 |
+| 다른 seed의 B0 미대응 박스 비율 평균 | 0.5655 | 0.6596 |
+
+기하 불일치는 seed29/43 각각에서 IoU≥0.3 최대 matching으로 B0에 대응하지 않는 박스 비율을 구한 뒤 평균했다. E에서 상위 약 20%의 포착률은 개수 0.3750, 기하 불일치 0.4701이다. 동점은 경계 집단의 기대 포착 수로 처리했다. GT 양성·한 박스 출력으로 제한한 E 163명/26사건에서 기하 불일치 AUROC는 0.6131이다.
+
+다른 seed가 B0의 완전 비중첩 GT를 IoU≥0.3으로 잡은 엄격한 사건은 C 1/20, E 8/27이다. 이는 존재하는 대체 후보의 관찰이며 seed union의 실용 성능이나 FP 통제를 의미하지 않는다.
+
+중요한 새 확인은 종료 위치다. 로컬 고정 revision의 tokenizer.json에서 23131=`▁opacity`, 236775=`\"`, 15947=`}]`, 23179=`\"},`, 106=`<end_of_turn>`임을 확인했다. C/E 비어 있지 않은 603건 모두 마지막 네 token이 `[23131,236775,15947,106]`이다. 두 박스 출력의 중간에는 23131 다음 23179가 나타난다. 따라서 EOS만 검사하면 목록을 이미 닫은 뒤의 신호를 보게 된다. 마지막 opacity 직후의 `logit(23179)−logit(236775)`를 사전 고정한 후보 score로 사용한다. 이는 관찰된 직렬화의 분기 margin이며 전체 종료/계속 확률로 부르지 않는다.
+
+train 2,400명의 GT 개수는 0/1/2/3/4개가 1,200/649/533/13/5명이다. E의 세 SFT seed는 모두 최대 두 박스만 출력했다. 희귀 cardinality 학습 부족은 경쟁 설명으로 남으며 구조적 최대 개수 제한이나 원인으로 단정하지 않는다.
+
+iter_028 C의 비어 있지 않은 token_score는 8 token에서 잘렸고 `nll_eos_step1`은 실제 EOS score가 아니다. 예를 들어 val_00006084는 ended_eos=false·reproduced_expected_suffix=false다. 첫 entropy의 제한된 재사용 가능성과 별개로, 전체 token·닫기 score는 새 추출이 필요하다. 빈 출력용 함수를 이름만 바꿔 재사용하지 않는다.
+
+## 질문 4 — 규모와 실행 결정
+
+C 20사건과 E 27사건은 큰 신호·실패 조건을 판별하는 개발 진단에는 쓸 수 있지만 작은 효과나 독립 일반화를 증명하기에는 부족하다. C201에서 먼저 native score와 단일 continuation 대조를 실행하고, 사전 유망성 또는 정밀도 보완 기준에 따라 E402로 확대한다. 새 환자·reserve·외부 데이터는 자동 개방하지 않는다. 관찰된 모집단과 사건 수를 공개한 상태의 개발 실험임을 유지한다.
+
+기존 native 생성의 누적 요청 시간은 C 1,808초, E 3,089초였다. 새 score 추출·continuation의 비용은 아직 미측정이다. 전체 실행은 대략 1–3시간을 초기 추정으로 두고 D 실측으로 갱신한다. 시간 상한으로 사용하지 않는다.
+
+## 재사용 확인
+
+현재 HEAD는 `0a47e99642921fb22fa49219e58805381e9eb25f`이며 status/diff는 비어 있다. 반입할 18개 파일의 git tree 존재를 확인했다. 새 기반 iter_006은 `68117cfd08429ffc3cb9b77e14fb1db3221d86ab`이며 rsna_diag가 없다. B0 adapter의 실제 파일 SHA는 `5f542af96df705e567bf4cfb000398b09313db2456c577e772bd76481799cf29`로 기존 기록과 일치했다. tensor digest는 이번 라운드에서 재계산하지 않았으며 실행 때 확인한다.
+
+직전 decision의 C/E 혼용·token family 누락·digest 및 덮어쓰기 결함은 새 correction 경로에서 최소 보완한다. 기존 GPU 출력과 통계는 보존한다.
+
+## 대규모 GPU 필요 후보
+
+다기관 다중 병변 자료로 영역 탐지·집합 완전성·출력 종료를 함께 학습하는 전체 post-training은 보존 후보다. 현재는 필요성 자체가 미확정이며, 단순 decoding 대조와 경량·모듈형 대안부터 비교한다.
+
+이전 사고 라운드 노트: agent/runs/iter_030/think/
