@@ -37,8 +37,10 @@ def check_coregistration(mask_hdr, img_meta, patient):
         a, b = mask_hdr[k], img_meta[k]
         if len(a) != len(b) or any(abs(float(x) - float(y)) > 1e-4 for x, y in zip(a, b)):
             raise DataQualityError(f"{patient}: mask/image {k} differ: {a} != {b}")
-    if mask_hdr["direction"] != img_meta["direction"]:
-        raise DataQualityError(f"{patient}: mask/image direction differ: {mask_hdr['direction']} != {img_meta['direction']}")
+    da, db = mask_hdr["direction"], img_meta["direction"]
+    if len(da) != len(db) or any(len(ra) != len(rb) or any(abs(float(x) - float(y)) > 1e-6 for x, y in zip(ra, rb))
+                                  for ra, rb in zip(da, db)):
+        raise DataQualityError(f"{patient}: mask/image direction differ: {da} != {db}")
 
 
 def instance_point_native(mask_vol, sag_idx, axes, label):
