@@ -604,5 +604,29 @@ Claude 계정의 /usage 또는 Settings > Usage에서 제한을 확인한 뒤 �
 - ▶ **결정**: 자동 진행 (smart) — 1순위로 진행
 - 💾 **개발 이력 체크포인트** `1764e105c6ebc34e9722174e53b9337006d7b4d0`: interrupted (검증 승인 아님)
 - ⏹ 중단: 오류: claude 실행 준비 실패 (errno=7): Argument list too long. 로그: /SSD1_1TB/home/milab/daniel/08_medgemma/agent/runs/iter_023/claude_stream.jsonl (Claude 구현/실험 중)
+- ↻ 재실행: 'Claude 구현' 단계부터 이어서 (orchestrator dd21f11)
+- ▶ **결정**: 자동 진행 (smart) — 1순위로 진행
+- 💾 **개발 이력 체크포인트** `3271c85f34c135081bba28352baa31468125f842`: implementation_finished (검증 승인 아님)
+- 🔧 **Claude** (standard): (요약 없음) [자체 검증 없음, 파일 154개 변경]
+  - 새 브랜치 `approach/rsna-spatial-transfer` ← 68117cf (68117cf)
+  - ⚠ 권한 거부 2건
+- 🔍 **리뷰** (GPT normal): [CONTINUE / execution_failed] iter_023은 45개 fixture와 부분 bbox GPU 생성까지 확인됐지만 사분면 QA는 미실행이다. 기존 RSNA SFT 성과는 유지되며 능력 전이는 실행 복구 후 판정해야 한다.
+  - 접근법 판단: 부분 bbox 생성 뒤 실행이 중단됐으며 영역 질의 가설 검증은 미실행이다. 실행 수명·단계 gate·평가 검증을 보완해 원 계획을 이어간다.
+  - 목표 진전: 데이터 구성과 부분 GPU 생성은 확인했지만 해석 가능한 전이 실험은 완료하지 못했다. 기존 iter_012의 SFT 개선은 유지된다. 이번 질문의 성능 개선·전이 가설 지지·신규 기여 가능성은 모두 미판정이다.
+  - 판정 범위: iter_023의 D24 bbox 준비·실행 관리 및 미완성 평가 경로에 한정한다. 사분면 QA 본실험은 미실행이므로 RSNA SFT의 능력 전이, 기존 bbox 개선 또는 접근법의 과학적 가치를 기각하지 않는다.
+  - 현재 결론 무효: D24 사분면 QA·oracle·gray 및 E60 본실험 결과가 없다. 직접 답변·bbox 규칙·reader 비교를 수행하지 못해 계획의 가설을 판정할 수 없다.
+  - 현재 결론 무효: 정식 D24_bbox M0는 48개 요청 중 47개만 저장됐고 completion.json이 없다. attempt는 interrupted이며 마지막 worker 종료 코드는 -15다. 정식 B0 bbox도 미완료다.
+  - 재사용 전 수정: background 작업을 시작한 뒤 대기 문구로 Claude 호출을 종료했다. 세션 종료 후 작업이 killed/stopped 처리됐다. 실행 호스트의 PID/starttime·lock·자식 종료 상태를 확인하고, 실제 완료와 종료 코드 수집까지 유지되는 실행 방식으로 복구해야 한다.
+  - 재사용 전 수정: roi23_pipeline.py의 설명과 달리 E60/E200 요청 생성 및 roi23_run의 직접 실행에 이전 단계 decision 검증이 없다. D gate·E200 확대·seed 진입 조건을 저장하고 실행·재개·완료 건너뛰기 모두에서 강제해야 한다.
+  - 재사용 전 수정: roi23_protocol.py는 extra 파일을 선택적으로 받는다. query·집합·정답·checkpoint·원본 bbox 출처·stage decision의 필수 잠금을 stage별로 강제해야 한다. source_bbox_records의 pinned도 선택적이며 현재 호출은 원본 출력 provenance를 검증하지 않는다.
+  - 재사용 전 수정: roi23_pipeline._verify_and_collect는 protocol digest를 첫 출력에서 받아들이고 현재 protocol/config/adapter 및 completion의 요청 hash를 충분히 대조하지 않는다. manifest에서 예상 환자×질문×조건을 독립 재구성하고 완전한 검증을 공유해야 한다.
+  - 재사용 전 수정: D24 bbox를 QA evidence와 규칙 점수로 읽는 경로는 completion·중복·출처 검증 없이 사전으로 덮어쓴다. 누락을 unavailable로 조용히 바꾸지 말고 필수 출처 오류로 차단해야 한다.
+  - 재사용 전 수정: fmt가 plain으로 고정돼 D에서 정한 JSON fallback을 후속 실행에 전달할 수 없다. strict 지표·환자별 결과·사분면별 지표 저장, oracle 정확도의 전체 요청 분모, 퇴화 CI의 보수적 차이 구간과 판정 연결을 완성해야 한다.
+  - 재사용 전 수정: reuse_manifest의 실제 공식 입력 대조, 기존 bbox sanity, 24개 요청 중단·재개 및 완료 후 변조 거부, 동일 요청의 2/4 worker 정합성·처리량 비교와 긴 출력 메모리 stress 완료 근거가 없다. 해당 검증 후 본실험 구성을 확정해야 한다.
+  - 재사용 전 수정: 구 protocol은 roi23_pipeline.py hash가 현재와 다르고 v2는 일치한다. 수정 전후 호환 근거를 명시하고 기존 결과·protocol·claim을 보존한 상태에서 재사용 범위를 결정해야 한다.
+  - 추후 개선: fixture의 margin_boundary_exactly_25_ok는 실제로 중앙선에서 275 떨어진 사례다. 정확한 25 경계와 그 직전 값을 검사하도록 보강한다.
+  - 추후 개선: permutation p-value에 유한 반복 보정을 적용하고, 탐색 자료에서 계산한 최빈 정답 패턴을 사전 고정 prior와 구분해 표시한다.
+  - 추후 개선: 유효한 전이 결과가 나온 뒤 외부 원천 자료·다른 seed와 적절한 detector/encoder+head 대안을 검토한다.
+  - 다음: 현재 진단을 유지하며 복구한다. 실행 호스트에서 기존 작업의 PID/starttime·lock·종료 상태를 먼저 확인하고 살아 있는 작업은 중복 실행하지 않는다. 부분 출력·claim·protocol을 보존하며 실행 수명 관리, 단계 decision 강제, 필수 출처 잠금과 평가 완전성을 보완한다. 실제 D 입력의 공식 구성 대조·adapter 및 bbox sanity·24개 재개/변조 검사·동일 요청 2/4 worker 처리량과 정합성·긴 출력 메모리 검증을 완료한다. 유효한 기존 출력은 호환성을 확인해 재사용하고 D24 QA gate를 통과하면 E60, 원래 조건에 따른 E200 및 seed 비교를 이어간다. 가설·성공 기준은 유지하고 MRI F139·reserve·새 학습은 열지 않는다. D gate 실패 시 형식·지시 문제와 능력 전이를 구분해 보고한다.
 - 📁 원본: `agent/runs/iter_023/`
 
