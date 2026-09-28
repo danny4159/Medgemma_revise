@@ -1,0 +1,1890 @@
+diff --git a/analyze_iter025_marker.py b/analyze_iter025_marker.py
+new file mode 100644
+index 0000000..b8cd8ce
+--- /dev/null
++++ b/analyze_iter025_marker.py
+@@ -0,0 +1,97 @@
++"""iter_026 Implementation Task 10: iter_025 D768 원시 응답에 thinking marker(<unused94>...<unused95>) 이후의
++최종 yes/no 답을 별도로 재파싱해, 원래 strict/semantic_v1 parser가 invalid 처리한 건 중 몇 건이 marker 보정으로
++valid가 되는지, 그리고 GT와 paired 정확도가 어떻게 달라지는지 분석한다.
++
++원본 report/decision/gate는 건드리지 않고 새 GPU 출력도 만들지 않는다. 이 분석은 새 실험의 진입 조건이 아니다.
++"""
++import glob
++import json
++import os
++import re
++
++from rsna_diag import roi23_spec as R23, roi25_requests as Q25, roi25_spec as R25
++
++THINK_OPEN, THINK_CLOSE = "<unused94>", "<unused95>"
++EOT = "<end_of_turn>"
++_PUNCT = ".!"
++
++
++def marker_aware_answer(raw, ended_eos):
++    """thinking 블록이 닫혀 있으면 그 뒤 텍스트에서 bare yes/no 또는 {"answer":"yes|no"}를 찾는다."""
++    if not ended_eos:
++        return None, "truncated"
++    t = raw[:-len(EOT)] if raw.endswith(EOT) else raw
++    if THINK_OPEN in t:
++        if THINK_CLOSE not in t:
++            return None, "unclosed_thinking"
++        t = t.split(THINK_CLOSE, 1)[1]
++    t = t.strip()
++    core = t.lower()
++    if core and core[-1] in _PUNCT:
++        core = core[:-1]
++    if re.fullmatch(r"[a-z]+", core) and core in ("yes", "no"):
++        return core, "bare_yes_no_after_marker"
++    if t.startswith("{"):
++        try:
++            v = json.loads(t)
++        except ValueError:
++            v = None
++        if isinstance(v, dict) and list(v) == ["answer"] and v["answer"] in ("yes", "no"):
++            return v["answer"], "json_answer_after_marker"
++    return None, "still_invalid"
++
++
++def read_gen(gen_dir):
++    recs = {}
++    for f in sorted(glob.glob(os.path.join(gen_dir, "gen_worker*.jsonl"))):
++        for ln in open(f):
++            if ln.strip():
++                r = json.loads(ln)
++                recs[r["request_id"]] = r
++    return recs
++
++
++def gt_answers_for(items_gt, pid):
++    boxes = [b["yxyx_norm"] for b in items_gt[pid]["boxes"]]
++    return R23.answers(boxes)
++
++
++def main():
++    from rsna_diag import roi23_data as D
++    items, gts = D.load_val_pool()
++    out = {"n_flipped": 0, "n_flipped_correct": 0, "n_flipped_incorrect": 0, "by_ckpt_cond": {}, "flips": []}
++    for ckpt in ("M0", "B0"):
++        rp = f"results/iter_025/requests/D__{ckpt}.jsonl"
++        if not os.path.exists(rp):
++            continue
++        rows = Q25.load_rows(rp)
++        gen_dir = f"results/iter_025/gen/D__{ckpt}"
++        recs = read_gen(gen_dir)
++        for row in rows:
++            rec = recs.get(row["request_id"])
++            if rec is None:
++                continue
++            st, ans, conv = R25.parse_semantic(row["target"], row["fmt"], rec["suffix_text_raw"], rec["ended_eos"])
++            if st == "valid":
++                continue
++            new_ans, reason = marker_aware_answer(rec["suffix_text_raw"], rec["ended_eos"])
++            key = f"{ckpt}_{row['condition']}"
++            out["by_ckpt_cond"].setdefault(key, {"n_orig_invalid": 0, "n_flipped": 0})
++            out["by_ckpt_cond"][key]["n_orig_invalid"] += 1
++            if new_ans is not None:
++                out["by_ckpt_cond"][key]["n_flipped"] += 1
++                out["n_flipped"] += 1
++                gt = gt_answers_for(gts, row["id"])[row["target"]]
++                correct = new_ans == gt
++                out["n_flipped_correct"] += int(correct)
++                out["n_flipped_incorrect"] += int(not correct)
++                out["flips"].append({"ckpt": ckpt, "condition": row["condition"], "id": row["id"],
++                                      "target": row["target"], "orig_status": st, "new_answer": new_ans,
++                                      "gt": gt, "correct": correct, "reason": reason})
++    os.makedirs("results/iter_026/analysis", exist_ok=True)
++    json.dump(out, open("results/iter_026/analysis/iter025_marker_reanalysis.json", "w"), indent=1, default=str)
++    print(json.dumps({k: v for k, v in out.items() if k != "flips"}, indent=1))
++
++
++if __name__ == "__main__":
++    main()
+diff --git a/build_iter026_d.py b/build_iter026_d.py
+new file mode 100644
+index 0000000..e2083ca
+--- /dev/null
++++ b/build_iter026_d.py
+@@ -0,0 +1,39 @@
++"""iter_026 D24 요청 생성 (동작 확인 stage)."""
++import json
++
++from rsna_diag import roi23_data as D, roi26_data as D26, roi26_requests as Q, roi26_protocol as P
++
++cfg, _ = P.static_cfg()
++items, gts = D.load_val_pool()
++d24, counts = D.select_d24(items, gts)
++d24_items = {i: items[i] for i in d24}
++tab = Q.checkpoints(["M0", "B0"])
++print("tab ok", {k: tab[k]["digest"] for k in tab})
++
++v = Q.build_v(d24_items, tab, cfg, ["M0", "B0"], "D")
++for ck, rows in v.items():
++    print("V", ck, len(rows))
++    Q.write_rows(f"D_V__{ck}", rows)
++
++o = Q.build_o(d24_items, gts, tab, cfg, ["M0", "B0"], "D")
++for ck, rows in o.items():
++    print("O", ck, len(rows))
++    Q.write_rows(f"D_O__{ck}", rows)
++
++b0_recs = D26.load_val_b0_records()
++props = {}
++for i in d24:
++    rec = b0_recs.get(i)
++    props[i] = D26.proposal_for("B0", rec) if rec else (None, "missing")
++rd_rows, unavail = Q.build_rd(d24_items, props, tab, cfg, "D", ckpt="M0")
++print("RD", len(rd_rows), "unavailable", unavail)
++Q.write_rows("D_RD__M0", rd_rows)
++
++t = Q.build_text(tab, cfg, ["M0", "B0"], "D")
++for ck, rows in t.items():
++    print("TEXT", ck, len(rows))
++    Q.write_rows(f"D_TEXT__{ck}", rows)
++
++json.dump({"d24_ids": d24, "layer_counts": counts, "n_unavailable_rd": len(unavail), "unavailable_rd": unavail},
++          open("results/iter_026/manifests_d24_build.json", "w"), indent=1)
++print("done")
+diff --git a/build_iter026_e.py b/build_iter026_e.py
+new file mode 100644
+index 0000000..427c961
+--- /dev/null
++++ b/build_iter026_e.py
+@@ -0,0 +1,44 @@
++"""iter_026 E60/E200 요청 생성: V_M0/V_B0/RD_M0 (con_* pool). rule/copy/empty baseline은 생성 없이 이후 평가 단계에서 계산한다.
++사용: python build_iter026_e.py E60
++     python build_iter026_e.py E200_extra   (E60에 포함되지 않은 나머지 140명)
++"""
++import json
++import sys
++
++from rsna_diag import roi23_data as D, roi26_data as D26, roi26_requests as Q, roi26_protocol as P
++
++stage = sys.argv[1]
++cfg, _ = P.static_cfg()
++items, gts = D.load_confirm_pool()
++sets = json.load(open("results/iter_023/manifests/sets.json"))
++
++if stage == "E60":
++    ids = sorted(sets["E60"]["primary"] + sets["E60"]["boundary"])
++elif stage == "E200_extra":
++    e60 = set(sets["E60"]["primary"] + sets["E60"]["boundary"])
++    e200 = set(sets["E200"]["primary"] + sets["E200"]["boundary"])
++    ids = sorted(e200 - e60)
++else:
++    raise SystemExit(f"unknown stage {stage}")
++
++stage_items = {i: items[i] for i in ids}
++tab = Q.checkpoints(["M0", "B0"])
++
++v = Q.build_v(stage_items, tab, cfg, ["M0", "B0"], stage)
++for ck, rows in v.items():
++    print("V", ck, len(rows))
++    Q.write_rows(f"{stage}_V__{ck}", rows)
++
++b0_recs, n_total = D26.source_bbox_records("B0", "concise")
++print("B0 confirm concise source total records (all prompts)", n_total, "concise", len(b0_recs))
++props = {}
++for i in ids:
++    rec = b0_recs.get(i)
++    props[i] = D26.proposal_for("B0", rec) if rec else (None, "missing")
++rd_rows, unavail = Q.build_rd(stage_items, props, tab, cfg, stage, ckpt="M0")
++print("RD", len(rd_rows), "unavailable", unavail)
++Q.write_rows(f"{stage}_RD__M0", rd_rows)
++
++json.dump({"stage": stage, "ids": ids, "n": len(ids), "n_unavailable_rd": len(unavail), "unavailable_rd": unavail},
++          open(f"results/iter_026/manifests_{stage}_build.json", "w"), indent=1)
++print("done", stage, len(ids))
+diff --git a/decide_iter026_d.py b/decide_iter026_d.py
+new file mode 100644
+index 0000000..05401e5
+--- /dev/null
++++ b/decide_iter026_d.py
+@@ -0,0 +1,8 @@
++"""iter_026 D24 gate 판정."""
++import json
++
++from rsna_diag import roi26_decide as DEC
++
++report = json.load(open("results/iter_026/eval/report_D.json"))
++d = DEC.decide_d(report, "results/iter_026/decide/D_decision.json", "results/iter_026/eval/report_D.json")
++print(json.dumps(d, indent=1))
+diff --git a/eval_iter026.py b/eval_iter026.py
+new file mode 100644
+index 0000000..1260fc5
+--- /dev/null
++++ b/eval_iter026.py
+@@ -0,0 +1,177 @@
++"""iter_026 공용 평가 실행기: stage(D24/E60/E200 등)의 V/O/RD 결과를 채점해 report JSON을 만든다.
++사용: python eval_iter026.py D
++     python eval_iter026.py E60
++     python eval_iter026.py E200   (E60+E200_extra gen dir를 합쳐 200명 전체로 채점)
++"""
++import glob
++import json
++import sys
++
++import numpy as np
++
++from rsna_diag import roi23_data as D, roi26_data as D26, roi26_eval as E, roi26_requests as Q, roi26_spec as R26
++
++stage = sys.argv[1]
++
++
++def load_gen_merged(names):
++    recs = {}
++    for name in names:
++        for f in sorted(glob.glob(f"results/iter_026/gen/{name}/gen_worker*.jsonl")):
++            for ln in open(f):
++                if ln.strip():
++                    r = json.loads(ln)
++                    if r["request_id"] in recs and json.dumps(recs[r["request_id"]], sort_keys=True) != json.dumps(r, sort_keys=True):
++                        raise E.EvalError(f"conflicting duplicate {r['request_id']}")
++                    recs[r["request_id"]] = r
++    return recs
++
++
++def per_patient_from_rows(rows, recs):
++    return E.collect_direct(rows, recs)
++
++
++if stage == "D":
++    items, gts = D.load_val_pool()
++    d24 = json.load(open("results/iter_026/manifests_d24_build.json"))["d24_ids"]
++    patient_ids = sorted(d24)
++    jobs = {"V_M0": "D_V__M0", "V_B0": "D_V__B0", "O_M0": "D_O__M0", "O_B0": "D_O__B0", "RD_M0": "D_RD__M0"}
++    text_jobs = {"V_M0_text": "D_TEXT__M0", "V_B0_text": "D_TEXT__B0"}
++elif stage in ("E60", "E200"):
++    items, gts = D.load_confirm_pool()
++    sets = json.load(open("results/iter_023/manifests/sets.json"))
++    if stage == "E60":
++        patient_ids = sorted(sets["E60"]["primary"] + sets["E60"]["boundary"])
++        jobs = {"V_M0": ["E60_V__M0"], "V_B0": ["E60_V__B0"], "RD_M0": ["E60_RD__M0"]}
++    else:
++        patient_ids = sorted(sets["E200"]["primary"] + sets["E200"]["boundary"])
++        jobs = {"V_M0": ["E60_V__M0", "E200_extra_V__M0"], "V_B0": ["E60_V__B0", "E200_extra_V__B0"],
++                "RD_M0": ["E60_RD__M0", "E200_extra_RD__M0"]}
++    text_jobs = {}
++else:
++    raise SystemExit(f"unknown stage {stage}")
++
++report = {"stage": stage, "n_patients": len(patient_ids)}
++
++if stage == "D":
++    per = {}
++    valid_count = {}
++    for key, name in jobs.items():
++        rows = Q.load_rows(f"results/iter_026/requests/{name}.jsonl")
++        recs = load_gen_merged([name])
++        p = per_patient_from_rows(rows, recs)
++        per[key] = p
++        n_valid = sum(1 for i in patient_ids for t in R26.TARGETS if p.get(i, {}).get(t, {}).get("status") in ("valid_nonempty", "valid_empty"))
++        valid_count[key] = n_valid
++    for key, name in text_jobs.items():
++        rows = Q.load_rows(f"results/iter_026/requests/{name}.jsonl")
++        recs = load_gen_merged([name])
++        st = {t: R26.parse_row(recs[r["request_id"]]["suffix_text_raw"], recs[r["request_id"]]["ended_eos"])["status"] for r in rows for t in [r["target"]]}
++        valid_count[key] = sum(1 for v in st.values() if v in ("valid_nonempty", "valid_empty"))
++        report.setdefault("text_status", {})[key] = st
++    report["valid_count"] = valid_count
++
++    metrics = {}
++    for key in ("V_M0", "V_B0", "O_M0", "O_B0", "RD_M0"):
++        m, det = E.build_metrics(per[key], gts, patient_ids)
++        metrics[key] = {k: (v.tolist() if hasattr(v, "tolist") else v) for k, v in m.items()}
++        metrics[key]["mean_S"] = float(np.mean(m["S"]))
++        metrics[key]["mean_Q4"] = float(np.mean(m["Q4"]))
++        metrics[key]["mean_C_query"] = float(np.mean(m["C_query"]))
++        metrics[key]["n_invalid"] = int(m["invalid"].sum())
++    report["metrics"] = metrics
++    report["comparisons"] = {
++        "V_B0_minus_V_M0_S": E.paired_ci(metrics["V_B0"]["S"], metrics["V_M0"]["S"]),
++        "RD_M0_minus_V_M0_S": E.paired_ci(metrics["RD_M0"]["S"], metrics["V_M0"]["S"]),
++        "O_B0_minus_O_M0_S": E.paired_ci(metrics["O_B0"]["S"], metrics["O_M0"]["S"]),
++    }
++
++else:
++    per = {}
++    valid_count = {}
++    for key, names in jobs.items():
++        rows = []
++        for name in names:
++            rows += Q.load_rows(f"results/iter_026/requests/{name}.jsonl")
++        recs = load_gen_merged(names)
++        p = per_patient_from_rows(rows, recs)
++        per[key] = p
++        n_valid = sum(1 for i in patient_ids for t in R26.TARGETS if p.get(i, {}).get(t, {}).get("status") in ("valid_nonempty", "valid_empty"))
++        valid_count[key] = n_valid
++    report["valid_count"] = valid_count
++    report["valid_rate"] = {k: v / (len(patient_ids) * 4) for k, v in valid_count.items()}
++
++    multi = D26.multi_quadrant_subset(gts, patient_ids)
++    pairs, donor_map = E.donor_pairs(patient_ids)
++
++    metrics = {}
++    for key in ("V_M0", "V_B0", "RD_M0"):
++        m, det = E.build_metrics(per[key], gts, patient_ids, donor_map=(donor_map if key in ("V_M0", "V_B0") else None))
++        metrics[key] = {k: (v.tolist() if hasattr(v, "tolist") else v) for k, v in m.items()}
++        metrics[key]["mean_S"] = float(np.mean(m["S"]))
++        metrics[key]["mean_Q4"] = float(np.mean(m["Q4"]))
++        metrics[key]["mean_C_query"] = float(np.mean(m["C_query"]))
++        metrics[key]["n_invalid"] = int(m["invalid"].sum())
++        metrics[key]["_detail"] = None
++    report["metrics"] = metrics
++
++    idx_multi = [k for k, i in enumerate(patient_ids) if i in set(multi)]
++    report["subset_ids"] = multi
++    report["n_subset"] = len(multi)
++
++    src_bbox = {}
++    for ck, prompt_name in (("M0", "official_long"), ("B0", "concise")):
++        recs_b, ntot = D26.source_bbox_records(ck, prompt_name)
++        src = {i: D26.predicted_boxes(recs_b.get(i)) for i in patient_ids}
++        src_bbox[ck] = src
++    baselines = {}
++    for ck in ("M0", "B0"):
++        baselines[ck] = E.rule_copy_empty_baseline(src_bbox[ck], gts, patient_ids)
++
++    report["baselines"] = {ck: {name: {"mean_S": float(np.mean(baselines[ck][name]["S"])),
++                                        "mean_Q4": float(np.mean(baselines[ck][name]["Q4"])),
++                                        "n_invalid": int(baselines[ck][name]["invalid"].sum())}
++                                 for name in ("rule", "copy", "empty")} for ck in ("M0", "B0")}
++
++    def subset_arr(arr):
++        return np.array(arr)[idx_multi]
++
++    report["comparisons"] = {
++        "S_B0_minus_S_M0": E.paired_ci(metrics["V_B0"]["S"], metrics["V_M0"]["S"]),
++        "S_B0_minus_Copy_B0": E.paired_ci(metrics["V_B0"]["S"], baselines["B0"]["copy"]["S"]),
++        "S_RD_minus_S_B0": E.paired_ci(metrics["RD_M0"]["S"], metrics["V_B0"]["S"]),
++        "S_rule_B0_minus_S_B0_direct": E.paired_ci(baselines["B0"]["rule"]["S"], metrics["V_B0"]["S"]),
++        "S_RD_minus_S_V_M0": E.paired_ci(metrics["RD_M0"]["S"], metrics["V_M0"]["S"]),
++    }
++    report["C_query_ci"] = {ck: E.paired_ci(metrics[f"V_{ck}"]["C_query"], np.zeros(len(patient_ids))) for ck in ("M0", "B0")}
++
++    subset_q4_b0_direct = subset_arr(metrics["V_B0"]["Q4"])
++    subset_q4_b0_rule = subset_arr(baselines["B0"]["rule"]["Q4"])
++    subset_q4_m0_direct = subset_arr(metrics["V_M0"]["Q4"])
++
++    def exact_ci(k, n):
++        return E.exact_binom_ci(k, n)
++
++    report["subset"] = {
++        "n": len(multi),
++        "B0_direct_Q4_select_successes": int(subset_q4_b0_direct.sum()),
++        "B0_direct_Q4_select_rate": float(subset_q4_b0_direct.mean()) if len(multi) else None,
++        "B0_direct_Q4_select_exact_ci": exact_ci(int(subset_q4_b0_direct.sum()), len(multi)),
++        "B0_rule_Q4_select_rate": float(subset_q4_b0_rule.mean()) if len(multi) else None,
++        "B0_rule_Q4_select_exact_ci": exact_ci(int(subset_q4_b0_rule.sum()), len(multi)),
++        "M0_direct_Q4_select_successes": int(subset_q4_m0_direct.sum()),
++    }
++
++    donor_diff = {}
++    for ck in ("M0", "B0"):
++        real = metrics[f"V_{ck}"]["S"]
++        donor = metrics[f"V_{ck}"]["donor_S"]
++        diff_by_id = {}
++        for i, r, dn in zip(patient_ids, real, donor):
++            if not (isinstance(dn, float) and np.isnan(dn)):
++                diff_by_id[i] = r - dn
++        donor_diff[ck] = E.cluster_paired_ci(diff_by_id, pairs)
++    report["donor_diff"] = donor_diff
++
++json.dump(report, open(f"results/iter_026/eval/report_{stage}.json", "w"), indent=1, default=str)
++print("wrote", f"results/iter_026/eval/report_{stage}.json")
+diff --git a/launch_iter026_d.py b/launch_iter026_d.py
+new file mode 100644
+index 0000000..2a05279
+--- /dev/null
++++ b/launch_iter026_d.py
+@@ -0,0 +1,19 @@
++"""iter_026 D24 정식 생성 실행 (7개 요청 파일, 4 worker=2GPU x 2)."""
++import sys
++
++from rsna_diag import roi26_run as RR
++
++jobs = ["results/iter_026/requests/D_V__M0.jsonl", "results/iter_026/requests/D_V__B0.jsonl",
++        "results/iter_026/requests/D_O__M0.jsonl", "results/iter_026/requests/D_O__B0.jsonl",
++        "results/iter_026/requests/D_RD__M0.jsonl", "results/iter_026/requests/D_TEXT__M0.jsonl",
++        "results/iter_026/requests/D_TEXT__B0.jsonl"]
++protocol = "results/iter_026/protocol_D.json"
++allowed = RR.allowed_gpus()
++summary = []
++for rp in jobs:
++    res = RR.run_one(rp, protocol, workers=4, gpus_arg="0,1", peak_gb=9.0, allowed=allowed, out_root="results/iter_026")
++    summary.append(res)
++    print(res, flush=True)
++import json
++print(json.dumps(summary))
++sys.exit(0 if all(s["status"] in ("complete", "verified_complete") for s in summary) else 2)
+diff --git a/launch_iter026_e.py b/launch_iter026_e.py
+new file mode 100644
+index 0000000..139c1ac
+--- /dev/null
++++ b/launch_iter026_e.py
+@@ -0,0 +1,21 @@
++"""iter_026 E60/E200_extra 정식 생성 실행.
++사용: python launch_iter026_e.py E60
++     python launch_iter026_e.py E200_extra
++"""
++import json
++import sys
++
++from rsna_diag import roi26_run as RR
++
++stage = sys.argv[1]
++jobs = [f"results/iter_026/requests/{stage}_V__M0.jsonl", f"results/iter_026/requests/{stage}_V__B0.jsonl",
++        f"results/iter_026/requests/{stage}_RD__M0.jsonl"]
++protocol = f"results/iter_026/protocol_{stage}.json"
++allowed = RR.allowed_gpus()
++summary = []
++for rp in jobs:
++    res = RR.run_one(rp, protocol, workers=4, gpus_arg="0,1", peak_gb=9.0, allowed=allowed, out_root="results/iter_026")
++    summary.append(res)
++    print(res, flush=True)
++print(json.dumps(summary))
++sys.exit(0 if all(s["status"] in ("complete", "verified_complete") for s in summary) else 2)
+diff --git a/rsna_diag/roi26_data.py b/rsna_diag/roi26_data.py
+new file mode 100644
+index 0000000..2fcde15
+--- /dev/null
++++ b/rsna_diag/roi26_data.py
+@@ -0,0 +1,88 @@
++"""iter_026 데이터 연결: roi23_data의 D24(val)/E60·E200(confirm) pool과 iter_012 원시 bbox 출력을 재사용한다.
++
++- D24(val_*)의 B0 reader-proposal bbox: iter_012 train/lr2e-4_s17/epoch_05/val_gen (concise, split=validation).
++- E60/E200(con_*)의 M0 rule(official_long/concise) 및 B0 rule/reader-proposal(concise) bbox: iter_012 confirm_base/confirm_sft_seed17
++  (roi23_data.source_bbox_records/BBOX_DIR를 그대로 쓴다).
++- B29/B43(con_*)의 rule bbox: confirm_sft_seed29/43.
++"""
++import glob
++import json
++import os
++
++from . import geometry, roi23_data as D26D, roi26_spec as R26
++from . import roi23_spec as R23
++
++VAL_B0_DIR = "results/iter_012/train/lr2e-4_s17/epoch_05/val_gen"
++
++
++class DataError(RuntimeError):
++    pass
++
++
++def load_val_b0_records(pinned=None):
++    """D24(val_*)의 B0(seed17 epoch5) concise 원시 record, {id: record}. pinned: {path: sha256}로 변조 거부."""
++    files = sorted(glob.glob(os.path.join(VAL_B0_DIR, "gen_worker*.jsonl")))
++    if not files:
++        raise DataError(f"no gen_worker*.jsonl in {VAL_B0_DIR}")
++    if pinned:
++        for f in files:
++            got = D26D.sha(open(f, "rb").read())
++            if f not in pinned or got != pinned[f]:
++                raise DataError(f"val B0 source {f} not pinned or changed")
++    out = {}
++    for f in files:
++        for ln in open(f):
++            if not ln.strip():
++                continue
++            r = json.loads(ln)
++            if r.get("prompt_name") != "concise" or r.get("split") != "validation":
++                continue
++            if r["id"] in out:
++                raise DataError(f"duplicate val B0 record for {r['id']}")
++            out[r["id"]] = r
++    return out
++
++
++def completion_ok(gen_dir, expected_n):
++    cp = os.path.join(gen_dir, "completion.json")
++    if not os.path.exists(cp):
++        raise DataError(f"no completion.json in {gen_dir}")
++    c = json.load(open(cp))
++    if (c.get("n_expected") != expected_n or c.get("n_actual_unique") != expected_n or c.get("n_missing") != 0
++            or c.get("n_duplicate") != 0 or c.get("n_extra", 0) != 0 or not c.get("returncodes")
++            or any(x != 0 for x in c["returncodes"])):
++        raise DataError(f"completion.json content invalid in {gen_dir}: {c}")
++    return c
++
++
++def proposal_for(ckpt, rec):
++    """record -> (boxes_norm float list or None, status). None이면 unavailable(파싱 실패/truncated)."""
++    return D26D.predicted_boxes(rec)
++
++
++def partition_gt(boxes_norm):
++    """GT box(yxyx_norm float) 목록 -> {target: [box,...]} 사분면 분할."""
++    out = {t: [] for t in R26.TARGETS}
++    for b in boxes_norm:
++        cy, cx = R23.center_yx(b)
++        out[R23.quadrant_of(cy, cx)].append(list(b))
++    return out
++
++
++def multi_quadrant_subset(gts, ids):
++    """여러 사분면에 GT가 있는(진부분집합) 환자 id 목록, 정렬됨."""
++    out = []
++    for i in ids:
++        boxes = [b["yxyx_norm"] for b in gts[i]["boxes"]]
++        quads = {R23.quadrant_of(*R23.center_yx(b)) for b in boxes}
++        if len(quads) >= 2:
++            out.append(i)
++    return sorted(out)
++
++
++load_val_pool = D26D.load_val_pool
++load_confirm_pool = D26D.load_confirm_pool
++check_disjoint = D26D.check_disjoint
++source_bbox_records = D26D.source_bbox_records
++predicted_boxes = D26D.predicted_boxes
++BBOX_DIR = D26D.BBOX_DIR
+diff --git a/rsna_diag/roi26_decide.py b/rsna_diag/roi26_decide.py
+new file mode 100644
+index 0000000..13e1e03
+--- /dev/null
++++ b/rsna_diag/roi26_decide.py
+@@ -0,0 +1,82 @@
++"""iter_026 stage gate 판정 (계획에 사전 고정한 절대 기준). report 내용을 그대로 재검증한다."""
++import hashlib
++import json
++import os
++
++D_MIN_VALID = 92  # /96
++E_MIN_VALID_RATE = 0.95
++
++
++def _sha_file(p):
++    h = hashlib.sha256()
++    with open(p, "rb") as f:
++        for b in iter(lambda: f.read(1 << 20), b""):
++            h.update(b)
++    return h.hexdigest()
++
++
++def atomic_json(obj, path):
++    os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
++    tmp = path + ".tmp"
++    with open(tmp, "w") as f:
++        json.dump(obj, f, indent=1, default=str)
++    os.replace(tmp, path)
++
++
++def decide_d(report, out_path, report_path):
++    """direct M0/B0 각 96요청 중 bbox 형식 valid>=92. oracle/reader는 gate에 포함하지 않는다."""
++    valid = {"V_M0": report["valid_count"]["V_M0"], "V_B0": report["valid_count"]["V_B0"]}
++    ok = {k: v >= D_MIN_VALID for k, v in valid.items()}
++    passed = all(ok.values())
++    d = {"stage": "D", "report_path": report_path, "report_sha256": _sha_file(report_path),
++         "valid_count": valid, "min_required": D_MIN_VALID, "ok_by_key": ok, "passed": passed}
++    atomic_json(d, out_path)
++    return d
++
++
++def decide_e60_to_e200(report, out_path, report_path):
++    """확대 기준 3가지 중 하나 + 형식 gate."""
++    vr = report["valid_rate_primary"]
++    fmt_ok = vr["V_M0"] >= E_MIN_VALID_RATE and vr["V_B0"] >= E_MIN_VALID_RATE
++    diff_s = report["primary"]["S_B0_minus_S_M0"]
++    cond1 = fmt_ok and abs(diff_s["mean_diff"]) >= 0.05 and (report["primary"]["C_query_B0_ci_lo"] >= 0.05
++                                                              or report["primary"]["C_query_M0_ci_lo"] >= 0.05)
++    subset = report["subset"]
++    q4_rule = subset["B0_rule_Q4_select_rate"]
++    q4_direct_ci_hi = subset["B0_direct_Q4_select_exact_ci"][1]
++    cond2 = fmt_ok and q4_rule >= 0.20 and q4_direct_ci_hi >= 0.10 >= subset["B0_direct_Q4_select_exact_ci"][0]
++    gap = report["primary"]["rule_or_reader_minus_B0_direct_S"]
++    cond3 = (fmt_ok and gap.get("max_mean_diff", 0.0) >= 0.10
++             and (report["primary"]["C_query_B0_mean"] > 0 or subset["B0_direct_Q4_select_successes"] > 0))
++    reasons = {"functional_diff_candidate": cond1, "precision_supplement": cond2, "modular_gap_candidate": cond3}
++    passed = fmt_ok and any(reasons.values())
++    d = {"stage": "E60_to_E200", "report_path": report_path, "report_sha256": _sha_file(report_path),
++         "format_ok": fmt_ok, "reasons": reasons, "passed": passed}
++    atomic_json(d, out_path)
++    return d
++
++
++def decide_seed_expansion(report, out_path, report_path):
++    """조건부 기존 seed 재현 진입: 양성 조건 충족 또는 규칙 대비 명확한 직접 활용 격차."""
++    positive = report.get("positive_candidate", False)
++    gap = report["primary"].get("rule_minus_B0_direct_S", {})
++    clear_gap = gap.get("mean_diff", 0.0) >= 0.10 and gap.get("ci_lo", -1.0) > 0.0
++    passed = bool(positive or clear_gap)
++    d = {"stage": "seed_expansion", "report_path": report_path, "report_sha256": _sha_file(report_path),
++         "positive_candidate": positive, "clear_rule_gap": clear_gap, "passed": passed}
++    atomic_json(d, out_path)
++    return d
++
++
++def classify_e200(report):
++    """양성/음성/불확정 후보 판정 (최종 investment 판단은 사람이 읽는 보고서에서 서술)."""
++    p = report["primary"]
++    sub = report["subset"]
++    pos = (p["S_B0_minus_S_M0"]["mean_diff"] >= 0.05 and p["S_B0_minus_S_M0"]["ci_lo"] > 0
++           and p["S_B0_minus_Copy_B0"]["mean_diff"] >= 0.05 and p["S_B0_minus_Copy_B0"]["ci_lo"] > 0
++           and p["C_query_B0_ci_lo"] > 0
++           and sub["B0_direct_Q4_select_rate"] >= 0.10 and sub["B0_direct_Q4_select_successes"] > 0
++           and p["donor_diff_B0"]["ci_lo"] > 0)
++    fmt_ok = report["valid_rate_primary"]["V_M0"] >= E_MIN_VALID_RATE and report["valid_rate_primary"]["V_B0"] >= E_MIN_VALID_RATE
++    neg = (fmt_ok and sub["B0_direct_Q4_select_exact_ci"][1] < 0.10 and sub["B0_rule_Q4_select_exact_ci"][0] > 0.20)
++    return {"positive_candidate": pos, "negative_candidate": neg, "inconclusive": not (pos or neg)}
+diff --git a/rsna_diag/roi26_eval.py b/rsna_diag/roi26_eval.py
+new file mode 100644
+index 0000000..582fd8f
+--- /dev/null
++++ b/rsna_diag/roi26_eval.py
+@@ -0,0 +1,245 @@
++"""iter_026 채점: S_i(사분면 결합 F1), Q4_select(전체 정답), C_query(질의 배정 대조), 환자 영상 대응 대조, 통계."""
++import glob
++import hashlib
++import itertools
++import json
++import os
++
++import numpy as np
++
++from . import metrics as M, roi26_spec as R26, roi26_data as D26
++
++IOU_THR = 0.3
++IOU_THR2 = 0.5
++PERMS = list(itertools.permutations(R26.TARGETS))  # 24개, identity 포함
++
++
++class EvalError(RuntimeError):
++    pass
++
++
++def load_gen(gen_dir):
++    recs = {}
++    for f in sorted(glob.glob(os.path.join(gen_dir, "gen_worker*.jsonl"))):
++        for ln in open(f):
++            if ln.strip():
++                r = json.loads(ln)
++                if r["request_id"] in recs:
++                    raise EvalError(f"duplicate request_id {r['request_id']} in {gen_dir}")
++                recs[r["request_id"]] = r
++    return recs
++
++
++def parsed_for_row(row, recs_by_rid):
++    rec = recs_by_rid.get(row["request_id"])
++    if rec is None:
++        raise EvalError(f"missing generation record for {row['request_id']} (id={row['id']}, target={row['target']})")
++    pr = R26.parse_row(rec["suffix_text_raw"], rec["ended_eos"])
++    return pr
++
++
++def collect_direct(rows, recs_by_rid):
++    """rows: 같은 (ckpt,condition)의 4×N 행. returns {id: {target: parse_result}}."""
++    out = {}
++    for row in rows:
++        pr = parsed_for_row(row, recs_by_rid)
++        out.setdefault(row["id"], {})[row["target"]] = pr
++    return out
++
++
++def is_valid(pr):
++    return pr["status"] in ("valid_nonempty", "valid_empty")
++
++
++def eligible_boxes(boxes, target):
++    return [b for b in boxes if R26.quadrant_of(*R26.center_yx(b)) == target]
++
++
++def patient_score(per_target_pred, gt_by_target, thr=IOU_THR):
++    """per_target_pred: {target: [box,...]} (미필터, 요청 조건별 원본 예측). gt_by_target: {target: [box,...]}.
++    returns (S, tp_sum, p_sum, g_sum, per_target_tp)."""
++    tp_sum, p_sum, g_sum = 0, 0, 0
++    detail = {}
++    for t in R26.TARGETS:
++        pred = per_target_pred.get(t, [])
++        gt = gt_by_target.get(t, [])
++        elig = eligible_boxes(pred, t)
++        pairs = M.match(elig, gt, thr)
++        tp = len(pairs)
++        tp_sum += tp
++        p_sum += len(pred)
++        g_sum += len(gt)
++        detail[t] = {"tp": tp, "n_pred": len(pred), "n_gt": len(gt)}
++    s = (2.0 * tp_sum / (p_sum + g_sum)) if (p_sum + g_sum) > 0 else 0.0
++    return s, tp_sum, p_sum, g_sum, detail
++
++
++def q4_select(per_target_pred, gt_by_target):
++    for t in R26.TARGETS:
++        pred = per_target_pred.get(t, [])
++        gt = gt_by_target.get(t, [])
++        elig = eligible_boxes(pred, t)
++        pairs = M.match(elig, gt, IOU_THR)
++        if len(pairs) != len(gt) or len(pred) != len(gt):
++            return False
++    return True
++
++
++def c_query(per_target_pred, gt_by_target, thr=IOU_THR):
++    """permutation π: query t에 원래 target π(t)로 생성된 리스트를 배정한다."""
++    real, _, _, _, _ = patient_score(per_target_pred, gt_by_target, thr)
++    scores = []
++    for perm in PERMS:
++        assign = {t: per_target_pred.get(pt, []) for t, pt in zip(R26.TARGETS, perm)}
++        s, _, _, _, _ = patient_score(assign, gt_by_target, thr)
++        scores.append(s)
++    return real - float(np.mean(scores))
++
++
++def patient_valid(per_target):
++    return len(per_target) == 4 and all(is_valid(per_target[t]) for t in R26.TARGETS)
++
++
++def build_metrics(per_id, gts, patient_ids, donor_map=None):
++    """per_id: {id: {target: parse_result}}. gts: roi23_data GT dict. returns per-patient arrays + detail."""
++    S, Q4, CQ, INVALID = [], [], [], []
++    detail = {}
++    for i in patient_ids:
++        pt = per_id.get(i, {})
++        gt_by_target = D26.partition_gt([b["yxyx_norm"] for b in gts[i]["boxes"]])
++        if not patient_valid(pt):
++            S.append(0.0)
++            Q4.append(0.0)
++            CQ.append(0.0)
++            INVALID.append(True)
++            detail[i] = {"valid": False, "statuses": {t: pt.get(t, {}).get("status") for t in R26.TARGETS}}
++            continue
++        pred_by_t = {t: pt[t]["boxes"] for t in R26.TARGETS}
++        s, tp, p, g, det = patient_score(pred_by_t, gt_by_target)
++        q4 = q4_select(pred_by_t, gt_by_target)
++        cq = c_query(pred_by_t, gt_by_target)
++        S.append(s)
++        Q4.append(1.0 if q4 else 0.0)
++        CQ.append(cq)
++        INVALID.append(False)
++        detail[i] = {"valid": True, "S": s, "Q4": q4, "C_query": cq, "tp": tp, "n_pred": p, "n_gt": g, "per_target": det}
++    out = {"S": np.array(S), "Q4": np.array(Q4), "C_query": np.array(CQ), "invalid": np.array(INVALID)}
++    if donor_map:
++        DS = []
++        for i in patient_ids:
++            donor = donor_map.get(i)
++            if donor is None or not patient_valid(per_id.get(donor, {})):
++                DS.append(float("nan"))
++                continue
++            pred_by_t = {t: per_id[donor][t]["boxes"] for t in R26.TARGETS}
++            gt_by_target = D26.partition_gt([b["yxyx_norm"] for b in gts[i]["boxes"]])
++            s, _, _, _, _ = patient_score(pred_by_t, gt_by_target)
++            DS.append(s)
++        out["donor_S"] = np.array(DS)
++    return out, detail
++
++
++def rule_copy_empty_baseline(source_boxes_by_id, gts, patient_ids):
++    """source_boxes_by_id: {id: (boxes_norm float list or None, status)} (하나의 원본 전체 bbox 출력).
++    returns {name: metrics dict} for rule / copy / empty. status != valid는 invalid로 표시한다."""
++    out = {}
++    for name in ("rule", "copy", "empty"):
++        S, Q4, CQ, INVALID = [], [], [], []
++        detail = {}
++        for i in patient_ids:
++            boxes, status = source_boxes_by_id.get(i, (None, "missing"))
++            gt_by_target = D26.partition_gt([b["yxyx_norm"] for b in gts[i]["boxes"]])
++            if boxes is None:
++                S.append(0.0); Q4.append(0.0); CQ.append(0.0); INVALID.append(True)
++                detail[i] = {"valid": False, "status": status}
++                continue
++            if name == "empty":
++                pred_by_t = {t: [] for t in R26.TARGETS}
++            elif name == "copy":
++                pred_by_t = {t: list(boxes) for t in R26.TARGETS}
++            else:  # rule
++                parts = D26.partition_gt(boxes)
++                pred_by_t = parts
++            s, tp, p, g, det = patient_score(pred_by_t, gt_by_target)
++            q4 = q4_select(pred_by_t, gt_by_target)
++            cq = c_query(pred_by_t, gt_by_target)
++            S.append(s); Q4.append(1.0 if q4 else 0.0); CQ.append(cq); INVALID.append(False)
++            detail[i] = {"valid": True, "S": s, "Q4": q4, "C_query": cq}
++        out[name] = {"S": np.array(S), "Q4": np.array(Q4), "C_query": np.array(CQ), "invalid": np.array(INVALID),
++                     "detail": detail}
++    return out
++
++
++def donor_pairs(patient_ids):
++    """SHA256('iter026-pair-v1|'+id) 순 정렬 후 인접 2명씩 짝짓는다 (홀수면 마지막 1명은 짝 없음)."""
++    ordered = sorted(patient_ids, key=lambda i: hashlib.sha256(("iter026-pair-v1|" + i).encode()).hexdigest())
++    pairs = []
++    for k in range(0, len(ordered) - 1, 2):
++        pairs.append((ordered[k], ordered[k + 1]))
++    donor_map = {}
++    for a, b in pairs:
++        donor_map[a] = b
++        donor_map[b] = a
++    return pairs, donor_map
++
++
++def paired_ci(a, b, seed=26026, B=10000):
++    a = np.asarray(a, float)
++    b = np.asarray(b, float)
++    n = len(a)
++    idx = M.bootstrap_indices(n, B=B, seed=seed)
++    mean_diff, lo, hi = M.paired_boot_ci(a, b, idx)
++    d = a - b
++    return {"mean_diff": mean_diff, "ci_lo": lo, "ci_hi": hi, "n": n, "n_improve": int((d > 0).sum()),
++            "n_worsen": int((d < 0).sum()), "n_same": int((d == 0).sum())}
++
++
++def cluster_paired_ci(diff_by_id, pairs, seed=26026, B=10000):
++    """diff_by_id: {id: real_S - donor_S} (nan 제외하고 넘긴다). pairs: (a,b) 교환 쌍 목록 (cluster 단위).
++    쌍을 통째로 resample하고 그 안의 개인 모두를 포함해 평균 차이의 percentile 95% CI를 구한다."""
++    usable = [(a, b) for a, b in pairs if a in diff_by_id and b in diff_by_id]
++    if not usable:
++        return {"mean_diff": float("nan"), "ci_lo": float("nan"), "ci_hi": float("nan"), "n_pairs": 0, "n_indiv": 0}
++    rng = np.random.default_rng(seed)
++    n = len(usable)
++    all_vals = np.array([diff_by_id[i] for pair in usable for i in pair])
++    mean_diff = float(all_vals.mean())
++    means = []
++    for _ in range(B):
++        idx = rng.integers(0, n, size=n)
++        vals = np.array([diff_by_id[i] for k in idx for i in usable[k]])
++        means.append(vals.mean())
++    means = np.array(means)
++    return {"mean_diff": mean_diff, "ci_lo": float(np.percentile(means, 2.5)), "ci_hi": float(np.percentile(means, 97.5)),
++            "n_pairs": n, "n_indiv": len(all_vals)}
++
++
++def _binom_cdf(k, n, p):
++    from math import comb
++    if p <= 0.0:
++        return 1.0 if k >= 0 else 0.0
++    if p >= 1.0:
++        return 1.0 if k >= n else 0.0
++    return sum(comb(n, i) * p**i * (1 - p) ** (n - i) for i in range(0, k + 1))
++
++
++def _solve_p_for_cdf(target_cdf, k, n, tol=1e-10):
++    lo, hi = 0.0, 1.0
++    for _ in range(100):
++        mid = (lo + hi) / 2.0
++        if _binom_cdf(k, n, mid) > target_cdf:
++            lo = mid
++        else:
++            hi = mid
++        if hi - lo < tol:
++            break
++    return (lo + hi) / 2.0
++
++
++def exact_binom_ci(k, n, alpha=0.05):
++    """Clopper-Pearson exact two-sided CI (scipy 없이 이항 CDF 이분탐색으로 계산)."""
++    if n == 0:
++        return (float("nan"), float("nan"))
++    lo = 0.0 if k == 0 else _solve_p_for_cdf(1 - alpha / 2, k - 1, n)
++    hi = 1.0 if k == n else _solve_p_for_cdf(alpha / 2, k, n)
++    return (float(lo), float(hi))
+diff --git a/rsna_diag/roi26_gen.py b/rsna_diag/roi26_gen.py
+new file mode 100644
+index 0000000..4acdeb4
+--- /dev/null
++++ b/rsna_diag/roi26_gen.py
+@@ -0,0 +1,226 @@
++"""iter_026 전용 생성 worker (roi25_gen.py 기반, 동일 claim/재개/변조 거부 규약)."""
++import argparse
++import glob
++import json
++import os
++import re
++import sys
++import time
++
++from . import generate, roi26_protocol as qa_protocol, roi26_requests as Q, queue_lock
++
++
++class QAError(RuntimeError):
++    pass
++
++
++def read_strict(path, repair_tail=False, tolerate_tail=False):
++    if not os.path.exists(path):
++        return []
++    raw = open(path, "rb").read()
++    lines = raw.split(b"\n")
++    tail = lines[-1]
++    recs = []
++    body = lines[:-1]
++    if tail.strip() and tolerate_tail:
++        pass
++    elif tail.strip():
++        if repair_tail:
++            with open(path + ".partial", "ab") as f:
++                f.write(tail + b"\n")
++            with open(path, "wb") as f:
++                f.write(b"\n".join(body) + (b"\n" if body else b""))
++        else:
++            raise QAError(f"truncated last line (no newline) in {path}; rerun with --repair-tail to quarantine it")
++    for k, ln in enumerate(body):
++        if ln.strip():
++            try:
++                recs.append(json.loads(ln))
++            except ValueError as e:
++                raise QAError(f"corrupt JSON line {k} in {path}") from e
++    return recs
++
++
++def _worker_of(path):
++    m = re.fullmatch(r"gen_worker(\d+)\.jsonl", os.path.basename(path))
++    return int(m.group(1)) if m else None
++
++
++def _has_tail(path):
++    if not os.path.exists(path):
++        return False
++    with open(path, "rb") as f:
++        data = f.read()
++    return bool(data.split(b"\n")[-1].strip())
++
++
++def read_all_owned(out_dir, my_worker, repair, live, info):
++    out = {}
++    for f in sorted(glob.glob(os.path.join(out_dir, "gen_worker*.jsonl"))):
++        w = _worker_of(f)
++        if w == my_worker or not _has_tail(f):
++            out[f] = read_strict(f, repair_tail=repair and w == my_worker and not live)
++            continue
++        lk, _, _ = queue_lock.try_lock(os.path.join(out_dir, f"worker{w}.lock"), info)
++        if lk is None:
++            out[f] = read_strict(f, tolerate_tail=True)
++        else:
++            try:
++                out[f] = read_strict(f, repair_tail=repair and not live, tolerate_tail=live)
++            finally:
++                lk.release()
++    return out
++
++
++def validate_records(files_records, rows, cdig, adapter_digest, protocol_digest, pixel_sha):
++    by = {r["request_id"]: r for r in rows}
++    done = {}
++    for fn, recs in files_records.items():
++        for r in recs:
++            rid = r.get("request_id")
++            row = by.get(rid)
++            if row is None:
++                raise QAError(f"unexpected record {rid} in {fn}: not in current request set")
++            if rid in done:
++                raise QAError(f"duplicate record {rid} in {fn}")
++            for k, want in (("prompt_sha256", row["prompt_sha256"]), ("adapter_digest", adapter_digest),
++                            ("config_digest", cdig), ("protocol_digest", protocol_digest), ("id", row["id"]),
++                            ("condition", row["condition"]), ("checkpoint", row["checkpoint"]),
++                            ("target", row["target"]), ("modality", row["modality"])):
++                if r.get(k) != want:
++                    raise QAError(f"{k} mismatch for {rid} in {fn}: {r.get(k)!r} != {want!r}")
++            if row["modality"] == "image":
++                if r.get("image_file_sha256") != row["file_sha256"]:
++                    raise QAError(f"image_file_sha256 mismatch for {rid} in {fn}")
++                if r.get("input_pixel_sha256") != pixel_sha(row["image"]):
++                    raise QAError(f"input image changed since generation for {rid}")
++            else:
++                if r.get("image") is not None or r.get("image_file_sha256") is not None or r.get("input_pixel_sha256") is not None:
++                    raise QAError(f"text-only record {rid} in {fn} carries image fields")
++            done[rid] = r
++    return done
++
++
++def check_inputs(rows):
++    from . import inputs
++    seen = {}
++    for r in rows:
++        if r["modality"] == "text":
++            if r.get("image") is not None or r.get("file_sha256") is not None or r.get("pixel_sha256") is not None:
++                raise QAError(f"text-only row {r['id']}/{r['request_id']} carries image fields")
++            continue
++        if r["modality"] != "image":
++            raise QAError(f"unknown modality {r['modality']!r} for {r['request_id']}")
++        key = r["image"]
++        if key in seen:
++            continue
++        if generate.sha(open(key, "rb").read()) != r["file_sha256"]:
++            raise QAError(f"file sha changed for {r['id']}")
++        if inputs.raw_pixel_sha(key) != r["pixel_sha256"]:
++            raise QAError(f"pixel sha changed for {r['id']}")
++        seen[key] = 1
++
++
++def main():
++    ap = argparse.ArgumentParser()
++    ap.add_argument("--requests", required=True)
++    ap.add_argument("--out-dir", required=True)
++    ap.add_argument("--worker", type=int, required=True)
++    ap.add_argument("--protocol", required=True)
++    ap.add_argument("--adapter", default=None)
++    ap.add_argument("--time-limit", type=float, default=None)
++    ap.add_argument("--max-requests", type=int, default=None)
++    ap.add_argument("--repair-tail", action="store_true")
++    a = ap.parse_args()
++    pdig = qa_protocol.verify(a.protocol)
++    if json.load(open(a.protocol))["locked"]["files"].get(a.requests) != generate.sha(open(a.requests, "rb").read()):
++        sys.exit(f"request file {a.requests} is not locked in {a.protocol} (or changed)")
++    cfg, _ = qa_protocol.static_cfg()
++    rows = Q.load_rows(a.requests, cfg)
++    if len({(r["checkpoint"], r["adapter_digest"]) for r in rows}) != 1:
++        sys.exit("one run must contain one checkpoint")
++    check_inputs(rows)
++    os.makedirs(a.out_dir, exist_ok=True)
++    info = queue_lock.my_info(worker=a.worker)
++    lk, own, _ = queue_lock.try_lock(os.path.join(a.out_dir, f"worker{a.worker}.lock"), info)
++    if lk is None:
++        sys.exit(f"worker {a.worker} already running: {own}")
++    try:
++        run_worker(a, rows, pdig, cfg, info)
++    finally:
++        lk.release()
++
++
++def run_worker(a, rows, pdig, cfg, info):
++    torch, proc, model = generate.load_model()
++    adapter_digest = generate.load_adapter(torch, model, a.adapter) if a.adapter else None
++    if adapter_digest != rows[0]["adapter_digest"]:
++        raise QAError(f"loaded adapter digest {adapter_digest} != requests {rows[0]['adapter_digest']}")
++    env = generate.env_info(torch, proc, model)
++    cdig, core = generate.config_digest(env, {})
++    if cdig != cfg:
++        raise QAError("runtime generation config digest != protocol config digest")
++    eos = env["eos_token_id"]
++    eos_ids = set(eos if isinstance(eos, list) else [eos])
++    with open(os.path.join(a.out_dir, f"gen_worker{a.worker}.jsonl.env.json"), "w") as f:
++        json.dump({"env": env, "config_digest": cdig, "adapter_digest": adapter_digest, "protocol_digest": pdig,
++                   "worker": a.worker, "requests": a.requests}, f, indent=1, default=str)
++    cache = {}
++
++    def px(path):
++        if path not in cache:
++            cache[path] = generate.load_image(path)[2]
++        return cache[path]
++
++    def read_all(repair, live=False):
++        return read_all_owned(a.out_dir, a.worker, repair, live, info)
++
++    done = validate_records(read_all(a.repair_tail), rows, cdig, adapter_digest, pdig, px)
++    out = os.path.join(a.out_dir, f"gen_worker{a.worker}.jsonl")
++    claim_dir = os.path.join(a.out_dir, "claims")
++    os.makedirs(claim_dir, exist_ok=True)
++    log = open(out + ".log", "a")
++    t0, n_done = time.time(), 0
++    for row in sorted(rows, key=lambda r: r["request_id"]):
++        if row["request_id"] in done:
++            continue
++        if (a.time_limit and time.time() - t0 > a.time_limit) or (a.max_requests is not None and n_done >= a.max_requests):
++            log.write(json.dumps({"event": "stop", "done_this_run": n_done}) + "\n")
++            break
++        clk, prev, reclaimed = queue_lock.try_lock(os.path.join(claim_dir, row["request_id"] + ".claim"), info)
++        if clk is None:
++            continue
++        try:
++            if reclaimed:
++                log.write(json.dumps({"event": "claim_reclaimed_from_dead_owner", "request_id": row["request_id"], "prev_owner": prev}) + "\n")
++            done = validate_records(read_all(False, live=True), rows, cdig, adapter_digest, pdig, px)
++            if row["request_id"] in done:
++                continue
++            try:
++                rec = generate.run_request_modal(torch, proc, model, eos_ids, row)
++            except torch.cuda.OutOfMemoryError as e:
++                log.write(json.dumps({"event": "oom", "request_id": row["request_id"], "err": str(e)[:200]}) + "\n")
++                log.flush()
++                raise
++            rec.update({"request_id": row["request_id"], "split": row["split"], "checkpoint": row["checkpoint"],
++                        "target": row["target"], "condition": row["condition"],
++                        "adapter_digest": adapter_digest, "protocol_digest": pdig, "config_digest": cdig,
++                        "worker": a.worker, "ts": time.time(), "gpu_uuid": env.get("gpu_uuid"), "stage": row["stage"],
++                        "modality": row["modality"]})
++            with open(out, "a") as f:
++                f.write(json.dumps(rec) + "\n")
++                f.flush()
++                os.fsync(f.fileno())
++            done[row["request_id"]] = rec
++            n_done += 1
++            log.write(json.dumps({"event": "done", "request_id": row["request_id"], "n_out": rec["n_output_tokens"], "finish": rec["finish_reason"],
++                                  "runtime_s": round(rec["runtime_s_total"], 2), "peak_gb": round(rec["peak_mem_alloc_gb_max"], 2),
++                                  "elapsed": round(time.time() - t0, 1)}) + "\n")
++            log.flush()
++        finally:
++            clk.release()
++    print(f"worker {a.worker}: finished; {n_done} new requests this run", flush=True)
++
++
++if __name__ == "__main__":
++    main()
+diff --git a/rsna_diag/roi26_protocol.py b/rsna_diag/roi26_protocol.py
+new file mode 100644
+index 0000000..ad94316
+--- /dev/null
++++ b/rsna_diag/roi26_protocol.py
+@@ -0,0 +1,92 @@
++"""iter_026 protocol 잠금 (roi25_protocol.py 기반): 이번 실행이 실제로 import하는 코드와 필요한 source manifest/원시 bbox 파일을 잠근다."""
++import argparse
++import json
++import os
++import sys
++
++from . import generate, lock_protocol
++
++SCHEMA = "iter026_roi26_protocol_v1"
++REQUIRED_CODE = [
++    "rsna_diag/__init__.py", "rsna_diag/geometry.py", "rsna_diag/parse.py", "rsna_diag/metrics.py",
++    "rsna_diag/lora.py", "rsna_diag/generate.py", "rsna_diag/prompts.py", "rsna_diag/queue_lock.py",
++    "rsna_diag/lock_protocol.py", "rsna_diag/inputs.py", "rsna_diag/eval_gate.py", "rsna_diag/qa_spec.py",
++    "rsna_diag/roi23_spec.py", "rsna_diag/roi23_data.py",
++    "rsna_diag/roi26_spec.py", "rsna_diag/roi26_data.py", "rsna_diag/roi26_protocol.py", "rsna_diag/roi26_requests.py",
++    "rsna_diag/roi26_gen.py", "rsna_diag/roi26_run.py", "rsna_diag/roi26_eval.py", "rsna_diag/roi26_decide.py",
++]
++REQUIRED_DATA = [
++    "results/iter_023/manifests/sets.json", "results/iter_023/manifests/labels.json",
++    "results/iter_010/manifests/infer_manifest.jsonl", "results/iter_010/manifests/gt_manifest.json",
++    "results/iter_010/manifests/validation_ids.json",
++    "results/iter_015/manifests/infer_manifest.jsonl", "results/iter_015/manifests/labels.json",
++    "results/iter_015/manifests/sets.json",
++    "results/iter_009/source/official/cxr_anatomy_localization_with_hugging_face.ipynb",
++]
++
++
++def static_cfg():
++    d, core = generate.config_digest(generate.static_env(), {})
++    return d, core
++
++
++def current(extra=()):
++    files = list(REQUIRED_CODE) + list(REQUIRED_DATA) + list(extra)
++    missing = [f for f in files if not os.path.isfile(f)]
++    if missing:
++        raise RuntimeError(f"required protocol files missing: {missing}")
++    d, core = static_cfg()
++    return {"schema": SCHEMA, "files": {f: lock_protocol.sha(f) for f in files},
++            "generation_config_digest": d, "generation_config": core}
++
++
++def create(out, extra=(), note=""):
++    if os.path.exists(out):
++        raise RuntimeError(f"protocol exists (not overwriting): {out}")
++    cur = current(extra)
++    os.makedirs(os.path.dirname(out) or ".", exist_ok=True)
++    json.dump({"locked": cur, "note": note}, open(out, "w"), indent=1, default=str)
++    return lock_protocol.locked_digest(cur)
++
++
++def verify(path, allowed_edits=None):
++    if not path or not os.path.exists(path):
++        raise RuntimeError(f"protocol file missing: {path!r}")
++    old = json.load(open(path))
++    lk = old["locked"]
++    if lk.get("schema") != SCHEMA:
++        raise RuntimeError(f"protocol schema {lk.get('schema')!r} != {SCHEMA}")
++    missing_req = [f for f in list(REQUIRED_CODE) + list(REQUIRED_DATA) if f not in lk["files"]]
++    if missing_req:
++        raise RuntimeError(f"protocol does not lock required files: {missing_req}")
++    extra = [f for f in lk["files"] if f not in list(REQUIRED_CODE) + list(REQUIRED_DATA)]
++    cur = current(extra)
++    allowed_edits = allowed_edits or {}
++    diff = {}
++    for k, v in cur["files"].items():
++        if lk["files"].get(k) == v:
++            continue
++        e = allowed_edits.get(k)
++        if e and e.get("reason") and e.get("before") == lk["files"].get(k) and e.get("after") == v:
++            continue
++        diff[k] = (lk["files"].get(k), v)
++    if diff or lk["generation_config_digest"] != cur["generation_config_digest"]:
++        raise RuntimeError("LOCK MISMATCH " + json.dumps(diff, indent=1)[:2000])
++    return lock_protocol.locked_digest(lk)
++
++
++def locked_file_sha(path, f):
++    return json.load(open(path))["locked"]["files"].get(f)
++
++
++def main():
++    ap = argparse.ArgumentParser()
++    ap.add_argument("--out", required=True)
++    ap.add_argument("--extra", nargs="*", default=[])
++    ap.add_argument("--note", default="")
++    a = ap.parse_args()
++    print("locked", a.out, create(a.out, a.extra, a.note))
++
++
++if __name__ == "__main__":
++    sys.exit(main())
+diff --git a/rsna_diag/roi26_requests.py b/rsna_diag/roi26_requests.py
+new file mode 100644
+index 0000000..9d77a62
+--- /dev/null
++++ b/rsna_diag/roi26_requests.py
+@@ -0,0 +1,168 @@
++"""iter_026 요청 행렬 빌더: V(direct)/O(oracle, D전용)/RD(reader, M0전용)/text-only(D전용).
++
++request_id는 stage를 포함하지 않는다 (roi25_requests와 동일한 설계): 같은 (checkpoint, target, condition, id, prompt)
++조합이면 E60/E200처럼 서로 다른 stage에서도 같은 request_id를 가져 생성 출력을 그대로 재사용할 수 있다.
++"""
++import json
++import os
++
++from . import generate, prompts as P, roi23_spec as R, roi26_spec as R26
++
++OUT = os.environ.get("ROI26_RUN_ROOT", "results/iter_026")
++CKPT_SPEC = {"M0": None, "B0": "results/iter_012/train/lr2e-4_s17/epoch_05",
++             "B29": "results/iter_012/train/lr2e-4_s29/epoch_05", "B43": "results/iter_012/train/lr2e-4_s43/epoch_05"}
++ID_FIELDS = ("model_revision", "adapter_digest", "id", "split", "modality", "file_sha256", "pixel_sha256", "target",
++             "condition", "prompt_sha256", "config_digest", "preprocess")
++
++
++class RequestError(RuntimeError):
++    pass
++
++
++def compute_id(row):
++    return R.request_key({k: row.get(k) for k in ID_FIELDS})
++
++
++def make_row(item_id, split, ckpt, adapter_digest, target, condition, prompt, cfg_digest, stage, modality,
++             image_fields=None, extra=None):
++    row = {"id": item_id, "split": split, "checkpoint": ckpt, "adapter_digest": adapter_digest, "target": target,
++           "condition": condition, "prompt": prompt, "prompt_sha256": P.digest(prompt),
++           "model_revision": generate.MODEL_REVISION, "config_digest": cfg_digest,
++           "preprocess": generate.PREPROC_VERSION, "stage": stage, "modality": modality}
++    if modality == "image":
++        row.update({"image": image_fields["image"], "file_sha256": image_fields["file_sha256"],
++                    "pixel_sha256": image_fields["pixel_sha256"]})
++    else:
++        row.update({"image": None, "file_sha256": None, "pixel_sha256": None})
++    if extra:
++        row["extra"] = extra
++    row["request_id"] = compute_id(row)
++    return row
++
++
++def verify_row(row, cfg_digest):
++    if row.get("prompt_sha256") != P.digest(row["prompt"]):
++        raise RequestError(f"prompt_sha256 mismatch for {row.get('request_id')}")
++    if row.get("config_digest") != cfg_digest:
++        raise RequestError(f"config_digest mismatch for {row.get('request_id')}")
++    if row.get("model_revision") != generate.MODEL_REVISION:
++        raise RequestError("model revision differs")
++    if row.get("request_id") != compute_id(row):
++        raise RequestError(f"request_id != recomputed for {row.get('request_id')}")
++    if row["modality"] == "text" and (row.get("image") is not None or row.get("file_sha256") is not None):
++        raise RequestError(f"text-only row {row.get('request_id')} carries image fields")
++    if row["modality"] == "image" and row.get("image") is None:
++        raise RequestError(f"image row {row.get('request_id')} missing image field")
++    return True
++
++
++def load_rows(path, cfg_digest=None):
++    rows = [json.loads(ln) for ln in open(path) if ln.strip()]
++    ids = [r["request_id"] for r in rows]
++    if len(set(ids)) != len(ids):
++        raise RequestError(f"duplicate request_id in {path}")
++    if cfg_digest:
++        for r in rows:
++            verify_row(r, cfg_digest)
++    return rows
++
++
++def checkpoints(ckpts, out=None):
++    import torch
++    from . import eval_gate
++    out = out or f"{OUT}/manifests/checkpoints.json"
++    tab = json.load(open(out)) if os.path.exists(out) else {}
++    changed = False
++    for k in ckpts:
++        if k in tab:
++            continue
++        d = CKPT_SPEC[k]
++        if d is None:
++            tab[k] = {"dir": None, "digest": None}
++        else:
++            b = torch.load(os.path.join(d, "adapter.pt"), map_location="cpu", weights_only=True)
++            tab[k] = {"dir": d, "digest": eval_gate.adapter_digest(d), "epoch": b.get("epoch"), "step": b.get("step"),
++                      "train_digest": b.get("train_digest"), "lora": b["config"]}
++        changed = True
++    if changed:
++        os.makedirs(os.path.dirname(out), exist_ok=True)
++        tmp = out + ".tmp"
++        json.dump(tab, open(tmp, "w"), indent=1)
++        os.replace(tmp, out)
++    return tab
++
++
++def _img_fields(item):
++    return {"image": item["image"], "file_sha256": item["file_sha256"], "pixel_sha256": item["pixel_sha256"]}
++
++
++def build_v(items, tab, cfg, ckpts, stage):
++    out = {}
++    for ckpt in ckpts:
++        ad = tab[ckpt]["digest"]
++        rows = []
++        for i in sorted(items):
++            for t in R26.TARGETS:
++                txt = R26.v_prompt(t)
++                rows.append(make_row(i, items[i]["split"], ckpt, ad, t, "V", txt, cfg, stage, "image",
++                                     _img_fields(items[i])))
++        out[ckpt] = rows
++    return out
++
++
++def build_o(items, gts, tab, cfg, ckpts, stage="D"):
++    out = {}
++    for ckpt in ckpts:
++        ad = tab[ckpt]["digest"]
++        rows = []
++        for i in sorted(items):
++            boxes_f = sorted([b["yxyx_norm"] for b in gts[i]["boxes"]], key=lambda b: json.dumps(b))
++            boxes_i = R26.boxes_int(boxes_f)
++            for t in R26.TARGETS:
++                txt = R26.o_prompt(t, boxes_i)
++                rows.append(make_row(i, items[i]["split"], ckpt, ad, t, "O", txt, cfg, stage, "image",
++                                     _img_fields(items[i]), extra={"gt_boxes_int": boxes_i}))
++        out[ckpt] = rows
++    return out
++
++
++def build_rd(items, proposals, tab, cfg, stage, ckpt="M0"):
++    """proposals: {id: (boxes_norm_float or None, status)}. status != valid면 그 환자는 건너뛰고 unavailable로 기록."""
++    ad = tab[ckpt]["digest"]
++    rows, unavailable = [], []
++    for i in sorted(items):
++        boxes_f, status = proposals.get(i, (None, "missing"))
++        if boxes_f is None:
++            unavailable.append({"id": i, "status": status})
++            continue
++        boxes_i = R26.boxes_int(boxes_f)
++        for t in R26.TARGETS:
++            txt = R26.rd_prompt(t, boxes_i)
++            rows.append(make_row(i, items[i]["split"], ckpt, ad, t, "RD", txt, cfg, stage, "image",
++                                 _img_fields(items[i]), extra={"proposal_boxes_int": boxes_i,
++                                                                "proposal_status": status}))
++    return rows, unavailable
++
++
++def build_text(tab, cfg, ckpts, stage="D"):
++    out = {}
++    for ckpt in ckpts:
++        ad = tab[ckpt]["digest"]
++        rows = []
++        for t in R26.TARGETS:
++            txt = R26.v_prompt(t)
++            rows.append(make_row("control_text", "control", ckpt, ad, t, "V_TEXT", txt, cfg, stage, "text"))
++        out[ckpt] = rows
++    return out
++
++
++def write_rows(name, rows, out_dir=None):
++    out_dir = out_dir or f"{OUT}/requests"
++    os.makedirs(out_dir, exist_ok=True)
++    p = f"{out_dir}/{name}.jsonl"
++    if os.path.exists(p):
++        raise RequestError(f"{p} exists (not overwriting)")
++    with open(p, "w") as f:
++        for r in rows:
++            f.write(json.dumps(r) + "\n")
++    return p
+diff --git a/rsna_diag/roi26_run.py b/rsna_diag/roi26_run.py
+new file mode 100644
+index 0000000..082c8e7
+--- /dev/null
++++ b/rsna_diag/roi26_run.py
+@@ -0,0 +1,255 @@
++"""iter_026 stage 실행기 (roi25_run.py 기반). 요청 jsonl 파일 목록(각 파일은 단일 checkpoint)을 순차 처리한다.
++사용: python -m rsna_diag.roi26_run --jobs f1.jsonl,f2.jsonl --protocol P --workers 2 --peak-gb 10
++"""
++import argparse
++import glob
++import signal
++import json
++import os
++import subprocess
++import sys
++import time
++
++from . import eval_gate, generate, roi26_gen as qa_gen, roi26_protocol as qa_protocol, roi26_requests as Q, queue_lock
++
++MIB_PER_GIB = 1024
++
++
++class GpuError(RuntimeError):
++    pass
++
++
++def atomic_json(obj, path):
++    tmp = path + ".tmp"
++    with open(tmp, "w") as f:
++        json.dump(obj, f, indent=1, default=str)
++        f.flush()
++        os.fsync(f.fileno())
++    os.replace(tmp, path)
++
++
++def allowed_gpus():
++    raw = os.environ.get("CUDA_VISIBLE_DEVICES")
++    if not raw:
++        raise GpuError("CUDA_VISIBLE_DEVICES not set (allowed GPU set unknown)")
++    try:
++        return [int(x) for x in raw.split(",")]
++    except ValueError:
++        raise GpuError(f"non-integer CUDA_VISIBLE_DEVICES {raw!r}")
++
++
++def query_gpus(idx):
++    r = subprocess.run(["nvidia-smi", "--query-gpu=index,uuid,memory.used,memory.total", "--format=csv,noheader,nounits"],
++                       capture_output=True, text=True)
++    if r.returncode != 0:
++        raise GpuError(f"nvidia-smi failed rc={r.returncode}: {r.stderr[:200]}")
++    rows = {}
++    try:
++        for ln in r.stdout.strip().splitlines():
++            i, u, mu, mt = [x.strip() for x in ln.split(",")]
++            rows[int(i)] = {"uuid": u, "used_mib": int(mu), "total_mib": int(mt)}
++    except ValueError as e:
++        raise GpuError(f"cannot parse nvidia-smi output: {r.stdout[:200]}") from e
++    missing = [i for i in idx if i not in rows]
++    if missing:
++        raise GpuError(f"gpus {missing} not reported by nvidia-smi")
++    return {i: rows[i] for i in idx}
++
++
++def plan_gpus(gpus, workers, peak_gb, allowed, snapshot):
++    if not gpus or not set(gpus) <= set(allowed):
++        raise GpuError(f"gpus {gpus} not within allowed {allowed}")
++    assign = [(k, gpus[k % len(gpus)]) for k in range(workers)]
++    for g in gpus:
++        n = sum(1 for _, x in assign if x == g)
++        need = n * (peak_gb + 2.0) * MIB_PER_GIB
++        free = snapshot[g]["total_mib"] - snapshot[g]["used_mib"]
++        if n and need > free:
++            raise GpuError(f"gpu {g}: {n} workers x ({peak_gb}+2) GiB = {need:.0f} MiB > free {free} MiB")
++    return assign
++
++
++def live_workers(out_dir):
++    live = []
++    for f in sorted(glob.glob(os.path.join(out_dir, "worker*.lock"))):
++        fd = os.open(f, os.O_RDWR)
++        try:
++            import fcntl
++            try:
++                fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
++            except BlockingIOError:
++                live.append((f, queue_lock._read(fd)))
++                continue
++            fcntl.flock(fd, fcntl.LOCK_UN)
++        finally:
++            os.close(fd)
++    return live
++
++
++def stop_children(procs, grace=60.0):
++    for p in procs:
++        if p.poll() is None:
++            p.terminate()
++    t0 = time.time()
++    while time.time() - t0 < grace and any(p.poll() is None for p in procs):
++        time.sleep(0.5)
++    for p in procs:
++        if p.poll() is None:
++            p.kill()
++    for p in procs:
++        p.wait()
++    return [{"pid": p.pid, "returncode": p.returncode} for p in procs]
++
++
++def verify_job(out_dir, rows, cfg, pdig, adapter_dir):
++    qa_gen.check_inputs(rows)
++    adg = eval_gate.adapter_digest(adapter_dir) if adapter_dir else None
++    if adg != rows[0]["adapter_digest"]:
++        raise qa_gen.QAError(f"adapter digest {adg} != requests {rows[0]['adapter_digest']}")
++    files = {f: qa_gen.read_strict(f) for f in sorted(glob.glob(os.path.join(out_dir, "gen_worker*.jsonl")))}
++    cache = {}
++    px = lambda p: cache.setdefault(p, generate.load_image(p)[2])
++    done = qa_gen.validate_records(files, rows, cfg, adg, pdig, px)
++    missing = [r["request_id"] for r in rows if r["request_id"] not in done]
++    return done, missing
++
++
++class _Term(BaseException):
++    pass
++
++
++def _on_term(signum, frame):
++    raise _Term(f"signal {signum}")
++
++
++def run_one(rp, protocol, workers, gpus_arg, peak_gb, allowed, out_root, max_requests=None, time_limit=None,
++            repair_tail=False, poll_s=20.0):
++    pdig = qa_protocol.verify(protocol)
++    cfg, _ = qa_protocol.static_cfg()
++    rows = Q.load_rows(rp, cfg)
++    if json.load(open(protocol))["locked"]["files"].get(rp) != generate.sha(open(rp, "rb").read()):
++        raise RuntimeError(f"{rp} not locked in {protocol}")
++    ckpt = rows[0]["checkpoint"]
++    tab = Q.checkpoints([ckpt])
++    adapter = tab[ckpt]["dir"]
++    name = os.path.splitext(os.path.basename(rp))[0]
++    out_dir = f"{out_root}/gen/{name}"
++    os.makedirs(out_dir, exist_ok=True)
++    cp = os.path.join(out_dir, "completion.json")
++    if os.path.exists(cp):
++        done, missing = verify_job(out_dir, rows, cfg, pdig, adapter)
++        c = json.load(open(cp))
++        ok_c = (not missing and c.get("protocol_digest") == pdig and c.get("n_expected") == len(rows)
++                and c.get("n_actual_unique") == len(rows) and c.get("n_missing") == 0 and c.get("n_duplicate") == 0
++                and bool(c.get("returncodes")) and all(x == 0 for x in c["returncodes"]))
++        if ok_c:
++            print(f"[{name}] already complete & re-verified ({len(rows)} requests); skip", flush=True)
++            return {"name": name, "status": "verified_complete", "n": len(rows)}
++    alive = live_workers(out_dir)
++    if alive:
++        raise RuntimeError(f"live worker(s) still own {out_dir}: {alive} (parent was killed?). Wait for/stop them, then rerun.")
++    gpus = [int(x) for x in gpus_arg.split(",")] if gpus_arg else allowed
++    snap = query_gpus(gpus)
++    assign = plan_gpus(gpus, workers, peak_gb, allowed, snap)
++    info = queue_lock.my_info(role="roi26_run")
++    rlk, own, _ = queue_lock.try_lock(os.path.join(out_dir, "run.lock"), info)
++    if rlk is None:
++        raise RuntimeError(f"another roi26_run owns {out_dir}: {own}")
++    aid = f"{time.strftime('%Y%m%d_%H%M%S')}_{os.getpid()}"
++    att_dir = os.path.join(out_dir, "attempts")
++    os.makedirs(att_dir, exist_ok=True)
++    att_path = os.path.join(att_dir, f"attempt_{aid}.json")
++    att = {"attempt_id": aid, "status": "running", "pid": os.getpid(), "t_start": time.time(), "workers": workers,
++           "assign_worker_gpu": assign, "gpu_uuid": {g: snap[g]["uuid"] for g in gpus}, "peak_gb_assumed": peak_gb,
++           "gpu_snapshot_before": snap, "allowed": allowed}
++    procs = []
++    try:
++        if os.path.exists(cp):
++            os.replace(cp, os.path.join(att_dir, f"completion_superseded_by_{aid}.json"))
++        atomic_json(att, att_path)
++        for k, g in assign:
++            cmd = [sys.executable, "-m", "rsna_diag.roi26_gen", "--requests", rp, "--out-dir", out_dir, "--worker", str(k),
++                   "--protocol", protocol]
++            if adapter:
++                cmd += ["--adapter", adapter]
++            if max_requests is not None:
++                cmd += ["--max-requests", str(max_requests)]
++            if time_limit:
++                cmd += ["--time-limit", str(time_limit)]
++            if repair_tail:
++                cmd += ["--repair-tail"]
++            env = dict(os.environ, CUDA_VISIBLE_DEVICES=str(g), CUDA_DEVICE_ORDER="PCI_BUS_ID")
++            procs.append(subprocess.Popen(cmd, env=env, stdout=open(f"{out_dir}/worker{k}.stdout.log", "a"),
++                                          stderr=open(f"{out_dir}/worker{k}.stderr.log", "a")))
++        att["children"] = [{"pid": p.pid, "start": queue_lock.proc_start(p.pid), "worker": k, "gpu": g} for p, (k, g) in zip(procs, assign)]
++        atomic_json(att, att_path)
++        t0 = time.time()
++        rl = open(f"{out_dir}/resource_log.jsonl", "a")
++        while any(p.poll() is None for p in procs):
++            try:
++                q = query_gpus(gpus)
++                apps = subprocess.run(["nvidia-smi", "--query-compute-apps=gpu_uuid,pid,used_memory", "--format=csv,noheader,nounits"],
++                                      capture_output=True, text=True).stdout.strip().splitlines()
++            except GpuError as e:
++                q, apps = {"error": str(e)}, []
++            rl.write(json.dumps({"t": time.time() - t0, "gpus": q, "apps": apps}) + "\n")
++            rl.flush()
++            time.sleep(poll_s)
++        codes = [p.returncode for p in procs]
++        wall = time.time() - t0
++        err = None
++        try:
++            done, missing = verify_job(out_dir, rows, cfg, pdig, adapter)
++        except (qa_gen.QAError, eval_gate.GateError) as e:
++            done, missing, err = {}, [r["request_id"] for r in rows], str(e)[:500]
++        per_file = {os.path.basename(f): len(qa_gen.read_strict(f)) for f in sorted(glob.glob(f"{out_dir}/gen_worker*.jsonl"))}
++        rep = {"name": name, "n_expected": len(rows), "n_actual_unique": len(done), "n_missing": len(missing),
++               "n_duplicate": 0, "n_extra": 0, "returncodes": codes, "wall_s": wall, "per_file": per_file, "protocol_digest": pdig,
++               "adapter_digest": rows[0]["adapter_digest"], "worker_gpu": assign, "gpu_uuid": att["gpu_uuid"], "verify_error": err,
++               "requests": rp, "requests_sha256": generate.sha(open(rp, "rb").read()), "config_digest": cfg, "attempt_id": aid}
++        atomic_json(rep, f"{out_dir}/last_run.json")
++        ok = not missing and err is None and all(c == 0 for c in codes)
++        att.update({"status": "complete" if ok else "failed_or_incomplete", "returncodes": codes, "t_end": time.time(), "report": rep})
++        atomic_json(att, att_path)
++        if ok:
++            atomic_json(rep, cp)
++        print(f"[{name}] rc={codes} wall={wall:.0f}s n={len(done)}/{len(rows)} ok={ok}", flush=True)
++        return {"name": name, "status": "complete" if ok else "FAILED", "n": len(done), "of": len(rows), "wall_s": wall,
++                "rc": codes, "missing": len(missing), "err": err}
++    finally:
++        stopped = stop_children(procs) if any(p.poll() is None for p in procs) else [{"pid": p.pid, "returncode": p.returncode} for p in procs]
++        if att["status"] == "running":
++            att.update({"status": "interrupted", "t_end": time.time(), "children_final": stopped})
++            try:
++                atomic_json(att, att_path)
++            except OSError:
++                pass
++        rlk.release()
++
++
++def main():
++    signal.signal(signal.SIGTERM, _on_term)
++    ap = argparse.ArgumentParser()
++    ap.add_argument("--jobs", required=True, help="comma-separated request jsonl paths")
++    ap.add_argument("--protocol", required=True)
++    ap.add_argument("--workers", type=int, required=True)
++    ap.add_argument("--gpus", default=None)
++    ap.add_argument("--peak-gb", type=float, required=True)
++    ap.add_argument("--max-requests", type=int, default=None)
++    ap.add_argument("--time-limit", type=float, default=None)
++    ap.add_argument("--repair-tail", action="store_true")
++    ap.add_argument("--poll-s", type=float, default=20.0)
++    ap.add_argument("--out-root", default=Q.OUT)
++    a = ap.parse_args()
++    allowed = allowed_gpus()
++    summary = []
++    for rp in a.jobs.split(","):
++        res = run_one(rp, a.protocol, a.workers, a.gpus, a.peak_gb, allowed, a.out_root, a.max_requests, a.time_limit,
++                      a.repair_tail, a.poll_s)
++        summary.append(res)
++    print(json.dumps(summary))
++    sys.exit(0 if all(s["status"] in ("complete", "verified_complete") for s in summary) else 2)
++
++
++if __name__ == "__main__":
++    main()
+diff --git a/rsna_diag/roi26_spec.py b/rsna_diag/roi26_spec.py
+new file mode 100644
+index 0000000..89bd536
+--- /dev/null
++++ b/rsna_diag/roi26_spec.py
+@@ -0,0 +1,87 @@
++"""iter_026 영역 선택 진단의 질문·prompt·parser (결과를 보기 전에 고정).
++
++TL/TR/BL/BR 사분면 기하와 strict bbox parser(parse.py)는 그대로 재사용한다. 세 조건을 정의한다.
++- V (direct): 원본 영상만 보고 지정 사분면의 opacity bbox를 반환한다.
++- O (oracle, D 전용): 원본 영상 + GT box 전체 목록(참조)을 주고 그 목록에서만 고르게 한다.
++- RD (reader): 원본 영상 + B0 예측 bbox 전체 목록(불완전할 수 있는 proposal)을 주고 영상 근거 수정을 허용한다.
++직접 prompt는 하나의 템플릿에서 quadrant/condition만 치환한다 (계획 원문 그대로).
++"""
++import json
++
++from . import parse as PA
++from . import roi23_spec as R
++
++TARGETS = R.TARGETS
++QUADRANT_NAME = R.QUADRANT_NAME
++CONDITION_EXPR = {"TL": "cy<500 and cx<500", "TR": "cy<500 and cx>=500", "BL": "cy>=500 and cx<500",
++                  "BR": "cy>=500 and cx>=500"}
++
++V_TMPL = ('Localize all pulmonary opacities suspicious for pneumonia whose bounding-box centers are in the '
++          '{quadrant} quadrant of this chest radiograph. Divide the displayed image at its horizontal and vertical '
++          'midlines. Left and right refer to the displayed image, not the patient\'s sides. For a box [y_min, '
++          'x_min, y_max, x_max], its center is cy=(y_min+y_max)/2 and cx=(x_min+x_max)/2. The requested quadrant '
++          'satisfies {condition}. Return only a JSON list. Each entry must contain "box_2d": [y_min, x_min, y_max, '
++          'x_max] and a nonempty "label" string. Coordinates must be between 0 and 1000 relative to the entire '
++          'square-padded image, with y before x. Return the full enclosing boxes; do not clip boxes to the '
++          'quadrant. Exclude opacities centered in other quadrants. Return [] if no such opacity is visible in the '
++          'requested quadrant.')
++
++O_TMPL = ('Supplied annotation list (reference; all pulmonary opacities suspicious for pneumonia found in this '
++          'chest radiograph), JSON list of boxes [y_min, x_min, y_max, x_max] integers on a 0-1000 canvas: '
++          '{list_json}\n\nUse only the supplied annotation list to answer; do not re-detect, replace, or modify '
++          'it. Divide the displayed image at its horizontal and vertical midlines. Left and right refer to the '
++          'displayed image, not the patient\'s sides. For a box [y_min, x_min, y_max, x_max], its center is '
++          'cy=(y_min+y_max)/2 and cx=(x_min+x_max)/2. Select the entries from the supplied list whose center '
++          'satisfies {condition} ({quadrant} quadrant). Return only a JSON list containing the selected entries, '
++          'unchanged, each with its original "box_2d" and a nonempty "label" string. Return [] if none of the '
++          'supplied boxes has its center in the requested quadrant.')
++
++RD_TMPL = ('Supplied proposal (from a separate automated localization pass on this image; may be incomplete, may '
++           'contain errors, or may be empty), JSON list of boxes [y_min, x_min, y_max, x_max] integers on a '
++           '0-1000 canvas: {list_json}\n\nUsing the image, correct, add, or remove entries as needed to find all '
++           'pulmonary opacities suspicious for pneumonia whose bounding-box centers are in the {quadrant} '
++           'quadrant of this chest radiograph. Divide the displayed image at its horizontal and vertical '
++           'midlines. Left and right refer to the displayed image, not the patient\'s sides. For a box [y_min, '
++           'x_min, y_max, x_max], its center is cy=(y_min+y_max)/2 and cx=(x_min+x_max)/2. The requested quadrant '
++           'satisfies {condition}. Return only a JSON list. Each entry must contain "box_2d": [y_min, x_min, '
++           'y_max, x_max] and a nonempty "label" string. Coordinates must be between 0 and 1000 relative to the '
++           'entire square-padded image, with y before x. Return the full enclosing boxes; do not clip boxes to '
++           'the quadrant. Exclude opacities centered in other quadrants. Return [] if no such opacity is visible '
++           'in the requested quadrant.')
++
++CONDITIONS = ("V", "O", "RD")
++
++
++class SpecError(RuntimeError):
++    pass
++
++
++def boxes_int(boxes_norm):
++    return [[int(round(v)) for v in b] for b in boxes_norm]
++
++
++def v_prompt(target):
++    return V_TMPL.format(quadrant=QUADRANT_NAME[target], condition=CONDITION_EXPR[target])
++
++
++def o_prompt(target, gt_boxes_i):
++    lst = json.dumps(gt_boxes_i, separators=(",", ":"))
++    return O_TMPL.format(list_json=lst, quadrant=QUADRANT_NAME[target], condition=CONDITION_EXPR[target])
++
++
++def rd_prompt(target, proposal_boxes_i):
++    lst = json.dumps(proposal_boxes_i, separators=(",", ":"))
++    return RD_TMPL.format(list_json=lst, quadrant=QUADRANT_NAME[target], condition=CONDITION_EXPR[target])
++
++
++def parse_row(raw_suffix, ended_eos):
++    """parse.py의 strict bbox parser를 그대로 사용. returns dict(status, boxes, labels, problems, flags)."""
++    return PA.parse_response(raw_suffix, ended_eos)
++
++
++center_yx = R.center_yx
++quadrant_of = R.quadrant_of
++margin_ok = R.margin_ok
++answers = R.answers
++sha = R.sha
++request_key = R.request_key
+diff --git a/sanity_iter026.py b/sanity_iter026.py
+new file mode 100644
+index 0000000..a5e5dc7
+--- /dev/null
++++ b/sanity_iter026.py
+@@ -0,0 +1,91 @@
++"""iter_026 GPU 실행 전 sanity: (1) 독립 경로(tokenizer.apply_chat_template + processor.__call__)로 구성한 tensor를
++generate.build_inputs와 대조 (2) B0 adapter digest 확인 (3) V/O/RD 8건 재생성 결정성 sanity (D 생성 후 실행).
++사용: python sanity_iter026.py pre   (D 생성 전: tensor/adapter만)
++     python sanity_iter026.py post  (D 생성 후: 8건 재생성 대조 추가)
++"""
++import glob
++import json
++import os
++import sys
++
++from rsna_diag import generate as G, roi23_data as D, roi23_spec as R, roi26_spec as R26, roi26_requests as Q
++
++out = {"checks": []}
++
++
++def add(name, ok, detail=None):
++    out["checks"].append({"name": name, "pass": bool(ok), "detail": detail})
++    print(("PASS" if ok else "FAIL"), name)
++
++
++mode = sys.argv[1] if len(sys.argv) > 1 else "pre"
++
++items, gts = D.load_val_pool()
++d24, counts = D.select_d24(items, gts)
++
++torch, proc, model = G.load_model()
++env = G.env_info(torch, proc, model)
++eos_ids = set(env["eos_token_id"] if isinstance(env["eos_token_id"], list) else [env["eos_token_id"]])
++
++pid = d24[0]
++img, aff, px = G.load_image(items[pid]["image"])
++prompt = R26.v_prompt("TL")
++
++inp_a = G.build_inputs(proc, img, prompt)
++
++msgs = [{"role": "user", "content": [{"type": "image", "image": img}, {"type": "text", "text": prompt}]}]
++text_b = proc.tokenizer.apply_chat_template(msgs, tokenize=False, add_generation_prompt=True)
++inp_b = proc(text=text_b, images=[img], return_tensors="pt", add_special_tokens=False)
++
++keys_common = sorted(set(inp_a.keys()) & set(inp_b.keys()))
++add("independent_tensor_keys_overlap_nonempty", len(keys_common) > 0, keys_common)
++for k in keys_common:
++    same_shape = tuple(inp_a[k].shape) == tuple(inp_b[k].shape)
++    same_val = same_shape and bool((inp_a[k] == inp_b[k]).all())
++    add(f"independent_tensor_match_{k}", same_val,
++        {"shape_a": list(inp_a[k].shape), "shape_b": list(inp_b[k].shape)})
++
++adg = G.load_adapter(torch, model, "results/iter_012/train/lr2e-4_s17/epoch_05")
++add("B0_adapter_digest_matches_pinned", adg == "e13f3c4461b826a060c90dfe4e4ee4c2ebac36a08f84be1a45a37495816cec11", adg)
++
++if mode == "post":
++    import hashlib
++    rows = []
++    for name in ("D_V__M0", "D_V__B0", "D_O__M0", "D_O__B0"):
++        rs = Q.load_rows(f"results/iter_026/requests/{name}.jsonl")
++        rows += rs
++    rows.sort(key=lambda r: (r["checkpoint"], r["request_id"]))
++    m0_rows = [r for r in rows if r["checkpoint"] == "M0"]
++    b0_rows = [r for r in rows if r["checkpoint"] == "B0"]
++    probe = m0_rows[:4] + b0_rows[:4]
++    gen_dirs = {"M0": None, "B0": "results/iter_012/train/lr2e-4_s17/epoch_05"}
++    stored = {}
++    for name in ("D_V__M0", "D_V__B0", "D_O__M0", "D_O__B0"):
++        for f in sorted(glob.glob(f"results/iter_026/gen/{name}/gen_worker*.jsonl")):
++            for ln in open(f):
++                if ln.strip():
++                    r = json.loads(ln)
++                    stored[r["request_id"]] = r
++    cur_adapter = None
++    for row in probe:
++        want_adapter = gen_dirs[row["checkpoint"]]
++        if want_adapter != cur_adapter and want_adapter:
++            G.load_adapter(torch, model, want_adapter)
++            cur_adapter = want_adapter
++        img2, _, _ = G.load_image(row["image"])
++        rec = G.run_request(torch, proc, model, eos_ids, {"id": row["id"], "image": row["image"],
++                                                           "file_sha256": row["file_sha256"]},
++                             row["condition"], row["prompt"])
++        old = stored.get(row["request_id"])
++        if old is None:
++            add(f"regen_{row['request_id']}_has_stored", False, row["request_id"])
++            continue
++        match = rec["suffix_ids"] == old["suffix_ids"] and rec["ended_eos"] == old["ended_eos"]
++        add(f"regen_{row['request_id']}_matches_stored", match,
++            {"ckpt": row["checkpoint"], "cond": row["condition"], "target": row["target"]})
++
++os.makedirs("results/iter_026/sanity", exist_ok=True)
++out["n"] = len(out["checks"])
++out["n_pass"] = sum(1 for c in out["checks"] if c["pass"])
++json.dump(out, open(f"results/iter_026/sanity/sanity_{mode}.json", "w"), indent=1, default=str)
++print(f"{out['n_pass']}/{out['n']} passed")
+diff --git a/throughput_iter026.py b/throughput_iter026.py
+new file mode 100644
+index 0000000..3e2c9c6
+--- /dev/null
++++ b/throughput_iter026.py
+@@ -0,0 +1,49 @@
++"""iter_026 D 처리량 비교: 같은 24요청 부분집합을 2 worker(1/GPU)와 4 worker(2/GPU)로 비교한다 (계상 외, throughput probe).
++사용: python throughput_iter026.py {2w|4w}
++"""
++import json
++import os
++import subprocess
++import sys
++import time
++
++from rsna_diag import roi26_requests as Q, roi26_protocol as P
++
++mode = sys.argv[1]
++n_workers = 2 if mode == "2w" else 4
++gpus = [0, 1]
++
++rows_all = Q.load_rows("results/iter_026/requests/D_V__M0.jsonl")
++rows_all += Q.load_rows("results/iter_026/requests/D_O__M0.jsonl")
++rows = sorted(rows_all, key=lambda r: r["request_id"])[:24]
++out_dir = f"results/iter_026/throughput/{mode}"
++os.makedirs(out_dir, exist_ok=True)
++rp = f"{out_dir}/probe.jsonl"
++with open(rp, "w") as f:
++    for r in rows:
++        f.write(json.dumps(r) + "\n")
++
++P.create(f"{out_dir}/protocol.json", extra=[rp], note=f"throughput probe {mode}")
++
++procs = []
++t0 = time.time()
++for k in range(n_workers):
++    g = gpus[k % len(gpus)]
++    cmd = [sys.executable, "-m", "rsna_diag.roi26_gen", "--requests", rp, "--out-dir", out_dir, "--worker", str(k),
++           "--protocol", f"{out_dir}/protocol.json"]
++    env = dict(os.environ, CUDA_VISIBLE_DEVICES=str(g), CUDA_DEVICE_ORDER="PCI_BUS_ID")
++    procs.append(subprocess.Popen(cmd, env=env, stdout=open(f"{out_dir}/w{k}.out.log", "w"),
++                                  stderr=open(f"{out_dir}/w{k}.err.log", "w")))
++
++peak = {}
++while any(p.poll() is None for p in procs):
++    r = subprocess.run(["nvidia-smi", "--query-gpu=index,memory.used", "--format=csv,noheader,nounits"],
++                       capture_output=True, text=True)
++    for ln in r.stdout.strip().splitlines():
++        i, u = [x.strip() for x in ln.split(",")]
++        peak[i] = max(peak.get(i, 0), int(u))
++    time.sleep(3)
++wall = time.time() - t0
++codes = [p.returncode for p in procs]
++print(json.dumps({"mode": mode, "n_workers": n_workers, "n_requests": len(rows), "wall_s": wall,
++                  "req_per_min": len(rows) / wall * 60, "returncodes": codes, "peak_used_mib": peak}))
