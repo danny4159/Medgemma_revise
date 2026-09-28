@@ -109,18 +109,18 @@ SPIDER T2의 동일 volume slice-pair를 사용하는 iter_021 최종 prompt와 
 
 ## rsna-quadrant-oracle-interface — observed
 
-MedGemma 1.5의 고정 D24 개발 환자 24명에서, 원본 영상과 정답 bbox 좌표를 제공한 사분면 중심 질의의 정확도는 M0 41/96, RSNA SFT B0 65/96이었다. 현재 prompt의 oracle gate 90%를 충족하지 못했다. 이는 해당 인터페이스의 제한된 관찰이며, 공간 능력 부재나 SFT 전이 실패를 확정하지 않는다.
+고정 RSNA D24 개발 환자에서 제공 목록만 사용하라는 지시와 중심 계산식을 추가해도 bbox oracle 정확도는 M0 영상/텍스트 41/96·42/96, B0 50/96·42/96으로 90% gate를 충족하지 못했다. 계산된 중심 제공도 충분하지 않았고, 사분면 이름 제공은 M0 90/96·B0 96/96이었다. 이 차이는 현재 인터페이스의 제한된 관찰이며 산술 원인, 일반적 공간 능력 결함 또는 SFT 전이 실패를 확정하지 않는다.
 
 - 적용 목표 시작: iter_003
-- 최신 리뷰: agent/runs/iter_024/review.json
-- 근거: research/results/iter_024/gen/D24__O_{M0,B0}/gen_worker*.jsonl: 각각 96개 고유 요청, 모두 EOS 종료.
-- 근거: research/results/iter_024/eval/report_D24.json 및 decide/D24_decision.json: oracle 정확도 0.4270833/0.6770833, passed=false.
-- 근거: 리뷰에서 원시 응답을 별도로 정규화하고 정답 bbox 중심과 대조해 41/96·65/96을 재현했다.
-- 사용·평가 검증: D24의 원본 iter_010 bbox와 현재 labels 일치, 중심 사분면 정답 및 oracle prompt에 반올림되어 들어간 좌표의 정답 일치 확인.
-- 사용·평가 검증: QA 576건은 모두 EOS 종료하며 고정 plain parser 범위에서 유효하다.
-- 사용·평가 검증: 두 protocol의 잠긴 파일 28개·36개는 현재 파일과 일치하고 잠긴 소스는 리뷰 SHA와 일치한다.
-- 사용·평가 검증: 실제 D 입력의 공식 구성 대조와 과거 bbox adapter sanity 완료 근거는 확인되지 않았다.
-- 미해결: 좌표 해석, 지시 범위, 영상과 reference evidence의 관계, 답변 prior 중 무엇이 oracle 저하를 설명하는가?
-- 미해결: 정상 사용 대조와 최소 인터페이스 진단 후에도 문제가 남는가?
-- 미해결: 독립 환자와 다른 seed에서도 재현되는가?
+- 최신 리뷰: agent/runs/iter_025/review.json
+- 근거: research/results/iter_025/gen/{D,AR}__{M0,B0}/gen_worker*.jsonl: D 768건·AR 192건을 독립 재집계했다.
+- 근거: research/results/iter_025/eval/report_D.json: OC 영상/텍스트 정확도는 M0 39/96·49/96, B0 42/96·44/96이다.
+- 근거: research/results/iter_025/decide/D_decision.json: passed=false이며 E60/E200은 미실행이다.
+- 사용·평가 검증: 960건의 요청 집합 일치, 중복·누락 없음, 주요 request-record provenance 일치와 EOS 종료를 확인했다.
+- 사용·평가 검증: D24 bbox는 iter_010 원본 주석 및 iter_023 labels와 일치했고, 현재 영상 24개의 file/raw pixel hash와 I/T의 동일 텍스트를 확인했다.
+- 사용·평가 검증: sanity/sanity.json은 bbox 재생성 8건의 기존 token 일치와 B0 adapter digest 일치를 기록한다. 공식 구성과 실제 D tensor의 동등성 검사는 수행하지 않았다.
+- 사용·평가 검증: M0 OB_T 24건·OC_T 3건은 완결된 thinking marker 뒤에 답이 있으나 기존 parser에서 invalid 처리됐다. 사전 계획한 marker 처리는 구현되지 않았다.
+- 미해결: 표현·지시 해석·응답 prior·형식의 기여는 아직 분리되지 않았다.
+- 미해결: 독립 환자·다른 seed에서의 재현과 직접 시각 질의 전이는 미검증이다.
+- 미해결: 현재 사분면 yes/no 인터페이스보다 학습된 bbox 출력 형식을 유지하는 영역 선택 진단이 더 식별력 있는가?
 

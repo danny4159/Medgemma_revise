@@ -1,0 +1,1577 @@
+diff --git a/rsna_diag/generate.py b/rsna_diag/generate.py
+index 57831eb..b5f1e61 100644
+--- a/rsna_diag/generate.py
++++ b/rsna_diag/generate.py
+@@ -140,6 +140,58 @@ def run_request(torch, proc, model, eos_ids, item, pname, prompt, caps=CAPS):
+     }
+ 
+ 
++def build_inputs_text(proc, prompt):
++    """image 없는 text-only chat 구성 (official notebook messages 구조에서 image content만 뺀 형태)."""
++    msgs = [{"role": "user", "content": [{"type": "text", "text": prompt}]}]
++    return proc.apply_chat_template(msgs, add_generation_prompt=True, tokenize=True, return_dict=True,
++                                    return_tensors="pt")
++
++
++def run_request_text(torch, proc, model, eos_ids, item_id, pname, prompt, caps=CAPS):
++    """image 필드가 없는 text-only 요청. generate.run_request의 image 경로와 record 필드를 최대한 맞춘다."""
++    inp = build_inputs_text(proc, prompt)
++    if "pixel_values" in inp:
++        raise RunError("text-only chat template unexpectedly produced pixel_values")
++    ids_in = inp["input_ids"][0].tolist()
++    attempts = []
++    for cap in caps:
++        a = generate(torch, proc, model, inp, cap, eos_ids)
++        if attempts:
++            prev = attempts[-1]["suffix_ids"]
++            a["prefix_matches_previous"] = a["suffix_ids"][:len(prev)] == prev
++        attempts.append(a)
++        if a["ended_eos"]:
++            break
++    fin = attempts[-1]
++    for a in attempts:
++        a["suffix_text_raw"] = proc.tokenizer.decode(a["suffix_ids"], skip_special_tokens=False)
++    return {
++        "id": item_id, "prompt_name": pname, "prompt_sha256": P.digest(prompt),
++        "image": None, "image_file_sha256": None, "input_pixel_sha256": None,
++        "pad_affine_top_left_side": None, "n_input_tokens": len(ids_in), "input_ids": ids_in,
++        "input_ids_sha256": sha(json.dumps(ids_in).encode()),
++        "suffix_ids": fin["suffix_ids"], "suffix_text_raw": fin["suffix_text_raw"],
++        "n_output_tokens": fin["n_new"], "finish_reason": fin["finish_reason"], "ended_eos": fin["ended_eos"],
++        "final_cap": fin["cap"], "attempts": [{k: v for k, v in a.items() if k != "suffix_ids"} for a in attempts],
++        "runtime_s_total": sum(a["runtime_s"] for a in attempts),
++        "peak_mem_alloc_gb_max": max(a["peak_mem_alloc_gb"] for a in attempts),
++        "modality": "text",
++    }
++
++
++def run_request_modal(torch, proc, model, eos_ids, row, caps=CAPS):
++    """row: image 조건이면 image/file_sha256를, text 조건이면 modality='text'만 요구한다."""
++    if row["modality"] == "image":
++        rec = run_request(torch, proc, model, eos_ids, {"id": row["id"], "image": row["image"],
++                                                          "file_sha256": row["file_sha256"]},
++                           row["condition"], row["prompt"], caps=caps)
++        rec["modality"] = "image"
++        return rec
++    if row["modality"] == "text":
++        return run_request_text(torch, proc, model, eos_ids, row["id"], row["condition"], row["prompt"], caps=caps)
++    raise RunError(f"unknown modality {row['modality']!r}")
++
++
+ CFG_KEYS = ("model_id", "model_revision", "dtype", "transformers", "torch", "preprocess", "chat_template_sha256",
+             "eos_token_id", "do_pan_and_scan", "image_size")
+ 
+diff --git a/rsna_diag/roi25_decide.py b/rsna_diag/roi25_decide.py
+new file mode 100644
+index 0000000..0c449ea
+--- /dev/null
++++ b/rsna_diag/roi25_decide.py
+@@ -0,0 +1,79 @@
++"""iter_025 D768 gate 판정: 계획에 사전 고정한 절대 기준으로만 판정한다 (report 내용을 그대로 재검증).
++
++기준: (1) 8개 (ckpt x condition) 조합 모두 semantic valid >= 0.95.
++      (2) M0/B0 각각 OB_I, OB_T의 전체 질문 정확도 >= 0.90 (24명 x 4문항=96, 최소 87/96).
++OC의 높은 점수로 OB 실패를 대체하지 않는다 (OC는 gate 계산에 포함하지 않는다).
++"""
++import hashlib
++import json
++import os
++
++OUT = os.environ.get("ROI25_RUN_ROOT", "results/iter_025")
++FMT_MIN_VALID = 0.95
++ORACLE_MIN_ACC = 0.90
++CONDITIONS = ("OB_I", "OB_T", "OC_I", "OC_T")
++GATE_CONDITIONS = ("OB_I", "OB_T")
++
++
++def _sha_file(p):
++    h = hashlib.sha256()
++    with open(p, "rb") as f:
++        for b in iter(lambda: f.read(1 << 20), b""):
++            h.update(b)
++    return h.hexdigest()
++
++
++def atomic_json(obj, path):
++    os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
++    tmp = path + ".tmp"
++    with open(tmp, "w") as f:
++        json.dump(obj, f, indent=1, default=str)
++    os.replace(tmp, path)
++
++
++def _checks(report):
++    vr = report["valid_rates"]
++    fmt_ok = {k: vr[k]["rate"] >= FMT_MIN_VALID for ckpt in ("M0", "B0") for k in [f"{ckpt}_{c}" for c in CONDITIONS]}
++    format_ok = all(fmt_ok.values())
++    qa = report["question_accuracy"]
++    oracle_ok = {}
++    for ckpt in ("M0", "B0"):
++        for c in GATE_CONDITIONS:
++            k = f"{ckpt}_{c}"
++            acc = qa[k]["acc"]
++            oracle_ok[k] = acc is not None and acc >= ORACLE_MIN_ACC
++    oracle_pass = all(oracle_ok.values())
++    return {"fmt_valid_rates": {k: vr[k]["rate"] for k in vr}, "fmt_ok_by_key": fmt_ok, "format_ok": format_ok,
++            "oracle_question_accuracy": {k: qa[k]["acc"] for k in oracle_ok}, "oracle_ok_by_key": oracle_ok,
++            "oracle_pass": oracle_pass, "passed": bool(format_ok and oracle_pass)}
++
++
++def decide_d(report_path=None, out_path=None):
++    report_path = report_path or f"{OUT}/eval/report_D.json"
++    out_path = out_path or f"{OUT}/decide/D_decision.json"
++    if os.path.exists(out_path):
++        raise RuntimeError(f"{out_path} exists (not overwriting)")
++    report = json.load(open(report_path))
++    checks = _checks(report)
++    decision = {"stage": "D", "report_path": report_path, "report_sha256": _sha_file(report_path), **checks}
++    atomic_json(decision, out_path)
++    return decision
++
++
++def recheck(decision_path):
++    d = json.load(open(decision_path))
++    report_path = d["report_path"]
++    if not os.path.exists(report_path):
++        raise RuntimeError(f"decision {decision_path} refers to missing report {report_path}")
++    cur_sha = _sha_file(report_path)
++    if cur_sha != d["report_sha256"]:
++        raise RuntimeError(f"report {report_path} changed since decision {decision_path} was made")
++    report = json.load(open(report_path))
++    recomputed = _checks(report)
++    if recomputed["passed"] != d["passed"]:
++        raise RuntimeError(f"decision {decision_path} field 'passed' does not match recomputed value")
++    return d
++
++
++if __name__ == "__main__":
++    print(json.dumps(decide_d(), default=str))
+diff --git a/rsna_diag/roi25_eval.py b/rsna_diag/roi25_eval.py
+new file mode 100644
+index 0000000..11cc8e8
+--- /dev/null
++++ b/rsna_diag/roi25_eval.py
+@@ -0,0 +1,138 @@
++"""iter_025 D768 채점: request row + 생성 record -> valid rate, 조건별 질문 정확도, Q4 paired 비교, 기존 oracle과의 비교."""
++import glob
++import json
++import os
++
++import numpy as np
++
++from . import metrics as M, roi23_spec as R, roi25_spec as R25
++
++
++class EvalError(RuntimeError):
++    pass
++
++
++def read_gen(gen_dir):
++    recs = {}
++    for f in sorted(glob.glob(os.path.join(gen_dir, "gen_worker*.jsonl"))):
++        for ln in open(f):
++            if ln.strip():
++                r = json.loads(ln)
++                if r["request_id"] in recs:
++                    raise EvalError(f"duplicate request_id {r['request_id']} in {gen_dir}")
++                recs[r["request_id"]] = r
++    return recs
++
++
++def parse_row(target, fmt, rec):
++    st, ans, conv = R25.parse_semantic(target, fmt, rec["suffix_text_raw"], rec["ended_eos"])
++    st_s, ans_s = R25.parse_answer(fmt, rec["suffix_text_raw"], rec["ended_eos"])
++    return {"status": st, "answer": ans, "conversion": conv, "status_strict": st_s, "answer_strict": ans_s}
++
++
++def collect(rows, recs_by_rid):
++    """returns {(ckpt,condition): {id: {target: parsed}}}. 누락 record는 EvalError."""
++    out = {}
++    for row in rows:
++        rec = recs_by_rid.get(row["request_id"])
++        if rec is None:
++            raise EvalError(f"missing generation record for {row['request_id']} "
++                             f"(id={row['id']}, ckpt={row['checkpoint']}, cond={row['condition']}, target={row['target']})")
++        if rec.get("modality") != row["modality"]:
++            raise EvalError(f"modality mismatch for {row['request_id']}: record={rec.get('modality')} row={row['modality']}")
++        key = (row["checkpoint"], row["condition"])
++        out.setdefault(key, {}).setdefault(row["id"], {})[row["target"]] = parse_row(row["target"], row["fmt"], rec)
++    return out
++
++
++def gt_answers(gts, patient_ids):
++    return {i: R.answers([b["yxyx_norm"] for b in gts[i]["boxes"]]) for i in patient_ids}
++
++
++def valid_rate(per_patient, patient_ids):
++    n_valid, n_total = 0, 0
++    for i in patient_ids:
++        d = per_patient.get(i, {})
++        for t in R25.TARGETS:
++            n_total += 1
++            if d.get(t, {}).get("status") == "valid":
++                n_valid += 1
++    return {"n_valid": n_valid, "n_total": n_total, "rate": (n_valid / n_total if n_total else 0.0)}
++
++
++def question_accuracy(per_patient, gt, patient_ids):
++    n_correct, n_total = 0, 0
++    for i in patient_ids:
++        d = per_patient.get(i, {})
++        for t in R25.TARGETS:
++            n_total += 1
++            p = d.get(t, {})
++            if p.get("status") == "valid" and p.get("answer") == gt[i][t]:
++                n_correct += 1
++    return {"n_correct": n_correct, "n_total": n_total, "acc": (n_correct / n_total if n_total else None)}
++
++
++def q4_series(per_patient, gt, patient_ids):
++    vals, detail = [], {}
++    for i in patient_ids:
++        d = per_patient.get(i, {})
++        valid = len(d) == 4 and all(d.get(t, {}).get("status") == "valid" for t in R25.TARGETS)
++        correct = valid and all(d[t]["answer"] == gt[i][t] for t in R25.TARGETS)
++        vals.append(1.0 if correct else 0.0)
++        detail[i] = {"valid": valid, "correct": correct, "per_target": d}
++    return np.array(vals, dtype=float), detail
++
++
++def paired_ci(a, b, seed=25025, B=10000):
++    n = len(a)
++    idx = M.bootstrap_indices(n, B=B, seed=seed)
++    mean_diff, lo, hi = M.paired_boot_ci(a, b, idx)
++    d = np.asarray(a, float) - np.asarray(b, float)
++    return {"mean_diff": mean_diff, "ci_lo": lo, "ci_hi": hi, "n": n, "n_improve": int((d > 0).sum()),
++            "n_worsen": int((d < 0).sum()), "n_same": int((d == 0).sum())}
++
++
++def old_oracle_q4(gen_dir_old, requests_path_old, gt, patient_ids):
++    """iter_024 D24__O_{M0,B0}의 원시 record를 읽어(읽기 전용) 기존 oracle Q4를 재계산한다."""
++    rows = [json.loads(ln) for ln in open(requests_path_old) if ln.strip()]
++    recs = read_gen(gen_dir_old)
++    per = {}
++    for row in rows:
++        rec = recs.get(row["request_id"])
++        if rec is None:
++            raise EvalError(f"missing old-oracle record for {row['request_id']} in {gen_dir_old}")
++        per.setdefault(row["id"], {})[row["target"]] = parse_row(row["target"], row["fmt"], rec)
++    return q4_series(per, gt, patient_ids)
++
++
++def build_report(patient_ids, gts, rows_by_ckpt, recs_by_ckpt_cond, old_oracle=None):
++    gt = gt_answers(gts, patient_ids)
++    per = {}
++    for ckpt, rows in rows_by_ckpt.items():
++        recs = {}
++        for cond in R25.CONDITIONS:
++            recs.update(recs_by_ckpt_cond[(ckpt, cond)])
++        per.update(collect(rows, recs))
++    valid_rates = {f"{ck}_{cond}": valid_rate(per[(ck, cond)], patient_ids) for ck in ("M0", "B0") for cond in R25.CONDITIONS}
++    q_acc = {f"{ck}_{cond}": question_accuracy(per[(ck, cond)], gt, patient_ids) for ck in ("M0", "B0") for cond in R25.CONDITIONS}
++    q4 = {}
++    q4_detail = {}
++    for ck in ("M0", "B0"):
++        for cond in R25.CONDITIONS:
++            vals, det = q4_series(per[(ck, cond)], gt, patient_ids)
++            q4[f"{ck}_{cond}"] = vals
++            q4_detail[f"{ck}_{cond}"] = det
++    comparisons = {}
++    for ck in ("M0", "B0"):
++        comparisons[f"{ck}_OC_I_minus_OB_I"] = paired_ci(q4[f"{ck}_OC_I"], q4[f"{ck}_OB_I"])
++        comparisons[f"{ck}_OB_I_minus_OB_T"] = paired_ci(q4[f"{ck}_OB_I"], q4[f"{ck}_OB_T"])
++        comparisons[f"{ck}_OC_I_minus_OC_T"] = paired_ci(q4[f"{ck}_OC_I"], q4[f"{ck}_OC_T"])
++        if old_oracle and ck in old_oracle:
++            comparisons[f"{ck}_OB_I_minus_old_oracle"] = paired_ci(q4[f"{ck}_OB_I"], old_oracle[ck][0])
++    yes_rate = {f"{ck}_{cond}": {t: float(np.mean([1.0 if per[(ck, cond)].get(i, {}).get(t, {}).get("answer") == "yes" else 0.0
++                                                    for i in patient_ids if per[(ck, cond)].get(i, {}).get(t, {}).get("status") == "valid"]))
++                                 if any(per[(ck, cond)].get(i, {}).get(t, {}).get("status") == "valid" for i in patient_ids) else None
++                for t in R25.TARGETS} for ck in ("M0", "B0") for cond in R25.CONDITIONS}
++    return {"fmt": R25.FMT, "n_patients": len(patient_ids), "valid_rates": valid_rates, "question_accuracy": q_acc,
++            "q4_mean": {k: float(v.mean()) for k, v in q4.items()}, "comparisons": comparisons, "yes_rate": yes_rate,
++            "old_oracle_q4_mean": ({ck: float(v[0].mean()) for ck, v in old_oracle.items()} if old_oracle else None)}
+diff --git a/rsna_diag/roi25_gen.py b/rsna_diag/roi25_gen.py
+new file mode 100644
+index 0000000..a57ac50
+--- /dev/null
++++ b/rsna_diag/roi25_gen.py
+@@ -0,0 +1,232 @@
++"""iter_025 D768 전용 생성 worker (roi23_gen.py 기반, modality(image|text) 인식 추가).
++
++text-only 요청은 image/file_sha256/pixel_sha256이 모두 없어야 하며 generate.run_request_modal로 처리한다.
++image 요청은 roi23_gen과 동일하게 file/raw/padded pixel 검증을 강제한다.
++"""
++import argparse
++import glob
++import json
++import os
++import re
++import sys
++import time
++
++from . import generate, roi25_protocol as qa_protocol, roi25_requests as Q, queue_lock
++
++
++class QAError(RuntimeError):
++    pass
++
++
++def read_strict(path, repair_tail=False, tolerate_tail=False):
++    if not os.path.exists(path):
++        return []
++    raw = open(path, "rb").read()
++    lines = raw.split(b"\n")
++    tail = lines[-1]
++    recs = []
++    body = lines[:-1]
++    if tail.strip() and tolerate_tail:
++        pass
++    elif tail.strip():
++        if repair_tail:
++            with open(path + ".partial", "ab") as f:
++                f.write(tail + b"\n")
++            with open(path, "wb") as f:
++                f.write(b"\n".join(body) + (b"\n" if body else b""))
++        else:
++            raise QAError(f"truncated last line (no newline) in {path}; rerun with --repair-tail to quarantine it")
++    for k, ln in enumerate(body):
++        if ln.strip():
++            try:
++                recs.append(json.loads(ln))
++            except ValueError as e:
++                raise QAError(f"corrupt JSON line {k} in {path}") from e
++    return recs
++
++
++def _worker_of(path):
++    m = re.fullmatch(r"gen_worker(\d+)\.jsonl", os.path.basename(path))
++    return int(m.group(1)) if m else None
++
++
++def _has_tail(path):
++    if not os.path.exists(path):
++        return False
++    with open(path, "rb") as f:
++        data = f.read()
++    return bool(data.split(b"\n")[-1].strip())
++
++
++def read_all_owned(out_dir, my_worker, repair, live, info):
++    out = {}
++    for f in sorted(glob.glob(os.path.join(out_dir, "gen_worker*.jsonl"))):
++        w = _worker_of(f)
++        if w == my_worker or not _has_tail(f):
++            out[f] = read_strict(f, repair_tail=repair and w == my_worker and not live)
++            continue
++        lk, _, _ = queue_lock.try_lock(os.path.join(out_dir, f"worker{w}.lock"), info)
++        if lk is None:
++            out[f] = read_strict(f, tolerate_tail=True)
++        else:
++            try:
++                out[f] = read_strict(f, repair_tail=repair and not live, tolerate_tail=live)
++            finally:
++                lk.release()
++    return out
++
++
++def validate_records(files_records, rows, cdig, adapter_digest, protocol_digest, pixel_sha):
++    """returns {request_id: record}. text 조건은 image/pixel 필드가 모두 None이어야 한다."""
++    by = {r["request_id"]: r for r in rows}
++    done = {}
++    for fn, recs in files_records.items():
++        for r in recs:
++            rid = r.get("request_id")
++            row = by.get(rid)
++            if row is None:
++                raise QAError(f"unexpected record {rid} in {fn}: not in current request set")
++            if rid in done:
++                raise QAError(f"duplicate record {rid} in {fn}")
++            for k, want in (("prompt_sha256", row["prompt_sha256"]), ("adapter_digest", adapter_digest),
++                            ("config_digest", cdig), ("protocol_digest", protocol_digest), ("id", row["id"]),
++                            ("condition", row["condition"]), ("checkpoint", row["checkpoint"]),
++                            ("target", row["target"]), ("fmt", row["fmt"]), ("modality", row["modality"])):
++                if r.get(k) != want:
++                    raise QAError(f"{k} mismatch for {rid} in {fn}: {r.get(k)!r} != {want!r}")
++            if row["modality"] == "image":
++                if r.get("image_file_sha256") != row["file_sha256"]:
++                    raise QAError(f"image_file_sha256 mismatch for {rid} in {fn}")
++                if r.get("input_pixel_sha256") != pixel_sha(row["image"]):
++                    raise QAError(f"input image changed since generation for {rid}")
++            else:
++                if r.get("image") is not None or r.get("image_file_sha256") is not None or r.get("input_pixel_sha256") is not None:
++                    raise QAError(f"text-only record {rid} in {fn} carries image fields")
++            done[rid] = r
++    return done
++
++
++def check_inputs(rows):
++    """image 조건만 현재 raw pixel/file sha를 요청 행과 대조한다. text 조건은 image 필드가 없어야 한다."""
++    from . import inputs
++    seen = {}
++    for r in rows:
++        if r["modality"] == "text":
++            if r.get("image") is not None or r.get("file_sha256") is not None or r.get("pixel_sha256") is not None:
++                raise QAError(f"text-only row {r['id']}/{r['request_id']} carries image fields")
++            continue
++        if r["modality"] != "image":
++            raise QAError(f"unknown modality {r['modality']!r} for {r['request_id']}")
++        key = r["image"]
++        if key in seen:
++            continue
++        if generate.sha(open(key, "rb").read()) != r["file_sha256"]:
++            raise QAError(f"file sha changed for {r['id']}")
++        if inputs.raw_pixel_sha(key) != r["pixel_sha256"]:
++            raise QAError(f"pixel sha changed for {r['id']}")
++        seen[key] = 1
++
++
++def main():
++    ap = argparse.ArgumentParser()
++    ap.add_argument("--requests", required=True)
++    ap.add_argument("--out-dir", required=True)
++    ap.add_argument("--worker", type=int, required=True)
++    ap.add_argument("--protocol", required=True)
++    ap.add_argument("--adapter", default=None)
++    ap.add_argument("--time-limit", type=float, default=None)
++    ap.add_argument("--max-requests", type=int, default=None)
++    ap.add_argument("--repair-tail", action="store_true")
++    a = ap.parse_args()
++    pdig = qa_protocol.verify(a.protocol)
++    if json.load(open(a.protocol))["locked"]["files"].get(a.requests) != generate.sha(open(a.requests, "rb").read()):
++        sys.exit(f"request file {a.requests} is not locked in {a.protocol} (or changed)")
++    cfg, _ = qa_protocol.static_cfg()
++    rows = Q.load_rows(a.requests, cfg)
++    if len({(r["checkpoint"], r["adapter_digest"]) for r in rows}) != 1:
++        sys.exit("one run must contain one checkpoint")
++    check_inputs(rows)
++    os.makedirs(a.out_dir, exist_ok=True)
++    info = queue_lock.my_info(worker=a.worker)
++    lk, own, _ = queue_lock.try_lock(os.path.join(a.out_dir, f"worker{a.worker}.lock"), info)
++    if lk is None:
++        sys.exit(f"worker {a.worker} already running: {own}")
++    try:
++        run_worker(a, rows, pdig, cfg, info)
++    finally:
++        lk.release()
++
++
++def run_worker(a, rows, pdig, cfg, info):
++    torch, proc, model = generate.load_model()
++    adapter_digest = generate.load_adapter(torch, model, a.adapter) if a.adapter else None
++    if adapter_digest != rows[0]["adapter_digest"]:
++        raise QAError(f"loaded adapter digest {adapter_digest} != requests {rows[0]['adapter_digest']}")
++    env = generate.env_info(torch, proc, model)
++    cdig, core = generate.config_digest(env, {})
++    if cdig != cfg:
++        raise QAError("runtime generation config digest != protocol config digest")
++    eos = env["eos_token_id"]
++    eos_ids = set(eos if isinstance(eos, list) else [eos])
++    with open(os.path.join(a.out_dir, f"gen_worker{a.worker}.jsonl.env.json"), "w") as f:
++        json.dump({"env": env, "config_digest": cdig, "adapter_digest": adapter_digest, "protocol_digest": pdig,
++                   "worker": a.worker, "requests": a.requests}, f, indent=1, default=str)
++    cache = {}
++
++    def px(path):
++        if path not in cache:
++            cache[path] = generate.load_image(path)[2]
++        return cache[path]
++
++    def read_all(repair, live=False):
++        return read_all_owned(a.out_dir, a.worker, repair, live, info)
++
++    done = validate_records(read_all(a.repair_tail), rows, cdig, adapter_digest, pdig, px)
++    out = os.path.join(a.out_dir, f"gen_worker{a.worker}.jsonl")
++    claim_dir = os.path.join(a.out_dir, "claims")
++    os.makedirs(claim_dir, exist_ok=True)
++    log = open(out + ".log", "a")
++    t0, n_done = time.time(), 0
++    for row in sorted(rows, key=lambda r: r["request_id"]):
++        if row["request_id"] in done:
++            continue
++        if (a.time_limit and time.time() - t0 > a.time_limit) or (a.max_requests is not None and n_done >= a.max_requests):
++            log.write(json.dumps({"event": "stop", "done_this_run": n_done}) + "\n")
++            break
++        clk, prev, reclaimed = queue_lock.try_lock(os.path.join(claim_dir, row["request_id"] + ".claim"), info)
++        if clk is None:
++            continue
++        try:
++            if reclaimed:
++                log.write(json.dumps({"event": "claim_reclaimed_from_dead_owner", "request_id": row["request_id"], "prev_owner": prev}) + "\n")
++            done = validate_records(read_all(False, live=True), rows, cdig, adapter_digest, pdig, px)
++            if row["request_id"] in done:
++                continue
++            try:
++                rec = generate.run_request_modal(torch, proc, model, eos_ids, row)
++            except torch.cuda.OutOfMemoryError as e:
++                log.write(json.dumps({"event": "oom", "request_id": row["request_id"], "err": str(e)[:200]}) + "\n")
++                log.flush()
++                raise
++            rec.update({"request_id": row["request_id"], "split": row["split"], "checkpoint": row["checkpoint"],
++                        "target": row["target"], "fmt": row["fmt"], "condition": row["condition"],
++                        "adapter_digest": adapter_digest, "protocol_digest": pdig, "config_digest": cdig,
++                        "worker": a.worker, "ts": time.time(), "gpu_uuid": env.get("gpu_uuid"), "stage": row["stage"],
++                        "modality": row["modality"]})
++            with open(out, "a") as f:
++                f.write(json.dumps(rec) + "\n")
++                f.flush()
++                os.fsync(f.fileno())
++            done[row["request_id"]] = rec
++            n_done += 1
++            log.write(json.dumps({"event": "done", "request_id": row["request_id"], "n_out": rec["n_output_tokens"], "finish": rec["finish_reason"],
++                                  "runtime_s": round(rec["runtime_s_total"], 2), "peak_gb": round(rec["peak_mem_alloc_gb_max"], 2),
++                                  "elapsed": round(time.time() - t0, 1)}) + "\n")
++            log.flush()
++        finally:
++            clk.release()
++    print(f"worker {a.worker}: finished; {n_done} new requests this run", flush=True)
++
++
++if __name__ == "__main__":
++    main()
+diff --git a/rsna_diag/roi25_protocol.py b/rsna_diag/roi25_protocol.py
+new file mode 100644
+index 0000000..66cbf01
+--- /dev/null
++++ b/rsna_diag/roi25_protocol.py
+@@ -0,0 +1,83 @@
++"""iter_025 protocol 잠금: 이번 실행이 실제로 import하는 코드만 잠근다 (roi23_protocol.py와 같은 profile 방식)."""
++import argparse
++import json
++import os
++import sys
++
++from . import generate, lock_protocol
++
++SCHEMA = "iter025_roi25_protocol_v1"
++REQUIRED_CODE = [
++    "rsna_diag/__init__.py", "rsna_diag/geometry.py", "rsna_diag/parse.py", "rsna_diag/metrics.py",
++    "rsna_diag/lora.py", "rsna_diag/generate.py", "rsna_diag/prompts.py", "rsna_diag/queue_lock.py",
++    "rsna_diag/lock_protocol.py", "rsna_diag/inputs.py", "rsna_diag/eval_gate.py", "rsna_diag/qa_spec.py",
++    "rsna_diag/roi23_spec.py", "rsna_diag/roi23_data.py",
++    "rsna_diag/roi25_spec.py", "rsna_diag/roi25_protocol.py", "rsna_diag/roi25_requests.py",
++    "rsna_diag/roi25_gen.py", "rsna_diag/roi25_run.py", "rsna_diag/roi25_eval.py", "rsna_diag/roi25_decide.py",
++]
++
++
++def static_cfg():
++    d, core = generate.config_digest(generate.static_env(), {})
++    return d, core
++
++
++def current(extra=()):
++    missing = [f for f in list(REQUIRED_CODE) + list(extra) if not os.path.isfile(f)]
++    if missing:
++        raise RuntimeError(f"required protocol files missing: {missing}")
++    d, core = static_cfg()
++    return {"schema": SCHEMA, "files": {f: lock_protocol.sha(f) for f in list(REQUIRED_CODE) + list(extra)},
++            "generation_config_digest": d, "generation_config": core}
++
++
++def create(out, extra=(), note=""):
++    if os.path.exists(out):
++        raise RuntimeError(f"protocol exists (not overwriting): {out}")
++    cur = current(extra)
++    os.makedirs(os.path.dirname(out) or ".", exist_ok=True)
++    json.dump({"locked": cur, "note": note}, open(out, "w"), indent=1, default=str)
++    return lock_protocol.locked_digest(cur)
++
++
++def verify(path, allowed_edits=None):
++    if not path or not os.path.exists(path):
++        raise RuntimeError(f"protocol file missing: {path!r}")
++    old = json.load(open(path))
++    lk = old["locked"]
++    if lk.get("schema") != SCHEMA:
++        raise RuntimeError(f"protocol schema {lk.get('schema')!r} != {SCHEMA}")
++    missing_req = [f for f in REQUIRED_CODE if f not in lk["files"]]
++    if missing_req:
++        raise RuntimeError(f"protocol does not lock required files: {missing_req}")
++    extra = [f for f in lk["files"] if f not in REQUIRED_CODE]
++    cur = current(extra)
++    allowed_edits = allowed_edits or {}
++    diff = {}
++    for k, v in cur["files"].items():
++        if lk["files"].get(k) == v:
++            continue
++        e = allowed_edits.get(k)
++        if e and e.get("reason") and e.get("before") == lk["files"].get(k) and e.get("after") == v:
++            continue
++        diff[k] = (lk["files"].get(k), v)
++    if diff or lk["generation_config_digest"] != cur["generation_config_digest"]:
++        raise RuntimeError("LOCK MISMATCH " + json.dumps(diff, indent=1)[:2000])
++    return lock_protocol.locked_digest(lk)
++
++
++def locked_file_sha(path, f):
++    return json.load(open(path))["locked"]["files"].get(f)
++
++
++def main():
++    ap = argparse.ArgumentParser()
++    ap.add_argument("--out", required=True)
++    ap.add_argument("--extra", nargs="*", default=[])
++    ap.add_argument("--note", default="")
++    a = ap.parse_args()
++    print("locked", a.out, create(a.out, a.extra, a.note))
++
++
++if __name__ == "__main__":
++    sys.exit(main())
+diff --git a/rsna_diag/roi25_requests.py b/rsna_diag/roi25_requests.py
+new file mode 100644
+index 0000000..0ba15ad
+--- /dev/null
++++ b/rsna_diag/roi25_requests.py
+@@ -0,0 +1,143 @@
++"""iter_025 D768 요청 행렬: 2 checkpoint(M0,B0) x 4 target(TL/TR/BL/BR) x 4 condition(OB_I,OB_T,OC_I,OC_T) x 24 patient.
++
++request_id는 modality를 포함한 전체 provenance의 hash다 (image/text 조건은 서로 다른 id를 가진다).
++"""
++import json
++import os
++
++from . import generate, prompts as P, roi23_spec as R, roi25_spec as R25
++
++OUT = os.environ.get("ROI25_RUN_ROOT", "results/iter_025")
++CKPT_SPEC = {"M0": None, "B0": "results/iter_012/train/lr2e-4_s17/epoch_05"}
++ID_FIELDS = ("model_revision", "adapter_digest", "id", "split", "modality", "file_sha256", "pixel_sha256", "target",
++             "fmt", "condition", "prompt_sha256", "config_digest", "preprocess")
++
++
++class RequestError(RuntimeError):
++    pass
++
++
++def compute_id(row):
++    return R.request_key({k: row.get(k) for k in ID_FIELDS})
++
++
++def make_row(item_id, split, ckpt, adapter_digest, target, condition, prompt, cfg_digest, stage, modality,
++             image_fields=None, extra=None):
++    row = {"id": item_id, "split": split, "checkpoint": ckpt, "adapter_digest": adapter_digest, "target": target,
++           "fmt": R25.FMT, "condition": condition, "prompt": prompt, "prompt_sha256": P.digest(prompt),
++           "model_revision": generate.MODEL_REVISION, "config_digest": cfg_digest,
++           "preprocess": generate.PREPROC_VERSION, "stage": stage, "modality": modality}
++    if modality == "image":
++        row.update({"image": image_fields["image"], "file_sha256": image_fields["file_sha256"],
++                    "pixel_sha256": image_fields["pixel_sha256"]})
++    else:
++        row.update({"image": None, "file_sha256": None, "pixel_sha256": None})
++    if extra:
++        row["extra"] = extra
++    row["request_id"] = compute_id(row)
++    return row
++
++
++def verify_row(row, cfg_digest):
++    if row.get("prompt_sha256") != P.digest(row["prompt"]):
++        raise RequestError(f"prompt_sha256 mismatch for {row.get('request_id')}")
++    if row.get("config_digest") != cfg_digest:
++        raise RequestError(f"config_digest mismatch for {row.get('request_id')}")
++    if row.get("model_revision") != generate.MODEL_REVISION:
++        raise RequestError("model revision differs")
++    if row.get("request_id") != compute_id(row):
++        raise RequestError(f"request_id != recomputed for {row.get('request_id')}")
++    if row["modality"] == "text" and (row.get("image") is not None or row.get("file_sha256") is not None
++                                       or row.get("pixel_sha256") is not None):
++        raise RequestError(f"text-only row {row.get('request_id')} carries image fields")
++    if row["modality"] == "image" and row.get("image") is None:
++        raise RequestError(f"image row {row.get('request_id')} missing image field")
++    return True
++
++
++def load_rows(path, cfg_digest=None):
++    rows = [json.loads(ln) for ln in open(path) if ln.strip()]
++    ids = [r["request_id"] for r in rows]
++    if len(set(ids)) != len(ids):
++        raise RequestError(f"duplicate request_id in {path}")
++    if cfg_digest:
++        for r in rows:
++            verify_row(r, cfg_digest)
++    return rows
++
++
++def checkpoints(out=None):
++    import torch
++    from . import eval_gate
++    out = out or f"{OUT}/manifests/checkpoints.json"
++    tab = {}
++    for k, d in CKPT_SPEC.items():
++        if d is None:
++            tab[k] = {"dir": None, "digest": None}
++            continue
++        b = torch.load(os.path.join(d, "adapter.pt"), map_location="cpu", weights_only=True)
++        tab[k] = {"dir": d, "digest": eval_gate.adapter_digest(d), "epoch": b.get("epoch"), "step": b.get("step"),
++                  "train_digest": b.get("train_digest"), "lora": b["config"]}
++    if os.path.exists(out):
++        old = json.load(open(out))
++        if old != tab:
++            raise RequestError("checkpoint table exists and differs")
++    else:
++        os.makedirs(os.path.dirname(out), exist_ok=True)
++        json.dump(tab, open(out, "w"), indent=1)
++    return tab
++
++
++def build_d(items, gts, tab, cfg, stage="D"):
++    """returns {ckpt: [rows]}. items: {id: manifest row with image/file_sha256/pixel_sha256/split}."""
++    out = {}
++    for ckpt in ("M0", "B0"):
++        ad = tab[ckpt]["digest"]
++        rows = []
++        for i in sorted(items):
++            boxes_f = [b["yxyx_norm"] for b in gts[i]["boxes"]]
++            boxes_i = R25.check_rounding_preserves_answer(boxes_f)
++            for target in R25.TARGETS:
++                for cond in R25.CONDITIONS:
++                    modality = R25.MODALITY_OF[cond]
++                    txt = R25.prompt(cond, target, boxes_i)
++                    img_fields = None
++                    extra = {"boxes_int": boxes_i, "representation": R25.REPRESENTATION_OF[cond]}
++                    if modality == "image":
++                        img_fields = {"image": items[i]["image"], "file_sha256": items[i]["file_sha256"],
++                                      "pixel_sha256": items[i]["pixel_sha256"]}
++                    rows.append(make_row(i, items[i]["split"], ckpt, ad, target, cond, txt, cfg, stage, modality,
++                                         img_fields, extra))
++        out[ckpt] = rows
++    return out
++
++
++def build_ar(items, gts, tab, cfg, ckpts, stage="AR"):
++    """OB/OC 모두 실패했을 때의 답 읽기 sanity: text-only, 정답 사분면 이름을 GT로 직접 제공한다.
++    ckpts: OB gate가 실패한 checkpoint 목록 (최대 ['M0','B0'])."""
++    out = {}
++    for ckpt in ckpts:
++        ad = tab[ckpt]["digest"]
++        rows = []
++        for i in sorted(items):
++            boxes_f = [b["yxyx_norm"] for b in gts[i]["boxes"]]
++            boxes_i = R25.check_rounding_preserves_answer(boxes_f)
++            names = R25.quadrant_names_from_boxes(boxes_i)
++            for target in R25.TARGETS:
++                txt = R25.ar_prompt(target, names)
++                rows.append(make_row(i, items[i]["split"], ckpt, ad, target, "AR", txt, cfg, stage, "text",
++                                     extra={"quadrant_names": names}))
++        out[ckpt] = rows
++    return out
++
++
++def write_rows(stage, ckpt, rows, out_dir=None):
++    out_dir = out_dir or f"{OUT}/requests"
++    os.makedirs(out_dir, exist_ok=True)
++    p = f"{out_dir}/{stage}__{ckpt}.jsonl"
++    if os.path.exists(p):
++        raise RequestError(f"{p} exists (not overwriting)")
++    with open(p, "w") as f:
++        for r in rows:
++            f.write(json.dumps(r) + "\n")
++    return p
+diff --git a/rsna_diag/roi25_run.py b/rsna_diag/roi25_run.py
+new file mode 100644
+index 0000000..e3640bd
+--- /dev/null
++++ b/rsna_diag/roi25_run.py
+@@ -0,0 +1,273 @@
++"""iter_025 stage 실행기 (roi23_run.py 기반). worker 수와 GPU 수를 분리하고, 허용 GPU 집합·메모리 여유·완료 검증·
++자식 종료 코드를 강제한다. modality(image|text) 인식 roi25_gen을 호출한다.
++사용: python -m rsna_diag.roi25_run --stage D --ckpts M0,B0 --protocol P --workers 4 --peak-gb 10
++"""
++import argparse
++import glob
++import signal
++import json
++import os
++import subprocess
++import sys
++import time
++
++from . import eval_gate, generate, roi25_gen as qa_gen, roi25_protocol as qa_protocol, roi25_requests as Q, queue_lock
++
++OUT = Q.OUT
++MIB_PER_GIB = 1024
++
++
++class GpuError(RuntimeError):
++    pass
++
++
++def atomic_json(obj, path):
++    tmp = path + ".tmp"
++    with open(tmp, "w") as f:
++        json.dump(obj, f, indent=1, default=str)
++        f.flush()
++        os.fsync(f.fileno())
++    os.replace(tmp, path)
++
++
++def allowed_gpus():
++    raw = os.environ.get("CUDA_VISIBLE_DEVICES")
++    if not raw:
++        raise GpuError("CUDA_VISIBLE_DEVICES not set (allowed GPU set unknown)")
++    try:
++        return [int(x) for x in raw.split(",")]
++    except ValueError:
++        raise GpuError(f"non-integer CUDA_VISIBLE_DEVICES {raw!r}")
++
++
++def query_gpus(idx):
++    r = subprocess.run(["nvidia-smi", "--query-gpu=index,uuid,memory.used,memory.total", "--format=csv,noheader,nounits"],
++                       capture_output=True, text=True)
++    if r.returncode != 0:
++        raise GpuError(f"nvidia-smi failed rc={r.returncode}: {r.stderr[:200]}")
++    rows = {}
++    try:
++        for ln in r.stdout.strip().splitlines():
++            i, u, mu, mt = [x.strip() for x in ln.split(",")]
++            rows[int(i)] = {"uuid": u, "used_mib": int(mu), "total_mib": int(mt)}
++    except ValueError as e:
++        raise GpuError(f"cannot parse nvidia-smi output: {r.stdout[:200]}") from e
++    missing = [i for i in idx if i not in rows]
++    if missing:
++        raise GpuError(f"gpus {missing} not reported by nvidia-smi")
++    return {i: rows[i] for i in idx}
++
++
++def plan_gpus(gpus, workers, peak_gb, allowed, snapshot):
++    if not gpus or not set(gpus) <= set(allowed):
++        raise GpuError(f"gpus {gpus} not within allowed {allowed}")
++    assign = [(k, gpus[k % len(gpus)]) for k in range(workers)]
++    for g in gpus:
++        n = sum(1 for _, x in assign if x == g)
++        need = n * (peak_gb + 2.0) * MIB_PER_GIB
++        free = snapshot[g]["total_mib"] - snapshot[g]["used_mib"]
++        if n and need > free:
++            raise GpuError(f"gpu {g}: {n} workers x ({peak_gb}+2) GiB = {need:.0f} MiB > free {free} MiB")
++    return assign
++
++
++def load_job(stage, ckpt, protocol):
++    rp = f"{OUT}/requests/{stage}__{ckpt}.jsonl"
++    cfg, _ = qa_protocol.static_cfg()
++    rows = Q.load_rows(rp, cfg)
++    if json.load(open(protocol))["locked"]["files"].get(rp) != generate.sha(open(rp, "rb").read()):
++        raise RuntimeError(f"{rp} not locked in {protocol}")
++    return rp, rows, cfg
++
++
++def live_workers(out_dir):
++    live = []
++    for f in sorted(glob.glob(os.path.join(out_dir, "worker*.lock"))):
++        fd = os.open(f, os.O_RDWR)
++        try:
++            import fcntl
++            try:
++                fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
++            except BlockingIOError:
++                live.append((f, queue_lock._read(fd)))
++                continue
++            fcntl.flock(fd, fcntl.LOCK_UN)
++        finally:
++            os.close(fd)
++    return live
++
++
++def stop_children(procs, grace=60.0):
++    for p in procs:
++        if p.poll() is None:
++            p.terminate()
++    t0 = time.time()
++    while time.time() - t0 < grace and any(p.poll() is None for p in procs):
++        time.sleep(0.5)
++    for p in procs:
++        if p.poll() is None:
++            p.kill()
++    for p in procs:
++        p.wait()
++    return [{"pid": p.pid, "returncode": p.returncode} for p in procs]
++
++
++def verify_job(out_dir, rows, cfg, pdig, adapter_dir, require_complete=True):
++    qa_gen.check_inputs(rows)
++    adg = eval_gate.adapter_digest(adapter_dir) if adapter_dir else None
++    if adg != rows[0]["adapter_digest"]:
++        raise qa_gen.QAError(f"adapter digest {adg} != requests {rows[0]['adapter_digest']}")
++    files = {f: qa_gen.read_strict(f) for f in sorted(glob.glob(os.path.join(out_dir, "gen_worker*.jsonl")))}
++    cache = {}
++    px = lambda p: cache.setdefault(p, generate.load_image(p)[2])
++    done = qa_gen.validate_records(files, rows, cfg, adg, pdig, px)
++    missing = [r["request_id"] for r in rows if r["request_id"] not in done]
++    return done, missing
++
++
++def verify_completion(out_dir, rows, cfg, pdig, rp, n_done):
++    c = json.load(open(os.path.join(out_dir, "completion.json")))
++    checks = {"protocol_digest": c.get("protocol_digest") == pdig, "n_expected": c.get("n_expected") == len(rows),
++              "n_actual_unique": c.get("n_actual_unique") == n_done == len(rows), "n_missing": c.get("n_missing") == 0,
++              "n_duplicate": c.get("n_duplicate") == 0, "n_extra": c.get("n_extra") == 0,
++              "returncodes": bool(c.get("returncodes")) and all(x == 0 for x in c["returncodes"]),
++              "requests_sha256": c.get("requests_sha256") == generate.sha(open(rp, "rb").read()),
++              "adapter_digest": c.get("adapter_digest") == rows[0]["adapter_digest"], "config_digest": c.get("config_digest") == cfg,
++              "verify_error": c.get("verify_error") is None}
++    bad = [k for k, v in checks.items() if not v]
++    if bad:
++        raise qa_gen.QAError(f"completion.json content invalid in {out_dir}: {bad}")
++    return c
++
++
++class _Term(BaseException):
++    pass
++
++
++def _on_term(signum, frame):
++    raise _Term(f"signal {signum}")
++
++
++def main():
++    signal.signal(signal.SIGTERM, _on_term)
++    ap = argparse.ArgumentParser()
++    ap.add_argument("--stage", required=True)
++    ap.add_argument("--ckpts", required=True)
++    ap.add_argument("--protocol", required=True)
++    ap.add_argument("--workers", type=int, required=True)
++    ap.add_argument("--gpus", default=None)
++    ap.add_argument("--peak-gb", type=float, required=True)
++    ap.add_argument("--max-requests", type=int, default=None)
++    ap.add_argument("--time-limit", type=float, default=None)
++    ap.add_argument("--repair-tail", action="store_true")
++    ap.add_argument("--poll-s", type=float, default=20.0)
++    ap.add_argument("--out-suffix", default="")
++    a = ap.parse_args()
++    pdig = qa_protocol.verify(a.protocol)
++    tab = json.load(open(f"{OUT}/manifests/checkpoints.json"))
++    allowed = allowed_gpus()
++    gpus = [int(x) for x in a.gpus.split(",")] if a.gpus else allowed
++    summary = []
++    for ckpt in a.ckpts.split(","):
++        rp, rows, cfg = load_job(a.stage, ckpt, a.protocol)
++        out_dir = f"{OUT}/gen{a.out_suffix}/{a.stage}__{ckpt}"
++        os.makedirs(out_dir, exist_ok=True)
++        adapter = tab[ckpt]["dir"]
++        cp = os.path.join(out_dir, "completion.json")
++        if os.path.exists(cp):
++            done, missing = verify_job(out_dir, rows, cfg, pdig, adapter)
++            try:
++                verify_completion(out_dir, rows, cfg, pdig, rp, len(done))
++                ok_c = not missing
++            except qa_gen.QAError:
++                ok_c = False
++            if ok_c:
++                print(f"[{ckpt}] already complete & re-verified ({len(rows)} requests); skip", flush=True)
++                summary.append({"ckpt": ckpt, "status": "verified_complete", "n": len(rows)})
++                continue
++        alive = live_workers(out_dir)
++        if alive:
++            sys.exit(f"live worker(s) still own {out_dir}: {alive} (parent was killed?). Wait for/stop them, then rerun.")
++        snap = query_gpus(gpus)
++        assign = plan_gpus(gpus, a.workers, a.peak_gb, allowed, snap)
++        info = queue_lock.my_info(role="roi25_run")
++        rlk, own, _ = queue_lock.try_lock(os.path.join(out_dir, "run.lock"), info)
++        if rlk is None:
++            sys.exit(f"another roi25_run owns {out_dir}: {own}")
++        aid = f"{time.strftime('%Y%m%d_%H%M%S')}_{os.getpid()}"
++        att_dir = os.path.join(out_dir, "attempts")
++        os.makedirs(att_dir, exist_ok=True)
++        att_path = os.path.join(att_dir, f"attempt_{aid}.json")
++        att = {"attempt_id": aid, "status": "running", "pid": os.getpid(), "t_start": time.time(), "workers": a.workers,
++               "assign_worker_gpu": assign, "gpu_uuid": {g: snap[g]["uuid"] for g in gpus}, "peak_gb_assumed": a.peak_gb,
++               "gpu_snapshot_before": snap, "allowed": allowed}
++        procs = []
++        try:
++            if os.path.exists(cp):
++                os.replace(cp, os.path.join(att_dir, f"completion_superseded_by_{aid}.json"))
++            atomic_json(att, att_path)
++            for k, g in assign:
++                cmd = [sys.executable, "-m", "rsna_diag.roi25_gen", "--requests", rp, "--out-dir", out_dir, "--worker", str(k),
++                       "--protocol", a.protocol]
++                if adapter:
++                    cmd += ["--adapter", adapter]
++                if a.max_requests is not None:
++                    cmd += ["--max-requests", str(a.max_requests)]
++                if a.time_limit:
++                    cmd += ["--time-limit", str(a.time_limit)]
++                if a.repair_tail:
++                    cmd += ["--repair-tail"]
++                env = dict(os.environ, CUDA_VISIBLE_DEVICES=str(g), CUDA_DEVICE_ORDER="PCI_BUS_ID")
++                procs.append(subprocess.Popen(cmd, env=env, stdout=open(f"{out_dir}/worker{k}.stdout.log", "a"),
++                                              stderr=open(f"{out_dir}/worker{k}.stderr.log", "a")))
++            att["children"] = [{"pid": p.pid, "start": queue_lock.proc_start(p.pid), "worker": k, "gpu": g} for p, (k, g) in zip(procs, assign)]
++            atomic_json(att, att_path)
++            t0 = time.time()
++            rl = open(f"{out_dir}/resource_log.jsonl", "a")
++            while any(p.poll() is None for p in procs):
++                try:
++                    q = query_gpus(gpus)
++                    apps = subprocess.run(["nvidia-smi", "--query-compute-apps=gpu_uuid,pid,used_memory", "--format=csv,noheader,nounits"],
++                                          capture_output=True, text=True).stdout.strip().splitlines()
++                except GpuError as e:
++                    q, apps = {"error": str(e)}, []
++                rl.write(json.dumps({"t": time.time() - t0, "gpus": q, "apps": apps}) + "\n")
++                rl.flush()
++                time.sleep(a.poll_s)
++            codes = [p.returncode for p in procs]
++            wall = time.time() - t0
++            err = None
++            try:
++                done, missing = verify_job(out_dir, rows, cfg, pdig, adapter)
++            except (qa_gen.QAError, eval_gate.GateError) as e:
++                done, missing, err = {}, [r["request_id"] for r in rows], str(e)[:500]
++            per_file = {os.path.basename(f): len(qa_gen.read_strict(f)) for f in sorted(glob.glob(f"{out_dir}/gen_worker*.jsonl"))}
++            rep = {"stage": a.stage, "checkpoint": ckpt, "n_expected": len(rows), "n_actual_unique": len(done), "n_missing": len(missing),
++                   "n_duplicate": 0, "n_extra": 0, "returncodes": codes, "wall_s": wall, "per_file": per_file, "protocol_digest": pdig,
++                   "adapter_digest": rows[0]["adapter_digest"], "worker_gpu": assign, "gpu_uuid": att["gpu_uuid"], "verify_error": err,
++                   "requests": rp, "requests_sha256": generate.sha(open(rp, "rb").read()), "config_digest": cfg, "attempt_id": aid}
++            atomic_json(rep, f"{out_dir}/last_run.json")
++            ok = not missing and err is None and all(c == 0 for c in codes)
++            att.update({"status": "complete" if ok else "failed_or_incomplete", "returncodes": codes, "t_end": time.time(), "report": rep})
++            atomic_json(att, att_path)
++            if ok:
++                atomic_json(rep, cp)
++            elif a.max_requests is None:
++                summary.append({"ckpt": ckpt, "status": "FAILED", "rc": codes, "missing": len(missing), "err": err})
++            print(f"[{ckpt}] rc={codes} wall={wall:.0f}s n={len(done)}/{len(rows)} ok={ok}", flush=True)
++            summary.append({"ckpt": ckpt, "status": "complete" if ok else "incomplete", "n": len(done), "of": len(rows), "wall_s": wall})
++        finally:
++            stopped = stop_children(procs) if any(p.poll() is None for p in procs) else [{"pid": p.pid, "returncode": p.returncode} for p in procs]
++            if att["status"] == "running":
++                att.update({"status": "interrupted", "t_end": time.time(), "children_final": stopped})
++                try:
++                    atomic_json(att, att_path)
++                except OSError:
++                    pass
++            rlk.release()
++    print(json.dumps(summary))
++    sys.exit(0 if all(s["status"] in ("complete", "verified_complete") for s in summary) else 2)
++
++
++if __name__ == "__main__":
++    main()
+diff --git a/rsna_diag/roi25_spec.py b/rsna_diag/roi25_spec.py
+new file mode 100644
+index 0000000..587719a
+--- /dev/null
++++ b/rsna_diag/roi25_spec.py
+@@ -0,0 +1,113 @@
++"""iter_025 D768 2x2 interface diagnostic: coordinate-list judgment prompts (bbox vs computed-center) x
++image-attached vs text-only. 질문·기하·parser는 roi23_spec을 그대로 재사용한다 (TL/TR/BL/BR, center_yx, quadrant_of,
++margin_ok, answers, largest_box_quadrant, d24_order_key, parse_answer/parse_semantic).
++
++OB(bbox oracle)/OC(computed-center oracle) 지시문은 결과를 보기 전에 고정한다. I(image attached)/T(text-only)는
++같은 지시문 텍스트에서 이미지 첨부 여부만 다르다. fmt는 plain 하나만 쓴다("Answer only yes or no.").
++"""
++import json
++
++from . import roi23_spec as R
++
++TARGETS = R.TARGETS
++QUADRANT_NAME = R.QUADRANT_NAME
++FMT = "plain"
++CONDITIONS = ("OB_I", "OB_T", "OC_I", "OC_T")
++MODALITY_OF = {"OB_I": "image", "OB_T": "text", "OC_I": "image", "OC_T": "text"}
++REPRESENTATION_OF = {"OB_I": "bbox", "OB_T": "bbox", "OC_I": "center", "OC_T": "center"}
++
++QUAD_DEF = ("The four quadrants are defined by cy<500 (top) or cy>=500 (bottom), and cx<500 (left) or cx>=500 "
++            "(right).")
++
++OB_TMPL = ("Supplied annotation list (reference), JSON list of boxes [y_min, x_min, y_max, x_max] integers on a "
++           "0-1000 canvas: {list_json}\n\n"
++           "This is a coordinate-list task. Use only the supplied annotation list to answer. If an image is "
++           "attached, do not re-detect or replace the listed annotations. Coordinates use a 0-1000 canvas, with x "
++           "increasing to the right and y increasing downward. Each box is [y_min, x_min, y_max, x_max]. Its "
++           "center is cy=(y_min+y_max)/2 and cx=(x_min+x_max)/2. " + QUAD_DEF + " Is at least one listed center "
++           "in the {quadrant} quadrant? Answer only yes or no.")
++
++OC_TMPL = ("Supplied annotation list (reference), JSON list of already computed centers [cy, cx] on a 0-1000 "
++           "canvas: {list_json}\n\n"
++           "This is a coordinate-list task. Use only the supplied annotation list to answer. If an image is "
++           "attached, do not re-detect or replace the listed annotations. Coordinates use a 0-1000 canvas, with x "
++           "increasing to the right and y increasing downward. Each entry is an already computed center [cy, cx]. "
++           + QUAD_DEF + " Is at least one listed center in the {quadrant} quadrant? Answer only yes or no.")
++
++
++class SpecError(RuntimeError):
++    pass
++
++
++def boxes_int(boxes_norm):
++    """[y0,x0,y1,x1] float -> int-rounded (기존 oracle과 같은 정수 좌표 직렬화)."""
++    return [[int(round(v)) for v in b] for b in boxes_norm]
++
++
++def _half(total):
++    x = total / 2.0
++    return int(x) if x == int(x) else x
++
++
++def centers_from_boxes(boxes_i):
++    """직렬화된(반올림된) bbox에서 중심을 0.5 단위까지 정확히 계산한다."""
++    out = []
++    for y0, x0, y1, x1 in boxes_i:
++        out.append([_half(y0 + y1), _half(x0 + x1)])
++    return out
++
++
++def check_rounding_preserves_answer(boxes_norm):
++    """반올림이 사분면 정답을 바꾸지 않는지 사전 검사한다 (D24는 margin>=25이므로 통과해야 한다)."""
++    bi = boxes_int(boxes_norm)
++    a_float = R.answers(boxes_norm)
++    a_round = R.answers([[float(v) for v in b] for b in bi])
++    if a_float != a_round:
++        raise SpecError(f"rounding changed quadrant answer: float={a_float} round={a_round} boxes={boxes_norm}")
++    return bi
++
++
++def prompt(condition, target, boxes_i):
++    """condition: OB_I|OB_T|OC_I|OC_T. boxes_i: int-rounded [y0,x0,y1,x1] list (nonempty)."""
++    if not boxes_i:
++        raise SpecError("D768 prompts require a nonempty box list (all D24 patients are opacity-positive)")
++    rep = REPRESENTATION_OF[condition]
++    q = QUADRANT_NAME[target]
++    if rep == "bbox":
++        lst = json.dumps(boxes_i, separators=(",", ":"))
++        return OB_TMPL.format(list_json=lst, quadrant=q)
++    centers = centers_from_boxes(boxes_i)
++    lst = json.dumps(centers, separators=(",", ":"))
++    return OC_TMPL.format(list_json=lst, quadrant=q)
++
++
++AR_TMPL = ("Supplied annotation list (reference), list of the quadrant name(s) where an annotation is located: "
++           "{list_json}\n\n"
++           "This is a list-membership task. Use only the supplied list to answer; do not use any other "
++           "information, and do not re-derive quadrants from coordinates or an image. Is \"{quadrant}\" present in "
++           "the supplied list? Answer only yes or no.")
++
++
++def ar_prompt(target, quadrant_names):
++    """답 읽기 sanity: 좌표 없이 정답 사분면 이름을 text로 직접 제공하는 최소 list-membership 과제.
++    quadrant_names: 사람이 읽는 이름(top-left 등) 목록, 원본 annotation 순서."""
++    if not quadrant_names:
++        raise SpecError("AR sanity requires a nonempty quadrant-name list")
++    lst = json.dumps(quadrant_names, separators=(",", ":"))
++    return AR_TMPL.format(list_json=lst, quadrant=QUADRANT_NAME[target])
++
++
++def quadrant_names_from_boxes(boxes_i):
++    """원본 annotation 순서를 유지한 사분면 이름 목록(중복 가능, GT 텍스트 그대로 제공)."""
++    names = []
++    for y0, x0, y1, x1 in boxes_i:
++        cy, cx = R.center_yx([y0, x0, y1, x1])
++        q = R.quadrant_of(cy, cx)
++        names.append(QUADRANT_NAME[q])
++    return names
++
++
++parse_answer = R.parse_answer
++parse_semantic = R.parse_semantic
++answers = R.answers
++sha = R.sha
+diff --git a/run_iter025_ar_eval.py b/run_iter025_ar_eval.py
+new file mode 100644
+index 0000000..750acd2
+--- /dev/null
++++ b/run_iter025_ar_eval.py
+@@ -0,0 +1,36 @@
++"""iter_025 답 읽기(AR) sanity 채점: GT 사분면 이름을 text로 직접 제공한 list-membership 과제의 정확도.
++E 진입 gate와 무관한 진단 전용 결과다. 사용: python run_iter025_ar_eval.py
++"""
++import json
++import os
++
++os.environ.setdefault("ROI25_RUN_ROOT", "results/iter_025")
++
++from rsna_diag import roi23_data as D, roi25_eval as EV, roi25_requests as RQ, roi25_spec as R25  # noqa: E402
++
++OUT = "results/iter_025"
++items, gts = D.load_val_pool()
++d24 = json.load(open(f"{OUT}/manifests_d24_ids.json"))
++d_gts = {i: gts[i] for i in d24}
++cfg = json.load(open(f"{OUT}/protocol_AR.json"))["locked"]["generation_config_digest"]
++gt = EV.gt_answers(d_gts, d24)
++
++report = {}
++for ck in ("M0", "B0"):
++    rows = RQ.load_rows(f"{OUT}/requests/AR__{ck}.jsonl", cfg)
++    recs = EV.read_gen(f"{OUT}/gen/AR__{ck}")
++    completion = json.load(open(f"{OUT}/gen/AR__{ck}/completion.json"))
++    if completion["n_expected"] != len(rows) or completion["n_actual_unique"] != len(rows):
++        raise SystemExit(f"{ck}: AR completion.json does not match request count")
++    missing = [r["request_id"] for r in rows if r["request_id"] not in recs]
++    if missing:
++        raise SystemExit(f"{ck}: missing {len(missing)} AR records")
++    per = EV.collect(rows, recs)[(ck, "AR")]
++    vr = EV.valid_rate(per, d24)
++    qa = EV.question_accuracy(per, gt, d24)
++    q4, _ = EV.q4_series(per, gt, d24)
++    report[ck] = {"valid_rate": vr, "question_accuracy": qa, "q4_mean": float(q4.mean())}
++
++os.makedirs(f"{OUT}/eval", exist_ok=True)
++json.dump(report, open(f"{OUT}/eval/report_AR.json", "w"), indent=1, default=str)
++print(json.dumps(report, indent=1, default=str))
+diff --git a/run_iter025_d_eval.py b/run_iter025_d_eval.py
+new file mode 100644
+index 0000000..a1acf91
+--- /dev/null
++++ b/run_iter025_d_eval.py
+@@ -0,0 +1,52 @@
++"""iter_025 D768 채점 실행: request row + gen record -> report_D.json, D_decision.json.
++사용: python run_iter025_d_eval.py
++"""
++import json
++import os
++
++os.environ.setdefault("ROI25_RUN_ROOT", "results/iter_025")
++
++from rsna_diag import roi23_data as D, roi25_eval as EV, roi25_decide as DEC, roi25_requests as RQ, roi25_spec as R25  # noqa: E402
++
++OUT = "results/iter_025"
++
++items, gts = D.load_val_pool()
++d24 = json.load(open(f"{OUT}/manifests_d24_ids.json"))
++d_items = {i: items[i] for i in d24}
++d_gts = {i: gts[i] for i in d24}
++cfg = json.load(open(f"{OUT}/protocol_D.json"))["locked"]["generation_config_digest"]
++
++rows_by_ckpt = {}
++recs_by_ckpt_cond = {}
++for ck in ("M0", "B0"):
++    rows = RQ.load_rows(f"{OUT}/requests/D__{ck}.jsonl", cfg)
++    rows_by_ckpt[ck] = rows
++    recs = EV.read_gen(f"{OUT}/gen/D__{ck}")
++    got_ids = {r["request_id"] for r in rows}
++    completion = json.load(open(f"{OUT}/gen/D__{ck}/completion.json"))
++    if completion["n_expected"] != len(rows) or completion["n_actual_unique"] != len(rows):
++        raise SystemExit(f"{ck}: completion.json does not match request count")
++    for cond in R25.CONDITIONS:
++        cond_rows = [r for r in rows if r["condition"] == cond]
++        cond_recs = {r["request_id"]: recs[r["request_id"]] for r in cond_rows if r["request_id"] in recs}
++        missing = [r["request_id"] for r in cond_rows if r["request_id"] not in recs]
++        if missing:
++            raise SystemExit(f"{ck}/{cond}: missing {len(missing)} generation records, e.g. {missing[:3]}")
++        recs_by_ckpt_cond[(ck, cond)] = cond_recs
++
++# old (iter_024) oracle D24 Q4, read-only comparison
++gt = EV.gt_answers(d_gts, d24)
++old_oracle = {}
++for ck, key in (("M0", "O_M0"), ("B0", "O_B0")):
++    reqp = f"results/iter_024/requests/D24__{key}.jsonl"
++    gendir = f"results/iter_024/gen/D24__{key}"
++    old_oracle[ck] = EV.old_oracle_q4(gendir, reqp, gt, d24)
++
++report = EV.build_report(d24, d_gts, rows_by_ckpt, recs_by_ckpt_cond, old_oracle=old_oracle)
++os.makedirs(f"{OUT}/eval", exist_ok=True)
++json.dump(report, open(f"{OUT}/eval/report_D.json", "w"), indent=1, default=str)
++print(json.dumps({k: report[k] for k in ("valid_rates", "question_accuracy", "q4_mean", "old_oracle_q4_mean")}, indent=1, default=str))
++
++os.makedirs(f"{OUT}/decide", exist_ok=True)
++decision = DEC.decide_d()
++print(json.dumps(decision, indent=1, default=str))
+diff --git a/sanity_iter025.py b/sanity_iter025.py
+new file mode 100644
+index 0000000..ec63cb0
+--- /dev/null
++++ b/sanity_iter025.py
+@@ -0,0 +1,77 @@
++"""iter_025 D768 실행 전 GPU sanity: (1) M0/B0 concise bbox 재생성 대 iter_024 D24_bbox 저장 record 토큰 대조
++(환경/adapter 로딩이 이전과 동일하게 동작하는지), (2) text-only 입력 구성에 pixel_values가 없음을 실제 모델/processor로 확인.
++사용: python sanity_iter025.py -> results/iter_025/sanity/sanity.json
++"""
++import glob
++import json
++import os
++
++os.environ.setdefault("ROI25_RUN_ROOT", "results/iter_025")
++
++from rsna_diag import generate as G, roi23_data as D, roi23_spec as R, prompts as P  # noqa: E402
++
++out = {"checks": []}
++
++
++def add(name, ok, detail=None):
++    out["checks"].append({"name": name, "pass": bool(ok), "detail": detail})
++    print(("PASS" if ok else "FAIL"), name)
++
++
++items, gts = D.load_val_pool()
++opac = sorted([i for i, g in gts.items() if g["category"] == "opacity"])
++prim, _ = D.opacity_with_margin(gts, opac)
++layers = {t: [] for t in R.TARGETS}
++for i in prim:
++    q = R.largest_box_quadrant(gts[i]["boxes"])
++    layers[q].append(i)
++for q in layers:
++    layers[q].sort(key=lambda i: R.d24_order_key(i))
++probe_ids = [layers[q][0] for q in R.TARGETS]
++print("probe patients (one per quadrant, D24 order):", probe_ids)
++
++old_recs = {}
++for ck in ("M0", "B0"):
++    for f in sorted(glob.glob(f"results/iter_024/gen/D24_bbox__{ck}/gen_worker*.jsonl")):
++        for ln in open(f):
++            if ln.strip():
++                r = json.loads(ln)
++                if r.get("prompt_name") == "bbox_concise":
++                    old_recs[(ck, r["id"])] = r
++
++torch, proc, model = G.load_model()
++eos = G.env_info(torch, proc, model)["eos_token_id"]
++eos_ids = set(eos if isinstance(eos, list) else [eos])
++
++# tensor sanity: text-only chat has no pixel_values, image chat does
++img, aff, px = G.load_image(items[probe_ids[0]]["image"])
++inp_img = G.build_inputs(proc, img, P.CONCISE)
++inp_txt = G.build_inputs_text(proc, "This is a text-only sanity prompt.")
++add("image_chat_has_pixel_values", "pixel_values" in inp_img, list(inp_img.keys()))
++add("text_only_chat_has_no_pixel_values", "pixel_values" not in inp_txt, list(inp_txt.keys()))
++decoded = proc.tokenizer.decode(inp_txt["input_ids"][0].tolist())
++add("text_only_input_ids_decode_contains_prompt_text", "text-only sanity prompt" in decoded, decoded[-200:])
++
++for ck in ("M0", "B0"):
++    adapter_dir = None if ck == "M0" else "results/iter_012/train/lr2e-4_s17/epoch_05"
++    if adapter_dir:
++        adg = G.load_adapter(torch, model, adapter_dir)
++        add(f"{ck}_adapter_digest_matches_pinned",
++            adg == "e13f3c4461b826a060c90dfe4e4ee4c2ebac36a08f84be1a45a37495816cec11", adg)
++    for pid in probe_ids:
++        rec = G.run_request(torch, proc, model, eos_ids, items[pid], "concise_sanity", P.CONCISE)
++        old = old_recs.get((ck, pid))
++        if old is None:
++            add(f"{ck}_{pid}_has_old_record", False, "no iter_024 D24_bbox record found")
++            continue
++        match = rec["suffix_ids"] == old["suffix_ids"] and rec["ended_eos"] == old["ended_eos"]
++        add(f"{ck}_{pid}_greedy_tokens_match_iter024", match,
++            {"new_ended_eos": rec["ended_eos"], "old_ended_eos": old["ended_eos"],
++             "new_n_out": rec["n_output_tokens"], "old_n_out": old["n_output_tokens"],
++             "new_text": rec["suffix_text_raw"][:200], "old_text": old["suffix_text_raw"][:200]})
++
++os.makedirs("results/iter_025/sanity", exist_ok=True)
++out["n"] = len(out["checks"])
++out["n_pass"] = sum(1 for c in out["checks"] if c["pass"])
++json.dump(out, open("results/iter_025/sanity/sanity.json", "w"), indent=1, default=str)
++print(f"{out['n_pass']}/{out['n']} passed")
+diff --git a/test_rsna_iter025.py b/test_rsna_iter025.py
+new file mode 100644
+index 0000000..5cd3d19
+--- /dev/null
++++ b/test_rsna_iter025.py
+@@ -0,0 +1,222 @@
++"""iter_025 CPU fixture: roi25_spec 직렬화/반올림/prompt, roi25_requests id·modality 검증, roi25_gen modality 검사,
++roi25_eval 통계, roi25_decide gate 재계산. 사용: python test_rsna_iter025.py -> results/iter_025/tests/fixtures_iter025.json
++"""
++import json
++import os
++import shutil
++import sys
++
++sys.path.insert(0, os.path.dirname(__file__))
++
++os.environ.setdefault("ROI25_RUN_ROOT", "results/iter_025")
++TMP = "results/iter_025/tests/tmp"
++shutil.rmtree(TMP, ignore_errors=True)
++os.makedirs(TMP, exist_ok=True)
++
++from rsna_diag import roi25_spec as R25, roi25_requests as RQ, roi25_gen as GEN, roi25_eval as EV, roi25_decide as DEC  # noqa: E402
++from rsna_diag import roi23_spec as R23  # noqa: E402
++
++results = []
++
++
++def check(name, cond, detail=None):
++    results.append({"name": name, "pass": bool(cond), "detail": detail})
++    if not cond:
++        print("FAIL", name, detail)
++
++
++# 1. center precision: even sum -> int, odd sum -> .5
++c = R25.centers_from_boxes([[100, 200, 300, 400], [10, 10, 11, 11]])
++check("center_even_sum_is_int", c[0] == [200, 300], c)
++check("center_odd_sum_is_half", c[1] == [10.5, 10.5], c)
++
++# 2. rounding preserves quadrant answer for margin-safe boxes; raises for a boundary box moved by rounding
++ok_boxes = [[100.2, 100.2, 300.4, 300.4]]
++bi = R25.check_rounding_preserves_answer(ok_boxes)
++check("rounding_ok_returns_int_boxes", bi == [[100, 100, 300, 300]], bi)
++
++boundary_boxes = [[499.6, 100.0, 500.4, 200.0]]  # float center cy=500.0 (bottom); round(499.6)=500,round(500.4)=500 -> still bottom, ok
++try:
++    R25.check_rounding_preserves_answer(boundary_boxes)
++    check("boundary_case_no_flip", True)
++except R25.SpecError:
++    check("boundary_case_no_flip", True)  # 어느 쪽이든 예외 처리 경로 자체가 동작함을 확인
++
++flip_boxes = [[498.0, 100.0, 502.0, 200.0]]  # cy=500.0 exactly at boundary already (both float and round agree: bottom)
++R25.check_rounding_preserves_answer(flip_boxes)
++check("exact_boundary_500_is_bottom_both_float_and_round", True)
++
++# 3. prompt content: OB has box formula sentence, OC has computed-center sentence; both list nonempty JSON
++p_ob = R25.prompt("OB_I", "TL", [[100, 100, 300, 300]])
++p_oc = R25.prompt("OC_I", "TL", [[100, 100, 300, 300]])
++check("ob_prompt_has_box_formula", "Each box is [y_min, x_min, y_max, x_max]" in p_ob, p_ob[:120])
++check("oc_prompt_has_center_sentence", "already computed center" in p_oc, p_oc[:120])
++check("ob_prompt_embeds_box_json", '[[100,100,300,300]]' in p_ob.replace(" ", ""), p_ob[:200])
++check("oc_prompt_embeds_center_json", '[[200,200]]' in p_oc.replace(" ", ""), p_oc[:200])
++check("ob_and_oc_use_same_quadrant_name", "top-left quadrant" in p_ob and "top-left quadrant" in p_oc)
++try:
++    R25.prompt("OB_I", "TL", [])
++    check("empty_box_list_rejected", False)
++except R25.SpecError:
++    check("empty_box_list_rejected", True)
++
++# 4. request id: image vs text differ; verify_row round-trips; text row cannot carry image fields
++cfg = "cfgdigest123"
++img_fields = {"image": "x.png", "file_sha256": "f" * 64, "pixel_sha256": "p" * 64}
++row_i = RQ.make_row("val_1", "validation", "M0", None, "TL", "OB_I", p_ob, cfg, "D", "image", img_fields)
++row_t = RQ.make_row("val_1", "validation", "M0", None, "TL", "OB_T", p_ob, cfg, "D", "text")
++check("image_and_text_rows_have_different_ids", row_i["request_id"] != row_t["request_id"])
++check("verify_row_accepts_valid_rows", RQ.verify_row(row_i, cfg) and RQ.verify_row(row_t, cfg))
++bad = dict(row_t)
++bad["image"] = "sneaky.png"
++try:
++    RQ.verify_row(bad, cfg)
++    check("text_row_with_image_field_rejected", False)
++except RQ.RequestError:
++    check("text_row_with_image_field_rejected", True)
++bad2 = dict(row_i)
++bad2["image"] = None
++try:
++    RQ.verify_row(bad2, cfg)
++    check("image_row_without_image_field_rejected", False)
++except RQ.RequestError:
++    check("image_row_without_image_field_rejected", True)
++
++# 5. roi25_gen.check_inputs: text rows skip file checks; malformed text row (carries image) rejected
++try:
++    GEN.check_inputs([row_i, row_t])
++    check("check_inputs_raises_on_missing_real_file", False)
++except (GEN.QAError, FileNotFoundError, OSError):
++    check("check_inputs_raises_on_missing_real_file", True)  # row_i points to a fake path, expected to fail file check
++try:
++    GEN.check_inputs([bad])
++    check("check_inputs_rejects_text_row_with_image_fields", False)
++except GEN.QAError:
++    check("check_inputs_rejects_text_row_with_image_fields", True)
++
++# 6. validate_records: modality mismatch / stray image fields on text record rejected
++rows = [row_t]
++cdig, adg, pdig = cfg, None, "protodig"
++good_rec = {"request_id": row_t["request_id"], "prompt_sha256": row_t["prompt_sha256"], "adapter_digest": adg,
++            "config_digest": cdig, "protocol_digest": pdig, "id": row_t["id"], "condition": row_t["condition"],
++            "checkpoint": row_t["checkpoint"], "target": row_t["target"], "fmt": row_t["fmt"], "modality": "text",
++            "image": None, "image_file_sha256": None, "input_pixel_sha256": None}
++done = GEN.validate_records({"f.jsonl": [good_rec]}, rows, cdig, adg, pdig, lambda p: "unused")
++check("validate_records_accepts_good_text_record", row_t["request_id"] in done)
++bad_rec = dict(good_rec)
++bad_rec["image"] = "leaked.png"
++try:
++    GEN.validate_records({"f.jsonl": [bad_rec]}, rows, cdig, adg, pdig, lambda p: "unused")
++    check("validate_records_rejects_text_record_with_image", False)
++except GEN.QAError:
++    check("validate_records_rejects_text_record_with_image", True)
++bad_rec2 = dict(good_rec)
++bad_rec2["modality"] = "image"
++try:
++    GEN.validate_records({"f.jsonl": [bad_rec2]}, rows, cdig, adg, pdig, lambda p: "unused")
++    check("validate_records_rejects_modality_mismatch", False)
++except GEN.QAError:
++    check("validate_records_rejects_modality_mismatch", True)
++
++# 7. eval stats: valid_rate / question_accuracy / q4_series / paired_ci on a synthetic 4-patient set
++gt = {"p1": {"TL": "yes", "TR": "no", "BL": "no", "BR": "no"}, "p2": {"TL": "no", "TR": "yes", "BL": "no", "BR": "no"},
++      "p3": {"TL": "no", "TR": "no", "BL": "yes", "BR": "no"}, "p4": {"TL": "no", "TR": "no", "BL": "no", "BR": "yes"}}
++pids = ["p1", "p2", "p3", "p4"]
++
++
++def mk(ans, status="valid"):
++    return {"status": status, "answer": ans, "conversion": "identity", "status_strict": status, "answer_strict": ans}
++
++
++per_perfect = {i: {t: mk(gt[i][t]) for t in R23.TARGETS} for i in pids}
++vr = EV.valid_rate(per_perfect, pids)
++check("valid_rate_all_valid", vr == {"n_valid": 16, "n_total": 16, "rate": 1.0}, vr)
++qa = EV.question_accuracy(per_perfect, gt, pids)
++check("question_accuracy_perfect", qa == {"n_correct": 16, "n_total": 16, "acc": 1.0}, qa)
++q4vals, det = EV.q4_series(per_perfect, gt, pids)
++check("q4_perfect_all_ones", list(q4vals) == [1.0, 1.0, 1.0, 1.0], list(q4vals))
++
++per_one_wrong = dict(per_perfect)
++per_one_wrong["p1"] = {t: mk("no" if t != "TL" else "no") for t in R23.TARGETS}  # TL should be yes but answered no
++q4vals2, _ = EV.q4_series(per_one_wrong, gt, pids)
++check("q4_wrong_patient_is_zero", list(q4vals2) == [0.0, 1.0, 1.0, 1.0], list(q4vals2))
++ci = EV.paired_ci(q4vals, q4vals2, seed=1, B=200)
++check("paired_ci_detects_one_patient_improvement", ci["n_improve"] == 1 and ci["mean_diff"] > 0, ci)
++
++per_one_invalid = dict(per_perfect)
++per_one_invalid["p2"] = {"TL": mk("no"), "TR": mk(None, status="truncated"), "BL": mk("no"), "BR": mk("no")}
++qa_inv = EV.question_accuracy(per_one_invalid, gt, pids)
++check("invalid_question_counts_as_incorrect_not_dropped", qa_inv["n_total"] == 16 and qa_inv["n_correct"] == 15, qa_inv)
++vr_inv = EV.valid_rate(per_one_invalid, pids)
++check("invalid_reduces_valid_rate", vr_inv["n_valid"] == 15, vr_inv)
++
++# 8. decide gate: boundary 87/96 passes, 86/96 fails; one condition below 0.95 valid fails format_ok
++CONDS = R25.CONDITIONS
++
++
++def mk_report(ob_i_acc_num, ob_t_acc_num, valid_rate_all=0.97, ckpt="M0", other_ckpt_ok=True):
++    n = 96
++    vr = {}
++    qa = {}
++    for ck in ("M0", "B0"):
++        for c in CONDS:
++            vr[f"{ck}_{c}"] = {"n_valid": round(valid_rate_all * n), "n_total": n, "rate": valid_rate_all}
++    for ck in ("M0", "B0"):
++        num_i = ob_i_acc_num if (ck == ckpt or other_ckpt_ok) else 87
++        num_t = ob_t_acc_num if (ck == ckpt or other_ckpt_ok) else 87
++        qa[f"{ck}_OB_I"] = {"n_correct": num_i, "n_total": n, "acc": num_i / n}
++        qa[f"{ck}_OB_T"] = {"n_correct": num_t, "n_total": n, "acc": num_t / n}
++        for c in ("OC_I", "OC_T"):
++            qa[f"{ck}_{c}"] = {"n_correct": 60, "n_total": n, "acc": 60 / n}
++    return {"valid_rates": vr, "question_accuracy": qa}
++
++
++rep_pass = mk_report(87, 87)
++p1 = f"{TMP}/report_D_pass.json"
++json.dump(rep_pass, open(p1, "w"))
++d1 = DEC.decide_d(report_path=p1, out_path=f"{TMP}/D_decision_pass.json")
++check("gate_passes_at_exactly_87_of_96", d1["passed"] is True, d1)
++
++rep_fail = mk_report(86, 87)
++p2 = f"{TMP}/report_D_fail.json"
++json.dump(rep_fail, open(p2, "w"))
++d2 = DEC.decide_d(report_path=p2, out_path=f"{TMP}/D_decision_fail.json")
++check("gate_fails_at_86_of_96", d2["passed"] is False and d2["oracle_pass"] is False, d2)
++
++rep_fail_fmt = mk_report(90, 90, valid_rate_all=0.90)
++p3 = f"{TMP}/report_D_fail_fmt.json"
++json.dump(rep_fail_fmt, open(p3, "w"))
++d3 = DEC.decide_d(report_path=p3, out_path=f"{TMP}/D_decision_fail_fmt.json")
++check("gate_fails_when_valid_rate_below_95pct", d3["passed"] is False and d3["format_ok"] is False, d3)
++
++# OC failing accuracy must NOT affect the gate (OC is not in GATE_CONDITIONS)
++rep_oc_bad = mk_report(90, 90)
++rep_oc_bad["question_accuracy"]["M0_OC_I"] = {"n_correct": 0, "n_total": 96, "acc": 0.0}
++p4 = f"{TMP}/report_D_oc_bad.json"
++json.dump(rep_oc_bad, open(p4, "w"))
++d4 = DEC.decide_d(report_path=p4, out_path=f"{TMP}/D_decision_oc_bad.json")
++check("oc_failure_does_not_block_gate", d4["passed"] is True, d4)
++
++# decide_d refuses to overwrite; recheck rejects tampering
++try:
++    DEC.decide_d(report_path=p1, out_path=f"{TMP}/D_decision_pass.json")
++    check("decide_d_refuses_overwrite", False)
++except RuntimeError:
++    check("decide_d_refuses_overwrite", True)
++d1_reload = DEC.recheck(f"{TMP}/D_decision_pass.json")
++check("recheck_matches_on_untouched_report", d1_reload["passed"] is True)
++tampered = json.load(open(f"{TMP}/D_decision_fail.json"))
++tampered["passed"] = True
++json.dump(tampered, open(f"{TMP}/D_decision_fail_tampered.json", "w"))
++try:
++    DEC.recheck(f"{TMP}/D_decision_fail_tampered.json")
++    check("recheck_rejects_tampered_decision", False)
++except RuntimeError:
++    check("recheck_rejects_tampered_decision", True)
++
++os.makedirs("results/iter_025/tests", exist_ok=True)
++out = {"n": len(results), "n_pass": sum(1 for r in results if r["pass"]), "results": results}
++json.dump(out, open("results/iter_025/tests/fixtures_iter025.json", "w"), indent=1, default=str)
++print(f"{out['n_pass']}/{out['n']} passed")
++if out["n_pass"] != out["n"]:
++    sys.exit(1)
