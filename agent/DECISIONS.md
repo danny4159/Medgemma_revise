@@ -630,3 +630,31 @@ Claude 계정의 /usage 또는 Settings > Usage에서 제한을 확인한 뒤 �
   - 다음: 현재 진단을 유지하며 복구한다. 실행 호스트에서 기존 작업의 PID/starttime·lock·종료 상태를 먼저 확인하고 살아 있는 작업은 중복 실행하지 않는다. 부분 출력·claim·protocol을 보존하며 실행 수명 관리, 단계 decision 강제, 필수 출처 잠금과 평가 완전성을 보완한다. 실제 D 입력의 공식 구성 대조·adapter 및 bbox sanity·24개 재개/변조 검사·동일 요청 2/4 worker 처리량과 정합성·긴 출력 메모리 검증을 완료한다. 유효한 기존 출력은 호환성을 확인해 재사용하고 D24 QA gate를 통과하면 E60, 원래 조건에 따른 E200 및 seed 비교를 이어간다. 가설·성공 기준은 유지하고 MRI F139·reserve·새 학습은 열지 않는다. D gate 실패 시 형식·지시 문제와 능력 전이를 구분해 보고한다.
 - 📁 원본: `agent/runs/iter_023/`
 
+## iter_024 — RSNA 영역 질의 전이 진단 (2번째 시도) · 2026-09-28 17:01
+
+- 🧭 **계획** (GPT normal): iter_023의 실행·평가 경로를 복구해 RSNA SFT의 사분면 질의 전이를 실제로 검증한다. 기존 bbox 성과는 유지하며, 형식·지시 gate 실패를 전이 부재로 해석하지 않는다.
+  - 대안: 1) RSNA 영역 질의 전이 진단: 확인된 실행 결함을 수정하고 원래 직접·규칙·reader 비교를 완료한다. · 2) 지정 범위의 bbox 선택 진단: 사분면 질의의 정상 사용 gate를 확보할 수 없을 때 정보 이득을 비교할 후보로 보존한다. · 3) 기존 grounding 방법 개선: 직접·외부 활용 차이를 확인한 뒤 필요한 supervision과 강한 직접 SFT 비교를 설계한다. · 4) MRI·longitudinal 등 다른 질문으로 전환: 현재 진단을 대체할 새 근거가 없고 사용자 우선순위가 유지되어 보류한다.
+  - 1순위 선택 근거: 미완료 원인과 수정 대상이 구체적이며, 가설·표본·기준을 변경하지 않고 기존 권한 내에서 실제 전이 진단을 완료할 수 있다. 새로운 사용자 가치 선택이나 추가 자원이 필요하지 않다.
+- ▶ **결정**: 자동 진행 (smart) — 1순위로 진행
+- 💾 **개발 이력 체크포인트** `d60460f8be761e11e1dbce306aa571173e4229db`: implementation_finished (검증 승인 아님)
+- 🔧 **Claude** (standard): D24 사분면 QA를 실제 GPU에서 완료했으나(형식 100% 정상) 사전 등록한 oracle gate가 base 42.7%/SFT 67.7%로 기준(90%) 미달해 계획대로 E60/E200 확대 없이 gate 실패로 정지·보고했다. [자체 검증 PASS, 파일 962개 변경]
+  - 브랜치 `approach/rsna-spatial-transfer`에서 계속
+- 🔍 **리뷰** (GPT normal): [CONTINUE / inconclusive] D24 QA 576건에서 형식은 모두 유효했지만 oracle 정확도 M0 42.7%·B0 67.7%로 본평가를 보류했다. RSNA SFT의 가까운 질의 전이와 응답 prior의 기여는 아직 구분되지 않았다.
+  - 접근법 판단: D24 출력과 oracle gate 실패는 확인됐으나 전이 가설은 미판정이다. 정상 사용과 인터페이스 해석을 구분할 최소 후속 진단의 가치를 재검토한다.
+  - 목표 진전: 부분 bbox 실행에서 실제 D24 QA 576건 완료로 진전했다. oracle gate 실패는 재현됐지만 동작 확인 단계에 머물러 계획한 전이 가설의 해석 가능한 본검증은 완료되지 않았다. D_B0의 Q4 4/24 대 D_M0 0/24는 개발 관찰이며, 응답 prior와 위치 정보 활용을 분리하지 못했다. 신규 방법의 기여와 외부 일반화는 미검증이다.
+  - 판정 범위: 고정 RSNA D24 개발 환자 24명, seed17 B0, 현재 plain 사분면 질문과 bbox-text oracle 인터페이스에 한정한다. E60/E200·추가 seed·독립 확인은 미실행이다. 기존 RSNA bbox SFT 개선이나 일반적 공간 능력·전이 가능성을 기각하지 않는다.
+  - 현재 결론 무효: 사전 oracle gate가 M0 41/96·B0 65/96으로 모두 실패했다. E60/E200은 미실행이므로 직접 전이 또는 직접·외부 활용 차이를 확정하는 결론은 성립하지 않는다.
+  - 현재 결론 무효: 실제 D 입력의 공식 구성 대조와 기존 bbox adapter sanity 등 필수 정상 사용 검증 완료 근거가 없다. 현재 oracle 저하를 사용·실행 오류까지 통제한 모델 한계로 승격할 수 없다.
+  - 재사용 전 수정: roi23_decide._e_expand_checks는 discordance Wilson 상한 대신 1−최소 valid rate를 사용하고 분모도 160 대신 현재 n_primary를 쓴다. 더욱이 precision 조건을 expand에 반영하지 않는다. E의 형식·oracle gate도 확대 판정에 연결해야 한다.
+  - 재사용 전 수정: decision 검증은 요청 생성 일부에만 연결돼 있다. 직접 실행·재개·완료 건너뛰기·평가에서 선행 stage와 선택 fmt를 강제하고, recheck가 stage·fmt 등 관련 필드를 함께 대조하도록 수정해야 한다.
+  - 재사용 전 수정: protocol extra와 기존 bbox source의 pinned가 여전히 선택적이다. 원본 자료·checkpoint 선택·bbox 결과 및 completion·선행 decision을 실제 사용 stage별 필수 출처로 잠가야 한다.
+  - 재사용 전 수정: _verify_and_collect는 protocol digest를 첫 출력에서 받아들인다. 현재 protocol/config/adapter와 completion 연결을 검증하고 manifest에서 예상 요청 행렬을 독립 재구성해야 한다.
+  - 재사용 전 수정: D24 bbox evidence 로더의 completion 확인은 일부 필드 검사에 그친다. 규칙 점수 로더에는 중복 덮어쓰기와 출처 검증 누락이 남아 있다. 누락 source를 모델의 invalid 또는 unavailable로 취급하지 않아야 한다.
+  - 재사용 전 수정: 실제 24개 요청의 worker·pipeline 중단/재개, 완료 후 변조 거부, 공식 입력 대조, adapter sanity 및 계획한 처리량 비교가 미완료다. 다음 실제 사용 경로에서 완료해야 한다.
+  - 재사용 전 수정: 사분면별 지표·strict 집계·환자별 상세 저장과 D에서 고정한 prior의 E 적용이 미완성이다. permutation p-value의 (b+1)/(B+1) 보정도 적용해야 한다.
+  - 재사용 전 수정: 기존 테스트 실행이 results/iter_023/tests/fixtures_iter023.json에 다시 기록된다. 이후 검증 산출물은 현재 반복 경로로 저장하고 이전 기록 불변 주장과 실제 변경 목록을 일치시켜야 한다.
+  - 추후 개선: 정상 사용과 과제 식별성이 확보된 뒤에만 다른 seed·독립 환자·외부 원천 재현을 설계한다.
+  - 추후 개선: 후속 방법의 추가 가치를 주장할 때 직접 질의 SFT와 공정한 detector/encoder+head 대안을 포함한다.
+  - 다음: 진단을 우선하는 deep 전략 판단을 수행한다. 기존 D24 출력과 checkpoint를 유지하고, 실제 공식 입력·adapter 연결 검증 후 좌표 해석과 영상 활용을 분리하는 최소 대조의 정보 이득을 지정 범위 bbox 선택 대안과 비교한다. 정답 사분면을 직접 제공하는 대조를 쓰더라도 답 읽기 sanity로만 취급하고 공간 전이 증거로 세지 않는다. 현재 gate를 사후 완화하거나 E60을 바로 열지 말고 변경된 설계·gate·중단 조건을 새 경로에 사전 고정한다. 식별성이 확보되면 필요한 E 탐색과 조건부 확대를 실행하고, 계속 확보되지 않으면 무엇이 미해결인지 명시해 가까운 대안으로 전환한다. 재사용 수정은 선택한 실행 경로에 한정하며 새 loss·학습·MRI F139·reserve는 자동 투입하지 않는다.
+- 📁 원본: `agent/runs/iter_024/`
+

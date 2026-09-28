@@ -1,0 +1,460 @@
+diff --git a/rsna_diag/roi23_decide.py b/rsna_diag/roi23_decide.py
+new file mode 100644
+index 0000000..c15495c
+--- /dev/null
++++ b/rsna_diag/roi23_decide.py
+@@ -0,0 +1,137 @@
++"""iter_024 stage decision: D24 형식/oracle gate, E60->E200 확대 gate. 파일 존재만으로 통과하지 않는다.
++
++decide()는 report_*.json을 직접 읽어 계획의 사전 고정 기준으로 판정하고 atomic하게 decision 파일을 쓴다
++(이미 있으면 덮어쓰지 않는다: 같은 stage를 다시 결정해 유리한 결과로 바꾸지 못한다).
++recheck()는 결정 파일이 참조하는 report를 다시 읽어 저장된 판정이 report 내용과 실제로 일치하는지 재계산한다
++(roi23_pipeline.cmd_requests가 다음 stage 진입 전에 이 recheck를 호출한다).
++"""
++import hashlib
++import json
++import os
++import sys
++
++OUT = os.environ.get("ROI23_RUN_ROOT", "results/iter_024")
++FMT_MIN_VALID = 0.95
++ORACLE_MIN_ACC = 0.90
++ROW_KEYS = ("D_M0", "D_B0", "L", "U", "O_M0", "O_B0")
++
++
++def _sha_file(p):
++    h = hashlib.sha256()
++    with open(p, "rb") as f:
++        for b in iter(lambda: f.read(1 << 20), b""):
++            h.update(b)
++    return h.hexdigest()
++
++
++def atomic_json(obj, path):
++    os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
++    tmp = path + ".tmp"
++    with open(tmp, "w") as f:
++        json.dump(obj, f, indent=1, default=str)
++    os.replace(tmp, path)
++
++
++def _d24_checks(report):
++    valid_rates = report["valid_rates"]
++    fmt_ok = {k: valid_rates[k]["rate"] >= FMT_MIN_VALID for k in ROW_KEYS}
++    format_ok = all(fmt_ok.values())
++    oracle = report["oracle_accuracy"]
++    oracle_ok = {k: (oracle[k]["acc_over_all_questions"] is not None and oracle[k]["acc_over_all_questions"] >= ORACLE_MIN_ACC)
++                 for k in ("O_M0", "O_B0")}
++    oracle_pass = all(oracle_ok.values())
++    return {"fmt_valid_rates": {k: valid_rates[k]["rate"] for k in ROW_KEYS}, "fmt_ok_by_key": fmt_ok, "format_ok": format_ok,
++            "oracle_acc_over_all_questions": {k: oracle[k]["acc_over_all_questions"] for k in ("O_M0", "O_B0")},
++            "oracle_ok_by_key": oracle_ok, "oracle_pass": oracle_pass, "passed": bool(format_ok and oracle_pass)}
++
++
++def decide_d24(report_path=None, out_path=None):
++    report_path = report_path or f"{OUT}/eval/report_D24.json"
++    out_path = out_path or f"{OUT}/decide/D24_decision.json"
++    if os.path.exists(out_path):
++        raise RuntimeError(f"{out_path} exists (not overwriting)")
++    report = json.load(open(report_path))
++    checks = _d24_checks(report)
++    decision = {"stage": "D24", "report_path": report_path, "report_sha256": _sha_file(report_path),
++                "fmt_used": report.get("fmt", "plain"), **checks}
++    atomic_json(decision, out_path)
++    return decision
++
++
++def _e_expand_checks(report):
++    cmp_ = report["comparisons"]
++    delta_direct = cmp_["delta_direct"]
++    g_official = cmp_["G_official"]
++    rb0_minus_db0 = cmp_["RB0_minus_DB0"]
++    l_minus_db0 = cmp_["L_minus_DB0"]
++
++    def point_ge(d, thr):
++        return d["mean_diff"] >= thr
++
++    def ci_contains(d, thr):
++        return d["judge_ci_lo"] <= thr <= d["judge_ci_hi"]
++
++    crit_point = point_ge(delta_direct, 0.10) or point_ge(g_official, 0.10)
++    crit_reader = point_ge(rb0_minus_db0, 0.10) or point_ge(l_minus_db0, 0.10)
++    ci_flags = {"delta_direct": ci_contains(delta_direct, 0.10), "G_official": ci_contains(g_official, 0.10),
++                "RB0_minus_DB0": ci_contains(rb0_minus_db0, 0.10), "L_minus_DB0": ci_contains(l_minus_db0, 0.10)}
++    crit_ci = any(ci_flags.values())
++
++    valid_rates = report["valid_rates"]
++    n_primary = report["n_primary"]
++    import math
++    q_upper = max(v["n_valid"] / v["n_total"] if v["n_total"] else 1.0 for v in valid_rates.values())
++    q_upper = 1.0 - min(v["rate"] for v in valid_rates.values())  # discordance proxy: 1 - min valid rate across keys
++    prec_bound = 1.96 * math.sqrt(max(q_upper, 1e-9) / max(n_primary, 1))
++    crit_precision_note = {"q_upper_proxy": q_upper, "n_primary": n_primary, "bound_1_96_sqrt_q_over_n": prec_bound,
++                           "bound_le_0_12": prec_bound <= 0.12}
++
++    expand = bool(crit_point or crit_reader or crit_ci)
++    return {"delta_direct": delta_direct, "G_official": g_official, "RB0_minus_DB0": rb0_minus_db0, "L_minus_DB0": l_minus_db0,
++            "crit_point_estimate_ge_0.10": crit_point, "crit_reader_ge_0.10": crit_reader, "ci_contains_0.10": ci_flags,
++            "crit_ci_contains_0.10": crit_ci, "precision_note": crit_precision_note, "expand": expand}
++
++
++def decide_e(stage, report_path=None, out_path=None):
++    report_path = report_path or f"{OUT}/eval/report_{stage}.json"
++    out_path = out_path or f"{OUT}/decide/{stage}_decision.json"
++    if os.path.exists(out_path):
++        raise RuntimeError(f"{out_path} exists (not overwriting)")
++    report = json.load(open(report_path))
++    checks = _e_expand_checks(report)
++    decision = {"stage": stage, "report_path": report_path, "report_sha256": _sha_file(report_path), **checks}
++    atomic_json(decision, out_path)
++    return decision
++
++
++def recheck(decision_path):
++    """decision 파일이 가리키는 report를 다시 읽어 저장된 필드를 재계산하고, 재계산 결과와 저장된 값이 같은지 확인한다."""
++    d = json.load(open(decision_path))
++    report_path = d["report_path"]
++    if not os.path.exists(report_path):
++        raise RuntimeError(f"decision {decision_path} refers to missing report {report_path}")
++    cur_sha = _sha_file(report_path)
++    if cur_sha != d["report_sha256"]:
++        raise RuntimeError(f"report {report_path} changed since decision {decision_path} was made")
++    report = json.load(open(report_path))
++    if d["stage"] == "D24":
++        recomputed = _d24_checks(report)
++        key = "passed"
++    else:
++        recomputed = _e_expand_checks(report)
++        key = "expand"
++    if recomputed[key] != d[key]:
++        raise RuntimeError(f"decision {decision_path} field {key} does not match recomputed value from {report_path}")
++    return d
++
++
++def main():
++    stage = sys.argv[1]
++    if stage == "D24":
++        print(json.dumps(decide_d24(), default=str))
++    else:
++        print(json.dumps(decide_e(stage), default=str))
++
++
++if __name__ == "__main__":
++    main()
+diff --git a/rsna_diag/roi23_eval.py b/rsna_diag/roi23_eval.py
+index a9c03c1..5643467 100644
+--- a/rsna_diag/roi23_eval.py
++++ b/rsna_diag/roi23_eval.py
+@@ -129,8 +129,12 @@ def paired_ci(a, b, seed=23023, B=10000, bonferroni_m=2):
+                        "Clopper-Pearson bounds on improve/worsen proportions as a conservative alternative")
+         out["cp_improve_prop_ci"] = [imp_lo, imp_hi]
+         out["cp_worsen_prop_ci"] = [wor_lo, wor_hi]
++        # 계획식: [L_improve-U_worsen, U_improve-L_worsen], [-1,1]로 clip. 판정에는 이 구간을 쓴다 (bootstrap 원본은 보존).
++        out["diff_interval_clipped"] = [max(-1.0, imp_lo - wor_hi), min(1.0, imp_hi - wor_lo)]
+     else:
+         out["degenerate"] = False
++    lo_j, hi_j = (out["diff_interval_clipped"] if out["degenerate"] else (out["ci_lo"], out["ci_hi"]))
++    out["judge_ci_lo"], out["judge_ci_hi"] = lo_j, hi_j
+     return out
+ 
+ 
+diff --git a/rsna_diag/roi23_pipeline.py b/rsna_diag/roi23_pipeline.py
+index 126f193..4ab3966 100644
+--- a/rsna_diag/roi23_pipeline.py
++++ b/rsna_diag/roi23_pipeline.py
+@@ -115,12 +115,24 @@ def bbox_pred_for(ckpt, prompt_name, ids, conf_only=True):
+     return out, recs
+ 
+ 
+-def cmd_requests(stage, cfg):
++def _require_decision(stage_needed, field, expect=True):
++    """이전 stage decision 파일이 존재하고, 그 파일이 참조하는 report를 다시 읽어 조건을 재확인한 뒤에만 통과시킨다.
++    파일 존재만으로 통과하지 않는다 (roi23_decide.recheck가 report 원본에서 재계산한다)."""
++    from . import roi23_decide as DEC
++    path = f"{OUT}/decide/{stage_needed}_decision.json"
++    if not os.path.exists(path):
++        raise RuntimeError(f"missing required decision file {path}; run roi23_decide first")
++    rechecked = DEC.recheck(path)
++    if rechecked.get(field) != expect:
++        raise RuntimeError(f"decision {path} field {field!r} != {expect} (recomputed from source report; not just file content)")
++    return rechecked
++
++
++def cmd_requests(stage, cfg, fmt="plain"):
+     sets_ = _load_sets()
+     labels = _load_labels()
+     items = _load_source_items()
+     tab = json.load(open(f"{OUT}/manifests/checkpoints.json"))
+-    fmt = "plain"
+     patients = stage_patients(stage, sets_)
+     gts = {i: {"boxes": labels[i]["boxes"]} for i in patients}
+     written = []
+@@ -134,6 +146,11 @@ def cmd_requests(stage, cfg):
+         print(json.dumps({"stage": "D24_bbox", "written": written, "n_m0": len(rows_bbox_m0), "n_b0": len(rows_bbox_b0)}))
+         return
+ 
++    if stage == "E60":
++        _require_decision("D24", "passed", True)
++    elif stage == "E200":
++        _require_decision("E60", "expand", True)
++
+     if stage in ("E60", "E200"):
+         b0_recs, _ = D.source_bbox_records("B0", "concise")
+         bbox_pred_b0 = {i: D.predicted_boxes(b0_recs.get(i)) for i in patients}
+@@ -146,16 +163,22 @@ def cmd_requests(stage, cfg):
+     raise ValueError(stage)
+ 
+ 
+-def cmd_qa_requests_d24(cfg):
++def cmd_qa_requests_d24(cfg, fmt="plain"):
+     """D24 bbox 완료 후 호출: B0 예측 bbox를 D24 원시 결과에서 읽어 6조건 QA 요청(576)을 만든다."""
+     sets_ = _load_sets()
+     labels = _load_labels()
+     items = _load_source_items()
+     tab = json.load(open(f"{OUT}/manifests/checkpoints.json"))
+-    fmt = "plain"
+     patients = stage_patients("D24", sets_)
+     gts = {i: {"boxes": labels[i]["boxes"]} for i in patients}
+     b0_dir = f"{OUT}/gen/D24_bbox__B0"
++    cp = os.path.join(b0_dir, "completion.json")
++    if not os.path.exists(cp):
++        raise RuntimeError(f"no completion.json in {b0_dir} (D24_bbox B0 not finished)")
++    c = json.load(open(cp))
++    if (c.get("n_missing") != 0 or c.get("n_duplicate") != 0 or c.get("n_extra") != 0
++            or not c.get("returncodes") or any(x != 0 for x in c["returncodes"])):
++        raise RuntimeError(f"completion.json content invalid in {b0_dir}: {c}")
+     recs = {}
+     import glob
+     for f in sorted(glob.glob(f"{b0_dir}/gen_worker*.jsonl")):
+@@ -163,6 +186,8 @@ def cmd_qa_requests_d24(cfg):
+             if ln.strip():
+                 r = json.loads(ln)
+                 if r.get("condition") == "bbox_concise":
++                    if r["id"] in recs:
++                        raise RuntimeError(f"duplicate D24_bbox B0 record for {r['id']}")
+                     recs[r["id"]] = r
+     bbox_pred_b0 = {i: D.predicted_boxes(recs.get(i)) for i in patients}
+     d24_items = {i: items[i] for i in patients}
+@@ -220,16 +245,21 @@ def _rule_series(bbox_by_id, gt, patients):
+ def cmd_score(stage):
+     sets_ = _load_sets()
+     labels = _load_labels()
+-    fmt = "plain"
+     primary = sets_[stage]["primary"]
+     boundary = sets_[stage]["boundary"]
+     gt = {i: labels[i]["answers"] for i in primary + boundary}
+ 
+-    per_by_key, completion_by_key = {}, {}
++    per_by_key, completion_by_key, fmt_by_key = {}, {}, {}
+     for key in ROW_KEYS:
+-        rows, per_patient, c = _verify_and_collect(stage, key, fmt)
++        rows0 = _load_rows(stage, key)
++        fmts = {r["fmt"] for r in rows0}
++        if len(fmts) != 1:
++            raise RuntimeError(f"mixed fmt in {stage}__{key} requests: {fmts}")
++        fmt_by_key[key] = next(iter(fmts))
++        rows, per_patient, c = _verify_and_collect(stage, key, fmt_by_key[key])
+         per_by_key[key] = per_patient
+         completion_by_key[key] = {"n": len(rows), "wall_s": None}
++    fmt = next(iter(set(fmt_by_key.values()))) if len(set(fmt_by_key.values())) == 1 else fmt_by_key
+ 
+     q4 = {}
+     for key in ROW_KEYS:
+@@ -277,15 +307,17 @@ def cmd_score(stage):
+     valid_rates = {key: E.valid_rate(per_by_key[key], primary + boundary) for key in ROW_KEYS}
+     oracle_acc = {}
+     for key in ("O_M0", "O_B0"):
+-        n_correct, n_tot = 0, 0
++        n_correct, n_valid, n_denom = 0, 0, 0
+         for i in primary + boundary:
+             d = per_by_key[key].get(i, {})
+             for t in R.TARGETS:
++                n_denom += 1  # 계획: invalid도 분모에 포함 (전체 질문 기준 정확도)
+                 if d.get(t, {}).get("status") == "valid":
+-                    n_tot += 1
++                    n_valid += 1
+                     n_correct += int(d[t]["answer"] == gt[i][t])
+-        oracle_acc[key] = {"n_correct": n_correct, "n_question_valid": n_tot,
+-                            "acc_on_valid": (n_correct / n_tot if n_tot else None)}
++        oracle_acc[key] = {"n_correct": n_correct, "n_question_valid": n_valid, "n_total_questions": n_denom,
++                            "acc_on_valid": (n_correct / n_valid if n_valid else None),
++                            "acc_over_all_questions": (n_correct / n_denom if n_denom else None)}
+ 
+     boxcount = {}
+     for i in primary:
+@@ -318,7 +350,7 @@ def cmd_score(stage):
+         gray_report = {"note": "gray control not generated yet"}
+ 
+     report = {
+-        "stage": stage, "n_primary": len(primary), "n_boundary": len(boundary),
++        "stage": stage, "fmt": fmt, "n_primary": len(primary), "n_boundary": len(boundary),
+         "q4_mean": {k: {"primary": float(np.mean(v["primary"])), "boundary": (float(np.mean(v["boundary"])) if v["boundary"] is not None else None)} for k, v in q4.items()},
+         "comparisons": cmp_,
+         "rule_coverage": {"R_M0_official_invalid": r_m0_off_inv, "R_M0_concise_invalid": r_m0_con_inv, "R_B0_invalid": r_b0_inv,
+@@ -359,17 +391,19 @@ def main():
+     r = sp.add_parser("requests")
+     r.add_argument("--stage", required=True)
+     r.add_argument("--cfg", required=True)
++    r.add_argument("--fmt", default="plain")
+     d24r = sp.add_parser("d24-qa-requests")
+     d24r.add_argument("--cfg", required=True)
++    d24r.add_argument("--fmt", default="plain")
+     s = sp.add_parser("score")
+     s.add_argument("--stage", required=True)
+     a = ap.parse_args()
+     if a.cmd == "manifests":
+         build_manifests()
+     elif a.cmd == "requests":
+-        cmd_requests(a.stage, a.cfg)
++        cmd_requests(a.stage, a.cfg, a.fmt)
+     elif a.cmd == "d24-qa-requests":
+-        cmd_qa_requests_d24(a.cfg)
++        cmd_qa_requests_d24(a.cfg, a.fmt)
+     elif a.cmd == "score":
+         cmd_score(a.stage)
+ 
+diff --git a/rsna_diag/roi23_protocol.py b/rsna_diag/roi23_protocol.py
+index d11a3aa..a5409f2 100644
+--- a/rsna_diag/roi23_protocol.py
++++ b/rsna_diag/roi23_protocol.py
+@@ -20,7 +20,7 @@ REQUIRED_CODE = [
+     "rsna_diag/qa_requests.py",
+     "rsna_diag/roi23_spec.py", "rsna_diag/roi23_protocol.py", "rsna_diag/roi23_data.py",
+     "rsna_diag/roi23_requests.py", "rsna_diag/roi23_gen.py", "rsna_diag/roi23_run.py",
+-    "rsna_diag/roi23_eval.py", "rsna_diag/roi23_pipeline.py",
++    "rsna_diag/roi23_eval.py", "rsna_diag/roi23_pipeline.py", "rsna_diag/roi23_decide.py",
+ ]
+ 
+ 
+diff --git a/test_rsna_iter024.py b/test_rsna_iter024.py
+new file mode 100644
+index 0000000..bd40d35
+--- /dev/null
++++ b/test_rsna_iter024.py
+@@ -0,0 +1,126 @@
++"""iter_024 CPU fixture: roi23_decide gate 재계산, D24 완료 재검증(오라클 전체 분모), B0 bbox 중복 거부, decide recheck 변조 거부.
++사용: python test_rsna_iter024.py  ->  results/iter_024/tests/fixtures_iter024.json
++"""
++import json
++import os
++import shutil
++import sys
++
++sys.path.insert(0, os.path.dirname(__file__))
++
++os.environ.setdefault("ROI23_RUN_ROOT", "results/iter_024")
++TMP = "results/iter_024/tests/tmp_decide"
++shutil.rmtree(TMP, ignore_errors=True)
++os.makedirs(TMP, exist_ok=True)
++
++from rsna_diag import roi23_decide as DEC  # noqa: E402
++
++results = []
++
++
++def check(name, cond, detail=None):
++    results.append({"name": name, "pass": bool(cond), "detail": detail})
++    if not cond:
++        print("FAIL", name, detail)
++
++
++def mk_valid_rates(rate=0.98, n_total=96):
++    n_valid = round(rate * n_total)
++    return {k: {"n_valid": n_valid, "n_total": n_total, "rate": n_valid / n_total} for k in DEC.ROW_KEYS}
++
++
++# 1. D24 gate: 모든 조건 통과
++rep_pass = {"fmt": "plain", "valid_rates": mk_valid_rates(0.98),
++            "oracle_accuracy": {"O_M0": {"acc_over_all_questions": 0.95}, "O_B0": {"acc_over_all_questions": 0.94}}}
++p1 = f"{TMP}/report_D24_pass.json"
++json.dump(rep_pass, open(p1, "w"))
++d1 = DEC.decide_d24(report_path=p1, out_path=f"{TMP}/D24_decision_pass.json")
++check("d24_gate_passes_when_fmt_and_oracle_ok", d1["passed"] is True, d1)
++
++# 2. D24 gate: oracle 분모에 invalid 포함 -> 실패 사례 (acc_over_all_questions 낮음)
++rep_fail_oracle = {"fmt": "plain", "valid_rates": mk_valid_rates(0.98),
++                   "oracle_accuracy": {"O_M0": {"acc_over_all_questions": 0.80}, "O_B0": {"acc_over_all_questions": 0.94}}}
++p2 = f"{TMP}/report_D24_fail_oracle.json"
++json.dump(rep_fail_oracle, open(p2, "w"))
++d2 = DEC.decide_d24(report_path=p2, out_path=f"{TMP}/D24_decision_fail_oracle.json")
++check("d24_gate_fails_on_low_oracle_full_denominator", d2["passed"] is False and d2["oracle_pass"] is False, d2)
++
++# 3. D24 gate: format below 95% for one key fails
++rep_fail_fmt = dict(rep_pass)
++vr = mk_valid_rates(0.98)
++vr["L"] = {"n_valid": 80, "n_total": 96, "rate": 80 / 96}
++rep_fail_fmt = {"fmt": "plain", "valid_rates": vr, "oracle_accuracy": rep_pass["oracle_accuracy"]}
++p3 = f"{TMP}/report_D24_fail_fmt.json"
++json.dump(rep_fail_fmt, open(p3, "w"))
++d3 = DEC.decide_d24(report_path=p3, out_path=f"{TMP}/D24_decision_fail_fmt.json")
++check("d24_gate_fails_when_one_key_below_95pct_valid", d3["passed"] is False and d3["format_ok"] is False, d3)
++
++# 4. decide_d24 refuses to overwrite existing decision file
++try:
++    DEC.decide_d24(report_path=p1, out_path=f"{TMP}/D24_decision_pass.json")
++    check("decide_d24_refuses_overwrite", False)
++except RuntimeError:
++    check("decide_d24_refuses_overwrite", True)
++
++# 5. recheck passes when report unchanged
++rc = DEC.recheck(f"{TMP}/D24_decision_pass.json")
++check("recheck_matches_when_report_unchanged", rc["passed"] is True)
++
++# 6. recheck rejects when report content changed after decision (tamper detection)
++p1b = f"{TMP}/report_D24_pass_mutate.json"
++json.dump(rep_pass, open(p1b, "w"))
++d1b = DEC.decide_d24(report_path=p1b, out_path=f"{TMP}/D24_decision_pass_mutate.json")
++json.dump(rep_fail_oracle, open(p1b, "w"))  # 결정 후 report를 몰래 바꿔치기
++try:
++    DEC.recheck(f"{TMP}/D24_decision_pass_mutate.json")
++    check("recheck_rejects_mutated_report", False)
++except RuntimeError:
++    check("recheck_rejects_mutated_report", True)
++
++# 7. E-stage expand gate: point estimate >= 0.10 triggers expand
++cmp_expand = {"delta_direct": {"mean_diff": 0.15, "judge_ci_lo": 0.05, "judge_ci_hi": 0.25},
++              "G_official": {"mean_diff": 0.02, "judge_ci_lo": -0.05, "judge_ci_hi": 0.09},
++              "RB0_minus_DB0": {"mean_diff": 0.01, "judge_ci_lo": -0.05, "judge_ci_hi": 0.07},
++              "L_minus_DB0": {"mean_diff": 0.01, "judge_ci_lo": -0.05, "judge_ci_hi": 0.07}}
++rep_e = {"comparisons": cmp_expand, "valid_rates": mk_valid_rates(0.98), "n_primary": 48}
++p4 = f"{TMP}/report_E60_expand.json"
++json.dump(rep_e, open(p4, "w"))
++d4 = DEC.decide_e("E60", report_path=p4, out_path=f"{TMP}/E60_decision_expand.json")
++check("e_gate_expands_on_point_estimate", d4["expand"] is True, d4)
++
++# 8. E-stage expand gate: all small effects and CI excludes 0.10 -> no expand
++cmp_noexpand = {"delta_direct": {"mean_diff": 0.02, "judge_ci_lo": -0.05, "judge_ci_hi": 0.08},
++                "G_official": {"mean_diff": 0.01, "judge_ci_lo": -0.05, "judge_ci_hi": 0.07},
++                "RB0_minus_DB0": {"mean_diff": 0.00, "judge_ci_lo": -0.06, "judge_ci_hi": 0.06},
++                "L_minus_DB0": {"mean_diff": 0.00, "judge_ci_lo": -0.06, "judge_ci_hi": 0.06}}
++rep_e2 = {"comparisons": cmp_noexpand, "valid_rates": mk_valid_rates(0.98), "n_primary": 48}
++p5 = f"{TMP}/report_E60_noexpand.json"
++json.dump(rep_e2, open(p5, "w"))
++d5 = DEC.decide_e("E60", report_path=p5, out_path=f"{TMP}/E60_decision_noexpand.json")
++check("e_gate_no_expand_when_all_small_and_ci_excludes_0.10", d5["expand"] is False, d5)
++
++# 9. roi23_pipeline._require_decision uses recheck (not just file existence) — simulate via monkeypatch of OUT
++from rsna_diag import roi23_pipeline as PL  # noqa: E402
++PL.OUT = TMP  # redirect decide/ lookup for this isolated check
++os.makedirs(f"{TMP}/decide", exist_ok=True)
++shutil.copy(f"{TMP}/D24_decision_pass.json", f"{TMP}/decide/D24_decision.json")
++try:
++    got = PL._require_decision("D24", "passed", True)
++    check("pipeline_require_decision_passes_on_valid_gate", got["passed"] is True)
++except Exception as e:
++    check("pipeline_require_decision_passes_on_valid_gate", False, str(e))
++
++shutil.copy(f"{TMP}/D24_decision_fail_oracle.json", f"{TMP}/decide/D24_decision_should_block.json")
++os.remove(f"{TMP}/decide/D24_decision.json")
++shutil.copy(f"{TMP}/D24_decision_fail_oracle.json", f"{TMP}/decide/D24_decision.json")
++try:
++    PL._require_decision("D24", "passed", True)
++    check("pipeline_require_decision_blocks_failed_gate", False)
++except RuntimeError:
++    check("pipeline_require_decision_blocks_failed_gate", True)
++
++n_fail = sum(1 for r in results if not r["pass"])
++os.makedirs("results/iter_024/tests", exist_ok=True)
++json.dump({"n": len(results), "n_fail": n_fail, "results": results}, open("results/iter_024/tests/fixtures_iter024.json", "w"), indent=1)
++print(f"{len(results) - n_fail}/{len(results)} PASS")
++sys.exit(1 if n_fail else 0)

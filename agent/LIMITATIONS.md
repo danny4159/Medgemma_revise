@@ -107,3 +107,20 @@ SPIDER T2의 동일 volume slice-pair를 사용하는 iter_021 최종 prompt와 
 - 미해결: 좌표 복사가 유리한 현재 동일-grid 과제가 실제 reference 정보 활용을 식별할 수 있는가?
 - 미해결: 정상 사용 대조 후에도 중요한 잔여 실패가 독립 환자에서 재현되는가?
 
+## rsna-quadrant-oracle-interface — observed
+
+MedGemma 1.5의 고정 D24 개발 환자 24명에서, 원본 영상과 정답 bbox 좌표를 제공한 사분면 중심 질의의 정확도는 M0 41/96, RSNA SFT B0 65/96이었다. 현재 prompt의 oracle gate 90%를 충족하지 못했다. 이는 해당 인터페이스의 제한된 관찰이며, 공간 능력 부재나 SFT 전이 실패를 확정하지 않는다.
+
+- 적용 목표 시작: iter_003
+- 최신 리뷰: agent/runs/iter_024/review.json
+- 근거: research/results/iter_024/gen/D24__O_{M0,B0}/gen_worker*.jsonl: 각각 96개 고유 요청, 모두 EOS 종료.
+- 근거: research/results/iter_024/eval/report_D24.json 및 decide/D24_decision.json: oracle 정확도 0.4270833/0.6770833, passed=false.
+- 근거: 리뷰에서 원시 응답을 별도로 정규화하고 정답 bbox 중심과 대조해 41/96·65/96을 재현했다.
+- 사용·평가 검증: D24의 원본 iter_010 bbox와 현재 labels 일치, 중심 사분면 정답 및 oracle prompt에 반올림되어 들어간 좌표의 정답 일치 확인.
+- 사용·평가 검증: QA 576건은 모두 EOS 종료하며 고정 plain parser 범위에서 유효하다.
+- 사용·평가 검증: 두 protocol의 잠긴 파일 28개·36개는 현재 파일과 일치하고 잠긴 소스는 리뷰 SHA와 일치한다.
+- 사용·평가 검증: 실제 D 입력의 공식 구성 대조와 과거 bbox adapter sanity 완료 근거는 확인되지 않았다.
+- 미해결: 좌표 해석, 지시 범위, 영상과 reference evidence의 관계, 답변 prior 중 무엇이 oracle 저하를 설명하는가?
+- 미해결: 정상 사용 대조와 최소 인터페이스 진단 후에도 문제가 남는가?
+- 미해결: 독립 환자와 다른 seed에서도 재현되는가?
+
