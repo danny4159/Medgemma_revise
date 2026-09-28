@@ -32,6 +32,7 @@
 - iter_024 [CONTINUE] (normal/standard/normal) <RSNA 영역 질의 전이 진단: inconclusive> 💾d60460f8be761e11e1dbce306aa571173e4229db D24 QA 576건에서 형식은 모두 유효했지만 oracle 정확도 M0 42.7%·B0 67.7%로 본평가를 보류했다. RSNA SFT의 가까운 질의 전이와 응답 prior의 기여는 아직 구분되지 않았다. → 다음: 진단을 우선하는 deep 전략 판단을 수행한다. 기존 D24 출력과 checkpoint를 유지하고, 실제 공식 입력·adapter 연결 검증 후 좌표 해석과 영상 활용을 분리하는 최소 대조의 정보 이득을 지정 범위 bbox 선택 대안과 비교한다. 정답 사분면을 직접 제공하는 대조를 쓰더라도 답 읽기 sanity로만 취급하고 공간 전이 증거로 세지 않는다. 현재 gate를 사후 완화하거나 E60을 바로 열지 말고 변경된 설계·gate·중단 조건을 새 경로에 사전 고정한다. 식별성이 확보되면 필요한 E 탐색과 조건부 확대를 실행하고, 계속 확보되지 않으면 무엇이 미해결인지 명시해 가까운 대안으로 전환한다. 재사용 수정은 선택한 실행 경로에 한정하며 새 loss·학습·MRI F139·reserve는 자동 투입하지 않는다.
 - iter_025 [CONTINUE] (deep/standard/normal) <RSNA 영역 질의 전이 진단: inconclusive> 💾89b2975a679c6eed3d9a356d2c01d85b7950a1bf D768·AR192의 실제 출력에서 좌표 oracle gate 실패를 재현했다. 답 읽기 성공은 확인했지만 형식 처리 누락과 원인 미분리로 RSNA SFT의 능력 전이는 여전히 미판정이다. → 다음: 가까운 진단으로의 전환을 우선 비교한다. 현재 사분면 yes/no prompt 탐색과 E 확대는 종료하고, 기존 출력의 형식·정확도 분석을 보완해 남은 설명을 정리한다. 다음 deep 계획에서 학습된 bbox 출력 형식을 유지하는 지정 영역 선택과 현재 인터페이스의 추가 진단을 정보 이득·사용 가치·비용으로 비교한다. 전체 복사·빈 목록·예측 bbox+규칙 대조로 실제 선택 능력을 구분할 수 있을 때만 새 개발 실험을 사전 고정한다. 선택한 실행 경로의 공식 입력·재개·provenance 결함만 먼저 해결하고 기존 결과는 재생성하지 않는다. 새 loss·학습·MRI F139·reserve는 자동 투입하지 않는다.
 - iter_026 [CONTINUE] (deep/standard/normal) <RSNA 영역 질의 전이 진단: inconclusive> 💾b8be58c9f3c92266e885ca8c3f5384dbe412b4bd RSNA E60 primary 48명에서 SFT는 base보다 S가 0.229 높지만 전체 bbox 복사 대비 이득은 불확정이다. 다중 사분면 직접 선택은 0/22로, oracle 실패와 E200 미완료 때문에 전이 부재는 아직 결론낼 수 없다. → 다음: 평가·재개 검증을 보완하고 기존 E200 확대를 완료해 현재 선택 성능의 불확실성을 줄인다. 먼저 실행 호스트에서 기존 launcher·worker의 PID/starttime·lock·종료 상태를 확인하고 살아 있는 작업을 중복 실행하거나 실행 중 소스를 바꾸지 않는다. 원시 출력·claim·protocol·이전 report를 보존하고, primary/boundary 분리·집단 내 donor pairing·invalid 처리·decision 기준과 report schema를 수정한다. 잠긴 예상 행렬·현재 입력·source bbox·checkpoint·completion 연결과 통제된 중단/재개·변조 거부를 검증한 뒤 호환되는 출력은 재사용한다. E60 정밀도 보완 기준은 독립 재계산에서도 유지되므로 prompt·표본·metric을 바꾸지 않고 E200을 마친다. D oracle의 schema 불일치와 0/14 선택 실패를 원인 해석의 한계로 유지하고, 격차만으로 B29/B43을 자동 실행하지 않는다. E200 이후 양성 조건 또는 원 계획의 oracle 해석 조건까지 충족할 때만 seed 재현으로 진행한다. 새 loss·학습·MRI F139·reserve는 열지 않는다.
+- iter_027 [CONTINUE] (normal/standard/normal) <RSNA 영역 질의 전이 진단: success> 💾ed966685298f152e194069d4de3d856e065886bc RSNA E200 다중 사분면 66명에서 직접 선택 0명·bbox+규칙 26명으로 사전 음성 기준을 충족했다. SFT의 검출 개선은 유지되지만 oracle 실패로 일반적인 전이 부재는 미확정이다. → 다음: 현재 사분면 진단의 확대는 종료하고, 남은 인터페이스 원인을 구분할 최소 검사와 다른 연구 질문의 가치를 비교하는 deep 전략 판단을 수행한다. 기존 RSNA SFT 성과와 이번 규칙 baseline을 보존하고, 원인 분리 없이 seed·새 loss·학습을 자동 추가하지 않는다. 현재 개발 출력으로 먼저 설명 가능한 범위를 정리한 뒤, oracle schema·지시 해석을 바로잡는 단일 검사가 후속 방법 투자를 실제로 바꿀 때만 새 계획으로 실행한다. 그렇지 않으면 무엇이 기각됐고 무엇이 미해결인지 명시하며 GOAL 안의 다른 질문으로 전환한다. 선택한 경로에 필요한 gate·재개·출처 검증만 보완하고, 과거 report 덮어쓰기의 복구 가능성과 유실 범위를 기록한다. MRI F139·reserve는 유지한다.
 
 ## 이전 목표들의 접근법 (참고용, 현재 목표의 재평가 횟수에는 안 들어감)
 
@@ -49,13 +50,13 @@
 - 질문 대상과 음성 의미 보존 진단 [approach/target-scope-diagnostic]: 4회 (iter_015, iter_016, iter_017, iter_018), 유효한 실험 3회, 미분류 0회, 최근 판정: inconclusive, 커밋: 3265f117bf3f4de99ba084f2c9b4e476568f24bd, 6a4fb41d490305061028de9cab863c0b5e9747ad, d12ef5ccea60d05b9163519980cdb1624b3fa682, 4e453bbba4b0e798c0deeb6a940644dd62707fa3
 - 동일 volume의 reference 대상 선택 진단 [approach/reference-instance-diagnostic]: 3회 (iter_019, iter_020, iter_021), 유효한 실험 1회, 미분류 0회, 최근 판정: inconclusive, 커밋: ff16f12f6fca43e62c5e3ff795456db9200220b2, 5720d0c82da88c67af5843554afd1791308c6007, 933eebaba2689d6eb654808ea177d8625ca2ca4c
 - 시간·영상 역할 관계 진단 [approach/temporal-role-diagnostic]: 1회 (iter_022), 유효한 실험 0회, 미분류 0회, 최근 판정: 사용자 보완으로 전환 (검증 미완료), 커밋: 없음
-- RSNA 영역 질의 전이 진단 [approach/rsna-spatial-transfer]: 4회 (iter_023, iter_024, iter_025, iter_026), 유효한 실험 2회, 미분류 0회, 최근 판정: inconclusive, 커밋: 3271c85f34c135081bba28352baa31468125f842, d60460f8be761e11e1dbce306aa571173e4229db, 89b2975a679c6eed3d9a356d2c01d85b7950a1bf, b8be58c9f3c92266e885ca8c3f5384dbe412b4bd
+- RSNA 영역 질의 전이 진단 [approach/rsna-spatial-transfer]: 5회 (iter_023, iter_024, iter_025, iter_026, iter_027), 유효한 실험 3회, 미분류 0회, 최근 판정: success, 커밋: 3271c85f34c135081bba28352baa31468125f842, d60460f8be761e11e1dbce306aa571173e4229db, 89b2975a679c6eed3d9a356d2c01d85b7950a1bf, b8be58c9f3c92266e885ca8c3f5384dbe412b4bd, ed966685298f152e194069d4de3d856e065886bc
 
 현재 연구 브랜치: approach/rsna-spatial-transfer (코드 위치: /SSD1_1TB/home/milab/daniel/08_medgemma/research)
 
 ### 최근 계획의 대안 순위
 
-1. RSNA 영역 질의 전이 진단: bbox 형식의 지정 영역 선택을 전체 복사·규칙·질의 배정 대조와 비교해 기존 SFT의 기능적 전이를 확인한다.
-2. 현재 인터페이스의 추가 진단: 기존 출력의 형식 보정 분석만 마무리하고, 같은 yes/no prompt의 추가 GPU 탐색은 정보 이득이 낮아 종료한다.
-3. 기존 grounding 방법 개선: 직접 질의와 외부 규칙 활용의 차이가 확인된 후 강한 직접 SFT·모듈형 대안에 연결할 방법을 검토한다.
-4. 다른 의료 VLM 질문으로 전환: 현재 가까운 진단의 식별성이 확보되지 않거나 추가 투자 가치가 없다는 근거가 생기면 사용자 우선순위와 미해결 범위를 명시해 비교한다.
+1. RSNA 영역 질의 전이 진단: 평가·실행 결함을 수정하고 사전 확대 E200을 완료해 전체 선택 성능의 불확실성을 줄인다.
+2. 현재 인터페이스의 추가 원인 진단: oracle schema 보정은 해석에 도움이 될 수 있으나 이번 E200 완료의 선행 조건이나 자동 후속 실험으로 삼지 않는다.
+3. 기존 grounding 방법 개선: 직접 질의 활용과 외부 규칙의 차이가 정리된 후에만 강한 직접 SFT·모듈형 대안과 비교할 방법을 검토한다.
+4. 다른 의료 VLM 질문으로 전환: E200 이후 남은 설명과 현재 자산의 정보 이득을 명시적으로 비교한 뒤 판단한다.

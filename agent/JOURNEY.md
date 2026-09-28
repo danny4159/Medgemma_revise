@@ -157,3 +157,19 @@ QA 형식 실패를 의미 능력 손실로 오해하지 않도록 실제 출력
 - 접근법: 질문 대상과 음성 의미 보존 진단 (`approach/target-scope-diagnostic`), 시도: iter_015, iter_016, iter_017
 - 커밋: 3265f117bf3f4de99ba084f2c9b4e476568f24bd, 6a4fb41d490305061028de9cab863c0b5e9747ad, d12ef5ccea60d05b9163519980cdb1624b3fa682
 - 자세히: DECISIONS.md의 iter_017, `agent/runs/iter_017/review.md`
+
+## 🏁 RSNA 위치 학습의 개선만으로는 신뢰할 만한 사분면 전체 선택이 확보되지 않았다
+
+*iter_027 · 2026-09-29 03:47 · 판정: CONTINUE / success*
+
+기존 위치 학습의 성과와 미학습 영역 선택 능력을 구분하는 제한적 음성 근거를 확보했다.
+**고민:** iter_012의 직접 LoRA는 bbox 검출을 크게 개선했지만 다른 공간 질문으로의 전이는 미확인이었다.
+**시도:** 사분면 yes/no는 oracle 해석 gate를 통과하지 못해, 학습된 bbox 출력 형식을 유지하는 선택 과제로 옮겼다.
+**개발:** 전체 bbox 복사·bbox+규칙·영상+bbox reader를 비교하고 E60의 불확실성을 사전 E200 확대로 줄였다.
+**결과:** primary 160명에서 B0−M0 S는 +0.1943이지만 복사 대비 +0.0181은 불확정이었다.
+**결과:** 다중 사분면 66명에서 직접 전체 선택은 0명, bbox+규칙은 26명이 성공해 사전 음성 기준을 충족했다.
+**의미:** 검출 향상과 신뢰할 만한 선택 전이는 구분해야 한다. 부분 질의 반응과 oracle 실패가 남으므로 일반적인 전이 부재는 미확정이며, 다음 투자는 최소 원인 진단과 전환의 가치를 비교해 결정한다.
+
+- 접근법: RSNA 영역 질의 전이 진단 (`approach/rsna-spatial-transfer`), 시도: iter_023, iter_024, iter_025, iter_026, iter_027
+- 커밋: 3271c85f34c135081bba28352baa31468125f842, d60460f8be761e11e1dbce306aa571173e4229db, 89b2975a679c6eed3d9a356d2c01d85b7950a1bf, b8be58c9f3c92266e885ca8c3f5384dbe412b4bd, ed966685298f152e194069d4de3d856e065886bc
+- 자세히: DECISIONS.md의 iter_027, `agent/runs/iter_027/review.md`

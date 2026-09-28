@@ -126,19 +126,20 @@ SPIDER T2의 동일 volume slice-pair를 사용하는 iter_021 최종 prompt와 
 
 ## rsna-region-selection-transfer — observed
 
-iter_026의 고정 RSNA 개발 E60 중 primary 48명에서 seed17 grounding SFT B0의 지정 사분면 bbox 선택 점수 S는 M0보다 높았지만, 전체 bbox 복사 baseline보다 낫다는 근거는 없었다. 다중 사분면 22명의 Q4_select는 직접 B0 0/22, B0 bbox+규칙 11/22였다. 현재 인터페이스의 제한된 관찰이며, oracle 선택 실패와 E200 미완료 때문에 일반적인 공간 능력 전이 부재나 내부 원인을 확정하지 않는다.
+고정 RSNA 개발 E200의 primary 160명에서 seed17 grounding SFT B0는 M0보다 지정 사분면 bbox 선택 점수 S가 높았지만, 전체 bbox 복사 대비 사전 양성 기준은 충족하지 못했다. 다중 사분면 66명의 전체 선택 Q4_select는 직접 B0 0/66, B0 bbox+규칙 26/66으로 현재 인터페이스의 사전 음성 기준을 충족했다. 부분적인 질의 반응은 남으며, oracle 실패 때문에 일반적인 공간 전이 부재나 내부 원인은 확정하지 않는다.
 
 - 적용 목표 시작: iter_003
-- 최신 리뷰: agent/runs/iter_026/review.json
-- 근거: research/results/iter_026/gen/E60_{V__M0,V__B0,RD__M0}/gen_worker*.jsonl: 720건 실제 출력.
-- 근거: 리뷰 독립 parser·matching 재계산: primary 48명의 B0−M0 S=0.228624, 95% CI [0.171281, 0.284445]; B0−Copy_B0=0.000218, CI [-0.030970, 0.032546].
-- 근거: 동일 primary에서 Rule_B0−direct B0=0.403320, CI [0.318012, 0.482821]; 다중 사분면 22명은 직접 0명·규칙 11명 성공.
-- 근거: D24 oracle은 M0/B0 각각 Q4_select 1/24이며, 다중 사분면 14명에서는 두 모델 모두 0/14.
-- 사용·평가 검증: 완료된 D488·E720의 예상 환자×영역 행렬, 요청 중복·누락, 주요 request-record provenance 불일치 0을 독립 확인했다.
-- 사용·평가 검증: 현재 영상 84개의 file/raw pixel/padded input hash 불일치 0, 별도 parser와 기존 parser의 판정·box 불일치 0을 확인했다.
-- 사용·평가 검증: sanity_post.json의 tensor 대조와 adapter digest 및 8건 재생성 일치를 확인했다. tensor 대조는 D의 한 영상·V_TL prompt 범위이며 과거 bbox baseline 재현 검사는 아니다.
-- 사용·평가 검증: 저장 평가의 primary/boundary 혼합을 리뷰에서 분리 재계산했다. 정식 평가기 수정과 재개·변조 검증은 남아 있다.
-- 미해결: E200 primary 160명·다중 사분면 66명에서도 같은 패턴이 유지되는가?
-- 미해결: oracle 실패에 좌표 지시 해석과 제공 목록의 schema 불일치가 얼마나 기여하는가?
-- 미해결: 부분적인 질의 조건화와 신뢰할 만한 전체 선택을 구분해야 하며, 다른 seed·독립 원천 데이터의 재현은 미검증이다.
+- 최신 리뷰: agent/runs/iter_027/review.json
+- 근거: research/results/iter_026/gen/{E60,E200_extra}_{V__M0,V__B0,RD__M0}/gen_worker*.jsonl: 200명×4영역×3조건의 2,400건.
+- 근거: research/results/iter_027/eval/report_E200.json: primary B0−M0 S=0.194292, 95% CI [0.163216, 0.226417]; B0−Copy_B0=0.018060, CI [-0.004103, 0.042368]. 리뷰의 별도 matching·bootstrap 계산과 일치.
+- 근거: 다중 사분면 66명 직접 B0 0/66, exact CI [0, 0.054359]; 규칙 26/66, CI [0.275809, 0.521910]. 리뷰에서 성공 수를 별도 재계산.
+- 근거: Rule_B0−direct B0 S=0.304984, 95% CI [0.252904, 0.356755]. 저장 C_query_B0=0.019755, CI 하한 0.006957.
+- 사용·평가 검증: 리뷰에서 6개 job의 예상 환자×영역 행렬, 요청 ID와 원시 결과의 일치, 중복·누락·잉여 없음 및 completion 종료 코드 0을 확인했다.
+- 사용·평가 검증: 요청과 원시 결과의 공통 필드 불일치 0, record와 completion의 protocol/adapter digest 불일치 0을 확인했다.
+- 사용·평가 검증: 현재 영상 200개의 file/raw pixel hash 불일치 0을 확인했다. 최종 비EOS 19건은 parser에서 invalid로 처리한다.
+- 사용·평가 검증: sanity/sanity.json의 V_TL·RD_TL 전체 tensor key/shape/dtype/value 비교, adapter digest, 기존 D 영역 질의 8건 재생성 통과를 확인했다. 이는 기존 전체 bbox baseline 재생성 검사는 아니다.
+- 사용·평가 검증: 공통 parser를 적용한 뒤 별도 최대 matching과 환자 bootstrap으로 주요 S 차이·CI 및 Q4 성공 수를 재현했다.
+- 미해결: oracle 목록 schema와 좌표·지시 해석을 바로잡은 조건에서도 같은 선택 단절이 남는가?
+- 미해결: 부분적인 질의 반응과 신뢰할 만한 전체 선택을 구분하는 최소 진단이 다음 투자 판단을 바꾸는가?
+- 미해결: 다른 seed·독립 환자·다른 원천 데이터에서의 재현은 미검증이다. E200은 개발 자료다.
 

@@ -1,0 +1,889 @@
+diff --git a/decide_iter026_e200.py b/decide_iter026_e200.py
+new file mode 100644
+index 0000000..3e12a7a
+--- /dev/null
++++ b/decide_iter026_e200.py
+@@ -0,0 +1,15 @@
++"""iter_026 E200 판정: 양성/음성/불확정 분류와 조건부 seed 확장 gate.
++사용: python decide_iter026_e200.py"""
++import json
++
++from rsna_diag import roi26_decide as DEC
++
++REPORT = "results/iter_027/eval/report_E200.json"
++OUT_SEED = "results/iter_027/decide/E200_seed_expansion_decision.json"
++
++report = json.load(open(REPORT))
++cls = report.get("classification") or DEC.classify_e200(report)
++print("classification:", json.dumps(cls, indent=1))
++
++seed_d = DEC.decide_seed_expansion(report, OUT_SEED, REPORT)
++print(json.dumps(seed_d, indent=1))
+diff --git a/decide_iter026_e60.py b/decide_iter026_e60.py
+index 8ec29f9..b54f1a9 100644
+--- a/decide_iter026_e60.py
++++ b/decide_iter026_e60.py
+@@ -1,46 +1,14 @@
+-"""iter_026 E60->E200 확대 판정: 계획에 사전 고정한 세 조건(기능적 차이/정밀도 보완/모듈형 격차) 중 하나 + 형식 gate."""
+-import hashlib
++"""iter_026 E60->E200 확대 판정: rsna_diag.roi26_decide.decide_e60_to_e200(승인된 모듈)을 실제로 호출한다.
++이전 버전은 report 필드를 직접 재구현해 C_query 조건을 점추정 대신 CI 하한으로 잘못 대체했고 reader 격차의 부호를
++반전시켰다. 이번 버전은 eval_iter026.py가 만드는 report["primary"]/report["subset"] 스키마를 그대로
++roi26_decide 모듈에 넘겨 판정한다(스키마 불일치 해소)."""
+ import json
+-import os
+ 
+-REPORT = "results/iter_026/eval/report_E60.json"
+-OUT = "results/iter_026/decide/E60_to_E200_decision.json"
++from rsna_diag import roi26_decide as DEC
+ 
++REPORT = "results/iter_027/eval/report_E60.json"
++OUT = "results/iter_027/decide/E60_to_E200_decision.json"
+ 
+-def sha_file(p):
+-    h = hashlib.sha256()
+-    with open(p, "rb") as f:
+-        for b in iter(lambda: f.read(1 << 20), b""):
+-            h.update(b)
+-    return h.hexdigest()
+-
+-
+-r = json.load(open(REPORT))
+-fmt_ok = r["valid_rate"]["V_M0"] >= 0.95 and r["valid_rate"]["V_B0"] >= 0.95
+-
+-diff_s = r["comparisons"]["S_B0_minus_S_M0"]
+-cq = r["C_query_ci"]
+-cond1 = abs(diff_s["mean_diff"]) >= 0.05 and (cq["M0"]["ci_lo"] >= 0.05 or cq["B0"]["ci_lo"] >= 0.05)
+-
+-sub = r["subset"]
+-ci = sub["B0_direct_Q4_select_exact_ci"]
+-cond2 = sub["B0_rule_Q4_select_rate"] >= 0.20 and ci[0] <= 0.10 <= ci[1]
+-
+-rule_gap = r["comparisons"]["S_rule_B0_minus_S_B0_direct"]["mean_diff"]
+-reader_gap = -r["comparisons"]["S_RD_minus_S_B0"]["mean_diff"]  # S_B0 - S_RD sign flip if reader higher
+-max_gap = max(rule_gap, reader_gap)
+-cond3 = (max_gap >= 0.10 and (r["metrics"]["V_B0"]["mean_C_query"] > 0 or sub["B0_direct_Q4_select_successes"] > 0))
+-
+-reasons = {"functional_diff_candidate": cond1, "precision_supplement": cond2, "modular_gap_candidate": cond3}
+-passed = fmt_ok and any(reasons.values())
+-
+-decision = {
+-    "stage": "E60_to_E200", "report_path": REPORT, "report_sha256": sha_file(REPORT),
+-    "format_ok": fmt_ok, "valid_rate": r["valid_rate"],
+-    "S_B0_minus_S_M0": diff_s, "C_query_ci": cq, "subset": sub,
+-    "rule_minus_direct_S": rule_gap, "reader_minus_direct_S": reader_gap,
+-    "reasons": reasons, "passed": passed,
+-}
+-os.makedirs(os.path.dirname(OUT), exist_ok=True)
+-json.dump(decision, open(OUT, "w"), indent=1, default=str)
+-print(json.dumps(decision, indent=1))
++report = json.load(open(REPORT))
++d = DEC.decide_e60_to_e200(report, OUT, REPORT)
++print(json.dumps(d, indent=1))
+diff --git a/eval_iter026.py b/eval_iter026.py
+index 3f81fb9..2b85d49 100644
+--- a/eval_iter026.py
++++ b/eval_iter026.py
+@@ -96,100 +96,138 @@ else:
+         recs = load_gen_merged(names)
+         p = per_patient_from_rows(rows, recs)
+         per[key] = p
+-        n_valid = sum(1 for i in patient_ids for t in R26.TARGETS if p.get(i, {}).get(t, {}).get("status") in ("valid_nonempty", "valid_empty"))
+-        valid_count[key] = n_valid
+-    report["valid_count"] = valid_count
+-    report["valid_rate"] = {k: v / (len(patient_ids) * 4) for k, v in valid_count.items()}
++        valid_count[key] = None  # per-group(primary/boundary) valid_count는 아래에서 별도 계산한다
++    del valid_count
+ 
+     primary_ids = sorted(sets[stage]["primary"])
+     boundary_ids = sorted(sets[stage]["boundary"])
+-    multi = D26.multi_quadrant_subset(gts, primary_ids)  # 계획의 "진부분집합"은 primary 안에서 정의한다
+-    multi_boundary = D26.multi_quadrant_subset(gts, boundary_ids)
+-    pairs, donor_map = E.donor_pairs(patient_ids)
+-
+-    metrics = {}
+-    for key in ("V_M0", "V_B0", "RD_M0"):
+-        m, det = E.build_metrics(per[key], gts, patient_ids, donor_map=(donor_map if key in ("V_M0", "V_B0") else None))
+-        metrics[key] = {k: (v.tolist() if hasattr(v, "tolist") else v) for k, v in m.items()}
+-        metrics[key]["mean_S"] = float(np.mean(m["S"]))
+-        metrics[key]["mean_Q4"] = float(np.mean(m["Q4"]))
+-        metrics[key]["mean_C_query"] = float(np.mean(m["C_query"]))
+-        metrics[key]["n_invalid"] = int(m["invalid"].sum())
+-        metrics[key]["_detail"] = None
+-    report["metrics"] = metrics
+-
+-    idx_multi = [k for k, i in enumerate(patient_ids) if i in set(multi)]
+-    idx_multi_boundary = [k for k, i in enumerate(patient_ids) if i in set(multi_boundary)]
+-    report["subset_ids"] = multi
+-    report["n_subset"] = len(multi)
+-    report["subset_boundary_ids"] = multi_boundary
+-    report["n_subset_boundary"] = len(multi_boundary)
++    report["n_primary"] = len(primary_ids)
++    report["n_boundary"] = len(boundary_ids)
+ 
+     src_bbox = {}
+     for ck, prompt_name in (("M0", "official_long"), ("B0", "concise")):
+         recs_b, ntot = D26.source_bbox_records(ck, prompt_name)
+         src = {i: D26.predicted_boxes(recs_b.get(i)) for i in patient_ids}
+         src_bbox[ck] = src
+-    baselines = {}
+-    for ck in ("M0", "B0"):
+-        baselines[ck] = E.rule_copy_empty_baseline(src_bbox[ck], gts, patient_ids)
+-
+-    report["baselines"] = {ck: {name: {"mean_S": float(np.mean(baselines[ck][name]["S"])),
+-                                        "mean_Q4": float(np.mean(baselines[ck][name]["Q4"])),
+-                                        "n_invalid": int(baselines[ck][name]["invalid"].sum())}
+-                                 for name in ("rule", "copy", "empty")} for ck in ("M0", "B0")}
+-
+-    def subset_arr(arr):
+-        return np.array(arr)[idx_multi]
+-
+-    report["comparisons"] = {
+-        "S_B0_minus_S_M0": E.paired_ci(metrics["V_B0"]["S"], metrics["V_M0"]["S"]),
+-        "S_B0_minus_Copy_B0": E.paired_ci(metrics["V_B0"]["S"], baselines["B0"]["copy"]["S"]),
+-        "S_RD_minus_S_B0": E.paired_ci(metrics["RD_M0"]["S"], metrics["V_B0"]["S"]),
+-        "S_rule_B0_minus_S_B0_direct": E.paired_ci(baselines["B0"]["rule"]["S"], metrics["V_B0"]["S"]),
+-        "S_RD_minus_S_V_M0": E.paired_ci(metrics["RD_M0"]["S"], metrics["V_M0"]["S"]),
+-    }
+-    report["C_query_ci"] = {ck: E.paired_ci(metrics[f"V_{ck}"]["C_query"], np.zeros(len(patient_ids))) for ck in ("M0", "B0")}
+-
+-    subset_q4_b0_direct = subset_arr(metrics["V_B0"]["Q4"])
+-    subset_q4_b0_rule = subset_arr(baselines["B0"]["rule"]["Q4"])
+-    subset_q4_m0_direct = subset_arr(metrics["V_M0"]["Q4"])
+-
+-    def exact_ci(k, n):
+-        return E.exact_binom_ci(k, n)
+-
+-    report["subset"] = {
+-        "n": len(multi),
+-        "B0_direct_Q4_select_successes": int(subset_q4_b0_direct.sum()),
+-        "B0_direct_Q4_select_rate": float(subset_q4_b0_direct.mean()) if len(multi) else None,
+-        "B0_direct_Q4_select_exact_ci": exact_ci(int(subset_q4_b0_direct.sum()), len(multi)),
+-        "B0_rule_Q4_select_rate": float(subset_q4_b0_rule.mean()) if len(multi) else None,
+-        "B0_rule_Q4_select_exact_ci": exact_ci(int(subset_q4_b0_rule.sum()), len(multi)),
+-        "M0_direct_Q4_select_successes": int(subset_q4_m0_direct.sum()),
+-    }
+-
+-    def subset_arr_b(arr):
+-        return np.array(arr)[idx_multi_boundary]
+-
+-    bq4_b0_direct = subset_arr_b(metrics["V_B0"]["Q4"])
+-    bq4_b0_rule = subset_arr_b(baselines["B0"]["rule"]["Q4"])
+-    report["subset_boundary"] = {
+-        "n": len(multi_boundary),
+-        "B0_direct_Q4_select_successes": int(bq4_b0_direct.sum()),
+-        "B0_direct_Q4_select_rate": float(bq4_b0_direct.mean()) if len(multi_boundary) else None,
+-        "B0_rule_Q4_select_rate": float(bq4_b0_rule.mean()) if len(multi_boundary) else None,
+-    }
+-
+-    donor_diff = {}
+-    for ck in ("M0", "B0"):
+-        real = metrics[f"V_{ck}"]["S"]
+-        donor = metrics[f"V_{ck}"]["donor_S"]
+-        diff_by_id = {}
+-        for i, r, dn in zip(patient_ids, real, donor):
+-            if not (isinstance(dn, float) and np.isnan(dn)):
+-                diff_by_id[i] = r - dn
+-        donor_diff[ck] = E.cluster_paired_ci(diff_by_id, pairs)
+-    report["donor_diff"] = donor_diff
+-
+-json.dump(report, open(f"results/iter_026/eval/report_{stage}.json", "w"), indent=1, default=str)
+-print("wrote", f"results/iter_026/eval/report_{stage}.json")
++    # M0-concise baseline 복원 (iter_026 리뷰 task 8): gate/comparisons에는 쓰지 않고 정보용으로만 보고한다.
++    recs_m0c, _ = D26.source_bbox_records("M0", "concise")
++    src_bbox["M0_concise"] = {i: D26.predicted_boxes(recs_m0c.get(i)) for i in patient_ids}
++
++    def group_report(ids, group_name):
++        """primary 또는 boundary 집단 하나에 대해 metrics/baseline/comparison/subset을 독립적으로 계산한다.
++        primary·boundary를 합쳐서 donor pairing·paired CI를 만들지 않는다 (iter_026 리뷰 결함 수정)."""
++        g = {}
++        vc = {}
++        for key in ("V_M0", "V_B0", "RD_M0"):
++            n_valid = sum(1 for i in ids for t in R26.TARGETS
++                          if per[key].get(i, {}).get(t, {}).get("status") in ("valid_nonempty", "valid_empty"))
++            vc[key] = n_valid
++        g["valid_count"] = vc
++        g["valid_rate"] = {k: v / (len(ids) * 4) if ids else None for k, v in vc.items()}
++
++        pairs, donor_map = E.donor_pairs(ids)
++        metrics = {}
++        for key in ("V_M0", "V_B0", "RD_M0"):
++            m, det = E.build_metrics(per[key], gts, ids, donor_map=(donor_map if key in ("V_M0", "V_B0") else None))
++            metrics[key] = {k: (v.tolist() if hasattr(v, "tolist") else v) for k, v in m.items()}
++            metrics[key]["mean_S"] = float(np.mean(m["S"])) if ids else None
++            metrics[key]["mean_Q4"] = float(np.mean(m["Q4"])) if ids else None
++            metrics[key]["mean_C_query"] = float(np.mean(m["C_query"])) if ids else None
++            metrics[key]["n_invalid"] = int(m["invalid"].sum())
++        g["metrics"] = metrics
++        g["diagnostics"] = {key: E.diagnostics(per[key], gts, ids) for key in ("V_M0", "V_B0", "RD_M0")}
++
++        baselines = {ck: E.rule_copy_empty_baseline({i: src_bbox[ck][i] for i in ids}, gts, ids)
++                     for ck in ("M0", "B0", "M0_concise")}
++        g["baselines"] = {ck: {name: {"mean_S": float(np.mean(baselines[ck][name]["S"])) if ids else None,
++                                       "mean_Q4": float(np.mean(baselines[ck][name]["Q4"])) if ids else None,
++                                       "n_invalid": int(baselines[ck][name]["invalid"].sum())}
++                                for name in ("rule", "copy", "empty")} for ck in ("M0", "B0", "M0_concise")}
++
++        s_b0_minus_m0 = E.paired_ci(metrics["V_B0"]["S"], metrics["V_M0"]["S"])
++        s_b0_minus_copy = E.paired_ci(metrics["V_B0"]["S"], baselines["B0"]["copy"]["S"])
++        rule_minus_b0_direct = E.paired_ci(baselines["B0"]["rule"]["S"], metrics["V_B0"]["S"])
++        reader_minus_b0_direct = E.paired_ci(metrics["RD_M0"]["S"], metrics["V_B0"]["S"])  # RD(reader) - B0 direct (부호 반전 없음)
++        cq_b0 = E.paired_ci(metrics["V_B0"]["C_query"], np.zeros(len(ids)))
++        cq_m0 = E.paired_ci(metrics["V_M0"]["C_query"], np.zeros(len(ids)))
++
++        donor_diff = {}
++        for ck in ("M0", "B0"):
++            real = metrics[f"V_{ck}"]["S"]
++            donor = metrics[f"V_{ck}"]["donor_S"]
++            diff_by_id = {}
++            for i, r, dn in zip(ids, real, donor):
++                if not (isinstance(dn, float) and np.isnan(dn)):
++                    diff_by_id[i] = r - dn
++            donor_diff[ck] = E.cluster_paired_ci(diff_by_id, pairs)
++
++        g["primary_like"] = {
++            "S_B0_minus_S_M0": s_b0_minus_m0,
++            "S_B0_minus_Copy_B0": s_b0_minus_copy,
++            "S_rule_B0_minus_S_B0_direct": rule_minus_b0_direct,
++            "rule_minus_B0_direct_S": rule_minus_b0_direct,
++            "reader_minus_B0_direct_S": reader_minus_b0_direct,
++            "rule_or_reader_minus_B0_direct_S": {
++                "rule": rule_minus_b0_direct, "reader": reader_minus_b0_direct,
++                "max_mean_diff": max(rule_minus_b0_direct["mean_diff"], reader_minus_b0_direct["mean_diff"]),
++            },
++            "C_query_B0_mean": cq_b0["mean_diff"], "C_query_B0_ci_lo": cq_b0["ci_lo"],
++            "C_query_M0_mean": cq_m0["mean_diff"], "C_query_M0_ci_lo": cq_m0["ci_lo"],
++            "donor_diff_B0": donor_diff["B0"], "donor_diff_M0": donor_diff["M0"],
++        }
++
++        multi = D26.multi_quadrant_subset(gts, ids)
++        idx_multi = [k for k, i in enumerate(ids) if i in set(multi)]
++
++        def sub(arr):
++            return np.array(arr)[idx_multi] if idx_multi else np.array([])
++
++        q4_b0_direct = sub(metrics["V_B0"]["Q4"])
++        q4_b0_rule = sub(baselines["B0"]["rule"]["Q4"])
++        q4_m0_direct = sub(metrics["V_M0"]["Q4"])
++        g["subset_like"] = {
++            "ids": multi, "n": len(multi),
++            "B0_direct_Q4_select_successes": int(q4_b0_direct.sum()) if len(multi) else 0,
++            "B0_direct_Q4_select_rate": float(q4_b0_direct.mean()) if len(multi) else None,
++            "B0_direct_Q4_select_exact_ci": E.exact_binom_ci(int(q4_b0_direct.sum()), len(multi)) if len(multi) else (float("nan"), float("nan")),
++            "B0_rule_Q4_select_rate": float(q4_b0_rule.mean()) if len(multi) else None,
++            "B0_rule_Q4_select_exact_ci": E.exact_binom_ci(int(q4_b0_rule.sum()), len(multi)) if len(multi) else (float("nan"), float("nan")),
++            "M0_direct_Q4_select_successes": int(q4_m0_direct.sum()) if len(multi) else 0,
++        }
++        return g
++
++    rep_primary = group_report(primary_ids, "primary")
++    rep_boundary = group_report(boundary_ids, "boundary") if boundary_ids else None
++
++    report["valid_count_primary"] = rep_primary["valid_count"]
++    report["valid_rate_primary"] = rep_primary["valid_rate"]
++    report["metrics_primary"] = rep_primary["metrics"]
++    report["baselines_primary"] = rep_primary["baselines"]
++    report["diagnostics_primary"] = rep_primary["diagnostics"]
++    report["primary"] = rep_primary["primary_like"]
++    report["subset"] = rep_primary["subset_like"]
++    report["subset_ids"] = rep_primary["subset_like"]["ids"]
++    report["n_subset"] = rep_primary["subset_like"]["n"]
++
++    if rep_boundary is not None:
++        report["valid_count_boundary"] = rep_boundary["valid_count"]
++        report["valid_rate_boundary"] = rep_boundary["valid_rate"]
++        report["metrics_boundary"] = rep_boundary["metrics"]
++        report["baselines_boundary"] = rep_boundary["baselines"]
++        report["diagnostics_boundary"] = rep_boundary["diagnostics"]
++        report["boundary"] = rep_boundary["primary_like"]
++        report["subset_boundary"] = rep_boundary["subset_like"]
++        report["subset_boundary_ids"] = rep_boundary["subset_like"]["ids"]
++        report["n_subset_boundary"] = rep_boundary["subset_like"]["n"]
++
++    if stage == "E200":
++        from rsna_diag import roi26_decide as DEC
++        cls = DEC.classify_e200(report)
++        report["classification"] = cls
++        report["positive_candidate"] = cls["positive_candidate"]
++
++import os as _os
++_os.makedirs("results/iter_027/eval", exist_ok=True)
++_outp = f"results/iter_027/eval/report_{stage}.json"
++json.dump(report, open(_outp, "w"), indent=1, default=str)
++print("wrote", _outp)
+diff --git a/launch_iter027_e200.py b/launch_iter027_e200.py
+new file mode 100644
+index 0000000..bd372bd
+--- /dev/null
++++ b/launch_iter027_e200.py
+@@ -0,0 +1,41 @@
++"""iter_027 E200_extra 완료 실행.
++
++각 job은 실제로 어떤 protocol_digest로 이미 기록된 데이터가 있는지에 맞춰 서로 다른 protocol 파일을 쓴다:
++- V_M0: iter_026에서 405/560 완료된 상태였고 원본 protocol_E200_extra.json(v1)의 digest로 기록돼 있다.
++  roi26_eval.py(평가 전용, 생성 미사용)의 iter_027 수정 때문에 v1을 그대로 verify()하면 실패하므로
++  allowed_edits_gen.json(생성 의미가 바뀌지 않았음을 기록한 사전 승인)을 써서 v1 digest를 그대로 재사용한다.
++- V_B0: iter_027 세션 중 protocol_E200_extra_v3.json(재잠금본) digest로 388/560 기록된 상태이므로
++  그 기록과 일치하도록 v3을 그대로 쓴다(폐기하면 이미 완료된 유효 생성을 버리게 된다).
++- RD_M0: 아직 기록이 없으므로 v3을 그대로 쓴다.
++
++사용: python launch_iter027_e200.py --workers 4
++"""
++import argparse
++import json
++import sys
++
++from rsna_diag import roi26_run as RR
++
++ap = argparse.ArgumentParser()
++ap.add_argument("--workers", type=int, required=True)
++ap.add_argument("--peak-gb", type=float, default=9.0)
++a = ap.parse_args()
++
++ALLOWED_EDITS_PATH = "results/iter_027/allowed_edits_gen.json"
++allowed_edits = json.load(open(ALLOWED_EDITS_PATH))
++
++jobs = [
++    ("results/iter_026/requests/E200_extra_V__M0.jsonl", "results/iter_026/protocol_E200_extra.json", allowed_edits, ALLOWED_EDITS_PATH),
++    ("results/iter_026/requests/E200_extra_V__B0.jsonl", "results/iter_026/protocol_E200_extra_v3.json", allowed_edits, ALLOWED_EDITS_PATH),
++    ("results/iter_026/requests/E200_extra_RD__M0.jsonl", "results/iter_026/protocol_E200_extra_v3.json", allowed_edits, ALLOWED_EDITS_PATH),
++]
++allowed = RR.allowed_gpus()
++summary = []
++for rp, protocol, ae, aep in jobs:
++    res = RR.run_one(rp, protocol, workers=a.workers, gpus_arg="0,1", peak_gb=a.peak_gb, allowed=allowed,
++                     out_root="results/iter_026", allowed_edits=ae, allowed_edits_path=aep)
++    summary.append(res)
++    print(res, flush=True)
++json.dump(summary, open("results/iter_027/launch_e200_summary.json", "w"), indent=1, default=str)
++print(json.dumps(summary))
++sys.exit(0 if all(s["status"] in ("complete", "verified_complete") for s in summary) else 2)
+diff --git a/lock_eval_iter027.py b/lock_eval_iter027.py
+new file mode 100644
+index 0000000..5108baf
+--- /dev/null
++++ b/lock_eval_iter027.py
+@@ -0,0 +1,79 @@
++"""iter_027 평가 입력 잠금: eval_iter026.py의 report가 실제로 어떤 코드·원시 데이터에서 나왔는지 독립적으로
++기록한다. iter_026 리뷰는 평가·decision 진입점(eval_iter026.py, decide_iter026_*.py)과 원시 bbox
++completion, checkpoint manifest가 protocol에 잠기지 않는다고 지적했다. roi26_protocol.REQUIRED_CODE는
++생성 경로 전용이라 바꾸지 않고, 이번 평가 단계 전용 잠금을 별도로 만든다(생성 protocol과 동일한 sha 방식 재사용).
++사용: python lock_eval_iter027.py {E60|E200} --out results/iter_027/eval_protocol_{stage}.json
++"""
++import argparse
++import glob
++import json
++import os
++import sys
++
++from rsna_diag import lock_protocol
++
++EVAL_CODE = [
++    "eval_iter026.py", "decide_iter026_d.py", "decide_iter026_e60.py", "decide_iter026_e200.py",
++    "rsna_diag/roi26_eval.py", "rsna_diag/roi26_decide.py", "rsna_diag/roi26_data.py",
++    "rsna_diag/roi23_data.py", "rsna_diag/roi23_spec.py", "rsna_diag/parse.py", "rsna_diag/metrics.py",
++]
++
++
++def stage_gen_dirs(stage):
++    if stage == "E60":
++        return ["E60_V__M0", "E60_V__B0", "E60_RD__M0"]
++    if stage == "E200":
++        return ["E60_V__M0", "E60_V__B0", "E60_RD__M0", "E200_extra_V__M0", "E200_extra_V__B0", "E200_extra_RD__M0"]
++    raise SystemExit(f"unknown stage {stage}")
++
++
++def verify(path):
++    old = json.load(open(path))
++    stage = old["stage"]
++    cur = build_files(stage)
++    diff = {k: (old["files"].get(k), v) for k, v in cur.items() if old["files"].get(k) != v}
++    missing = [k for k in old["files"] if k not in cur]
++    if diff or missing:
++        raise SystemExit(f"EVAL LOCK MISMATCH diff={json.dumps(diff, indent=1)[:2000]} missing={missing}")
++    print("verify ok", path, "n_files", len(cur))
++
++
++def build_files(stage):
++    files = {}
++    for f in EVAL_CODE:
++        files[f] = lock_protocol.sha(f)
++    for name in stage_gen_dirs(stage):
++        cp = f"results/iter_026/gen/{name}/completion.json"
++        if not os.path.exists(cp):
++            raise SystemExit(f"missing completion.json for {name}; generation not finished (execution gap, cannot lock eval inputs yet)")
++        files[cp] = lock_protocol.sha(cp)
++        for gf in sorted(glob.glob(f"results/iter_026/gen/{name}/gen_worker*.jsonl")):
++            files[gf] = lock_protocol.sha(gf)
++        rp = f"results/iter_026/requests/{name}.jsonl"
++        if os.path.exists(rp):
++            files[rp] = lock_protocol.sha(rp)
++    for extra in ("results/iter_023/manifests/sets.json", "results/iter_023/manifests/labels.json",
++                  "results/iter_026/manifests/checkpoints.json", "results/iter_010/manifests/validation_ids.json"):
++        if os.path.exists(extra):
++            files[extra] = lock_protocol.sha(extra)
++    return files
++
++
++def main():
++    ap = argparse.ArgumentParser()
++    ap.add_argument("stage", choices=["E60", "E200"])
++    ap.add_argument("--out", required=True)
++    ap.add_argument("--verify-only", action="store_true")
++    a = ap.parse_args()
++    if a.verify_only:
++        return verify(a.out)
++
++    files = build_files(a.stage)
++    obj = {"schema": "iter027_eval_lock_v1", "stage": a.stage, "files": files}
++    os.makedirs(os.path.dirname(a.out) or ".", exist_ok=True)
++    json.dump(obj, open(a.out, "w"), indent=1, default=str)
++    print("locked", a.out, "n_files", len(files))
++
++
++if __name__ == "__main__":
++    sys.exit(main())
+diff --git a/rsna_diag/roi26_eval.py b/rsna_diag/roi26_eval.py
+index 582fd8f..4896e86 100644
+--- a/rsna_diag/roi26_eval.py
++++ b/rsna_diag/roi26_eval.py
+@@ -125,12 +125,18 @@ def build_metrics(per_id, gts, patient_ids, donor_map=None):
+         detail[i] = {"valid": True, "S": s, "Q4": q4, "C_query": cq, "tp": tp, "n_pred": p, "n_gt": g, "per_target": det}
+     out = {"S": np.array(S), "Q4": np.array(Q4), "C_query": np.array(CQ), "invalid": np.array(INVALID)}
+     if donor_map:
++        # donor가 배정되지 않은 경우(홀수 인원의 남는 1명)만 nan(제외)로 둔다.
++        # donor는 있지만 그 donor의 응답이 invalid면, invalid=0점 규약(patient_valid 실패시 S=0)을 그대로 적용해
++        # donor_S=0.0으로 채점한다(제외하지 않는다).
+         DS = []
+         for i in patient_ids:
+             donor = donor_map.get(i)
+-            if donor is None or not patient_valid(per_id.get(donor, {})):
++            if donor is None:
+                 DS.append(float("nan"))
+                 continue
++            if not patient_valid(per_id.get(donor, {})):
++                DS.append(0.0)
++                continue
+             pred_by_t = {t: per_id[donor][t]["boxes"] for t in R26.TARGETS}
+             gt_by_target = D26.partition_gt([b["yxyx_norm"] for b in gts[i]["boxes"]])
+             s, _, _, _, _ = patient_score(pred_by_t, gt_by_target)
+@@ -141,13 +147,19 @@ def build_metrics(per_id, gts, patient_ids, donor_map=None):
+ 
+ def rule_copy_empty_baseline(source_boxes_by_id, gts, patient_ids):
+     """source_boxes_by_id: {id: (boxes_norm float list or None, status)} (하나의 원본 전체 bbox 출력).
+-    returns {name: metrics dict} for rule / copy / empty. status != valid는 invalid로 표시한다."""
++    returns {name: metrics dict} for rule / copy / empty. status != valid는 invalid로 표시한다.
++    id가 source_boxes_by_id에 아예 없으면(실행 결함으로 그 환자의 원본 생성이 누락) EvalError를 던진다.
++    실제 생성은 있었으나 parse가 invalid인 경우만 모델 실패(0점)로 표시한다."""
+     out = {}
+     for name in ("rule", "copy", "empty"):
+         S, Q4, CQ, INVALID = [], [], [], []
+         detail = {}
+         for i in patient_ids:
+-            boxes, status = source_boxes_by_id.get(i, (None, "missing"))
++            if i not in source_boxes_by_id:
++                raise EvalError(f"source bbox record entirely missing for {i} (execution gap, not a model failure)")
++            boxes, status = source_boxes_by_id[i]
++            if status == "missing":
++                raise EvalError(f"source bbox status=missing for {i} (execution gap, not a model failure)")
+             gt_by_target = D26.partition_gt([b["yxyx_norm"] for b in gts[i]["boxes"]])
+             if boxes is None:
+                 S.append(0.0); Q4.append(0.0); CQ.append(0.0); INVALID.append(True)
+@@ -170,6 +182,51 @@ def rule_copy_empty_baseline(source_boxes_by_id, gts, patient_ids):
+     return out
+ 
+ 
++def diagnostics(per_id, gts, patient_ids, thr2=IOU_THR2):
++    """iter_026 리뷰 task 8 복원: 요청 밖(다른 사분면) 예측 비율, 빈 응답 비율, '전체 복사' 성향 proxy,
++    사분면별 tp/pred/gt 평균, IoU@0.5 S를 patient_valid인 환자만 대상으로 집계한다(정보용, gate에 미사용)."""
++    n_valid_patients = 0
++    n_empty_resp, n_resp = 0, 0
++    n_out_of_quadrant, n_pred_total = 0, 0
++    per_target_tp = {t: 0 for t in R26.TARGETS}
++    per_target_pred = {t: 0 for t in R26.TARGETS}
++    per_target_gt = {t: 0 for t in R26.TARGETS}
++    s50 = []
++    copy_like = 0  # 한 응답의 예측 개수가 그 환자의 GT 전체 개수(4개 target 합)보다 많거나 같고 3개 이상인 경우(전체 복사 proxy)
++    for i in patient_ids:
++        pt = per_id.get(i, {})
++        gt_by_target = D26.partition_gt([b["yxyx_norm"] for b in gts[i]["boxes"]])
++        n_gt_total = sum(len(gt_by_target[t]) for t in R26.TARGETS)
++        if not patient_valid(pt):
++            continue
++        n_valid_patients += 1
++        pred_by_t = {t: pt[t]["boxes"] for t in R26.TARGETS}
++        s5, tp5, p5, g5, det5 = patient_score(pred_by_t, gt_by_target, thr=thr2)
++        s50.append(s5)
++        for t in R26.TARGETS:
++            n_resp += 1
++            pred = pred_by_t[t]
++            if len(pred) == 0:
++                n_empty_resp += 1
++            elig = eligible_boxes(pred, t)
++            n_out_of_quadrant += len(pred) - len(elig)
++            n_pred_total += len(pred)
++            if n_gt_total > 0 and len(pred) >= n_gt_total and len(pred) >= 3:
++                copy_like += 1
++            per_target_tp[t] += det5[t]["tp"]
++            per_target_pred[t] += det5[t]["n_pred"]
++            per_target_gt[t] += det5[t]["n_gt"]
++    return {
++        "n_valid_patients": n_valid_patients,
++        "mean_S_iou50": float(np.mean(s50)) if s50 else None,
++        "empty_response_rate": (n_empty_resp / n_resp) if n_resp else None,
++        "out_of_quadrant_pred_rate": (n_out_of_quadrant / n_pred_total) if n_pred_total else None,
++        "copy_like_response_rate": (copy_like / n_resp) if n_resp else None,
++        "per_target": {t: {"tp": per_target_tp[t], "n_pred": per_target_pred[t], "n_gt": per_target_gt[t]}
++                       for t in R26.TARGETS},
++    }
++
++
+ def donor_pairs(patient_ids):
+     """SHA256('iter026-pair-v1|'+id) 순 정렬 후 인접 2명씩 짝짓는다 (홀수면 마지막 1명은 짝 없음)."""
+     ordered = sorted(patient_ids, key=lambda i: hashlib.sha256(("iter026-pair-v1|" + i).encode()).hexdigest())
+diff --git a/rsna_diag/roi26_gen.py b/rsna_diag/roi26_gen.py
+index 4acdeb4..8355b3f 100644
+--- a/rsna_diag/roi26_gen.py
++++ b/rsna_diag/roi26_gen.py
+@@ -131,8 +131,11 @@ def main():
+     ap.add_argument("--time-limit", type=float, default=None)
+     ap.add_argument("--max-requests", type=int, default=None)
+     ap.add_argument("--repair-tail", action="store_true")
++    ap.add_argument("--allowed-edits", default=None,
++                    help="생성과 무관한 코드(예: 평가 전용 파일)의 사전 검토된 hash 변경을 허용하는 JSON 파일 경로")
+     a = ap.parse_args()
+-    pdig = qa_protocol.verify(a.protocol)
++    allowed_edits = json.load(open(a.allowed_edits)) if a.allowed_edits else None
++    pdig = qa_protocol.verify(a.protocol, allowed_edits=allowed_edits)
+     if json.load(open(a.protocol))["locked"]["files"].get(a.requests) != generate.sha(open(a.requests, "rb").read()):
+         sys.exit(f"request file {a.requests} is not locked in {a.protocol} (or changed)")
+     cfg, _ = qa_protocol.static_cfg()
+diff --git a/rsna_diag/roi26_run.py b/rsna_diag/roi26_run.py
+index 082c8e7..96397b9 100644
+--- a/rsna_diag/roi26_run.py
++++ b/rsna_diag/roi26_run.py
+@@ -123,8 +123,8 @@ def _on_term(signum, frame):
+ 
+ 
+ def run_one(rp, protocol, workers, gpus_arg, peak_gb, allowed, out_root, max_requests=None, time_limit=None,
+-            repair_tail=False, poll_s=20.0):
+-    pdig = qa_protocol.verify(protocol)
++            repair_tail=False, poll_s=20.0, allowed_edits=None, allowed_edits_path=None):
++    pdig = qa_protocol.verify(protocol, allowed_edits=allowed_edits)
+     cfg, _ = qa_protocol.static_cfg()
+     rows = Q.load_rows(rp, cfg)
+     if json.load(open(protocol))["locked"]["files"].get(rp) != generate.sha(open(rp, "rb").read()):
+@@ -178,6 +178,8 @@ def run_one(rp, protocol, workers, gpus_arg, peak_gb, allowed, out_root, max_req
+                 cmd += ["--time-limit", str(time_limit)]
+             if repair_tail:
+                 cmd += ["--repair-tail"]
++            if allowed_edits_path:
++                cmd += ["--allowed-edits", allowed_edits_path]
+             env = dict(os.environ, CUDA_VISIBLE_DEVICES=str(g), CUDA_DEVICE_ORDER="PCI_BUS_ID")
+             procs.append(subprocess.Popen(cmd, env=env, stdout=open(f"{out_dir}/worker{k}.stdout.log", "a"),
+                                           stderr=open(f"{out_dir}/worker{k}.stderr.log", "a")))
+diff --git a/sanity_iter027.py b/sanity_iter027.py
+new file mode 100644
+index 0000000..c4fd35e
+--- /dev/null
++++ b/sanity_iter027.py
+@@ -0,0 +1,104 @@
++"""iter_027 GPU sanity: 공식 tensor 구성 완전 검증 (key set·shape·dtype·값) + V/RD 조건 포함 + B0 adapter + 재생성 대조.
++iter_026 sanity_iter026.py는 tensor key 교집합만 확인했고(공통 key만) V_TL 프롬프트 1건만 검사했다. 이번은
++key 전체 집합 일치·dtype까지 확인하고 실제 E200에서 쓰는 RD(reader) 조건도 포함한다. 실패 시 비정상 종료(exit 1)한다.
++사용: python sanity_iter027.py"""
++import glob
++import json
++import os
++import sys
++
++from rsna_diag import generate as G, roi23_data as D, roi26_data as D26, roi26_requests as Q, roi26_spec as R26
++
++out = {"checks": []}
++failed = False
++
++
++def add(name, ok, detail=None):
++    global failed
++    out["checks"].append({"name": name, "pass": bool(ok), "detail": detail})
++    print(("PASS" if ok else "FAIL"), name)
++    if not ok:
++        failed = True
++
++
++items, gts = D.load_val_pool()
++d24, counts = D.select_d24(items, gts)
++pid = d24[0]
++img, aff, px = G.load_image(items[pid]["image"])
++
++torch, proc, model = G.load_model()
++env = G.env_info(torch, proc, model)
++eos_ids = set(env["eos_token_id"] if isinstance(env["eos_token_id"], list) else [env["eos_token_id"]])
++
++
++def independent_build(prompt):
++    msgs = [{"role": "user", "content": [{"type": "image", "image": img}, {"type": "text", "text": prompt}]}]
++    text_b = proc.tokenizer.apply_chat_template(msgs, tokenize=False, add_generation_prompt=True)
++    return proc(text=text_b, images=[img], return_tensors="pt", add_special_tokens=False)
++
++
++def full_tensor_check(tag, prompt):
++    inp_a = G.build_inputs(proc, img, prompt)  # official: proc.apply_chat_template(...)
++    inp_b = independent_build(prompt)  # 독립 재구성: tokenizer.apply_chat_template(tokenize=False) + proc(...)
++    keys_a, keys_b = set(inp_a.keys()), set(inp_b.keys())
++    add(f"{tag}_key_set_equal", keys_a == keys_b, {"a": sorted(keys_a), "b": sorted(keys_b)})
++    for k in sorted(keys_a & keys_b):
++        same_shape = tuple(inp_a[k].shape) == tuple(inp_b[k].shape)
++        same_dtype = inp_a[k].dtype == inp_b[k].dtype
++        same_val = same_shape and same_dtype and bool((inp_a[k] == inp_b[k]).all())
++        add(f"{tag}_tensor_match_{k}", same_shape and same_dtype and same_val,
++            {"shape_a": list(inp_a[k].shape), "shape_b": list(inp_b[k].shape),
++             "dtype_a": str(inp_a[k].dtype), "dtype_b": str(inp_b[k].dtype)})
++
++
++# V(direct) 조건: 실제 E200_extra V_M0/V_B0가 쓰는 prompt 경로
++full_tensor_check("V_TL", R26.v_prompt("TL"))
++
++# RD(reader) 조건: 실제 E200_extra RD_M0가 쓰는 prompt 경로 (proposal 목록 포함, 더 긴 prompt)
++sample_boxes_i = [[100, 100, 200, 200], [700, 700, 800, 800]]
++full_tensor_check("RD_TL", R26.rd_prompt("TL", sample_boxes_i))
++
++# 기존 D 전체 bbox 출력에서 hash로 고른 M0/B0 각 4건 재현 sanity (이미 완료된 검사이나, 이번 코드 변경 이후 재확인)
++# 주의(iter_026 sanity_iter026.py의 규약을 그대로 따른다): M0 probe는 adapter를 아직 로드하지 않은 "clean" 모델에서
++# 먼저 실행해야 한다. adapter를 먼저 로드하면 M0(무적응) 재현이 실패한다.
++rows = []
++for name in ("D_V__M0", "D_V__B0", "D_O__M0", "D_O__B0"):
++    rows += Q.load_rows(f"results/iter_026/requests/{name}.jsonl")
++rows.sort(key=lambda r: (r["checkpoint"], r["request_id"]))
++m0_rows = [r for r in rows if r["checkpoint"] == "M0"][:4]
++b0_rows = [r for r in rows if r["checkpoint"] == "B0"][:4]
++stored = {}
++for name in ("D_V__M0", "D_V__B0", "D_O__M0", "D_O__B0"):
++    for f in sorted(glob.glob(f"results/iter_026/gen/{name}/gen_worker*.jsonl")):
++        for ln in open(f):
++            if ln.strip():
++                r = json.loads(ln)
++                stored[r["request_id"]] = r
++
++
++def regen_and_check(rows_):
++    for row in rows_:
++        rec = G.run_request(torch, proc, model, eos_ids, {"id": row["id"], "image": row["image"],
++                                                           "file_sha256": row["file_sha256"]},
++                             row["condition"], row["prompt"])
++        old = stored.get(row["request_id"])
++        if old is None:
++            add(f"regen_{row['request_id']}_has_stored", False, row["request_id"])
++            continue
++        match = rec["suffix_ids"] == old["suffix_ids"] and rec["ended_eos"] == old["ended_eos"]
++        add(f"regen_{row['request_id']}_matches_stored", match,
++            {"ckpt": row["checkpoint"], "cond": row["condition"], "target": row["target"]})
++
++
++regen_and_check(m0_rows)  # adapter 로드 전, clean base model에서 먼저 실행
++adg = G.load_adapter(torch, model, "results/iter_012/train/lr2e-4_s17/epoch_05")
++add("B0_adapter_digest_matches_pinned", adg == "e13f3c4461b826a060c90dfe4e4ee4c2ebac36a08f84be1a45a37495816cec11", adg)
++regen_and_check(b0_rows)
++
++os.makedirs("results/iter_027/sanity", exist_ok=True)
++out["n"] = len(out["checks"])
++out["n_pass"] = sum(1 for c in out["checks"] if c["pass"])
++json.dump(out, open("results/iter_027/sanity/sanity.json", "w"), indent=1, default=str)
++print(f"{out['n_pass']}/{out['n']} passed")
++if failed:
++    sys.exit(1)
+diff --git a/test_rsna_iter027.py b/test_rsna_iter027.py
+new file mode 100644
+index 0000000..a19c9de
+--- /dev/null
++++ b/test_rsna_iter027.py
+@@ -0,0 +1,124 @@
++"""iter_027 CPU fixture: roi26_eval의 primary/boundary 분리, donor invalid=0점 규약, source-missing 오류,
++reader/rule 부호, 극단 시나리오(S/Q4/C_query) 독립 검증. 사용: python test_rsna_iter027.py"""
++import json
++
++import numpy as np
++
++from rsna_diag import roi26_eval as E, roi26_spec as R26
++
++results = []
++
++
++def check(name, cond, detail=None):
++    results.append({"name": name, "pass": bool(cond), "detail": detail})
++    print(("PASS" if cond else "FAIL"), name)
++
++
++# 1 box per quadrant GT (yxyx_norm 0-1000 스케일, roi23 center_yx/quadrant_of와 동일 규약)
++GT = {"TL": [[100, 100, 200, 200]], "TR": [[100, 700, 200, 800]], "BL": [[700, 100, 800, 200]], "BR": [[700, 700, 800, 800]]}
++ALL_BOXES = [b for t in R26.TARGETS for b in GT[t]]
++
++# 시나리오 1: 완벽한 선택 (질의 t에 GT[t]만 반환)
++perfect = {t: list(GT[t]) for t in R26.TARGETS}
++s, tp, p, g, det = E.patient_score(perfect, GT)
++q4 = E.q4_select(perfect, GT)
++cq = E.c_query(perfect, GT)
++check("perfect_S_eq_1", abs(s - 1.0) < 1e-9, s)
++check("perfect_Q4_true", q4 is True, q4)
++check("perfect_Cquery_positive", cq > 0, cq)
++
++# 시나리오 2: 전체 GT 복사 (질의와 무관하게 4개 전부 반환)
++copy_all = {t: list(ALL_BOXES) for t in R26.TARGETS}
++s2, tp2, p2, g2, det2 = E.patient_score(copy_all, GT)
++q4_2 = E.q4_select(copy_all, GT)
++cq2 = E.c_query(copy_all, GT)
++check("copy_S_eq_0.4", abs(s2 - 0.4) < 1e-9, s2)
++check("copy_Q4_false", q4_2 is False, q4_2)
++check("copy_Cquery_eq_0", abs(cq2 - 0.0) < 1e-9, cq2)
++
++# 시나리오 3: 빈 목록
++empty = {t: [] for t in R26.TARGETS}
++s3, tp3, p3, g3, det3 = E.patient_score(empty, GT)
++q4_3 = E.q4_select(empty, GT)
++check("empty_S_eq_0", abs(s3 - 0.0) < 1e-9, s3)
++check("empty_Q4_false", q4_3 is False, q4_3)
++
++# 시나리오 4: rule_copy_empty_baseline 래퍼로 동일 값 재확인 (실제 평가 경로가 쓰는 함수)
++gts_fmt = {"pA": {"boxes": [{"yxyx_norm": b} for b in ALL_BOXES]}}
++src = {"pA": (ALL_BOXES, "valid_nonempty")}
++base = E.rule_copy_empty_baseline(src, gts_fmt, ["pA"])
++check("wrapper_copy_S_eq_0.4", abs(base["copy"]["S"][0] - 0.4) < 1e-9, base["copy"]["S"].tolist())
++check("wrapper_empty_S_eq_0", abs(base["empty"]["S"][0] - 0.0) < 1e-9, base["empty"]["S"].tolist())
++check("wrapper_rule_S_eq_1", abs(base["rule"]["S"][0] - 1.0) < 1e-9, base["rule"]["S"].tolist())
++
++# 시나리오 5: source 완전 누락(id가 dict에 없음) -> EvalError (execution gap), score 0으로 숨기지 않는다
++try:
++    E.rule_copy_empty_baseline({}, gts_fmt, ["pA"])
++    check("missing_source_raises", False, "no exception")
++except E.EvalError:
++    check("missing_source_raises", True)
++
++# 시나리오 5b: status="missing" (recs_b.get(i) None으로 예측된 경우)도 동일하게 오류
++try:
++    E.rule_copy_empty_baseline({"pA": (None, "missing")}, gts_fmt, ["pA"])
++    check("status_missing_raises", False, "no exception")
++except E.EvalError:
++    check("status_missing_raises", True)
++
++# 시나리오 5c: 실제 parse 실패(예: invalid_json)는 execution gap이 아니라 모델 실패 -> 0점 처리(예외 아님)
++base2 = E.rule_copy_empty_baseline({"pA": (None, "invalid_json")}, gts_fmt, ["pA"])
++check("model_failure_scores_zero_not_raise", base2["copy"]["invalid"][0] and abs(base2["copy"]["S"][0]) < 1e-9,
++      {"invalid": bool(base2["copy"]["invalid"][0]), "S": float(base2["copy"]["S"][0])})
++
++# 시나리오 6: donor invalid -> donor_S=0.0 (NaN 삭제로 쌍 제외하지 않는다)
++per_id = {
++    "a": {t: {"status": "valid_nonempty", "boxes": GT[t]} for t in R26.TARGETS},  # a: valid, GT를 그대로 반환(완벽)
++    "b": {t: {"status": "invalid_json", "boxes": []} for t in R26.TARGETS},  # b: invalid (4개 중 하나라도 invalid)
++}
++gts2 = {"a": {"boxes": [{"yxyx_norm": b} for b in ALL_BOXES]}, "b": {"boxes": [{"yxyx_norm": b} for b in ALL_BOXES]}}
++donor_map = {"a": "b", "b": "a"}
++m, det = E.build_metrics(per_id, gts2, ["a", "b"], donor_map=donor_map)
++check("donor_invalid_scores_zero_not_nan", (not np.isnan(m["donor_S"][0])) and abs(m["donor_S"][0] - 0.0) < 1e-9,
++      m["donor_S"].tolist())
++check("donor_valid_case_not_nan_for_b", not np.isnan(m["donor_S"][1]), m["donor_S"].tolist())
++
++# 시나리오 6b: donor가 배정되지 않은 홀수 인원(짝 없음)은 여전히 nan으로 제외한다
++per_id3 = dict(per_id)
++per_id3["c"] = per_id["a"]
++gts3 = dict(gts2)
++gts3["c"] = gts2["a"]
++donor_map3 = {"a": "b", "b": "a", "c": None}
++m3, _ = E.build_metrics(per_id3, gts3, ["a", "b", "c"], donor_map=donor_map3)
++check("donor_unpaired_is_nan", np.isnan(m3["donor_S"][2]), m3["donor_S"].tolist())
++
++# 시나리오 7: donor_pairs가 SHA256 순서 결정론적임을 확인 (매 실행 동일 페어링)
++pairs1, dm1 = E.donor_pairs(["p1", "p2", "p3", "p4", "p5"])
++pairs2, dm2 = E.donor_pairs(["p5", "p4", "p3", "p2", "p1"])  # 입력 순서를 바꿔도 동일해야 함
++check("donor_pairs_order_invariant", pairs1 == pairs2, {"pairs1": pairs1, "pairs2": pairs2})
++check("donor_pairs_odd_one_excluded", len(dm1) == 4 and sum(1 for k in ["p1", "p2", "p3", "p4", "p5"] if k not in dm1) == 1,
++      dm1)
++
++# 시나리오 8: reader/rule 격차의 부호 규약 - paired_ci(a,b)는 mean(a-b)를 반환해야 한다 (reader-direct, rule-direct 모두 이 규약)
++a = np.array([0.8, 0.6, 0.4])
++b = np.array([0.5, 0.5, 0.5])
++pc = E.paired_ci(a, b, seed=1, B=200)
++check("paired_ci_mean_is_a_minus_b", abs(pc["mean_diff"] - float(np.mean(a - b))) < 1e-9, pc["mean_diff"])
++
++# 시나리오 9: exact_binom_ci 경계값 (k=0, k=n)
++lo0, hi0 = E.exact_binom_ci(0, 10)
++lon, hin = E.exact_binom_ci(10, 10)
++check("exact_ci_k0_lo_is_zero", lo0 == 0.0, (lo0, hi0))
++check("exact_ci_kn_hi_is_one", hin == 1.0, (lon, hin))
++
++# 시나리오 10: cluster_paired_ci - 쌍 단위 resample이며 개별 diff 평균과 point estimate가 일치해야 한다
++diff_by_id = {"p1": 0.3, "p2": 0.3, "p3": -0.1, "p4": -0.1}
++pairs_ = [("p1", "p2"), ("p3", "p4")]
++cc = E.cluster_paired_ci(diff_by_id, pairs_, seed=1, B=500)
++check("cluster_paired_ci_mean_matches", abs(cc["mean_diff"] - 0.1) < 1e-9, cc)
++
++n = sum(1 for r in results if r["pass"])
++out = {"n": len(results), "n_pass": n, "checks": results}
++import os
++os.makedirs("results/iter_027/tests", exist_ok=True)
++json.dump(out, open("results/iter_027/tests/fixtures_iter027.json", "w"), indent=1, default=str)
++print(f"{n}/{len(results)} passed")
+diff --git a/throughput_iter027.py b/throughput_iter027.py
+new file mode 100644
+index 0000000..ff54542
+--- /dev/null
++++ b/throughput_iter027.py
+@@ -0,0 +1,59 @@
++"""iter_027 처리량 비교: 고정 D 24요청(M0 12 + B0 12, 균형)을 2 worker(1/GPU)와 4 worker(2/GPU)로 비교한다.
++iter_026의 throughput_iter026.py는 M0-only였다(리뷰 결함). 이번은 M0/B0를 섞어 실제 E200_extra 생성 구성과 맞춘다.
++사용: python throughput_iter027.py {2w|4w}
++"""
++import json
++import os
++import subprocess
++import sys
++import time
++
++from rsna_diag import roi26_requests as Q, roi26_protocol as P
++
++mode = sys.argv[1]
++n_workers = 2 if mode == "2w" else 4
++gpus = [0, 1]
++
++m0_rows = sorted(Q.load_rows("results/iter_026/requests/D_V__M0.jsonl"), key=lambda r: r["request_id"])[:12]
++b0_rows = sorted(Q.load_rows("results/iter_026/requests/D_V__B0.jsonl"), key=lambda r: r["request_id"])[:12]
++rows = m0_rows + b0_rows
++out_dir = f"results/iter_027/throughput/{mode}"
++os.makedirs(out_dir, exist_ok=True)
++
++procs = []
++t0 = time.time()
++per_ckpt_gpu_workers = {}
++for ckpt, ck_rows in (("M0", m0_rows), ("B0", b0_rows)):
++    rp = f"{out_dir}/probe_{ckpt}.jsonl"
++    with open(rp, "w") as f:
++        for r in ck_rows:
++            f.write(json.dumps(r) + "\n")
++    protocol_path = f"{out_dir}/protocol_{ckpt}.json"
++    adapter = Q.CKPT_SPEC[ckpt]
++    P.create(protocol_path, extra=[rp], note=f"iter_027 throughput probe {mode} {ckpt}")
++    half = n_workers // 2
++    for k in range(half):
++        g = gpus[len(procs) % len(gpus)]
++        cmd = [sys.executable, "-m", "rsna_diag.roi26_gen", "--requests", rp, "--out-dir", f"{out_dir}/{ckpt}", "--worker", str(k),
++               "--protocol", protocol_path]
++        if adapter:
++            cmd += ["--adapter", adapter]
++        env = dict(os.environ, CUDA_VISIBLE_DEVICES=str(g), CUDA_DEVICE_ORDER="PCI_BUS_ID")
++        os.makedirs(f"{out_dir}/{ckpt}", exist_ok=True)
++        procs.append(subprocess.Popen(cmd, env=env, stdout=open(f"{out_dir}/{ckpt}_w{k}.out.log", "w"),
++                                      stderr=open(f"{out_dir}/{ckpt}_w{k}.err.log", "w")))
++
++peak = {}
++while any(p.poll() is None for p in procs):
++    r = subprocess.run(["nvidia-smi", "--query-gpu=index,memory.used", "--format=csv,noheader,nounits"],
++                       capture_output=True, text=True)
++    for ln in r.stdout.strip().splitlines():
++        i, u = [x.strip() for x in ln.split(",")]
++        peak[i] = max(peak.get(i, 0), int(u))
++    time.sleep(3)
++wall = time.time() - t0
++codes = [p.returncode for p in procs]
++result = {"mode": mode, "n_workers": n_workers, "n_requests": len(rows), "wall_s": wall,
++          "req_per_min": len(rows) / wall * 60, "returncodes": codes, "peak_used_mib": peak}
++json.dump(result, open(f"{out_dir}/result.json", "w"), indent=1)
++print(json.dumps(result))
