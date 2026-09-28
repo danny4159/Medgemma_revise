@@ -27,7 +27,8 @@
 - iter_019 [CONTINUE] (deep/standard/normal) <동일 volume의 reference 대상 선택 진단: execution_failed> 💾ff16f12f6fca43e62c5e3ff795456db9200220b2 iter_019는 합성 검사·GPU 메모리 측정에 머물렀고 다운로드 종료와 방향·NCC 좌표 결함을 확인했다. 실제 환자 실험은 미실행이므로 가설·신규 기여는 미판정이며 복구 후 원 계획을 이어간다. → 다음: 현재 방향을 유지하며 복구·검증을 우선한다. 실행 호스트에서 기존 다운로드·worker·lock·종료 상태를 확인하고 부분 파일과 checkpoint를 보존한다. images.zip을 별도 복구 경로에서 완성해 원저자 checksum을 확인한다. 본평가 전에 MHA 방향과 sagittal 축, NCC padding, 사전 pair 선택, 필수 provenance·pipeline 종료·완전성 결함을 수정한다. 실제 image/mask overlay와 중복·연결성 검증 후 적격 N과 D8/E48/F를 고정한다. N<56이면 원 계획대로 자료 식별성 부족으로 종료하고, 충분하면 D8·24개 재개 검사·두 GPU 처리량 비교를 완료해 E48로 진행한다. F는 원래 확대 조건을 충족할 때만 연다. 성능 결과가 나오기 전 새 loss·방법 학습이나 광범위한 재조사를 추가하지 않는다.
 - iter_020 [CONTINUE] (normal/standard/normal) <동일 volume의 reference 대상 선택 진단: execution_failed> 💾5720d0c82da88c67af5843554afd1791308c6007 iter_020은 좌표 처리의 일부 수정과 27개 검사 통과에 머물렀으며, images.zip 미완성과 환자 실험 미실행으로 가설은 미판정이다. 자료·provenance·단계 gate를 보완한 뒤 원래 진단을 이어가야 한다. → 다음: 복구·진단 계속을 권고한다. 실행 호스트에서 기존 다운로드와 worker의 PID/starttime·소유권·종료 코드를 확인하고 살아 있는 작업을 중복 실행하지 않는다. 기존 부분 파일을 보존하며 검증 가능한 다운로드를 완성하고, 방향·연결성·중복·pair 선택과 provenance·단계 gate·완료 재사용 결함을 해결한다. 최종 적격 N을 고정한 뒤 N<56이면 자료 식별성 부족으로 종료한다. 충분하면 실제 overlay와 공식 입력 대조, D8 및 24개 재개 검사, 두 GPU의 안전한 처리량 비교를 통과해 E48과 원래 조건부 F를 완료한다. 새 학습이나 광범위한 문헌 조사는 예약하지 않는다. 자료 접근 또는 정상 사용 gate를 확보할 수 없다는 구체적 근거가 생기면 다른 임상 다중 영상 질문으로의 전환을 재평가한다.
 - iter_021 [CONTINUE] (normal/standard/normal) <동일 volume의 reference 대상 선택 진단: inconclusive> 💾933eebaba2689d6eb654808ea177d8625ca2ca4c E48에서 O pair success 0/48과 J_TR 34/48을 재현했지만 J_TR 79/96건이 reference 좌표 복사였다. reference 선택 한계·신규 기여는 미판정이며 F는 보존한다. → 다음: 진단과 전환을 비교하는 deep 전략 판단을 권고한다. 먼저 기존 D/E 원시 출력으로 좌표 복사, O 점 해석, 대상 범위 및 실제 공식 입력 연결을 점검해 다음 선택을 바꿀 최소 검증을 정한다. E48은 개발 자료로 유지하고 F139를 자동 개방하거나 H에서 O 조건을 사후 제거하지 않는다. 현재 과제 개선, 중요한 reference 의존 과제로의 전환, 다른 임상 다중 영상 질문을 사용 가치·식별성·가까운 선행 방법·두 GPU 비용으로 비교한다. 정상 사용 보정으로 문제가 해소되거나 좌표 복사로 충분한 과제에 머물면 현 설계 투자를 종료한다. 중요한 잔여 실패를 분리할 수 있을 때만 새 계획과 독립 확인을 준비한다. 실제 재사용 경로의 gate·재개·provenance 결함과 처리량 선택 근거를 먼저 보완하되 주변 코드 정비만으로 반복을 소비하지 않는다.
-- iter_022 [진행 중]
+- iter_022 [사용자 보완으로 전환 → iter_023] 기존 기록 보존, 성공·실패 판정 아님 (계획 확인)
+- iter_023 [진행 중] — 사용자 보완 반영, GPT 재계획부터
 
 ## 이전 목표들의 접근법 (참고용, 현재 목표의 재평가 횟수에는 안 들어감)
 
@@ -44,14 +45,14 @@
 - 영상 조건부 집합 grounding [approach/conditional-set-grounding]: 5회 (iter_010, iter_011, iter_012, iter_013, iter_014), 유효한 실험 3회, 미분류 0회, 최근 판정: abandon, 커밋: 5581ed255a350e42a0ad422065edf13c56a33bf6, 8b030717b813bcbff85a2ffc5f52c9561a73f452, 783d2d04671ae296f3dc0c700e575f8af8e021c9, d68840e0f9317700a8b585bcf6edbb8ef73703a0, 698c161f51ec098b1263ea8a5acf4d2870930e0b
 - 질문 대상과 음성 의미 보존 진단 [approach/target-scope-diagnostic]: 4회 (iter_015, iter_016, iter_017, iter_018), 유효한 실험 3회, 미분류 0회, 최근 판정: inconclusive, 커밋: 3265f117bf3f4de99ba084f2c9b4e476568f24bd, 6a4fb41d490305061028de9cab863c0b5e9747ad, d12ef5ccea60d05b9163519980cdb1624b3fa682, 4e453bbba4b0e798c0deeb6a940644dd62707fa3
 - 동일 volume의 reference 대상 선택 진단 [approach/reference-instance-diagnostic]: 3회 (iter_019, iter_020, iter_021), 유효한 실험 1회, 미분류 0회, 최근 판정: inconclusive, 커밋: ff16f12f6fca43e62c5e3ff795456db9200220b2, 5720d0c82da88c67af5843554afd1791308c6007, 933eebaba2689d6eb654808ea177d8625ca2ca4c
-- 시간·영상 역할 관계 진단 [approach/temporal-role-diagnostic]: 1회 (iter_022), 유효한 실험 0회, 미분류 0회, 최근 판정: 진행 중, 커밋: 없음
+- 시간·영상 역할 관계 진단 [approach/temporal-role-diagnostic]: 1회 (iter_022), 유효한 실험 0회, 미분류 0회, 최근 판정: 사용자 보완으로 전환 (검증 미완료), 커밋: 없음
+- RSNA 영역 질의 전이 진단 [approach/rsna-spatial-transfer]: 1회 (iter_023), 유효한 실험 0회, 미분류 0회, 최근 판정: 진행 중, 커밋: 없음
 
-현재 연구 브랜치: approach/reference-instance-diagnostic (코드 위치: /SSD1_1TB/home/milab/daniel/08_medgemma/research)
+현재 연구 브랜치: approach/rsna-spatial-transfer (코드 위치: /SSD1_1TB/home/milab/daniel/08_medgemma/research)
 
 ### 최근 계획의 대안 순위
 
-1. 시간·영상 역할 관계 진단: 승인된 원천 자료를 확보할 수 있을 때 정규화 이후의 변화 판단과 모듈형 비교를 검증한다.
-2. 접근 가능한 다른 의료 VLM 질문으로 전환: 원천 자료를 사용할 수 없다면 temporal 준비 반복을 만들지 않고 현재 후보를 보류한다.
-3. 현재 MRI 과제의 최소 보정: 기존 관찰은 보존하지만 좌표 복사 confound 때문에 F 확대와 새 학습의 투자 가치는 낮다.
-4. 기존 grounding 방법 개선: 직접 SFT 자산을 유지하되 새 학습을 정당화할 효과·효율 가설이 확보될 때 재검토한다.
-5. 자연적 반복·상보성 진단: 필요한 관계 주석과 기존 TwI 이후의 구별 가능한 실패 조건을 확보하지 못해 보류한다.
+1. RSNA 영역 질의 전이 진단: 같은 영상·소견에서 질문 영역만 바꾸어 기존 위치 학습의 직접 활용과 외부 활용을 구분한다.
+2. 지정 범위의 bbox 선택 진단: 출력 형식 변화는 작지만 기존 좌표 출력의 연장과 능력 전이를 구분하는 정보가 상대적으로 적다.
+3. 기존 grounding 방법 개선: 추가 학습·loss보다 먼저 전이 범위를 확인해야 다음 supervision과 비교군을 정할 수 있다.
+4. MRI·longitudinal 등 다른 질문으로 전환: 현재 사용자 우선순위와 여러 변수 동시 변경의 비용 때문에 보류하며 자동 후속 과제로 두지 않는다.
