@@ -45,20 +45,14 @@ for k in keys_common:
     add(f"independent_tensor_match_{k}", same_val,
         {"shape_a": list(inp_a[k].shape), "shape_b": list(inp_b[k].shape)})
 
-adg = G.load_adapter(torch, model, "results/iter_012/train/lr2e-4_s17/epoch_05")
-add("B0_adapter_digest_matches_pinned", adg == "e13f3c4461b826a060c90dfe4e4ee4c2ebac36a08f84be1a45a37495816cec11", adg)
-
 if mode == "post":
-    import hashlib
     rows = []
     for name in ("D_V__M0", "D_V__B0", "D_O__M0", "D_O__B0"):
         rs = Q.load_rows(f"results/iter_026/requests/{name}.jsonl")
         rows += rs
     rows.sort(key=lambda r: (r["checkpoint"], r["request_id"]))
-    m0_rows = [r for r in rows if r["checkpoint"] == "M0"]
-    b0_rows = [r for r in rows if r["checkpoint"] == "B0"]
-    probe = m0_rows[:4] + b0_rows[:4]
-    gen_dirs = {"M0": None, "B0": "results/iter_012/train/lr2e-4_s17/epoch_05"}
+    m0_rows = [r for r in rows if r["checkpoint"] == "M0"][:4]
+    b0_rows = [r for r in rows if r["checkpoint"] == "B0"][:4]
     stored = {}
     for name in ("D_V__M0", "D_V__B0", "D_O__M0", "D_O__B0"):
         for f in sorted(glob.glob(f"results/iter_026/gen/{name}/gen_worker*.jsonl")):
@@ -66,23 +60,30 @@ if mode == "post":
                 if ln.strip():
                     r = json.loads(ln)
                     stored[r["request_id"]] = r
-    cur_adapter = None
-    for row in probe:
-        want_adapter = gen_dirs[row["checkpoint"]]
-        if want_adapter != cur_adapter and want_adapter:
-            G.load_adapter(torch, model, want_adapter)
-            cur_adapter = want_adapter
-        img2, _, _ = G.load_image(row["image"])
-        rec = G.run_request(torch, proc, model, eos_ids, {"id": row["id"], "image": row["image"],
-                                                           "file_sha256": row["file_sha256"]},
-                             row["condition"], row["prompt"])
-        old = stored.get(row["request_id"])
-        if old is None:
-            add(f"regen_{row['request_id']}_has_stored", False, row["request_id"])
-            continue
-        match = rec["suffix_ids"] == old["suffix_ids"] and rec["ended_eos"] == old["ended_eos"]
-        add(f"regen_{row['request_id']}_matches_stored", match,
-            {"ckpt": row["checkpoint"], "cond": row["condition"], "target": row["target"]})
+
+    def regen_and_check(rows_):
+        for row in rows_:
+            rec = G.run_request(torch, proc, model, eos_ids, {"id": row["id"], "image": row["image"],
+                                                               "file_sha256": row["file_sha256"]},
+                                 row["condition"], row["prompt"])
+            old = stored.get(row["request_id"])
+            if old is None:
+                add(f"regen_{row['request_id']}_has_stored", False, row["request_id"])
+                continue
+            match = rec["suffix_ids"] == old["suffix_ids"] and rec["ended_eos"] == old["ended_eos"]
+            add(f"regen_{row['request_id']}_matches_stored", match,
+                {"ckpt": row["checkpoint"], "cond": row["condition"], "target": row["target"],
+                 "new_ended_eos": rec["ended_eos"], "old_ended_eos": old["ended_eos"],
+                 "new_n_out": rec["n_output_tokens"], "old_n_out": old["n_output_tokens"]})
+
+    # M0 probes first, on the clean (no-adapter) model, before any adapter is ever loaded.
+    regen_and_check(m0_rows)
+    adg = G.load_adapter(torch, model, "results/iter_012/train/lr2e-4_s17/epoch_05")
+    add("B0_adapter_digest_matches_pinned", adg == "e13f3c4461b826a060c90dfe4e4ee4c2ebac36a08f84be1a45a37495816cec11", adg)
+    regen_and_check(b0_rows)
+else:
+    adg = G.load_adapter(torch, model, "results/iter_012/train/lr2e-4_s17/epoch_05")
+    add("B0_adapter_digest_matches_pinned", adg == "e13f3c4461b826a060c90dfe4e4ee4c2ebac36a08f84be1a45a37495816cec11", adg)
 
 os.makedirs("results/iter_026/sanity", exist_ok=True)
 out["n"] = len(out["checks"])

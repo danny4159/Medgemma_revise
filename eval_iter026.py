@@ -101,7 +101,10 @@ else:
     report["valid_count"] = valid_count
     report["valid_rate"] = {k: v / (len(patient_ids) * 4) for k, v in valid_count.items()}
 
-    multi = D26.multi_quadrant_subset(gts, patient_ids)
+    primary_ids = sorted(sets[stage]["primary"])
+    boundary_ids = sorted(sets[stage]["boundary"])
+    multi = D26.multi_quadrant_subset(gts, primary_ids)  # 계획의 "진부분집합"은 primary 안에서 정의한다
+    multi_boundary = D26.multi_quadrant_subset(gts, boundary_ids)
     pairs, donor_map = E.donor_pairs(patient_ids)
 
     metrics = {}
@@ -116,8 +119,11 @@ else:
     report["metrics"] = metrics
 
     idx_multi = [k for k, i in enumerate(patient_ids) if i in set(multi)]
+    idx_multi_boundary = [k for k, i in enumerate(patient_ids) if i in set(multi_boundary)]
     report["subset_ids"] = multi
     report["n_subset"] = len(multi)
+    report["subset_boundary_ids"] = multi_boundary
+    report["n_subset_boundary"] = len(multi_boundary)
 
     src_bbox = {}
     for ck, prompt_name in (("M0", "official_long"), ("B0", "concise")):
@@ -160,6 +166,18 @@ else:
         "B0_rule_Q4_select_rate": float(subset_q4_b0_rule.mean()) if len(multi) else None,
         "B0_rule_Q4_select_exact_ci": exact_ci(int(subset_q4_b0_rule.sum()), len(multi)),
         "M0_direct_Q4_select_successes": int(subset_q4_m0_direct.sum()),
+    }
+
+    def subset_arr_b(arr):
+        return np.array(arr)[idx_multi_boundary]
+
+    bq4_b0_direct = subset_arr_b(metrics["V_B0"]["Q4"])
+    bq4_b0_rule = subset_arr_b(baselines["B0"]["rule"]["Q4"])
+    report["subset_boundary"] = {
+        "n": len(multi_boundary),
+        "B0_direct_Q4_select_successes": int(bq4_b0_direct.sum()),
+        "B0_direct_Q4_select_rate": float(bq4_b0_direct.mean()) if len(multi_boundary) else None,
+        "B0_rule_Q4_select_rate": float(bq4_b0_rule.mean()) if len(multi_boundary) else None,
     }
 
     donor_diff = {}
