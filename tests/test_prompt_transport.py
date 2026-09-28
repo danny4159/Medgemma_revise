@@ -63,6 +63,52 @@ class PromptTransportTests(unittest.TestCase):
         self.assertNotIn("목표·권한·원본 보존", log)
         self.assertIsNone(loop.STATE["proc"])
 
+    def test_claude_long_input_and_resume_preserve_bytes_options_and_session(self):
+        policy = "정책 원문\n"
+        prompt = "  시작\r\n" + "한글🙂 '$변수' \\\n" * 15000 + "끝  \n"
+        payload = (policy + prompt).encode("utf-8")
+        self.assertGreater(len(payload), 131072)
+        args = argparse.Namespace(gpus="0,1", claude_timeout=10)
+        original = loop.run_streaming
+        child = (
+            "import sys,hashlib,json; d=sys.stdin.buffer.read(); "
+            "print(json.dumps({'type':'system','session_id':'saved-session'})); "
+            "print(json.dumps({'type':'result','is_error':False,"
+            "'result':{'bytes':len(d),'sha256':hashlib.sha256(d).hexdigest()}}))"
+        )
+        for resume in (None, "saved-session"):
+            with self.subTest(resume=resume):
+                session = self.root / "session.txt"
+
+                def run(cmd, log, timeout, env, on_line, **kwargs):
+                    self.assertEqual(cmd[:2], ["claude", "-p"])
+                    for flag, value in (("--input-format", "text"),
+                                        ("--output-format", "stream-json"),
+                                        ("--permission-mode", "acceptEdits"),
+                                        ("--model", "sonnet"), ("--effort", "medium"),
+                                        ("--settings", str(loop.AGENT_DIR / "claude_settings.json")),
+                                        ("--append-system-prompt-file", str(loop.PROMPT_DIR / "claude_engineer.md")),
+                                        ("--add-dir", str(loop.PROJECT_DIR))):
+                        self.assertEqual(cmd[cmd.index(flag) + 1], value)
+                    if resume:
+                        self.assertEqual(cmd[cmd.index("--resume") + 1], resume)
+                    else:
+                        self.assertNotIn("--resume", cmd)
+                    self.assertNotIn(policy + prompt, cmd)
+                    self.assertLess(max(len(v.encode()) for v in cmd), 131072)
+                    self.assertEqual(kwargs["stdin_text"].encode(), payload)
+                    self.assertEqual(kwargs["cwd"], loop.RESEARCH_DIR)
+                    self.assertEqual(env["CUDA_VISIBLE_DEVICES"], "0,1")
+                    kwargs["cwd"] = self.root
+                    return original([sys.executable, "-c", child], log, timeout, env, on_line, **kwargs)
+
+                with patch.object(loop, "resource_context", return_value=policy), \
+                        patch.object(loop, "run_streaming", side_effect=run):
+                    result = loop.run_claude(args, prompt, self.log, "standard", session, resume)
+                self.assertEqual(session.read_text(), "saved-session")
+                self.assertEqual(result["result"], {"bytes": len(payload),
+                                                  "sha256": hashlib.sha256(payload).hexdigest()})
+
     def test_output_before_reading_large_input_does_not_deadlock(self):
         prompt = "입력\n" * 50000
         lines = []

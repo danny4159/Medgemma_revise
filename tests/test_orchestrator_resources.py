@@ -59,9 +59,11 @@ class ResourcePolicyTests(unittest.TestCase):
 
     def test_claude_resume_reloads_policy(self):
         commands = []
+        inputs = []
 
         def run(cmd, log, timeout, env, on_line, **kwargs):
             commands.append(cmd)
+            inputs.append(kwargs["stdin_text"])
             on_line('{"type":"result","result":"완료","is_error":false}')
 
         with patch.object(loop, "run_streaming", side_effect=run):
@@ -71,12 +73,12 @@ class ResourcePolicyTests(unittest.TestCase):
             self.usage_policy.write_text("수정된 사용량 정책", encoding="utf-8")
             self.reporting_style.write_text("수정된 보고서 기준", encoding="utf-8")
             loop.run_claude(self.args, "재개", self.root / "log", "heavy", resume_id="session")
-        self.assertIn("현재 허용된 두 GPU", commands[0][-1])
-        self.assertIn("핵심 먼저, 상세 검증 유지", commands[0][-1])
-        self.assertIn("수정된 자원 정책", commands[1][-1])
-        self.assertIn("수정된 연구 운영 정책", commands[1][-1])
-        self.assertIn("수정된 사용량 정책", commands[1][-1])
-        self.assertIn("수정된 보고서 기준", commands[1][-1])
+        self.assertIn("현재 허용된 두 GPU", inputs[0])
+        self.assertIn("핵심 먼저, 상세 검증 유지", inputs[0])
+        self.assertIn("수정된 자원 정책", inputs[1])
+        self.assertIn("수정된 연구 운영 정책", inputs[1])
+        self.assertIn("수정된 사용량 정책", inputs[1])
+        self.assertIn("수정된 보고서 기준", inputs[1])
         self.assertEqual(commands[1][commands[1].index("--resume") + 1], "session")
 
     def test_inherited_gpu_restriction_and_explicit_timeout(self):

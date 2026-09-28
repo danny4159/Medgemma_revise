@@ -654,7 +654,7 @@ def run_claude(args, prompt, log_path, tier, session_file=None, resume_id=None):
     cmd = [
         "claude", "-p",
         "--permission-mode", "acceptEdits",
-        "--output-format", "stream-json", "--verbose",
+        "--output-format", "stream-json", "--input-format", "text", "--verbose",
         "--model", spec["model"],
         "--effort", spec["effort"],
         # 작업 디렉터리는 research/. 프로젝트 폴더는 계획과 legacy/ 데이터를 읽는 용도.
@@ -666,7 +666,7 @@ def run_claude(args, prompt, log_path, tier, session_file=None, resume_id=None):
     ]
     if resume_id:
         cmd += ["--resume", resume_id]
-    cmd.append(resource_context(args) + prompt)
+    input_text = resource_context(args) + prompt
 
     result = {}
 
@@ -691,7 +691,8 @@ def run_claude(args, prompt, log_path, tier, session_file=None, resume_id=None):
             result.update(event)
 
     try:
-        run_streaming(cmd, log_path, args.claude_timeout, agent_env(args.gpus), on_line, cwd=RESEARCH_DIR)
+        run_streaming(cmd, log_path, args.claude_timeout, agent_env(args.gpus), on_line,
+                      cwd=RESEARCH_DIR, stdin_text=input_text)
     finally:
         # 실패·timeout·사용자 정지도 집계한다. 원본을 재집계하므로 누적값/재시도를 중복 합산하지 않는다.
         if log_path.exists():
