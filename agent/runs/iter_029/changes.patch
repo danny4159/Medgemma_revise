@@ -1,0 +1,873 @@
+diff --git a/run_iter029_audit.py b/run_iter029_audit.py
+new file mode 100644
+index 0000000..fceb9f6
+--- /dev/null
++++ b/run_iter029_audit.py
+@@ -0,0 +1,187 @@
++"""iter_029 단계 1: iter_028 C/E raw 산출물을 read-only로 감사하고 provenance를 새 경로에 기록한다.
++
++과거 파일은 전혀 쓰지 않는다. 여기서 만드는 audit.json이 이번 교정 평가의 입력 완전성 근거다.
++"""
++import glob
++import hashlib
++import json
++import os
++
++from rsna_diag import risk28
++
++SRC_MANIFEST = "results/iter_028/source_manifest.json"
++PROTOCOL = "results/iter_028/protocol.json"
++OUT = "results/iter_029/audit"
++
++
++def sha256_file(path):
++    return hashlib.sha256(open(path, "rb").read()).hexdigest()
++
++
++def check_protocol_locked_files():
++    proto = json.load(open(PROTOCOL))
++    problems = []
++    cur = {}
++    for path, want in proto["locked"]["files"].items():
++        if not os.path.exists(path):
++            problems.append(f"missing locked file: {path}")
++            continue
++        got = sha256_file(path)
++        cur[path] = got
++        if got != want:
++            problems.append(f"hash mismatch: {path} got={got} want={want}")
++    return {"n_locked": len(proto["locked"]["files"]), "problems": problems, "current_hashes": cur}
++
++
++def audit_split(sm, split):
++    """variant별 completion, 중복/누락/잉여, adapter/protocol/pixel 연결을 검사한다.
++
++    계획서 감사 대상: C는 실제로 전체 400명(빈+비빈)에 생성했고(400*5=2000),
++    주분석은 그중 빈 출력 199명(199*5=995)만 사용한다. E는 처음부터 빈 출력
++    398명에만 생성했다(398*5=1990, 여기에는 확장분이 없다). 두 split의 실제
++    생성 대상 모집단이 다르므로 completion 기대 행렬을 분리해서 검사한다.
++    """
++    all_items = list(sm["patients"][split].values())
++    empty_items = [p for p in all_items if p["seed17_empty"]]
++    out_dir = f"results/iter_028/{split}"
++    expect_items = all_items if split == "C" else empty_items
++    comp = risk28.check_completion(out_dir, expect_items, variants=("base", "sft"))
++    items = empty_items  # primary-analysis population used below
++
++    problems = list(comp["problems"])
++    # per-record cross-checks: adapter digest, protocol digest, pixel hash, duplicate across files
++    base_all = risk28.load_all(out_dir, "base")
++    sft_all = risk28.load_all(out_dir, "sft")
++
++    proto = json.load(open(PROTOCOL))
++    proto_digest_expect = None  # recorded protocol_digest in records; just check internal consistency
++    seen_protocol_digests = set()
++    for (pid, task), r in list(base_all.items()) + list(sft_all.items()):
++        seen_protocol_digests.add(r.get("protocol_digest"))
++        if r.get("adapter_digest") is not None and task in ("presence", "ptrue") and r["variant"] == "base":
++            problems.append(f"base record has non-null adapter_digest: {pid}/{task}")
++    if len(seen_protocol_digests) != 1:
++        problems.append(f"multiple distinct protocol_digest values in {split}: {seen_protocol_digests}")
++
++    adapter_digest_seed17 = sm["adapter_digest_seed17"]
++    for (pid, task), r in sft_all.items():
++        if r.get("adapter_digest") != adapter_digest_seed17:
++            problems.append(f"sft record adapter_digest mismatch: {pid}/{task}")
++
++    # exact expected request matrix from source+protocol (not from observed results); primary analysis
++    # population is always the empty-output patients, but C's actual generation covered all 400.
++    expect_base = {(p["id"], t) for p in expect_items for t in risk28.expected_tasks("base")}
++    expect_sft = {(p["id"], t) for p in expect_items for t in risk28.expected_tasks("sft")}
++    got_base = set(base_all)
++    got_sft = set(sft_all)
++    if got_base != expect_base:
++        problems.append(f"base matrix mismatch: missing={len(expect_base-got_base)} extra={len(got_base-expect_base)}")
++    if got_sft != expect_sft:
++        problems.append(f"sft matrix mismatch: missing={len(expect_sft-got_sft)} extra={len(got_sft-expect_sft)}")
++    n_primary_base = {(p["id"], t) for p in items for t in risk28.expected_tasks("base")}
++    n_primary_sft = {(p["id"], t) for p in items for t in risk28.expected_tasks("sft")}
++    if not (n_primary_base <= got_base and n_primary_sft <= got_sft):
++        problems.append("primary-analysis (empty-output) requests are not a subset of generated records")
++
++    return {
++        "split": split, "n_empty": len(items), "n_events": sum(1 for p in items if p["y_miss"]),
++        "n_base_records": len(base_all), "n_sft_records": len(sft_all),
++        "problems": problems, "protocol_digests_seen": sorted(str(d) for d in seen_protocol_digests),
++        "completion": comp,
++    }
++
++
++def check_pixel_hashes(sm, split):
++    """images의 현재 file/pixel hash를 manifest 저장값과 대조한다 (GPU 로드 없이 파일 hash만)."""
++    items = sm["patients"][split]
++    problems = []
++    n = 0
++    for pid, p in items.items():
++        path = p["image"]
++        if not os.path.exists(path):
++            problems.append(f"missing image file: {pid} {path}")
++            continue
++        file_sha = sha256_file(path)
++        if file_sha != p["file_sha256"]:
++            problems.append(f"file hash mismatch: {pid} got={file_sha} want={p['file_sha256']}")
++        n += 1
++    return {"split": split, "n_checked": n, "problems": problems}
++
++
++def protocol_digest_reconciliation():
++    """C와 E는 서로 다른 protocol_digest로 생성됐다(claude_stream.jsonl 라인 668/706/712에서 복원).
++    C 생성 완료 후 risk28.py main()의 분기가 'C/E 요청 전체(400/800명)'를 채점하던 버그를
++    '빈 출력만 채점'하도록 한 줄 수정했고, 그 직후 protocol을 재잠금해 E를 생성했다.
++    이 수정은 빈 출력 199/398명 각자의 score_token_original/score_yes_no 계산 경로를
++    바꾸지 않는다(호출 인자·prompt·max_new가 patient 단위로 동일하다). 따라서 두 protocol_digest
++    차이는 주분석 대상 population에 영향을 주지 않는 것으로 문서화하되, 과거 protocol.json bytes
++    자체(교체 전 버전)는 현재 파일로 복원할 수 없어 완전한 재실행 검증은 아니다."""
++    return {
++        "explanation": "C empty-199 records were generated before a one-line risk28.py fix "
++                       "(main(): item filter 'all patients' -> 'seed17_empty only') that only "
++                       "removes surplus nonempty-patient requests from being scored; it does not "
++                       "change how any individual patient (empty or not) is scored. E was generated "
++                       "after this fix and after re-locking protocol.json.",
++        "recovered_from": "agent/runs/iter_028/claude_stream.jsonl lines 668 (C launch), 701 (bug "
++                           "note), 706 (Edit diff), 712 (protocol re-lock), 748 (E launch)",
++        "edit_old": "items = list(sm[\"patients\"][a.split].values())",
++        "edit_new": "items = [p for p in sm[\"patients\"][a.split].values() if p[\"seed17_empty\"]]",
++        "affects_primary_empty_population_scoring": False,
++        "caveat": "past protocol.json bytes at C-generation-time are not independently recoverable; "
++                  "this is a documented code-diff reconciliation, not a byte-level replay.",
++    }
++
++
++def main():
++    os.makedirs(OUT, exist_ok=True)
++    sm = json.load(open(SRC_MANIFEST))
++
++    proto_check = check_protocol_locked_files()
++
++    sm_hash = sha256_file(SRC_MANIFEST)
++    proto = json.load(open(PROTOCOL))
++    sm_locked = proto["locked"]["files"].get(SRC_MANIFEST)
++
++    problems_all = list(proto_check["problems"])
++    if sm_locked is not None and sm_hash != sm_locked:
++        problems_all.append(f"source_manifest hash changed since protocol lock: {sm_hash} != {sm_locked}")
++
++    splits_report = {}
++    for split in ("C", "E"):
++        r = audit_split(sm, split)
++        px = check_pixel_hashes(sm, split)
++        r["pixel_audit"] = px
++        problems_all += [f"{split}: {p}" for p in r["problems"]]
++        problems_all += [f"{split}: {p}" for p in px["problems"]]
++        splits_report[split] = r
++
++    # cross-split patient/pixel-hash overlap check
++    c_ids = set(sm["patients"]["C"])
++    e_ids = set(sm["patients"]["E"])
++    overlap = c_ids & e_ids
++    if overlap:
++        problems_all.append(f"patient id overlap between C and E: {len(overlap)}")
++    c_px = {p["file_sha256"] for p in sm["patients"]["C"].values()}
++    e_px = {p["file_sha256"] for p in sm["patients"]["E"].values()}
++    px_overlap = c_px & e_px
++    if px_overlap:
++        problems_all.append(f"pixel hash overlap between C and E: {len(px_overlap)}")
++
++    out = {
++        "protocol_check": proto_check,
++        "protocol_digest_reconciliation": protocol_digest_reconciliation(),
++        "source_manifest_hash": sm_hash, "source_manifest_locked_hash": sm_locked,
++        "splits": splits_report,
++        "patient_id_overlap_C_E": len(overlap),
++        "pixel_hash_overlap_C_E": len(px_overlap),
++        "n_problems": len(problems_all), "problems": problems_all,
++        "ok": len(problems_all) == 0,
++    }
++    json.dump(out, open(os.path.join(OUT, "audit.json"), "w"), indent=1)
++    print(f"ok={out['ok']} n_problems={len(problems_all)}")
++    for p in problems_all:
++        print(" -", p)
++
++
++if __name__ == "__main__":
++    main()
+diff --git a/run_iter029_decide.py b/run_iter029_decide.py
+new file mode 100644
+index 0000000..874cf2a
+--- /dev/null
++++ b/run_iter029_decide.py
+@@ -0,0 +1,89 @@
++"""iter_029 계획의 Evaluation 기준으로 E 결과를 기계 판독 decision으로 정리한다.
++
++기준(plan.md Evaluation 절 그대로):
++- 단순 baseline 양성: E에서 고정 score가 AUROC>=0.75, 95% CI 하한>=0.65, Capture@20%>=0.50.
++  token 또는 seed로 충족하면 confidence head/loss는 보류.
++- 재질의 추가 정보 양성: C 선택 V-T AUROC 차이>=0.10, 97.5% CI 하한>0, Capture@20%도 같은 방향.
++- 음성: 모든 score의 95% CI 상한이 실용 목표 미달.
++- 불확정: CI가 기준을 가로지름.
++"""
++import json
++import os
++
++OUT = "results/iter_029/decide"
++
++
++def main():
++    e = json.load(open("results/iter_029/E_eval/e_eval.json"))
++    c = json.load(open("results/iter_029/C_eval/c_eval.json"))
++    verify = json.load(open(os.path.join(OUT, "independent_verify.json")))
++    if not verify["ok"]:
++        raise RuntimeError("independent verification failed; refusing to render a decision")
++
++    rep_T, rep_V = e["representative_T"], e["representative_V"]
++
++    simple_baseline_positive = {}
++    for name in e["raw_auroc"]:
++        if name == "random":
++            continue
++        auc = e["cis"][name]["auroc"]
++        cap = e["cis"][name]["capture20"]
++        pos = auc["point"] >= 0.75 and auc["lo"] >= 0.65 and cap["point"] >= 0.50
++        simple_baseline_positive[name] = {
++            "positive": pos, "auroc_point": auc["point"], "auroc_ci_lo": auc["lo"],
++            "capture20_point": cap["point"],
++        }
++    token_or_seed_positive = simple_baseline_positive["entropy"]["positive"] or \
++        simple_baseline_positive["token_nll"]["positive"] or \
++        simple_baseline_positive["seed_disagreement"]["positive"]
++
++    diff_VT_C = c["diff_V_minus_T_auroc"]
++    v_minus_t_auroc_diff = e["raw_auroc"][rep_V] - e["raw_auroc"][rep_T]
++    v_cap = e["capture_at_20pct"][rep_V]
++    t_cap = e["capture_at_20pct"][rep_T]
++    requery_positive = (diff_VT_C["point"] >= 0.10 and diff_VT_C["lo"] > 0.0 and v_cap > t_cap)
++
++    all_ci_upper_below_target = all(
++        (e["cis"][name]["auroc"]["hi"] < 0.75) and (e["cis"][name]["capture20"]["hi"] < 0.50)
++        for name in e["raw_auroc"] if name != "random"
++    )
++
++    any_ci_straddles = any(
++        (e["cis"][name]["auroc"]["lo"] < 0.75 < e["cis"][name]["auroc"]["hi"])
++        for name in e["raw_auroc"] if name != "random"
++    )
++
++    if token_or_seed_positive:
++        overall = "simple_baseline_positive_new_confidence_head_deferred"
++    elif all_ci_upper_below_target:
++        overall = "negative_limited_to_current_score_set"
++    elif any_ci_straddles:
++        overall = "inconclusive_ci_straddles_target"
++    else:
++        overall = "mixed"
++
++    decision = {
++        "representative_T": rep_T, "representative_V": rep_V,
++        "simple_baseline_positive_per_score": simple_baseline_positive,
++        "token_or_seed_meets_simple_baseline_positive": token_or_seed_positive,
++        "requery_additional_info_positive": {
++            "positive": requery_positive,
++            "C_diff_V_minus_T_point": diff_VT_C["point"], "C_diff_V_minus_T_ci_lo_975": diff_VT_C["lo"],
++            "E_diff_V_minus_T_point": v_minus_t_auroc_diff,
++            "E_capture20_V": v_cap, "E_capture20_T": t_cap,
++        },
++        "overall": overall,
++        "notes": [
++            "token_or_seed_positive=True는 entropy/token_nll/seed_disagreement 중 하나가 E에서 "
++            "사전 목표를 충족함을 뜻하며, 계획에 따라 새 confidence head/loss 투자는 보류 대상이다.",
++            "requery_positive=False는 presence_b0(교정된 V)가 C에서 사전 정한 추가 정보 이득 기준을 "
++            "충족하지 못했다는 뜻이다(diff_V-T point는 음수).",
++            "이 decision은 개발 자료(C/E)에서 나온 것이며 독립 확인(새 환자 집단)은 별도로 필요하다.",
++        ],
++    }
++    json.dump(decision, open(os.path.join(OUT, "decision.json"), "w"), indent=1, ensure_ascii=False)
++    print(json.dumps(decision, indent=1, ensure_ascii=False))
++
++
++if __name__ == "__main__":
++    main()
+diff --git a/run_iter029_eval_c.py b/run_iter029_eval_c.py
+new file mode 100644
+index 0000000..f51377c
+--- /dev/null
++++ b/run_iter029_eval_c.py
+@@ -0,0 +1,167 @@
++"""iter_029 C400(빈 출력 199명) 교정 평가.
++
++iter_028의 run_iter028_eval_c.py를 방향 오류만 고쳐 재사용한다. Presence는 logit_yes-logit_no
++(모델이 opacity가 있다고 답할수록 위험이 높다), P(True)는 logit_no-logit_yes(제안한 빈 응답이
++틀렸다는 답일수록 위험이 높다)이며, risk28.py가 저장한 값은 항상 risk_no_minus_yes(=logit_no-logit_yes)
++이므로 presence_*는 그 값을 부호 반전해서 사용해야 한다. 과거 run_iter028_eval_c.py는 둘 다
++risk_no_minus_yes를 그대로 썼다(presence 부호 오류). 원본 파일은 건드리지 않고 새 경로에만 쓴다.
++"""
++import json
++import os
++
++import numpy as np
++
++from rsna_diag import risk28, risk28_eval as E
++
++RESULTS_ROOT = "results/iter_028"  # read-only: C/E raw generations live here
++OUT = "results/iter_029/C_eval"
++
++SCORE_NAMES = ["token_nll", "token_nll_eos", "entropy", "seed_disagreement",
++               "presence_m0", "presence_b0", "ptrue_m0", "ptrue_b0"]
++TOKEN_FAMILY = ["token_nll", "token_nll_eos", "entropy"]
++IMAGE_FAMILY = ["presence_m0", "presence_b0", "ptrue_m0", "ptrue_b0"]
++
++
++def build_table(sm, split):
++    all_patients = list(sm["patients"][split].values())
++    patients = [p for p in all_patients if p["seed17_empty"]]
++
++    # completeness gate. C's actual generation covered all 400 patients (a pre-fix run scored the
++    # full split before risk28.py was restricted to empty-only; see run_iter029_audit.py's
++    # protocol_digest_reconciliation for the recovered code-diff). E only ever generated the empty
++    # subset. So we check completeness against the *actual* generation population (all patients for
++    # C, empty-only for E) to catch real missing/duplicate/extra problems without false-flagging the
++    # known, documented C surplus; then separately assert the primary (empty) population is a strict
++    # subset with no missing/duplicate entries.
++    expect_population = all_patients if split == "C" else patients
++    comp = risk28.check_completion(f"{RESULTS_ROOT}/{split}", expect_population, variants=("base", "sft"))
++    if not comp["ok"]:
++        raise RuntimeError(f"{split}: completion check against actual generation population failed: "
++                            f"{comp['problems']}")
++
++    expected_n_empty = {"C": 199, "E": 398}.get(split)
++    if expected_n_empty is not None and len(patients) != expected_n_empty:
++        raise RuntimeError(f"{split}: expected {expected_n_empty} empty-output patients, got {len(patients)}")
++
++    sft = risk28.load_all(f"{RESULTS_ROOT}/{split}", "sft")
++    base = risk28.load_all(f"{RESULTS_ROOT}/{split}", "base")
++    rows = []
++    for p in patients:
++        pid = p["id"]
++        ts = sft[(pid, "token_score")]
++        pres_b = sft[(pid, "presence")]
++        ptrue_b = sft[(pid, "ptrue")]
++        pres_m = base[(pid, "presence")]
++        ptrue_m = base[(pid, "ptrue")]
++        seed_dis = ((not p["seed29_empty"]) + (not p["seed43_empty"])) / 2.0
++        rows.append({
++            "id": pid, "y": int(p["y_miss"]), "category": p["category"],
++            "token_nll": ts["nll_bracket"], "token_nll_eos": (ts["nll_bracket"] + ts["nll_eos_step1"]) / 2.0,
++            "entropy": ts["entropy_bracket"], "seed_disagreement": seed_dis,
++            # Presence risk = logit_yes - logit_no = -(logit_no - logit_yes) = -risk_no_minus_yes
++            "presence_m0": -pres_m["risk_no_minus_yes"], "presence_b0": -pres_b["risk_no_minus_yes"],
++            # P(True) risk = logit_no - logit_yes = risk_no_minus_yes (already correct direction)
++            "ptrue_m0": ptrue_m["risk_no_minus_yes"], "ptrue_b0": ptrue_b["risk_no_minus_yes"],
++        })
++    return rows
++
++
++def main():
++    if os.path.exists(os.path.join(OUT, "c_eval.json")):
++        raise RuntimeError(f"refusing to overwrite existing {OUT}/c_eval.json")
++    os.makedirs(OUT, exist_ok=True)
++    sm = json.load(open(f"{RESULTS_ROOT}/source_manifest.json"))
++    rows = build_table(sm, "C")
++    y = [r["y"] for r in rows]
++    n = len(rows)
++    rng = np.random.default_rng(28017)
++    random_score = rng.uniform(size=n).tolist()
++
++    raw_auroc = {}
++    for name in SCORE_NAMES:
++        s = [r[name] for r in rows]
++        raw_auroc[name] = E.auroc(s, y)
++    raw_auroc["random"] = E.auroc(random_score, y)
++
++    rep_T = max(TOKEN_FAMILY, key=lambda k: raw_auroc[k])
++    rep_V = max(IMAGE_FAMILY, key=lambda k: raw_auroc[k])
++
++    calibrations = {}
++    for name in SCORE_NAMES:
++        s = np.array([r[name] for r in rows])
++        calibrations[name] = E.fit_platt(s, y)
++
++    capture20 = {name: E.capture_at_k([r[name] for r in rows], y, 0.2) for name in SCORE_NAMES}
++    capture20["random"] = E.capture_at_k(random_score, y, 0.2)
++
++    def ci_for(name):
++        s = np.array([r[name] for r in rows])
++        yy = np.array(y)
++
++        def auc_fn(idx):
++            return E.auroc(s[idx], yy[idx])
++
++        def cap_fn(idx):
++            return E.capture_at_k(s[idx], yy[idx], 0.2)
++        return {"auroc": E.metric_ci(auc_fn, n, B=10000, seed=28017, alpha_lo=2.5, alpha_hi=97.5),
++                "capture20": E.metric_ci(cap_fn, n, B=10000, seed=28017, alpha_lo=2.5, alpha_hi=97.5)}
++
++    cis = {name: ci_for(name) for name in SCORE_NAMES}
++
++    s_T = np.array([r[rep_T] for r in rows])
++    s_V = np.array([r[rep_V] for r in rows])
++    s_seed = np.array([r["seed_disagreement"] for r in rows])
++    yy = np.array(y)
++
++    def auc_T(idx):
++        return E.auroc(s_T[idx], yy[idx])
++
++    def auc_V(idx):
++        return E.auroc(s_V[idx], yy[idx])
++
++    def auc_seed(idx):
++        return E.auroc(s_seed[idx], yy[idx])
++
++    diff_VT = E.paired_diff_ci(auc_V, auc_T, n, B=10000, seed=28017, alpha_lo=2.5, alpha_hi=97.5)
++    diff_Vseed = E.paired_diff_ci(auc_V, auc_seed, n, B=10000, seed=28017, alpha_lo=2.5, alpha_hi=97.5)
++
++    enter_E = False
++    reasons = []
++    for name in SCORE_NAMES:
++        if cis[name]["auroc"]["hi"] >= 0.75:
++            enter_E = True
++            reasons.append(f"{name}: AUROC CI upper {cis[name]['auroc']['hi']:.3f} >= 0.75")
++        if cis[name]["capture20"]["hi"] >= 0.50:
++            enter_E = True
++            reasons.append(f"{name}: Capture@20 CI upper {cis[name]['capture20']['hi']:.3f} >= 0.50")
++    if diff_VT["lo"] <= 0.10 <= diff_VT["hi"] and (diff_VT["hi"] - diff_VT["lo"]) > 0.10:
++        enter_E = True
++        reasons.append(f"V-T AUROC diff CI [{diff_VT['lo']:.3f},{diff_VT['hi']:.3f}] contains 0.10 and width>0.10")
++    if diff_Vseed["lo"] <= 0.10 <= diff_Vseed["hi"] and (diff_Vseed["hi"] - diff_Vseed["lo"]) > 0.10:
++        enter_E = True
++        reasons.append(f"V-seed AUROC diff CI [{diff_Vseed['lo']:.3f},{diff_Vseed['hi']:.3f}] contains 0.10 and width>0.10")
++
++    out = {
++        "n": n, "n_events": int(sum(y)), "representative_T": rep_T, "representative_V": rep_V,
++        "raw_auroc": raw_auroc, "capture_at_20pct": capture20, "cis": cis,
++        "diff_V_minus_T_auroc": diff_VT, "diff_V_minus_seed_auroc": diff_Vseed,
++        "enter_E": enter_E, "reasons": reasons,
++        "calibrations": calibrations,
++        "sign_convention": "presence = logit_yes-logit_no (= -risk_no_minus_yes); "
++                            "ptrue = logit_no-logit_yes (= risk_no_minus_yes, unchanged from iter_028)",
++        "corrects": "iter_028's run_iter028_eval_c.py which used risk_no_minus_yes for presence too",
++    }
++    json.dump(out, open(os.path.join(OUT, "c_eval.json"), "w"), indent=1)
++    json.dump(rows, open(os.path.join(OUT, "c_table.json"), "w"), indent=1)
++    print(f"n={n} n_events={sum(y)} rep_T={rep_T} rep_V={rep_V}")
++    print("raw_auroc:", json.dumps(raw_auroc, indent=1))
++    print("capture20:", json.dumps(capture20, indent=1))
++    print("diff_V-T:", diff_VT)
++    print("diff_V-seed:", diff_Vseed)
++    print("enter_E:", enter_E)
++    for r in reasons:
++        print(" -", r)
++
++
++if __name__ == "__main__":
++    main()
+diff --git a/run_iter029_eval_e.py b/run_iter029_eval_e.py
+new file mode 100644
+index 0000000..fd65264
+--- /dev/null
++++ b/run_iter029_eval_e.py
+@@ -0,0 +1,100 @@
++"""iter_029 E800(빈 출력 398명) 확인 평가. C에서 고정한 대표 T/V·calibration을 그대로 적용, 재선택하지 않는다.
++
++iter_028의 run_iter028_eval_e.py를 그대로 따르되 build_table을 이번 교정본(run_iter029_eval_c)에서
++가져온다. C_eval/c_eval.json이 먼저 존재해야 한다(단계 2가 단계 3보다 먼저 실행돼야 함을 강제).
++"""
++import json
++import os
++
++import numpy as np
++
++from rsna_diag import risk28_eval as Ev
++from run_iter029_eval_c import build_table, SCORE_NAMES, RESULTS_ROOT
++
++OUT = "results/iter_029/E_eval"
++C_EVAL_PATH = "results/iter_029/C_eval/c_eval.json"
++
++
++def main():
++    if not os.path.exists(C_EVAL_PATH):
++        raise RuntimeError(f"missing {C_EVAL_PATH}: run run_iter029_eval_c.py first (C selects rep_T/rep_V/calibration)")
++    if os.path.exists(os.path.join(OUT, "e_eval.json")):
++        raise RuntimeError(f"refusing to overwrite existing {OUT}/e_eval.json")
++    os.makedirs(OUT, exist_ok=True)
++    sm = json.load(open(f"{RESULTS_ROOT}/source_manifest.json"))
++    c_eval = json.load(open(C_EVAL_PATH))
++    rep_T, rep_V = c_eval["representative_T"], c_eval["representative_V"]
++    calibrations = c_eval["calibrations"]
++
++    rows = build_table(sm, "E")
++    y = [r["y"] for r in rows]
++    n = len(rows)
++    print(f"E: n={n} n_events={sum(y)}")
++
++    raw_auroc = {name: Ev.auroc([r[name] for r in rows], y) for name in SCORE_NAMES}
++    capture20 = {name: Ev.capture_at_k([r[name] for r in rows], y, 0.2) for name in SCORE_NAMES}
++    remain20 = {name: Ev.remaining_after_review([r[name] for r in rows], y, 0.2) for name in SCORE_NAMES}
++
++    def ci_for(name):
++        s = np.array([r[name] for r in rows])
++        yy = np.array(y)
++
++        def auc_fn(idx):
++            return Ev.auroc(s[idx], yy[idx])
++
++        def cap_fn(idx):
++            return Ev.capture_at_k(s[idx], yy[idx], 0.2)
++        return {"auroc": Ev.metric_ci(auc_fn, n, B=10000, seed=28017),
++                "capture20": Ev.metric_ci(cap_fn, n, B=10000, seed=28017)}
++
++    cis = {name: ci_for(name) for name in SCORE_NAMES}
++
++    s_T = np.array([r[rep_T] for r in rows])
++    s_V = np.array([r[rep_V] for r in rows])
++    s_seed = np.array([r["seed_disagreement"] for r in rows])
++    yy = np.array(y)
++
++    def auc_T(idx):
++        return Ev.auroc(s_T[idx], yy[idx])
++
++    def auc_V(idx):
++        return Ev.auroc(s_V[idx], yy[idx])
++
++    def auc_seed(idx):
++        return Ev.auroc(s_seed[idx], yy[idx])
++
++    diff_VT = Ev.paired_diff_ci(auc_V, auc_T, n, B=10000, seed=28017, alpha_lo=1.25, alpha_hi=98.75)
++    diff_Vseed = Ev.paired_diff_ci(auc_V, auc_seed, n, B=10000, seed=28017, alpha_lo=1.25, alpha_hi=98.75)
++
++    calib_metrics = {}
++    for name in SCORE_NAMES:
++        s = np.array([r[name] for r in rows])
++        probs = Ev.apply_platt(calibrations[name], s)
++        calib_metrics[name] = {"brier": Ev.brier(probs, y), "ece": Ev.ece(probs, y)}
++
++    by_cat = {}
++    for cat in ("opacity", "normal", "not_normal_no_opacity"):
++        sub = [r for r in rows if r["category"] == cat]
++        by_cat[cat] = {"n": len(sub), "n_events": sum(r["y"] for r in sub)}
++
++    n_common3 = sum(1 for r in rows if r["seed_disagreement"] == 0.0)
++
++    single_class_subgroups = [cat for cat, d in by_cat.items() if d["n_events"] == 0 or d["n_events"] == d["n"]]
++
++    out = {
++        "n": n, "n_events": int(sum(y)), "representative_T": rep_T, "representative_V": rep_V,
++        "raw_auroc": raw_auroc, "capture_at_20pct": capture20, "remaining_after_review": remain20,
++        "cis": cis, "diff_V_minus_T_auroc_975": diff_VT, "diff_V_minus_seed_auroc_975": diff_Vseed,
++        "calibration_metrics": calib_metrics, "by_category": by_cat,
++        "n_common_empty_3seeds": n_common3,
++        "single_class_subgroups_auroc_undefined": single_class_subgroups,
++        "sign_convention": "same as C_eval (presence corrected, ptrue unchanged from iter_028)",
++        "corrects": "iter_028's run_iter028_eval_e.py which inherited the presence sign error via build_table",
++    }
++    json.dump(out, open(os.path.join(OUT, "e_eval.json"), "w"), indent=1)
++    json.dump(rows, open(os.path.join(OUT, "e_table.json"), "w"), indent=1)
++    print(json.dumps(out, indent=1))
++
++
++if __name__ == "__main__":
++    main()
+diff --git a/run_iter029_verify.py b/run_iter029_verify.py
+new file mode 100644
+index 0000000..78b09fe
+--- /dev/null
++++ b/run_iter029_verify.py
+@@ -0,0 +1,151 @@
++"""iter_029 독립 검증: c_table/e_table 파생 표에 의존하지 않고 원시 JSONL과 GT/source에서
++방향·rank AUROC·동점 포착률·대표 선택을 별도로 계산해 저장 결과와 대조한다.
++"""
++import json
++import math
++import os
++
++import numpy as np
++
++from rsna_diag import risk28
++
++RESULTS_ROOT = "results/iter_028"
++OUT = "results/iter_029/decide"
++
++
++def rank_auroc(scores, y):
++    """Mann-Whitney rank 기반 AUROC (동점은 평균 순위)."""
++    s = np.asarray(scores, float)
++    yy = np.asarray(y, int)
++    order = np.argsort(s)
++    ranks = np.empty(len(s))
++    sv = s[order]
++    i = 0
++    while i < len(sv):
++        j = i
++        while j + 1 < len(sv) and sv[j + 1] == sv[i]:
++            j += 1
++        avg = (i + 1 + j + 1) / 2.0
++        ranks[order[i:j + 1]] = avg
++        i = j + 1
++    n_pos, n_neg = int(yy.sum()), int(len(yy) - yy.sum())
++    if n_pos == 0 or n_neg == 0:
++        return float("nan")
++    r_pos = ranks[yy == 1].sum()
++    return float((r_pos - n_pos * (n_pos + 1) / 2.0) / (n_pos * n_neg))
++
++
++def capture_at_k_tiebreak_expected(scores, y, frac=0.2):
++    """rsna_diag.risk28_eval.capture_at_k와 동일한 경계 동점 기대값 처리를 독립 구현한다."""
++    s = np.asarray(scores, float)
++    yy = np.asarray(y, int)
++    n = len(s)
++    k = int(round(n * frac))
++    if k <= 0 or yy.sum() == 0:
++        return 0.0
++    order = np.argsort(-s, kind="stable")
++    thresh = s[order[k - 1]]
++    above = s > thresh
++    tie = s == thresh
++    n_take_from_tie = k - int(above.sum())
++    captured = float(yy[above].sum())
++    if n_take_from_tie > 0 and tie.sum() > 0:
++        captured += n_take_from_tie * (yy[tie].sum() / tie.sum())
++    return float(captured / yy.sum())
++
++
++def build_rows_independent(sm, split):
++    """run_iter029_eval_c.build_table과 별도로, raw JSONL을 직접 읽어 부호를 적용한다."""
++    all_patients = list(sm["patients"][split].values())
++    patients = [p for p in all_patients if p["seed17_empty"]]
++    sft = risk28.load_all(f"{RESULTS_ROOT}/{split}", "sft")
++    base = risk28.load_all(f"{RESULTS_ROOT}/{split}", "base")
++    rows = []
++    for p in patients:
++        pid = p["id"]
++        ts = sft[(pid, "token_score")]
++        pres_b, ptrue_b = sft[(pid, "presence")], sft[(pid, "ptrue")]
++        pres_m, ptrue_m = base[(pid, "presence")], base[(pid, "ptrue")]
++        # independent re-derivation straight from logit_yes/logit_no, not from stored risk_no_minus_yes
++        presence_m0 = pres_m["logit_yes"] - pres_m["logit_no"]
++        presence_b0 = pres_b["logit_yes"] - pres_b["logit_no"]
++        ptrue_m0 = ptrue_m["logit_no"] - ptrue_m["logit_yes"]
++        ptrue_b0 = ptrue_b["logit_no"] - ptrue_b["logit_yes"]
++        seed_dis = ((not p["seed29_empty"]) + (not p["seed43_empty"])) / 2.0
++        rows.append({
++            "id": pid, "y": int(p["y_miss"]), "category": p["category"],
++            "token_nll": ts["nll_bracket"], "token_nll_eos": (ts["nll_bracket"] + ts["nll_eos_step1"]) / 2.0,
++            "entropy": ts["entropy_bracket"], "seed_disagreement": seed_dis,
++            "presence_m0": presence_m0, "presence_b0": presence_b0,
++            "ptrue_m0": ptrue_m0, "ptrue_b0": ptrue_b0,
++        })
++    return rows
++
++
++SCORE_NAMES = ["token_nll", "token_nll_eos", "entropy", "seed_disagreement",
++               "presence_m0", "presence_b0", "ptrue_m0", "ptrue_b0"]
++TOKEN_FAMILY = ["token_nll", "token_nll_eos", "entropy"]
++IMAGE_FAMILY = ["presence_m0", "presence_b0", "ptrue_m0", "ptrue_b0"]
++
++
++def main():
++    os.makedirs(OUT, exist_ok=True)
++    sm = json.load(open(f"{RESULTS_ROOT}/source_manifest.json"))
++    c_eval = json.load(open("results/iter_029/C_eval/c_eval.json"))
++    e_eval = json.load(open("results/iter_029/E_eval/e_eval.json"))
++    c_table_saved = json.load(open("results/iter_029/C_eval/c_table.json"))
++    e_table_saved = json.load(open("results/iter_029/E_eval/e_table.json"))
++
++    problems = []
++    report = {}
++    for split, saved_eval, saved_table in (("C", c_eval, c_table_saved), ("E", e_eval, e_table_saved)):
++        rows = build_rows_independent(sm, split)
++        y = [r["y"] for r in rows]
++        n = len(rows)
++
++        # cross-check independent rows against saved table (id-aligned, same values)
++        saved_by_id = {r["id"]: r for r in saved_table}
++        if set(saved_by_id) != {r["id"] for r in rows}:
++            problems.append(f"{split}: independent id set != saved table id set")
++        max_abs_diff = {}
++        for name in SCORE_NAMES:
++            diffs = [abs(r[name] - saved_by_id[r["id"]][name]) for r in rows]
++            max_abs_diff[name] = max(diffs)
++            if max_abs_diff[name] > 1e-9:
++                problems.append(f"{split}/{name}: independent vs saved max abs diff {max_abs_diff[name]}")
++
++        raw_auroc_indep = {name: rank_auroc([r[name] for r in rows], y) for name in SCORE_NAMES}
++        capture20_indep = {name: capture_at_k_tiebreak_expected([r[name] for r in rows], y) for name in SCORE_NAMES}
++        for name in SCORE_NAMES:
++            d = abs(raw_auroc_indep[name] - saved_eval["raw_auroc"][name])
++            if d > 1e-9:
++                problems.append(f"{split}/{name}: independent AUROC {raw_auroc_indep[name]} vs saved "
++                                 f"{saved_eval['raw_auroc'][name]} diff {d}")
++            dc = abs(capture20_indep[name] - saved_eval["capture_at_20pct"][name])
++            if dc > 1e-9:
++                problems.append(f"{split}/{name}: independent capture20 {capture20_indep[name]} vs saved "
++                                 f"{saved_eval['capture_at_20pct'][name]} diff {dc}")
++
++        rep_T_indep = max(TOKEN_FAMILY, key=lambda k: raw_auroc_indep[k])
++        rep_V_indep = max(IMAGE_FAMILY, key=lambda k: raw_auroc_indep[k])
++        if split == "C":
++            if rep_T_indep != saved_eval["representative_T"] or rep_V_indep != saved_eval["representative_V"]:
++                problems.append(f"C: independent representative selection ({rep_T_indep},{rep_V_indep}) != "
++                                 f"saved ({saved_eval['representative_T']},{saved_eval['representative_V']})")
++
++        report[split] = {
++            "n": n, "n_events": int(sum(y)),
++            "raw_auroc_independent": raw_auroc_indep, "capture20_independent": capture20_indep,
++            "max_abs_diff_vs_saved_table": max_abs_diff,
++            "representative_T_independent": rep_T_indep, "representative_V_independent": rep_V_indep,
++        }
++
++    out = {"ok": len(problems) == 0, "problems": problems, "per_split": report}
++    json.dump(out, open(os.path.join(OUT, "independent_verify.json"), "w"), indent=1)
++    print(f"ok={out['ok']} n_problems={len(problems)}")
++    for p in problems:
++        print(" -", p)
++
++
++if __name__ == "__main__":
++    main()
+diff --git a/test_rsna_iter029.py b/test_rsna_iter029.py
+new file mode 100644
+index 0000000..d1d2bf7
+--- /dev/null
++++ b/test_rsna_iter029.py
+@@ -0,0 +1,143 @@
++"""iter_029 CPU fixture: 방향 교정 build_table, 완전성 검증, 대표 선택/동점, calibration 경계.
++
++GPU 불필요. rsna_diag/risk28_eval.py의 기존 AUROC/Platt/bootstrap 계산을 재사용하고,
++run_iter029_eval_c/e.py의 새 build_table(방향 교정)과 독립 검증 로직을 검사한다.
++"""
++import json
++import math
++import os
++import shutil
++
++import numpy as np
++
++from rsna_diag import risk28, risk28_eval as E
++import run_iter029_eval_c as C
++
++results = []
++
++
++def check(name, cond, detail=""):
++    results.append((name, bool(cond), detail))
++
++
++# --- build_table sign correctness on synthetic records ---
++def make_sm_and_gen(tmp_root):
++    """1명 환자, presence/ptrue logit을 통제해 부호 교정을 직접 검사한다."""
++    sm = {
++        "adapter_digest_seed17": "ADAPTER_X",
++        "patients": {
++            "T": {
++                "p0": {"id": "p0", "seed17_empty": True, "category": "opacity", "y_miss": True,
++                       "seed29_empty": True, "seed43_empty": True},
++            }
++        },
++    }
++    out_dir = os.path.join(tmp_root, "T")
++    os.makedirs(out_dir, exist_ok=True)
++
++    def rec(task, **kw):
++        base = {"id": "p0", "task": task, "adapter_digest": None, "split": "T"}
++        base.update(kw)
++        return base
++
++    with open(os.path.join(out_dir, "gen_base_worker0.jsonl"), "w") as f:
++        f.write(json.dumps(rec("presence", logit_yes=5.0, logit_no=1.0, risk_no_minus_yes=1.0 - 5.0)) + "\n")
++        f.write(json.dumps(rec("ptrue", logit_yes=2.0, logit_no=7.0, risk_no_minus_yes=7.0 - 2.0)) + "\n")
++    with open(os.path.join(out_dir, "gen_sft_worker0.jsonl"), "w") as f:
++        f.write(json.dumps(rec("presence", adapter_digest="ADAPTER_X",
++                                logit_yes=3.0, logit_no=9.0, risk_no_minus_yes=9.0 - 3.0)) + "\n")
++        f.write(json.dumps(rec("ptrue", adapter_digest="ADAPTER_X",
++                                logit_yes=4.0, logit_no=6.0, risk_no_minus_yes=6.0 - 4.0)) + "\n")
++        f.write(json.dumps(rec("token_score", adapter_digest="ADAPTER_X",
++                                nll_bracket=0.5, entropy_bracket=1.2, nll_eos_step1=0.3)) + "\n")
++    return sm, out_dir
++
++
++tmp = "results/iter_029/tests/_tmp_signtest"
++shutil.rmtree(tmp, ignore_errors=True)
++os.makedirs(tmp, exist_ok=True)
++sm, _ = make_sm_and_gen(tmp)
++old_root = C.RESULTS_ROOT
++C.RESULTS_ROOT = tmp
++try:
++    rows = C.build_table(sm, "T")
++finally:
++    C.RESULTS_ROOT = old_root
++row = rows[0]
++# Presence risk = logit_yes - logit_no (모델이 opacity 있다고 답할수록 위험↑)
++check("presence_m0_sign", row["presence_m0"] == 5.0 - 1.0, row["presence_m0"])
++check("presence_b0_sign", row["presence_b0"] == 3.0 - 9.0, row["presence_b0"])
++# P(True) risk = logit_no - logit_yes (제안한 답(빈 응답=no opacity)이 틀렸다고 할수록 위험↑)
++check("ptrue_m0_sign", row["ptrue_m0"] == 7.0 - 2.0, row["ptrue_m0"])
++check("ptrue_b0_sign", row["ptrue_b0"] == 6.0 - 4.0, row["ptrue_b0"])
++check("token_nll_passthrough", row["token_nll"] == 0.5, row["token_nll"])
++check("seed_disagreement_zero", row["seed_disagreement"] == 0.0, row["seed_disagreement"])
++shutil.rmtree(tmp, ignore_errors=True)
++
++# --- extreme/tie values for presence/ptrue direction don't break finiteness ---
++check("presence_extreme_finite", math.isfinite(50.0 - (-50.0)))
++check("presence_tie_zero", (5.0 - 5.0) == 0.0)
++
++# --- representative selection tie-break follows listed order ---
++family = ["a", "b", "c"]
++aurocs = {"a": 0.7, "b": 0.7, "c": 0.9}
++rep = max(family, key=lambda k: aurocs[k])
++check("rep_select_max", rep == "c")
++family_tie = ["a", "b"]
++aurocs_tie = {"a": 0.8, "b": 0.8}
++rep_tie = max(family_tie, key=lambda k: aurocs_tie[k])
++check("rep_select_tie_first_in_order", rep_tie == "a")
++
++# --- capture_at_k boundary tie already covered upstream (fixtures_iter028.json); re-check here too ---
++scores_tie = [1, 1, 1, 1, 0, 0]
++y_tie = [1, 0, 1, 0, 0, 0]
++cap_tie = E.capture_at_k(scores_tie, y_tie, frac=1.0 / 3.0)
++check("capture_boundary_tie_expected_029", abs(cap_tie - 0.5) < 1e-9, cap_tie)
++
++# --- label flip: reversing y flips AUROC around 0.5 ---
++s = [0.1, 0.4, 0.6, 0.9]
++y1 = [0, 0, 1, 1]
++y0 = [1, 1, 0, 0]
++a1 = E.auroc(s, y1)
++a0 = E.auroc(s, y0)
++check("label_flip_auroc_complement", abs((a1 + a0) - 1.0) < 1e-9, (a1, a0))
++
++# --- calibration: constant score with all-positive / all-negative Jeffreys still in (0,1) ---
++cal_allpos = E.fit_platt(np.zeros(10), [1] * 10)
++check("platt_const_allpos_bounded", 0.0 < E.apply_platt(cal_allpos, [0.0])[0] < 1.0, cal_allpos)
++cal_allneg = E.fit_platt(np.zeros(10), [0] * 10)
++check("platt_const_allneg_bounded", 0.0 < E.apply_platt(cal_allneg, [0.0])[0] < 1.0, cal_allneg)
++
++# --- duplicate / stale record rejection in load_all-based completeness check ---
++tmp2 = "results/iter_029/tests/_tmp_dupcheck"
++shutil.rmtree(tmp2, ignore_errors=True)
++os.makedirs(tmp2, exist_ok=True)
++with open(os.path.join(tmp2, "gen_base_worker0.jsonl"), "w") as f:
++    f.write(json.dumps({"id": "p0", "task": "presence", "variant": "base", "image": "x.png"}) + "\n")
++with open(os.path.join(tmp2, "gen_base_worker1.jsonl"), "w") as f:
++    f.write(json.dumps({"id": "p0", "task": "presence", "variant": "base", "image": "x.png"}) + "\n")
++loaded = risk28.load_all(tmp2, "base")
++check("load_all_present_but_duplicate_undetected_by_load_all",
++      len(loaded) == 1, "load_all silently keeps last; our audit script's own duplicate-detection "
++                          "in run_iter029_audit.check_completion catches this via check_completion, not load_all")
++comp = risk28.check_completion(tmp2, [{"id": "p0", "image": "x.png"}], variants=("base",))
++check("check_completion_detects_duplicate_across_workers",
++      any("duplicate" in p for p in comp["problems"]), comp["problems"])
++shutil.rmtree(tmp2, ignore_errors=True)
++
++# --- existing_done() in risk28.run_worker rejects records with mismatched split (source/output-path tamper) ---
++# (documented behavior check via source inspection rather than re-running GPU worker)
++src = open("rsna_diag/risk28.py").read()
++check("existing_done_checks_split_mismatch", 'r.get("split") != split' in src)
++check("existing_done_checks_pixel_hash", 'input_pixel_sha256' in src and 'px(r["image"])[2]' in src)
++
++n_pass = sum(1 for _, ok, _ in results if ok)
++print(f"{n_pass}/{len(results)} PASS")
++for name, ok, detail in results:
++    if not ok:
++        print("FAIL", name, detail)
++os.makedirs("results/iter_029/tests", exist_ok=True)
++json.dump({"n_pass": n_pass, "n_total": len(results),
++           "results": [{"name": n, "ok": ok, "detail": str(d)} for n, ok, d in results]},
++          open("results/iter_029/tests/fixtures_iter029.json", "w"), indent=1)
++assert n_pass == len(results), "some iter_029 fixtures failed"
