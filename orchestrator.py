@@ -1575,8 +1575,7 @@ def step_checkpoint(args, n):
                 + "\n".join(f"• {c}" for c in concerns)) if away else ""
         notify(notice(f"▶ iter_{n:03d} | 계획대로 자동 진행", [
             ("할 일", plan.get("plan_summary") or approach),
-            ("이유", plan.get("decision_reason")),
-            ("진행 설정", f"{approach} · {attempt}번째 시도 · Claude {claude_tier(args, n)} · GPT 리뷰 {plan.get('review_mode', 'full')}"),
+            ("다음", "Claude 구현·실험 후 계획된 검증을 진행합니다."),
             ("주의", note),
         ], reference=f"agent/runs/iter_{n:03d}/plan.md"))
         record_event(n, "decision", by="auto", mode=mode, result="1순위로 진행",
@@ -2064,11 +2063,11 @@ def handle_paper(n, review):
     record_event(n, "paper", title=paper["title"], url=url)
     print(f"\n📚 논문 추천: {paper['title']}")
     notify(notice(f"📚 iter_{n:03d} | 읽어볼 논문", [
-        ("논문", f"{paper['title']} ({paper['authors_year']})\n{url}"),
-        ("현재 연구와의 연결", paper["current_work"]),
+        ("논문", f"{paper['title']} ({paper['authors_year']})"),
+        ("근거", paper["current_work"]),
         ("추천 이유", paper["why"]),
         ("먼저 읽을 부분", paper["what_to_read"]),
-    ], reference="agent/PAPERS.md"))
+    ], reference=f"{url}\n연구 결과·상세: agent/PAPERS.md"))
 
 
 def handle_milestone(n, review):
@@ -2099,9 +2098,7 @@ def handle_milestone(n, review):
     record_event(n, "milestone", title=milestone["title"])
     rebuild_index()
     print(f"\n🏁 마일스톤: {milestone['title']}")
-    notify(notice(f"🏁 iter_{n:03d} | 주요 연구 진전", [
-        ("핵심", milestone["title"]), ("무엇이 달라졌나", milestone["story"]),
-    ], reference="agent/JOURNEY.md"))
+    # 상세 흐름은 JOURNEY에 보존한다. Telegram은 iteration_result 한 건에 강조해 중복을 피한다.
 
 
 def step_skip_review(n, reason):
@@ -2486,12 +2483,12 @@ def run_loop(args):
         if args.autonomy == "full" or (ask("계속할까요? [y/N] ") or "").lower() != "y":
             return
 
-    first_line = goal.splitlines()[0] if goal else ""
     away_text = (f"\n{args.no_ask_until:%m-%d %H:%M}까지는 묻지 않고 진행합니다 (그 후 원래 규칙)."
                  if args.no_ask_until else "")
     notify(notice(f"▶ iter_{current_iteration():03d} | 연구 루프 시작", [
-        ("목표", first_line), ("진행 범위", f"이번 실행에서 최대 {args.max_iters}회 반복" if args.max_iters
-         else "반복 횟수 제한 없이 계속 진행합니다. 목표 달성·오류·정지 요청 시 종료하고, 필요한 사용자 판단은 기다립니다."),
+        ("현재", f"{stage_of(n)} 단계부터 이어갑니다."),
+        ("진행 범위", f"최대 {args.max_iters}회 반복" if args.max_iters
+         else "반복 횟수 제한 없이 자동 진행 · 사용자 결정이 필요하면 질문합니다."),
         ("사용자 확인", away_text),
     ], reference="agent/GOAL.md"))
 
