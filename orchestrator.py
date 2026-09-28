@@ -92,6 +92,7 @@ import subprocess
 import sys
 import tempfile
 import threading
+import time
 import traceback
 import urllib.request
 import uuid
@@ -179,6 +180,11 @@ class RetryableError(AgentError):
 class UsageLimitError(RetryableError):
     """구독 사용 한도 초과. 한도가 풀릴 때까지 기다렸다 다시 시도한다."""
 
+    def __init__(self, message, output="", *, reset_at=None, limit_type=None):
+        super().__init__(message, output)
+        self.reset_at = reset_at
+        self.limit_type = limit_type
+
 
 class SpendLimitError(AgentError):
     """월간 지출 한도. 자동 재시도·지출 한도 인상 없이 중단한다."""
@@ -197,8 +203,19 @@ USAGE_LIMIT_PATTERN = re.compile(
 LIMIT = {"poll": 30 * 60, "max": 8 * 60 * 60}
 
 
-def failure_error(message, output):
-    """월간 지출 한도는 중단, 일시적 사용 한도와 그 외 오류는 각각 재시도한다."""
+def failure_error(message, output, *, limit_info=None):
+    """실제 거절된 구독 window를 우선한다. 경고/불명확한 문구로 지출 한도를 우회하지 않는다."""
+    info = limit_info if isinstance(limit_info, dict) else {}
+    kind = info.get("rateLimitType")
+    if info.get("status") == "rejected" and kind in ("five_hour", "seven_day"):
+        reset_at = info.get("resetsAt")
+        # 외부 입력의 비정상 timestamp가 대기/표시 경로를 중단시키지 않게 검증한다.
+        if (isinstance(reset_at, bool) or not isinstance(reset_at, (int, float))
+                or not 0 < reset_at < 253402300799):
+            reset_at = None
+        label = "5시간" if kind == "five_hour" else "주간"
+        return UsageLimitError(f"{label} 사용 한도 도달: {message}", output,
+                               reset_at=reset_at, limit_type=kind)
     if SPEND_LIMIT_PATTERN.search(output or ""):
         return SpendLimitError(
             f"월간 지출 한도로 중단 (자동 재시도 안 함): {message}\n"
@@ -215,7 +232,8 @@ class StopRequested(Exception):
 
 
 # 지금 무엇을 하고 있는지 (Telegram status, 중단 기록용)
-STATE = {"n": None, "stage": "시작 전", "since": None, "proc": None, "stop_now": False, "limit_wait": None}
+STATE = {"n": None, "stage": "시작 전", "since": None, "proc": None, "stop_now": False,
+         "limit_wait": None, "limit_retry_at": None}
 
 
 def set_stage(n, stage):
@@ -235,10 +253,18 @@ def sleep_with_stop(seconds):
         threading.Event().wait(5)
 
 
+def usage_retry_delay(error, waited):
+    """확인된 초기화 시각+60초까지 기다리고, 없거나 지난 시각이면 기존 주기로 확인한다."""
+    delay = LIMIT["poll"]
+    if error.reset_at is not None and error.reset_at > time.time():
+        delay = int(error.reset_at - time.time()) + 61
+    return max(0, min(delay, LIMIT["max"] - waited))
+
+
 def with_retries(what, fn):
     """fn()을 실행한다.
 
-    - 사용 한도 초과(UsageLimitError): 한도가 풀릴 때까지 LIMIT["poll"]마다 다시 시도, 최대 LIMIT["max"].
+    - 사용 한도 초과: 알려진 초기화 시각 이후 재시도, 미확인/계속 거절이면 poll 주기. 최대 max.
     - 그 밖의 일시적 실패(RetryableError): RETRY_DELAYS 간격으로 다시 시도.
     """
     last = None
@@ -246,26 +272,36 @@ def with_retries(what, fn):
     waited = 0
     limited = False
     while True:
+        if limited and waited >= LIMIT["max"]:
+            raise AgentError(f"{what}: 사용 한도 대기 상한({LIMIT['max'] / 3600:g}시간)에 도달함. 마지막 오류: {last}")
         try:
             result = fn()
         except UsageLimitError as e:
             last = e
             if waited >= LIMIT["max"]:
                 raise AgentError(f"{what}: 사용 한도가 {waited // 3600}시간 동안 풀리지 않음. 마지막 오류: {e}")
+            delay = usage_retry_delay(e, waited)
+            retry_at = datetime.datetime.fromtimestamp(time.time() + delay)
+            reaches_budget = waited + delay >= LIMIT["max"]
+            action = "대기 상한으로 종료" if reaches_budget else "재시도"
+            label = {"five_hour": "5시간 사용 한도", "seven_day": "주간 사용 한도"}.get(
+                e.limit_type, "일시적 사용 한도")
+            hours = LIMIT["max"] / 3600
+            print(f"\n[한도] {what}: {label} → {retry_at:%m-%d %H:%M:%S} {action} (최대 {hours:g}시간 대기)")
+            notify(notice(f"⏳ {what} | {label}로 대기", [
+                ("현재", "완료된 작업·세션을 보존하고 대기합니다. 지출 한도는 올리지 않습니다."),
+                ("다음", f"{retry_at:%m-%d %H:%M:%S}에 {action}합니다. 초기화 시각이 없거나 이후에도 거절되면 "
+                         f"{LIMIT['poll'] // 60}분 주기로 확인합니다. 최대 총 {hours:g}시간 대기합니다."),
+            ]))
+            if STATE["n"] is not None:
+                record_event(STATE["n"], "limit_wait", what=what, limit_type=e.limit_type,
+                             reset_at=e.reset_at, retry_at=retry_at.isoformat())
             if not limited:
-                limited = True
-                hours = LIMIT["max"] / 3600
-                print(f"\n[한도] {what}: 사용 한도 도달 → {LIMIT['poll'] // 60}분마다 확인하며 최대 {hours:g}시간 대기")
-                notify(notice(f"⏳ {what} | 사용 한도로 대기", [
-                    ("현재", "사용 한도에 도달해 작업이 대기 중입니다."),
-                    ("다음", f"{LIMIT['poll'] // 60}분마다 재시도합니다. 최대 {hours:g}시간 대기하며 한도가 풀리면 자동으로 이어갑니다."),
-                    ("오류", str(e.output or e)),
-                ]))
-                if STATE["n"] is not None:
-                    record_event(STATE["n"], "limit_wait", what=what)
                 STATE["limit_wait"] = (what, datetime.datetime.now())
-            sleep_with_stop(LIMIT["poll"])
-            waited += LIMIT["poll"]
+            limited = True
+            STATE["limit_retry_at"] = None if reaches_budget else retry_at
+            sleep_with_stop(delay)
+            waited += delay
             continue
         except RetryableError as e:
             last = e
@@ -289,6 +325,7 @@ def with_retries(what, fn):
             if STATE["n"] is not None:
                 record_event(STATE["n"], "limit_resume", what=what, minutes=minutes)
         STATE["limit_wait"] = None
+        STATE["limit_retry_at"] = None
         return result
 
 
@@ -669,6 +706,7 @@ def run_claude(args, prompt, log_path, tier, session_file=None, resume_id=None):
     input_text = resource_context(args) + prompt
 
     result = {}
+    latest_limit = {}
 
     def on_line(line):
         try:
@@ -676,6 +714,13 @@ def run_claude(args, prompt, log_path, tier, session_file=None, resume_id=None):
         except json.JSONDecodeError:
             print(f"  [claude] {line}", end="", flush=True)
             return
+
+        if event.get("type") == "rate_limit_event":
+            # 이번 호출의 최신 상태만 사용해 과거 로그나 warning으로 오분류하지 않는다.
+            latest_limit.clear()
+            info = event.get("rate_limit_info")
+            if isinstance(info, dict):
+                latest_limit.update(info)
 
         if session_file and event.get("session_id") and not read(session_file).strip():
             save(session_file, event["session_id"])
@@ -691,8 +736,13 @@ def run_claude(args, prompt, log_path, tier, session_file=None, resume_id=None):
             result.update(event)
 
     try:
-        run_streaming(cmd, log_path, args.claude_timeout, agent_env(args.gpus), on_line,
-                      cwd=RESEARCH_DIR, stdin_text=input_text)
+        try:
+            run_streaming(cmd, log_path, args.claude_timeout, agent_env(args.gpus), on_line,
+                          cwd=RESEARCH_DIR, stdin_text=input_text)
+        except (UsageLimitError, SpendLimitError) as e:
+            # 비정상 종료 코드에서도 stream으로 받은 정확한 한도 종류를 보존한다.
+            raise failure_error(str(e), getattr(e, "output", "") or str(e),
+                                limit_info=latest_limit) from e
     finally:
         # 실패·timeout·사용자 정지도 집계한다. 원본을 재집계하므로 누적값/재시도를 중복 합산하지 않는다.
         if log_path.exists():
@@ -710,7 +760,7 @@ def run_claude(args, prompt, log_path, tier, session_file=None, resume_id=None):
     if result.get("is_error"):
         # 오류로 끝난 결과를 보고서로 저장하면 다음 실행에서 Claude 단계를 건너뛴다. 재시도한다.
         text = str(result.get("result", ""))
-        raise failure_error(f"Claude가 오류로 종료: {text[:300]}", text)
+        raise failure_error(f"Claude가 오류로 종료: {text[:300]}", text, limit_info=latest_limit)
     return result
 
 
@@ -2343,6 +2393,8 @@ def status_text():
         what, since = STATE["limit_wait"]
         waited = int((datetime.datetime.now() - since).total_seconds() // 60)
         text += f"\n⏳ {what}: 사용 한도가 풀리길 기다리는 중 ({waited}분째)"
+        if STATE.get("limit_retry_at"):
+            text += f"\n다음 재시도: {STATE['limit_retry_at']:%m-%d %H:%M:%S}"
     return text
 
 
