@@ -140,6 +140,58 @@ def run_request(torch, proc, model, eos_ids, item, pname, prompt, caps=CAPS):
     }
 
 
+def build_inputs_text(proc, prompt):
+    """image 없는 text-only chat 구성 (official notebook messages 구조에서 image content만 뺀 형태)."""
+    msgs = [{"role": "user", "content": [{"type": "text", "text": prompt}]}]
+    return proc.apply_chat_template(msgs, add_generation_prompt=True, tokenize=True, return_dict=True,
+                                    return_tensors="pt")
+
+
+def run_request_text(torch, proc, model, eos_ids, item_id, pname, prompt, caps=CAPS):
+    """image 필드가 없는 text-only 요청. generate.run_request의 image 경로와 record 필드를 최대한 맞춘다."""
+    inp = build_inputs_text(proc, prompt)
+    if "pixel_values" in inp:
+        raise RunError("text-only chat template unexpectedly produced pixel_values")
+    ids_in = inp["input_ids"][0].tolist()
+    attempts = []
+    for cap in caps:
+        a = generate(torch, proc, model, inp, cap, eos_ids)
+        if attempts:
+            prev = attempts[-1]["suffix_ids"]
+            a["prefix_matches_previous"] = a["suffix_ids"][:len(prev)] == prev
+        attempts.append(a)
+        if a["ended_eos"]:
+            break
+    fin = attempts[-1]
+    for a in attempts:
+        a["suffix_text_raw"] = proc.tokenizer.decode(a["suffix_ids"], skip_special_tokens=False)
+    return {
+        "id": item_id, "prompt_name": pname, "prompt_sha256": P.digest(prompt),
+        "image": None, "image_file_sha256": None, "input_pixel_sha256": None,
+        "pad_affine_top_left_side": None, "n_input_tokens": len(ids_in), "input_ids": ids_in,
+        "input_ids_sha256": sha(json.dumps(ids_in).encode()),
+        "suffix_ids": fin["suffix_ids"], "suffix_text_raw": fin["suffix_text_raw"],
+        "n_output_tokens": fin["n_new"], "finish_reason": fin["finish_reason"], "ended_eos": fin["ended_eos"],
+        "final_cap": fin["cap"], "attempts": [{k: v for k, v in a.items() if k != "suffix_ids"} for a in attempts],
+        "runtime_s_total": sum(a["runtime_s"] for a in attempts),
+        "peak_mem_alloc_gb_max": max(a["peak_mem_alloc_gb"] for a in attempts),
+        "modality": "text",
+    }
+
+
+def run_request_modal(torch, proc, model, eos_ids, row, caps=CAPS):
+    """row: image 조건이면 image/file_sha256를, text 조건이면 modality='text'만 요구한다."""
+    if row["modality"] == "image":
+        rec = run_request(torch, proc, model, eos_ids, {"id": row["id"], "image": row["image"],
+                                                          "file_sha256": row["file_sha256"]},
+                           row["condition"], row["prompt"], caps=caps)
+        rec["modality"] = "image"
+        return rec
+    if row["modality"] == "text":
+        return run_request_text(torch, proc, model, eos_ids, row["id"], row["condition"], row["prompt"], caps=caps)
+    raise RunError(f"unknown modality {row['modality']!r}")
+
+
 CFG_KEYS = ("model_id", "model_revision", "dtype", "transformers", "torch", "preprocess", "chat_template_sha256",
             "eos_token_id", "do_pan_and_scan", "image_size")
 
