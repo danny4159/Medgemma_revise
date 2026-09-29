@@ -19,7 +19,43 @@ from .risk28 import fp32_logsoftmax_stats, resolve_special_ids  # 범용 FP32 lo
 MODEL_ID = G.MODEL_ID
 MODEL_REVISION = G.MODEL_REVISION
 CAPS = G.CAPS
-RUNNER_VERSION = "iter030_risk_v1"
+RUNNER_VERSION = "iter031_risk_v2"
+
+# iter_031: 이 실행 경로가 의존하는 코드·데이터 중 protocol에 반드시 잠겨 있어야 하는 것들.
+# LP.verify()는 "locked에 있는 파일만" 재검증하므로, 여기 목록이 실제로 잠금 목록 안에
+# 있는지까지 별도로 강제해야 불완전한 protocol(예: risk28_eval.py 누락)을 막을 수 있다.
+REQUIRED_EXTRA_LOCK_FILES = [
+    "rsna_diag/risk30.py", "rsna_diag/risk30_source.py", "rsna_diag/risk30_eval.py",
+    "rsna_diag/risk28.py", "rsna_diag/risk28_eval.py",
+]
+
+
+def require_full_protocol(protocol_path, source_manifest_path):
+    """protocol의 코드 상태를 재검증하고, 이번 실행이 요구하는 필수 파일이 실제로 잠금 목록에
+    있는지 확인한다. source_manifest_path도 잠금 목록에 있어야 한다 (내용은 LP.verify가 재대조).
+    returns protocol digest."""
+    from . import lock_protocol as LP
+    if not protocol_path:
+        raise G.RunError("--protocol is required for risk30 runs")
+    dig = LP.verify(protocol_path)
+    locked_files = json.load(open(protocol_path))["locked"]["files"]
+    required = REQUIRED_EXTRA_LOCK_FILES + [source_manifest_path]
+    missing = [f for f in required if f not in locked_files]
+    if missing:
+        raise G.RunError(f"protocol {protocol_path} is missing required locked files: {missing}")
+    return dig
+
+
+def verify_c_gate(decide_c_path):
+    """split=='E' 실행 전에 C201 decision이 enter_E=True인지 확인한다. returns (decision dict, sha256)."""
+    if not decide_c_path or not os.path.exists(decide_c_path):
+        raise G.RunError(f"--decide-c is required for split E and must exist: {decide_c_path!r}")
+    raw = open(decide_c_path, "rb").read()
+    decision = json.loads(raw)
+    if not decision.get("enter_E"):
+        raise G.RunError(f"C201 decision at {decide_c_path} has enter_E={decision.get('enter_E')}; "
+                          f"E402 generation is not authorized")
+    return decision, sha(raw)
 
 
 def sha(b):
@@ -27,12 +63,21 @@ def sha(b):
 
 
 def read_records(path):
+    """gen_worker*.jsonl을 읽는다. 마지막 줄만 손상됐으면(강제 종료 중 fsync 직전 tearing) 버리고
+    계속한다. 그 이전 줄이 손상됐으면 (더 심각한 문제이므로) 그대로 예외를 낸다."""
     out = []
     if os.path.exists(path):
-        with open(path) as f:
-            for ln in f:
-                if ln.strip():
-                    out.append(json.loads(ln))
+        lines = open(path).read().splitlines()
+        last = len(lines) - 1
+        for i, ln in enumerate(lines):
+            if not ln.strip():
+                continue
+            try:
+                out.append(json.loads(ln))
+            except json.JSONDecodeError:
+                if i == last:
+                    continue
+                raise
     return out
 
 
@@ -169,18 +214,28 @@ def request_id(task, split, item_id):
     return sha(f"{MODEL_REVISION}|iter030|{task}|{split}|{item_id}".encode())[:32]
 
 
-def validate_existing(out_dir, adapter_digest, split, px_fn):
-    """out_dir의 모든 gen_worker*.jsonl을 현재 adapter/split/입력 pixel hash와 대조한다.
+def validate_existing(out_dir, adapter_digest, split, px_fn, protocol_digest=None, accept_protocol_digests=()):
+    """out_dir의 모든 gen_worker*.jsonl을 현재 adapter/split/입력 pixel hash·protocol·request_id와 대조한다.
 
-    stale/foreign(다른 adapter·split)·입력 변경·파일 간 중복이면 RunError. returns {(id, task): record}.
+    stale/foreign(다른 adapter·split·protocol)·입력 변경·request_id 위조·파일 간 중복이면 RunError.
+    returns {(id, task): record}.
     px_fn: image path -> (image, aff, pixel_sha256) (테스트에서는 순수 함수로 주입 가능).
+    protocol_digest=None이면 protocol/request_id 연결 검사를 생략한다 (레거시 fixture 호환용).
+    accept_protocol_digests: 호환성이 확인된 과거 실행(D24 등)의 protocol digest를 명시적으로 허용한다.
     """
+    ok_protocols = ({protocol_digest, *accept_protocol_digests}) if protocol_digest is not None else None
     done = {}
     for fn in sorted(glob.glob(os.path.join(out_dir, "gen_worker*.jsonl"))):
         for r in read_records(fn):
             key = (r["id"], r["task"])
             if r.get("adapter_digest") != adapter_digest or r.get("split") != split:
                 raise G.RunError(f"stale/foreign record in {fn}: {key}")
+            if ok_protocols is not None and r.get("protocol_digest") not in ok_protocols:
+                raise G.RunError(f"protocol_digest not accepted for {key} in {fn}: {r.get('protocol_digest')}")
+            if ok_protocols is not None:
+                expect_rid = request_id(r["task"], split, r["id"])
+                if r.get("request_id") != expect_rid:
+                    raise G.RunError(f"request_id mismatch for {key} in {fn} (tampered id/task/split?)")
             if r["input_pixel_sha256"] != px_fn(r["image"])[2]:
                 raise G.RunError(f"input image changed since completion for {key}")
             if key in done:
@@ -190,9 +245,15 @@ def validate_existing(out_dir, adapter_digest, split, px_fn):
 
 
 def run_worker(items, split, out_dir, worker_idx, protocol_path, adapter_dir, source_manifest,
-               tasks=("O", "F"), time_limit=None, max_patients=None):
+               source_manifest_path, tasks=("O", "F"), time_limit=None, max_patients=None,
+               decide_c_path=None, accept_protocol_digests=()):
     from . import lock_protocol as LP, queue_lock as QL
-    pdig_protocol = LP.verify(protocol_path) if protocol_path else None
+    pdig_protocol = require_full_protocol(protocol_path, source_manifest_path)
+    c_gate_info = None
+    if split == "E":
+        c_decision, c_decision_sha = verify_c_gate(decide_c_path)
+        c_gate_info = {"decide_c_path": decide_c_path, "decide_c_sha256": c_decision_sha,
+                       "bstar": c_decision.get("bstar"), "enter_E": c_decision.get("enter_E")}
     info = QL.my_info(worker=worker_idx, split=split)
     wl = os.path.join(out_dir, f"worker_{worker_idx}.lock")
     lk, own, _ = QL.try_lock(wl, info)
@@ -217,7 +278,7 @@ def run_worker(items, split, out_dir, worker_idx, protocol_path, adapter_dir, so
         env_path = os.path.join(out_dir, f"worker_{worker_idx}.env.json")
         if not os.path.exists(env_path):
             json.dump({"env": env, "adapter_digest": adapter_digest, "protocol_digest": pdig_protocol,
-                       "special_token_ids": ids_map, "worker": worker_idx},
+                       "special_token_ids": ids_map, "worker": worker_idx, "c_gate": c_gate_info},
                       open(env_path, "w"), indent=1, default=str)
 
         out_path = os.path.join(out_dir, f"gen_worker{worker_idx}.jsonl")
@@ -231,7 +292,7 @@ def run_worker(items, split, out_dir, worker_idx, protocol_path, adapter_dir, so
             return img_cache[path]
 
         def existing_done():
-            return validate_existing(out_dir, adapter_digest, split, px)
+            return validate_existing(out_dir, adapter_digest, split, px, pdig_protocol, accept_protocol_digests)
 
         done = existing_done()
         log = open(out_path + ".log", "a")
@@ -310,7 +371,10 @@ def load_all(out_dir):
     out = {}
     for fn in sorted(glob.glob(os.path.join(out_dir, "gen_worker*.jsonl"))):
         for r in read_records(fn):
-            out[(r["id"], r["task"])] = r
+            key = (r["id"], r["task"])
+            if key in out:
+                raise G.RunError(f"duplicate {key} across worker files in {out_dir}")
+            out[key] = r
     return out
 
 
@@ -321,17 +385,22 @@ def main():
     ap.add_argument("--split", required=True, choices=["C", "E", "D24"])
     ap.add_argument("--out-dir", required=True)
     ap.add_argument("--worker", type=int, required=True)
-    ap.add_argument("--protocol", default=None)
+    ap.add_argument("--protocol", required=True, help="필수: 이번 코드·source manifest를 잠근 protocol 경로")
     ap.add_argument("--adapter", required=True)
     ap.add_argument("--time-limit", type=float, default=None)
     ap.add_argument("--max-patients", type=int, default=None)
     ap.add_argument("--ids", default=None)
     ap.add_argument("--tasks", default="O,F")
+    ap.add_argument("--decide-c", default=None, help="split=E일 때 필수: enter_E=true인 C201 decision 경로")
+    ap.add_argument("--accept-protocol", nargs="*", default=[],
+                    help="호환성 확인된 과거 실행(D24 등)의 protocol 파일 경로; 해당 digest의 기존 record를 재사용 허용")
     ap.add_argument("--gpu", default=None, help="물리 GPU index; CUDA 초기화 전에 CUDA_VISIBLE_DEVICES로 설정한다 "
                     "(셸에서 env var 접두사 대신 CLI 인자로 받아 승인 프롬프트를 피한다)")
     a = ap.parse_args()
     if a.gpu is not None:
         os.environ["CUDA_VISIBLE_DEVICES"] = str(a.gpu)
+    if a.split == "E" and not a.decide_c:
+        raise SystemExit("--decide-c is required for split E")
 
     sm = json.load(open(a.source_manifest))
     if a.split == "D24":
@@ -346,8 +415,11 @@ def main():
         items = [it for it in items if it["id"] in keep]
     os.makedirs(a.out_dir, exist_ok=True)
     tasks = tuple(a.tasks.split(","))
-    res = run_worker(items, src_split, a.out_dir, a.worker, a.protocol, a.adapter, sm,
-                      tasks=tasks, time_limit=a.time_limit, max_patients=a.max_patients)
+    from . import lock_protocol as LP
+    accept_digests = tuple(LP.digest_of(p) for p in a.accept_protocol)
+    res = run_worker(items, src_split, a.out_dir, a.worker, a.protocol, a.adapter, sm, a.source_manifest,
+                      tasks=tasks, time_limit=a.time_limit, max_patients=a.max_patients,
+                      decide_c_path=a.decide_c, accept_protocol_digests=accept_digests)
     print(json.dumps(res))
 
 
