@@ -1,0 +1,1417 @@
+diff --git a/rsna_diag/det37.py b/rsna_diag/det37.py
+new file mode 100644
+index 0000000..0725bf4
+--- /dev/null
++++ b/rsna_diag/det37.py
+@@ -0,0 +1,703 @@
++"""iter_037: RSNA detector17/29 대 MedGemma grounding SFT의 고정 FP budget별 비용·성능 표, GT·후보 감사 행,
++같은 대응쌍의 IoU0.5 통과율과 독립 재매칭의 구분, 통합 FP 범주, criterion_a/b (medgemma env, CPU만 사용).
++
++iter_036의 det_error_audit.py는 결과 재현성을 위해 수정하지 않고 그 순수 함수(classify 규칙 참고, fp_decompose,
++stratified_d24, ratio_ci_cluster, pair_row)만 재사용한다. 이 모듈은 실제 사용하는 저장 출력 loader(fail-closed)와
++분석 출력 소유권(flock, 덮어쓰기 거부, 단위별 재개)을 새로 제공한다. det_match.bounded_match의 GT identity는 쓰지 않고
++metrics.match(승인된 최대 cardinality matching)만 쓴다.
++
++FP 범주 amendment: `competes_for_matched_gt`는 중복 후보와 GT 대응 경쟁을 합친 통합 범주이며 둘의 원인을 분리하지 않는다.
++"""
++import argparse
++import fcntl
++import glob
++import hashlib
++import json
++import math
++import multiprocessing as mp
++import os
++import sys
++import time
++
++import numpy as np
++from PIL import Image
++
++BASE = "/SSD1_1TB/home/milab/daniel/08_medgemma/research"
++sys.path.insert(0, BASE)
++from rsna_diag import det_compare as DC  # noqa: E402
++from rsna_diag import det_error_audit as DA  # noqa: E402
++from rsna_diag import det_eval as E  # noqa: E402
++from rsna_diag import det_lib as D  # noqa: E402
++from rsna_diag import geometry as G  # noqa: E402
++from rsna_diag import metrics as M  # noqa: E402
++from rsna_diag import parse as PA  # noqa: E402
++from rsna_diag import sft_eval as SE  # noqa: E402
++
++IT010 = DC.IT010
++IT012 = DC.IT012
++ADAPTERS = DC.ADAPTERS
++LOCK_PATH = f"{BASE}/results/iter_035/select/LOCK.json"
++SEL = {17: f"{BASE}/results/iter_035/select/seed17/v400_selection.json",
++       29: f"{BASE}/results/iter_035/select/seed29/v400_selection.json"}
++DET_DIRS = {"confirm800": {17: f"{BASE}/results/iter_035/confirm800/det17", 29: f"{BASE}/results/iter_035/confirm800/det29"},
++            "V400": {17: f"{BASE}/results/iter_035/eval/seed17/V400_e18", 29: f"{BASE}/results/iter_035/eval/seed29/V400_e26"}}
++MANIFEST_NAME = {"confirm800": "confirm800", "V400": "V400"}
++SFT_DIRS = {"confirm800": {s: f"{IT012}/confirm_sft_seed{s}" for s in (17, 29, 43)},
++            "V400": {17: f"{IT012}/train/lr2e-4_s17/epoch_05/val_gen"}}
++IDS_PATH = {"confirm800": f"{IT010}/confirm_ids.json", "V400": f"{IT010}/validation_ids.json"}
++CAP = 100
++NEW_BOOT_SEED = DA.NEW_BOOT_SEED  # 20260929 (R·threshold 제외 비율, 97.5% 환자 cluster bootstrap)
++OLD_BOOT_SEED = DC.BOOT_SEED      # 20260924 (기존 F1/FP/상보성 비교의 원본 설정)
++B = 10000
++IOUS = (0.3, 0.5)
++CATS = DA.CATS
++CATEGORIES = ("opacity", "normal", "not_normal_no_opacity")
++PRIMARY_SFT = 17
++
++
++# ------------------------------------------------------------------ 공용 유틸
++def sha_file(p):
++    h = hashlib.sha256()
++    with open(p, "rb") as f:
++        for c in iter(lambda: f.read(1 << 20), b""):
++            h.update(c)
++    return h.hexdigest()
++
++
++def jd(o):
++    return hashlib.sha256(json.dumps(o, sort_keys=True, default=str).encode()).hexdigest()
++
++
++def write_json_new(path, obj):
++    """원자적·덮어쓰기 거부: 임시 파일에 쓴 뒤 os.link로 생성(이미 있으면 FileExistsError)."""
++    if os.path.exists(path):
++        raise FileExistsError(path)
++    tmp = f"{path}.tmp{os.getpid()}"
++    with open(tmp, "w") as f:
++        json.dump(obj, f, indent=1, default=str)
++    try:
++        os.link(tmp, path)
++    finally:
++        os.unlink(tmp)
++
++
++class OutputOwner:
++    """분석 출력 디렉터리의 단일 소유권: 비차단 flock. 두 번째 프로세스는 즉시 거부된다."""
++
++    def __init__(self, out_dir):
++        os.makedirs(out_dir, exist_ok=True)
++        self.fd = open(os.path.join(out_dir, ".owner.lock"), "a+")
++        try:
++            fcntl.flock(self.fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
++        except BlockingIOError:
++            raise RuntimeError(f"{out_dir} is owned by another running process")
++        self.fd.seek(0)
++        self.fd.truncate()
++        self.fd.write(json.dumps({"pid": os.getpid(), "t": time.time()}))
++        self.fd.flush()
++
++    def release(self):
++        fcntl.flock(self.fd, fcntl.LOCK_UN)
++        self.fd.close()
++
++
++# ------------------------------------------------------------------ provenance / loader
++def verify_lock(lock_path=LOCK_PATH, base=BASE):
++    """LOCK의 5개 파일 hash·seed 집합을 현재 파일과 대조한다."""
++    lock = json.load(open(lock_path))
++    if lock.get("seed_set") != [17, 29] or not lock.get("locked_before_confirm800"):
++        raise ValueError(f"unexpected LOCK seed_set/flag: {lock.get('seed_set')}")
++    for name, ent in lock["files"].items():
++        p = os.path.join(base, ent["path"])
++        if sha_file(p) != ent["sha256"]:
++            raise ValueError(f"LOCK file {name} changed: {p}")
++    if len(lock["files"]) != 5:
++        raise ValueError("LOCK must list 5 files")
++    return lock
++
++
++def verify_selection(selp, lock, base=BASE):
++    """선택 파일이 LOCK 목록의 파일이며 내용이 잠긴 hash와 같은지, 필수 key가 있는지 확인한다."""
++    rel = os.path.relpath(os.path.abspath(selp), base)
++    ent = [e for e in lock["files"].values() if e["path"] == rel]
++    if len(ent) != 1 or sha_file(selp) != ent[0]["sha256"]:
++        raise ValueError(f"selection {selp} not locked / changed")
++    sel = json.load(open(selp))
++    for k in ("selected", "selected_checkpoint", "selected_checkpoint_sha256", "fp_budgets", "cap_ok"):
++        if k not in sel:
++            raise ValueError(f"selection missing {k}")
++    if not sel["cap_ok"]:
++        raise ValueError("selection reports cap problem")
++    return sel
++
++
++def validate_raw_record(pid, rec, img_hw=None):
++    """boxes/scores/labels 길이, 유한성, 좌표 유효성, label, score 범위. 조용한 보정·절단 없음."""
++    bx, sc, lb = rec["boxes_xyxy_px"], rec["scores"], rec["labels"]
++    if not (len(bx) == len(sc) == len(lb)):
++        raise ValueError(f"{pid}: boxes/scores/labels length mismatch {len(bx)}/{len(sc)}/{len(lb)}")
++    if len(bx) > CAP:
++        raise ValueError(f"{pid}: more than cap candidates")
++    h, w = rec["img_hw"]
++    if img_hw is not None and (h, w) != tuple(img_hw):
++        raise ValueError(f"{pid}: img_hw {h, w} != image {img_hw}")
++    for k, (b, s, l) in enumerate(zip(bx, sc, lb)):
++        if len(b) != 4 or not all(isinstance(v, (int, float)) and math.isfinite(v) for v in b):
++            raise ValueError(f"{pid}[{k}]: non-finite/invalid box {b}")
++        if not (isinstance(s, (int, float)) and math.isfinite(s) and 0.0 <= s <= 1.0):
++            raise ValueError(f"{pid}[{k}]: invalid score {s}")
++        if l != 1:
++            raise ValueError(f"{pid}[{k}]: unexpected label {l}")
++        x0, y0, x1, y1 = b
++        if not (x1 > x0 and y1 > y0 and x0 >= -1e-3 and y0 >= -1e-3 and x1 <= w + 1e-3 and y1 <= h + 1e-3):
++            raise ValueError(f"{pid}[{k}]: box outside image or non-positive size {b} for {w}x{h}")
++
++
++def check_shards(out_dir, comp, ids, raw, infer):
++    """completion에 기록된 shard의 모든 record가 request 집합·provenance·raw_preds와 일치하는지 확인."""
++    seen = {}
++    for fn in sorted(comp["shard_sha256"]):
++        for ln in open(os.path.join(out_dir, fn)):
++            r = json.loads(ln)
++            if r["id"] in seen:
++                raise ValueError(f"duplicate id {r['id']} in shards of {out_dir}")
++            for k in ("checkpoint_sha256", "source_digest", "manifest_digest", "batch_size"):
++                if r.get(k) != comp[k]:
++                    raise ValueError(f"shard record {r['id']} provenance {k} mismatch")
++            if r.get("file_sha256") != infer[r["id"]]["file_sha256"]:
++                raise ValueError(f"shard record {r['id']} file_sha256 != infer manifest")
++            for k in ("boxes_xyxy_px", "scores", "labels", "img_hw"):
++                if r[k] != raw[r["id"]][k]:
++                    raise ValueError(f"shard record {r['id']} differs from raw_preds ({k})")
++            seen[r["id"]] = True
++    if set(seen) != set(ids) or len(seen) != len(ids):
++        raise ValueError(f"shard request set != expected ({len(seen)} vs {len(ids)})")
++
++
++def image_hw(infer_rec):
++    with Image.open(f"{BASE}/{infer_rec['image']}") as im:
++        return im.size[1], im.size[0]
++
++
++def verify_images(ids, infer):
++    """현재 영상 file hash(infer manifest)와 실제 크기를 확인하고 (h,w)를 반환한다."""
++    hw = {}
++    for i in ids:
++        p = f"{BASE}/{infer[i]['image']}"
++        if sha_file(p) != infer[i]["file_sha256"]:
++            raise ValueError(f"image file hash mismatch: {i}")
++        hw[i] = image_hw(infer[i])
++    return hw
++
++
++def load_detector(split, dseed, ids, infer, hw, lock):
++    """LOCK·선택·completion·shard·영상·경계 검사를 통과한 raw 후보만 반환한다."""
++    sel = verify_selection(SEL[dseed], lock)
++    cdir = DET_DIRS[split][dseed]
++    raw, comp, rid = E.load_verified(cdir, MANIFEST_NAME[split], sel["selected_checkpoint"])
++    if comp["checkpoint_sha256"] != sel["selected_checkpoint_sha256"]:
++        raise ValueError(f"{cdir}: checkpoint sha != locked selection")
++    if rid != ids:
++        raise ValueError(f"{cdir}: id order != expected ids")
++    if comp["batch_size"] != 1:
++        raise ValueError(f"{cdir}: batch_size {comp['batch_size']} != 1")
++    if comp["source_digest"] != E.source_digest():
++        raise ValueError(f"{cdir}: generation source digest differs from preserved sources")
++    check_shards(cdir, comp, ids, raw, infer)
++    for i in ids:
++        validate_raw_record(i, raw[i], hw[i])
++    return raw, sel, comp
++
++
++def load_sft(split, seed, ids, infer, hw):
++    """DC.load_stored(중복·집합·adapter·protocol·영상hash·completion) + prompt·EOS·pad affine·현재 영상 연결."""
++    run_dir = SFT_DIRS[split][seed]
++    recs, prov = DC.load_stored(run_dir, ids, ("concise",), ADAPTERS[seed], infer)
++    prompt_hashes = {r["prompt_sha256"] for r in recs.values()}
++    ref = json.loads(open(f"{IT012}/confirm_sft_seed17/gen_worker0.jsonl").readline())["prompt_sha256"]
++    if prompt_hashes != {ref}:
++        raise ValueError(f"{run_dir}: prompt hash set {prompt_hashes} != reference {ref}")
++    for (i, _), r in recs.items():
++        if r["image"] != infer[i]["image"]:
++            raise ValueError(f"{run_dir}: image path differs from infer manifest for {i}")
++        top, left, side = G.pad_offsets(*hw[i])
++        if list(r["pad_affine_top_left_side"][:2]) != [top, left]:
++            raise ValueError(f"{run_dir}: pad affine differs for {i}")
++    preds = SE.parse_records(recs, ids, "concise", strict=True)
++    n_eos = sum(1 for r in recs.values() if r["ended_eos"])
++    prov["n_ended_eos"] = n_eos
++    prov["status_counts"] = {s: sum(1 for p in preds.values() if p["status"] == s) for s in sorted({p["status"] for p in preds.values()})}
++    return preds, prov
++
++
++# ------------------------------------------------------------------ 후보·대응
++def candidates(rec, hw):
++    """label==1 후보 전체를 원래 index와 함께 padded 0-1000 yxyx로 변환한다 (길이 불일치 시 예외)."""
++    validate_raw_record("cand", rec, hw)
++    h, w = rec["img_hw"]
++    top, left, side = G.pad_offsets(h, w)
++    return [{"idx": k, "box": G.canvas_to_norm(b, top, left, side), "score": float(s)}
++            for k, (b, s) in enumerate(zip(rec["boxes_xyxy_px"], rec["scores"]))]
++
++
++def op_select(cands, thr):
++    return [c for c in cands if c["score"] >= thr]
++
++
++def pairs_orig(sel_cands, gt_boxes, thr):
++    """{gi: (원래 candidate idx, IoU)} — metrics.match(최대 cardinality)의 결과를 원래 index로 환원."""
++    if not sel_cands or not gt_boxes:
++        return {}
++    boxes = [c["box"] for c in sel_cands]
++    return {gi: (sel_cands[pi]["idx"], M.iou(boxes[pi], gt_boxes[gi])) for gi, pi in M.match(boxes, gt_boxes, thr)}
++
++
++def sft_pairs(pred, gt_boxes, thr):
++    b = pred["boxes"] if pred["status"] in PA.VALID else []
++    if not b or not gt_boxes:
++        return {}
++    return {gi: (pi, M.iou(b[pi], gt_boxes[gi])) for gi, pi in M.match(b, gt_boxes, thr)}
++
++
++def best_iou(cands, gb):
++    """(max IoU, 그 후보 idx) — 동률은 낮은 idx. 후보 없으면 (0.0, None)."""
++    best, bi = 0.0, None
++    for c in cands:
++        v = M.iou(c["box"], gb)
++        if bi is None or v > best:
++            best, bi = v, c["idx"]
++    return (best, bi) if bi is not None else (0.0, None)
++
++
++def best_score_over(cands, gb, thr):
++    """IoU>=thr 후보 중 score 최고 후보 (score, idx, iou). 부재는 None(0 score로 대체하지 않음)."""
++    best = None
++    for c in cands:
++        v = M.iou(c["box"], gb)
++        if v >= thr and (best is None or c["score"] > best[0]):
++            best = (c["score"], c["idx"], v)
++    return list(best) if best else None
++
++
++def category(sel_cands, all_cands, gb, thr, adj=DA.ADJ_THR):
++    """SFT-only GT의 4범주. 규칙은 det_error_audit.classify_gt와 동일."""
++    if max((M.iou(c["box"], gb) for c in sel_cands), default=0.0) >= thr:
++        return "matching_competition"
++    mx = max((M.iou(c["box"], gb) for c in all_cands), default=0.0)
++    if mx >= thr:
++        return "threshold_excluded"
++    if mx >= adj:
++        return "adjacent_localization_error"
++    return "no_stored_candidate_coverage"
++
++
++def gt_audit_rows(pos, gt, cands_by, thr_op, sft_preds):
++    """양성 GT별 감사 행. SFT 의존 필드는 seed별로 저장한다."""
++    rows = []
++    for pid in pos:
++        gbs = [b["yxyx_norm"] for b in gt[pid]["boxes"]]
++        allc = cands_by[pid]
++        selc = op_select(allc, thr_op)
++        dp = {t: pairs_orig(selc, gbs, t) for t in IOUS}
++        sp = {s: {t: sft_pairs(sft_preds[s][pid], gbs, t) for t in IOUS} for s in sft_preds}
++        for gi, gb in enumerate(gbs):
++            mi_sel, ii_sel = best_iou(selc, gb)
++            mi_all, ii_all = best_iou(allc, gb)
++            row = {"patient": pid, "gi": gi, "n_cands_total": len(allc), "n_cands_selected": len(selc),
++                   "max_iou_selected": mi_sel if ii_sel is not None else None, "max_iou_selected_idx": ii_sel,
++                   "max_iou_all": mi_all if ii_all is not None else None, "max_iou_all_idx": ii_all,
++                   "top_score_cand_iou_ge_0.3": best_score_over(allc, gb, 0.3),
++                   "top_score_cand_iou_ge_0.5": best_score_over(allc, gb, 0.5)}
++            for t in IOUS:
++                row[f"det_pair_idx@{t}"] = dp[t][gi][0] if gi in dp[t] else None
++                row[f"det_pair_iou@{t}"] = dp[t][gi][1] if gi in dp[t] else None
++                for s in sp:
++                    row[f"sft{s}_pair_idx@{t}"] = sp[s][t][gi][0] if gi in sp[s][t] else None
++                    row[f"sft{s}_pair_iou@{t}"] = sp[s][t][gi][1] if gi in sp[s][t] else None
++            for s in sp:
++                for t in IOUS:
++                    if gi in sp[s][t] and gi not in dp[t]:
++                        row[f"sft{s}_only_category@{t}"] = category(selc, allc, gb, t)
++                    else:
++                        row[f"sft{s}_only_category@{t}"] = None
++            rows.append(row)
++    return rows
++
++
++def category_stats(rows, pos, s, t, idx):
++    """rows에서 SFT seed s의 IoU t 분해와 R(원 정의)·threshold 제외 비율(97.5% cluster CI)을 계산한다."""
++    key = f"sft{s}_only_category@{t}"
++    pat_pos = {p: k for k, p in enumerate(pos)}
++    n_gt = np.zeros(len(pos)); rn = np.zeros(len(pos)); tn = np.zeros(len(pos)); so = np.zeros(len(pos))
++    counts = {c: 0 for c in CATS}
++    for r in rows:
++        k = pat_pos[r["patient"]]
++        n_gt[k] += 1
++        c = r[key]
++        if c:
++            counts[c] += 1
++            so[k] += 1
++            rn[k] += c in ("adjacent_localization_error", "no_stored_candidate_coverage")
++            tn[k] += c == "threshold_excluded"
++    out = {"category_counts": counts, "sft_only_total": int(so.sum()), "total_gt": int(n_gt.sum()),
++           "r_numerator": int(rn.sum()), "r_point": float(rn.sum() / n_gt.sum()), "r_n_affected_patients": int((rn > 0).sum()),
++           "r_ci97.5": DA.ratio_ci_cluster(rn, n_gt, idx)["ci"],
++           "threshold_excluded_point": float(tn.sum() / so.sum()) if so.sum() > 0 else None,
++           "threshold_excluded_ci97.5": DA.ratio_ci_cluster(tn, so, idx)["ci"],
++           "threshold_excluded_n_degenerate_denom0": DA.ratio_ci_cluster(tn, so, idx)["n_degenerate_denom0"]}
++    if rn.sum() == 0:
++        out["r_degenerate_bootstrap"] = True
++        out["r_patient_event_wilson95"] = list(M.wilson(0, len(pos)))
++    if tn.sum() == 0:
++        out["threshold_excluded_degenerate_bootstrap"] = True
++    return out, rn, n_gt
++
++
++def pair_rows(model, pos, gt, pairs03, hit05_sets):
++    """IoU0.3 원래 대응쌍을 고정하고 그 쌍 자체의 IoU>=0.5 여부와 독립 IoU0.5 재매칭의 GT 검출 여부를 기록한다."""
++    out = []
++    for pid in pos:
++        gbs = [b["yxyx_norm"] for b in gt[pid]["boxes"]]
++        for gi, (pi, iou_v) in pairs03[pid].items():
++            out.append({"model": model, "patient": pid, "gi": gi, "pair_iou": iou_v,
++                        "pair_iou_ge_0.5": iou_v >= 0.5, "gt_hit_independent_rematch_0.5": gi in hit05_sets[pid],
++                        "pred_idx": pi, "gt_box": gbs[gi]})
++    return out
++
++
++def summarize_pairs(rows_):
++    out = {}
++    for model in sorted({r["model"] for r in rows_}):
++        mr = [r for r in rows_ if r["model"] == model]
++        pass05 = np.array([r["pair_iou_ge_0.5"] for r in mr])
++        rem = np.array([r["gt_hit_independent_rematch_0.5"] for r in mr])
++        out[model] = {"n_pairs_iou0.3": len(mr), "pair_pass_iou0.5_rate": float(pass05.mean()),
++                      "gt_hit_by_independent_rematch_0.5_rate": float(rem.mean()),
++                      "pair_fail_but_rematch_hit": int((~pass05 & rem).sum()),
++                      "pair_pass_but_rematch_miss": int((pass05 & ~rem).sum())}
++    return out
++
++
++# ------------------------------------------------------------------ FP 비용·성능 표
++def preds_from_cands(cands_by, thr):
++    out = {}
++    for pid, cs in cands_by.items():
++        bx = [c["box"] for c in op_select(cs, thr)]
++        out[pid] = {"status": "valid_nonempty" if bx else "valid_empty", "boxes": bx}
++    return out
++
++
++def fp_block(preds, gt, ids_by_cat, ids_all):
++    """FP 총수/환자당/분모/invalid + 두 IoU의 통합 범주 (범주 합 == 전체 FP 검사)."""
++    out = {"n_invalid": sum(1 for i in ids_all if preds[i]["status"] not in PA.VALID)}
++    for name, ids_ in (("all800" if len(ids_all) == 800 else "all", ids_all), *ids_by_cat.items()):
++        blk = {"n_patients": len(ids_), "n_invalid": sum(1 for i in ids_ if preds[i]["status"] not in PA.VALID)}
++        for t in IOUS:
++            d = DA.fp_decompose(ids_, gt, preds, thr=t)
++            tot = d["n_fp_total"]
++            if sum(v for k, v in d.items() if k != "n_fp_total") != tot:
++                raise AssertionError("FP category sum != total")
++            blk[f"iou{t}"] = {**d, "fp_per_patient": tot / len(ids_)}
++        out[name] = blk
++    return out
++
++
++def model_table(preds, gt, ids, pos, ids_by_cat, edges, idx_pos):
++    sm = SE.summarize(preds, gt, ids, edges=edges)
++    tab = {"f1@0.3": sm["f1@0.3"], "f1@0.5": sm["f1@0.5"], "utility": sm["utility"], "status_all": sm["status_all"],
++           "lesion@0.3": DC.lesion_stats(preds, gt, pos, 0.3), "lesion@0.5": DC.lesion_stats(preds, gt, pos, 0.5),
++           "fp": fp_block(preds, gt, ids_by_cat, ids)}
++    # 기존 구현(det_compare.fp_stats)과 FP 총수 대조
++    fs, _ = DC.fp_stats(preds, gt, ids)
++    if int(fs.sum()) != tab["fp"]["all800" if len(ids) == 800 else "all"]["iou0.3"]["n_fp_total"]:
++        raise AssertionError("FP total != det_compare.fp_stats")
++    return tab
++
++
++def compare_block(det_preds, sft_preds, gt, pos, idx_pos):
++    """양성 환자 paired 차이(det−SFT) F1@0.3/0.5, 97.5% CI(기존 설정) + 상보성."""
++    _, pd_ = SE.per_patient(det_preds, gt, pos + [])  # pos만 전달돼도 pos 순서
++    _, ps_ = SE.per_patient(sft_preds, gt, pos)
++    out = {}
++    for k in ("f1@0.3", "f1@0.5"):
++        d = pd_[k] - ps_[k]
++        out[f"diff_{k}"] = {"diff": float(d.mean()), "ci97.5": DC.boot_ci(d, idx_pos, 1.25, 98.75)}
++    out["complementarity"] = {}
++    for t in IOUS:
++        c, _ = DC.complementarity(det_preds, sft_preds, gt, pos, t, idx_pos)
++        out["complementarity"][f"iou{t}"] = c
++    return out
++
++
++# ------------------------------------------------------------------ criterion a/b
++def criterion_ab(r_num, n_gt, cap_pat, idx, min_patients=20, thr=0.05):
++    """criterion_a: 관측 R의 영향 환자>=20이고 97.5% CI 상한>=5%.
++    criterion_b: cap(100)에 도달한 환자의 저장 후보 미대응 GT(R 분자)를 (관측=회복 불가 / 0=모두 회복 가능)의 양극단으로
++    두었을 때 criterion_a 판정이 달라지는지. cap 환자가 없으면 비해당(False). escalate = a 또는 b.
++    (이 구성에서 lo<=hi이므로 b는 a가 참인 경우에만 참일 수 있다 — cap 민감성을 명시하는 역할.)"""
++    r_num, n_gt = np.asarray(r_num, float), np.asarray(n_gt, float)
++    cap_pat = np.asarray(cap_pat, bool)
++
++    def crit(num):
++        ci = DA.ratio_ci_cluster(num, n_gt, idx)["ci"]
++        aff = int((num > 0).sum())
++        return {"r_point": float(num.sum() / n_gt.sum()), "n_affected_patients": aff, "ci97.5_upper": ci[1],
++                "met": bool(aff >= min_patients and ci[1] is not None and ci[1] >= thr)}
++    hi = crit(r_num)
++    lo = crit(np.where(cap_pat, 0.0, r_num))
++    cap_present = bool(cap_pat.any())
++    b = bool(cap_present and hi["met"] != lo["met"])
++    return {"criterion_a_met": hi["met"], "criterion_b_applicable": cap_present, "criterion_b_met": b,
++            "extreme_not_recoverable": hi, "extreme_all_recoverable": lo, "n_cap_patients": int(cap_pat.sum()),
++            "escalate_to_gpu_trace": bool(hi["met"] or b)}
++
++
++# ------------------------------------------------------------------ 단위 실행
++class Ctx:
++    """분할별 검증된 입력. fork된 worker가 공유한다."""
++
++    def __init__(self, split, ids=None, sft_seeds=None):
++        self.split = split
++        self.gt, self.infer = D.load_gt_infer()
++        self.all_ids = json.load(open(IDS_PATH[split]))
++        self.ids = self.all_ids if ids is None else ids
++        self.full = ids is None
++        self.lock = verify_lock()
++        self.hw = verify_images(self.all_ids, self.infer)
++        self.raw, self.sel, self.comp, self.cands = {}, {}, {}, {}
++        for d in (17, 29):
++            r, s, c = load_detector(split, d, self.all_ids, self.infer, self.hw, self.lock)
++            self.raw[d], self.sel[d], self.comp[d] = r, s, c
++        self.sft, self.sft_prov = {}, {}
++        for s in (sft_seeds or SFT_DIRS[split]):
++            self.sft[s], self.sft_prov[s] = load_sft(split, s, self.all_ids, self.infer, self.hw)
++        self.pos = [i for i in self.ids if self.gt[i]["category"] == "opacity"]
++        self.by_cat = {c: [i for i in self.ids if self.gt[i]["category"] == c] for c in CATEGORIES}
++        self.edges = json.load(open(f"{BASE}/results/iter_033/data/area_edges.json"))["train_positive_area_tertile_edges"]
++        for d in (17, 29):
++            self.cands[d] = {i: candidates(self.raw[d][i], self.hw[i]) for i in self.ids}
++        self.idx_pos = M.bootstrap_indices(len(self.pos), B=B, seed=OLD_BOOT_SEED)
++        self.idx_new = M.bootstrap_indices(len(self.pos), B=B, seed=NEW_BOOT_SEED)
++
++    def operating_points(self, d):
++        ops = {"selected": self.sel[d]["selected"]["threshold"]}
++        for b, r in self.sel[d]["fp_budgets"].items():
++            if r is not None:
++                ops[f"fp_budget_{b}"] = r["threshold"]
++        return ops
++
++    def unit_names(self):
++        u = [f"sft{s}" for s in sorted(self.sft)]
++        for d in (17, 29):
++            u += [f"det{d}__{op}" for op in self.operating_points(d)]
++        return u
++
++    def inputs_digest(self):
++        return jd({"lock": {k: v["sha256"] for k, v in self.lock["files"].items()},
++                   "det": {d: {"raw": self.comp[d]["raw_preds_sha256"], "ckpt": self.comp[d]["checkpoint_sha256"]} for d in self.comp},
++                   "sft": {s: p["files"] for s, p in self.sft_prov.items()}, "ids": jd(self.ids),
++                   "sft_seeds": sorted(self.sft), "split": self.split})
++
++
++def code_digest():
++    files = [f"{BASE}/rsna_diag/{n}.py" for n in ("det37", "det_error_audit", "det_compare", "det_eval", "det_lib", "geometry", "metrics", "parse", "sft_eval")]
++    return {os.path.relpath(p, BASE): sha_file(p) for p in files}
++
++
++CONFIG = {"B": B, "boot_seed_old": OLD_BOOT_SEED, "boot_seed_new": NEW_BOOT_SEED, "ious": list(IOUS), "cap": CAP,
++          "adj_thr": DA.ADJ_THR, "ci_percentiles_primary": [1.25, 98.75], "primary_sft": PRIMARY_SFT,
++          "fp_definition": "unmatched predictions (n_pred - tp at the IoU); invalid SFT output counts 0 FP (lower bound)",
++          "fp_category_amendment": "competes_for_matched_gt merges duplicate candidates and GT-matching competition",
++          "matching": "metrics.match (max cardinality, then total IoU, then lexicographic)"}
++
++
++def run_unit(ctx, name):
++    t0 = time.time()
++    if name.startswith("sft"):
++        s = int(name[3:])
++        pr = ctx.sft[s]
++        out = {"kind": "sft", "seed": s, "table": model_table(pr, ctx.gt, ctx.ids, ctx.pos, ctx.by_cat, ctx.edges, ctx.idx_pos)}
++    else:
++        dpart, opname = name.split("__")
++        d = int(dpart[3:])
++        thr = ctx.operating_points(d)[opname]
++        pr = preds_from_cands(ctx.cands[d], thr)
++        # 기존 경로(preds_to_norm_yxyx)와 선택 결과 동일성
++        old = D.preds_to_norm_yxyx({i: ctx.raw[d][i] for i in ctx.ids}, ctx.gt, thr)
++        if any(old[i]["boxes"] != pr[i]["boxes"] for i in ctx.ids):
++            raise AssertionError("candidate selection differs from D.preds_to_norm_yxyx")
++        out = {"kind": "detector", "seed": d, "op": opname, "threshold": thr,
++               "table": model_table(pr, ctx.gt, ctx.ids, ctx.pos, ctx.by_cat, ctx.edges, ctx.idx_pos)}
++        out["vs_sft"] = {}
++        cap_pat = np.array([len(ctx.cands[d][i]) >= CAP for i in ctx.pos])
++        rows = gt_audit_rows(ctx.pos, ctx.gt, ctx.cands[d], thr, ctx.sft)
++        out["gt_audit_rows"] = rows
++        for s in sorted(ctx.sft):
++            blk = compare_block(pr, ctx.sft[s], ctx.gt, ctx.pos, ctx.idx_pos)
++            blk["decomposition"] = {}
++            for t in IOUS:
++                cs, rn, ngt = category_stats(rows, ctx.pos, s, t, ctx.idx_new)
++                if cs["sft_only_total"] != blk["complementarity"][f"iou{t}"]["sft_only"]:
++                    raise AssertionError("category sum != complementarity sft_only")
++                blk["decomposition"][f"iou{t}"] = cs
++                if t == 0.3:
++                    blk["criterion"] = criterion_ab(rn, ngt, cap_pat, ctx.idx_new)
++            out["vs_sft"][f"sft{s}"] = blk
++        # 위치: IoU0.3 대응쌍 고정, 그 쌍의 IoU>=0.5 통과 vs 독립 재매칭
++        pairs03, hit05 = {}, {}
++        for pid in ctx.pos:
++            gbs = [b["yxyx_norm"] for b in ctx.gt[pid]["boxes"]]
++            sc = op_select(ctx.cands[d][pid], thr)
++            pairs03[pid] = pairs_orig(sc, gbs, 0.3)
++            hit05[pid] = set(pairs_orig(sc, gbs, 0.5))
++        prow = pair_rows("detector", ctx.pos, ctx.gt, pairs03, hit05)
++        for s in sorted(ctx.sft):
++            p3, h5 = {}, {}
++            for pid in ctx.pos:
++                gbs = [b["yxyx_norm"] for b in ctx.gt[pid]["boxes"]]
++                p3[pid] = sft_pairs(ctx.sft[s][pid], gbs, 0.3)
++                h5[pid] = set(sft_pairs(ctx.sft[s][pid], gbs, 0.5))
++            prow += pair_rows(f"sft{s}", ctx.pos, ctx.gt, p3, h5)
++        out["pair_summary"] = summarize_pairs(prow)
++        out["pair_rows"] = prow
++        out["n_at_cap"] = int(sum(1 for i in ctx.ids if len(ctx.cands[d][i]) >= CAP))
++        out["max_candidates"] = max(len(ctx.cands[d][i]) for i in ctx.ids)
++    out["elapsed_s"] = time.time() - t0
++    return out
++
++
++def unit_path(out_dir, name):
++    return os.path.join(out_dir, "units", f"{name}.json")
++
++
++def header(ctx):
++    return {"config": CONFIG, "config_digest": jd(CONFIG), "inputs_digest": ctx.inputs_digest(), "code": code_digest(), "split": ctx.split}
++
++
++def _worker(args):
++    ctx, out_dir, name, hdr = args
++    p = unit_path(out_dir, name)
++    if os.path.exists(p):
++        cur = json.load(open(p))
++        if cur["header"]["inputs_digest"] != hdr["inputs_digest"] or cur["header"]["config_digest"] != hdr["config_digest"]:
++            raise ValueError(f"existing unit {name} has different config/inputs")
++        return name, "reused"
++    res = run_unit(ctx, name)
++    write_json_new(p, {"header": hdr, "unit": name, "result": res})
++    return name, "computed"
++
++
++def run_all(ctx, out_dir, workers=1, stop_after=None):
++    owner = OutputOwner(out_dir)
++    try:
++        os.makedirs(os.path.join(out_dir, "units"), exist_ok=True)
++        hdr = header(ctx)
++        mpath = os.path.join(out_dir, "manifest.json")
++        if os.path.exists(mpath):
++            cur = json.load(open(mpath))
++            for k in ("config_digest", "inputs_digest", "code", "split"):
++                if cur[k] != hdr[k]:
++                    raise ValueError(f"manifest {k} differs from current run; use a new attempt dir")
++        else:
++            write_json_new(mpath, hdr)
++        todo = ctx.unit_names()
++        if stop_after is not None:  # 재개 검사용: 지정 개수만 계산하고 비정상 종료
++            done = 0
++            for n in todo:
++                if not os.path.exists(unit_path(out_dir, n)):
++                    if done >= stop_after:
++                        os._exit(7)
++                    _worker((ctx, out_dir, n, hdr))
++                    done += 1
++            return todo
++        jobs = [(ctx, out_dir, n, hdr) for n in todo]
++        if workers > 1:
++            with mp.get_context("fork").Pool(workers) as pool:
++                for n, st in pool.imap_unordered(_worker, jobs):
++                    print(n, st, flush=True)
++        else:
++            for j in jobs:
++                print(*_worker(j), flush=True)
++        return todo
++    finally:
++        owner.release()
++
++
++def load_units(out_dir, ctx):
++    hdr = header(ctx)
++    units = {}
++    for n in ctx.unit_names():
++        p = unit_path(out_dir, n)
++        if not os.path.exists(p):
++            raise FileNotFoundError(f"missing unit {n}")
++        u = json.load(open(p))
++        if u["header"]["inputs_digest"] != hdr["inputs_digest"] or u["header"]["config_digest"] != hdr["config_digest"]:
++            raise ValueError(f"unit {n} stale")
++        units[n] = u["result"]
++    return units
++
++
++def finalize(ctx, out_dir):
++    """모든 unit을 검증해 report.json(GT 감사 행·pair 행은 별도 jsonl)을 만든다."""
++    units = load_units(out_dir, ctx)
++    audit_dir = os.path.join(out_dir, "audit")
++    os.makedirs(audit_dir, exist_ok=True)
++    report = {"header": header(ctx), "n_ids": len(ctx.ids), "n_positive": len(ctx.pos),
++              "n_gt": int(sum(len(ctx.gt[i]["boxes"]) for i in ctx.pos)),
++              "sft_provenance": ctx.sft_prov, "tables": {}, "detector": {}}
++    for n, u in units.items():
++        if u["kind"] == "sft":
++            report["tables"][n] = u["table"]
++            continue
++        slim = {k: v for k, v in u.items() if k not in ("gt_audit_rows", "pair_rows")}
++        report["detector"][n] = slim
++        for key, fname in (("gt_audit_rows", "gt_audit"), ("pair_rows", "pairs")):
++            p = os.path.join(audit_dir, f"{n}__{fname}.jsonl")
++            if not os.path.exists(p):
++                with open(p + f".tmp{os.getpid()}", "w") as f:
++                    for r in u[key]:
++                        f.write(json.dumps(r) + "\n")
++                os.link(p + f".tmp{os.getpid()}", p)
++                os.unlink(p + f".tmp{os.getpid()}")
++    # R 불변성: 같은 후보 pool·SFT에서 R 분자는 detector operating threshold에 의존하지 않는다.
++    inv = {}
++    for d in (17, 29):
++        for s in sorted(ctx.sft):
++            for t in IOUS:
++                vals = {n: report["detector"][n]["vs_sft"][f"sft{s}"]["decomposition"][f"iou{t}"]["r_numerator"]
++                        for n in report["detector"] if n.startswith(f"det{d}__")}
++                inv[f"det{d}_vs_sft{s}_iou{t}"] = {"r_numerator_by_op": vals, "invariant": len(set(vals.values())) == 1}
++    report["r_invariance"] = inv
++    report["cap_check"] = {f"det{d}": {"n_at_cap100": max(report["detector"][n]["n_at_cap"] for n in report["detector"] if n.startswith(f"det{d}__")),
++                                       "max_candidates": max(report["detector"][n]["max_candidates"] for n in report["detector"] if n.startswith(f"det{d}__"))}
++                           for d in (17, 29)}
++    write_json_new(os.path.join(out_dir, "report.json"), report)
++    return report
++
++
++def main():
++    ap = argparse.ArgumentParser()
++    ap.add_argument("--split", required=True, choices=["confirm800", "V400"])
++    ap.add_argument("--out", required=True)
++    ap.add_argument("--workers", type=int, default=1)
++    ap.add_argument("--d24", action="store_true", help="V400/confirm800의 D24 hash 순서 층화 subset만 분석(동작 확인)")
++    ap.add_argument("--stop_after", type=int, default=None, help="재개 검사 전용")
++    a = ap.parse_args()
++    ctx = Ctx(a.split)
++    if a.d24:
++        d24 = DA.stratified_d24(ctx.all_ids, ctx.gt)
++        ctx.ids = d24
++        ctx.pos = [i for i in d24 if ctx.gt[i]["category"] == "opacity"]
++        ctx.by_cat = {c: [i for i in d24 if ctx.gt[i]["category"] == c] for c in CATEGORIES}
++        for d in (17, 29):
++            ctx.cands[d] = {i: ctx.cands[d][i] for i in d24}
++        ctx.idx_pos = M.bootstrap_indices(len(ctx.pos), B=B, seed=OLD_BOOT_SEED)
++        ctx.idx_new = M.bootstrap_indices(len(ctx.pos), B=B, seed=NEW_BOOT_SEED)
++    run_all(ctx, a.out, a.workers, a.stop_after)
++    if a.stop_after is None:
++        rep = finalize(ctx, a.out)
++        print(json.dumps({"finalized": True, "n_units": len(ctx.unit_names())}))
++
++
++if __name__ == "__main__":
++    main()
+diff --git a/rsna_diag/det37_overlay.py b/rsna_diag/det37_overlay.py
+new file mode 100644
+index 0000000..28a7ded
+--- /dev/null
++++ b/rsna_diag/det37_overlay.py
+@@ -0,0 +1,67 @@
++"""iter_037 overlay: det37 GT 감사 행에서 범주별 최대 6명(hash 순서, 성능 무관)을 골라 분류 근거를 그린다.
++초록=GT, 빨강=detector 선택 후보, 파랑=SFT17, 노랑=GT의 IoU>=0.3 최고 score 후보(index·score 표기, threshold 아래 포함),
++주황=최대 IoU 후보(index). 사용: python rsna_diag/det37_overlay.py --report_dir <det37 결과 dir> --det 17|29 --out_dir <새 dir>"""
++import argparse
++import json
++import os
++import sys
++
++from PIL import Image, ImageDraw
++
++BASE = "/SSD1_1TB/home/milab/daniel/08_medgemma/research"
++sys.path.insert(0, BASE)
++from rsna_diag import det37 as T  # noqa: E402
++from rsna_diag import geometry as G  # noqa: E402
++
++
++def main():
++    ap = argparse.ArgumentParser()
++    ap.add_argument("--report_dir", required=True)
++    ap.add_argument("--det", type=int, required=True)
++    ap.add_argument("--out_dir", required=True)
++    ap.add_argument("--split", default="confirm800")
++    a = ap.parse_args()
++    if os.path.exists(a.out_dir):
++        raise FileExistsError(a.out_dir)
++    ctx = T.Ctx(a.split, sft_seeds=[17])
++    rows = [json.loads(l) for l in open(f"{a.report_dir}/audit/det{a.det}__selected__gt_audit.jsonl")]
++    thr = ctx.operating_points(a.det)["selected"]
++    key = "sft17_only_category@0.3"
++    os.makedirs(a.out_dir)
++    manifest = {}
++    for cat in T.CATS:
++        pats = sorted({r["patient"] for r in rows if r[key] == cat}, key=T.DA.sha_str)[:6]
++        manifest[cat] = pats
++        for pid in pats:
++            im = Image.open(f"{T.BASE}/{ctx.infer[pid]['image']}").convert("RGB")
++            top, left, side = G.pad_offsets(im.size[1], im.size[0])
++            canvas = Image.new("RGB", (side, side))
++            canvas.paste(im, (left, top))
++            dr = ImageDraw.Draw(canvas)
++            px = lambda b: (b[1] / 1000 * side, b[0] / 1000 * side, b[3] / 1000 * side, b[2] / 1000 * side)
++            cands = {c["idx"]: c for c in ctx.cands[a.det][pid]}
++            for b in ctx.gt[pid]["boxes"]:
++                dr.rectangle(px(b["yxyx_norm"]), outline=(0, 255, 0), width=4)
++            for c in cands.values():
++                if c["score"] >= thr:
++                    dr.rectangle(px(c["box"]), outline=(255, 0, 0), width=3)
++            for b in ctx.sft[17][pid]["boxes"]:
++                dr.rectangle(px(b), outline=(0, 128, 255), width=3)
++            for r in [r for r in rows if r["patient"] == pid and r[key] == cat]:
++                ts = r["top_score_cand_iou_ge_0.3"]
++                if ts:
++                    c = cands[ts[1]]
++                    dr.rectangle(px(c["box"]), outline=(255, 255, 0), width=2)
++                    dr.text((px(c["box"])[0] + 3, px(c["box"])[1] + 3), f"idx{ts[1]} s={ts[0]:.3f}", fill=(255, 255, 0))
++                if r["max_iou_all_idx"] is not None:
++                    c = cands[r["max_iou_all_idx"]]
++                    dr.rectangle(px(c["box"]), outline=(255, 140, 0), width=2)
++                    dr.text((px(c["box"])[0] + 3, px(c["box"])[3] - 12), f"maxIoU idx{r['max_iou_all_idx']} {r['max_iou_all']:.2f} s={c['score']:.3f}", fill=(255, 140, 0))
++            canvas.resize((768, 768)).save(os.path.join(a.out_dir, f"{cat}__{pid}.png"))
++    with open(os.path.join(a.out_dir, "manifest.json"), "w") as f:
++        json.dump({"det": a.det, "threshold": thr, "patients_by_category": manifest}, f, indent=1)
++    print(json.dumps(manifest))
++
++
++if __name__ == "__main__":
++    main()
+diff --git a/tests_det/regress_iter037.py b/tests_det/regress_iter037.py
+new file mode 100644
+index 0000000..f068b89
+--- /dev/null
++++ b/tests_det/regress_iter037.py
+@@ -0,0 +1,121 @@
++"""iter_037 회귀 대조: 변경된 계산 경로(det37)의 수치를 원래 저장 결과와 대조한다 (정확한 count, 수치 1e-8).
++  V400(사후 검사): 선택 파일의 selected/fp_budgets 수치, SFT17 val_metrics.
++  confirm800: iter_036 analysis.json(분해·R·CI·위치·FP 분해), iter_035 confirm800 analysis(FP budget·상보성·요약).
++사용: python tests_det/regress_iter037.py --v400 <report.json> --c800 <report.json> --out <새 json>  (덮어쓰기 거부)"""
++import argparse
++import json
++import os
++import sys
++
++BASE = "/SSD1_1TB/home/milab/daniel/08_medgemma/research"
++sys.path.insert(0, BASE)
++from rsna_diag import det37 as T  # noqa: E402
++
++TOL = 1e-8
++res = {"pass": 0, "fail": 0, "checks": []}
++
++
++def chk(name, a, b, tol=TOL):
++    if isinstance(a, (int, bool, str)) and isinstance(b, (int, bool, str)) or a is None or b is None:
++        ok = a == b
++    elif isinstance(a, (list, tuple)):
++        ok = len(a) == len(b) and all(abs(x - y) <= tol for x, y in zip(a, b))
++    else:
++        ok = abs(a - b) <= tol
++    res["pass" if ok else "fail"] += 1
++    res["checks"].append({"name": name, "new": a, "old": b, "ok": bool(ok)})
++    if not ok:
++        print("FAIL", name, a, b)
++
++
++def main():
++    ap = argparse.ArgumentParser()
++    ap.add_argument("--v400", required=True)
++    ap.add_argument("--c800", required=True)
++    ap.add_argument("--out", required=True)
++    a = ap.parse_args()
++    if os.path.exists(a.out):
++        raise FileExistsError(a.out)
++    v = json.load(open(a.v400))
++    c = json.load(open(a.c800))
++    # ---- V400: 선택 파일 수치 (scan 경로의 별도 계산)
++    for d in (17, 29):
++        sel = json.load(open(T.SEL[d]))
++        s = sel["selected"]
++        t = v["detector"][f"det{d}__selected"]["table"]
++        chk(f"V400 det{d} selected f1@0.3", t["f1@0.3"], s["f1@0.3"])
++        chk(f"V400 det{d} selected f1@0.5", t["f1@0.5"], s["f1@0.5"])
++        chk(f"V400 det{d} selected utility", t["utility"], s["utility"])
++        chk(f"V400 det{d} selected lesion_recall@0.3", t["lesion@0.3"]["lesion_recall"], s["lesion_recall@0.3"])
++        chk(f"V400 det{d} selected fp/patient", t["fp"]["all"]["iou0.3"]["fp_per_patient"], s["fp_per_patient"])
++        for b, r in sel["fp_budgets"].items():
++            t = v["detector"][f"det{d}__fp_budget_{b}"]["table"]
++            chk(f"V400 det{d} budget{b} lesion_recall@0.3", t["lesion@0.3"]["lesion_recall"], r["lesion_recall@0.3"])
++            chk(f"V400 det{d} budget{b} fp/patient", t["fp"]["all"]["iou0.3"]["fp_per_patient"], r["fp_per_patient"])
++    vm = json.load(open(f"{T.IT012}/train/lr2e-4_s17/epoch_05/val_metrics.json"))
++    ts = v["tables"]["sft17"]
++    chk("V400 sft17 f1@0.3", ts["f1@0.3"], vm["f1@0.3"])
++    chk("V400 sft17 f1@0.5", ts["f1@0.5"], vm["f1@0.5"])
++    chk("V400 sft17 utility", ts["utility"], vm["utility"])
++    chk("V400 sft17 status_all", str(sorted(ts["status_all"].items())), str(sorted(vm["status_all"].items())))
++    # ---- confirm800 vs iter_036
++    old36 = json.load(open(f"{BASE}/results/iter_036/full/analysis.json"))
++    for d in (17, 29):
++        for s in (17, 29, 43):
++            for t in (0.3, 0.5):
++                new = c["detector"][f"det{d}__selected"]["vs_sft"][f"sft{s}"]["decomposition"][f"iou{t}"]
++                old = old36["decomposition"][f"det{d}_vs_sft{s}_iou{t}"]
++                chk(f"c800 det{d} sft{s} iou{t} category_counts", str(sorted(new["category_counts"].items())), str(sorted(old["category_counts"].items())))
++                if t == 0.3:
++                    o = old36["r_and_threshold_excluded"][f"det{d}_vs_sft{s}"]
++                    chk(f"c800 det{d} sft{s} r_numerator", new["r_numerator"], o["r_numerator"])
++                    chk(f"c800 det{d} sft{s} r_affected", new["r_n_affected_patients"], o["r_n_affected_patients"])
++                    chk(f"c800 det{d} sft{s} r_ci97.5", new["r_ci97.5"], o["r_ci97.5"])
++                    chk(f"c800 det{d} sft{s} thr_excl_point", new["threshold_excluded_point"], o["threshold_excluded_point"])
++                    chk(f"c800 det{d} sft{s} thr_excl_ci", new["threshold_excluded_ci97.5"], o["threshold_excluded_ci97.5"])
++    ps = c["detector"]["det17__selected"]["pair_summary"]
++    op = old36["position_precision_det17_vs_sft17"]
++    chk("c800 det17 n_pairs", ps["detector"]["n_pairs_iou0.3"], op["detector"]["n_pairs_iou0.3"])
++    chk("c800 sft17 n_pairs", ps["sft17"]["n_pairs_iou0.3"], op["sft"]["n_pairs_iou0.3"])
++    chk("c800 det17 rematch rate (old transfer_rate)", ps["detector"]["gt_hit_by_independent_rematch_0.5_rate"], op["detector"]["transfer_rate_to_iou0.5"])
++    chk("c800 sft17 rematch rate (old transfer_rate)", ps["sft17"]["gt_hit_by_independent_rematch_0.5_rate"], op["sft"]["transfer_rate_to_iou0.5"])
++    for nm, key in (("detector17", "det17__selected"), ("sft17", "sft17")):
++        fp = (c["detector"][key]["table"] if key.startswith("det") else c["tables"][key])["fp"]["all800"]["iou0.3"]
++        o = old36["fp_decomposition"][nm]
++        for k in ("competes_for_matched_gt", "near_miss_0.1_to_thr", "no_gt_within_0.1", "n_fp_total"):
++            chk(f"c800 {nm} fp {k}", fp[k], o[k])
++    # ---- confirm800 vs iter_035 analysis
++    old35 = json.load(open(f"{BASE}/results/iter_035/confirm800/analysis.json"))
++    for b, o in old35["fp_budget_detector17"].items():
++        n = c["detector"][f"det17__fp_budget_{b}"]["table"]
++        chk(f"c800 det17 budget{b} lesion@0.3 tp", n["lesion@0.3"]["tp"], o["lesion@0.3"]["tp"])
++        chk(f"c800 det17 budget{b} f1@0.3", n["f1@0.3"], o["f1@0.3"])
++        chk(f"c800 det17 budget{b} fp/patient", n["fp"]["all800"]["iou0.3"]["fp_per_patient"], o["fp_all800"]["fp_per_patient_all_n_lower_bound"])
++        for t in (0.3, 0.5):
++            nn = c["detector"][f"det17__fp_budget_{b}"]["vs_sft"]["sft17"]["complementarity"][f"iou{t}"]
++            oo = old35["complementarity"][f"iou{t}_fpbudget{b}"]
++            for k in ("detector_only", "sft_only", "both_hit", "both_miss", "total_gt"):
++                chk(f"c800 det17 budget{b} iou{t} {k}", nn[k], oo[k])
++    for t in (0.3, 0.5):
++        for k in ("detector_only", "sft_only", "both_hit", "both_miss"):
++            chk(f"c800 det17 selected iou{t} {k}", c["detector"]["det17__selected"]["vs_sft"]["sft17"]["complementarity"][f"iou{t}"][k], old35["complementarity"][f"iou{t}"][k])
++            chk(f"c800 det17 selected iou{t} {k}_rate_ci95", c["detector"]["det17__selected"]["vs_sft"]["sft17"]["complementarity"][f"iou{t}"][f"{k}_rate_ci95"], old35["complementarity"][f"iou{t}"][f"{k}_rate_ci95"])
++    for m, key in (("detector17", "det17__selected"),):
++        n = c["detector"][key]["table"]
++        chk("c800 det17 selected f1@0.3 vs iter035 summary", n["f1@0.3"], old35["summary"][m]["f1@0.3"])
++        chk("c800 det17 selected f1@0.5 vs iter035 summary", n["f1@0.5"], old35["summary"][m]["f1@0.5"])
++        chk("c800 det17 selected utility", n["utility"], old35["summary"][m]["utility"])
++        chk("c800 det17 selected fp_all800", n["fp"]["all800"]["iou0.3"]["fp_per_patient"], old35["summary"][m]["fp_all800"]["fp_per_patient_all_n_lower_bound"])
++    for s in (17, 29, 43):
++        chk(f"c800 sft{s} f1@0.3", c["tables"][f"sft{s}"]["f1@0.3"], old35["summary"][f"sft{s}"]["f1@0.3"])
++        chk(f"c800 sft{s} fp/patient", c["tables"][f"sft{s}"]["fp"]["all800"]["iou0.3"]["fp_per_patient"], old35["summary"][f"sft{s}"]["fp_all800"]["fp_per_patient_all_n_lower_bound"])
++    d = c["detector"]["det17__selected"]["vs_sft"]["sft17"]["diff_f1@0.3"]
++    chk("c800 primary diff f1@0.3", d["diff"], old35["primary_detector17_minus_B0"]["f1@0.3"]["diff"])
++    chk("c800 primary ci97.5 f1@0.3", d["ci97.5"], old35["primary_detector17_minus_B0"]["f1@0.3"]["ci97.5"])
++    print(json.dumps({"pass": res["pass"], "fail": res["fail"]}))
++    T.write_json_new(a.out, res)
++    sys.exit(1 if res["fail"] else 0)
++
++
++if __name__ == "__main__":
++    main()
+diff --git a/tests_det/test_iter037.py b/tests_det/test_iter037.py
+new file mode 100644
+index 0000000..a5ca737
+--- /dev/null
++++ b/tests_det/test_iter037.py
+@@ -0,0 +1,285 @@
++"""iter_037 fixture: det37의 fail-closed loader, 출력 소유권·재개, criterion_a/b, 감사 행 규약 검사 (medgemma env, CPU).
++원본 자료는 변조하지 않고 메모리/임시 복사본에서만 변조한다. 결과: 환경변수 DET37_FIXTURES_OUT (새 경로, 덮어쓰기 거부)."""
++import copy
++import json
++import os
++import subprocess
++import sys
++import tempfile
++
++import numpy as np
++
++BASE = "/SSD1_1TB/home/milab/daniel/08_medgemma/research"
++sys.path.insert(0, BASE)
++from rsna_diag import det37 as T  # noqa: E402
++from rsna_diag import det_error_audit as DA  # noqa: E402
++from rsna_diag import metrics as M  # noqa: E402
++
++res = {"pass": 0, "fail": 0, "details": []}
++
++
++def check(name, cond, extra=None):
++    ok = bool(cond)
++    res["pass" if ok else "fail"] += 1
++    res["details"].append({"name": name, "ok": ok, "extra": extra})
++    if not ok:
++        print("FAIL", name, extra)
++
++
++def raises(fn, exc=Exception):
++    try:
++        fn()
++    except exc as e:
++        return True, str(e)[:120]
++    return False, None
++
++
++GOOD = {"boxes_xyxy_px": [[10.0, 20.0, 60.0, 80.0], [100.0, 100.0, 150.0, 160.0]], "scores": [0.9, 0.2], "labels": [1, 1], "img_hw": [256, 256]}
++
++
++def test_validate_raw():
++    T.validate_raw_record("ok", GOOD)
++    check("raw_valid_passes", True)
++    variants = {
++        "scores_shorter": {**GOOD, "scores": [0.9]},
++        "labels_longer": {**GOOD, "labels": [1, 1, 1]},
++        "nan_box": {**GOOD, "boxes_xyxy_px": [[float("nan"), 20, 60, 80], GOOD["boxes_xyxy_px"][1]]},
++        "inf_box": {**GOOD, "boxes_xyxy_px": [[10, 20, float("inf"), 80], GOOD["boxes_xyxy_px"][1]]},
++        "nan_score": {**GOOD, "scores": [float("nan"), 0.2]},
++        "score_gt1": {**GOOD, "scores": [1.5, 0.2]},
++        "label0": {**GOOD, "labels": [1, 0]},
++        "zero_size": {**GOOD, "boxes_xyxy_px": [[10, 20, 10, 80], GOOD["boxes_xyxy_px"][1]]},
++        "outside_image": {**GOOD, "boxes_xyxy_px": [[10, 20, 400, 80], GOOD["boxes_xyxy_px"][1]]},
++        "over_cap": {**GOOD, "boxes_xyxy_px": [[1.0, 1.0, 5.0, 5.0]] * 101, "scores": [0.5] * 101, "labels": [1] * 101},
++    }
++    for n, rec in variants.items():
++        ok, msg = raises(lambda rec=rec: T.validate_raw_record("v", rec), ValueError)
++        check(f"raw_reject_{n}", ok, msg)
++    ok, msg = raises(lambda: T.validate_raw_record("hw", GOOD, img_hw=(300, 300)), ValueError)
++    check("raw_reject_img_hw_mismatch", ok, msg)
++    ok, msg = raises(lambda: T.candidates({**GOOD, "scores": [0.9]}, (256, 256)), ValueError)
++    check("candidates_reject_length_mismatch", ok, msg)
++
++
++def test_lock_tamper():
++    lock = json.load(open(T.LOCK_PATH))
++    T.verify_lock()
++    check("lock_valid_passes", True)
++    with tempfile.TemporaryDirectory() as td:
++        bad = copy.deepcopy(lock)
++        bad["files"]["seed17"]["sha256"] = "0" * 64
++        p = os.path.join(td, "LOCK_bad.json")
++        json.dump(bad, open(p, "w"))
++        ok, msg = raises(lambda: T.verify_lock(p), ValueError)
++        check("lock_reject_changed_hash", ok, msg)
++        bad2 = copy.deepcopy(lock)
++        bad2["seed_set"] = [17, 29, 43]
++        p2 = os.path.join(td, "LOCK_bad2.json")
++        json.dump(bad2, open(p2, "w"))
++        ok, msg = raises(lambda: T.verify_lock(p2), ValueError)
++        check("lock_reject_seed_set", ok, msg)
++        bad3 = copy.deepcopy(lock)
++        del bad3["files"]["extend29"]
++        p3 = os.path.join(td, "LOCK_bad3.json")
++        json.dump(bad3, open(p3, "w"))
++        ok, msg = raises(lambda: T.verify_lock(p3), ValueError)
++        check("lock_reject_missing_file_entry", ok, msg)
++        # 잠기지 않은 선택 파일 (내용 복사본)
++        sel_copy = os.path.join(td, "v400_selection.json")
++        open(sel_copy, "w").write(open(T.SEL[17]).read())
++        ok, msg = raises(lambda: T.verify_selection(sel_copy, lock), ValueError)
++        check("selection_reject_unlocked_copy", ok, msg)
++    T.verify_selection(T.SEL[17], lock)
++    check("selection_locked_passes", True)
++
++
++def test_shards_and_images():
++    gt, infer = T.D.load_gt_infer()
++    ids = ["a", "b"]
++    inf = {"a": {"file_sha256": "fa", "image": "x"}, "b": {"file_sha256": "fb", "image": "x"}}
++    comp = {"checkpoint_sha256": "c", "source_digest": "s", "manifest_digest": "m", "batch_size": 1}
++    raw = {"a": GOOD, "b": GOOD}
++
++    def mk(td, recs, fn="preds_w00.jsonl"):
++        with open(os.path.join(td, fn), "w") as f:
++            for r in recs:
++                f.write(json.dumps(r) + "\n")
++        return {**comp, "shard_sha256": {fn: "x"}}
++
++    def rec(i, **kw):
++        return {"id": i, **GOOD, **{k: comp[k] for k in comp}, "file_sha256": inf[i]["file_sha256"], **kw}
++    with tempfile.TemporaryDirectory() as td:
++        c = mk(td, [rec("a"), rec("b")])
++        T.check_shards(td, c, ids, raw, inf)
++        check("shards_valid_passes", True)
++    with tempfile.TemporaryDirectory() as td:
++        c = mk(td, [rec("a"), rec("a"), rec("b")])
++        ok, msg = raises(lambda: T.check_shards(td, c, ids, raw, inf), ValueError)
++        check("shards_reject_duplicate_id", ok, msg)
++    with tempfile.TemporaryDirectory() as td:
++        c = mk(td, [rec("a")])
++        ok, msg = raises(lambda: T.check_shards(td, c, ids, raw, inf), ValueError)
++        check("shards_reject_missing_request", ok, msg)
++    with tempfile.TemporaryDirectory() as td:
++        c = mk(td, [rec("a"), rec("b", source_digest="other")])
++        ok, msg = raises(lambda: T.check_shards(td, c, ids, raw, inf), ValueError)
++        check("shards_reject_source_digest", ok, msg)
++    with tempfile.TemporaryDirectory() as td:
++        c = mk(td, [rec("a"), rec("b", file_sha256="zz")])
++        ok, msg = raises(lambda: T.check_shards(td, c, ids, raw, inf), ValueError)
++        check("shards_reject_file_hash_vs_infer", ok, msg)
++    with tempfile.TemporaryDirectory() as td:
++        c = mk(td, [rec("a"), rec("b", scores=[0.9, 0.3])])
++        ok, msg = raises(lambda: T.check_shards(td, c, ids, raw, inf), ValueError)
++        check("shards_reject_differs_from_raw_preds", ok, msg)
++    # 영상 hash 연결: 실제 한 영상의 infer hash를 변조
++    v = json.load(open(T.IDS_PATH["V400"]))[:2]
++    bad = {i: dict(infer[i]) for i in v}
++    bad[v[0]]["file_sha256"] = "0" * 64
++    ok, msg = raises(lambda: T.verify_images(v, bad), ValueError)
++    check("images_reject_hash_mismatch", ok, msg)
++    hw = T.verify_images(v, infer)
++    check("images_valid_returns_hw", len(hw) == 2 and all(len(x) == 2 for x in hw.values()))
++    # source digest 변조는 실제 detector loader가 거부
++    ids400 = json.load(open(T.IDS_PATH["V400"]))
++    hw400 = {i: (1, 1) for i in ids400}  # 도달 전에 거부되므로 사용되지 않음
++    os.environ["DET_TEST_SOURCE_SALT"] = "tamper"
++    try:
++        ok, msg = raises(lambda: T.load_detector("V400", 17, ids400, infer, hw400, T.verify_lock()), ValueError)
++    finally:
++        del os.environ["DET_TEST_SOURCE_SALT"]
++    check("detector_loader_rejects_source_digest_mismatch", ok, msg)
++
++
++def test_output_protection():
++    with tempfile.TemporaryDirectory() as td:
++        p = os.path.join(td, "x.json")
++        T.write_json_new(p, {"a": 1})
++        ok, msg = raises(lambda: T.write_json_new(p, {"a": 2}), FileExistsError)
++        check("write_json_new_refuses_overwrite", ok and json.load(open(p)) == {"a": 1}, msg)
++        check("write_json_new_no_tmp_left", [f for f in os.listdir(td) if ".tmp" in f] == [])
++        o = T.OutputOwner(td)
++        code = ("import sys;sys.path.insert(0,'%s');from rsna_diag import det37 as T\n"
++                "try:\n    T.OutputOwner(sys.argv[1]);print('acquired')\nexcept RuntimeError as e:\n    print('refused')\n" % BASE)
++        r = subprocess.run([sys.executable, "-c", code, td], capture_output=True, text=True)
++        check("owner_lock_second_process_refused", r.stdout.strip() == "refused", (r.stdout, r.stderr[-200:]))
++        o.release()
++        r = subprocess.run([sys.executable, "-c", code, td], capture_output=True, text=True)
++        check("owner_lock_reacquired_after_release", r.stdout.strip() == "acquired", (r.stdout, r.stderr[-200:]))
++
++
++def test_criterion():
++    n_gt = np.ones(300)
++    idx = M.bootstrap_indices(300, B=2000, seed=1)
++    # cap 없음: 영향 환자 30명(10%) → a 참, b 비해당
++    r = np.zeros(300); r[:30] = 1
++    out = T.criterion_ab(r, n_gt, np.zeros(300, bool), idx)
++    check("crit_no_cap_a_true_b_na", out["criterion_a_met"] and not out["criterion_b_applicable"] and not out["criterion_b_met"] and out["escalate_to_gpu_trace"], out)
++    # 관측 R 낮음(1명): a 거짓, cap 있어도 b 거짓, 승격 없음
++    r = np.zeros(300); r[0] = 1
++    cap = np.zeros(300, bool); cap[:5] = True
++    out = T.criterion_ab(r, n_gt, cap, idx)
++    check("crit_low_r_no_escalation", (not out["criterion_a_met"]) and (not out["criterion_b_met"]) and not out["escalate_to_gpu_trace"], out)
++    # cap 있고 판단 유지: 영향 30명 중 cap 환자 3명 → 양극단 모두 a 참
++    r = np.zeros(300); r[:30] = 1
++    cap = np.zeros(300, bool); cap[:3] = True
++    out = T.criterion_ab(r, n_gt, cap, idx)
++    check("crit_cap_decision_unchanged", out["criterion_b_applicable"] and out["criterion_a_met"] and not out["criterion_b_met"], out)
++    # cap 있고 판단이 바뀜: 영향 21명 전부 cap 환자 → 회복 가능 극단에서 0 → a 거짓
++    r = np.zeros(300); r[:21] = 1
++    cap = np.zeros(300, bool); cap[:21] = True
++    out = T.criterion_ab(r, n_gt, cap, idx)
++    check("crit_cap_decision_changes", out["criterion_b_met"] and out["criterion_a_met"] and not out["extreme_all_recoverable"]["met"], out)
++
++
++def test_audit_rows_and_categories():
++    gt = {"p": {"boxes": [{"yxyx_norm": [400, 400, 500, 500]}, {"yxyx_norm": [100, 100, 200, 200]}], "category": "opacity"}}
++    cands = [{"idx": 0, "box": [405, 405, 505, 505], "score": 0.9},          # GT0에 잘 맞음(선택)
++             {"idx": 1, "box": [102, 102, 202, 202], "score": 0.2},          # GT1에 맞음, 낮은 score(threshold 아래)
++             {"idx": 2, "box": [102, 102, 202, 202], "score": 0.4},          # 같은 위치, 더 높은 score(threshold 아래)
++             {"idx": 3, "box": [700, 700, 800, 800], "score": 0.8}]          # 어느 GT와도 무관(FP)
++    sft = {17: {"p": {"status": "valid_nonempty", "boxes": [[400, 400, 500, 500], [100, 100, 200, 200]]}}}
++    rows = T.gt_audit_rows(["p"], gt, {"p": cands}, 0.5, sft)
++    r0, r1 = rows
++    check("audit_det_pair_idx_selected", r0["det_pair_idx@0.3"] == 0 and r1["det_pair_idx@0.3"] is None, (r0["det_pair_idx@0.3"], r1["det_pair_idx@0.3"]))
++    check("audit_top_score_over_thr_picks_highest_score_not_first", r1["top_score_cand_iou_ge_0.3"][:2] == [0.4, 2], r1["top_score_cand_iou_ge_0.3"])
++    check("audit_max_iou_all_tie_lowest_idx", r1["max_iou_all_idx"] == 1, r1["max_iou_all_idx"])
++    check("audit_max_iou_selected_of_missing_gt_is_low", r1["max_iou_selected"] < 0.3 and r1["max_iou_selected_idx"] in (0, 3), (r1["max_iou_selected"], r1["max_iou_selected_idx"]))
++    check("audit_category_threshold_excluded", r1["sft17_only_category@0.3"] == "threshold_excluded" and r0["sft17_only_category@0.3"] is None, (r1["sft17_only_category@0.3"], r0["sft17_only_category@0.3"]))
++    cands_far = [{"idx": 0, "box": [700, 700, 800, 800], "score": 0.9}]
++    rows2 = T.gt_audit_rows(["p"], gt, {"p": cands_far}, 0.5, sft)
++    check("audit_missing_is_none_not_zero", rows2[0]["top_score_cand_iou_ge_0.3"] is None and rows2[0]["top_score_cand_iou_ge_0.5"] is None, rows2[0]["top_score_cand_iou_ge_0.3"])
++    check("audit_category_no_coverage_for_far_candidates", rows2[0]["sft17_only_category@0.3"] == "no_stored_candidate_coverage", rows2[0]["sft17_only_category@0.3"])
++    empty = T.gt_audit_rows(["p"], gt, {"p": []}, 0.5, sft)
++    check("audit_empty_candidates_max_iou_none", empty[0]["max_iou_all"] is None and empty[0]["max_iou_all_idx"] is None, empty[0]["max_iou_all"])
++    cs, rn, ng = T.category_stats(rows2, ["p"], 17, 0.3, M.bootstrap_indices(1, B=50, seed=3))
++    check("category_stats_r_numerator", cs["r_numerator"] == 2 and cs["total_gt"] == 2 and cs["r_n_affected_patients"] == 1, cs["r_numerator"])
++    # FP 범주 합 == 전체, 두 IoU
++    preds = {"p": {"status": "valid_nonempty", "boxes": [c["box"] for c in cands]}}
++    for t in (0.3, 0.5):
++        d = DA.fp_decompose(["p"], {"p": {"boxes": gt["p"]["boxes"]}}, preds, thr=t)
++        check(f"fp_category_sum_equals_total_iou{t}", sum(v for k, v in d.items() if k != "n_fp_total") == d["n_fp_total"], d)
++    # pair: IoU0.3 쌍의 IoU가 0.5 미만이어도 독립 재매칭(0.5)으로는 다른 후보가 GT를 검출하는 사례
++    g = [[0, 0, 100, 100]]
++    p1 = [[0, 0, 100, 40]]   # IoU 0.4 (0.3 대응, 0.5 실패)
++    check("pair_fixed_pair_fail_at_0.5", T.pairs_orig([{"idx": 7, "box": p1[0]}], g, 0.3)[0][0] == 7 and T.pairs_orig([{"idx": 7, "box": p1[0]}], g, 0.5) == {})
++
++
++def test_resume_and_real_d24():
++    """실제 V400 D24: 단위 3개 후 강제 종료 → 재개 → 무중단 실행 결과와 단위별 동일, 다른 split 재개 거부."""
++    ref_dir = f"{BASE}/results/iter_037/a1/d24_V400"
++    if not os.path.exists(f"{ref_dir}/report.json"):
++        check("d24_reference_exists", False, ref_dir)
++        return
++    ref = json.load(open(f"{ref_dir}/report.json"))
++    check("d24_reference_n_ids_24", ref["n_ids"] == 24 and ref["n_positive"] == 8, (ref["n_ids"], ref["n_positive"]))
++    cats = {}
++    gt = json.load(open(f"{BASE}/results/iter_010/manifests/gt_manifest.json"))
++    d24 = DA.stratified_d24(json.load(open(T.IDS_PATH["V400"])), gt)
++    for i in d24:
++        cats[gt[i]["category"]] = cats.get(gt[i]["category"], 0) + 1
++    check("d24_category_counts_8_each", cats == {"opacity": 8, "normal": 8, "not_normal_no_opacity": 8}, cats)
++    check("d24_gt_count_strata_present", len({len(gt[i]["boxes"]) for i in d24 if gt[i]["category"] == "opacity"}) >= 3)
++    with tempfile.TemporaryDirectory(dir=f"{BASE}/results/iter_037") as td:
++        out = os.path.join(td, "resume")
++        cmd = [sys.executable, f"{BASE}/rsna_diag/det37.py", "--split", "V400", "--d24", "--out", out, "--workers", "1"]
++        r1 = subprocess.run(cmd + ["--stop_after", "3"], capture_output=True, text=True)
++        n_partial = len(os.listdir(os.path.join(out, "units")))
++        check("resume_forced_stop_after_3_units", r1.returncode == 7 and n_partial == 3, (r1.returncode, n_partial))
++        r2 = subprocess.run(cmd, capture_output=True, text=True)
++        check("resume_completes", r2.returncode == 0 and os.path.exists(os.path.join(out, "report.json")), r2.stderr[-300:])
++        same = True
++        for n in ref["tables"]:
++            same &= ref["tables"][n] == json.load(open(os.path.join(out, "report.json")))["tables"][n]
++        rep2 = json.load(open(os.path.join(out, "report.json")))
++        for n in ref["detector"]:
++            a, b = dict(ref["detector"][n]), dict(rep2["detector"][n])
++            a.pop("elapsed_s"); b.pop("elapsed_s")
++            same &= a == b
++        check("resume_result_equals_uninterrupted_run", same)
++        full = [sys.executable, f"{BASE}/rsna_diag/det37.py", "--split", "V400", "--out", out, "--workers", "1"]
++        r3 = subprocess.run(full, capture_output=True, text=True)  # 전체 분할(d24 아님) → 다른 입력
++        check("rerun_with_different_inputs_refused", r3.returncode != 0 and "differs" in r3.stderr, r3.stderr[-200:])
++        r4 = subprocess.run(cmd, capture_output=True, text=True)
++        check("rerun_after_complete_refuses_report_overwrite", r4.returncode != 0 and "FileExistsError" in r4.stderr, r4.stderr[-200:])
++        # unit 변조(입력 digest)가 있으면 재사용 거부
++        up = os.path.join(out, "units", "sft17.json")
++        u = json.load(open(up)); u["header"]["inputs_digest"] = "bad"; json.dump(u, open(up, "w"))
++        os.unlink(os.path.join(out, "report.json"))
++        r5 = subprocess.run(cmd, capture_output=True, text=True)
++        check("stale_unit_reuse_refused", r5.returncode != 0 and "different config/inputs" in r5.stderr, r5.stderr[-200:])
++
++
++if __name__ == "__main__":
++    test_validate_raw()
++    test_lock_tamper()
++    test_shards_and_images()
++    test_output_protection()
++    test_criterion()
++    test_audit_rows_and_categories()
++    test_resume_and_real_d24()
++    print(json.dumps({"pass": res["pass"], "fail": res["fail"]}))
++    out_path = sys.argv[1] if len(sys.argv) > 1 else os.environ.get("DET37_FIXTURES_OUT")
++    if out_path:
++        T.write_json_new(out_path, res)
++    sys.exit(1 if res["fail"] else 0)
+diff --git a/tests_det/verify_iter037_independent.py b/tests_det/verify_iter037_independent.py
+new file mode 100644
+index 0000000..5e09ae8
+--- /dev/null
++++ b/tests_det/verify_iter037_independent.py
+@@ -0,0 +1,211 @@
++"""iter_037 독립 수치 대조. det37 report.json의 표를 원시 raw_preds.json과 SFT 응답에서 자체 구현으로 다시 계산한다.
++
++독립 구현: IoU, itertools 열거 matching(최대 cardinality→총 IoU→사전순, det_match/metrics.match 미사용),
++padding 좌표 변환(geometry 미사용), F1·lesion recall·FP·통합 FP 범주·상보성·SFT-only 4범주·R·pair IoU0.5 통과율.
++공유(독립 아님): SFT 응답 parser(parse.parse_response), 영상 크기 img_hw는 raw_preds 기록, GT manifest, 선택 threshold(LOCK 파일).
++bootstrap CI는 이 검증에서 다시 계산하지 않는다(회귀 검사와 iter_036 리뷰의 독립 재계산에 의존).
++사용: python tests_det/verify_iter037_independent.py --split V400|confirm800 --report <report.json> --out <새 json> (덮어쓰기 거부)"""
++import argparse
++import itertools
++import json
++import os
++import sys
++
++BASE = "/SSD1_1TB/home/milab/daniel/08_medgemma/research"
++sys.path.insert(0, BASE)
++from rsna_diag import parse as PA  # noqa: E402  (parser만 공유)
++
++SEL = {17: f"{BASE}/results/iter_035/select/seed17/v400_selection.json", 29: f"{BASE}/results/iter_035/select/seed29/v400_selection.json"}
++RAWDIR = {"confirm800": {17: "results/iter_035/confirm800/det17", 29: "results/iter_035/confirm800/det29"},
++          "V400": {17: "results/iter_035/eval/seed17/V400_e18", 29: "results/iter_035/eval/seed29/V400_e26"}}
++SFTDIR = {"confirm800": {s: f"results/iter_012/confirm_sft_seed{s}" for s in (17, 29, 43)},
++          "V400": {17: "results/iter_012/train/lr2e-4_s17/epoch_05/val_gen"}}
++IDS = {"confirm800": "results/iter_010/manifests/confirm_ids.json", "V400": "results/iter_010/manifests/validation_ids.json"}
++
++
++def iou(a, b):
++    ih = max(0.0, min(a[2], b[2]) - max(a[0], b[0]))
++    iw = max(0.0, min(a[3], b[3]) - max(a[1], b[1]))
++    i = ih * iw
++    u = (a[2] - a[0]) * (a[3] - a[1]) + (b[2] - b[0]) * (b[3] - b[1]) - i
++    return i / u if u > 0 else 0.0
++
++
++def pairs(pred, gt, thr):
++    """{gi: pi} 열거 matching."""
++    if not pred or not gt:
++        return {}
++    cands = [[p for p in range(len(pred)) if iou(pred[p], g) >= thr] + [None] for g in gt]
++    best, bk = {}, None
++    for combo in itertools.product(*cands):
++        used = [c for c in combo if c is not None]
++        if len(used) != len(set(used)):
++            continue
++        k = (len(used), sum(iou(pred[c], gt[gi]) for gi, c in enumerate(combo) if c is not None))
++        if bk is None or k[0] > bk[0] or (k[0] == bk[0] and k[1] > bk[1] + 1e-12):
++            bk, best = k, {gi: c for gi, c in enumerate(combo) if c is not None}
++    return best
++
++
++def to_norm(box, h, w):
++    side = max(h, w)
++    top = (side - h) // 2 if h < w else 0
++    left = (side - w) // 2 if w < h else 0
++    x0, y0, x1, y1 = box
++    return [(y0 + top) * 1000.0 / side, (x0 + left) * 1000.0 / side, (y1 + top) * 1000.0 / side, (x1 + left) * 1000.0 / side]
++
++
++def f1(tp, npred, ngt):
++    p = tp / npred if npred else 0.0
++    r = tp / ngt if ngt else 0.0
++    return 2 * p * r / (p + r) if p + r > 0 else 0.0
++
++
++def fp_cats(pred, gt, thr):
++    pr = pairs(pred, gt, thr)
++    mp_, mg = set(pr.values()), set(pr)
++    c = {"competes_for_matched_gt": 0, "near_miss_0.1_to_thr": 0, "no_gt_within_0.1": 0}
++    for pi, b in enumerate(pred):
++        if pi in mp_:
++            continue
++        m = max((iou(b, g) for g in gt), default=0.0)
++        if m >= thr:
++            c["competes_for_matched_gt"] += 1
++        elif m >= 0.1:
++            c["near_miss_0.1_to_thr"] += 1
++        else:
++            c["no_gt_within_0.1"] += 1
++    return c
++
++
++def main():
++    ap = argparse.ArgumentParser()
++    ap.add_argument("--split", required=True, choices=["V400", "confirm800"])
++    ap.add_argument("--report", required=True)
++    ap.add_argument("--out", required=True)
++    a = ap.parse_args()
++    if os.path.exists(a.out):
++        raise FileExistsError(a.out)
++    rep = json.load(open(a.report))
++    gtm = json.load(open(f"{BASE}/results/iter_010/manifests/gt_manifest.json"))
++    ids = json.load(open(f"{BASE}/{IDS[a.split]}"))
++    if rep["n_ids"] != len(ids):
++        raise ValueError("report n_ids differs (D24 report is not verified here)")
++    gt = {i: [b["yxyx_norm"] for b in gtm[i]["boxes"]] for i in ids}
++    cat = {i: gtm[i]["category"] for i in ids}
++    pos = [i for i in ids if cat[i] == "opacity"]
++    sft = {}
++    for s, d in SFTDIR[a.split].items():
++        recs = {}
++        for fn in sorted(os.listdir(f"{BASE}/{d}")):
++            if fn.startswith("gen_worker") and fn.endswith(".jsonl"):
++                for ln in open(f"{BASE}/{d}/{fn}"):
++                    r = json.loads(ln)
++                    recs[r["id"]] = r
++        sft[s] = {}
++        for i in ids:
++            p = PA.parse_response(recs[i]["suffix_text_raw"], recs[i]["ended_eos"])
++            sft[s][i] = (p["status"], p["boxes"] if p["status"] in PA.VALID else [])
++    out = {"mismatches": [], "n_compared": 0}
++
++    def cmp(name, new, old):
++        out["n_compared"] += 1
++        ok = (abs(new - old) <= 1e-8) if isinstance(new, float) or isinstance(old, float) else new == old
++        if not ok:
++            out["mismatches"].append({"name": name, "independent": new, "report": old})
++
++    def model_numbers(preds):
++        """preds {id: boxes} -> 독립 계산 표."""
++        f3, f5, tp3, tp5, ngt = [], [], 0, 0, 0
++        for i in pos:
++            p3, p5 = len(pairs(preds[i], gt[i], 0.3)), len(pairs(preds[i], gt[i], 0.5))
++            f3.append(f1(p3, len(preds[i]), len(gt[i]))); f5.append(f1(p5, len(preds[i]), len(gt[i])))
++            tp3 += p3; tp5 += p5; ngt += len(gt[i])
++        fp = {}
++        for name, sub in (("all", ids), *[(c, [i for i in ids if cat[i] == c]) for c in ("opacity", "normal", "not_normal_no_opacity")]):
++            fp[name] = {}
++            for t in (0.3, 0.5):
++                tot = {"competes_for_matched_gt": 0, "near_miss_0.1_to_thr": 0, "no_gt_within_0.1": 0}
++                for i in sub:
++                    for k, v in fp_cats(preds[i], gt[i], t).items():
++                        tot[k] += v
++                fp[name][t] = tot
++        return {"f1@0.3": sum(f3) / len(f3), "f1@0.5": sum(f5) / len(f5), "tp@0.3": tp3, "tp@0.5": tp5, "n_gt": ngt, "fp": fp}
++
++    def check_table(tag, ind, tab):
++        cmp(f"{tag} f1@0.3", ind["f1@0.3"], tab["f1@0.3"])
++        cmp(f"{tag} f1@0.5", ind["f1@0.5"], tab["f1@0.5"])
++        cmp(f"{tag} tp@0.3", ind["tp@0.3"], tab["lesion@0.3"]["tp"])
++        cmp(f"{tag} tp@0.5", ind["tp@0.5"], tab["lesion@0.5"]["tp"])
++        cmp(f"{tag} n_gt", ind["n_gt"], tab["lesion@0.3"]["n_gt"])
++        for name, blk in ind["fp"].items():
++            rn = "all800" if name == "all" and len(ids) == 800 else name
++            for t, c in blk.items():
++                rc = tab["fp"][rn][f"iou{t}"]
++                for k, v in c.items():
++                    cmp(f"{tag} fp {rn} iou{t} {k}", v, rc[k])
++                cmp(f"{tag} fp {rn} iou{t} total", sum(c.values()), rc["n_fp_total"])
++
++    for s in sft:
++        check_table(f"sft{s}", model_numbers({i: sft[s][i][1] for i in ids}), rep["tables"][f"sft{s}"])
++    for d in (17, 29):
++        raw = json.load(open(f"{BASE}/{RAWDIR[a.split][d]}/raw_preds.json"))
++        allc = {i: [(to_norm(b, *raw[i]["img_hw"]), s_) for b, s_, l in zip(raw[i]["boxes_xyxy_px"], raw[i]["scores"], raw[i]["labels"])] for i in ids}
++        sel = json.load(open(SEL[d]))
++        ops = {"selected": sel["selected"]["threshold"], **{f"fp_budget_{b}": r["threshold"] for b, r in sel["fp_budgets"].items() if r}}
++        for opn, thr in ops.items():
++            key = f"det{d}__{opn}"
++            unit = rep["detector"][key]
++            cmp(f"{key} threshold", thr, unit["threshold"])
++            selb = {i: [b for b, s_ in allc[i] if s_ >= thr] for i in ids}
++            check_table(key, model_numbers(selb), unit["table"])
++            # 상보성 / 분해 / R / pair
++            for s in sft:
++                blk = unit["vs_sft"][f"sft{s}"]
++                for t in (0.3, 0.5):
++                    cnt = {"both_hit": 0, "detector_only": 0, "sft_only": 0, "both_miss": 0}
++                    cats = {c: 0 for c in ("matching_competition", "threshold_excluded", "adjacent_localization_error", "no_stored_candidate_coverage")}
++                    r_num = 0
++                    for i in pos:
++                        dh, sh = set(pairs(selb[i], gt[i], t)), set(pairs(sft[s][i][1], gt[i], t))
++                        for gi, g in enumerate(gt[i]):
++                            k = ("both_hit" if gi in dh and gi in sh else "detector_only" if gi in dh else "sft_only" if gi in sh else "both_miss")
++                            cnt[k] += 1
++                            if k == "sft_only":
++                                if any(iou(b, g) >= t for b in selb[i]):
++                                    c = "matching_competition"
++                                else:
++                                    m = max((iou(b, g) for b, _ in allc[i]), default=0.0)
++                                    c = "threshold_excluded" if m >= t else "adjacent_localization_error" if m >= 0.1 else "no_stored_candidate_coverage"
++                                cats[c] += 1
++                                r_num += c in ("adjacent_localization_error", "no_stored_candidate_coverage")
++                    for k, v in cnt.items():
++                        cmp(f"{key} sft{s} iou{t} {k}", v, blk["complementarity"][f"iou{t}"][k])
++                    for k, v in cats.items():
++                        cmp(f"{key} sft{s} iou{t} cat {k}", v, blk["decomposition"][f"iou{t}"]["category_counts"][k])
++                    cmp(f"{key} sft{s} iou{t} r_numerator", r_num, blk["decomposition"][f"iou{t}"]["r_numerator"])
++            # pair 표
++            for model, pr in [("detector", selb)] + [(f"sft{s}", {i: sft[s][i][1] for i in ids}) for s in sft]:
++                n = p05 = rem = 0
++                for i in pos:
++                    p3 = pairs(pr[i], gt[i], 0.3)
++                    h5 = set(pairs(pr[i], gt[i], 0.5))
++                    for gi, pi in p3.items():
++                        n += 1
++                        p05 += iou(pr[i][pi], gt[i][gi]) >= 0.5
++                        rem += gi in h5
++                sm = unit["pair_summary"][model]
++                cmp(f"{key} {model} pair n", n, sm["n_pairs_iou0.3"])
++                cmp(f"{key} {model} pair pass0.5 rate", p05 / n, sm["pair_pass_iou0.5_rate"])
++                cmp(f"{key} {model} rematch rate", rem / n, sm["gt_hit_by_independent_rematch_0.5_rate"])
++    out["pass"] = not out["mismatches"]
++    print(json.dumps({"n_compared": out["n_compared"], "n_mismatch": len(out["mismatches"]), "pass": out["pass"]}))
++    tmp = a.out + ".tmp"
++    json.dump(out, open(tmp, "w"), indent=1)
++    os.link(tmp, a.out)
++    os.unlink(tmp)
++    sys.exit(0 if out["pass"] else 1)
++
++
++if __name__ == "__main__":
++    main()

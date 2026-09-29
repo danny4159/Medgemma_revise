@@ -13128,3 +13128,460 @@ R은 IoU0.3 대응 후보 부재다. 더 느슨한 IoU0.1 미만 범주가0이�
 기존 계획을 기준으로 미완료 비교와 실제 사용할 코드의 출처 보호만 보완한다. V400 저장 출력의 존재를 정정하고 필요한 회귀 검사에 활용하되, 사전 실행 순서를 소급해서 바꾸지 않는다. 기존800명 주분해·학습·GPU 추적을 반복할 이유는 없다.
 
 고정 FP budget 비교까지 정리한 뒤 현재 방법 개선·최소 선택 진단·언어와 근거가 필요한 다른 질문을 비교해 다음 투자를 정한다. VinDr 승인 통지가 오면 실제 권한·파일·target 차이를 확인하고 외부 계획을 재검토한다. 승인 통지 전 다운로드·외부 평가나 반복 질문은 하지 않으며 continuation·MRI F139·reserve는 보존한다.
+
+
+## iter_037 GPT PLAN [RSNA 전용 detector와 SFT 비교 / proceed] — 2026-09-29 23:46:05
+
+# 요약
+
+- **이번에 할 일:** iter_036의 미완료 FP 비용 비교, 대응쌍 감사와 실제 사용 loader의 출처 검증을 마무리한다.
+- **필요한 이유:** 낮은 score 후보의 존재만으로 detector의 실용적 우위나 SFT의 추가 가치를 판단할 수 없다.
+- **확인할 기준:** 고정 operating point의 성능·FP 비용, 원래 대응쌍과 재매칭의 구분, 입력 무결성과 독립 수치 대조를 확인한다.
+- **주의·다음:** 개발800은 독립 확인이 아니다. 완료 결과를 재생성하지 않고 이번 보완 후 다음 투자 방향을 선택한다. VinDr 승인 대기는 유지한다.
+
+# Current Understanding
+
+## 기준 문서와 적용 범위
+
+기준은 `agent/runs/iter_036/plan.md`, SHA256 `d00ffbce7c43c3ae34433e89f5ed563feece3991ee71d2af00890de4655ea123`이다. Claude는 이 원문과 `agent/runs/iter_036/review.md`, 해당 `review.json/code_assets`를 먼저 읽는다. 이 계획은 기준 문서의 미완료 부분에 대한 amendment다. 아래 명시한 변경 외 가설·자료·metric·threshold·seed·확대 및 판정 조건을 유지한다.
+
+**유지:** 사용자 보완 `20260929_131450_4dda5b89`, GOAL, 기존 학습·선택·분할, 개발800 지위, 정상 사용 규약, 완료된 detector/SFT/continuation 결과와 원본 기록을 유지한다. VinDr 승인 통지 전 다운로드·외부 평가·반복 승인 질문을 하지 않는다. MRI F139와 reserve는 열지 않는다.
+
+**이번 변경:** V400 출력 부재 설명을 새 보고서와 현재 코드 설명에서 정정한다. 기존 보고서·결과는 덮어쓰지 않는다. 원래 수행하지 않은 사전 검사를 이제 수행했다고 소급하지 않고, V400을 사후 회귀 검사에 사용한다. FP의 중복 후보와 대응 경쟁을 합친 기존 구현은 이번 amendment에서 명시적으로 유지하되 두 원인을 따로 검증했다고 표현하지 않는다.
+
+**미완료:** 양쪽 detector의 고정 FP budget별 전체 표, GT·후보 index와 score 감사 자료, 같은 대응쌍의 IoU0.5 통과율, 자동 provenance·cap 판정·출력 소유권 보호다.
+
+**재사용:** iter_036 리뷰가 독립 재현한 6개 seed 조합의 주분해·R·CI와 iter_035의 유효한 성능·비용·층별 표는 hash와 출처를 연결해 재사용한다. 변경된 계산 경로의 회귀 검사는 필요하지만 완료된800명 진단 전체를 새 실험으로 반복하지 않는다.
+
+# Strategy Check / 연구 방향 판단
+
+직전 전략 근거는 iter_036 plan과 review의 Strategy Check다. 같은 실험의 보완이므로 문헌·방법 후보를 처음부터 다시 조사하지 않는다. 현재 유효 실험은2회이며, 이번 종료 시 반복 횟수와 별개로 다음 투자 판단을 기록한다.
+
+중요한 능력은 미검출을 줄이면서 FP와 위치 오차를 억제하는 의료 영상 근거 생성이다. 확인된 사실은 SFT-only GT 대부분에 detector의 threshold 아래 후보가 있다는 것이다. 후보 선택의 실제 효용, confidence 교정의 효과와 외부 재현은 확인되지 않았다.
+
+1. **현재 bbox 방법 개선:** 실제 생성 개선으로 연결될 수 있지만 큰 후보 발견 차이에 근거한 새 학습은 현재 지지가 약하다. 비용과 신규성 불확실성이 크다.
+2. **원인·선택 진단 마무리:** 기존 출력으로 빠진 비용 비교를 완성할 수 있다. 현재 가장 적은 추가 작업으로 투자 판단을 바꿀 선택이다.
+3. **언어·근거가 필요한 다른 질문:** VLM의 필요성을 직접 물을 가치가 있으나 유효한 정답·사용 과제·직접 SFT 및 detector+VLM 같은 비교군을 별도로 설계해야 한다. 이번에 조용히 새 benchmark나 MRI·longitudinal 실험으로 전환하지 않는다.
+
+완료 후 보고서에는 위 세 선택 중 다음 우선순위 하나와 근거·반증 조건을 적는다. 같은 개발800에서 분석 종류를 계속 늘리는 권고는 하지 않는다. 새 학습이나 표준 calibration도 자동 실행하지 않는다.
+
+# Hypothesis
+
+기준 계획의 H_selection, H_geometry, H_residual을 유지한다. 이번 보완은 새로운 가설 검증을 가장한 재학습이 아니다.
+
+- H_selection의 기존 지지를 실제 FP 비용과 함께 해석한다.
+- H_geometry에서 같은 prediction–GT 쌍의 위치 정밀도와 독립 재매칭 효과를 구분한다.
+- H_residual의 기존 음성 근거와 조건부 GPU 확대 기준을 유지한다. 원시 후보 coverage를 검출 recall로 바꾸어 표현하지 않는다.
+
+# Limitation Evidence / Correct Usage Checks
+
+직접 대상은 `rsna-detector-sft-localization-tradeoff`이며 상태는 observed다. 근거 원문은 `agent/LIMITATIONS.md`의 해당 항목과 `agent/runs/iter_036/review.json`이다.
+
+리뷰가 확인한 SFT-only threshold 제외는 detector17에서75/77개, detector29에서80/87개다. R은1/589·7/589, 97.5% CI 상한은0.006768·0.022375이며 영향 환자는1·7명이다. cap100 도달은0건이다. 내부 원인·일반적인 VLM 결함·외부 일반화는 확정되지 않았다.
+
+MedGemma revision `91850547d9f0b2fdd21aa7c5f4f3d1a8a52c243b`, 기존 adapter·prompt·processor·EOS·strict parser·원본 pixel xyxy와 padded yxyx 0–1000 연결을 유지한다. 생성 길이와 입력을 변경하지 않는다. 기존 정상 사용 검증은 동일 소스·입력 조건에서만 재사용한다.
+
+현재 입력 hash와 과거 생성 소스 SHA를 각각 확인한다. 수정된 분석 코드 digest를 과거 추론 digest와 같게 만들거나 원본 metadata를 갱신하지 않는다.
+
+# Contribution Path / Baselines / Reuse
+
+## 비교 조건
+
+주비교는 detector17 epoch18/threshold0.70 대 SFT17이다. detector29 epoch26/threshold0.60 및 SFT29·43의 기존 민감도를 유지한다. 잠긴 FP budget0.25/0.5/1.0 threshold는 각각 detector17의0.75/0.50/0.15, detector29의0.65/0.25/0.10이다.
+
+선택 원본은 `results/iter_035/select/LOCK.json`과 `select/seed{17,29}/v400_selection.json`이다. validation에서 선택된 checkpoint와 threshold를 다시 선택하지 않는다. nominal budget과 개발 집단의 실제 FP/환자를 모두 표시한다.
+
+동일 annotation budget이 동일 학습 비용을 뜻하지 않는다. detector 전체 적응과 VLM rank16 LoRA의 사전학습·학습량·추론 차이는 기존 iter_035 표에 연결한다. 이번에는 detector+VLM의 언어 과제 성능을 평가하지 않는다. GT 기반 coverage와 후보 회복 가능성은 oracle 진단으로 명시한다.
+
+가까운 오류 분해 선행연구는 기준 계획이 검토한 TIDE다. 이번 보완을 TIDE 재현이나 새로운 진단 방법으로 주장하지 않는다.
+
+## 코드 재사용
+
+현재 branch `approach/rsna-detector-comparison`, HEAD `f9bfbc250058ce1785f819dd404b1148998918b9`를 잇는다. 필요한 파일이 모두 있어 `reuse_iteration=0`, `reuse_assets=[]`다. 전체 snapshot 재사용 승인을 뜻하지 않는다.
+
+- 승인 범위 유지: `rsna_diag/__init__.py`, `geometry.py`, `parse.py`, `metrics.py`, `sft_eval.py`의 현재 RSNA 좌표·parser·matching·집계.
+- 제한된 승인 범위: `det_lib.py`의 기존 RSNA 입력·좌표 보조. 전체 실행기 승인은 아니다.
+- 수정 대상: `det_error_audit.py`, 실제 호출하는 `det_compare.py`와 `det_eval.py`의 저장 출력 loader, `tests_det/test_det_error_audit.py`, `tests_det/verify_error_audit_independent.py`.
+- 참조 검사: `tests_det/test_match_identity.py`, `verify_compare_independent.py`의 기존 규약과 독립 검산 방식. 고정 결과 경로로 실행하지 않는다.
+- `det_match.bounded_match`의 GT identity는 사용하지 않는다. `metrics.match`와 독립 identity 대조를 유지한다.
+- 미사용 `det_jobs.py`, 학습 연장·latency·continuation 실행기의 결함은 이번 보완으로 해결됐다고 보고하지 않는다. 조건부 GPU 진입 전까지 해당 실행기를 수정하지 않는다.
+
+# Proposed Experiment
+
+## 1. 동작 확인: 사용 경로와 출처 보호
+
+새 산출물은 `research/results/iter_037/<attempt_id>/`에만 쓴다. 기준 plan hash, 분석 코드 SHA와 변경 파일 hash, 입력 파일·LOCK·checkpoint·adapter·protocol·분할 hash, metric·분류 규칙·bootstrap 설정을 manifest/config에 고정한다. 기존 표를 재사용하면 파일 hash와 사용한 JSON key를 기록한다.
+
+실제 loader에서 다음을 fail-closed로 검사한다.
+
+- LOCK의5개 파일 hash, seed 집합, 선택 checkpoint·threshold와 완료 기록 연결.
+- 원시 JSON·shard·completion·manifest의 정확한 요청 집합, 중복·누락 및 batch1·과거 source digest.
+- 현재 영상의 file hash·크기·좌표 연결과 기존 pixel/protocol 근거. 생성 코드 출처는 보존 SHA에 대조한다.
+- boxes/scores/labels 길이 일치, 좌표·score 유한성, 유효한 크기·범위·label과 원래 candidate index. 잘못된 값을 조용히 잘라내거나 보정하지 않는다.
+- 분석·overlay·독립 검증 출력의 원자적 소유권과 덮어쓰기 거부. 완료 재사용 시 config와 입력 hash를 다시 대조한다.
+
+V400에서 category별8명, 양성 GT 개수 층을 포함하는 hash 순서 D24를 고정한다. 성능에 따라 선택하지 않는다. 기존18개 fixture를 수정 범위에 맞춰 재실행하고, 배열 길이·NaN/Inf·LOCK 변조·영상 연결·중복 ID·동시 실행·중단 재개·출력 덮어쓰기 거부를 검사한다. 원본 자료를 변조하지 않고 별도 fixture에서 수행한다.
+
+## 2. 가능성 탐색 대신 사후 회귀 검사: V400
+
+SFT17 원본은 `results/iter_012/train/lr2e-4_s17/epoch_05/val_gen/`이다. 계획 단계에서400개 고유 ID, validation_ids 집합, adapter digest와 completion을 확인했다. Claude는 나머지 provenance·prompt·EOS·영상 연결을 실제 검증한다.
+
+detector 원본은 `results/iter_035/eval/seed17/V400_e18`과 `eval/seed29/V400_e26`다. D24 통과 후 V400 전체에서 변경 loader·분모·후보 index·matching·FP 집계를 검사한다. 새로운 SFT 출력이나 학습은 필요 없다. 이 검사는 iter_036 이후 수행한 사후 검사이며 과거의 사전 gate를 복원한 것으로 기록하지 않는다.
+
+학습0 update, 새 모델 seed0개다. V400 결과가 유리한지로 본보완 진행 여부를 선택하지 않고 무결성 통과 여부만 사용한다.
+
+## 3. 본보완: 고정 개발800의 빠진 표
+
+양성400명·GT589개, Normal200명·NoOpacity/NotNormal200명의 기존 집합을 유지한다. detector2×800건과 SFT3×800건은 원본을 재사용한다. 이미 충분한 저장 출력이 있으므로 새 소규모 성능 pilot이나 새 환자 추출을 하지 않는다.
+
+각 detector의 선택점과 세 FP budget에서 다음을 작성한다. 주대조는 SFT17이며 SFT29·43의 기존 seed 민감도는 연결한다. 원 계획의 비용·상보성 해석에 필요한 seed 민감도도 동일 저장 출력으로 보완하며 새 seed는 학습하지 않는다.
+
+- 양성 환자 평균 F1@0.3/0.5와 lesion recall.
+- 전체800 및 세 category별 FP 총수·FP/환자·분모, invalid 수와 기존 처리 규칙.
+- 두 IoU의 both/detector-only/SFT-only/both-miss 및 비율.
+- 원래 정의의 R과 영향 환자 수. 같은 후보 pool·SFT에서 R은 detector operating threshold에 의존하지 않으므로 불변성도 검사한다.
+- 기존 detector17 budget 표와 겹치는 수치는 provenance를 연결해 재사용하거나 변경 경로의 회귀 대조로 확인한다. 원시 출력 생성과 완료된 학습은 반복하지 않는다.
+
+GT별 감사 행에는 patient ID·GT index·원래 candidate index·일대일 대응 index, 선택/전체 후보 최대 IoU, IoU0.3/0.5 이상 후보의 최고 score와 그 index를 남긴다. 최고 IoU 후보와 최고 score 후보를 구분한다. 부재는0 score로 대체하지 않고 명시적 결측으로 저장한다.
+
+위치 표는 IoU0.3의 원래 prediction–GT 쌍을 고정한 뒤 그 쌍의 IoU≥0.5 여부와 독립 IoU0.5 재매칭의 GT 검출 여부를 따로 집계한다. 기존 중심거리/GT 대각선·면적비·폭·높이 비를 유지하고 correspondence 변경을 위치 개선으로 해석하지 않는다.
+
+FP 분해는 기존 구현의 `competes_for_matched_gt`, `near_miss_0.1_to_thr`, `no_gt_within_0.1`을 유지한다. 첫 범주는 중복/대응 경쟁의 통합 범주임을 명시한다. 이는 원래 네 범주 계획에 대한 이번 amendment이며 별도 중복 원인 효과는 미판정이다. 두 IoU에서 범주 합이 전체 FP와 같아야 한다.
+
+새 overlay가 필요한 사례는 기존 범주별 hash 순서 최대6명 규칙을 따른다. 선택 bbox뿐 아니라 분류 근거인 threshold 아래 후보의 index·score·GT를 표시하고 직접 열어 좌표와 대응을 확인한다. 육안 관찰로 GT나 표본을 바꾸지 않는다.
+
+## 4. 회귀 검증과 조건부 GPU 확대
+
+검증된 원래 선택점의 F1·상보성·범주 수·R은 정확한 count 및 수치 오차1e-8 이내로 유지돼야 한다. 불일치가 있으면 원인을 규명하고 영향 범위를 기록한다. 기존 전체 분석과 bootstrap을 무조건 반복하지 않고 변경이 전파된 경로와 새 표를 검증한다.
+
+GPU 확대 기준은 기준 계획 그대로다. detector17 또는29 대 SFT17에서 (a) R 영향 환자≥20명이며97.5% CI 상한≥5%, 또는 (b) cap으로 가려진 후보를 모두 회복 가능/불가능으로 둔 양극단에서5% 투자 판단이 달라지고, 해당 구분이 다음 투자에 영향을 줄 때만 진입한다.
+
+criterion_b는 실제 cap 대상 환자의 SFT 검출 GT 중 저장 후보 미대응 GT를 사용해 양극단 분자를 구성한다. 실제 자료에서는 cap0이므로 비해당이다. cap이 있지만 판단이 유지되는 fixture와 판단이 바뀌는 fixture를 모두 검사해 criterion_a만 사용하는 결함을 고친다.
+
+현재 확인된 자료에서는 두 조건 모두 미충족이므로 GPU0·학습0이 예상된다. CPU 분석의 실제 판단 공백은 FP 비용과 감사 경로이며, GPU가 추가로 답할 수 있는 것은 저장되지 않은 후처리 전 후보의 영향이다. 단순 처리량 확보를 위해 추론을 반복하지 않는다.
+
+예상과 달리 유효한 정정으로 확대 조건이 충족되면 기준 계획의 GPU 절차를 그대로 적용한다. 선택 checkpoint를 유지하고 ROI decode→score filtering→small-box 제거→NMS→cap의 생존 index를 추적한다. GT는 추론 입력에 넣지 않는다. D24의 trace on/off 최종 출력 동일성, 고정 V100의 처리량·재개 검사를 통과한 뒤 두 seed의 V400+개발800 최대2,400 image×checkpoint 요청을 수행한다. 원래 반환 경로와 threshold는 변경하지 않는다.
+
+직전 `nvidia-smi`로 허용 GPU0,1의 실제 여유·UUID·논리 index 대응을 확인한다. 독립 seed/shard를 두 GPU에 배치하고 trace 작업에서 GPU당1 worker와2 worker를 비교한다. 동시 peak 합과 다른 점유에 worker당2GiB 여유를 더해 안전할 때 총4 worker를 허용한다. 기존 batch4 출력 차이 때문에 batch1을 유지한다. 기존 worker당 reserved peak 약766MiB는 trace 메모리의 보장이 아니므로 다시 측정한다. 처리량·peak·I/O 경합·오류·출력 정합성으로 선택한다.
+
+GPU 진입 시에만 실행 소유권·worker별 결과·요청 중복/누락·손상 tail 보존·부모 종료·재개 검사를 보완한다. 모든 worker 종료와 요청 집합 검증 전에는 완료를 보고하지 않는다.
+
+## 5. 규모·비용·독립 확인
+
+CPU 실행은 원 계획의10–40분 추정치를 출발점으로 삼고 D24/V400에서 실측한 처리량과 남은 표·bootstrap 작업량으로 ETA를 갱신한다. 구현·검증 시간과 분석 실행 시간을 구분한다. 조건부 trace는 모델 로드·검증·I/O를 포함해10–30분 추정이며 시간 상한이 아니다.
+
+완료 단위마다 입력/config hash와 결과 digest를 남겨 재개한다. 통계 계산을 중단했으면 동일 seed·환자 순서로 해당 단위를 다시 계산하고 이전 결과를 덮어쓰지 않는다.
+
+이번 독립 환자·기관 확인은 미실행이다. seed 민감도와 독립 검산은 외부 확인을 대신하지 않는다. VinDr 승인 통지 후 별도 계획에서 target 차이와 이번 결과를 반영한다.
+
+# Implementation Tasks for Claude
+
+1. 기준 plan SHA256, 현재 HEAD, 관련 review/code_assets와 원본 출력 경로를 확인한다. 같은 분석이 실행 중이면 중복 시작하지 않는다.
+2. 실제 저장 출력 loader와 분석 출력 경로에만 위 provenance·유한성·길이·소유권 보호를 추가한다. 과거 결과와 생성 metadata를 수정하지 않는다.
+3. V400 사후 검사와 필요한 fixture를 실행한다. 출력 부재 설명과 실제 실행 순서를 새 보고서에서 정정한다.
+4. 고정 FP budget 전체 표, GT·후보 감사 행, 원래 대응쌍/독립 재매칭 표, 통합 FP 범주를 완성한다. 승인된 기존 표·CI는 출처와 불변 조건을 연결해 재사용한다.
+5. 독립 검증기는 명시적 입력·출력 인자를 받고 덮어쓰기를 거부하게 한다. 새 주표는 자체 IoU·matching·집계로 대조하고 parser·좌표 변환을 공유한 범위와 독립 구현 범위를 보고한다.
+6. criterion_a/b와 이번 GPU 미진입 근거를 저장한다. 유효한 정정으로 조건이 바뀔 때만 상속한 trace 절차를 수행한다.
+7. 보고서에 원 계획 대비 유지/변경/미완료, 실제 실행량·비용, 실행 유효성/성능 개선/가설 지지/신규 기여를 구분하고 다음 투자 우선순위 하나를 적는다. `SELF_CHECK: PASS/FAIL`, `SUMMARY:`를 유지한다. Git·branch·checkpoint 관리는 orchestrator에 맡긴다.
+
+# Evaluation (성공/실패 기준 포함)
+
+## 통계와 완료 기준
+
+기존 주 F1 차이의97.5% paired CI, 전체 FP 차이의95% CI를 유지한다. 새 R·threshold 제외 비율은97.5% 환자 cluster bootstrap,10,000회, seed20260929를 유지한다. 기존 F1/FP 비교의 bootstrap은 해당 원본 설정을 유지하고 새 계산의 설정을 명시한다. 비율은 resample별 분자·분모를 다시 계산한다. seed를 독립 환자로 합치지 않는다.
+
+분모0은 결측으로 표시한다. 관찰0건의 퇴화 bootstrap은 모집단 영점의 증명이 아니며 원 계획의 환자 사건 Wilson 구간과 해석 제한을 유지한다. 추가 budget·층·seed 비교는 탐색적이며 유리한 operating point를 새 주비교로 선택하지 않는다.
+
+이번 보완의 완료는 provenance 검사, V400 사후 검사, 빠진 비용 표, 대응쌍 감사, 명시한 FP 범주 amendment, criterion_a/b, 독립 수치 대조와 다음 투자 판단이 모두 있을 때다. 기존 미사용 실행기 결함이나 외부 확인을 완료됐다고 보고하지 않는다.
+
+## 양성·음성·불확정의 의미
+
+**양성:** 원 계획대로 두 detector 모두 R의97.5% CI 하한>5%, 영향 환자≥20명이고 필요한 추적 및 SFT seed 민감도에서도 유지될 때 제한된 잔여 차이를 지지한다. 이는 외부 확인과 기존 방법 대비 구별 가능한 실패 조건 검토의 근거이며 새 학습의 자동 실행 조건은 아니다. 현재 검증 결과는 이 기준을 충족하지 않는다.
+
+**음성:** 두 detector의 R CI 상한<5%이고 cap 양극단이 판단을 바꾸지 않으면 큰 후보 발견 차이를 약화한다. threshold 제외 비율 CI 하한>0.5이면 기존 선택 효과 해석을 유지한다. FP 증가나 F1 악화가 함께 나타나면 후보 회복의 실용성은 미확정으로 남긴다. 이때 새 시각 표현 loss·단순 ensemble의 우선순위를 낮추고, 선택 문제의 추가 진단과 언어·근거 과제의 가치를 비교한다.
+
+**불확정:** CI가 투자 기준을 가로지르거나 seed·matching·cap 영향이 판단을 바꾸면 원인을 구분한다. 후처리 관측이 병목일 때만 고정 GPU 조건을 적용한다. 독립성·기관·표본 정밀도가 병목이면 같은800명에 분석을 추가하거나 새 seed를 학습하지 않고 필요한 외부 근거를 명시한다.
+
+**실행 실패:** 입력 연결·GT identity·새 표의 독립 재계산이 실패하면 해당 분석과 그 결론을 보류한다. 이미 검증된 iter_035·036 결과를 자동 무효화하지 않는다. 구현 완료나 fixture 통과만으로 유효 실험·성능 개선·목표 달성을 선언하지 않는다.
+
+# Risks / Checks
+
+- 저장 post-NMS 후보의 GT 중첩은 실제 검출·시각 이해·calibration 성공이 아니다. RPN 이전과 annotation 경계·사전학습 노출·SOP 수준 독립성은 남는다.
+- budget별 개발 FP는 서로 다르다. 비용과 두 IoU 성능을 함께 보고하여 하나의 유리한 수치로 전반적 우위를 선언하지 않는다.
+- 이번 FP 통합 범주는 중복과 대응 경쟁을 분리한 인과 분석이 아니다. 이를 명시하고 불필요한 새 분류 탐색을 하지 않는다.
+- V400 사후 검사는 과거 절차 이탈을 소급 해소하지 않는다. 원본 기록과 정정 근거를 함께 보존한다.
+- 출처나 보존 소스가 없으면 해당 경로를 중단한다. 재구현이나 metadata 갱신으로 결손을 숨기지 않는다.
+
+## 대규모 GPU 필요 후보
+
+다기관·다소견에서 vision encoder와 언어 decoder를 공동 적응하여 후보 coverage·위치 정밀도·언어 조건 선택을 함께 학습하는 post-training은 장기 후보로 유지한다. 큰 모델과 충분한 대조 학습에는 현재 두3090을 넘는 자원이 필요할 수 있다. 현재 결과는 그 필요성을 입증하지 않으며 이번에는 실행하지 않는다.
+
+# 계획의 근거 (GPT 조사 노트)
+
+## 새로 확인한 것
+
+- `agent/GOAL.md`, `GPT_USAGE_POLICY.md`, `REPORTING_STYLE.md`, 관련 `INDEX.md`, `LIMITATIONS.md`, `CODE_ASSETS.md`, iter_036의 plan·review·보고서 및 iter_035·036의 원본 `review.json/code_assets`를 확인했다.
+- 기준 계획은 `agent/runs/iter_036/plan.md`, SHA256 `d00ffbce7c43c3ae34433e89f5ed563feece3991ee71d2af00890de4655ea123`이다. 이번은 이 계획의 보완이며 가설·표본·주metric·투자 기준을 다시 설계하지 않는다.
+- 현재 research branch는 `approach/rsna-detector-comparison`, HEAD는 `f9bfbc250058ce1785f819dd404b1148998918b9`다. `git status --short`와 `git diff`는 비어 있고 필요한 파일은 현재 브랜치에 있다.
+- `results/iter_012/train/lr2e-4_s17/epoch_05/val_gen/gen_worker0.jsonl`을 직접 읽었다. 고유 ID 400개가 validation_ids와 일치하며 모든 adapter digest는 선택 SFT17의 `e13f3c4461b826a060c90dfe4e4ee4c2ebac36a08f84be1a45a37495816cec11`이다. completion은 unique400·missing0·duplicate0이다. 이는 메타데이터 확인이며 이번 계획 단계에서 새 평가나 전체 영상 검사를 실행한 것은 아니다.
+- `results/iter_035/select/LOCK.json`에 연결된 5개 파일의 실제 SHA256이 모두 일치했다. 선택된 V400 detector 출력은 `eval/seed17/V400_e18`, `eval/seed29/V400_e26`에 존재한다.
+- 잠긴 FP budget0.25/0.5/1.0의 threshold는 detector17이0.75/0.50/0.15, detector29가0.65/0.25/0.10이다. detector29의 budget1.0 지점도 validation 실제 FP/환자는0.7475이므로 budget 이름만으로 동일 비용 비교를 주장하면 안 된다.
+- 실제 `det_error_audit.py`는 LOCK을 검증하지 않으며 `raw_candidates_norm`은 zip으로 배열 길이 불일치를 숨길 수 있다. GT별 감사 행과 위치 대응 행을 계산하지만 최종 결과에 충분히 보존하지 않는다. 위치의 transfer_rate는 동일 bbox 쌍이 아니라 독립 재매칭 결과다.
+- `tests_det/verify_error_audit_independent.py`는 기존 결과 경로를 하드코딩한다. 새 분석 경로·덮어쓰기 거부·검증 범위 명시가 필요하다.
+
+## 의미와 선택
+
+iter_036 리뷰에서 주분해·R·CI는 독립 재현됐다. 이를 새로 발견한 결과처럼 반복 생산할 필요가 없다. 남은 FP 비용 표와 대응쌍 감사는 후보의 존재가 실제 효용으로 이어지는지를 판단하는 데 필요하다. 현재 R 영향 환자는1·7명이고 cap100 도달은0건이므로 사전 GPU 확대 조건은 충족되지 않았다.
+
+문헌과 전략을 처음부터 재조사할 새 근거는 없다. 가까운 선행 진단과 기존 대안 판단은 기준 계획의 검토를 유지한다. 이번에는 그 판단에 필요한 미완료 비교를 마무리하고, 새 loss·ensemble 또는 별도 언어 과제를 자동 시작하지 않는다.
+
+## 남은 확인
+
+Claude는 V400의 전체 provenance, 실제 사용할 loader의 자동 보호, 고정 FP budget별 빠진 표, 동일 대응쌍과 재매칭의 차이를 검증해야 한다. 외부 일반화·confidence 교정의 성공·VLM 고유 효용은 여전히 미검증이다.
+
+
+
+## iter_037 CLAUDE REPORT — 2026-09-29 23:55:50
+
+# 요약
+
+- **핵심 결과:** 고정 FP budget별 비용 표, GT·후보 감사 행, 같은 대응쌍의 IoU0.5 통과율, 독립 재매칭 표를 저장 출력만으로 완성했다. GPU 0, 학습 0이다. criterion_a/b는 두 detector 모두 미충족이라 GPU 확대는 하지 않았다.
+- **근거:** confirm800(개발800)에서 R의 영향 환자는 detector17 1명, detector29 7명이고 97.5% CI 상한은 0.68%·2.24%다. cap100 도달은 0건이다. SFT-only GT 대부분은 threshold 제외였다(detector17 75/77, detector29 80/87). 회귀 147/147, 독립 재계산 533건(V400)·943건(confirm800) 모두 불일치 0, fixture 57/57과 기존 18/18이 통과했다.
+- **미검증·주의:** 개발800과 V400은 선택에 쓰였으므로 독립 확인이 아니다. detector가 SFT보다 우위라고 말할 수 없다(아래 참고). post-NMS 후보만 다뤘고 외부 일반화·VLM 고유 효용은 미검증이다.
+- **다음:** VinDr 승인 대기 중이다. 같은 개발800에서 분석을 더 늘리지 않는 것을 권고한다. 자세한 권고는 마지막 절에 적었다.
+
+# Work Performed
+
+- 기준 계획(iter_036 plan, SHA256 `d00ffbce…`)과 iter_036 코드·결과를 확인했다. 실제 수정 대상 loader와 통계 코드를 읽었다.
+- **새 모듈 `rsna_diag/det37.py`:**
+  - 저장 출력 loader를 fail-closed로 만들었다. LOCK 5개 파일 hash와 seed 집합, 선택 파일 잠금, checkpoint·source digest·batch1 대조, shard record의 요청 집합·중복·provenance·raw_preds 일치, 영상 file hash와 크기, boxes/scores/labels 길이·유한성·좌표·label·cap을 검사한다.
+  - SFT는 prompt hash, EOS, pad affine, 영상 경로를 추가로 검사한다.
+  - 분석 출력은 flock 단일 소유, 덮어쓰기 거부(`os.link`), 단위별 config·입력 digest 재개를 갖춘다.
+- **분석 내용:** 모든 operating point(선택점과 FP budget 0.25/0.5/1.0)에서 F1@0.3/0.5, lesion recall, 전체·범주별 FP 총수·FP/환자·분모·invalid, 두 IoU의 both/det-only/SFT-only/both-miss를 냈다. 통합 FP 범주와 두 IoU의 범주 합=전체 FP 검사, R 불변성 검사, GT별 감사 행(원래 candidate index, 최대 IoU 후보와 최고 score 후보 구분, 부재는 None)을 포함한다.
+- **대응쌍 분석:** IoU0.3의 원래 대응쌍을 고정한 뒤 그 쌍의 IoU≥0.5 여부와 독립 IoU0.5 재매칭 GT 검출을 따로 집계했다.
+- **criterion_a/b:** cap 환자의 미대응 GT를 양극단(회복 불가/가능)으로 두는 `criterion_ab`를 구현하고 fixture 4종으로 검사했다.
+- **재사용:** `det_error_audit.py`는 iter_036 결과의 재현성을 위해 수정하지 않았다. 계획은 이 파일을 수정 대상으로 적었지만, 이번에는 새 모듈에서 fp_decompose·stratified_d24·ratio_ci_cluster를 import해 썼다.
+- **overlay:** `det37_overlay.py`로 범주별 hash 순서 최대 6명을 그렸다. 분류 근거인 threshold 아래 후보의 index·score와 최대 IoU 후보를 함께 표시한다. 3장을 직접 열어 GT·후보 좌표와 영상 방향을 확인했다.
+
+## 정정 사항(V400 출력 부재 설명)
+
+iter_036 `det_error_audit.py` docstring은 "validation_ids에 저장된 SFT 출력이 없다"고 적었다. 사실이 아니다.
+
+- `results/iter_012/train/lr2e-4_s17/epoch_05/val_gen/`에 SFT17의 400개 고유 요청이 있고, completion은 누락·중복 0이다.
+- SFT29/43의 V400 출력은 이번에 사용·검증하지 않았다.
+- 기존 보고서와 결과는 수정하지 않았고, 이 정정은 이 보고서와 `det37.py` docstring에만 남긴다.
+- V400은 원래 계획의 사전 gate가 아니다. iter_036 이후 수행한 사후 회귀 검사이며 사전 검사를 소급 복원한 것이 아니다.
+
+# Files Changed
+
+새 파일만 만들었고 기존 파일은 수정하지 않았다(`git status`: untracked 5개).
+
+- `rsna_diag/det37.py`
+- `rsna_diag/det37_overlay.py`
+- `tests_det/test_iter037.py`
+- `tests_det/regress_iter037.py`
+- `tests_det/verify_iter037_independent.py`
+
+# Commands / Experiments
+
+모두 성공했고 오류 후 재실행은 아래 두 건뿐이다. GPU는 쓰지 않았다(`nvidia-smi`: 두 장 모두 사실상 유휴).
+
+- `python rsna_diag/det37.py --split V400 --d24 --out results/iter_037/a1/d24_V400 --workers 4` — D24 동작 확인, 9개 unit.
+- `python rsna_diag/det37.py --split V400 --out results/iter_037/a1/V400 --workers 4` — 9 unit, 단위 계산 합 3.7초.
+- `python rsna_diag/det37.py --split confirm800 --out results/iter_037/a1/confirm800 --workers 4` — 11 unit, 단위 계산 합 19.8초.
+- `python tests_det/regress_iter037.py …` — 처음에 문자열 비교 버그로 실패해 `chk`를 고친 뒤 재실행했고, 이번 결과는 147/147 PASS다.
+- `python tests_det/verify_iter037_independent.py --split V400|confirm800 …` — 각각 PASS.
+- `python tests_det/test_iter037.py results/iter_037/tests/fixtures_iter037.json` — 57/57 PASS. 처음에 env 접두어 권한 문제로 인자 방식으로 바꿨다.
+- 기존 `tests_det/test_det_error_audit.py`를 새 결과 경로로 재실행해 18/18 PASS.
+- `det37_overlay.py`를 detector17과 detector29에 각각 실행했다.
+
+**규모·비용:** CPU 분석은 detector 추론을 반복하지 않아 매우 짧았다(단위 계산 합 약 24초). ETA 추정은 필요 없었다. worker 병렬은 CPU 4 worker(fork Pool)였고 GPU 병렬 비교는 GPU 미진입이라 수행하지 않았다.
+
+# Results
+
+경로는 모두 `results/iter_037/a1/` 아래다. 도달 단계는 동작 확인 → V400 사후 회귀 → 개발800 본보완까지이고, 독립 확인은 미실행이다.
+
+## 회귀·검증
+
+- `regression.json`: 147/147 PASS(V400은 선택 파일 수치·`val_metrics`, confirm800은 iter_036 분해·R·CI·위치·FP 분해와 iter_035 FP budget·상보성·요약). 수치 오차 1e-8 이내, count는 정확 일치.
+- `independent_V400.json` 533건, `independent_confirm800.json` 943건, 불일치 0.
+- 독립 구현 범위: IoU, itertools 열거 matching, padding 좌표 변환, F1·recall·FP·통합 FP 범주·상보성·4범주·R·pair 통과율.
+- 공유(독립 아님): SFT parser, GT manifest, 선택 threshold, raw_preds의 img_hw. bootstrap CI는 독립 재계산하지 않고 회귀와 iter_036 리뷰의 재현에 의존한다.
+- `tests/fixtures_iter037.json`: 57/57. 배열 길이·NaN·Inf·범위·label 거부, LOCK 변조 3종, 잠기지 않은 선택 파일, shard 중복·누락·digest·hash·raw 불일치, 영상 hash 변조, source digest 변조, 덮어쓰기 거부, 동시 실행 거부, 강제 중단(3 unit)→재개 결과가 무중단과 동일, 다른 입력 재개 거부, 변조된 unit 재사용 거부, criterion fixture 4종이 포함된다.
+- `tests/fixtures_iter036_rerun.json`: 18/18.
+- 조건 확인: R 분자는 12개 조합 모두 threshold와 무관하게 불변이다. cap100 도달은 0건(최대 후보 수 28/22)이다. V400 SFT17은 400건 모두 EOS이며 valid_empty 199·valid_nonempty 201이다.
+
+## 개발800(양성 400명·GT 589개)
+
+F1은 양성 환자 평균이다. FP/환자는 IoU0.3 기준 전체 800명 하한이다(invalid 0이라 하한이 아님). ΔF1은 detector−SFT17이다.
+
+| 모델 / 조건 | F1@0.3 | F1@0.5 | lesion recall@0.3 | FP/환자 | ΔF1@0.3 [97.5% CI] | ΔF1@0.5 [97.5% CI] |
+|---|---|---|---|---|---|---|
+| SFT17 | 0.6308 | 0.3487 | 0.647 | 0.269 | – | – |
+| det17 선택점(thr0.70) | 0.5816 | 0.4155 | 0.637 | 0.295 | −0.049 [−0.100, 0.002] | +0.067 [0.012, 0.122] |
+| det17 budget0.25(thr0.75) | 0.5740 | 0.4079 | 0.616 | 0.254 | −0.057 [−0.107, −0.005] | +0.059 [0.004, 0.115] |
+| det17 budget0.5(thr0.50) | 0.6222 | 0.4504 | 0.725 | 0.451 | −0.009 [−0.058, 0.041] | +0.102 [0.048, 0.156] |
+| det17 budget1.0(thr0.15) | 0.5844 | 0.4385 | 0.818 | 1.008 | −0.046 [−0.096, 0.005] | +0.090 [0.036, 0.145] |
+| det29 선택점(thr0.60) | 0.5739 | 0.4064 | 0.621 | 0.274 | −0.057 [−0.108, −0.006] | +0.058 [0.001, 0.114] |
+| det29 budget0.25 | 0.5642 | 0.4052 | 0.606 | 0.245 | −0.067 [−0.118, −0.015] | +0.057 [0.000, 0.112] |
+| det29 budget0.5 | 0.5950 | 0.4255 | 0.710 | 0.501 | −0.036 [−0.084, 0.013] | +0.077 [0.021, 0.133] |
+| det29 budget1.0 | 0.5962 | 0.4433 | 0.781 | 0.791 | −0.035 [−0.084, 0.015] | +0.095 [0.042, 0.147] |
+
+- SFT29/43: F1@0.3 0.6359/0.6528, F1@0.5 0.3132/0.3638, FP/환자 0.254/0.243.
+- FP/환자는 detector가 F1@0.3에서 SFT를 앞서는 점이 없고(ΔF1@0.3의 부호는 대부분 음수 또는 CI가 0을 포함), F1@0.5에서는 detector가 앞선다. 즉 지표에 따라 방향이 다르다. nominal budget이 같아도 실제 FP/환자는 서로 다르므로(det29 budget1.0은 0.791) 하나의 수치로 우위를 선언하지 않는다.
+- budget 0.25/0.5/1.0 비교는 탐색적이며 유리한 operating point를 새 주비교로 고르지 않았다.
+
+## 상보성과 잔여량 R(IoU0.3, det17 선택점 vs SFT17)
+
+- both/det-only/SFT-only/both-miss = 304/71/77/137. IoU0.5는 149/119/67/254.
+- SFT-only 77개의 분해는 matching_competition 1, threshold_excluded 75, adjacent 1, no_coverage 0이다.
+- R 분자는 1개(영향 환자 1명), R 97.5% CI [0, 0.00677], threshold 제외 비율 0.974(CI [0.927, 1]).
+- det29 선택점 vs SFT17은 threshold_excluded 80, adjacent 7이다. R은 7개(영향 환자 7명), CI [0.00337, 0.02238]이고 threshold 제외 비율은 0.920(CI [0.85, 0.977])이다.
+- IoU0.5 민감도(탐색적): det29의 R은 16개(영향 환자 16명), CI 상한 0.0425로 5% 기준에 가깝지만 기준 미달이다. det17은 6개, CI 상한 0.0204다.
+- FP budget이 커질수록 SFT-only가 줄고(det17 선택점 77 → budget1.0 23) FP/환자는 늘어난다. 후보 회복은 FP 증가와 함께 나타난다.
+- SFT29·43과의 비교도 report에 있으며 같은 방향이다.
+
+## 대응쌍 vs 독립 재매칭(selected op)
+
+- IoU0.3 대응쌍의 IoU≥0.5 통과율은 detector17 0.715(375쌍), SFT17 0.567(381쌍)이다.
+- 독립 IoU0.5 재매칭 GT 검출률은 통과율과 정확히 같다. "쌍은 실패, 재매칭은 성공"이나 그 반대 사례는 모든 op·모델에서 0이다.
+- 따라서 이번 자료에서는 IoU0.3에서 0.5로의 위치 차이가 대응 변경이 아니라 같은 쌍의 위치 정밀도 차이로만 나타난다.
+- iter_036 보고서의 `transfer_rate`는 이 재매칭 검출률이었다.
+
+## 통합 FP 범주
+
+`competes_for_matched_gt`는 중복 후보와 GT 대응 경쟁을 합친 통합 범주다. 두 원인을 따로 검증했다고 말하지 않는다. 범주 합=전체 FP는 모든 op·IoU·범주(전체·양성·Normal·NoOpacity/NotNormal)에서 통과했다.
+
+## V400 사후 검사
+
+- det17 선택점 vs SFT17의 SFT-only는 42개다(threshold_excluded 41, adjacent 1). R 영향 환자 1명, CI 상한 0.0127이다.
+- det29는 SFT-only 48개, R 영향 환자 4명, CI 상한 0.0379이다.
+- criterion 미충족이며 V400은 선택 자료이므로 독립 근거가 아니다.
+
+## criterion·판단
+
+- `decision.json`: criterion_a는 두 detector 모두 거짓, criterion_b는 cap 환자가 0명이라 비해당이다. escalate_to_gpu_trace=false, GPU 사용 0이다.
+- criterion_b 구현의 제한: 양극단을 (관측 R / cap 환자만 0)으로 두면 하한 ≤ 상한이므로 b는 a가 참일 때만 참이 될 수 있다. 즉 b는 승격 조건을 새로 만들지 않고 승격의 cap 민감성을 표시하는 역할이다. fixture로 이 동작을 검사했다.
+
+## 결과 파일
+
+- `V400/report.json`, `confirm800/report.json`
+- `confirm800/audit/*__gt_audit.jsonl` (GT별 감사 행), `confirm800/audit/*__pairs.jsonl` (대응쌍 행)
+- `confirm800/overlays_det17/`, `confirm800/overlays_det29/`
+- `regression.json`, `independent_V400.json`, `independent_confirm800.json`, `decision.json`, `tests/`
+
+# Goal Progress / Reused Assets
+
+## 목표 진전
+
+- detector와 SFT의 오류 상보성은 후보 존재 차이가 아니라 threshold 선택과 연결된다는 iter_036 관찰이 FP 비용을 포함해 유지됐다. det17 기준 SFT-only GT의 97.4%가 낮은 score 후보로 저장돼 있었다.
+- 후보 회복은 FP 증가와 함께 나타났고, 고정 FP budget 표에서 detector가 F1@0.3을 SFT보다 크게 높이는 점은 없었다. F1@0.5에서는 detector가 앞선다. 실용적 우위 결론은 지표·운영점에 따라 달라 한 방향으로 확정하지 않는다.
+- 큰 후보 발견 차이라는 설명은 두 detector 모두 약하다. R은 CI 상한이 5% 기준보다 훨씬 낮다.
+- 미검증: 후처리 전 후보(RPN·NMS 이전)의 영향, confidence 교정의 실효, 외부 일반화, 언어·근거 과제에서의 VLM 고유 효용.
+
+## 실행 유효성 / 성능 / 가설 / 신규성
+
+- **실행 유효성:** 입력 연결, provenance, 독립 수치 대조와 재개·소유권 검사가 통과했다.
+- **성능 개선:** 새 방법이 없으므로 성능 개선은 해당 없다.
+- **가설 지지:** H_selection은 지지가 유지되고, H_residual의 조건부 GPU 확대 기준은 미충족이다. 두 detector의 seed 결과를 독립 환자로 합치지 않았다.
+- **신규 기여:** TIDE 류 오류 분해의 적용이며 신규 방법이 아니다. 신규성은 주장하지 않는다.
+
+## 재사용 출처
+
+| 재사용 파일 | 검증 |
+|---|---|
+| `geometry.py`, `parse.py`, `metrics.py`, `sft_eval.py`, `det_compare.py`, `det_eval.py`, `det_lib.py` | 코드 수정 없음. 회귀 147/147과 독립 재계산으로 현재 사용 범위(좌표·matching·집계·loader)를 확인했다 |
+| `det_error_audit.py` | 수정하지 않고 함수만 재사용. 기존 fixture 18/18 재통과 |
+| `det_match.bounded_match` | 사용하지 않았다(iter_036 리뷰의 GT identity 미승인 조건 유지) |
+
+- 생성 코드 source digest는 현재 `det_eval.py`·`det_lib.py`·`geometry.py`가 `f40b8b7b…`로, iter_035 생성 시점과 같음을 확인했다. 과거 metadata는 갱신하지 않았다.
+
+# Problems
+
+- **현재 결론 무효:** 없음.
+- **재사용 전 수정(미해결):**
+  - `det37.py`의 loader 보호는 이번 사용 경로(V400·confirm800 저장 출력)만 검증했다. 다른 실행기(`det_jobs.py`, 학습 연장, latency, continuation)의 결함은 해결됐다고 보고하지 않는다.
+  - 저장 pair 행과 감사 행은 exact tie 없이 일치했다. 다만 `metrics.match`와 열거 matching의 tie 규약이 다른 자료에서도 같은지는 이번 범위 밖이다.
+- **추후 개선:**
+  - `criterion_ab`의 b가 a에 종속되는 정의.
+  - V400 SFT29/43 출력은 사용하지 않았다.
+  - 독립 검증기는 parser와 GT manifest를 공유하고 bootstrap CI를 독립 재계산하지 않는다.
+  - SFT invalid 응답은 FP 0으로 세는 하한이지만 이번 자료의 invalid는 0이다.
+- **한계:** 개발800·V400은 선택·분석에 쓰였으므로 독립 확인이 아니다. 후처리 후 후보만 다뤘고 RPN 이전 후보는 미추적이다. 사전학습 노출과 SOP 수준 독립성 불확실성은 그대로다.
+
+# Recommendation to GPT
+
+**전략 판단(Strategy Check 요약):** 계획의 세 선택 중 **2번(원인·선택 진단 마무리)을 이번에 완료**했고, 다음 우선순위는 **3번(언어·근거가 필요한 질문)**을 권고한다.
+
+- **근거:** 후보 coverage 부재(R)가 아니라 threshold 선택과 FP 비용이 detector와 SFT의 차이를 만든다. 이 차이는 F1@0.3에서는 SFT가 앞서거나 비슷하고, F1@0.5에서는 detector가 앞선다. bbox 정확도·비용 비교만으로는 VLM에 투자할지 판단할 근거가 더 나오지 않는다.
+- **하지 않을 것:** 같은 개발800에서 분석 종류를 더 늘리지 않는다. 새 loss·표준 calibration·단순 ensemble은 이번 결과로는 우선순위가 낮다. 후처리 전 후보 trace도 R이 작아 정보 가치가 낮다.
+- **방향을 바꿀 조건:** VinDr 승인 후 외부 자료에서 R이 커지거나 detector 우위가 사라지면 재검토한다. 언어·근거 과제는 유효한 정답·사용 목적·강한 모듈형 비교군(detector+VLM)을 갖춘 별도 계획으로 설계한다.
+- **한 줄 조언:** iter_036의 기존 결과·보고서는 그대로 두고, 이번 정정(V400 SFT17 출력 존재)은 이 반복의 기록으로만 인용한다.
+
+SELF_CHECK: PASS
+SUMMARY: RSNA detector17/29 대 SFT의 FP budget별 비용·성능 표, GT·후보 감사, 대응쌍 vs 재매칭을 저장 출력만으로 완성했고 회귀 147/147·독립 재계산 불일치 0으로 검증했다. criterion_a/b 미충족이라 GPU 0이며 detector 우위는 F1@0.5에서만 확인되고 F1@0.3에서는 SFT가 비슷하거나 앞선다.
+
+# [orchestrator] 권한 거부된 도구 호출
+- Bash: ls results/iter_035/select results/iter_035/select/seed17 results/iter_035/eval results/iter_035/eval/seed17 results/iter_035/eval/seed17/V400_e18 results/iter_036/full results/iter_036/tests; nvidia-smi --query-gpu=index,uuid,memory.used,memory.total --format=csv; echo $CUDA_VISIBLE_DEVICES
+- Bash: DET37_FIXTURES_OUT=results/iter_037/tests/fixtures_iter037.json python tests_det/test_iter037.py 2>&1 | tail -20
+
+
+
+## iter_037 GPT REVIEW [CONTINUE] — 2026-09-30 00:01:08
+
+# 요약
+
+- **판정:** valid_experiment=true, improve, CONTINUE. 성능·FP 비교는 유효하지만 전체 코드 재사용은 승인하지 않는다.
+- **핵심 근거:** detector17 선택점→budget1.0에서 SFT17-only GT는77→23개, FP/환자는0.295→1.0075였다. 후보 회복에는 비용이 따른다.
+- **의미·한계:** F1@0.5의 detector 이점과 F1@0.3의 trade-off가 유지된다. 개발800의 관찰이며 새 방법·외부 일반화·VLM 고유 효용의 증거는 아니다.
+- **다음:** 같은 집단의 분석을 늘리지 않고 다음 연구 질문을 선택한다. 재사용할 코드 경로의 보호 결함만 보완한다.
+
+# Assessment
+
+iter_037은 저장된 실제 모델 출력으로 미완료 비용 비교와 대응쌍 감사를 수행했다. 새 GPU 생성이나 학습은 없지만 단순 코드 검사에 그치지 않았으므로 유효한 diagnostic이다. V400을 사후 검사로 명시했고, 기존 threshold·checkpoint·개발800 지위를 유지했다. 다만 계획의 자동 provenance·완료 보호·criterion_b까지 모두 완료됐다는 SELF_CHECK 해석은 받아들이지 않는다.
+
+검토 대상은 SHA `755ec06e17606936422f1595f7bf62dc53085e59`이며 신규5파일과 현재 파일이 일치한다. 구현 전후 diff를 확인했고 unpreserved_paths는 없다. reuse_manifest의 요청 자산은 비어 있다.
+
+# Key Findings
+
+1. **원시 수치 재현:** 독립 검증기의 쓰기 부분만 메모리에서 제외해 V400 533항목·개발800 943항목을 재계산했고 불일치0이었다. IoU·좌표 변환·열거 matching은 주분석과 별도 구현이며 parser는 공유한다. 추가로 SFT17 원시 JSON을 별도 해석해 두 detector×4운영점×2 IoU의 paired F1 CI 16개를 재계산했고 모두 일치했다.
+2. **비용과 성능:** 개발800에서 SFT17의 양성 F1@0.3/0.5는0.63075/0.34867, FP/환자는0.26875다. detector17 선택점은0.58164/0.41555·0.295이고 budget1.0은0.58443/0.43852·1.0075다. detector29 budget1.0의 실제 FP/환자는0.79125로 nominal budget과 다르다. 동일 budget 이름을 동일 실제 비용으로 해석하면 안 된다.
+3. **선택과 후보 coverage:** detector17/29의 threshold 제외75/77·80/87과 R1/589·7/589는 기존 결과와 일치한다. R은 운영 threshold와 무관하게 유지되고 cap100 도달은0건이다. GPU trace를 하지 않은 결정은 타당하다.
+4. **대응쌍:** detector17의 IoU0.3 대응375쌍 중268쌍, SFT17의381쌍 중216쌍이 IoU0.5를 통과한다. 현재 저장 pair의 통과 여부와 독립 재매칭 검출 여부는 일치한다. 다만 서로 다른 검출 GT 집합을 조건으로 한 비교다.
+5. **입력·실행 근거:** 선택 LOCK5파일, 분석 manifest의 소스 hash, 현재 영상1,200개 file hash를 대조해 불일치0이었다. V400·개발800 환자 ID 교집합0이며 관련 protocol13파일도 일치했다. 저장 fixture57/57·기존18/18·회귀147/147 및 관련 성공 로그를 확인했다. fixture 전체를 리뷰에서 재실행하지는 않았다. 로그의 최초 회귀 문자열 비교 오류는 수정 후 성공 기록과 일치한다.
+6. **시각 감사:** `overlays_det17/threshold_excluded__con_00005918.png`를 직접 확인했다. GT와 선택 bbox 외에 낮은 score 후보가 표시돼 기존 overlay보다 분류 근거를 잘 보여준다.
+
+# Problems / Concerns
+
+현재 주요 수치를 무효화하는 문제는 발견하지 않았다. 다음은 재사용 전 수정 사항이다.
+
+- `Ctx.inputs_digest`는 GT·infer·protocol·area_edges 파일 hash를 포함하지 않는다. 현재 GT의 출처는 별도로 확인했지만 자동 재개 보호로 충분하지 않다.
+- `run_all`의 lock은 `finalize` 전에 해제된다. unit 결과 내용 digest가 없고 기존 audit 파일을 검증 없이 건너뛴다. 저장 fixture가 확인한 unit 변조는 입력 digest 변경이며 결과 내용 변조 검사가 아니다.
+- `criterion_b`는 5% cap 민감성 대신 영향 환자20명 조건까지 포함한 criterion_a의 변화로 구현됐다. 독립 확대 조건이라는 계획과 다르다. 현재 cap0이므로 이번 GPU 미진입은 유지한다.
+- SFT pad affine의 side 검사, overlay의 report/audit와 현재 입력 연결, 독립 검증기의 고유 임시 출력이 부족하다.
+- 미사용 학습·latency·기존 실행기의 과거 결함은 이번에 해결되지 않았다.
+
+기존 전체 FP 차이 CI는 iter_035 근거를 유지한다. 새 budget 표의 점추정치만으로 운영점 간 통계적 우위를 추가 선언하지 않는다. 전체 과거 protocol 소스와 공식 GPU 예제를 이번 리뷰에서 다시 검증한 것으로 기록하지 않는다.
+
+# Interpretation
+
+낮은 score 후보가 존재한다는 관찰은 실용적인 검출 성공과 다르다. detector17의 threshold를 낮추면 SFT-only GT가 줄지만 FP가 크게 늘고 F1@0.3은 SFT17을 넘지 않는다. 반면 F1@0.5의 이점은 유지된다. 따라서 한쪽의 전반적 우위보다 위치 정밀도·검출 범위·FP 비용의 trade-off로 해석해야 한다.
+
+이번 자료는 큰 후보 발견 차이를 전제로 한 새 표현 loss나 단순 ensemble의 우선순위를 낮춘다. 그렇다고 confidence 교정이 성공할 것이라거나 모든 bbox 연구의 가치가 없다고 결론낼 수는 없다. 개발800은 독립 확인이 아니고 언어 과제도 평가하지 않았다.
+
+# Strategy Check / 연구 방향 판단
+
+- **실행 유효성:** 실제 출력의 고정 비교를 수행했고 주요 표와 새 CI를 재현했다. 코드 안전성 미완료와 과학적 비교의 유효성을 구분한다.
+- **성능 개선:** 새 방법이나 새 checkpoint가 없어 이번 반복 자체의 성능 개선은 없다.
+- **가설 지지:** H_selection은 지지가 유지되고 큰 H_residual은 약화된다. 대응쌍 감사는 관찰된 높은 IoU 차이가 단순 재매칭 집계 차이만은 아님을 보여준다.
+- **신규 기여 가능성:** 오류 분해와 강한 비교군 확보는 완료에 가까워졌지만 새로운 방법·외부 일반화·언어적 효용은 미검증이다.
+
+현재 bbox 방법 개선은 큰 후보 발견 차이라는 근거가 약하고 새 학습 비용이 든다. 같은 개발800의 추가 선택 진단은 정보 이득이 줄었다. 다음 우선순위는 언어와 영상 근거 연결이 필요한 질문의 설계 가능성을 검토하는 것이다. 단, 이전 oracle·인터페이스 실패를 반복하지 않고 실제 정답과 강한 비교군이 있는지로 후보를 걸러야 한다. VinDr 승인 후 외부 재현이 기존 설명을 바꾸면 bbox 투자도 재검토할 수 있다.
+
+논문 추천은 보류한다. 이번 방향의 직접적인 오류 분석 문헌 TIDE는 이미 추천됐고, 아직 실험 근거가 없는 새 언어·근거 방향의 문헌을 추천할 단계는 아니다.
+
+# Recommended Next Experiment
+
+다음 deep 계획에서 기존 전이·인터페이스 진단의 원문을 연결해 다음 투자 후보를 비교한다. 유효한 정답과 직접 SFT·detector+VLM 대조를 확보할 수 있는 질문만 소규모 실제 출력 진단으로 구체화하고, 양성·음성·불확정 결과가 후속 투자를 어떻게 바꿀지 고정한다. 이 계획 없이 새 loss·calibration·ensemble이나 광범위한 benchmark 수집을 시작하지 않는다.
+
+이번 표와 checkpoint는 보존한다. 사용할 분석 경로의 결함만 함께 수정하며 별도 인프라 반복을 만들지 않는다. VinDr 승인 전 다운로드·외부 평가·반복 승인 질문은 하지 않고, continuation 추가 투자 종료 및 MRI F139·reserve 보존을 유지한다.

@@ -1035,3 +1035,30 @@ Claude 계정의 /usage 또는 Settings > Usage에서 제한을 확인한 뒤 �
 - 🏁 **마일스톤**: RSNA에서 SFT만 검출한 병변 대부분은 detector의 낮은 score 후보에도 있었다 — JOURNEY.md
 - 📁 원본: `agent/runs/iter_036/`
 
+## iter_037 — RSNA 전용 detector와 SFT 비교 (5번째 시도) · 2026-09-29 23:46
+
+- 🧭 **계획** (GPT deep): VinDr 승인 대기 동안 RSNA detector–SFT의 미완료 FP 비용 비교와 출처 검증을 마무리한다. 후보 coverage 관찰을 실용 성능과 구분해 다음 투자를 선택하며, 외부 일반화는 미검증으로 남긴다.
+  - 대안: 1) RSNA 전용 detector와 SFT 비교: 저장 출력의 미완료 비용·성능 비교를 끝내 다음 연구 투자 판단을 완성한다. · 2) 언어·근거가 필요한 연구 질문으로 전환: VLM의 필요성을 직접 검증할 후보지만 유효한 정답과 강한 모듈형 비교군을 갖춘 별도 설계가 필요하다. · 3) 표준 선택 진단: 고정 비용 비교에서 의미 있는 선택 문제가 남을 때만 calibration·선택 대안의 추가 정보 이득을 검토한다. · 4) 현재 grounding 방법 개선: 큰 후보 발견 차이를 지지하지 않는 현재 근거에서는 새 loss·ensemble 학습의 우선순위가 낮다. · 5) 외부 opacity 전이 확인: VinDr 승인 통지 후 실제 권한·파일·target 차이와 이번 결과를 반영해 재계획한다.
+  - 1순위 선택 근거: 필요한 원시 출력과 잠긴 비교 조건이 이미 있으며, 빠진 FP 비용 비교는 다음 투자 판단을 바꿀 수 있다. 기존 승인 범위 안의 보완이고 추가 권한이나 사용자 가치 선택이 필요하지 않다.
+- ▶ **결정**: 자동 진행 (smart) — 1순위로 진행
+- 💾 **개발 이력 체크포인트** `755ec06e17606936422f1595f7bf62dc53085e59`: implementation_finished (검증 승인 아님)
+- 🔧 **Claude** (standard): RSNA detector17/29 대 SFT의 FP budget별 비용·성능 표, GT·후보 감사, 대응쌍 vs 재매칭을 저장 출력만으로 완성했고 회귀 147/147·독립 재계산 불일치 0으로 검증했다. criterion_a/b 미충족이라 GPU 0이며 detector 우위는 F1@0.5에서만 확인되고 F1@0.3에서는 SFT가 비슷하거나 앞선다. [자체 검증 PASS, 파일 119개 변경]
+  - 브랜치 `approach/rsna-detector-comparison`에서 계속
+  - ⚠ 권한 거부 2건
+- 🔍 **리뷰** (GPT normal): [CONTINUE / improve] RSNA 개발800에서 detector17의 SFT-only 병변은 77→23개로 줄었지만 FP/환자는 0.295→1.008로 늘었다. 위치 정밀도 이점은 유지되며 외부 재현·VLM 고유 효용은 미검증이다.
+  - 접근법 판단: 필수 과학적 비교는 유효하게 보완됐지만 자동 provenance·재개 보호·criterion_b는 미완료다. 사용할 경로만 수정하고 다음 연구 질문의 투자 판단으로 넘어간다.
+  - 목표 진전: 저장 출력의 실제 비교를 완료해 낮은 threshold의 후보 회복과 FP 증가를 함께 확인했다. 새 방법의 성능 개선은 없으며, 큰 후보 발견 차이라는 설명은 계속 약화된다. detector의 높은 IoU 위치 정밀도와 SFT의 낮은 IoU F1 사이의 trade-off가 확인됐지만 신규 contribution이나 외부 일반화 근거는 아니다. 다음 투자를 선택할 근거는 충분해졌으며 같은 개발800의 추가 분석을 반복할 필요는 낮다.
+  - 판정 범위: 미완료는 iter_037 분석 경로의 자동 provenance·결과 재사용 보호와 cap 확대 판정에 한정된다. 현재 cap0인 RSNA 개발800의 고정 운영점 성능·FP·상보성 비교는 유효하다. 외부 일반화, calibration의 효용, 언어·근거 과제의 VLM 가치는 검증하지 않았다.
+  - 재사용 전 수정: det37.Ctx.inputs_digest에 GT manifest·infer manifest·protocol·area_edges의 명시적 hash가 빠져 있고 D.load_gt_infer도 protocol 잠금을 검사하지 않는다. GT가 바뀌어도 기존 unit을 재사용할 수 있다. 현재 입력은 리뷰에서 별도 확인했으므로 현재 수치 무효 사유는 아니다.
+  - 재사용 전 수정: run_all은 finalize 전에 lock을 해제한다. _worker/load_units는 unit의 결과 내용 digest를 검증하지 않고, finalize는 기존 audit 파일을 검증 없이 건너뛴다. 결과 내용 변조·finalize 중단·동시 finalize를 검사하고 완료까지 소유권을 유지해야 한다. 현재 fixture의 unit 변조 검사는 입력 digest 변경만 다룬다.
+  - 재사용 전 수정: criterion_b는 계획의 독립적인 5% cap 민감성 조건 대신 criterion_a 전체 판정의 변화로 구현됐다. 영향 환자20명 조건까지 포함해 b가 a에 종속된다. cap이 있는 입력에 재사용하기 전에 사전 정의와 일치시키고 a=false·b=true가 필요한 경계 사례를 검증해야 한다. 현재 cap0 판정에는 영향이 없다.
+  - 재사용 전 수정: load_sft의 pad affine 검사는 top·left만 확인하고 side를 제외한다. 현재 입력의 정상 사용 근거와 별개로 전체 affine·prompt/protocol 연결을 자동 검증해야 한다.
+  - 재사용 전 수정: 독립 검증기의 공통 .tmp 출력과 overlay의 report/audit provenance 미검증을 재사용 전에 보완해야 한다.
+  - 재사용 전 수정: iter_035의 det_jobs·학습 연장·det_eval 실행·selection gate·latency 결함은 해결되지 않았다. 해당 경로를 다시 사용할 때만 관련 수정과 회귀 검사를 수행한다.
+  - 추후 개선: 개발800의 반복 분석과 V400 사후 검사는 독립 환자·기관 확인을 대체하지 않는다. 추가 운영점·seed 비교의 CI는 탐색적으로 해석한다.
+  - 추후 개선: 원래 대응쌍의 IoU0.5 통과율 비교는 모델별로 서로 다른 검출 GT 집합을 조건으로 한다. 동일 병변의 인과적 위치 정밀도 개선으로 일반화하지 않는다.
+  - 추후 개선: 단위 계산 시간 합계 약24초는 loader·hash 검사·구현·전체 검증을 포함한 wall-clock이 아니다.
+  - 추후 개선: 관찰0건의 퇴화 bootstrap, 사전학습 노출, SOP 연결, annotation 경계 및 seed29 수렴 불확실성은 유지한다.
+  - 다음: 같은 RSNA 개발800의 추가 분석을 종료하고, 언어와 영상 근거 연결이 필요한 연구 질문의 투자 가치를 우선 비교한다. iter_037의 유효한 비용·성능 표와 기존 checkpoint를 보존하고 새 loss·ensemble·calibration을 자동 시작하지 않는다. iter_016–018과 iter_023–027의 기존 oracle·인터페이스 실패를 재검토해 같은 약한 진단을 반복하지 말고, 유효한 정답·사용 목적·직접 SFT 및 detector+VLM 비교군·결과별 전환 조건이 있는 후보를 선정한다. 방법 개발이면 validated 한계와의 연결을 먼저 확보한다. 기존 분석기를 실제 재사용할 때만 이번 reuse_issues를 수정하고 해당 회귀 검사를 수행하며, 별도 코드 정비 반복으로 과학적 판단을 미루지 않는다. VinDr 승인 통지 전 다운로드·외부 평가·반복 승인 질문은 하지 않고, 통지 후 target 차이와 이번 trade-off를 반영해 외부 계획을 재검토한다. continuation 추가 투자 종료와 MRI F139·reserve 보존을 유지한다.
+- 📁 원본: `agent/runs/iter_037/`
+
