@@ -7,6 +7,8 @@ def summarize_log(path):
     sessions = {}
     unreported = 0
     text = path.read_text(encoding="utf-8", errors="replace")
+    prompt_bytes = [int(value) for value in re.findall(
+        r"(?m)^\[input\] transport=stdin bytes=(\d+) sha256=", text)]
     for block in re.split(r"(?m)(?=^OpenAI Codex v)", text):
         identity = re.search(r"(?m)^session id: (.+)$", block)
         if not identity:
@@ -34,6 +36,8 @@ def summarize_log(path):
             "displayed_tokens": sum(s["displayed_tokens"] or 0 for s in sessions.values()),
             "error_sessions": sum(s["had_error"] for s in sessions.values()),
             "unreported_calls": unreported,
+            "input_bytes_per_attempt": prompt_bytes,
+            "input_bytes_note": "호출 시도별 UTF-8 전달 바이트. 실행 준비 실패 포함, 토큰/구독 소진율 아님",
             "accounting": "CLI tokens used 표시값. 동일 세션 최댓값. 캐시·입출력 구분/비용/구독 소진율 아님"}
 
 
@@ -41,8 +45,9 @@ def usage_report(runs_dir):
     lines = ["# GPT 사용량 (로컬 Codex 로그)", "",
              "CLI의 tokens used 표시값이며 비용·구독 한도 소진율이 아닙니다. 캐시·입출력 구분은 이 로그에 없습니다.",
              "동일 session_id의 반복 표시값은 최댓값만 셉니다. 오류·미집계 호출은 별도로 표시합니다.", "",
-             "| 반복 | 단계 | 세션 | 사고 수준 | 표시 토큰 | 오류 세션 | 미집계 호출 |",
-             "|---|---|---:|---|---:|---:|---:|"]
+             "전달 KiB는 기록이 있는 호출 시도별 값이며 실행 준비 실패도 포함할 수 있습니다.", "",
+             "| 반복 | 단계 | 세션 | 사고 수준 | 표시 토큰 | 오류 세션 | 미집계 호출 | 전달 KiB/시도 |",
+             "|---|---|---:|---|---:|---:|---:|---|"]
     sessions = {}
     stages = {}
     for path in sorted(runs_dir.glob("iter_*/*_codex.log")):
@@ -51,8 +56,9 @@ def usage_report(runs_dir):
         data = summarize_log(path)
         stage = "계획" if path.name.startswith("plan_") else "리뷰"
         effort = ", ".join(sorted({s["effort"] for s in data["sessions"].values()})) or "미기록"
+        sizes = ", ".join(f"{value / 1024:.1f}" for value in data["input_bytes_per_attempt"]) or "미기록"
         lines.append(f"| {path.parent.name} | {stage} | {data['session_count']} | {effort} | "
-                     f"{data['displayed_tokens']:,} | {data['error_sessions']} | {data['unreported_calls']} |")
+                     f"{data['displayed_tokens']:,} | {data['error_sessions']} | {data['unreported_calls']} | {sizes} |")
         for sid, entry in data["sessions"].items():
             value = entry["displayed_tokens"] or 0
             sessions[sid] = max(sessions.get(sid, 0), value)

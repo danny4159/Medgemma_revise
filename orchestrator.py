@@ -101,6 +101,7 @@ from notifier import Human
 from claude_usage import summarize_stream, usage_report
 import research_history as history
 import gpt_usage
+import gpt_context
 from presentation import notice, iteration_result
 
 PROJECT_DIR = Path(__file__).resolve().parent
@@ -633,6 +634,29 @@ def resource_context(args):
     )
 
 
+def gpt_record_context(n):
+    """GPT 입력만 선택적으로 구성한다. 기록 생성·Claude 입력·판정 gate는 유지한다."""
+    records = []
+    for i in existing_iterations():
+        if i > n:
+            continue
+        d = iter_dir(i)
+        records.append({"n": i, "plan": load_plan(i) or {}, "review": load_review(i) or {},
+                        "commit": load_json(d / "commit.json") or load_json(d / "checkpoint.json") or {},
+                        "archive": load_json(d / "code_archive.json") or {},
+                        "superseded": load_json(d / "superseded.json") or {},
+                        "recovery": (d / "code_recovery.md").exists()})
+    current = [r for r in records if r["n"] >= goal_start(n)]
+    selected = set()
+    for i in (n - 1, n):
+        selected.update((load_plan(i) or {}).get("limitation_ids", []))
+    return {
+        "history": gpt_context.history_context(current),
+        "assets": gpt_context.asset_context(records),
+        "limitations": gpt_context.limitation_context(limitation_registry(upto=n), selected),
+    }
+
+
 def run_codex(args, prompt, out_file, log_path, tier, schema=None):
     spec = tier_spec("gpt", tier)
     print(f"GPT 등급: {tier} ({spec['model']}, effort={spec['effort']})\n", flush=True)
@@ -1155,9 +1179,9 @@ def stage_of(n):
 def code_version():
     """지금 돌고 있는 orchestrator 버전 (main 커밋 + 커밋 안 된 수정 여부)."""
     sha = git("rev-parse", "--short", "HEAD")[1].strip()
-    dirty = git("status", "--porcelain", "--", "orchestrator.py", "notifier.py", "presentation.py", "claude_usage.py", "gpt_usage.py", "research_history.py", "agent/prompts",
+    dirty = git("status", "--porcelain", "--", "orchestrator.py", "notifier.py", "presentation.py", "claude_usage.py", "gpt_usage.py", "gpt_context.py", "research_history.py", "agent/prompts",
                 "agent/tiers.json", "agent/claude_settings.json", "agent/RESOURCE_POLICY.md",
-                "agent/RESEARCH_POLICY.md", "agent/CLAUDE_USAGE_POLICY.md", "agent/REPORTING_STYLE.md")[1].strip()
+                "agent/RESEARCH_POLICY.md", "agent/CLAUDE_USAGE_POLICY.md", "agent/GPT_USAGE_POLICY.md", "agent/REPORTING_STYLE.md")[1].strip()
     return f"{sha}+수정" if dirty else sha
 
 
@@ -1383,6 +1407,7 @@ def rebuild_decisions():
 def step_plan(args, goal, n):
     d = iter_dir(n)
     banner(f"[iter_{n:03d} · 1/3] GPT가 연구 계획을 작성합니다.")
+    context = gpt_record_context(n)
 
     prev = load_review(n - 1) if n > 1 else None
     superseded = load_json(iter_dir(n - 1) / "superseded.json") if n > 1 else None
@@ -1424,6 +1449,9 @@ agent/PAPERS.md, research/의 브랜치와 커밋(git -C research log --all --on
 이전 목표의 접근법을 그대로 이어갈 필요는 없다. plan_markdown 맨 앞에 "# 이전 기록에서 가져올 것" 섹션을 넣어라.
 """
     prompt = f"""{read(PROMPT_DIR / "gpt_plan.md")}
+
+=== GPT 사용량 운영 기준 (모델·필수 검증 유지) ===
+{read(AGENT_DIR / "GPT_USAGE_POLICY.md")}
 {goal_change}
 === 이번 반복 ===
 iter_{n:03d}
@@ -1431,8 +1459,8 @@ iter_{n:03d}
 === 연구 목표 ===
 {goal}
 
-=== 지금까지의 반복 요약 (agent/INDEX.md) ===
-{read(INDEX_FILE, "없음")}
+=== 현재 목표의 접근법 색인·최근 문제 (전체: agent/INDEX.md) ===
+{context['history']}
 
 === 연구 흐름의 마일스톤 (agent/JOURNEY.md, 최근 부분) ===
 {read(JOURNEY_FILE, "없음")[-6000:]}
@@ -1443,7 +1471,7 @@ iter_{n:03d}
 이전 수동 분석 기록과 입력 데이터: legacy/ (scripts, docs, eval_samples, eval_results)
 
 === 보존된 코드와 재사용 후보 ===
-{code_assets_text()}
+{context['assets']}
 새 코드를 쓰기 전에 재사용할 파일이 현재 브랜치에 있는지 확인하라. 보관본은 코드 소실이 아니다.
 
 === 직전 결과 ===
@@ -1456,7 +1484,7 @@ iter_{n:03d}
 {intervention_context(n)}
 
 === 한계 주장·사용법 검증·미해결 질문 ===
-{limitations_text()}
+{context['limitations']}
 방법 개발은 현재 목표에서 validated인 한계 주장과 연결해야 한다. 후보만 있으면 먼저 diagnostic을 설계한다.
 
 === 규칙 ===
@@ -1531,10 +1559,17 @@ def think_section(done_rounds, r, max_rounds, final):
     for path in done_rounds:
         prev = json.loads(read(path))
         questions = "\n".join(f"- {q}" for q in prev.get("open_questions", []))
-        text += (f"\n--- 라운드 {path.stem[-2:]}에서 알게 된 것 (원문: {path}) ---\n{prev.get('research_notes', '')}\n"
+        # 직전 노트는 원문, 오래된 노트는 요약·질문·출처로 연결한다. 원본은 삭제하지 않는다.
+        notes = prev.get('research_notes', '') if path == done_rounds[-1] else prev.get('plan_summary', '')
+        text += (f"\n--- 라운드 {path.stem[-2:]}에서 알게 된 것 (원문: {path}) ---\n{notes}\n"
                  f"라운드 {path.stem[-2:]}가 남긴 질문:\n{questions}\n")
     if done_rounds:
-        text += "\n이번 라운드에서는 위 질문들에 먼저 답하라 (웹 검색, 논문, 코드·결과 파일 확인).\n"
+        text += ("\n직전 라운드의 미해결 질문에 먼저 답하라. 이미 해결된 오래된 질문은 재조사하지 않는다.\n"
+                 "이전 요약을 근거로 중요한 판단을 할 때는 해당 원문 노트를 읽는다.\n"
+                 "추가 세션 없이 현재 라운드 안에서 필요한 도구 확인을 마치고 implement를 우선한다.\n")
+    else:
+        text += ("\n기본 목표는 이번 1라운드 안에서 필요한 조사와 계획을 완료하는 것이다.\n"
+                 "이 숫자는 최소 조사량/사용 목표가 아니라 안전 상한이다. 중요한 미해결 판단은 충분히 조사한다.\n")
     if final:
         text += ("\n이번이 마지막 사고 라운드다. next_action=implement로 전체 계획을 내라. "
                  "그래도 방향을 확신할 수 없으면 decision=ask_human으로 사람에게 구체적으로 물어라.\n")
@@ -1932,6 +1967,7 @@ JSON의 연구 질문·기여 경로·baseline·재사용 조건도 확인한다
 def step_review(args, goal, n):
     d = iter_dir(n)
     banner(f"[iter_{n:03d} · 3/3] GPT가 결과를 리뷰합니다.")
+    context = gpt_record_context(n)
     commit = load_json(d / "commit.json") or {}
     if commit.get("kind") == "checkpoint":
         if wgit("rev-parse", "HEAD")[1].strip() != commit["sha"]:
@@ -1946,6 +1982,9 @@ def step_review(args, goal, n):
         changed_text += f"\n... 외 {len(changed) - 200}개 (전체: agent/runs/iter_{n:03d}/changed_files.txt)"
 
     prompt = f"""{read(PROMPT_DIR / "gpt_review.md")}
+
+=== GPT 사용량 운영 기준 (모델·필수 검증 유지) ===
+{read(AGENT_DIR / "GPT_USAGE_POLICY.md")}
 
 === 이번 반복 ===
 iter_{n:03d}
@@ -1964,11 +2003,11 @@ iter_{n:03d}
 {intervention_context(n)}
 
 === 현재 한계 주장과 검증 근거 ===
-{limitations_text()}
+{context['limitations']}
 브랜치: {current_branch()} (코드 위치: {RESEARCH_DIR})
 
 === 지금까지의 반복 요약과 접근법 기록 (agent/INDEX.md) ===
-{read(INDEX_FILE, "없음")}
+{context['history']}
 
 === 이미 추천한 논문 (agent/PAPERS.md) ===
 {read(PAPERS_FILE, "없음")}
