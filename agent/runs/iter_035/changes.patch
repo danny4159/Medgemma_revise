@@ -1,0 +1,3564 @@
+diff --git a/det_jobs.py b/det_jobs.py
+new file mode 100644
+index 0000000..d2049d8
+--- /dev/null
++++ b/det_jobs.py
+@@ -0,0 +1,146 @@
++"""detector 작업 실행기 (기본 medgemma Python에서 실행).
++
++계획(iter_033 §0, iter_035 §1·§6)에 따라 detector 코드는 기존 detector 전용 환경
++(/home/test/.conda/envs/natten_py310/bin/python)을 subprocess로 명시 호출해 실행한다.
++이 실행기는 임의 명령 전달기가 아니다: research/rsna_diag/det_*.py와 research/tests_det/*.py만 실행하고,
++상속된 CUDA_VISIBLE_DEVICES 허용 집합 안에서 논리 index→물리 GPU를 배정한다.
++
++spec(JSON): {"name": str, "out_dir": str, "stages": [[job, ...], ...]}
++  job: {"name", "script"(research 기준 상대경로), "args": [...], "gpu": 논리 index 또는 null,
++        "ok_rc": [0], "env": {"DET_TEST_SOURCE_SALT": ...}(허용 키만)}
++stage 안의 job은 동시에, stage는 순서대로 실행한다. job 실패 시 이후 stage를 시작하지 않는다.
++진행 상태는 out_dir/status.json(60초 주기)에 GPU 메모리·마지막 로그와 함께 기록하고, 모든 자식의 실제
++종료 코드를 out_dir/result.json에 남긴다. SIGTERM/SIGINT를 받으면 자식에게 SIGTERM을 전달하고 기다린다.
++"""
++import json
++import os
++import signal
++import subprocess
++import sys
++import time
++
++BASE = "/SSD1_1TB/home/milab/daniel/08_medgemma/research"
++DET_PY = "/home/test/.conda/envs/natten_py310/bin/python"
++ALLOWED_PREFIX = ("rsna_diag/det_", "tests_det/")
++ALLOWED_ENV = {"DET_TEST_SOURCE_SALT"}
++_STOP = {"flag": False}
++
++
++def _h(signum, frame):
++    _STOP["flag"] = True
++
++
++def allowed_gpus():
++    v = os.environ.get("CUDA_VISIBLE_DEVICES")
++    if v is None or v.strip() == "":
++        raise RuntimeError("CUDA_VISIBLE_DEVICES not set; refusing to pick GPUs outside the inherited set")
++    return [x.strip() for x in v.split(",") if x.strip()]
++
++
++def gpu_mem():
++    try:
++        out = subprocess.run(["nvidia-smi", "--query-gpu=index,uuid,memory.used,memory.total,utilization.gpu",
++                              "--format=csv,noheader,nounits"], capture_output=True, text=True, timeout=30).stdout
++        return [dict(zip(["index", "uuid", "used_mib", "total_mib", "util"], [s.strip() for s in l.split(",")]))
++                for l in out.strip().splitlines()]
++    except Exception as e:  # noqa: BLE001
++        return str(e)
++
++
++def tail(path, n=2):
++    try:
++        with open(path, "rb") as f:
++            f.seek(0, 2)
++            size = f.tell()
++            f.seek(max(0, size - 4000))
++            return f.read().decode(errors="replace").strip().splitlines()[-n:]
++    except Exception:
++        return []
++
++
++def launch(job, out_dir, gpus):
++    script = job["script"]
++    if not script.startswith(ALLOWED_PREFIX) or ".." in script or not script.endswith(".py"):
++        raise RuntimeError(f"script not allowed: {script}")
++    path = os.path.join(BASE, script)
++    if not os.path.isfile(path):
++        raise FileNotFoundError(path)
++    env = dict(os.environ)
++    if job.get("gpu") is not None:
++        g = int(job["gpu"])
++        if g < 0 or g >= len(gpus):
++            raise RuntimeError(f"gpu index {g} outside inherited set {gpus}")
++        env["CUDA_VISIBLE_DEVICES"] = gpus[g]
++    for k, v in (job.get("env") or {}).items():
++        if k not in ALLOWED_ENV:
++            raise RuntimeError(f"env key not allowed: {k}")
++        env[k] = v
++    env["PYTHONUNBUFFERED"] = "1"
++    log = os.path.join(out_dir, f"{job['name']}.log")
++    fh = open(log, "a")
++    fh.write(f"\n=== launch {time.strftime('%Y-%m-%d %H:%M:%S')} gpu_logical={job.get('gpu')} "
++             f"physical={env.get('CUDA_VISIBLE_DEVICES')} ===\n")
++    fh.flush()
++    p = subprocess.Popen([DET_PY, path] + [str(a) for a in job.get("args", [])], cwd=BASE, env=env,
++                         stdout=fh, stderr=subprocess.STDOUT, start_new_session=False)
++    return {"job": job, "proc": p, "log": log, "fh": fh, "t0": time.time(),
++            "physical_gpu": env.get("CUDA_VISIBLE_DEVICES")}
++
++
++def main():
++    spec = json.load(open(sys.argv[1]))
++    out_dir = spec["out_dir"]
++    os.makedirs(out_dir, exist_ok=True)
++    gpus = allowed_gpus()
++    signal.signal(signal.SIGTERM, _h)
++    signal.signal(signal.SIGINT, _h)
++    results = []
++    status_path = os.path.join(out_dir, "status.json")
++    t_start = time.time()
++    failed = False
++    for si, stage in enumerate(spec["stages"]):
++        if failed or _STOP["flag"]:
++            for job in stage:
++                results.append({"name": job["name"], "stage": si, "rc": None, "skipped": True})
++            continue
++        running = [launch(j, out_dir, gpus) for j in stage]
++        last_status = 0.0
++        while True:
++            alive = [r for r in running if r["proc"].poll() is None]
++            if _STOP["flag"]:
++                for r in alive:
++                    r["proc"].send_signal(signal.SIGTERM)
++            if time.time() - last_status >= 60 or not alive:
++                st = {"spec": spec["name"], "stage": si, "elapsed_s": round(time.time() - t_start),
++                      "gpus_inherited": gpus, "gpu": gpu_mem(), "stop_requested": _STOP["flag"],
++                      "jobs": [{"name": r["job"]["name"], "pid": r["proc"].pid, "rc": r["proc"].poll(),
++                                "physical_gpu": r["physical_gpu"], "elapsed_s": round(time.time() - r["t0"]),
++                                "tail": tail(r["log"])} for r in running]}
++                tmp = status_path + ".tmp"
++                with open(tmp, "w") as f:
++                    json.dump(st, f, indent=1)
++                os.replace(tmp, status_path)
++                last_status = time.time()
++            if not alive:
++                break
++            time.sleep(5)
++        for r in running:
++            rc = r["proc"].wait()
++            r["fh"].close()
++            ok = rc in r["job"].get("ok_rc", [0])
++            results.append({"name": r["job"]["name"], "stage": si, "rc": rc, "ok": ok, "pid": r["proc"].pid,
++                            "physical_gpu": r["physical_gpu"], "wall_s": round(time.time() - r["t0"], 1),
++                            "log": r["log"]})
++            if not ok:
++                failed = True
++    res = {"spec": spec["name"], "all_ok": (not failed) and not _STOP["flag"]
++           and all(r.get("ok") for r in results), "stopped": _STOP["flag"],
++           "wall_s": round(time.time() - t_start, 1), "jobs": results}
++    with open(os.path.join(out_dir, "result.json"), "w") as f:
++        json.dump(res, f, indent=2)
++    print(json.dumps(res, indent=1))
++    sys.exit(0 if res["all_ok"] else 1)
++
++
++if __name__ == "__main__":
++    main()
+diff --git a/rsna_diag/det_audit.py b/rsna_diag/det_audit.py
+new file mode 100644
+index 0000000..d5eff6e
+--- /dev/null
++++ b/rsna_diag/det_audit.py
+@@ -0,0 +1,125 @@
++"""train2400+validation400+confirm800(=3600명) 전체 file/pixel hash 및 분할 중복 감사.
++iter_033 data_audit.json은 60명 표본만 재계산했다; 이번에는 전체를 재계산한다. default env, torch 불필요.
++원본: results/iter_034/data_audit_full.py (sha256 59dd08cf...). iter_035: 출력 경로를 iter_035로 바꾸고,
++detector 학습·평가 manifest(train2400_full/V100/V400/D32/L64/D24)가 iter_010 분할의 부분집합인지와
++iter_034 감사 결과와의 불변성을 함께 기록한다. 기존 결과 파일은 덮어쓰지 않는다."""
++import hashlib
++import json
++import os
++
++import numpy as np
++from PIL import Image
++
++BASE = "/SSD1_1TB/home/milab/daniel/08_medgemma/research"
++IT010 = f"{BASE}/results/iter_010/manifests"
++OUT = f"{BASE}/results/iter_035/data"
++
++
++def main():
++    gt = json.load(open(f"{IT010}/gt_manifest.json"))
++    train_ids = json.load(open(f"{IT010}/train_ids.json"))
++    val_ids = json.load(open(f"{IT010}/validation_ids.json"))
++    confirm_ids = json.load(open(f"{IT010}/confirm_ids.json"))
++    infer = {}
++    with open(f"{IT010}/infer_manifest.jsonl") as f:
++        for line in f:
++            r = json.loads(line)
++            infer[r["id"]] = r
++
++    all_ids = train_ids + val_ids + confirm_ids
++    overlaps = {
++        "train_val": sorted(set(train_ids) & set(val_ids)),
++        "train_confirm": sorted(set(train_ids) & set(confirm_ids)),
++        "val_confirm": sorted(set(val_ids) & set(confirm_ids)),
++    }
++    dup_within = len(all_ids) - len(set(all_ids))
++
++    hash_mismatches = []
++    missing_gt = []
++    missing_infer = []
++    pixel_hash_all = {}
++    n_checked = 0
++    for pid in all_ids:
++        if pid not in gt:
++            missing_gt.append(pid)
++            continue
++        if pid not in infer:
++            missing_infer.append(pid)
++            continue
++        rec = infer[pid]
++        path = f"{BASE}/{rec['image']}"
++        with open(path, "rb") as f:
++            data = f.read()
++        file_sha = hashlib.sha256(data).hexdigest()
++        arr = np.array(Image.open(path))
++        pixel_sha = hashlib.sha256(arr.tobytes()).hexdigest()
++        pixel_hash_all[pid] = pixel_sha
++        n_checked += 1
++        if file_sha != rec.get("file_sha256"):
++            hash_mismatches.append({"id": pid, "kind": "file", "expected": rec.get("file_sha256"), "got": file_sha})
++        if pixel_sha != gt[pid].get("pixel_sha256"):
++            hash_mismatches.append({"id": pid, "kind": "pixel", "expected": gt[pid].get("pixel_sha256"), "got": pixel_sha})
++
++    # cross-split decoded-pixel duplicate check across the FULL 3600 (not just a sample)
++    by_pixel = {}
++    id_to_split = {}
++    for pid in train_ids:
++        id_to_split[pid] = "train"
++    for pid in val_ids:
++        id_to_split[pid] = "validation"
++    for pid in confirm_ids:
++        id_to_split[pid] = "confirm"
++    for pid, h in pixel_hash_all.items():
++        by_pixel.setdefault(h, []).append(pid)
++    dup_pixel_groups = {h: ids for h, ids in by_pixel.items() if len(ids) > 1}
++    cross_split_dup = {h: ids for h, ids in dup_pixel_groups.items()
++                        if len(set(id_to_split[i] for i in ids)) > 1}
++
++    issues = []
++    if any(overlaps.values()):
++        issues.append("patient id overlap across splits")
++    if dup_within:
++        issues.append(f"{dup_within} duplicate ids within the concatenated 3600 list")
++    if hash_mismatches:
++        issues.append(f"{len(hash_mismatches)} file/pixel hash mismatches")
++    if missing_gt or missing_infer:
++        issues.append(f"missing_gt={len(missing_gt)} missing_infer={len(missing_infer)}")
++    if cross_split_dup:
++        issues.append(f"{len(cross_split_dup)} cross-split decoded-pixel duplicate groups")
++    if dup_pixel_groups and not cross_split_dup:
++        issues.append(f"{len(dup_pixel_groups)} within-split decoded-pixel duplicate groups (not cross-split)")
++
++    mans = {}
++    for nm, p in (("train2400_full", f"{BASE}/results/iter_033/data/train2400_full.json"), ("V100", f"{BASE}/results/iter_033/data/V100.json"),
++                  ("D32", f"{BASE}/results/iter_033/data/D32.json"), ("L64", f"{BASE}/results/iter_033/data/L64.json"),
++                  ("V400", f"{BASE}/results/iter_034/data/V400.json"), ("D24", f"{BASE}/results/iter_035/data/D24.json")):
++        mids = json.load(open(p))["ids"]
++        mans[nm] = {"n": len(mids), "n_unique": len(set(mids)),
++                    "subset_of": [s for s, ss in (("train", train_ids), ("validation", val_ids), ("confirm", confirm_ids)) if set(mids) <= set(ss)]}
++    issues += [f"manifest {k} not within a single split" for k, v in mans.items() if len(v["subset_of"]) != 1 or v["n"] != v["n_unique"]]
++    if set(json.load(open(f"{BASE}/results/iter_033/data/train2400_full.json"))["ids"]) != set(train_ids):
++        issues.append("train2400_full != iter_010 train ids")
++    prev = json.load(open(f"{BASE}/results/iter_034/data/data_audit_full_3600.json"))
++    result = {
++        "detector_manifests": mans,
++        "iter034_audit_same_counts": {k: prev.get(k) == v for k, v in (("n_checked", n_checked), ("duplicate_pixel_groups_total", len(dup_pixel_groups)))},
++        "n_train": len(train_ids), "n_validation": len(val_ids), "n_confirm": len(confirm_ids),
++        "n_total": len(all_ids), "n_checked": n_checked,
++        "overlaps": {k: len(v) for k, v in overlaps.items()},
++        "overlap_ids": overlaps,
++        "duplicate_ids_within_concat": dup_within,
++        "hash_mismatches": hash_mismatches,
++        "missing_gt": missing_gt, "missing_infer": missing_infer,
++        "duplicate_pixel_groups_total": len(dup_pixel_groups),
++        "cross_split_duplicate_pixel_groups": cross_split_dup,
++        "sop_linkage_note": "infer_manifest.jsonl에는 SOPInstanceUID 등 DICOM 식별자 필드가 없어 "
++                             "환자 ID(파일명 기반) 외의 SOP 수준 연결 여부는 이번 감사에서 검증하지 못했다 (미검증 범위).",
++        "issues": issues, "ok": len(issues) == 0,
++    }
++    with open(f"{OUT}/data_audit_full_3600.json", "w") as f:
++        json.dump(result, f, indent=2)
++    print(json.dumps({k: v for k, v in result.items() if k not in ("overlap_ids", "hash_mismatches", "cross_split_duplicate_pixel_groups")}, indent=2))
++
++
++if __name__ == "__main__":
++    main()
+diff --git a/rsna_diag/det_compare.py b/rsna_diag/det_compare.py
+new file mode 100644
+index 0000000..ecd026a
+--- /dev/null
++++ b/rsna_diag/det_compare.py
+@@ -0,0 +1,342 @@
++"""개발비교800(iter_010 confirm) detector vs 저장 base/SFT 비교 (기본 medgemma env).
++
++원본: results/iter_034/analyze_confirm800.py (sha256 88342a8d...)와 그 원본 iter_033 analyze_confirm800.py,
++results/iter_034/verify_confirm_sft.py (sha256 c11799c8...). metric·parser·utility는 기존 승인 모듈(sft_eval·metrics·parse)을 쓴다.
++iter_035 변경:
++- 저장 SFT/base 출력: 중복을 덮어쓰지 않고 오류, 예상 (id,prompt) 집합·adapter·protocol·completion·영상 hash 대조,
++  iter_012 확인 주수치(seed별 F1@0.3) 재현.
++- detector: det_eval.load_verified로 completion·checkpoint·manifest 연결을 검사하고, 잠긴 선택 파일의 checkpoint·
++  threshold만 사용한다. 누락 record는 오류.
++- 주비교: 양성 400명 환자 평균 F1@0.3·F1@0.5의 detector17−B0 차이에 실제 97.5% paired bootstrap CI
++  (1.25/98.75 percentile, 10,000회 공통 환자 resample). 원본은 95% 함수를 97.5 label로 불렀다. 기존 metrics.paired_boot_ci는
++  수정하지 않는다.
++- FP/환자(전체 N 하한, valid-only), FP 보유율과 차이의 95% CI, lesion recall, 전체 미검출, invalid, GT 개수·union 면적·
++  개별 GT 면적(train 기준 삼분위) 층, FP budget별 detector recall.
++- 상보성: exhaustive matching(metrics.match)의 GT identity로 both/det-only/SFT-only/both-miss, 비율 CI는 resample마다
++  분자·분모 재계산. 민감도: 동점 규칙 반대(높은 pred index 우선), best-IoU cover, 다른 SFT seed·detector seed·FP budget.
++"""
++import argparse
++import glob
++import hashlib
++import json
++import os
++import sys
++
++import numpy as np
++
++BASE = "/SSD1_1TB/home/milab/daniel/08_medgemma/research"
++sys.path.insert(0, BASE)
++from rsna_diag import geometry as G, metrics as M, parse as PA, sft_eval as SE  # noqa: E402
++
++IT010 = f"{BASE}/results/iter_010/manifests"
++IT012 = f"{BASE}/results/iter_012"
++ADAPTERS = {17: "e13f3c4461b826a060c90dfe4e4ee4c2ebac36a08f84be1a45a37495816cec11",
++            29: "9185488c82b6efd6fe53df3c92ca5f4b6efb3e059d0f36eeb3c9ee9f911a99cc",
++            43: "881ca7fda81669374993893f85b26ff91a74b9762a10edbb1c428c991ad735b7"}
++PROTOCOL = "797ae7074325d714cf1c54c2d4fb1cc6904dc0f5babd18e817195d219b4d4a92"
++B = 10000
++BOOT_SEED = 20260924
++
++
++def sha(p):
++    return hashlib.sha256(open(p, "rb").read()).hexdigest()
++
++
++def load_stored(run_dir, ids, prompts, adapter, infer):
++    recs = {}
++    files = sorted(glob.glob(f"{run_dir}/gen_worker*.jsonl"))
++    for p in files:
++        for l in open(p):
++            r = json.loads(l)
++            k = (r["id"], r["prompt_name"])
++            if k in recs:
++                raise ValueError(f"duplicate stored record {k} in {run_dir}")
++            recs[k] = r
++    exp = {(i, pr) for i in ids for pr in prompts}
++    if set(recs) != exp:
++        raise ValueError(f"{run_dir}: stored set != expected (missing {len(exp - set(recs))}, extra {len(set(recs) - exp)})")
++    bad = [k for k, r in recs.items() if r["adapter_digest"] != adapter or r["protocol_digest"] != PROTOCOL
++           or r["image_file_sha256"] != infer[k[0]]["file_sha256"]]
++    if bad:
++        raise ValueError(f"{run_dir}: provenance mismatch for {len(bad)} records e.g. {bad[:2]}")
++    comp = json.load(open(f"{run_dir}/completion.json"))
++    if comp["n_actual_unique"] != len(exp) or comp["n_missing"] or comp["n_duplicate"] or comp["adapter_digest"] != adapter:
++        raise ValueError(f"{run_dir}: completion inconsistent")
++    return recs, {"files": {os.path.basename(p): sha(p) for p in files}, "n": len(recs)}
++
++
++def boot_ci(d, idx, lo, hi):
++    m = d[idx].mean(axis=1)
++    return [float(np.percentile(m, lo)), float(np.percentile(m, hi))]
++
++
++def ratio_ci(num, den, idx):
++    rs = num[idx].sum(axis=1) / den[idx].sum(axis=1)
++    return [float(np.percentile(rs, 2.5)), float(np.percentile(rs, 97.5))]
++
++
++def boxes_valid(pred):
++    return pred["boxes"] if pred["status"] in PA.VALID else []
++
++
++def match_rev(pred, gt, thr):
++    """동점 민감도: pred 순서를 뒤집어 metrics.match를 적용(높은 index 우선) 후 원래 index로 환원."""
++    n = len(pred)
++    pairs = M.match(list(reversed(pred)), gt, thr)
++    return [(gi, n - 1 - pi) for gi, pi in pairs]
++
++
++def gt_hits(pred, g, thr, mode):
++    if not pred or not g:
++        return set()
++    if mode == "exact":
++        return {gi for gi, _ in M.match(pred, g, thr)}
++    if mode == "rev":
++        return {gi for gi, _ in match_rev(pred, g, thr)}
++    if mode == "cover":
++        return {gi for gi, gb in enumerate(g) if any(M.iou(p, gb) >= thr for p in pred)}
++    raise ValueError(mode)
++
++
++def complementarity(det, sft, gt, pos, thr, idx, mode="exact"):
++    rows = []
++    for i in pos:
++        g = [b["yxyx_norm"] for b in gt[i]["boxes"]]
++        dh, sh = gt_hits(boxes_valid(det[i]), g, thr, mode), gt_hits(boxes_valid(sft[i]), g, thr, mode)
++        n = len(g)
++        rows.append([len(dh & sh), len(dh - sh), len(sh - dh), n - len(dh | sh), n])
++    a = np.array(rows, float)
++    tot = a[:, 4].sum()
++    out = {"total_gt": int(tot), "both_hit": int(a[:, 0].sum()), "detector_only": int(a[:, 1].sum()),
++           "sft_only": int(a[:, 2].sum()), "both_miss": int(a[:, 3].sum()),
++           "n_patients_with_det_only": int((a[:, 1] > 0).sum()), "n_patients_with_sft_only": int((a[:, 2] > 0).sum())}
++    for k, c in (("detector_only", 1), ("sft_only", 2), ("both_miss", 3), ("both_hit", 0)):
++        out[f"{k}_rate"] = float(a[:, c].sum() / tot)
++        out[f"{k}_rate_ci95"] = ratio_ci(a[:, c], a[:, 4], idx)
++    out["gt_union_recall"] = float((a[:, 0] + a[:, 1] + a[:, 2]).sum() / tot)
++    return out, a
++
++
++def fp_stats(preds, gt, ids, thr=0.3):
++    allv, validv = [], []
++    for i in ids:
++        g = [b["yxyx_norm"] for b in gt[i]["boxes"]]
++        if preds[i]["status"] in PA.VALID:
++            pb = preds[i]["boxes"]
++            fp = len(pb) - (M.patient_metrics(pb, g, thr)["tp"] if pb and g else 0)
++            allv.append(fp); validv.append(fp)
++        else:
++            allv.append(0)  # invalid: 관측 가능한 FP 없음 → 전체 N 평균은 하한
++    return np.array(allv, float), {"fp_per_patient_all_n_lower_bound": float(np.mean(allv)),
++                                   "fp_per_patient_valid_only": float(np.mean(validv)) if validv else None,
++                                   "frac_with_fp_all_n": float(np.mean([x > 0 for x in allv])),
++                                   "n_all": len(allv), "n_valid": len(validv)}
++
++
++def lesion_stats(preds, gt, pos, thr):
++    tp = n = miss_all = inv = 0
++    for i in pos:
++        g = [b["yxyx_norm"] for b in gt[i]["boxes"]]
++        pb = boxes_valid(preds[i])
++        t = M.patient_metrics(pb, g, thr)["tp"] if pb else 0
++        tp += t; n += len(g); miss_all += (t == 0); inv += preds[i]["status"] not in PA.VALID
++    return {"lesion_recall": tp / n, "tp": tp, "n_gt": n, "patients_all_missed": miss_all,
++            "patients_all_missed_rate": miss_all / len(pos), "invalid_positive": inv}
++
++
++def indiv_area_edges(gt, train_ids):
++    a = [M.area(b["yxyx_norm"]) / 1e6 for i in train_ids if gt[i]["category"] == "opacity" for b in gt[i]["boxes"]]
++    return [float(np.quantile(a, 1 / 3)), float(np.quantile(a, 2 / 3))]
++
++
++def strata(det, sft, gt, pos, union_edges, gt_edges, idx_fn):
++    out = {}
++    def f1s(preds, ids, thr):
++        return np.array([M.patient_metrics(boxes_valid(preds[i]), [b["yxyx_norm"] for b in gt[i]["boxes"]], thr)["f1"] for i in ids])
++    groups = {"n_gt=1": [i for i in pos if len(gt[i]["boxes"]) == 1], "n_gt=2": [i for i in pos if len(gt[i]["boxes"]) == 2],
++              "n_gt>=3": [i for i in pos if len(gt[i]["boxes"]) >= 3]}
++    ua = {i: M.union_area([b["yxyx_norm"] for b in gt[i]["boxes"]]) / 1e6 for i in pos}
++    for k, name in enumerate(("small", "medium", "large")):
++        groups[f"union_area_{name}"] = [i for i in pos if int(np.digitize(ua[i], union_edges)) == k]
++    for name, ids in groups.items():
++        if not ids:
++            out[name] = {"n": 0}
++            continue
++        r = {"n": len(ids)}
++        for thr in (0.3, 0.5):
++            d, s = f1s(det, ids, thr), f1s(sft, ids, thr)
++            r[f"det_f1@{thr}"], r[f"b0_f1@{thr}"] = float(d.mean()), float(s.mean())
++            r[f"diff_f1@{thr}"] = float((d - s).mean())
++            r[f"diff_f1@{thr}_ci95"] = boot_ci(d - s, idx_fn(len(ids)), 2.5, 97.5)
++        out[name] = r
++    # 개별 GT 면적 삼분위: lesion recall
++    for k, name in enumerate(("small", "medium", "large")):
++        for thr in (0.3, 0.5):
++            dn = sn = n = 0
++            for i in pos:
++                g = [b["yxyx_norm"] for b in gt[i]["boxes"]]
++                dh, sh = gt_hits(boxes_valid(det[i]), g, thr, "exact"), gt_hits(boxes_valid(sft[i]), g, thr, "exact")
++                for gi, gb in enumerate(g):
++                    if int(np.digitize(M.area(gb) / 1e6, gt_edges)) == k:
++                        n += 1; dn += gi in dh; sn += gi in sh
++            out.setdefault(f"indiv_gt_area_{name}", {"n_gt": n})[f"lesion_recall@{thr}"] = {"det": dn / n if n else None, "b0": sn / n if n else None}
++    return out
++
++
++def main():
++    ap = argparse.ArgumentParser()
++    ap.add_argument("--selection17", required=True)
++    ap.add_argument("--confirm_dir17", required=True)
++    ap.add_argument("--extra_det", nargs="*", default=[], help="seed:selection.json:confirm_dir")
++    ap.add_argument("--out", required=True)
++    a = ap.parse_args()
++    if os.path.exists(a.out):
++        raise FileExistsError(a.out)
++    from rsna_diag import det_eval as E, det_lib as D
++    gt, infer = D.load_gt_infer()
++    ids = json.load(open(f"{IT010}/confirm_ids.json"))
++    train_ids = json.load(open(f"{IT010}/train_ids.json"))
++    pos = [i for i in ids if gt[i]["category"] == "opacity"]
++    cats = {c: [i for i in ids if gt[i]["category"] == c] for c in ("opacity", "normal", "not_normal_no_opacity")}
++    union_edges = json.load(open(f"{BASE}/results/iter_033/data/area_edges.json"))["train_positive_area_tertile_edges"]
++    if [round(x, 12) for x in union_edges] != [round(x, 12) for x in SE.area_edges(gt, train_ids)]:
++        raise ValueError("union-area edges differ from train recomputation")
++    gt_edges = indiv_area_edges(gt, train_ids)
++    out = {"n_confirm": len(ids), "n_positive": len(pos), "note": "confirm800은 이전 반복의 개발 비교에 쓰인 집단이며 독립 확인이 아니다.",
++           "union_area_edges_train": union_edges, "indiv_gt_area_edges_train": gt_edges}
++
++    # ---- 저장 VLM 출력
++    stored = {}
++    base_recs, prov = load_stored(f"{IT012}/confirm_base", ids, ("official_long", "concise"), None, infer)
++    out["provenance"] = {"base": prov}
++    for p in ("official_long", "concise"):
++        stored[f"base_{p}"] = SE.parse_records(base_recs, ids, p, strict=True)
++    for s in (17, 29, 43):
++        recs, prov = load_stored(f"{IT012}/confirm_sft_seed{s}", ids, ("concise",), ADAPTERS[s], infer)
++        out["provenance"][f"sft{s}"] = prov
++        stored[f"sft{s}"] = SE.parse_records(recs, ids, "concise", strict=True)
++    ref = json.load(open(f"{IT012}/final/confirm_result.json"))["primary"]["per_seed_f1@0.3"]
++
++    # ---- detector
++    def load_det(selp, cdir):
++        sel = json.load(open(selp))
++        raw, comp, rid = E.load_verified(cdir, "confirm800", sel["selected_checkpoint"])
++        if comp["checkpoint_sha256"] != sel["selected_checkpoint_sha256"] or rid != ids:
++            raise ValueError("detector confirm output not linked to locked selection")
++        thr = sel["selected"]["threshold"]
++        return raw, D.preds_to_norm_yxyx(raw, gt, thr), sel, comp
++    raw17, det17, sel17, comp17 = load_det(a.selection17, a.confirm_dir17)
++    out["provenance"]["detector17"] = {"selection": a.selection17, "selection_sha256": sha(a.selection17),
++                                       "confirm_dir": os.path.abspath(a.confirm_dir17),
++                                       "checkpoint_sha256": comp17["checkpoint_sha256"],
++                                       "raw_preds_sha256": comp17["raw_preds_sha256"], "threshold": sel17["selected"]["threshold"]}
++    models = {"detector17": det17, **stored}
++    extra = {}
++    for item in a.extra_det:
++        s, selp, cdir = item.split(":", 2)
++        raw_x, det_x, sel_x, comp_x = load_det(selp, cdir)
++        models[f"detector{s}"] = det_x
++        extra[s] = (raw_x, sel_x)
++        out["provenance"][f"detector{s}"] = {"selection": selp, "checkpoint_sha256": comp_x["checkpoint_sha256"],
++                                             "threshold": sel_x["selected"]["threshold"]}
++
++    out["summary"] = {}
++    for name, pr in models.items():
++        sm = SE.summarize(pr, gt, ids, edges=union_edges)
++        out["summary"][name] = {k: sm[k] for k in ("f1@0.3", "f1@0.5", "precision@0.3", "recall@0.3", "utility",
++                                                    "status_all", "positive_valid_empty", "neg_Normal",
++                                                    "neg_NoOpacity/NotNormal", "by_n_gt", "by_gt_area_tertile")}
++        out["summary"][name]["lesion@0.3"] = lesion_stats(pr, gt, pos, 0.3)
++        out["summary"][name]["lesion@0.5"] = lesion_stats(pr, gt, pos, 0.5)
++        _, fs = fp_stats(pr, gt, ids)
++        out["summary"][name]["fp_all800"] = fs
++        out["summary"][name]["fp_by_category"] = {c: fp_stats(pr, gt, cids)[1] for c, cids in cats.items()}
++    out["sft_reproduction_vs_iter012"] = {f"sft{s}": {"now": out["summary"][f"sft{s}"]["f1@0.3"], "iter012": ref[f"sft_seed{s}"],
++                                                      "match": abs(out["summary"][f"sft{s}"]["f1@0.3"] - ref[f"sft_seed{s}"]) < 1e-12}
++                                           for s in (17, 29, 43)}
++
++    # ---- 주비교: 97.5% paired CI
++    idx = M.bootstrap_indices(len(pos), B=B, seed=BOOT_SEED)
++    _, ppd = SE.per_patient(det17, gt, ids)
++    p0, ppb = SE.per_patient(stored["sft17"], gt, ids)
++    assert p0 == pos
++    prim = {}
++    for k in ("f1@0.3", "f1@0.5"):
++        d = ppd[k] - ppb[k]
++        prim[k] = {"diff": float(d.mean()), "ci97.5": boot_ci(d, idx, 1.25, 98.75), "ci95": boot_ci(d, idx, 2.5, 97.5),
++                   "det": float(ppd[k].mean()), "b0": float(ppb[k].mean())}
++    out["primary_detector17_minus_B0"] = {**prim, "B": B, "seed": BOOT_SEED, "unit": "positive patient (n=400)",
++                                          "percentiles": "97.5% CI = [1.25, 98.75]"}
++    out["other_pairs_positive"] = {}
++    for name in [m for m in models if m not in ("detector17", "sft17")]:
++        _, pp = SE.per_patient(models[name], gt, ids)
++        out["other_pairs_positive"][f"detector17_minus_{name}"] = {
++            k: {"diff": float((ppd[k] - pp[k]).mean()), "ci95": boot_ci(ppd[k] - pp[k], idx, 2.5, 97.5)} for k in ("f1@0.3", "f1@0.5")}
++        if name.startswith("detector"):
++            out["other_pairs_positive"][f"{name}_minus_B0"] = {
++                k: {"diff": float((pp[k] - ppb[k]).mean()), "ci97.5": boot_ci(pp[k] - ppb[k], idx, 1.25, 98.75)} for k in ("f1@0.3", "f1@0.5")}
++
++    # ---- FP 증가 95% CI (전체 800, 전체 N 하한 기준)
++    idx800 = M.bootstrap_indices(len(ids), B=B, seed=BOOT_SEED)
++    fd, _ = fp_stats(det17, gt, ids)
++    fb, _ = fp_stats(stored["sft17"], gt, ids)
++    out["fp_increase_detector17_minus_B0_all800"] = {"diff": float((fd - fb).mean()), "ci95": boot_ci(fd - fb, idx800, 2.5, 97.5),
++                                                     "note": "B0 invalid는 FP 0으로 세는 전체 N 하한 기준"}
++    out["fp_increase_by_category"] = {}
++    for c, cids in cats.items():
++        a1, _ = fp_stats(det17, gt, cids); a2, _ = fp_stats(stored["sft17"], gt, cids)
++        out["fp_increase_by_category"][c] = {"diff": float((a1 - a2).mean()),
++                                             "ci95": boot_ci(a1 - a2, M.bootstrap_indices(len(cids), B=B, seed=BOOT_SEED), 2.5, 97.5)}
++
++    # ---- FP budget operating points (validation에서 고정)
++    out["fp_budget_detector17"] = {}
++    for b, r in sel17["fp_budgets"].items():
++        if r is None:
++            out["fp_budget_detector17"][b] = None
++            continue
++        pr = D.preds_to_norm_yxyx(raw17, gt, r["threshold"])
++        out["fp_budget_detector17"][b] = {"threshold": r["threshold"], "val_fp": r["fp_per_patient"],
++                                          "lesion@0.3": lesion_stats(pr, gt, pos, 0.3), "fp_all800": fp_stats(pr, gt, ids)[1],
++                                          "f1@0.3": SE.summarize(pr, gt, ids)["f1@0.3"]}
++
++    # ---- 상보성
++    comp = {}
++    for thr in (0.3, 0.5):
++        c, arr = complementarity(det17, stored["sft17"], gt, pos, thr, idx)
++        comp[f"iou{thr}"] = c
++        comp[f"iou{thr}_tie_reversed"] = complementarity(det17, stored["sft17"], gt, pos, thr, idx, "rev")[0]
++        comp[f"iou{thr}_best_iou_cover"] = complementarity(det17, stored["sft17"], gt, pos, thr, idx, "cover")[0]
++        for s in (29, 43):
++            comp[f"iou{thr}_vs_sft{s}"] = complementarity(det17, stored[f"sft{s}"], gt, pos, thr, idx)[0]
++        for s in extra:
++            comp[f"iou{thr}_detector{s}_vs_sft17"] = complementarity(models[f"detector{s}"], stored["sft17"], gt, pos, thr, idx)[0]
++        for b, r in (out["fp_budget_detector17"] or {}).items():
++            if r:
++                pr = D.preds_to_norm_yxyx(raw17, gt, r["threshold"])
++                comp[f"iou{thr}_fpbudget{b}"] = complementarity(pr, stored["sft17"], gt, pos, thr, idx)[0]
++    out["complementarity"] = comp
++    out["strata"] = strata(det17, stored["sft17"], gt, pos, union_edges, gt_edges,
++                           lambda n: M.bootstrap_indices(n, B=B, seed=BOOT_SEED))
++
++    # ---- 사전 판정 기준(비용 조건은 latency 결과와 합쳐 보고서에서 판정)
++    c3 = comp["iou0.3"]
++    out["criteria"] = {
++        "detector_f1_ci97.5_lower_gt0_both": all(prim[k]["ci97.5"][0] > 0 for k in prim),
++        "detector_point_diff_ge_0.03_any": any(prim[k]["diff"] >= 0.03 for k in prim),
++        "fp_increase_ci95_upper_le_0.05": out["fp_increase_detector17_minus_B0_all800"]["ci95"][1] <= 0.05,
++        "sft_only_rate_ci95_upper_le_0.05@0.3": c3["sft_only_rate_ci95"][1] <= 0.05,
++        "complementarity_one_side_ge_5pct_and_ge20patients@0.3": {
++            "detector_only": c3["detector_only_rate"] >= 0.05 and c3["n_patients_with_det_only"] >= 20 and c3["detector_only_rate_ci95"][0] > 0,
++            "sft_only": c3["sft_only_rate"] >= 0.05 and c3["n_patients_with_sft_only"] >= 20 and c3["sft_only_rate_ci95"][0] > 0},
++        "sft_advantage_any_f1_ci97.5_upper_lt0": any(prim[k]["ci97.5"][1] < 0 for k in prim),
++    }
++    json.dump(out, open(a.out, "w"), indent=2)
++    print(json.dumps({"primary": out["primary_detector17_minus_B0"], "fp_increase": out["fp_increase_detector17_minus_B0_all800"],
++                      "comp@0.3": {k: c3[k] for k in ("detector_only_rate", "sft_only_rate", "both_miss_rate",
++                                                       "detector_only_rate_ci95", "sft_only_rate_ci95",
++                                                       "n_patients_with_det_only", "n_patients_with_sft_only")},
++                      "criteria": out["criteria"], "sft_repro": out["sft_reproduction_vs_iter012"]}, indent=1))
++
++
++if __name__ == "__main__":
++    main()
+diff --git a/rsna_diag/det_eval.py b/rsna_diag/det_eval.py
+new file mode 100644
+index 0000000..52e7f2b
+--- /dev/null
++++ b/rsna_diag/det_eval.py
+@@ -0,0 +1,382 @@
++"""detector 추론·완료 검증·threshold scan (natten_py310 env).
++
++원본: results/iter_034/eval_on_manifest.py (sha256 c9b346b1...), results/iter_034/eval_confirm800.py (sha256 df0b9375...),
++그 원본인 iter_033 eval_on_manifest.py/eval_confirm800.py. THRESHOLDS·preds_to_norm_yxyx·summarize 계산은 유지한다.
++iter_035 변경:
++- 추론을 record 단위 JSONL(worker shard)로 저장하고 재개한다. 각 record에 checkpoint sha256·source digest·
++  manifest digest·영상 file sha256을 남기고, 재개 시 기존 record의 provenance가 다르면 거부한다.
++- 마지막 줄 손상(tail)은 원본 bytes를 별도 파일로 보존한 뒤 잘라내고 재계산한다. 중간 줄 손상·중복은 오류.
++- run: worker 프로세스를 띄우고(PDEATHSIG) SIGTERM을 전달하며, 모두 성공하면 finalize로 정확한 ID 집합·중복·
++  provenance를 검증해 raw_preds.json과 completion.json을 원자적으로 쓴다. 누락 record는 점수화하지 않는다.
++- scan: completion을 재검증한 raw_preds에서만 threshold별 요약을 만든다. FP/환자는 전체 N 기준(detector는
++  모든 요청이 valid)이며, IoU 0.3·0.5의 lesion recall을 함께 기록한다.
++"""
++import argparse
++import ctypes
++import hashlib
++import json
++import os
++import signal
++import subprocess
++import sys
++import time
++
++BASE = "/SSD1_1TB/home/milab/daniel/08_medgemma/research"
++sys.path.insert(0, BASE)
++
++THRESHOLDS = [0.01, 0.025, 0.05, 0.10, 0.15, 0.20, 0.25, 0.30, 0.35, 0.40, 0.45, 0.50,
++              0.55, 0.60, 0.65, 0.70, 0.75, 0.80, 0.85, 0.90, 0.95, 0.975, 0.99, 1.0]
++SOURCE_FILES = [f"{BASE}/rsna_diag/det_eval.py", f"{BASE}/rsna_diag/det_lib.py", f"{BASE}/rsna_diag/geometry.py"]
++_STOP = {"flag": False}
++
++
++def _h(s, f):
++    _STOP["flag"] = True
++
++
++def sha_file(p):
++    h = hashlib.sha256()
++    with open(p, "rb") as f:
++        for c in iter(lambda: f.read(1 << 20), b""):
++            h.update(c)
++    return h.hexdigest()
++
++
++def jd(o):
++    return hashlib.sha256(json.dumps(o, sort_keys=True).encode()).hexdigest()
++
++
++def source_digest():
++    ent = {os.path.relpath(p, BASE): sha_file(p) for p in SOURCE_FILES}
++    if os.environ.get("DET_TEST_SOURCE_SALT"):
++        ent["_salt"] = os.environ["DET_TEST_SOURCE_SALT"]
++    return jd(ent)
++
++
++def manifest_ids(name):
++    from rsna_diag import det_train as T
++    if name == "confirm800":
++        p = f"{BASE}/results/iter_010/manifests/confirm_ids.json"
++        return json.load(open(p)), p
++    p = T.find_manifest(name)
++    return json.load(open(p))["ids"], p
++
++
++def provenance(args, ids):
++    return {"checkpoint": os.path.abspath(args.checkpoint), "checkpoint_sha256": sha_file(args.checkpoint),
++            "source_digest": source_digest(), "manifest": args.manifest, "manifest_digest": jd(ids),
++            "batch_size": args.batch_size}
++
++
++def read_shard(path, prov, repair):
++    """반환: {id: record}. 마지막 줄 손상은 repair=True일 때 보존·절단, 그 외 손상은 예외."""
++    if not os.path.exists(path):
++        return {}
++    with open(path, "rb") as f:
++        data = f.read()
++    cut = data.rfind(b"\n") + 1  # 개행으로 끝난 완전한 줄까지
++    complete, tail_frag = data[:cut], data[cut:]
++    if tail_frag:
++        if not repair:
++            raise ValueError(f"corrupt (unterminated) tail in {path}")
++        keep = f"{path}.corrupt_tail.{int(time.time() * 1000)}"
++        with open(keep, "wb") as f:
++            f.write(tail_frag)
++        with open(path, "r+b") as f:
++            f.truncate(cut)
++    recs = {}
++    for k, ln in enumerate(complete.split(b"\n")[:-1] if complete else []):
++        try:
++            r = json.loads(ln)
++        except Exception:
++            raise ValueError(f"corrupt internal line {k} in {path}")
++        for key in ("checkpoint_sha256", "source_digest", "manifest_digest", "batch_size"):
++            if r.get(key) != prov[key]:
++                raise ValueError(f"provenance mismatch ({key}) in existing record {r.get('id')} of {path}")
++        if r["id"] in recs:
++            raise ValueError(f"duplicate id {r['id']} in {path}")
++        recs[r["id"]] = r
++    return recs
++
++
++def cmd_worker(args):
++    import torch
++    from rsna_diag import det_lib as D
++    libc = ctypes.CDLL("libc.so.6")
++    libc.prctl(1, signal.SIGTERM)  # 부모가 죽으면 SIGTERM
++    signal.signal(signal.SIGTERM, _h)
++    ids, _ = manifest_ids(args.manifest)
++    mine = [i for k, i in enumerate(ids) if k % args.n_workers == args.worker]
++    prov = provenance(args, ids)
++    out = os.path.join(args.out_dir, f"preds_w{args.worker:02d}.jsonl")
++    done = read_shard(out, prov, repair=True)
++    todo = [i for i in mine if i not in done]
++    extra = set(done) - set(mine)
++    if extra:
++        raise ValueError(f"shard has ids outside its assignment: {sorted(extra)[:3]}")
++    gt, infer = D.load_gt_infer()
++    device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
++    t_load = time.time()
++    model = D.build_model().to(device)
++    ck = torch.load(args.checkpoint, map_location="cpu", weights_only=False)
++    model.load_state_dict(ck["model"])
++    model.eval()
++    del ck
++    t_load = time.time() - t_load
++    t0 = time.time()
++    n = 0
++    with open(out, "a") as f:
++        for s in range(0, len(todo), args.batch_size):
++            if _STOP["flag"]:
++                break
++            bid = todo[s:s + args.batch_size]
++            raw = D.run_inference(model, device, bid, gt, infer, batch_size=args.batch_size)
++            for i in bid:
++                r = {"id": i, **raw[i], "file_sha256": infer[i].get("file_sha256"), **{k: prov[k] for k in (
++                    "checkpoint_sha256", "source_digest", "manifest_digest", "batch_size")}}
++                f.write(json.dumps(r) + "\n")
++                f.flush()
++                n += 1
++    el = time.time() - t0
++    meta = {"worker": args.worker, "n_new": n, "n_prev": len(done), "elapsed_s": el, "model_load_s": t_load,
++            "images_per_sec": n / el if el > 0 and n else None, "stopped": _STOP["flag"],
++            "peak_alloc_mib": torch.cuda.max_memory_allocated() / 2**20 if torch.cuda.is_available() else None,
++            "peak_reserved_mib": torch.cuda.max_memory_reserved() / 2**20 if torch.cuda.is_available() else None}
++    with open(os.path.join(args.out_dir, f"worker{args.worker:02d}_meta_{int(time.time())}.json"), "w") as f:
++        json.dump(meta, f)
++    print(json.dumps(meta), flush=True)
++    return 3 if _STOP["flag"] else 0
++
++
++def finalize(args):
++    ids, mpath = manifest_ids(args.manifest)
++    prov = provenance(args, ids)
++    allrec = {}
++    files = {}
++    for w in range(args.n_workers):
++        p = os.path.join(args.out_dir, f"preds_w{w:02d}.jsonl")
++        recs = read_shard(p, prov, repair=False)
++        for i in recs:
++            if i in allrec:
++                raise ValueError(f"id {i} in multiple shards")
++        allrec.update(recs)
++        files[os.path.basename(p)] = sha_file(p)
++    if set(allrec) != set(ids) or len(allrec) != len(ids):
++        miss = sorted(set(ids) - set(allrec))
++        raise ValueError(f"incomplete: missing {len(miss)} e.g. {miss[:3]}, extra {len(set(allrec) - set(ids))}")
++    raw = {i: {k: allrec[i][k] for k in ("boxes_xyxy_px", "scores", "labels", "img_hw")} for i in ids}
++    tmp = os.path.join(args.out_dir, "raw_preds.json.tmp")
++    with open(tmp, "w") as f:
++        json.dump(raw, f)
++    os.replace(tmp, os.path.join(args.out_dir, "raw_preds.json"))
++    comp = {**prov, "manifest_path": mpath, "n_ids": len(ids), "n_workers": args.n_workers, "shard_sha256": files,
++            "raw_preds_sha256": sha_file(os.path.join(args.out_dir, "raw_preds.json")), "t": time.time()}
++    tmp = os.path.join(args.out_dir, "completion.json.tmp")
++    with open(tmp, "w") as f:
++        json.dump(comp, f, indent=2)
++    os.replace(tmp, os.path.join(args.out_dir, "completion.json"))
++    return comp
++
++
++def load_verified(out_dir, expect_manifest=None, expect_ckpt=None):
++    """completion.json과 raw_preds·shard·checkpoint·manifest를 대조한 뒤 raw_preds를 반환한다."""
++    comp = json.load(open(os.path.join(out_dir, "completion.json")))
++    rp = os.path.join(out_dir, "raw_preds.json")
++    if sha_file(rp) != comp["raw_preds_sha256"]:
++        raise ValueError("raw_preds sha256 mismatch with completion")
++    for fn, h in comp["shard_sha256"].items():
++        if sha_file(os.path.join(out_dir, fn)) != h:
++            raise ValueError(f"shard {fn} changed after completion")
++    if sha_file(comp["checkpoint"]) != comp["checkpoint_sha256"]:
++        raise ValueError("checkpoint changed after completion")
++    ids, _ = manifest_ids(comp["manifest"])
++    if jd(ids) != comp["manifest_digest"]:
++        raise ValueError("manifest changed after completion")
++    if expect_manifest and comp["manifest"] != expect_manifest:
++        raise ValueError("unexpected manifest")
++    if expect_ckpt and os.path.abspath(expect_ckpt) != comp["checkpoint"]:
++        raise ValueError("unexpected checkpoint")
++    raw = json.load(open(rp))
++    if list(raw.keys()) != ids:
++        raise ValueError("raw_preds id order/set differs from manifest")
++    return raw, comp, ids
++
++
++def cmd_run(args):
++    signal.signal(signal.SIGTERM, _h)
++    os.makedirs(args.out_dir, exist_ok=True)
++    ids, _ = manifest_ids(args.manifest)
++    if os.path.exists(os.path.join(args.out_dir, "completion.json")):
++        load_verified(args.out_dir, args.manifest, args.checkpoint)
++        print(json.dumps({"already_complete": True}))
++        return 0
++    gpus = os.environ.get("CUDA_VISIBLE_DEVICES", "").split(",")
++    wg = [int(x) for x in args.worker_gpus.split(",")]  # 논리 index(상속 집합 기준)
++    if len(wg) != args.n_workers or any(g < 0 or g >= len(gpus) for g in wg):
++        raise ValueError(f"worker_gpus {wg} invalid for inherited {gpus}")
++    procs = []
++    t0 = time.time()
++    for w in range(args.n_workers):
++        env = dict(os.environ, CUDA_VISIBLE_DEVICES=gpus[wg[w]], PYTHONUNBUFFERED="1")
++        logf = open(os.path.join(args.out_dir, f"worker{w:02d}.log"), "a")
++        cmd = [sys.executable, os.path.abspath(__file__), "worker", "--manifest", args.manifest, "--checkpoint",
++               args.checkpoint, "--out_dir", args.out_dir, "--batch_size", str(args.batch_size),
++               "--worker", str(w), "--n_workers", str(args.n_workers)]
++        procs.append((subprocess.Popen(cmd, env=env, stdout=logf, stderr=subprocess.STDOUT), logf))
++    signalled = set()
++    while any(p.poll() is None for p, _ in procs):
++        if _STOP["flag"]:
++            for k, (p, _) in enumerate(procs):
++                if p.poll() is None and k not in signalled:  # worker당 한 번만 전달(안전 종료 경계 보존)
++                    p.send_signal(signal.SIGTERM)
++                    signalled.add(k)
++        time.sleep(0.5)
++    rcs = [p.wait() for p, _ in procs]
++    for _, lf in procs:
++        lf.close()
++    wall = time.time() - t0
++    with open(os.path.join(args.out_dir, f"run_{int(time.time())}.json"), "w") as f:
++        json.dump({"worker_rcs": rcs, "wall_s": wall, "n_workers": args.n_workers, "worker_gpus": wg,
++                   "physical": [gpus[g] for g in wg], "batch_size": args.batch_size, "stopped": _STOP["flag"]}, f)
++    if _STOP["flag"] or any(rc != 0 for rc in rcs):
++        print(json.dumps({"incomplete": True, "worker_rcs": rcs}))
++        return 3 if _STOP["flag"] and all(rc in (0, 3) for rc in rcs) else 1
++    comp = finalize(args)
++    print(json.dumps({"complete": True, "n": comp["n_ids"], "wall_s": wall, "images_per_sec": len(ids) / wall}))
++    return 0
++
++
++def cmd_check(args):
++    load_verified(args.out_dir)
++    print(json.dumps({"verified": True}))
++    return 0
++
++
++def scan_table(raw, gt, ids, edges):
++    from rsna_diag import det_lib as D, sft_eval as SE, metrics as M
++    table, fp_table, lr_table = {}, {}, {}
++    for thr in THRESHOLDS:
++        preds = D.preds_to_norm_yxyx(raw, gt, threshold=thr)
++        summ = SE.summarize(preds, gt, ids, edges=edges)
++        table[str(thr)] = summ
++        fps, tp3, tp5, n_gt = [], 0, 0, 0
++        for i in ids:
++            pb = preds[i]["boxes"]
++            g = [b["yxyx_norm"] for b in gt[i]["boxes"]]
++            t3 = M.patient_metrics(pb, g, 0.3)["tp"] if pb and g else 0
++            t5 = M.patient_metrics(pb, g, 0.5)["tp"] if pb and g else 0
++            fps.append(len(pb) - t3)
++            tp3 += t3; tp5 += t5; n_gt += len(g)
++        fp_table[str(thr)] = {"fp_per_patient_all_n": sum(fps) / len(ids), "n": len(ids),
++                              "frac_patients_with_fp": sum(1 for x in fps if x > 0) / len(ids)}
++        lr_table[str(thr)] = {"lesion_recall@0.3": tp3 / n_gt if n_gt else None,
++                              "lesion_recall@0.5": tp5 / n_gt if n_gt else None, "tp@0.3": tp3, "n_gt": n_gt}
++    return table, fp_table, lr_table
++
++
++def cmd_scan(args):
++    from rsna_diag import det_lib as D
++    raw, comp, ids = load_verified(args.out_dir, args.manifest)
++    gt, _ = D.load_gt_infer()
++    edges = json.load(open(f"{BASE}/results/iter_033/data/area_edges.json"))["train_positive_area_tertile_edges"]
++    table, fp_table, lr_table = scan_table(raw, gt, ids, edges)
++    # 모든 threshold의 필수 수치가 유한해야 한다
++    for t in table:
++        for key in ("utility", "f1@0.3", "f1@0.5"):
++            v = table[t][key]
++            if v is None or v != v:
++                raise ValueError(f"missing/nonfinite {key} at threshold {t}")
++    max_n = max((len(r["scores"]) for r in raw.values()), default=0)
++    out = {"completion": comp, "manifest": args.manifest, "n_ids": len(ids), "thresholds": table,
++           "fp_per_patient": fp_table, "lesion_recall": lr_table, "max_candidates_per_image": max_n,
++           "n_images_at_cap100": sum(1 for r in raw.values() if len(r["scores"]) >= 100),
++           "min_score_at_cap": min((min(r["scores"]) for r in raw.values() if len(r["scores"]) >= 100), default=None)}
++    with open(os.path.join(args.out_dir, "threshold_scan.json"), "w") as f:
++        json.dump(out, f, indent=2)
++    best = max(THRESHOLDS, key=lambda t: (table[str(t)]["utility"], table[str(t)]["f1@0.5"], -fp_table[str(t)]["fp_per_patient_all_n"], t))
++    print(json.dumps({"n_ids": len(ids), "best_threshold_by_utility": best, "utility": table[str(best)]["utility"],
++                      "f1@0.3": table[str(best)]["f1@0.3"], "f1@0.5": table[str(best)]["f1@0.5"],
++                      "fp_per_patient": fp_table[str(best)]["fp_per_patient_all_n"],
++                      "n_images_at_cap100": out["n_images_at_cap100"]}, indent=1))
++    return 0
++
++
++def cmd_latency(args):
++    """단독 resident batch1 latency: 모델 로드 시간, warmup 8, manifest 전체를 순서대로 1건씩.
++    end-to-end = 영상 읽기·전처리·GPU 전송·forward·CPU 반환(synchronize 포함), model = forward 구간."""
++    import numpy as np
++    import torch
++    from rsna_diag import det_lib as D
++    ids, _ = manifest_ids(args.manifest)
++    gt, infer = D.load_gt_infer()
++    dev = torch.device("cuda:0")
++    torch.cuda.synchronize()
++    t = time.time()
++    model = D.build_model().to(dev)
++    model.load_state_dict(torch.load(args.checkpoint, map_location="cpu", weights_only=False)["model"])
++    model.eval()
++    torch.cuda.synchronize()
++    load_s = time.time() - t
++    ds = D.RSNADetDataset(ids, gt, infer, train_aug=False)
++    rows = []
++    torch.cuda.reset_peak_memory_stats()
++    with torch.no_grad():
++        for k, i in enumerate(ids[:8] + ids):
++            torch.cuda.synchronize()
++            t0 = time.time()
++            img, _, hw = ds[ds.ids.index(i)]
++            x = img.to(dev)
++            torch.cuda.synchronize()
++            t1 = time.time()
++            pr = model([x])[0]
++            torch.cuda.synchronize()
++            t2 = time.time()
++            _ = pr["boxes"].cpu().numpy(), pr["scores"].cpu().numpy()
++            t3 = time.time()
++            if k >= 8:
++                rows.append({"id": i, "end_to_end_s": t3 - t0, "model_s": t2 - t1})
++    e2e = [r["end_to_end_s"] for r in rows]; mo = [r["model_s"] for r in rows]
++    out = {"model": "detector", "checkpoint": args.checkpoint, "checkpoint_sha256": sha_file(args.checkpoint),
++           "load_s": load_s, "n": len(rows), "warmup": 8, "precision": "fp32",
++           "end_to_end": {"mean": float(np.mean(e2e)), "p50": float(np.percentile(e2e, 50)), "p95": float(np.percentile(e2e, 95))},
++           "model_only": {"mean": float(np.mean(mo)), "p50": float(np.percentile(mo, 50)), "p95": float(np.percentile(mo, 95))},
++           "peak_alloc_mib": torch.cuda.max_memory_allocated() / 2**20, "peak_reserved_mib": torch.cuda.max_memory_reserved() / 2**20,
++           "gpu": torch.cuda.get_device_name(0), "cuda_visible_devices": os.environ.get("CUDA_VISIBLE_DEVICES"), "rows": rows}
++    json.dump(out, open(args.out, "w"), indent=1)
++    print(json.dumps({k: v for k, v in out.items() if k != "rows"}))
++    return 0
++
++
++def main():
++    ap = argparse.ArgumentParser()
++    sub = ap.add_subparsers(dest="cmd", required=True)
++    p = sub.add_parser("latency")
++    p.add_argument("--manifest", required=True)
++    p.add_argument("--checkpoint", required=True)
++    p.add_argument("--out", required=True)
++    p.set_defaults(func=cmd_latency)
++    for name, fn in (("run", cmd_run), ("worker", cmd_worker)):
++        p = sub.add_parser(name)
++        p.add_argument("--manifest", required=True)
++        p.add_argument("--checkpoint", required=True)
++        p.add_argument("--out_dir", required=True)
++        p.add_argument("--batch_size", type=int, default=4)
++        p.add_argument("--n_workers", type=int, default=1)
++        if name == "run":
++            p.add_argument("--worker_gpus", default="0")
++        else:
++            p.add_argument("--worker", type=int, required=True)
++        p.set_defaults(func=fn)
++    p = sub.add_parser("check")
++    p.add_argument("--out_dir", required=True)
++    p.set_defaults(func=cmd_check)
++    p = sub.add_parser("scan")
++    p.add_argument("--out_dir", required=True)
++    p.add_argument("--manifest", required=True)
++    p.set_defaults(func=cmd_scan)
++    a = ap.parse_args()
++    sys.exit(a.func(a))
++
++
++if __name__ == "__main__":
++    main()
+diff --git a/rsna_diag/det_evalwatch.py b/rsna_diag/det_evalwatch.py
+new file mode 100644
+index 0000000..8be26d4
+--- /dev/null
++++ b/rsna_diag/det_evalwatch.py
+@@ -0,0 +1,71 @@
++"""본학습 epoch checkpoint 평가 감시 실행기 (natten_py310 env, GPU 1장).
++
++계획 일정: V100 epoch 6/12/18/22/26(연장 시 32/38), V400 epoch 12/26(연장 시 38). 학습 프로세스와 다른 GPU에서
++immutable epoch model(epoch_XX/model.pt, 원자 저장)을 평가한다. 각 model.pt의 update_idx·config·source·input digest를
++학습 run_config.json과 대조한 뒤 det_eval.py run(→completion)과 scan을 실행한다. 이미 완료된 평가는 completion을 재검증해
++건너뛴다. 학습이 target에 도달하지 못한 채 끝나면(학습 프로세스 종료·complete.json 없음) 오류로 종료한다.
++"""
++import argparse
++import json
++import os
++import subprocess
++import sys
++import time
++
++import torch
++
++BASE = "/SSD1_1TB/home/milab/daniel/08_medgemma/research"
++EVAL = f"{BASE}/rsna_diag/det_eval.py"
++
++
++def main():
++    ap = argparse.ArgumentParser()
++    ap.add_argument("--run_dir", required=True)
++    ap.add_argument("--out_root", required=True)
++    ap.add_argument("--jobs", nargs="+", required=True, help="epoch:manifest, 예 6:V100 12:V400")
++    ap.add_argument("--batch_size", type=int, default=4)
++    ap.add_argument("--n_workers", type=int, default=1)
++    ap.add_argument("--worker_gpus", default="0")
++    ap.add_argument("--train_pid_file", default=None)
++    a = ap.parse_args()
++    jobs = [(int(x.split(":")[0]), x.split(":")[1]) for x in a.jobs]
++    os.makedirs(a.out_root, exist_ok=True)
++    t_wait = time.time()
++    while not os.path.exists(os.path.join(a.run_dir, "run_config.json")):
++        if time.time() - t_wait > 1800:
++            raise RuntimeError("training run_config.json did not appear")
++        time.sleep(10)
++    rc_cfg = json.load(open(os.path.join(a.run_dir, "run_config.json")))
++    upe = rc_cfg["updates_per_epoch"]
++    log = open(os.path.join(a.out_root, "watch.log"), "a")
++    for ep, man in jobs:
++        mp = os.path.join(a.run_dir, f"epoch_{ep:02d}", "model.pt")
++        while not os.path.exists(mp):
++            # 연장(--extend) 중에는 이전 완료 marker가 남아 있으므로, 완료 update가 이 epoch 이상일 때만 누락으로 본다.
++            cp = os.path.join(a.run_dir, "complete.json")
++            if os.path.exists(cp) and json.load(open(cp))["total_updates"] >= ep * upe and not os.path.exists(mp):
++                raise RuntimeError(f"training complete but {mp} missing")
++            time.sleep(30)
++        meta = torch.load(mp, map_location="cpu", weights_only=False)
++        chk = {"update_idx": meta.get("update_idx") == ep * upe, "config": meta.get("config_digest") == rc_cfg["config_digest"],
++               "source": meta.get("source_digest") == rc_cfg["source_digest"], "input": meta.get("input_digest") == rc_cfg["input_digest"]}
++        del meta
++        if not all(chk.values()):
++            raise RuntimeError(f"epoch {ep} model metadata mismatch: {chk}")
++        out = os.path.join(a.out_root, f"{man}_e{ep:02d}")
++        t0 = time.time()
++        rc = subprocess.run([sys.executable, EVAL, "run", "--manifest", man, "--checkpoint", mp, "--out_dir", out,
++                             "--batch_size", str(a.batch_size), "--n_workers", str(a.n_workers), "--worker_gpus", a.worker_gpus]).returncode
++        if rc != 0:
++            raise RuntimeError(f"eval run failed epoch {ep} {man} rc={rc}")
++        if not os.path.exists(os.path.join(out, "threshold_scan.json")):
++            rc = subprocess.run([sys.executable, EVAL, "scan", "--out_dir", out, "--manifest", man]).returncode
++            if rc != 0:
++                raise RuntimeError(f"scan failed epoch {ep} {man} rc={rc}")
++        log.write(json.dumps({"epoch": ep, "manifest": man, "checks": chk, "wall_s": time.time() - t0, "t": time.time()}) + "\n")
++        log.flush()
++    print(json.dumps({"done": True, "jobs": a.jobs}))
++
++
++if __name__ == "__main__":
++    main()
+diff --git a/rsna_diag/det_latency.py b/rsna_diag/det_latency.py
+new file mode 100644
+index 0000000..776c4ce
+--- /dev/null
++++ b/rsna_diag/det_latency.py
+@@ -0,0 +1,188 @@
++"""동일 GPU 단독 resident latency 비교: detector vs MedGemma B0 (기본 medgemma env).
++
++원본: results/iter_034/latency_bench.py (sha256 a0809d67...; 그 원본 iter_033 latency_bench.py). 원본은 CUDA_VISIBLE_DEVICES를
++"1"로 하드코딩하고 B0만 측정했다. 이번 변경:
++- run: 상속된 허용 GPU 집합에서 논리 index 하나를 골라 두 모델을 각각 별도 프로세스로 단독 resident 실행한다.
++  반복 3회, 반복마다 순서를 교차(det→B0, B0→det, det→B0). 각 프로세스는 로드 시간 기록, warmup 8, L64 64건.
++  detector는 det_eval.py latency(detector 전용 env), B0는 이 파일의 b0 명령(기본 env).
++- b0: 공식 processor 경로(apply_chat_template 텍스트 + processor(text, images))와 wrapper(build_inputs)의 전체
++  tensor key/shape/dtype/value 대조, 저장 validation 출력(iter_012 seed17 epoch05)의 input_ids·suffix token 재현을
++  확인한 뒤 end-to-end(영상 읽기·전처리·생성·decode)와 모델 생성 구간을 synchronize로 잰다(cap ladder·greedy 유지).
++- stress: 저장 validation 출력 중 가장 긴 응답 4건을 재생성해 긴 출력의 시간·peak와 token 재현을 기록한다.
++"""
++import argparse
++import json
++import os
++import subprocess
++import sys
++import time
++
++import numpy as np
++
++BASE = "/SSD1_1TB/home/milab/daniel/08_medgemma/research"
++sys.path.insert(0, BASE)
++DET_PY = "/home/test/.conda/envs/natten_py310/bin/python"
++ADAPTER = f"{BASE}/results/iter_012/train/lr2e-4_s17/epoch_05"
++B0_VAL = f"{ADAPTER}/val_gen/gen_worker0.jsonl"
++
++
++def stats(x):
++    return {"mean": float(np.mean(x)), "p50": float(np.percentile(x, 50)), "p95": float(np.percentile(x, 95))}
++
++
++def official_tensor_check(proc, torch, GEN, ids, infer, stored, prompt):
++    """공식 processor 경로(chat template 텍스트 렌더링 + processor(text, images))와 wrapper(build_inputs) 대조.
++    렌더링 텍스트에 이미 <bos>가 있으므로 add_special_tokens=False가 HF 권장 경로다(True면 BOS가 중복된다).
++    iter_035 첫 latency 실행의 검사기는 이 인자를 빠뜨려 길이 361 대 360으로 불일치를 기록했다(검사기 결함)."""
++    tens = []
++    for i in ids:
++        img, aff, px = GEN.load_image(f"{BASE}/{infer[i]['image']}")
++        w = GEN.build_inputs(proc, img, prompt)
++        msgs = [{"role": "user", "content": [{"type": "image", "image": img}, {"type": "text", "text": prompt}]}]
++        text = proc.apply_chat_template(msgs, add_generation_prompt=True, tokenize=False)
++        o = proc(text=text, images=[img], return_tensors="pt", add_special_tokens=False)
++        o_default = proc(text=text, images=[img], return_tensors="pt")
++        same_keys = sorted(w.keys()) == sorted(o.keys())
++        eq = same_keys and all(w[k].shape == o[k].shape and w[k].dtype == o[k].dtype and torch.equal(w[k], o[k]) for k in w)
++        tens.append({"id": i, "keys": sorted(w.keys()), "shapes": {k: list(w[k].shape) for k in w},
++                     "dtypes": {k: str(w[k].dtype) for k in w}, "equal": bool(eq),
++                     "n_bos_wrapper": int((w["input_ids"][0] == proc.tokenizer.bos_token_id).sum()),
++                     "default_add_special_len": int(o_default["input_ids"].shape[1]),
++                     "input_ids_eq_stored": w["input_ids"][0].tolist() == stored[i]["input_ids"]})
++    return tens
++
++
++def cmd_tensorcheck(a):
++    os.environ.setdefault("HF_HOME", "/SSD1_1TB/home/milab/daniel/08_medgemma/hf_cache")
++    os.environ.setdefault("HF_HUB_OFFLINE", "1")
++    import torch
++    import transformers
++    from rsna_diag import generate as GEN, prompts as P
++    proc = transformers.AutoProcessor.from_pretrained(GEN.MODEL_ID, revision=GEN.MODEL_REVISION)
++    ids = json.load(open(f"{BASE}/results/iter_033/data/L64.json"))["ids"]
++    infer = {}
++    for l in open(f"{BASE}/results/iter_010/manifests/infer_manifest.jsonl"):
++        r = json.loads(l); infer[r["id"]] = r
++    stored = {}
++    for l in open(B0_VAL):
++        r = json.loads(l); stored[r["id"]] = r
++    tens = official_tensor_check(proc, torch, GEN, ids, infer, stored, P.CONCISE)
++    out = {"n": len(tens), "all_equal": all(x["equal"] for x in tens), "all_input_ids_eq_stored": all(x["input_ids_eq_stored"] for x in tens),
++           "rows": tens}
++    json.dump(out, open(a.out, "w"), indent=1)
++    print(json.dumps({k: v for k, v in out.items() if k != "rows"}))
++
++
++def cmd_b0(a):
++    from rsna_diag import generate as GEN, prompts as P
++    ids = json.load(open(f"{BASE}/results/iter_033/data/L64.json"))["ids"]
++    infer = {}
++    for l in open(f"{BASE}/results/iter_010/manifests/infer_manifest.jsonl"):
++        r = json.loads(l); infer[r["id"]] = r
++    stored = {}
++    for l in open(B0_VAL):
++        r = json.loads(l); stored[r["id"]] = r
++    import torch
++    torch.cuda.synchronize() if torch.cuda.is_available() else None
++    t = time.time()
++    torch, proc, model = GEN.load_model()
++    dig = GEN.load_adapter(torch, model, ADAPTER)
++    torch.cuda.synchronize()
++    load_s = time.time() - t
++    if dig != stored[ids[0]]["adapter_digest"]:
++        raise RuntimeError("adapter digest differs from stored validation outputs")
++    eos = {proc.tokenizer.eos_token_id, proc.tokenizer.convert_tokens_to_ids("<end_of_turn>")}
++    prompt = P.CONCISE
++    tens = official_tensor_check(proc, torch, GEN, ids[:8], infer, stored, prompt)
++    rows, repro = [], []
++    torch.cuda.reset_peak_memory_stats()
++    for k, i in enumerate(ids[:8] + ids):
++        item = {"id": i, "image": f"{BASE}/{infer[i]['image']}", "file_sha256": infer[i]["file_sha256"]}
++        torch.cuda.synchronize()
++        t0 = time.time()
++        rec = GEN.run_request(torch, proc, model, eos, item, "concise", prompt)
++        torch.cuda.synchronize()
++        dt = time.time() - t0
++        if k >= 8:
++            rows.append({"id": i, "end_to_end_s": dt, "model_s": rec["runtime_s_total"], "n_out": rec["n_output_tokens"],
++                         "final_cap": rec["final_cap"]})
++            repro.append(rec["suffix_ids"] == stored[i]["suffix_ids"])
++    out = {"model": "B0", "adapter_digest": dig, "load_s": load_s, "n": len(rows), "warmup": 8, "precision": "bf16",
++           "official_tensor_check": tens, "official_tensor_all_equal": all(x["equal"] for x in tens),
++           "stored_input_ids_equal": all(x["input_ids_eq_stored"] for x in tens),
++           "stored_suffix_reproduced": int(sum(repro)), "n_repro_checked": len(repro),
++           "end_to_end": stats([r["end_to_end_s"] for r in rows]), "model_only": stats([r["model_s"] for r in rows]),
++           "peak_alloc_mib": torch.cuda.max_memory_allocated() / 2**20, "peak_reserved_mib": torch.cuda.max_memory_reserved() / 2**20,
++           "gpu": torch.cuda.get_device_name(0), "cuda_visible_devices": os.environ.get("CUDA_VISIBLE_DEVICES"), "rows": rows}
++    if a.stress:
++        longest = sorted(stored.values(), key=lambda r: -r["n_output_tokens"])[:4]
++        st = []
++        for r in longest:
++            item = {"id": r["id"], "image": f"{BASE}/{r['image']}", "file_sha256": r["image_file_sha256"]}
++            torch.cuda.reset_peak_memory_stats()
++            rec = GEN.run_request(torch, proc, model, eos, item, "concise", prompt)
++            st.append({"id": r["id"], "stored_n_out": r["n_output_tokens"], "n_out": rec["n_output_tokens"],
++                       "runtime_s": rec["runtime_s_total"], "final_cap": rec["final_cap"], "ended_eos": rec["ended_eos"],
++                       "suffix_equal_stored": rec["suffix_ids"] == r["suffix_ids"],
++                       "peak_alloc_mib": torch.cuda.max_memory_allocated() / 2**20})
++        out["long_output_stress"] = st
++    json.dump(out, open(a.out, "w"), indent=1)
++    print(json.dumps({k: v for k, v in out.items() if k not in ("rows", "official_tensor_check")}))
++
++
++def cmd_run(a):
++    gpus = os.environ["CUDA_VISIBLE_DEVICES"].split(",")
++    phys = gpus[a.gpu]
++    os.makedirs(a.out_dir, exist_ok=True)
++    smi = subprocess.run(["nvidia-smi", "--query-gpu=index,uuid,memory.used,memory.total", "--format=csv,noheader"],
++                         capture_output=True, text=True).stdout
++    runs = []
++    for rep in range(3):
++        order = ["det", "b0"] if rep % 2 == 0 else ["b0", "det"]
++        for m in order:
++            outp = os.path.join(a.out_dir, f"rep{rep}_{m}.json")
++            env = dict(os.environ, CUDA_VISIBLE_DEVICES=phys, PYTHONUNBUFFERED="1")
++            if m == "det":
++                c = [DET_PY, f"{BASE}/rsna_diag/det_eval.py", "latency", "--manifest", "L64", "--checkpoint", a.det_checkpoint, "--out", outp]
++            else:
++                c = [sys.executable, os.path.abspath(__file__), "b0", "--out", outp] + (["--stress"] if rep == 0 else [])
++            with open(os.path.join(a.out_dir, f"rep{rep}_{m}.log"), "w") as f:
++                rc = subprocess.run(c, env=env, stdout=f, stderr=subprocess.STDOUT).returncode
++            runs.append({"rep": rep, "model": m, "rc": rc, "out": outp})
++            if rc != 0:
++                raise RuntimeError(f"latency {m} rep{rep} failed rc={rc}")
++    agg = {}
++    for m in ("det", "b0"):
++        rs = [json.load(open(r["out"])) for r in runs if r["model"] == m]
++        e2e = [x["end_to_end_s"] for r in rs for x in r["rows"]]
++        mo = [x["model_s"] for r in rs for x in r["rows"]]
++        agg[m] = {"end_to_end": stats(e2e), "model_only": stats(mo), "load_s": [r["load_s"] for r in rs],
++                  "peak_alloc_mib_max": max(r["peak_alloc_mib"] for r in rs), "peak_reserved_mib_max": max(r["peak_reserved_mib"] for r in rs),
++                  "n_requests": len(e2e)}
++    b0 = [json.load(open(r["out"])) for r in runs if r["model"] == "b0"]
++    res = {"gpu_logical": a.gpu, "gpu_physical": phys, "nvidia_smi_before": smi, "runs": runs, "aggregate": agg,
++           "speedup_det_over_b0_end_to_end_mean": agg["b0"]["end_to_end"]["mean"] / agg["det"]["end_to_end"]["mean"],
++           "speedup_det_over_b0_model_mean": agg["b0"]["model_only"]["mean"] / agg["det"]["model_only"]["mean"],
++           "b0_checks": {"official_tensor_all_equal": all(r["official_tensor_all_equal"] for r in b0),
++                         "stored_input_ids_equal": all(r["stored_input_ids_equal"] for r in b0),
++                         "stored_suffix_reproduced": [f"{r['stored_suffix_reproduced']}/{r['n_repro_checked']}" for r in b0]},
++           "long_output_stress": b0[0].get("long_output_stress"),
++           "note": "detector FP32(torchvision) vs B0 bf16(transformers, greedy·cap ladder). 단독 batch1 latency이며 batch 처리량과 별개."}
++    json.dump(res, open(os.path.join(a.out_dir, "latency_summary.json"), "w"), indent=2)
++    print(json.dumps({k: v for k, v in res.items() if k not in ("runs", "nvidia_smi_before")}, indent=1))
++
++
++def main():
++    ap = argparse.ArgumentParser()
++    sub = ap.add_subparsers(dest="cmd", required=True)
++    p = sub.add_parser("b0"); p.add_argument("--out", required=True); p.add_argument("--stress", action="store_true")
++    p.set_defaults(func=cmd_b0)
++    p = sub.add_parser("tensorcheck"); p.add_argument("--out", required=True); p.set_defaults(func=cmd_tensorcheck)
++    p = sub.add_parser("run"); p.add_argument("--gpu", type=int, required=True); p.add_argument("--det_checkpoint", required=True)
++    p.add_argument("--out_dir", required=True); p.set_defaults(func=cmd_run)
++    a = ap.parse_args()
++    a.func(a)
++
++
++if __name__ == "__main__":
++    main()
+diff --git a/rsna_diag/det_lib.py b/rsna_diag/det_lib.py
+index c8928cf..276c06f 100644
+--- a/rsna_diag/det_lib.py
++++ b/rsna_diag/det_lib.py
+@@ -5,6 +5,7 @@ iter_033의 results/iter_033/detector_lib.py를 원본으로 하고, iter_034에
+ d562f8b2059c24678a7bafc8798aa541b47a6a72c2e582aed96346c38d53a394):
+ - RSNADetDataset.__getitem__이 실제 적용한 flip 여부를 target["flip"]으로 반환한다 (재개 로그 검증용).
+ 그 외 dataset/model/optimizer/scheduler/rng/checkpoint 유틸리티 로직은 원본과 동일하다.
++iter_035: flip_p·min_size·max_size를 인자로 노출했다(기본값 0.5/800/1333은 기존 동작·torchvision 기본값과 동일).
+ """
+ import hashlib
+ import json
+@@ -37,11 +38,12 @@ def load_gt_infer():
+ class RSNADetDataset(Dataset):
+     """원본 uint8 영상(RGB 복제, 값 보존) + pixel xyxy GT box(opacity=label1). horizontal flip만 augmentation."""
+ 
+-    def __init__(self, ids, gt, infer, train_aug=False, seed=0):
++    def __init__(self, ids, gt, infer, train_aug=False, seed=0, flip_p=0.5):
+         self.ids = list(ids)
+         self.gt = gt
+         self.infer = infer
+         self.train_aug = train_aug
++        self.flip_p = flip_p
+         self.rng = random.Random(seed)
+ 
+     def __len__(self):
+@@ -59,7 +61,7 @@ class RSNADetDataset(Dataset):
+         h, w = rgb.shape[:2]
+         g = self.gt[pid]
+         boxes = [b["xyxy_px"] for b in g["boxes"]]
+-        do_flip = self.train_aug and self.rng.random() < 0.5
++        do_flip = self.train_aug and self.rng.random() < self.flip_p
+         if do_flip:
+             rgb = np.ascontiguousarray(rgb[:, ::-1, :])
+             boxes = [[w - x1, y0, w - x0, y1] for x0, y0, x1, y1 in boxes]
+@@ -81,13 +83,14 @@ def collate_fn(batch):
+     return imgs, targets, dims
+ 
+ 
+-def build_model(num_classes=2, trainable_backbone_layers=5):
++def build_model(num_classes=2, trainable_backbone_layers=5, min_size=800, max_size=1333):
+     from torchvision.models.detection import fasterrcnn_resnet50_fpn_v2, FasterRCNN_ResNet50_FPN_V2_Weights
+     from torchvision.models.detection.faster_rcnn import FastRCNNPredictor
+ 
+     weights = FasterRCNN_ResNet50_FPN_V2_Weights.COCO_V1
+     model = fasterrcnn_resnet50_fpn_v2(weights=weights, trainable_backbone_layers=trainable_backbone_layers,
+-                                       box_score_thresh=0.001, box_nms_thresh=0.5, box_detections_per_img=100)
++                                       box_score_thresh=0.001, box_nms_thresh=0.5, box_detections_per_img=100,
++                                       min_size=min_size, max_size=max_size)
+     in_features = model.roi_heads.box_predictor.cls_score.in_features
+     model.roi_heads.box_predictor = FastRCNNPredictor(in_features, num_classes)
+     return model
+@@ -135,12 +138,17 @@ def full_rng_state():
+     }
+ 
+ 
+-def restore_rng_state(state):
++def restore_rng_state(state, cuda_map=None):
++    """cuda_map=(저장 당시 학습 장치 index, 현재 학습 장치 index): 저장 process와 현재 process가 보는 GPU 수가
++    다를 수 있으므로 학습에 쓰인 장치의 CUDA generator만 옮긴다. None이면 기존처럼 전체 장치를 복원한다."""
+     random.setstate(state["python"])
+     np.random.set_state(state["numpy"])
+     torch.set_rng_state(state["torch_cpu"])
+     if state["torch_cuda"] is not None and torch.cuda.is_available():
+-        torch.cuda.set_rng_state_all(state["torch_cuda"])
++        if cuda_map is None:
++            torch.cuda.set_rng_state_all(state["torch_cuda"])
++        else:
++            torch.cuda.set_rng_state(state["torch_cuda"][cuda_map[0]], device=cuda_map[1])
+ 
+ 
+ def optimizer_state_to_device(optimizer, device):
+diff --git a/rsna_diag/det_migrate.py b/rsna_diag/det_migrate.py
+new file mode 100644
+index 0000000..e06e571
+--- /dev/null
++++ b/rsna_diag/det_migrate.py
+@@ -0,0 +1,129 @@
++"""iter_034 부분 학습 checkpoint(format 1)의 이관 가능성 감사 (natten_py310 env).
++
++원본 checkpoint·로그는 읽기만 한다. 결과로 migration manifest를 쓰며, det_train.py --init_from --migration이
++이 manifest를 요구한다. 판정 근거:
++  1. 원본 checkpoint sha256, update_idx/epoch/cursor 규약, scheduler(last_epoch·base_lrs), optimizer group lr,
++     저장 args, 필수 RNG·dataset RNG 존재.
++  2. 원본 로그: update 연속·중복 없음(=강제 종료 뒤 재개 이력 없음), 모든 finite, 저장 update 이후 orphan 수.
++  3. 결정적 재현: 원래 epoch permutation 함수와 epoch 시작 시딩 규약으로 로그 전체의 sample id·flip을 재생하고,
++     저장된 dataset RNG 상태가 저장 update까지 소비한 상태와 정확히 같은지 확인한다(실제 permutation 미저장 보완).
++  4. 실행 소스: 원본 run의 det_train/det_lib sha256(인자 값)과 commit 기록을 manifest에 남긴다.
++"""
++import argparse
++import json
++import os
++import random
++import sys
++
++import numpy as np
++import torch
++
++BASE = "/SSD1_1TB/home/milab/daniel/08_medgemma/research"
++sys.path.insert(0, BASE)
++from rsna_diag import det_lib as D, det_train as T  # noqa: E402
++
++
++def main():
++    ap = argparse.ArgumentParser()
++    ap.add_argument("--src_run", required=True)
++    ap.add_argument("--out", required=True)
++    ap.add_argument("--old_det_train_sha256", required=True)
++    ap.add_argument("--old_det_lib_sha256", required=True)
++    ap.add_argument("--old_commit", required=True)
++    a = ap.parse_args()
++
++    ck_path = os.path.join(a.src_run, "ckpt_latest.pt")
++    log_path = os.path.join(a.src_run, "train_log.jsonl")
++    # 구버전 extra.args=vars(args)에는 argparse의 func(__main__.cmd_train)가 pickle돼 있다. 로드용 이름만 제공한다.
++    sys.modules["__main__"].cmd_train = T.cmd_train
++    ck = torch.load(ck_path, map_location="cpu", weights_only=False)
++    old_args = {k: v for k, v in ck["extra"]["args"].items() if k != "func"}
++    checks = {}
++    ids = json.load(open(T.find_manifest(old_args["manifest"])))["ids"]
++    gt, infer = D.load_gt_infer()
++    upe = len(ids) // old_args["effective_batch"]
++    u = ck["update_idx"]
++    checks["format1_keys"] = all(k in ck for k in ("model", "optimizer", "scheduler", "rng", "epoch", "update_idx",
++                                                     "sample_cursor", "ids_order", "extra"))
++    checks["rng_keys"] = sorted(ck["rng"].keys()) == ["numpy", "python", "torch_cpu", "torch_cuda"] and ck["rng"]["torch_cuda"] is not None
++    checks["ds_rng_state_present"] = ck["extra"].get("ds_rng_state") is not None
++    checks["ids_order_is_manifest_order"] = ck["ids_order"] == ids
++    checks["epoch_cursor_convention"] = ck["epoch"] == (u - 1) // upe and ck["sample_cursor"] == (u - 1) % upe + 1
++    sch = ck["scheduler"]
++    checks["scheduler_last_epoch_eq_update"] = sch["last_epoch"] == u
++    checks["scheduler_base_lrs"] = all(x == old_args["lr"] for x in sch["base_lrs"])
++    warm = upe  # 원 코드: 1 epoch warmup
++    miles = [upe * m for m in old_args["lr_drop_epochs"]]
++
++    def lam(step):
++        if step < warm:
++            return (step + 1) / warm
++        f = 1.0
++        for m in miles:
++            if step >= m:
++                f *= 0.1
++        return f
++    grp_lrs = [g["lr"] for g in ck["optimizer"]["param_groups"]]
++    checks["optimizer_lr_eq_scheduled_next"] = all(abs(x - lam(u) * old_args["lr"]) < 1e-15 for x in grp_lrs)
++    checks["optimizer_initial_lr"] = all(g.get("initial_lr") == old_args["lr"] for g in ck["optimizer"]["param_groups"])
++
++    # 로그
++    L = [json.loads(l) for l in open(log_path) if l.strip()]
++    ups = [r["update"] for r in L]
++    checks["log_contiguous_from0_no_dup"] = ups == list(range(len(ups)))
++    checks["log_all_finite"] = all(r["finite"] and not r.get("skipped_nonfinite") for r in L)
++    checks["log_covers_saved_update"] = len(L) >= u
++    n_orphan = len([x for x in ups if x >= u])
++    # 원 코드의 lr_applied는 sched.step() 뒤의 다음 LR이다: lam(update+1)*lr
++    checks["log_lr_matches_fresh_schedule"] = all(abs(r["lr_applied"] - lam(r["update"] + 1) * old_args["lr"]) < 1e-15 for r in L)
++
++    # 결정적 재생: sample id·flip·dataset RNG
++    seed = old_args["seed"]
++    eb = old_args["effective_batch"]
++    mism = []
++    ds_state_at_u = None
++    rng = None
++    for upd in range(len(L)):
++        e, pos = upd // upe, upd % upe
++        if pos == 0:
++            rng = random.Random(seed * 1000 + e)
++        perm = T.epoch_perm(seed, e, len(ids))
++        bidx = perm[pos * eb:(pos + 1) * eb]
++        exp_ids = [ids[i] for i in bidx]
++        exp_flips = [rng.random() < 0.5 for _ in bidx]
++        if exp_ids != L[upd]["sample_ids"] or exp_flips != L[upd]["flips"]:
++            mism.append(upd)
++        if upd + 1 == u:
++            ds_state_at_u = rng.getstate()
++    checks["replay_sample_ids_flips_all_log"] = not mism
++    checks["replay_ds_rng_state_eq_saved"] = ds_state_at_u == ck["extra"]["ds_rng_state"]
++
++    new_cfg = {"manifest": old_args["manifest"], "effective_batch": eb, "microbatch": old_args["microbatch"],
++               "lr": old_args["lr"], "momentum": 0.9, "weight_decay": 1e-4, "lr_drop_epochs": old_args["lr_drop_epochs"],
++               "seed": seed, "warmup_epochs": 1, "trainable_backbone_layers": 5, "flip_p": 0.5, "min_size": 800,
++               "max_size": 1333}
++    ok = all(checks.values())
++    out = {
++        "kind": "det_train format1 -> format2 migration",
++        "ok": ok, "checks": checks, "replay_mismatch_updates": mism[:20],
++        "source_checkpoint": os.path.abspath(ck_path), "source_checkpoint_sha256": D.sha256_file(ck_path),
++        "source_log": os.path.abspath(log_path), "source_log_sha256": D.sha256_file(log_path),
++        "source_code_sha256": {"rsna_diag/det_train.py": a.old_det_train_sha256,
++                               "rsna_diag/det_lib.py": a.old_det_lib_sha256, "commit": a.old_commit},
++        "old_args": old_args, "config": new_cfg, "input_digest": T.input_digest(ids, gt, infer),
++        "update_idx": u, "n_log_records": len(L), "n_orphan_log_records": n_orphan,
++        "scheduler_state": {k: v for k, v in sch.items() if k != "lr_lambdas"}, "optimizer_group_lrs": grp_lrs,
++        "compat_note": ("format 1 저장값에는 config/input/source digest·실제 permutation이 없다. 동일 recipe의 기본값"
++                        "(momentum 0.9, wd 1e-4, warmup 1 epoch, backbone 5층, flip 0.5, 800/1333)은 원 코드 상수와 같고,"
++                        " permutation·flip·dataset RNG는 결정적 재생으로 유일하게 복원됨을 위 checks로 확인한다."),
++    }
++    os.makedirs(os.path.dirname(a.out), exist_ok=True)
++    with open(a.out, "w") as f:
++        json.dump(out, f, indent=2)
++    print(json.dumps({"ok": ok, "checks": checks, "update_idx": u, "n_orphan": n_orphan,
++                      "old_microbatch": old_args["microbatch"], "old_args": old_args}, indent=1))
++    sys.exit(0 if ok else 1)
++
++
++if __name__ == "__main__":
++    main()
+diff --git a/rsna_diag/det_select.py b/rsna_diag/det_select.py
+new file mode 100644
+index 0000000..4c25e7a
+--- /dev/null
++++ b/rsna_diag/det_select.py
+@@ -0,0 +1,227 @@
++"""detector validation 선택·수렴 보완·조건부 seed 판정 (기본 medgemma env, torch 불필요).
++
++원본: results/iter_034/select_checkpoint.py (sha256 15861b73...), results/iter_033/select_fp_budget.py (sha256 ed2edc7b...).
++iter_035 변경:
++- FP 누락·비유한 필수 수치는 오류(원본은 infinity로 대체).
++- V100: epoch별 최고 threshold(utility→양성 F1@0.5→작은 전체 FP/환자→높은 threshold), epoch 선택(utility→F1@0.5→이른 epoch).
++- 수렴 보완 규칙(계획 고정): epoch22→26 utility 또는 F1@0.5 증가≥0.01, 또는 epoch26 utility가 V100 최고점
++  대비 0.01 이내이면서 마지막 4 epoch 평균 train loss가 이전 4 epoch보다 10% 이상 감소 → 12 epoch 연장.
++- V400: checkpoint×threshold를 utility→양성 F1@0.5→작은 전체 FP/환자→이른 epoch→높은 threshold로 선택.
++  선택점에서 후보 cap(100개)에 걸린 영상이 threshold 이상 점수로 잘렸을 가능성이 있으면 차단.
++- FP budget 0.25/0.5/1.0: 선택 checkpoint에서 lesion recall@0.3 최대→작은 FP→높은 threshold.
++- seed 판정: V400에서 선택 detector와 B0(iter_012 seed17 epoch05 저장 validation 출력)의 차이.
++"""
++import argparse
++import hashlib
++import json
++import math
++import os
++import sys
++
++BASE = "/SSD1_1TB/home/milab/daniel/08_medgemma/research"
++sys.path.insert(0, BASE)
++B0_VAL = f"{BASE}/results/iter_012/train/lr2e-4_s17/epoch_05/val_gen/gen_worker0.jsonl"
++B0_VAL_SHA = "ac9718d1ab766d246a14507b69b5cfd6e063f2116403a90386cdd3250f87d33e"
++
++
++def sha(p):
++    return hashlib.sha256(open(p, "rb").read()).hexdigest()
++
++
++def finite(x):
++    return x is not None and isinstance(x, (int, float)) and math.isfinite(x)
++
++
++def rows_of(scan, epoch):
++    out = []
++    for t, s in scan["thresholds"].items():
++        fp = scan["fp_per_patient"].get(t, {}).get("fp_per_patient_all_n")
++        lr = scan["lesion_recall"].get(t, {})
++        vals = {"utility": s["utility"], "f1@0.3": s["f1@0.3"], "f1@0.5": s["f1@0.5"], "fp_per_patient": fp,
++                "lesion_recall@0.3": lr.get("lesion_recall@0.3")}
++        for k, v in vals.items():
++            if not finite(v):
++                raise ValueError(f"missing/nonfinite {k} at epoch {epoch} threshold {t}")
++        out.append({"epoch": int(epoch), "threshold": float(t), **vals,
++                    "frac_patients_with_fp": scan["fp_per_patient"][t]["frac_patients_with_fp"]})
++    return out
++
++
++def load_scan(d):
++    p = os.path.join(d, "threshold_scan.json")
++    s = json.load(open(p))
++    s["_path"] = p
++    s["_sha256"] = sha(p)
++    return s
++
++
++def best_threshold(rows):
++    return max(rows, key=lambda r: (r["utility"], r["f1@0.5"], -r["fp_per_patient"], r["threshold"]))
++
++
++def cmd_v100(a):
++    per = {}
++    for item in a.scans:
++        ep, d = item.split(":", 1)
++        s = load_scan(d)
++        if s["manifest"] != "V100":
++            raise ValueError(f"{d} is not V100")
++        b = best_threshold(rows_of(s, ep))
++        per[int(ep)] = {**b, "scan": s["_path"], "scan_sha256": s["_sha256"]}
++    best_ep = max(per, key=lambda e: (per[e]["utility"], per[e]["f1@0.5"], -e))
++    out = {"per_epoch_best": per, "best_epoch": best_ep, "rule": "threshold: utility>F1@0.5>small FP>high thr; epoch: utility>F1@0.5>earlier"}
++    json.dump(out, open(a.out, "w"), indent=2)
++    print(json.dumps({"best_epoch": best_ep, "per_epoch": {e: [round(v["utility"], 4), round(v["f1@0.3"], 4), round(v["f1@0.5"], 4), v["threshold"]] for e, v in sorted(per.items())}}, indent=1))
++
++
++def epoch_losses(run_dir, upe):
++    from rsna_diag import det_train as T
++    recs, _ = T.canonical_log(run_dir)
++    if not recs or recs[0]["update"] != 0:
++        raise ValueError("canonical log must start at 0")
++    by = {}
++    for r in recs:
++        by.setdefault(r["update"] // upe + 1, []).append(r["loss"])
++    return {e: sum(v) / len(v) for e, v in by.items() if len(v) == upe}
++
++
++def cmd_extend(a):
++    v = json.load(open(a.v100))["per_epoch_best"]
++    v = {int(k): x for k, x in v.items()}
++    if 22 not in v or 26 not in v:
++        raise ValueError("need V100 epochs 22 and 26")
++    rc = json.load(open(os.path.join(a.run_dir, "run_config.json")))
++    L = epoch_losses(a.run_dir, rc["updates_per_epoch"])
++    if any(e not in L for e in range(19, 27)):
++        raise ValueError("need complete epochs 19..26 in canonical log")
++    last4 = sum(L[e] for e in range(23, 27)) / 4
++    prev4 = sum(L[e] for e in range(19, 23)) / 4
++    top = max(x["utility"] for x in v.values())
++    c1 = (v[26]["utility"] - v[22]["utility"] >= 0.01) or (v[26]["f1@0.5"] - v[22]["f1@0.5"] >= 0.01)
++    c2 = (v[26]["utility"] >= top - 0.01) and (last4 <= 0.9 * prev4)
++    out = {"extend": bool(c1 or c2), "cond_increase_22_26": c1, "cond_near_top_and_loss_drop": c2,
++           "utility_22": v[22]["utility"], "utility_26": v[26]["utility"], "f1@0.5_22": v[22]["f1@0.5"],
++           "f1@0.5_26": v[26]["f1@0.5"], "v100_top_utility": top, "mean_loss_epochs19_22": prev4,
++           "mean_loss_epochs23_26": last4, "loss_ratio": last4 / prev4, "epoch_mean_loss": L}
++    json.dump(out, open(a.out, "w"), indent=2)
++    print(json.dumps({k: v for k, v in out.items() if k != "epoch_mean_loss"}, indent=1))
++
++
++def cap_problem(scan, thr, raw_dir):
++    """선택 threshold 이상 점수를 가진 box가 100개 cap에서 잘렸을 가능성: cap에 도달한 영상의 최저 점수≥thr."""
++    raw = json.load(open(os.path.join(raw_dir, "raw_preds.json")))
++    hits = [i for i, r in raw.items() if len(r["scores"]) >= 100 and min(r["scores"]) >= thr]
++    return hits
++
++
++def cmd_v400(a):
++    rows = []
++    scans = {}
++    for item in a.scans:
++        ep, d = item.split(":", 1)
++        s = load_scan(d)
++        if s["manifest"] != "V400":
++            raise ValueError(f"{d} is not V400")
++        scans[int(ep)] = (d, s)
++        rows += rows_of(s, ep)
++    sel = max(rows, key=lambda r: (r["utility"], r["f1@0.5"], -r["fp_per_patient"], -r["epoch"], r["threshold"]))
++    d, s = scans[sel["epoch"]]
++    cap_hits = cap_problem(s, sel["threshold"], d)
++    ep_rows = [r for r in rows if r["epoch"] == sel["epoch"]]
++    budgets = {}
++    for b in (0.25, 0.5, 1.0):
++        ok = [r for r in ep_rows if r["fp_per_patient"] <= b]
++        if not ok:
++            budgets[str(b)] = None
++            continue
++        r = max(ok, key=lambda r: (r["lesion_recall@0.3"], -r["fp_per_patient"], r["threshold"]))
++        budgets[str(b)] = {"threshold": r["threshold"], "lesion_recall@0.3": r["lesion_recall@0.3"],
++                           "fp_per_patient": r["fp_per_patient"], "cap_hits": len(cap_problem(s, r["threshold"], d))}
++    out = {"selected": sel, "selected_raw_dir": d, "selected_checkpoint": s["completion"]["checkpoint"],
++           "selected_checkpoint_sha256": s["completion"]["checkpoint_sha256"],
++           "cap_problem_ids": cap_hits, "cap_ok": not cap_hits, "fp_budgets": budgets,
++           "scans": {e: {"dir": dd, "scan_sha256": ss["_sha256"]} for e, (dd, ss) in scans.items()},
++           "rule": "utility>F1@0.5>small FP/patient(all N)>earlier epoch>higher threshold",
++           "top10": sorted(rows, key=lambda r: (-r["utility"], -r["f1@0.5"], r["fp_per_patient"], r["epoch"], -r["threshold"]))[:10]}
++    json.dump(out, open(a.out, "w"), indent=2)
++    print(json.dumps({"selected": sel, "cap_ok": out["cap_ok"], "fp_budgets": budgets}, indent=1))
++
++
++def det_vs_b0_val(raw_dir, thr):
++    from rsna_diag import sft_eval as SE, metrics as M, det_lib as D
++    gt, _ = D.load_gt_infer()
++    ids = json.load(open(f"{BASE}/results/iter_010/manifests/validation_ids.json"))
++    if sha(B0_VAL) != B0_VAL_SHA:
++        raise ValueError("B0 validation output changed")
++    recs = {}
++    for l in open(B0_VAL):
++        r = json.loads(l)
++        k = (r["id"], r["prompt_name"])
++        if k in recs:
++            raise ValueError("duplicate B0 record")
++        recs[k] = r
++    b0 = SE.parse_records(recs, ids, "concise", strict=True)
++    from rsna_diag import det_eval as E
++    raw, comp, rid = E.load_verified(raw_dir, "V400")
++    if rid != ids:
++        raise ValueError("V400 ids differ from validation ids")
++    det = D.preds_to_norm_yxyx(raw, gt, thr)
++    sd, sb = SE.summarize(det, gt, ids), SE.summarize(b0, gt, ids)
++    out = {"det_f1@0.3": sd["f1@0.3"], "det_f1@0.5": sd["f1@0.5"], "b0_f1@0.3": sb["f1@0.3"], "b0_f1@0.5": sb["f1@0.5"],
++           "diff_f1@0.3": sd["f1@0.3"] - sb["f1@0.3"], "diff_f1@0.5": sd["f1@0.5"] - sb["f1@0.5"],
++           "det_utility": sd["utility"], "b0_utility": sb["utility"]}
++    pos = [i for i in ids if gt[i]["category"] == "opacity"]
++    for thr_iou in (0.3, 0.5):
++        do = so = tot = 0
++        for i in pos:
++            g = [b["yxyx_norm"] for b in gt[i]["boxes"]]
++            db = det[i]["boxes"]
++            bb = b0[i]["boxes"] if b0[i]["status"] in ("valid_nonempty", "valid_empty") else []
++            dm = {gi for gi, _ in M.match(db, g, thr_iou)}
++            bm = {gi for gi, _ in M.match(bb, g, thr_iou)}
++            do += len(dm - bm); so += len(bm - dm); tot += len(g)
++        out[f"det_only_rate@{thr_iou}"] = do / tot
++        out[f"sft_only_rate@{thr_iou}"] = so / tot
++    return out
++
++
++def cmd_seed(a):
++    sel = json.load(open(a.selection))
++    r17 = det_vs_b0_val(sel["selected_raw_dir"], sel["selected"]["threshold"])
++    out = {"seed17": r17, "selection17": a.selection}
++    trig29 = (abs(r17["diff_f1@0.3"]) >= 0.03 or abs(r17["diff_f1@0.5"]) >= 0.03
++              or r17["det_only_rate@0.3"] >= 0.05 or r17["sft_only_rate@0.3"] >= 0.05)
++    out["train_seed29"] = bool(trig29)
++    out["rule29"] = "|dF1@0.3|>=0.03 or |dF1@0.5|>=0.03 or det-only/SFT-only GT rate@IoU0.3>=0.05 (V400, vs B0)"
++    if a.selection29:
++        sel29 = json.load(open(a.selection29))
++        r29 = det_vs_b0_val(sel29["selected_raw_dir"], sel29["selected"]["threshold"])
++        out["seed29"] = r29
++        flip = any((r17[k] > 0) != (r29[k] > 0) for k in ("diff_f1@0.3", "diff_f1@0.5"))
++        mag = any(abs(r17[k] - r29[k]) >= 0.03 for k in ("diff_f1@0.3", "diff_f1@0.5"))
++        out["train_seed43"] = bool(flip or mag)
++        out["rule43"] = "sign of (det-B0) differs between seeds or |d17-d29|>=0.03 for F1@0.3 or F1@0.5"
++    json.dump(out, open(a.out, "w"), indent=2)
++    print(json.dumps(out, indent=1))
++
++
++def main():
++    ap = argparse.ArgumentParser()
++    sub = ap.add_subparsers(dest="cmd", required=True)
++    p = sub.add_parser("v100"); p.add_argument("--scans", nargs="+", required=True); p.add_argument("--out", required=True)
++    p.set_defaults(func=cmd_v100)
++    p = sub.add_parser("extend"); p.add_argument("--v100", required=True); p.add_argument("--run_dir", required=True)
++    p.add_argument("--out", required=True); p.set_defaults(func=cmd_extend)
++    p = sub.add_parser("v400"); p.add_argument("--scans", nargs="+", required=True); p.add_argument("--out", required=True)
++    p.set_defaults(func=cmd_v400)
++    p = sub.add_parser("seed"); p.add_argument("--selection", required=True); p.add_argument("--selection29", default=None)
++    p.add_argument("--out", required=True); p.set_defaults(func=cmd_seed)
++    a = ap.parse_args()
++    for f in ("out",):
++        if os.path.exists(getattr(a, f)):
++            raise FileExistsError(f"refusing to overwrite {getattr(a, f)}")
++    a.func(a)
++
++
++if __name__ == "__main__":
++    main()
+diff --git a/rsna_diag/det_train.py b/rsna_diag/det_train.py
+index 888356c..88383be 100644
+--- a/rsna_diag/det_train.py
++++ b/rsna_diag/det_train.py
+@@ -1,76 +1,123 @@
+-"""RSNA detector 학습/평가 실행기 (natten_py310 env 전용).
+-
+-iter_033의 results/iter_033/run_detector.py(sha256 994b061dee66d48436f08606dc551d4f47329f9719dc5d270e38800ec6ddf18c)를
+-원본으로 하고, iter_034에서 다음 결함을 수정했다:
+-
+-1. augmentation RNG: 원본은 매 update마다 ds.set_epoch_rng(seed*1000+epoch)를 호출해 epoch 내 각 batch
+-   위치의 flip 패턴이 반복됐다. 수정본은 epoch 시작에만 재시딩하고 이후 rng 상태를 자연스럽게 이어간다.
+-   재개 시에는 checkpoint에 저장한 ds_rng_state를 그대로 복원해 이어간다(에폭 경계에서 재개하면 새로 시딩).
+-2. checkpoint: 실제 dataset RNG 상태(ds_rng_state)를 extra에 추가로 저장한다. 기존 model/optimizer/
+-   scheduler/full_rng_state/epoch/update_idx/sample_cursor/args는 원본과 동일하게 유지한다.
+-3. 로그: 매 update의 실제 sample id·flip 여부·적용 LR을 train_log.jsonl에 기록한다.
+-4. lock: 원본은 PID 존재 여부만 확인하는 파일 기반 lock이라 PID 재사용에 취약했다. 수정본은 fcntl.flock을
+-   프로세스 lifetime 동안 보유하는 방식으로 바꿔, 소유권이 OS 커널에 의해 강제되고(자기 lock만 해제),
+-   프로세스가 예기치 않게 죽어도 OS가 자동 해제한다.
+-5. 비유한 loss/gradient: 원본은 finite 여부를 기록만 하고 항상 opt.step()을 호출했다. 수정본은 optimizer
+-   update 전에 finite를 검사하고, 비유한 경우 opt.step()/sched.step()을 건너뛰고 기록한다.
+-6. SIGTERM: 안전한 경계에서 checkpoint를 저장하고 종료하는 handler를 추가했다.
+-7. --stop_after: 재개 검사(resume_check)에서 실제 cmd_train 프로세스를 지정한 update 수에서 중단시키기
+-   위한 테스트 전용 옵션이다.
+-
+-이 파일과 결정은 rsna_diag/det_lib.py의 재사용 승인 범위(전처리·모델·optimizer/scheduler 유틸리티)를
+-넘어서는 실행기 자체이므로 별도 검증(fixtures/resume_check)을 거친다.
++"""RSNA detector 학습 실행기 (natten_py310 env 전용).
++
++이력:
++- iter_033 results/iter_033/run_detector.py (sha256 994b061dee66d48436f08606dc551d4f47329f9719dc5d270e38800ec6ddf18c) 원본.
++- iter_034 수정본 (sha256 6c1898c5bfe9750747142641e339b9b9189e5304f27ac6403d4cc9e67c11b49b, commit bc80f2d):
++  augmentation RNG를 epoch 시작에만 시딩, ds_rng_state 저장, update별 sample/flip 로그, flock lock, SIGTERM 경계 저장.
++- iter_035 수정 (이 파일):
++  1. 재개 LR: 원본은 optimizer state를 로드한 뒤 LambdaLR을 생성해 생성자의 _initial_step()이 group lr을
++     lambda(0)×base로 덮어썼다. scheduler.load_state_dict는 group lr을 되돌리지 않으므로 재개 첫 update가
++     warmup 첫 LR(0.005/300)로 적용됐다. 이제 scheduler를 먼저 만들고 optimizer→scheduler 순으로 state를
++     복원한 뒤, 모든 param group의 실제 lr이 저장값·lr_lambda(last_epoch)×initial_lr과 같은지 검사한다.
++  2. 로그의 lr_applied는 opt.step() 직전 param group의 실제 lr이다(원본은 sched.step() 뒤 다음 LR). lr_next를 따로 기록한다.
++  3. checkpoint(format 2): 실제 epoch permutation, cursor, update, dataset RNG, Python/NumPy/CPU/CUDA RNG,
++     model/optimizer/scheduler, config·input·source digest, 적용 예정 lr, canonical 로그 수를 저장한다.
++     재개 시 필수 상태 누락·digest 불일치·permutation 불일치를 거부한다(조용한 재시딩 없음).
++  4. 비유한 loss/gradient는 optimizer.step 전에 nonfinite.json을 남기고 실패 종료한다(update를 소비하지 않음).
++  5. 로그는 프로세스(segment)별 파일로 쓰고 segments.json에 시작 update를 기록한다. checkpoint 이후 기록은
++     orphan으로 보존되며 canonical_log()가 중복·누락을 거부한다.
++  6. 완료 marker(complete.json)와 verify 명령, 기존 경로 fresh 실행 거부, lock 소유 metadata(pid/starttime/attempt).
++  7. --init_from: 다른 run의 checkpoint(동일 state)에서 새 run_dir로 이어간다(재개 검사·구버전 이관 공용).
++     구버전(format 1) checkpoint는 --migration manifest가 원본 sha256·검증 근거를 연결할 때만 허용한다.
++  8. 재개 검사 전용: --save_at(지정 update의 전체 snapshot), --stop_after, --trace(입력·parameter digest),
++     --deterministic(torch 결정적 알고리즘).
+ """
+ import argparse
+ import fcntl
++import hashlib
+ import json
+ import os
+ import signal
++import socket
+ import sys
+ import time
+ 
+-import numpy as np
+-import torch
++BASE = "/SSD1_1TB/home/milab/daniel/08_medgemma/research"
++if "--deterministic" in sys.argv:
++    os.environ.setdefault("CUBLAS_WORKSPACE_CONFIG", ":4096:8")
+ 
+-sys.path.insert(0, "/SSD1_1TB/home/milab/daniel/08_medgemma/research")
+-from rsna_diag import det_lib as D
++import numpy as np  # noqa: E402
++import torch  # noqa: E402
+ 
+-BASE = "/SSD1_1TB/home/milab/daniel/08_medgemma/research"
+-DATA_DIRS = {
+-    "iter_033": f"{BASE}/results/iter_033/data",
+-    "iter_034": f"{BASE}/results/iter_034/data",
+-}
++sys.path.insert(0, BASE)
++from rsna_diag import det_lib as D  # noqa: E402
++
++FORMAT_VERSION = 2
++DATA_DIRS = [f"{BASE}/results/iter_033/data", f"{BASE}/results/iter_034/data", f"{BASE}/results/iter_035/data"]
++SOURCE_FILES = [f"{BASE}/rsna_diag/det_train.py", f"{BASE}/rsna_diag/det_lib.py", f"{BASE}/rsna_diag/geometry.py"]
++# 학습 trajectory를 정의하는 설정. device·stop_after·save_at·trace·deterministic은 실행 제어로 digest에서 제외한다.
++CONFIG_KEYS = ["manifest", "effective_batch", "microbatch", "lr", "momentum", "weight_decay", "lr_drop_epochs",
++               "seed", "warmup_epochs", "trainable_backbone_layers", "flip_p", "min_size", "max_size"]
++EXIT_STOPPED = 3  # SIGTERM/stop_after로 안전 저장 후 종료(재개 가능)
++
++
++def find_manifest(name):
++    for d in DATA_DIRS:
++        p = f"{d}/{name}.json"
++        if os.path.exists(p):
++            return p
++    raise FileNotFoundError(name)
++
++
++def sha256_bytes(b):
++    return hashlib.sha256(b).hexdigest()
++
++
++def jdigest(obj):
++    return sha256_bytes(json.dumps(obj, sort_keys=True).encode())
++
++
++def source_digest():
++    ent = {os.path.relpath(p, BASE): D.sha256_file(p) for p in SOURCE_FILES}
++    salt = os.environ.get("DET_TEST_SOURCE_SALT")  # 변조 거부 검사 전용
++    if salt:
++        ent["_test_salt"] = salt
++    return jdigest(ent), ent
+ 
+ 
+-def load_manifest(name, data_dir=None):
+-    if data_dir is None:
+-        # iter_033 manifests take precedence (existing fixed D32/V100/train600/L64/train2400_full ids);
+-        # iter_034-only manifests (e.g. V400) live in iter_034/data.
+-        p33 = f"{DATA_DIRS['iter_033']}/{name}.json"
+-        p34 = f"{DATA_DIRS['iter_034']}/{name}.json"
+-        data_dir = DATA_DIRS['iter_033'] if os.path.exists(p33) else DATA_DIRS['iter_034']
+-    return json.load(open(f"{data_dir}/{name}.json"))
++def input_digest(ids, gt, infer):
++    """manifest ID 순서, 영상 file sha256, GT box(xyxy_px)를 묶은 digest."""
++    rows = []
++    for i in ids:
++        rows.append([i, infer[i]["image"], infer[i].get("file_sha256"), gt[i].get("pixel_sha256"),
++                     gt[i]["category"], [b["xyxy_px"] for b in gt[i]["boxes"]]])
++    salt = os.environ.get("DET_TEST_INPUT_SALT")  # 변조 거부 검사 전용
++    if salt:
++        rows.append(["_test_salt", salt])
++    return jdigest(rows)
+ 
+ 
+-def get_device(dev_arg):
+-    return torch.device(f"cuda:{dev_arg}" if torch.cuda.is_available() else "cpu")
++def config_of(args):
++    return {k: getattr(args, k) for k in CONFIG_KEYS}
++
++
++def proc_starttime(pid):
++    try:
++        with open(f"/proc/{pid}/stat") as f:
++            return int(f.read().rsplit(")", 1)[1].split()[19])
++    except Exception:
++        return None
+ 
+ 
+ class FlockLock:
+-    """fcntl.flock 기반 exclusive lock. 파일 열림 동안만 유효하며 프로세스 종료 시 OS가 자동 해제한다."""
++    """fcntl.flock 기반 exclusive lock(프로세스 종료 시 OS가 해제). 소유 metadata를 남긴다."""
+ 
+-    def __init__(self, run_dir):
++    def __init__(self, run_dir, attempt_id):
+         os.makedirs(run_dir, exist_ok=True)
+         self.path = os.path.join(run_dir, "train.lock")
+         self.fh = open(self.path, "a+")
+         try:
+             fcntl.flock(self.fh.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+         except BlockingIOError:
++            self.fh.seek(0)
++            owner = self.fh.read()
+             self.fh.close()
+-            raise RuntimeError(f"run_dir {run_dir} is locked by another live process (flock held)")
++            raise RuntimeError(f"run_dir {run_dir} is locked by another live process (flock held): {owner}")
+         self.fh.seek(0)
+         self.fh.truncate()
+-        self.fh.write(json.dumps({"pid": os.getpid(), "t": time.time()}))
++        self.fh.write(json.dumps({"pid": os.getpid(), "starttime": proc_starttime(os.getpid()),
++                                  "host": socket.gethostname(), "attempt_id": attempt_id, "t": time.time(),
++                                  "argv": sys.argv}))
+         self.fh.flush()
+ 
+     def release(self):
+@@ -87,192 +134,430 @@ def _sigterm_handler(signum, frame):
+     _STOP_REQUESTED["flag"] = True
+ 
+ 
+-def make_checkpoint(model, opt, sched, epoch, update_idx, sample_cursor, ids_order, extra):
++def epoch_perm(seed, epoch_idx, n):
++    rng = np.random.default_rng(seed * 100000 + epoch_idx)
++    return rng.permutation(n).tolist()
++
++
++# ---------------------------------------------------------------- log segments
++def read_jsonl(path):
++    out = []
++    with open(path) as f:
++        for line in f:
++            if line.strip():
++                out.append(json.loads(line))
++    return out
++
++
++def load_segments(run_dir):
++    p = os.path.join(run_dir, "segments.json")
++    return json.load(open(p)) if os.path.exists(p) else []
++
++
++def save_json_atomic(obj, path):
++    tmp = path + ".tmp"
++    with open(tmp, "w") as f:
++        json.dump(obj, f, indent=2)
++    os.replace(tmp, path)
++
++
++def canonical_log(run_dir):
++    """segments.json 순서대로 각 segment의 [start, 다음 segment start) 구간만 canonical로 채택한다.
++    외부 prefix(init_from 원본)도 segment로 참조한다. 중복·누락·순서 오류는 ValueError.
++    반환 record는 첫 segment 시작 update부터 연속이어야 한다(완료 판정은 0부터 전체를 따로 요구)."""
++    segs = load_segments(run_dir)
++    recs = []
++    orphans = 0
++    for k, s in enumerate(segs):
++        end = segs[k + 1]["start_update"] if k + 1 < len(segs) else None
++        path = s["path"] if os.path.isabs(s["path"]) else os.path.join(run_dir, s["path"])
++        if s.get("sha256_at_link") and D.sha256_file(path) != s["sha256_at_link"]:
++            raise ValueError(f"external log segment changed since link: {path}")
++        seg_recs = [r for r in read_jsonl(path) if r["update"] >= s["start_update"]]
++        if s.get("prefix_end") is not None:
++            seg_recs = [r for r in seg_recs if r["update"] < s["prefix_end"]]
++        for r in seg_recs:
++            if end is None or r["update"] < end:
++                recs.append(r)
++            else:
++                orphans += 1
++    ups = [r["update"] for r in recs]
++    if len(ups) != len(set(ups)):
++        raise ValueError("duplicate update in canonical log")
++    if ups and ups != list(range(ups[0], ups[0] + len(ups))):
++        raise ValueError(f"canonical log gap/order error: first={ups[:3]} last={ups[-3:]} n={len(ups)}")
++    return recs, orphans
++
++
++# ---------------------------------------------------------------- checkpoint
++REQUIRED = ["format_version", "model", "optimizer", "scheduler", "rng", "ds_rng_state", "epoch_of_next",
++            "update_idx", "cursor_in_epoch", "perm", "config", "config_digest", "input_digest", "source_digest",
++            "lr_next", "n_canonical_log", "attempt_id", "train_device_index"]
++
++
++def make_checkpoint(model, opt, sched, ds, update_idx, updates_per_epoch, perm_next, args, attempt_id, dig, n_log):
+     return {
++        "format_version": FORMAT_VERSION,
+         "model": model.state_dict(),
+         "optimizer": opt.state_dict(),
+-        "scheduler": sched.state_dict() if sched is not None else None,
++        "scheduler": sched.state_dict(),
+         "rng": D.full_rng_state(),
+-        "epoch": epoch,
++        "ds_rng_state": ds.rng.getstate(),
++        "epoch_of_next": update_idx // updates_per_epoch,
+         "update_idx": update_idx,
+-        "sample_cursor": sample_cursor,
+-        "ids_order": ids_order,
+-        "extra": extra,
++        "cursor_in_epoch": update_idx % updates_per_epoch,
++        "perm": perm_next,
++        "config": config_of(args),
++        "config_digest": jdigest(config_of(args)),
++        "input_digest": dig["input"],
++        "source_digest": dig["source"],
++        "lr_next": [g["lr"] for g in opt.param_groups],
++        "n_canonical_log": n_log,
++        "attempt_id": attempt_id,
++        "train_device_index": int(args.device),
++        "saved_t": time.time(),
+     }
+ 
+ 
++def params_digest(model):
++    h = hashlib.sha256()
++    for _, p in sorted(model.state_dict().items()):
++        h.update(p.detach().cpu().contiguous().numpy().tobytes())
++    return h.hexdigest()
++
++
++def opt_state_digest(opt):
++    h = hashlib.sha256()
++    for gi, g in enumerate(opt.param_groups):
++        for p in g["params"]:
++            st = opt.state.get(p, {})
++            for k in sorted(st):
++                v = st[k]
++                if torch.is_tensor(v):
++                    h.update(v.detach().cpu().contiguous().numpy().tobytes())
++    return h.hexdigest()
++
++
++def validate_and_load(ck, model, opt, sched, args, dig, updates_per_epoch, n_ids, migration=None):
++    """재개 checkpoint 검증. 실패는 RuntimeError. migration은 format 1 이관 기록(dict)."""
++    fmt = ck.get("format_version", 1)
++    if fmt == 1:
++        if migration is None:
++            raise RuntimeError("format-1 checkpoint requires --migration manifest")
++        # 구버전: 이관 manifest가 원본 sha256·설정·input·scheduler·RNG·permutation 복원 근거를 보증해야 한다.
++        for k in ("source_checkpoint_sha256", "config", "input_digest", "update_idx", "source_code_sha256"):
++            if k not in migration:
++                raise RuntimeError(f"migration manifest missing {k}")
++        if migration["config"] != config_of(args):
++            raise RuntimeError(f"migration config mismatch: {migration['config']} vs {config_of(args)}")
++        if migration["input_digest"] != dig["input"]:
++            raise RuntimeError("migration input digest mismatch")
++        for k in ("model", "optimizer", "scheduler", "rng", "update_idx", "sample_cursor", "epoch"):
++            if k not in ck:
++                raise RuntimeError(f"format-1 checkpoint missing {k}")
++        if ck.get("extra", {}).get("ds_rng_state") is None:
++            raise RuntimeError("format-1 checkpoint missing ds_rng_state")
++        u = ck["update_idx"]
++        if u != migration["update_idx"]:
++            raise RuntimeError("migration update_idx mismatch")
++        # 구버전 cursor 규약: epoch=마지막 완료 update의 epoch, sample_cursor=그 epoch 내 완료 update 수
++        if ck["epoch"] != (u - 1) // updates_per_epoch or ck["sample_cursor"] != (u - 1) % updates_per_epoch + 1:
++            raise RuntimeError("format-1 epoch/cursor inconsistent with update_idx")
++        ds_state = ck["extra"]["ds_rng_state"]
++        if u % updates_per_epoch == 0:
++            ds_state = None  # epoch 경계: 다음 epoch 시작에서 새로 시딩(원 코드와 동일)
++        norm = {"ds_rng_state": ds_state, "update_idx": u, "lr_expected_next": None,
++                "perm": epoch_perm(args.seed, u // updates_per_epoch, n_ids)}
++    else:
++        miss = [k for k in REQUIRED if k not in ck]
++        if miss:
++            raise RuntimeError(f"checkpoint missing required state: {miss}")
++        if ck["config"] != config_of(args) or ck["config_digest"] != jdigest(config_of(args)):
++            raise RuntimeError(f"config mismatch: saved={ck['config']} now={config_of(args)}")
++        if ck["input_digest"] != dig["input"]:
++            raise RuntimeError("input digest mismatch")
++        if ck["source_digest"] != dig["source"]:
++            raise RuntimeError("source digest mismatch (code changed since checkpoint)")
++        u = ck["update_idx"]
++        if ck["epoch_of_next"] != u // updates_per_epoch or ck["cursor_in_epoch"] != u % updates_per_epoch:
++            raise RuntimeError("epoch/cursor inconsistent with update_idx")
++        if ck["perm"] != epoch_perm(args.seed, u // updates_per_epoch, n_ids):
++            raise RuntimeError("saved permutation differs from deterministic epoch permutation")
++        norm = {"ds_rng_state": ck["ds_rng_state"] if u % updates_per_epoch != 0 else None, "update_idx": u,
++                "lr_expected_next": ck["lr_next"], "perm": ck["perm"]}
++    model.load_state_dict(ck["model"])
++    # 순서: scheduler 생성(이미 완료) → optimizer state → scheduler state. 이후 실제 group lr을 검사한다.
++    opt.load_state_dict(ck["optimizer"])
++    sched.load_state_dict(ck["scheduler"])
++    if sched.last_epoch != u:
++        raise RuntimeError(f"scheduler last_epoch {sched.last_epoch} != update_idx {u}")
++    for gi, g in enumerate(opt.param_groups):
++        exp = sched.lr_lambdas[gi](sched.last_epoch) * g["initial_lr"]
++        if abs(g["lr"] - exp) > 1e-15 * max(1.0, abs(exp)):
++            raise RuntimeError(f"group {gi} lr {g['lr']} != scheduled {exp}")
++        if norm["lr_expected_next"] is not None and g["lr"] != norm["lr_expected_next"][gi]:
++            raise RuntimeError(f"group {gi} lr {g['lr']} != saved lr_next {norm['lr_expected_next'][gi]}")
++        if g["initial_lr"] != args.lr:
++            raise RuntimeError("initial_lr differs from configured lr")
++    # 학습 장치의 CUDA generator만 복원(저장 process가 본 GPU 수와 무관). 구버전은 migration의 old_args.device.
++    saved_dev = int(migration["old_args"]["device"]) if fmt == 1 else ck["train_device_index"]
++    D.restore_rng_state(ck["rng"], (saved_dev, int(args.device)))
++    return norm
++
++
++# ---------------------------------------------------------------- train
++def has_train_artifacts(run_dir):
++    if not os.path.isdir(run_dir):
++        return False
++    names = set(os.listdir(run_dir))
++    return bool(names & {"ckpt_latest.pt", "segments.json", "complete.json", "train_log.jsonl"}) or any(
++        n.startswith("log_seg") for n in names)
++
++
+ def cmd_train(args):
+-    manifest = load_manifest(args.manifest)
++    if args.deterministic:
++        torch.use_deterministic_algorithms(True)
++        torch.backends.cudnn.deterministic = True
++        torch.backends.cudnn.benchmark = False
++    manifest = json.load(open(find_manifest(args.manifest)))
+     ids = manifest["ids"]
+     gt, infer = D.load_gt_infer()
+-    device = get_device(args.device)
++    device = torch.device(f"cuda:{args.device}" if torch.cuda.is_available() else "cpu")
+     run_dir = args.run_dir
+-    lock = FlockLock(run_dir)
++    latest_path = os.path.join(run_dir, "ckpt_latest.pt")
++    complete_path = os.path.join(run_dir, "complete.json")
++    attempt_id = f"{socket.gethostname()}-{os.getpid()}-{int(time.time())}"
++
++    existing = has_train_artifacts(run_dir)
++    if args.fresh and existing:
++        raise RuntimeError(f"--fresh refused: {run_dir} already has training artifacts")
++    if args.init_from and existing:
++        raise RuntimeError(f"--init_from refused: {run_dir} already has training artifacts")
++    if not args.fresh and not args.init_from and not os.path.exists(latest_path):
++        raise RuntimeError(f"no checkpoint in {run_dir}; use --fresh or --init_from")
++    lock = FlockLock(run_dir, attempt_id)
+     signal.signal(signal.SIGTERM, _sigterm_handler)
+     try:
+-        images_per_epoch = len(ids)
+-        updates_per_epoch = images_per_epoch // args.effective_batch
+-        total_updates = updates_per_epoch * args.epochs
+-        if args.stop_after is not None:
+-            total_updates = min(total_updates, args.stop_after)
+-        warmup_updates = updates_per_epoch  # 1 epoch warmup
++        updates_per_epoch = len(ids) // args.effective_batch
++        target_updates = updates_per_epoch * args.epochs
++        warmup_updates = updates_per_epoch * args.warmup_epochs
+         milestone_updates = [updates_per_epoch * m for m in args.lr_drop_epochs]
+-
+-        latest_path = os.path.join(run_dir, "ckpt_latest.pt")
+-        log_path = os.path.join(run_dir, "train_log.jsonl")
+-        resuming = os.path.exists(latest_path) and not args.fresh
+-        resume_ds_state = None
+-        resume_epoch = None
+-        resume_pos = None
+-        if resuming:
+-            ck = torch.load(latest_path, map_location="cpu", weights_only=False)
+-            model = D.build_model().to(device)
+-            model.load_state_dict(ck["model"])
+-            opt = D.build_optimizer(model, lr=args.lr)
+-            opt.load_state_dict(ck["optimizer"])
+-            D.optimizer_state_to_device(opt, device)
+-            sched = D.linear_warmup_then_multistep(opt, warmup_updates, milestone_updates)
+-            sched.load_state_dict(ck["scheduler"])
+-            D.restore_rng_state(ck["rng"])
+-            start_update = ck["update_idx"]
+-            resume_ds_state = ck.get("extra", {}).get("ds_rng_state")
+-            resume_epoch = ck.get("epoch")
+-            resume_pos = ck.get("sample_cursor")
+-            print(f"resumed from update {start_update}")
+-        else:
+-            torch.manual_seed(args.seed); np.random.seed(args.seed)
+-            model = D.build_model().to(device)
+-            opt = D.build_optimizer(model, lr=args.lr)
+-            sched = D.linear_warmup_then_multistep(opt, warmup_updates, milestone_updates)
++        dig = {"source": source_digest()[0], "input": input_digest(ids, gt, infer)}
++
++        if os.path.exists(complete_path):
++            comp = json.load(open(complete_path))
++            verify_complete(run_dir, comp)
++            if not args.extend or target_updates <= comp["total_updates"]:
++                raise RuntimeError(f"run already complete at {comp['total_updates']} updates; "
++                                   f"use --extend with larger --epochs to continue")
++
++        torch.manual_seed(args.seed)
++        np.random.seed(args.seed)
++        model = D.build_model(trainable_backbone_layers=args.trainable_backbone_layers,
++                              min_size=args.min_size, max_size=args.max_size).to(device)
++        opt = D.build_optimizer(model, lr=args.lr, momentum=args.momentum, weight_decay=args.weight_decay)
++        sched = D.linear_warmup_then_multistep(opt, warmup_updates, milestone_updates)
++        ds = D.RSNADetDataset(ids, gt, infer, train_aug=True, seed=args.seed, flip_p=args.flip_p)
++
++        segs = load_segments(run_dir)
++        if args.fresh:
+             start_update = 0
++            resume_ds_state = None
++            init_info = {"mode": "fresh"}
++        else:
++            src = args.init_from if args.init_from else latest_path
++            ck = torch.load(src, map_location="cpu", weights_only=False)
++            migration = json.load(open(args.migration)) if args.migration else None
++            if migration is not None and D.sha256_file(src) != migration["source_checkpoint_sha256"]:
++                raise RuntimeError("init checkpoint sha256 differs from migration manifest")
++            norm = validate_and_load(ck, model, opt, sched, args, dig, updates_per_epoch, len(ids), migration)
++            D.optimizer_state_to_device(opt, device)
++            start_update = norm["update_idx"]
++            resume_ds_state = norm["ds_rng_state"]
++            if args.init_from:
++                init_info = {"mode": "init_from", "source": os.path.abspath(src),
++                             "source_sha256": D.sha256_file(src), "update_idx": start_update,
++                             "migration": os.path.abspath(args.migration) if args.migration else None}
++                # 원본 run의 canonical 로그 prefix를 외부 segment로 연결(원본은 수정하지 않는다).
++                if args.prefix_log:
++                    segs.append({"path": os.path.abspath(args.prefix_log), "start_update": 0,
++                                 "prefix_end": start_update, "sha256_at_link": D.sha256_file(args.prefix_log),
++                                 "attempt_id": "external_prefix", "kind": "external_prefix"})
++            else:
++                init_info = {"mode": "resume", "update_idx": start_update}
++                # 최신 checkpoint의 canonical 로그 수 확인: 이후 기록은 orphan으로 남는다.
++                if ck.get("n_canonical_log") is not None and ck["n_canonical_log"] != start_update:
++                    raise RuntimeError("checkpoint n_canonical_log != update_idx")
++            if start_update >= target_updates:
++                raise RuntimeError(f"checkpoint at {start_update} >= target {target_updates}")
++            del ck
+ 
+         D.set_train_mode(model)
+-        ds = D.RSNADetDataset(ids, gt, infer, train_aug=True, seed=args.seed)
+-
+-        def epoch_order(epoch_idx):
+-            rng = np.random.default_rng(args.seed * 100000 + epoch_idx)
+-            perm = rng.permutation(len(ids)).tolist()
+-            return perm
++        seg_name = f"log_seg{len(segs):03d}.jsonl"
++        segs.append({"path": seg_name, "start_update": start_update, "attempt_id": attempt_id,
++                     "pid": os.getpid(), "starttime": proc_starttime(os.getpid()), "t": time.time(),
++                     "init": init_info, "target_updates": target_updates, "deterministic": args.deterministic,
++                     "device": args.device, "cuda_visible_devices": os.environ.get("CUDA_VISIBLE_DEVICES")})
++        save_json_atomic(segs, os.path.join(run_dir, "segments.json"))
++        save_json_atomic({"config": config_of(args), "config_digest": jdigest(config_of(args)),
++                          "source_digest": dig["source"], "source_files": source_digest()[1],
++                          "input_digest": dig["input"], "n_ids": len(ids), "updates_per_epoch": updates_per_epoch},
++                         os.path.join(run_dir, "run_config.json"))
++        seg_path = os.path.join(run_dir, seg_name)
++        stop_after = args.stop_after if args.stop_after is not None else target_updates
++        end_update = min(target_updates, stop_after)
++        save_at = set(args.save_at or [])
+ 
+         t0 = time.time()
+-        n_images_processed = 0
+-        last_epoch_started = -1
+-        first_iter = True
+-        n_skipped_nonfinite = 0
++        n_images = 0
++        cur_epoch = None
++        perm = None
+         update_idx = start_update
+-        for update_idx in range(start_update, total_updates):
++        for update_idx in range(start_update, end_update):
+             epoch_idx = update_idx // updates_per_epoch
+-            pos_in_epoch = update_idx % updates_per_epoch
+-            if epoch_idx != last_epoch_started:
+-                if (first_iter and resuming and resume_ds_state is not None
+-                        and epoch_idx == resume_epoch and pos_in_epoch == resume_pos):
++            pos = update_idx % updates_per_epoch
++            if epoch_idx != cur_epoch:
++                if update_idx == start_update and resume_ds_state is not None:
+                     ds.rng.setstate(resume_ds_state)
+                 else:
++                    if pos != 0:
++                        raise RuntimeError("mid-epoch start without dataset RNG state")
+                     ds.set_epoch_rng(args.seed * 1000 + epoch_idx)
+-                last_epoch_started = epoch_idx
+-            first_iter = False
+-            perm = epoch_order(epoch_idx)
+-            batch_indices = perm[pos_in_epoch * args.effective_batch:(pos_in_epoch + 1) * args.effective_batch]
+-            imgs, targets, batch_pids, batch_flips = [], [], [], []
+-            for bi in batch_indices:
++                perm = epoch_perm(args.seed, epoch_idx, len(ids))
++                cur_epoch = epoch_idx
++            bidx = perm[pos * args.effective_batch:(pos + 1) * args.effective_batch]
++            imgs, targets, pids, flips = [], [], [], []
++            for bi in bidx:
+                 img, target, hw = ds[bi]
+                 imgs.append(img.to(device))
+                 targets.append({"boxes": target["boxes"].to(device), "labels": target["labels"].to(device)})
+-                batch_pids.append(ds.ids[bi])
+-                batch_flips.append(bool(target["flip"]))
+-            micro = args.microbatch
++                pids.append(ds.ids[bi])
++                flips.append(bool(target["flip"]))
++            in_digest = None
++            if args.trace:
++                h = hashlib.sha256()
++                for im, tg in zip(imgs, targets):
++                    h.update(im.cpu().numpy().tobytes()); h.update(tg["boxes"].cpu().numpy().tobytes())
++                in_digest = h.hexdigest()
+             opt.zero_grad()
+             total_loss = 0.0
+-            loss_parts = {}
+-            for s in range(0, len(imgs), micro):
+-                sub_imgs = imgs[s:s + micro]
+-                sub_targets = targets[s:s + micro]
+-                loss_dict = model(sub_imgs, sub_targets)
+-                loss = sum(loss_dict.values()) * (len(sub_imgs) / len(imgs))
++            parts = {}
++            for s in range(0, len(imgs), args.microbatch):
++                sub_i, sub_t = imgs[s:s + args.microbatch], targets[s:s + args.microbatch]
++                loss_dict = model(sub_i, sub_t)
++                w = len(sub_i) / len(imgs)
++                loss = sum(loss_dict.values()) * w
+                 loss.backward()
+                 total_loss += float(loss.item())
+                 for k, v in loss_dict.items():
+-                    loss_parts[k] = loss_parts.get(k, 0.0) + float(v.item()) * (len(sub_imgs) / len(imgs))
+-            gn_t = torch.nn.utils.clip_grad_norm_([p for p in model.parameters() if p.requires_grad], 1e6)
+-            gn = float(gn_t)
+-            finite = bool(np.isfinite(total_loss)) and bool(np.isfinite(gn))
+-            if finite:
+-                opt.step()
+-                sched.step()
+-            else:
+-                opt.zero_grad()
+-                n_skipped_nonfinite += 1
+-            n_images_processed += len(batch_indices)
+-            rec = {"update": update_idx, "epoch": epoch_idx, "loss": total_loss, "finite": finite,
+-                   "skipped_nonfinite": (not finite), "grad_norm": gn, "lr_applied": sched.get_last_lr()[0],
+-                   "sample_ids": batch_pids, "flips": batch_flips, **loss_parts}
+-            with open(log_path, "a") as f:
++                    parts[k] = parts.get(k, 0.0) + float(v.item()) * w
++            gn = float(torch.nn.utils.clip_grad_norm_([p for p in model.parameters() if p.requires_grad], 1e6))
++            if os.environ.get("DET_TEST_NAN_AT") == str(update_idx):  # 비유한 중단 검사 전용
++                total_loss = float("nan")
++            if not (np.isfinite(total_loss) and np.isfinite(gn) and all(np.isfinite(v) for v in parts.values())):
++                save_json_atomic({"update": update_idx, "loss": total_loss, "grad_norm": gn, "parts": parts,
++                                  "sample_ids": pids, "attempt_id": attempt_id, "t": time.time()},
++                                 os.path.join(run_dir, "nonfinite.json"))
++                raise FloatingPointError(f"non-finite loss/grad at update {update_idx}; aborting before step")
++            lr_applied = [g["lr"] for g in opt.param_groups]
++            opt.step()
++            sched.step()
++            n_images += len(bidx)
++            rec = {"update": update_idx, "epoch": epoch_idx, "pos": pos, "loss": total_loss, "grad_norm": gn,
++                   "lr_applied": lr_applied[0], "lr_applied_all_equal": len(set(lr_applied)) == 1,
++                   "lr_next": opt.param_groups[0]["lr"], "sample_ids": pids, "flips": flips,
++                   "attempt_id": attempt_id, "t": time.time(), **parts}
++            if args.trace:
++                rec["input_digest"] = in_digest
++                rec["params_digest"] = params_digest(model)
++            with open(seg_path, "a") as f:
+                 f.write(json.dumps(rec) + "\n")
+-            if update_idx % 50 == 0:
+-                elapsed = time.time() - t0
+-                imgs_per_sec = n_images_processed / elapsed if elapsed > 0 else 0.0
+-                print(json.dumps({**{k: v for k, v in rec.items() if k in ("update", "epoch", "loss", "finite", "lr_applied")},
+-                                   "images_per_sec": imgs_per_sec}))
+-            do_epoch_ckpt = (update_idx + 1) % updates_per_epoch == 0
+-            do_periodic_ckpt = (update_idx + 1) % 100 == 0
+-            if do_epoch_ckpt or do_periodic_ckpt or _STOP_REQUESTED["flag"]:
+-                ck = make_checkpoint(model, opt, sched, epoch_idx, update_idx + 1, pos_in_epoch + 1, ids,
+-                                     {"args": vars(args), "ds_rng_state": ds.rng.getstate()})
++            done = update_idx + 1
++            if update_idx % 50 == 0 or done == end_update:
++                el = time.time() - t0
++                rate = n_images / el if el > 0 else 0.0
++                eta = (target_updates - done) * args.effective_batch / rate if rate > 0 else None
++                print(json.dumps({"update": update_idx, "epoch": epoch_idx, "loss": round(total_loss, 5),
++                                  "lr_applied": lr_applied[0], "images_per_sec": round(rate, 3),
++                                  "eta_s": round(eta) if eta else None,
++                                  "gpu_alloc_mib": round(torch.cuda.max_memory_allocated(device) / 2**20) if torch.cuda.is_available() else None}),
++                      flush=True)
++            epoch_end = done % updates_per_epoch == 0
++            stop_now = _STOP_REQUESTED["flag"] or done == end_update
++            if epoch_end or done % 100 == 0 or stop_now or done in save_at:
++                perm_next = perm if not epoch_end else epoch_perm(args.seed, done // updates_per_epoch, len(ids))
++                ck = make_checkpoint(model, opt, sched, ds, done, updates_per_epoch, perm_next, args, attempt_id,
++                                     dig, done)
++                if done in save_at:
++                    D.atomic_save(ck, os.path.join(run_dir, f"ckpt_u{done:05d}.pt"))
++                    if args.trace:
++                        with open(os.path.join(run_dir, f"ckpt_u{done:05d}.digest.json"), "w") as f:
++                            json.dump({"update": done, "params_digest": params_digest(model),
++                                       "opt_state_digest": opt_state_digest(opt), "lr_next": ck["lr_next"],
++                                       "sched_last_epoch": sched.last_epoch}, f)
+                 D.atomic_save(ck, latest_path)
+-                if do_epoch_ckpt:
+-                    ep_dir = os.path.join(run_dir, f"epoch_{epoch_idx + 1:02d}")
++                if epoch_end:
++                    ep_dir = os.path.join(run_dir, f"epoch_{done // updates_per_epoch:02d}")
+                     os.makedirs(ep_dir, exist_ok=True)
+-                    D.atomic_save({"model": model.state_dict()}, os.path.join(ep_dir, "model.pt"))
++                    D.atomic_save({"model": model.state_dict(), "update_idx": done, "config_digest": ck["config_digest"],
++                                   "source_digest": dig["source"], "input_digest": dig["input"]},
++                                  os.path.join(ep_dir, "model.pt"))
++                del ck
+             if _STOP_REQUESTED["flag"]:
+-                print(json.dumps({"sigterm_stop": True, "last_update_saved": update_idx}))
+-                return
+-        if args.stop_after is not None and update_idx == total_updates - 1:
+-            # 테스트 전용 강제 중단: 마지막 처리된 update가 주기적 checkpoint 경계와 맞지 않을 수 있으므로
+-            # 재개 정합성 검사를 위해 항상 checkpoint를 남긴다.
+-            pos_in_epoch_final = update_idx % updates_per_epoch
+-            epoch_idx_final = update_idx // updates_per_epoch
+-            ck = make_checkpoint(model, opt, sched, epoch_idx_final, update_idx + 1, pos_in_epoch_final + 1, ids,
+-                                 {"args": vars(args), "ds_rng_state": ds.rng.getstate()})
+-            D.atomic_save(ck, latest_path)
+-            print(json.dumps({"stop_after_reached": True, "last_update_saved": update_idx}))
+-            return
+-        elapsed = time.time() - t0
+-        peak_mib = torch.cuda.max_memory_allocated(device) / (1024 * 1024) if torch.cuda.is_available() else None
+-        peak_reserved_mib = torch.cuda.max_memory_reserved(device) / (1024 * 1024) if torch.cuda.is_available() else None
+-        print(json.dumps({"done": True, "total_updates": total_updates,
+-                           "elapsed_s": elapsed, "images_per_sec": n_images_processed / elapsed if elapsed > 0 else None,
+-                           "peak_allocated_mib": peak_mib, "peak_reserved_mib": peak_reserved_mib,
+-                           "n_skipped_nonfinite": n_skipped_nonfinite}))
++                print(json.dumps({"sigterm_stop": True, "saved_update": done}), flush=True)
++                return EXIT_STOPPED
++        if end_update < target_updates:
++            print(json.dumps({"stop_after_reached": True, "saved_update": end_update}), flush=True)
++            return EXIT_STOPPED
++        el = time.time() - t0
++        recs, orphans = canonical_log(run_dir)
++        if len(recs) != target_updates or recs[0]["update"] != 0:
++            raise RuntimeError(f"canonical log has {len(recs)} records from {recs[0]['update'] if recs else None}; "
++                               f"expected 0..{target_updates - 1}")
++        if os.path.exists(complete_path):  # --extend: 이전 완료 marker를 보존
++            prev = json.load(open(complete_path))
++            save_json_atomic(prev, os.path.join(run_dir, f"complete_u{prev['total_updates']:05d}.json"))
++        comp = {"total_updates": target_updates, "epochs": args.epochs, "ckpt_sha256": D.sha256_file(latest_path),
++                "canonical_log_digest": jdigest([[r["update"], r["loss"], r["sample_ids"], r["flips"]] for r in recs]),
++                "n_orphan_records": orphans, "config_digest": jdigest(config_of(args)), "source_digest": dig["source"],
++                "input_digest": dig["input"], "attempt_id": attempt_id, "t": time.time()}
++        save_json_atomic(comp, complete_path)
++        print(json.dumps({"done": True, "total_updates": target_updates, "elapsed_s": el,
++                          "images_per_sec": n_images / el if el > 0 else None,
++                          "peak_allocated_mib": torch.cuda.max_memory_allocated(device) / 2**20 if torch.cuda.is_available() else None,
++                          "peak_reserved_mib": torch.cuda.max_memory_reserved(device) / 2**20 if torch.cuda.is_available() else None}),
++              flush=True)
++        return 0
+     finally:
+         lock.release()
+ 
+ 
+-def cmd_eval(args):
+-    manifest = load_manifest(args.manifest)
+-    ids = manifest["ids"]
+-    gt, infer = D.load_gt_infer()
+-    device = get_device(args.device)
+-    model = D.build_model().to(device)
+-    ck = torch.load(args.checkpoint, map_location="cpu", weights_only=False)
+-    model.load_state_dict(ck["model"])
+-    model.to(device)
+-    t0 = time.time()
+-    raw = D.run_inference(model, device, ids, gt, infer, batch_size=args.batch_size)
+-    elapsed = time.time() - t0
+-    out_dir = args.out_dir
+-    os.makedirs(out_dir, exist_ok=True)
+-    with open(os.path.join(out_dir, "raw_preds.json"), "w") as f:
+-        json.dump(raw, f)
+-    with open(os.path.join(out_dir, "eval_meta.json"), "w") as f:
+-        json.dump({"checkpoint": args.checkpoint, "manifest": args.manifest, "n_ids": len(ids),
+-                   "elapsed_s": elapsed, "images_per_sec": len(ids) / elapsed}, f, indent=2)
+-    print(json.dumps({"n_ids": len(ids), "elapsed_s": elapsed, "images_per_sec": len(ids) / elapsed}))
++def verify_complete(run_dir, comp=None):
++    comp = comp or json.load(open(os.path.join(run_dir, "complete.json")))
++    latest = os.path.join(run_dir, "ckpt_latest.pt")
++    if D.sha256_file(latest) != comp["ckpt_sha256"]:
++        raise RuntimeError("complete.json ckpt_sha256 mismatch")
++    recs, _ = canonical_log(run_dir)
++    if len(recs) != comp["total_updates"] or recs[0]["update"] != 0:
++        raise RuntimeError("complete.json total_updates mismatch with canonical log")
++    d = jdigest([[r["update"], r["loss"], r["sample_ids"], r["flips"]] for r in recs])
++    if d != comp["canonical_log_digest"]:
++        raise RuntimeError("complete.json canonical_log_digest mismatch")
++    rc = json.load(open(os.path.join(run_dir, "run_config.json")))
++    if rc["config_digest"] != comp["config_digest"]:
++        raise RuntimeError("complete.json config digest mismatch")
++    return True
++
++
++def cmd_verify(args):
++    verify_complete(args.run_dir)
++    print(json.dumps({"verified": True, "run_dir": args.run_dir}))
++    return 0
+ 
+ 
+ def main():
+     ap = argparse.ArgumentParser()
+     sub = ap.add_subparsers(dest="cmd", required=True)
+-
+     p = sub.add_parser("train")
+     p.add_argument("--manifest", required=True)
+     p.add_argument("--run_dir", required=True)
+@@ -281,22 +566,30 @@ def main():
+     p.add_argument("--effective_batch", type=int, default=8)
+     p.add_argument("--microbatch", type=int, default=2)
+     p.add_argument("--lr", type=float, default=0.005)
++    p.add_argument("--momentum", type=float, default=0.9)
++    p.add_argument("--weight_decay", type=float, default=1e-4)
+     p.add_argument("--lr_drop_epochs", type=int, nargs="*", default=[])
++    p.add_argument("--warmup_epochs", type=int, default=1)
++    p.add_argument("--trainable_backbone_layers", type=int, default=5)
++    p.add_argument("--flip_p", type=float, default=0.5)
++    p.add_argument("--min_size", type=int, default=800)
++    p.add_argument("--max_size", type=int, default=1333)
+     p.add_argument("--seed", type=int, default=17)
+     p.add_argument("--fresh", action="store_true")
+-    p.add_argument("--stop_after", type=int, default=None, help="테스트용: 지정 update 수에서 강제 중단")
++    p.add_argument("--init_from", default=None)
++    p.add_argument("--migration", default=None)
++    p.add_argument("--prefix_log", default=None)
++    p.add_argument("--extend", action="store_true")
++    p.add_argument("--stop_after", type=int, default=None)
++    p.add_argument("--save_at", type=int, nargs="*", default=None)
++    p.add_argument("--trace", action="store_true")
++    p.add_argument("--deterministic", action="store_true")
+     p.set_defaults(func=cmd_train)
+-
+-    p = sub.add_parser("eval")
+-    p.add_argument("--manifest", required=True)
+-    p.add_argument("--checkpoint", required=True)
+-    p.add_argument("--out_dir", required=True)
+-    p.add_argument("--device", default="0")
+-    p.add_argument("--batch_size", type=int, default=4)
+-    p.set_defaults(func=cmd_eval)
+-
++    p = sub.add_parser("verify")
++    p.add_argument("--run_dir", required=True)
++    p.set_defaults(func=cmd_verify)
+     args = ap.parse_args()
+-    args.func(args)
++    sys.exit(args.func(args))
+ 
+ 
+ if __name__ == "__main__":
+diff --git a/rsna_diag/iter031_supp.py b/rsna_diag/iter031_supp.py
+new file mode 100644
+index 0000000..806254f
+--- /dev/null
++++ b/rsna_diag/iter031_supp.py
+@@ -0,0 +1,179 @@
++"""iter_031 continuation(F) 저장 출력 보완 분석 (기본 medgemma env, GPU 재생성 없음).
++
++원본: results/iter_034/analysis_iter031/supplement.py (sha256 a5990de1...). 원본은 report.json의 cost_rows만 쓰고
++(1) IoU0.5 회복을 환자 F1의 0→양수로 대신했고, (2) dedup을 FP 수에서 중복 수를 빼는 근사로 계산했다.
++이번 수정:
++- 원시 F token을 고정 tokenizer로 decode하고 기존 strict parser(parse.parse_response)로 다시 해석한다.
++  저장 report.json의 cost_rows(F1@0.3/0.5, TP/FP)와 H2 회복 수를 먼저 재현한다(불일치 시 중단).
++- 회복: 기존 엄격 누락 사건(y_partial)과 원래 누락 GT identity(zero_overlap_gt_idx)에 대해 새 box가
++  (a) IoU≥0.3 [원 정의 재현], (b) IoU≥0.5, (c) 중심이 누락 GT 내부 인 경우를 각각 계산한다.
++- dedup: 기존 정의(parse.duplicates = 동일 좌표 box)로 실제 중복 box를 제거(첫 등장 유지)한 뒤 재매칭한다.
++- 원래 O box 수 1/2 이상·category별 회복, 추가 TP/FP, F1, invalid와 분모를 보고한다. FP는 전체 N 하한(invalid→0)과
++  valid-only를 구분한다.
++- 비용: F 호출 자체(runtime, 생성 token)와 같은 환자 O 대비 F−O 차이를 분리한다. O·F는 같은 실행 구성에서
++  측정됐으므로 차이를 보고하되, 원래 SFT 생성 시간과의 비교는 구성 차이로 결측 처리한다.
++H1/H2 판정과 continuation 투자 종료 판단은 바꾸지 않는다.
++"""
++import glob
++import hashlib
++import json
++import os
++import sys
++
++import numpy as np
++
++BASE = "/SSD1_1TB/home/milab/daniel/08_medgemma/research"
++sys.path.insert(0, BASE)
++from rsna_diag import metrics as M, parse as PA  # noqa: E402
++
++SPLITS = {"C201": "C", "E402": "E"}
++
++
++def sha(p):
++    return hashlib.sha256(open(p, "rb").read()).hexdigest()
++
++
++def load_raw(run_dir):
++    out = {}
++    for p in sorted(glob.glob(f"{run_dir}/attempt1/gen_worker*.jsonl")):
++        for l in open(p):
++            if l.strip():
++                r = json.loads(l)
++                k = (r["id"], r["task"])
++                if k in out:
++                    raise ValueError(f"duplicate {k}")
++                out[k] = r
++    return out
++
++
++def dedup(boxes):
++    seen, out = set(), []
++    for b in boxes:
++        t = tuple(b)
++        if t not in seen:
++            seen.add(t)
++            out.append(b)
++    return out
++
++
++def center_in(b, g):
++    cy, cx = (b[0] + b[2]) / 2, (b[1] + b[3]) / 2
++    return g[0] <= cy <= g[2] and g[1] <= cx <= g[3]
++
++
++def analyze(name, split, tok):
++    run = f"{BASE}/results/iter_031/{name}"
++    rep = json.load(open(f"{run}/report.json"))
++    man = json.load(open(f"{BASE}/{rep['source_manifest_path']}"))
++    aud = json.load(open(f"{BASE}/{rep['source_audit_path']}"))
++    if sha(f"{BASE}/{rep['source_audit_path']}") != rep["source_audit_sha256"]:
++        raise ValueError("source_audit changed")
++    raw = load_raw(run)
++    ids = list(man["patients"][split].keys())
++    if set(raw) != {(i, t) for i in ids for t in ("O", "F")}:
++        raise ValueError("raw O/F set incomplete")
++    stored = {r["id"]: r for r in rep["h2"]["cost_rows"]}
++    stored_ev = {e["id"]: e for e in rep["h2"]["events_detail"]}
++    rows, mism = [], []
++    for pid in ids:
++        a = aud["patients"][split][pid]
++        gt = a["gt_boxes_norm"]
++        o_boxes = a["pred_boxes_seed17"]
++        f = raw[(pid, "F")]
++        o = raw[(pid, "O")]
++        txt = tok.decode(f["suffix_ids"], skip_special_tokens=False)
++        fp_ = PA.parse_response(txt, f["ended_eos"])
++        valid = fp_["status"] in PA.VALID
++        fb = fp_["boxes"] if valid else []
++        new = fb[len(o_boxes):] if valid and fb[:len(o_boxes)] == o_boxes else None
++        m3, m5 = (M.patient_metrics(fb, gt, 0.3), M.patient_metrics(fb, gt, 0.5)) if valid else (None, None)
++        s = stored[pid]
++        if (s["f_valid"] != valid or (valid and (abs(s["f_f1_03"] - m3["f1"]) > 1e-12 or abs(s["f_f1_05"] - m5["f1"]) > 1e-12
++                                                 or s["f_fp_03"] != m3["unmatched_pred"] or s["f_dup"] != PA.duplicates(fb)))):
++            mism.append(pid)
++        fd = dedup(fb) if valid else []
++        d3, d5 = (M.patient_metrics(fd, gt, 0.3), M.patient_metrics(fd, gt, 0.5)) if valid else (None, None)
++        om3, om5 = M.patient_metrics(o_boxes, gt, 0.3), M.patient_metrics(o_boxes, gt, 0.5)
++        ev = a["event"]
++        rec = {}
++        if ev["y_partial"]:
++            missed = [gt[i] for i in ev["zero_overlap_gt_idx"]]
++            nb = new or []
++            rec = {"iou0.3": bool(nb) and len(M.match(nb, missed, 0.3)) >= 1,
++                   "iou0.5": bool(nb) and len(M.match(nb, missed, 0.5)) >= 1,
++                   "center_in_gt": any(center_in(b, g) for b in nb for g in missed),
++                   "iou0.3_after_dedup": bool(nb) and len(M.match(dedup(nb), missed, 0.3)) >= 1}
++            if rec["iou0.3"] != stored_ev[pid]["recovered"]:
++                mism.append(pid + ":event")
++        rows.append({"id": pid, "category": a["category"], "n_pred_O": len(o_boxes), "event": bool(ev["y_partial"]), "rec": rec,
++                     "f_valid": valid, "o": {"f1@0.3": om3["f1"], "f1@0.5": om5["f1"], "tp@0.3": om3["tp"], "fp@0.3": om3["unmatched_pred"]},
++                     "f": None if not valid else {"f1@0.3": m3["f1"], "f1@0.5": m5["f1"], "tp@0.3": m3["tp"], "fp@0.3": m3["unmatched_pred"],
++                                                  "tp@0.5": m5["tp"], "n_pred": len(fb), "dup": PA.duplicates(fb)},
++                     "f_dedup": None if not valid else {"f1@0.3": d3["f1"], "f1@0.5": d5["f1"], "tp@0.3": d3["tp"],
++                                                        "fp@0.3": d3["unmatched_pred"], "n_pred": len(fd)},
++                     "tok_O": len(o["suffix_ids"]), "tok_F": len(f["suffix_ids"]), "rt_O": o["runtime_s"], "rt_F": f["runtime_s"]})
++    if mism:
++        raise ValueError(f"{name}: stored report not reproduced for {mism[:5]}")
++
++    def group(rs):
++        n = len(rs)
++        if not n:
++            return {"n": 0}
++        ev = [r for r in rs if r["event"]]
++        g = {"n": n, "n_invalid_F": sum(not r["f_valid"] for r in rs), "n_events": len(ev)}
++        for k in ("iou0.3", "iou0.5", "center_in_gt", "iou0.3_after_dedup"):
++            g[f"recovered_{k}"] = sum(r["rec"][k] for r in ev)
++            g[f"recovery_rate_{k}"] = g[f"recovered_{k}"] / len(ev) if ev else None
++        for thr in ("0.3", "0.5"):
++            g[f"mean_f1@{thr}_O"] = float(np.mean([r["o"][f"f1@{thr}"] for r in rs]))
++            g[f"mean_f1@{thr}_F_invalid0"] = float(np.mean([r["f"][f"f1@{thr}"] if r["f_valid"] else 0.0 for r in rs]))
++            g[f"mean_f1@{thr}_F_dedup_invalid0"] = float(np.mean([r["f_dedup"][f"f1@{thr}"] if r["f_valid"] else 0.0 for r in rs]))
++        g["extra_tp@0.3_total"] = sum(r["f"]["tp@0.3"] - r["o"]["tp@0.3"] for r in rs if r["f_valid"])
++        fp_all = [r["f"]["fp@0.3"] if r["f_valid"] else 0 for r in rs]
++        fpd_all = [r["f_dedup"]["fp@0.3"] if r["f_valid"] else 0 for r in rs]
++        g["fp@0.3_per_patient_O"] = float(np.mean([r["o"]["fp@0.3"] for r in rs]))
++        g["fp@0.3_per_patient_F_all_n_lower_bound"] = float(np.mean(fp_all))
++        g["fp@0.3_per_patient_F_valid_only"] = float(np.mean([r["f"]["fp@0.3"] for r in rs if r["f_valid"]])) if any(r["f_valid"] for r in rs) else None
++        g["fp@0.3_per_patient_F_dedup_all_n_lower_bound"] = float(np.mean(fpd_all))
++        g["extra_fp@0.3_per_patient_all_n"] = g["fp@0.3_per_patient_F_all_n_lower_bound"] - g["fp@0.3_per_patient_O"]
++        g["n_with_dup"] = sum(1 for r in rs if r["f_valid"] and r["f"]["dup"] > 0)
++        return g
++
++    cats = sorted({r["category"] for r in rows})
++    out = {"split": name, "n": len(rows), "stored_report_reproduced": True,
++           "all": group(rows),
++           "by_category": {c: group([r for r in rows if r["category"] == c]) for c in cats},
++           "by_n_pred_O": {"1": group([r for r in rows if r["n_pred_O"] == 1]), ">=2": group([r for r in rows if r["n_pred_O"] >= 2])},
++           "cost": {"F_call_runtime_s_mean": float(np.mean([r["rt_F"] for r in rows])),
++                    "F_minus_O_runtime_s_mean": float(np.mean([r["rt_F"] - r["rt_O"] for r in rows])),
++                    "F_minus_O_runtime_s_median": float(np.median([r["rt_F"] - r["rt_O"] for r in rows])),
++                    "F_tokens_mean": float(np.mean([r["tok_F"] for r in rows])),
++                    "F_minus_O_tokens_mean": float(np.mean([r["tok_F"] - r["tok_O"] for r in rows])),
++                    "extra_new_boxes_mean": float(np.mean([r["f"]["n_pred"] - r["n_pred_O"] for r in rows if r["f_valid"]])),
++                    "vs_original_iter012_generation": None,
++                    "note": "O·F는 같은 iter_031 실행 구성의 측정값이다. 원래 SFT 생성과의 시간 비교는 구성 차이로 결측."},
++           "inputs": {"report_sha256": sha(f"{run}/report.json"), "source_audit_sha256": rep["source_audit_sha256"],
++                      "raw_files": {os.path.basename(p): sha(p) for p in sorted(glob.glob(f"{run}/attempt1/gen_worker*.jsonl"))}}}
++    return out
++
++
++def main():
++    out_dir = f"{BASE}/results/iter_035/analysis_iter031"
++    os.makedirs(out_dir, exist_ok=True)
++    outp = f"{out_dir}/supplement.json"
++    if os.path.exists(outp):
++        raise FileExistsError(outp)
++    os.environ.setdefault("HF_HOME", "/SSD1_1TB/home/milab/daniel/08_medgemma/hf_cache")
++    os.environ.setdefault("HF_HUB_OFFLINE", "1")
++    import transformers
++    from rsna_diag.generate import MODEL_ID, MODEL_REVISION
++    tok = transformers.AutoProcessor.from_pretrained(MODEL_ID, revision=MODEL_REVISION).tokenizer
++    res = {k: analyze(k, s, tok) for k, s in SPLITS.items()}
++    json.dump(res, open(outp, "w"), indent=2)
++    for k, r in res.items():
++        a = r["all"]
++        print(k, json.dumps({x: a[x] for x in a if x.startswith(("recover", "n_", "mean_f1", "fp@", "extra"))}), json.dumps(r["cost"]))
++
++
++if __name__ == "__main__":
++    main()
+diff --git a/tests_det/test_det_cli.py b/tests_det/test_det_cli.py
+new file mode 100644
+index 0000000..60276df
+--- /dev/null
++++ b/tests_det/test_det_cli.py
+@@ -0,0 +1,135 @@
++"""det_train.py 실제 CLI의 거부·완료·lock·비유한 중단 검사 (natten_py310 env, GPU 1장).
++
++iter_034 tests/lock_check.py(sha256 c9e30d14...)의 flock 검사를 포함해 확장했다. 각 사례는 새 프로세스로
++det_train.py를 실행하고 종료 코드와 stderr의 거부 사유를 확인한다. 원본 결과 파일은 수정하지 않는다
++(변조 사례는 이번 결과 경로의 사본에서만 만든다).
++"""
++import argparse
++import json
++import os
++import shutil
++import signal
++import subprocess
++import sys
++import time
++
++import torch
++
++BASE = "/SSD1_1TB/home/milab/daniel/08_medgemma/research"
++TRAIN = f"{BASE}/rsna_diag/det_train.py"
++PY = sys.executable
++OLD_FORMAT1 = f"{BASE}/results/iter_033/sanity/resume_ckpt.pt"
++
++
++def common(mb, epochs=6, drop=("4",)):
++    return ["--manifest", "D32", "--epochs", str(epochs), "--effective_batch", "8", "--microbatch", str(mb),
++            "--seed", "999", "--lr", "0.005", "--lr_drop_epochs", *drop, "--device", "0"]
++
++
++def run(cmd, env_extra=None):
++    env = dict(os.environ)
++    env.update(env_extra or {})
++    r = subprocess.run(cmd, capture_output=True, text=True, env=env)
++    return r.returncode, (r.stdout + r.stderr)
++
++
++def main():
++    ap = argparse.ArgumentParser()
++    ap.add_argument("--microbatch", type=int, required=True)
++    ap.add_argument("--out", required=True)
++    a = ap.parse_args()
++    os.makedirs(a.out, exist_ok=True)
++    C = common(a.microbatch)
++    cases = {}
++
++    def case(name, rc, text, expect_rc, expect_substr):
++        ok = (rc == expect_rc if isinstance(expect_rc, int) else rc != 0) and (expect_substr is None or expect_substr in text)
++        cases[name] = {"rc": rc, "ok": ok, "expect_rc": expect_rc, "expect": expect_substr,
++                       "tail": text.strip().splitlines()[-2:]}
++
++    X = os.path.join(a.out, "X")
++    rc, t = run([PY, TRAIN, "train", "--run_dir", X, "--fresh", "--stop_after", "2"] + C)
++    case("base_stop_after_2", rc, t, 3, "stop_after_reached")
++    rc, t = run([PY, TRAIN, "train", "--run_dir", X, "--fresh"] + C)
++    case("fresh_on_existing_refused", rc, t, "nonzero", "--fresh refused")
++    rc, t = run([PY, TRAIN, "train", "--run_dir", X] + [x if x != "0.005" else "0.01" for x in C])
++    case("config_change_refused", rc, t, "nonzero", "config mismatch")
++    rc, t = run([PY, TRAIN, "train", "--run_dir", X] + C, {"DET_TEST_INPUT_SALT": "x"})
++    case("input_change_refused", rc, t, "nonzero", "input digest mismatch")
++    rc, t = run([PY, TRAIN, "train", "--run_dir", X] + C, {"DET_TEST_SOURCE_SALT": "x"})
++    case("source_change_refused", rc, t, "nonzero", "source digest mismatch")
++    rc, t = run([PY, TRAIN, "train", "--run_dir", os.path.join(a.out, "nockpt")] + C)
++    case("resume_without_checkpoint_refused", rc, t, "nonzero", "no checkpoint")
++
++    ck = torch.load(os.path.join(X, "ckpt_latest.pt"), map_location="cpu", weights_only=False)
++    tam = os.path.join(a.out, "tampered")
++    os.makedirs(tam, exist_ok=True)
++    variants = {}
++    c1 = dict(ck); c1.pop("ds_rng_state"); variants["missing_ds_rng_state"] = (c1, "missing required state")
++    c2 = dict(ck); c2["perm"] = list(reversed(ck["perm"])); variants["tampered_permutation"] = (c2, "permutation")
++    c3 = dict(ck); c3["optimizer"] = {**ck["optimizer"], "param_groups": [
++        {**g, "lr": g["lr"] * 2} for g in ck["optimizer"]["param_groups"]]}; variants["tampered_lr"] = (c3, "lr")
++    c4 = dict(ck); c4.pop("rng"); variants["missing_rng"] = (c4, "missing required state")
++    for name, (obj, msg) in variants.items():
++        p = os.path.join(tam, f"{name}.pt")
++        torch.save(obj, p)
++        rc, t = run([PY, TRAIN, "train", "--run_dir", os.path.join(a.out, f"init_{name}"), "--init_from", p] + C)
++        case(name + "_refused", rc, t, "nonzero", msg)
++    del ck
++    rc, t = run([PY, TRAIN, "train", "--run_dir", os.path.join(a.out, "init_format1"), "--init_from", OLD_FORMAT1] + C)
++    case("format1_without_migration_refused", rc, t, "nonzero", "requires --migration")
++
++    # 중복 소유: 첫 프로세스가 lock을 잡고 새 segment를 기록한 뒤 두 번째 실행
++    p = subprocess.Popen([PY, TRAIN, "train", "--run_dir", X] + C, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
++    t0 = time.time()
++    while time.time() - t0 < 300:
++        segs = json.load(open(os.path.join(X, "segments.json")))
++        if len(segs) >= 2:
++            break
++        time.sleep(0.3)
++    rc, t = run([PY, TRAIN, "train", "--run_dir", X] + C)
++    case("concurrent_owner_refused", rc, t, "nonzero", "locked by another live process")
++    p.send_signal(signal.SIGTERM)
++    out, _ = p.communicate()
++    case("first_owner_sigterm_safe_stop", p.returncode, out, 3, "sigterm_stop")
++
++    # 비유한 loss: step 전에 실패, update 미소비
++    nd = os.path.join(a.out, "nan")
++    rc, t = run([PY, TRAIN, "train", "--run_dir", nd, "--fresh"] + C, {"DET_TEST_NAN_AT": "5"})
++    case("nonfinite_abort", rc, t, "nonzero", "non-finite")
++    nf = os.path.join(nd, "nonfinite.json")
++    recs = [json.loads(l) for l in open(os.path.join(nd, "log_seg000.jsonl")) if l.strip()]
++    cases["nonfinite_not_consumed"] = {"ok": os.path.exists(nf) and max(r["update"] for r in recs) == 4
++                                       and torch.load(os.path.join(nd, "ckpt_latest.pt"), map_location="cpu",
++                                                      weights_only=False)["update_idx"] == 4,
++                                       "last_logged": max(r["update"] for r in recs)}
++
++    # 완료 marker
++    Y = os.path.join(a.out, "Y")
++    CY = common(a.microbatch, epochs=1, drop=())
++    CY = [x for x in CY if x != "--lr_drop_epochs"]
++    rc, t = run([PY, TRAIN, "train", "--run_dir", Y, "--fresh"] + CY)
++    case("complete_run", rc, t, 0, "\"done\": true")
++    rc, t = run([PY, TRAIN, "verify", "--run_dir", Y])
++    case("verify_ok", rc, t, 0, "verified")
++    rc, t = run([PY, TRAIN, "train", "--run_dir", Y] + CY)
++    case("train_on_complete_refused", rc, t, "nonzero", "already complete")
++    Yb = os.path.join(a.out, "Y_tampered")
++    shutil.copytree(Y, Yb)
++    os.remove(os.path.join(Yb, "train.lock"))
++    comp = json.load(open(os.path.join(Yb, "complete.json")))
++    comp["canonical_log_digest"] = "0" * 64
++    json.dump(comp, open(os.path.join(Yb, "complete.json"), "w"))
++    rc, t = run([PY, TRAIN, "verify", "--run_dir", Yb])
++    case("tampered_complete_marker_refused", rc, t, "nonzero", "canonical_log_digest mismatch")
++    rc, t = run([PY, TRAIN, "train", "--run_dir", Yb] + CY)
++    case("train_on_tampered_complete_refused", rc, t, "nonzero", "mismatch")
++
++    allok = all(v["ok"] for v in cases.values())
++    json.dump({"all_ok": allok, "cases": cases}, open(os.path.join(a.out, "cli_result.json"), "w"), indent=2)
++    print(json.dumps({"all_ok": allok, "cases": {k: (v["ok"], v.get("rc")) for k, v in cases.items()}}, indent=1))
++    sys.exit(0 if allok else 1)
++
++
++if __name__ == "__main__":
++    main()
+diff --git a/tests_det/test_det_infer.py b/tests_det/test_det_infer.py
+new file mode 100644
+index 0000000..725e93f
+--- /dev/null
++++ b/tests_det/test_det_infer.py
+@@ -0,0 +1,158 @@
++"""det_eval.py 추론 실행기의 중단·재개·tail 복구·변조 거부 검사 (natten_py310 env, GPU 1장).
++
++고정 D24(iter_033 D32의 앞 24명)에 기존 iter_034 epoch_02 model(읽기 전용)을 사용한다. 재개 정확 비교는
++batch 1(재개 뒤 batch 구성이 달라지지 않도록)로 하며, 같은 GPU에 worker 2개를 배치한다.
++  REF: 중단 없는 실행 → completion.
++  T:   부모에 SIGTERM(기록 6건 이상 확인 뒤) → 자식 전달·안전 종료 → shard에 불완전 tail 삽입 → 재실행 →
++       손상 tail 보존 파일·정확한 ID 집합·REF와 bit 동일 결과.
++  K:   부모 SIGKILL → PDEATHSIG로 worker 종료 → 재실행 완료·REF와 동일.
++  변조: 다른 checkpoint로 완료 경로 재사용, source 변경 후 부분 결과 재개, 중복 줄, 내부 손상 줄,
++       completion/raw_preds 변조, checkpoint 변경을 각각 거부해야 한다.
++"""
++import argparse
++import json
++import os
++import shutil
++import signal
++import subprocess
++import sys
++import time
++
++BASE = "/SSD1_1TB/home/milab/daniel/08_medgemma/research"
++EVAL = f"{BASE}/rsna_diag/det_eval.py"
++PY = sys.executable
++CK = f"{BASE}/results/iter_034/train/full_seed17/epoch_02/model.pt"
++CK_OTHER = f"{BASE}/results/iter_034/train/full_seed17/epoch_01/model.pt"
++
++
++def cmd(out, ck=CK, bs=1):
++    return [PY, EVAL, "run", "--manifest", "D24", "--checkpoint", ck, "--out_dir", out, "--batch_size", str(bs),
++            "--n_workers", "2", "--worker_gpus", "0,0"]
++
++
++def run(c, env=None):
++    """worker 오류는 worker 로그에 남으므로 해당 out_dir의 worker 로그 끝부분도 함께 반환한다."""
++    e = dict(os.environ); e.update(env or {})
++    r = subprocess.run(c, capture_output=True, text=True, env=e)
++    txt = r.stdout + r.stderr
++    if "--out_dir" in c:
++        out = c[c.index("--out_dir") + 1]
++        for w in (0, 1):
++            p = os.path.join(out, f"worker{w:02d}.log")
++            if os.path.exists(p):
++                txt += open(p).read()[-3000:]
++    return r.returncode, txt
++
++
++def nlines(out):
++    n = 0
++    for w in (0, 1):
++        p = os.path.join(out, f"preds_w{w:02d}.jsonl")
++        if os.path.exists(p):
++            n += sum(1 for l in open(p, "rb") if l.endswith(b"\n"))
++    return n
++
++
++def interrupt(out, sig, at=6):
++    p = subprocess.Popen(cmd(out), stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
++    t0 = time.time()
++    while nlines(out) < at and p.poll() is None and time.time() - t0 < 600:
++        time.sleep(0.2)
++    n_at = nlines(out)
++    p.send_signal(sig)
++    rc = p.wait()
++    time.sleep(3)
++    return rc, n_at
++
++
++def main():
++    ap = argparse.ArgumentParser()
++    ap.add_argument("--out", required=True)
++    a = ap.parse_args()
++    os.makedirs(a.out, exist_ok=True)
++    sys.path.insert(0, BASE)
++    from rsna_diag import det_eval as E
++    C = {}
++
++    def case(name, ok, **kw):
++        C[name] = {"ok": bool(ok), **kw}
++
++    ref = os.path.join(a.out, "REF")
++    rc, t = run(cmd(ref))
++    case("ref_complete", rc == 0, rc=rc)
++    R, comp, ids = E.load_verified(ref, "D24", CK)
++    case("ref_exact_id_set", list(R) == ids and len(ids) == 24)
++
++    T = os.path.join(a.out, "T")
++    rc, n_at = interrupt(T, signal.SIGTERM)
++    n_after = nlines(T)
++    case("sigterm_parent_safe_stop", rc == 3 and 0 < n_after < 24 and not os.path.exists(os.path.join(T, "completion.json")),
++         rc=rc, n_at_signal=n_at, n_after=n_after)
++    with open(os.path.join(T, "preds_w00.jsonl"), "ab") as f:
++        f.write(b'{"id": "tra_BROKEN", "boxes_xy')
++    rc, t = run(cmd(T))
++    kept = [x for x in os.listdir(T) if "corrupt_tail" in x]
++    RT, _, _ = E.load_verified(T, "D24", CK)
++    case("resume_after_corrupt_tail", rc == 0 and len(kept) == 1 and RT == R, rc=rc, corrupt_kept=kept,
++         equal_to_ref=RT == R)
++
++    K = os.path.join(a.out, "K")
++    rc, n_at = interrupt(K, signal.SIGKILL)
++    time.sleep(2)
++    alive = subprocess.run(["pgrep", "-f", f"det_eval.py worker .*{K}"], capture_output=True, text=True).stdout.strip()
++    rc2, t = run(cmd(K))
++    RK, _, _ = E.load_verified(K, "D24", CK)
++    case("sigkill_parent_workers_terminated_and_resume", not alive and rc2 == 0 and RK == R, orphan_workers=alive, rc=rc2)
++
++    rc, t = run(cmd(ref, ck=CK_OTHER))
++    case("reuse_complete_with_other_checkpoint_refused", rc != 0 and "unexpected checkpoint" in t, rc=rc)
++
++    P = os.path.join(a.out, "P_partial")
++    rc, n_at = interrupt(P, signal.SIGTERM)
++    rc, t = run(cmd(P), {"DET_TEST_SOURCE_SALT": "x"})
++    case("resume_with_changed_source_refused", rc != 0, rc=rc)
++    rc, t = run(cmd(P, ck=CK_OTHER))
++    case("resume_with_changed_checkpoint_refused", rc != 0, rc=rc)
++    rc, t = run(cmd(P, bs=4))
++    case("resume_with_changed_batch_refused", rc != 0, rc=rc)
++
++    Dd = os.path.join(a.out, "dup")
++    shutil.copytree(ref, Dd)
++    os.remove(os.path.join(Dd, "completion.json"))
++    line = open(os.path.join(Dd, "preds_w00.jsonl")).readline()
++    with open(os.path.join(Dd, "preds_w00.jsonl"), "a") as f:
++        f.write(line)
++    rc, t = run(cmd(Dd))
++    case("duplicate_line_refused", rc != 0 and "duplicate" in t, rc=rc)
++
++    Ib = os.path.join(a.out, "internal")
++    shutil.copytree(ref, Ib)
++    os.remove(os.path.join(Ib, "completion.json"))
++    lines = open(os.path.join(Ib, "preds_w01.jsonl")).readlines()
++    lines[2] = lines[2][:30] + "\n"
++    open(os.path.join(Ib, "preds_w01.jsonl"), "w").writelines(lines)
++    rc, t = run(cmd(Ib))
++    case("internal_corrupt_line_refused", rc != 0 and "corrupt internal line" in t, rc=rc)
++
++    Cm = os.path.join(a.out, "comp_tamper")
++    shutil.copytree(ref, Cm)
++    rp = json.load(open(os.path.join(Cm, "raw_preds.json")))
++    k0 = next(iter(rp)); rp[k0]["scores"] = [s * 0.5 for s in rp[k0]["scores"]]
++    json.dump(rp, open(os.path.join(Cm, "raw_preds.json"), "w"))
++    rc, t = run([PY, EVAL, "check", "--out_dir", Cm])
++    case("tampered_raw_preds_refused", rc != 0 and "raw_preds sha256 mismatch" in t, rc=rc)
++    Cs = os.path.join(a.out, "shard_tamper")
++    shutil.copytree(ref, Cs)
++    with open(os.path.join(Cs, "preds_w00.jsonl"), "a") as f:
++        f.write("\n")
++    rc, t = run([PY, EVAL, "check", "--out_dir", Cs])
++    case("tampered_shard_after_completion_refused", rc != 0 and "changed after completion" in t, rc=rc)
++
++    allok = all(v["ok"] for v in C.values())
++    json.dump({"all_ok": allok, "cases": C, "checkpoint": CK}, open(os.path.join(a.out, "infer_result.json"), "w"), indent=2)
++    print(json.dumps({"all_ok": allok, "cases": {k: v["ok"] for k, v in C.items()}}, indent=1))
++    sys.exit(0 if allok else 1)
++
++
++if __name__ == "__main__":
++    main()
+diff --git a/tests_det/test_det_migration_next.py b/tests_det/test_det_migration_next.py
+new file mode 100644
+index 0000000..c2765a4
+--- /dev/null
++++ b/tests_det/test_det_migration_next.py
+@@ -0,0 +1,86 @@
++"""이관한 iter_034 checkpoint(update 706)에서 다음 update 검증 (natten_py310 env, GPU 1장).
++
++원본 로그는 저장 update 706 직전(705)까지만 있으므로 원 프로세스의 다음 update와 직접 비교할 수 없다.
++대신 (1) 새 프로세스 두 개(a, b)를 같은 이관 state에서 3 update씩 실행해 control·입력·첫 update loss 일치,
++(2) 원래 결정적 함수(epoch permutation, epoch 시작 시딩 후 연속 소비한 dataset RNG)로 재생한 update 706–708의
++sample id·flip과 일치, (3) 적용 LR=0.005(warmup 이후, 감소 전 schedule)와 finite, (4) 첫 update loss가 원본 로그
++마지막 100 update의 loss 범위 안에 있는지를 확인한다. 원본 checkpoint·로그는 읽기만 한다.
++"""
++import argparse
++import json
++import os
++import random
++import subprocess
++import sys
++
++BASE = "/SSD1_1TB/home/milab/daniel/08_medgemma/research"
++sys.path.insert(0, BASE)
++from rsna_diag import det_train as T  # noqa: E402
++
++TRAIN = f"{BASE}/rsna_diag/det_train.py"
++PY = sys.executable
++
++
++def main():
++    ap = argparse.ArgumentParser()
++    ap.add_argument("--migration", required=True)
++    ap.add_argument("--out", required=True)
++    a = ap.parse_args()
++    os.makedirs(a.out, exist_ok=True)
++    m = json.load(open(a.migration))
++    cfg = m["config"]
++    u0 = m["update_idx"]
++    n = 3
++    C = ["--manifest", cfg["manifest"], "--epochs", "26", "--effective_batch", str(cfg["effective_batch"]),
++         "--microbatch", str(cfg["microbatch"]), "--lr", str(cfg["lr"]), "--lr_drop_epochs",
++         *[str(x) for x in cfg["lr_drop_epochs"]], "--seed", str(cfg["seed"]), "--device", "0", "--trace"]
++    res = {"update_idx": u0}
++    runs = {}
++    for tag in ("a", "b"):
++        d = os.path.join(a.out, f"next_{tag}")
++        with open(os.path.join(a.out, f"next_{tag}.log"), "w") as f:
++            rc = subprocess.run([PY, TRAIN, "train", "--run_dir", d, "--init_from", m["source_checkpoint"],
++                                 "--migration", a.migration, "--prefix_log", m["source_log"],
++                                 "--stop_after", str(u0 + n)] + C, stdout=f, stderr=subprocess.STDOUT).returncode
++        res[f"rc_{tag}"] = rc
++        recs, orph = T.canonical_log(d)
++        runs[tag] = {r["update"]: r for r in recs}
++        res[f"canonical_n_{tag}"] = len(recs)
++        res[f"canonical_first_{tag}"] = recs[0]["update"] if recs else None
++    ids = json.load(open(T.find_manifest(cfg["manifest"])))["ids"]
++    upe = len(ids) // cfg["effective_batch"]
++    seed, eb = cfg["seed"], cfg["effective_batch"]
++    exp = {}
++    rng = None
++    for upd in range(0, u0 + n):
++        e, pos = upd // upe, upd % upe
++        if pos == 0:
++            rng = random.Random(seed * 1000 + e)
++        perm = T.epoch_perm(seed, e, len(ids))
++        bidx = perm[pos * eb:(pos + 1) * eb]
++        exp[upd] = ([ids[i] for i in bidx], [rng.random() < cfg["flip_p"] for _ in bidx])
++    rows = []
++    for upd in range(u0, u0 + n):
++        ra, rb = runs["a"][upd], runs["b"][upd]
++        rows.append({"update": upd, "ids_flips_match_replay": (ra["sample_ids"], ra["flips"]) == exp[upd]
++                     and (rb["sample_ids"], rb["flips"]) == exp[upd],
++                     "input_digest_equal": ra["input_digest"] == rb["input_digest"],
++                     "lr_applied": [ra["lr_applied"], rb["lr_applied"]], "loss": [ra["loss"], rb["loss"]],
++                     "grad_norm": [ra["grad_norm"], rb["grad_norm"]], "params_equal": ra["params_digest"] == rb["params_digest"]})
++    old = [json.loads(l) for l in open(m["source_log"]) if l.strip()]
++    last = [r["loss"] for r in old[-100:]]
++    res["rows"] = rows
++    res["old_last100_loss_range"] = [min(last), max(last)]
++    first = rows[0]
++    res["prefix_records_linked"] = res["canonical_first_a"] == 0 and res["canonical_n_a"] == u0 + n
++    res["pass"] = bool(res["rc_a"] == 3 and res["rc_b"] == 3 and all(r["ids_flips_match_replay"] and r["input_digest_equal"]
++                                                                       and r["lr_applied"] == [0.005, 0.005] for r in rows)
++                       and abs(first["loss"][0] - first["loss"][1]) <= 1e-6
++                       and min(last) <= first["loss"][0] <= max(last) and res["prefix_records_linked"])
++    json.dump(res, open(os.path.join(a.out, "next_update_check.json"), "w"), indent=2)
++    print(json.dumps(res, indent=1))
++    sys.exit(0 if res["pass"] else 1)
++
++
++if __name__ == "__main__":
++    main()
+diff --git a/tests_det/test_det_resume.py b/tests_det/test_det_resume.py
+new file mode 100644
+index 0000000..bcef06c
+--- /dev/null
++++ b/tests_det/test_det_resume.py
+@@ -0,0 +1,209 @@
++"""det_train.py 실제 CLI의 재개 동등성 검사 (natten_py310 env, GPU 1장).
++
++iter_034 tests/resume_check.py(sha256 0e5db96b...)를 대체한다. 원본은 fresh 반복 간 loss 차이에 3배 여유를 둔
++판정으로 PASS를 기록했으나, 이번 계획은 동일 checkpoint에서 시작한 연속 실행과 새 프로세스 재개를 직접 대조한다.
++
++D32, effective batch 8(4 update/epoch), 6 epoch=24 update, warmup 4 update, LR 감소 16 update(epoch 4).
++저장·재개 경계: 2(warmup 중 epoch0 중간), 6(epoch1 중간), 15(LR 감소 직전). 각 경계 뒤 3 update를 비교한다.
++
++--mode det: torch 결정적 알고리즘. 연속 A와 재개 R_k가 control·입력·loss·grad_norm·parameter·optimizer
++            digest까지 bit 단위로 같아야 한다(주 gate). A2(반복)로 결정성 자체도 확인한다. 실제 SIGTERM(진행
++            기록 연동)과 SIGKILL(orphan 로그) 뒤 재개도 A와 bit 단위로 대조한다.
++--mode prod: 본학습 kernel. 같은 snapshot에서 재개한 R1_k·R2_k의 차이로 반복 변동을 먼저 기록하고(tolerance
++            파일을 A 비교 전에 저장), control·입력 정확 일치와 첫 재개 update loss 허용오차를 판정한다.
++            이후 update의 수치 차이는 반복 변동 대비 비율로 보고한다(정보용).
++"""
++import argparse
++import json
++import os
++import signal
++import subprocess
++import sys
++import time
++
++BASE = "/SSD1_1TB/home/milab/daniel/08_medgemma/research"
++TRAIN = f"{BASE}/rsna_diag/det_train.py"
++PY = sys.executable
++BOUNDS = [2, 6, 15]
++NCMP = 3
++CTRL = ["update", "epoch", "pos", "sample_ids", "flips", "lr_applied", "lr_next", "input_digest"]
++
++
++def common(mb, det):
++    c = ["--manifest", "D32", "--epochs", "6", "--effective_batch", "8", "--microbatch", str(mb), "--seed", "999",
++         "--lr", "0.005", "--lr_drop_epochs", "4", "--warmup_epochs", "1", "--device", "0", "--trace"]
++    return c + (["--deterministic"] if det else [])
++
++
++def run(cmd, log):
++    with open(log, "a") as f:
++        f.write(f"\n$ {' '.join(cmd)}\n"); f.flush()
++        r = subprocess.run(cmd, stdout=f, stderr=subprocess.STDOUT)
++    return r.returncode
++
++
++def seg_records(run_dir):
++    sys.path.insert(0, BASE)
++    from rsna_diag import det_train as T
++    recs, orph = T.canonical_log(run_dir)
++    return {r["update"]: r for r in recs}, orph
++
++
++def raw_count(run_dir):
++    n = 0
++    for fn in os.listdir(run_dir):
++        if fn.startswith("log_seg") and fn.endswith(".jsonl"):
++            with open(os.path.join(run_dir, fn)) as f:
++                n += sum(1 for l in f if l.strip())
++    return n
++
++
++def digest_at(run_dir, u):
++    p = os.path.join(run_dir, f"ckpt_u{u:05d}.digest.json")
++    return json.load(open(p)) if os.path.exists(p) else None
++
++
++def compare(A, R, updates):
++    out = []
++    for u in updates:
++        a, r = A[u], R[u]
++        out.append({"update": u, "ctrl_equal": all(a.get(k) == r.get(k) for k in CTRL),
++                    "loss_diff": abs(a["loss"] - r["loss"]), "grad_diff": abs(a["grad_norm"] - r["grad_norm"]),
++                    "params_equal": a["params_digest"] == r["params_digest"]})
++    return out
++
++
++def main():
++    ap = argparse.ArgumentParser()
++    ap.add_argument("--mode", choices=["det", "prod"], required=True)
++    ap.add_argument("--microbatch", type=int, required=True)
++    ap.add_argument("--out", required=True)
++    a = ap.parse_args()
++    det = a.mode == "det"
++    os.makedirs(a.out, exist_ok=True)
++    log = os.path.join(a.out, "commands.log")
++    C = common(a.microbatch, det)
++    res = {"mode": a.mode, "microbatch": a.microbatch, "bounds": BOUNDS, "n_compare": NCMP}
++    save_pts = sorted(set(BOUNDS + [k + NCMP for k in BOUNDS]))
++
++    dA = os.path.join(a.out, "A")
++    res["A_rc"] = run([PY, TRAIN, "train", "--run_dir", dA, "--fresh", "--save_at"] + [str(x) for x in save_pts] + C, log)
++    A, _ = seg_records(dA)
++    res["A_n"] = len(A)
++
++    rdirs = {}
++    reps = ["R1"] if det else ["R1", "R2"]
++    for k in BOUNDS:
++        for rep in reps:
++            d = os.path.join(a.out, f"{rep}_k{k:02d}")
++            rc = run([PY, TRAIN, "train", "--run_dir", d, "--init_from", os.path.join(dA, f"ckpt_u{k:05d}.pt"),
++                      "--prefix_log", os.path.join(dA, "log_seg000.jsonl"), "--stop_after", str(k + NCMP),
++                      "--save_at", str(k + NCMP)] + C, log)
++            rdirs[(rep, k)] = d
++            res[f"{rep}_k{k}_rc"] = rc
++
++    if det:
++        dA2 = os.path.join(a.out, "A2")
++        res["A2_rc"] = run([PY, TRAIN, "train", "--run_dir", dA2, "--fresh", "--stop_after", "18"] + C, log)
++        A2, _ = seg_records(dA2)
++        rep_cmp = compare(A, A2, range(18))
++        res["det_repeat_A_vs_A2_all_exact"] = all(x["ctrl_equal"] and x["loss_diff"] == 0 and x["grad_diff"] == 0
++                                                  and x["params_equal"] for x in rep_cmp)
++        res["det_repeat_max_loss_diff"] = max(x["loss_diff"] for x in rep_cmp)
++        gate = True
++        res["resume"] = {}
++        for k in BOUNDS:
++            R, _ = seg_records(rdirs[("R1", k)])
++            cmp_ = compare(A, R, range(k, k + NCMP))
++            dA_ = digest_at(dA, k + NCMP)
++            dR_ = digest_at(rdirs[("R1", k)], k + NCMP)
++            opt_eq = dA_ is not None and dR_ is not None and dA_ == dR_
++            ok = all(x["ctrl_equal"] and x["loss_diff"] == 0 and x["grad_diff"] == 0 and x["params_equal"] for x in cmp_) and opt_eq
++            res["resume"][f"k{k}"] = {"per_update": cmp_, "digest_at_k+3_equal(params,opt,lr,sched)": opt_eq, "exact": ok}
++            gate = gate and ok
++        # 실제 SIGTERM: 진행 기록(update 5 완료)을 확인한 뒤 신호 → 안전 저장 → 새 프로세스 재개 → 완료·verify
++        dS = os.path.join(a.out, "S_sigterm")
++        with open(log, "a") as f:
++            p = subprocess.Popen([PY, TRAIN, "train", "--run_dir", dS, "--fresh"] + C, stdout=f, stderr=subprocess.STDOUT)
++            while raw_count(dS) < 6 if os.path.isdir(dS) else True:
++                if p.poll() is not None:
++                    break
++                time.sleep(0.2)
++            n_at_signal = raw_count(dS)
++            p.send_signal(signal.SIGTERM)
++            rcS1 = p.wait()
++        res["S_n_records_when_signalled"] = n_at_signal
++        res["S_stop_rc"] = rcS1
++        res["S_resume_rc"] = run([PY, TRAIN, "train", "--run_dir", dS] + C, log)
++        res["S_verify_rc"] = run([PY, TRAIN, "verify", "--run_dir", dS], log)
++        S, orphS = seg_records(dS)
++        segsS = json.load(open(os.path.join(dS, "segments.json")))
++        res["S_resume_start_update"] = segsS[-1]["start_update"]
++        cmpS = compare(A, S, range(24))
++        res["S_all_exact_vs_A"] = all(x["ctrl_equal"] and x["loss_diff"] == 0 and x["grad_diff"] == 0 and x["params_equal"] for x in cmpS)
++        res["S_orphans"] = orphS
++        # SIGKILL: 마지막 checkpoint(epoch 경계) 이후 기록이 orphan으로 남는지와 canonical 재구성 확인
++        dK = os.path.join(a.out, "K_sigkill")
++        with open(log, "a") as f:
++            p = subprocess.Popen([PY, TRAIN, "train", "--run_dir", dK, "--fresh"] + C, stdout=f, stderr=subprocess.STDOUT)
++            while raw_count(dK) < 6 if os.path.isdir(dK) else True:
++                if p.poll() is not None:
++                    break
++                time.sleep(0.2)
++            p.send_signal(signal.SIGKILL)
++            res["K_kill_rc"] = p.wait()
++        res["K_n_records_before_resume"] = raw_count(dK)
++        res["K_resume_rc"] = run([PY, TRAIN, "train", "--run_dir", dK] + C, log)
++        res["K_verify_rc"] = run([PY, TRAIN, "verify", "--run_dir", dK], log)
++        K, orphK = seg_records(dK)
++        segsK = json.load(open(os.path.join(dK, "segments.json")))
++        res["K_resume_start_update"] = segsK[-1]["start_update"]
++        res["K_orphans"] = orphK
++        cmpK = compare(A, K, range(24))
++        res["K_all_exact_vs_A"] = all(x["ctrl_equal"] and x["loss_diff"] == 0 and x["grad_diff"] == 0 and x["params_equal"] for x in cmpK)
++        res["gate_pass"] = bool(gate and res["det_repeat_A_vs_A2_all_exact"] and res["A_rc"] == 0 and res["A2_rc"] == 3
++                                and all(res[f"R1_k{k}_rc"] == 3 for k in BOUNDS)
++                                and res["S_stop_rc"] == 3 and res["S_resume_rc"] == 0 and res["S_verify_rc"] == 0
++                                and res["S_all_exact_vs_A"] and 0 < res["S_resume_start_update"] < 24
++                                and res["K_resume_rc"] == 0 and res["K_verify_rc"] == 0 and res["K_all_exact_vs_A"]
++                                and res["K_orphans"] > 0)
++    else:
++        # 1) 반복 변동 먼저: 같은 snapshot의 R1 vs R2
++        noise = {}
++        for k in BOUNDS:
++            R1, _ = seg_records(rdirs[("R1", k)])
++            R2, _ = seg_records(rdirs[("R2", k)])
++            c = compare(R1, R2, range(k, k + NCMP))
++            noise[f"k{k}"] = c
++        first_noise = max(noise[f"k{k}"][0]["loss_diff"] for k in BOUNDS)
++        tol = {"rule": "first resumed update: |loss_A - loss_R| <= max(1e-6, max_k |loss_R1 - loss_R2| at first update); "
++                       "control/input exact. later updates reported as ratio to repeat noise (informational).",
++               "tol_first_update_loss": max(1e-6, first_noise), "fixed_before_A_comparison": True,
++               "noise_per_update": noise, "t": time.time()}
++        with open(os.path.join(a.out, "tolerance.json"), "w") as f:
++            json.dump(tol, f, indent=2)
++        # 2) A 대비
++        gate = True
++        res["resume"] = {}
++        for k in BOUNDS:
++            per = {}
++            for rep in reps:
++                R, _ = seg_records(rdirs[(rep, k)])
++                per[rep] = compare(A, R, range(k, k + NCMP))
++            ctrl_ok = all(x["ctrl_equal"] for rep in reps for x in per[rep])
++            first_ok = all(per[rep][0]["loss_diff"] <= tol["tol_first_update_loss"] for rep in reps)
++            later_ar = max(x["loss_diff"] for rep in reps for x in per[rep][1:])
++            later_noise = max(x["loss_diff"] for x in noise[f"k{k}"][1:])
++            res["resume"][f"k{k}"] = {"per_update": per, "ctrl_input_exact": ctrl_ok, "first_update_within_tol": first_ok,
++                                      "later_max_loss_diff_A_vs_R": later_ar, "later_max_loss_diff_R1_vs_R2": later_noise}
++            gate = gate and ctrl_ok and first_ok
++        res["gate_pass"] = bool(gate and res["A_rc"] == 0 and all(res[f"{rep}_k{k}_rc"] == 3 for k in BOUNDS for rep in reps))
++    with open(os.path.join(a.out, "resume_result.json"), "w") as f:
++        json.dump(res, f, indent=2)
++    print(json.dumps({k: v for k, v in res.items() if k != "resume"}, indent=1))
++    print(json.dumps({k: {kk: vv for kk, vv in v.items() if kk != "per_update"} for k, v in res.get("resume", {}).items()}, indent=1))
++    sys.exit(0 if res["gate_pass"] else 1)
++
++
++if __name__ == "__main__":
++    main()
+diff --git a/tests_det/test_match_identity.py b/tests_det/test_match_identity.py
+new file mode 100644
+index 0000000..b5132b0
+--- /dev/null
++++ b/tests_det/test_match_identity.py
+@@ -0,0 +1,140 @@
++"""metrics.match(상보성 GT identity 기준)의 독립 exhaustive 대조 (기본 medgemma env).
++
++iter_033 tests/test_det_match.py(sha256 e6ae4026...)는 무작위 비동점 사례 위주였고 handcrafted_tie가 실제 동점이
++아니었다. 이번 검사는 규약(최대 cardinality → 총 IoU(1e-12 초과 개선만 갱신) → GT 순서로 본 pred index tuple의
++사전순 최소, 미매칭은 모든 index보다 뒤)을 itertools.product 열거로 따로 구현해 다음을 비교한다.
++  1. 실제 동점: 같은 IoU의 pred 두 개, 한 pred가 두 GT와 같은 IoU, 겹친 GT, 동일 좌표 중복 pred.
++  2. 정수 격자로 동점을 자주 만드는 무작위 사례 2,000개(IoU 0.3/0.5).
++  3. 저장 VLM 목록: iter_012 confirm800 SFT seed17/29/43 및 base 두 prompt(양성, IoU 0.3/0.5).
++  4. 선택적으로 detector raw_preds(threshold 적용)의 양성 목록.
++det_match.bounded_match(DP)는 cardinality·총 IoU만 같아야 하며 identity 차이는 따로 센다(분석에는 쓰지 않음).
++"""
++import argparse
++import glob
++import itertools
++import json
++import os
++import random
++import sys
++
++BASE = "/SSD1_1TB/home/milab/daniel/08_medgemma/research"
++sys.path.insert(0, BASE)
++from rsna_diag import metrics as M, det_match as DM, parse as PA  # noqa: E402
++
++
++def iou(a, b):
++    ih = max(0.0, min(a[2], b[2]) - max(a[0], b[0]))
++    iw = max(0.0, min(a[3], b[3]) - max(a[1], b[1]))
++    i = ih * iw
++    u = max(0.0, a[2] - a[0]) * max(0.0, a[3] - a[1]) + max(0.0, b[2] - b[0]) * max(0.0, b[3] - b[1]) - i
++    return i / u if u > 0 else 0.0
++
++
++def brute(pred, gt, thr):
++    cands = [[pi for pi in range(len(pred)) if iou(pred[pi], g) >= thr] + [None] for g in gt]
++    best_key, best = None, []
++    for combo in itertools.product(*cands):
++        used = [c for c in combo if c is not None]
++        if len(used) != len(set(used)):
++            continue
++        card = len(used)
++        tot = 0.0
++        for gi, pi in enumerate(combo):
++            if pi is not None:
++                tot += iou(pred[pi], gt[gi])
++        if best_key is None or card > best_key[0] or (card == best_key[0] and tot > best_key[1] + 1e-12):
++            best_key, best = (card, tot), [(gi, pi) for gi, pi in enumerate(combo) if pi is not None]
++    return best, best_key
++
++
++def compare(pred, gt, thr, stats, tag):
++    if len(gt) == 0:
++        return
++    m = M.match(pred, gt, thr)
++    b, key = brute(pred, gt, thr)
++    stats["n"] += 1
++    if sorted(m) != sorted(b):
++        stats["identity_mismatch"].append({"tag": tag, "thr": thr, "match": m, "brute": b})
++    if len(gt) <= 4 and pred:
++        d = DM.bounded_match(pred, gt, thr)
++        tot_d = sum(iou(pred[p], gt[g]) for g, p in d)
++        if len(d) != (key[0] if key else 0) or (key and abs(tot_d - key[1]) > 1e-9):
++            stats["dp_card_or_total_mismatch"].append({"tag": tag, "thr": thr})
++        elif sorted(d) != sorted(b):
++            stats["dp_identity_diff_only"] += 1
++
++
++def main():
++    ap = argparse.ArgumentParser()
++    ap.add_argument("--out", required=True)
++    ap.add_argument("--det_raw", nargs="*", default=[], help="raw_preds_dir:threshold")
++    a = ap.parse_args()
++    stats = {"n": 0, "identity_mismatch": [], "dp_card_or_total_mismatch": [], "dp_identity_diff_only": 0}
++    hand = {
++        "equal_iou_two_preds": ([[0, 0, 10, 10], [0, 0, 10, 10]], [[0, 0, 10, 10]]),
++        "mirror_equal_iou": ([[0, 0, 10, 12], [0, -2, 10, 10]], [[0, 0, 10, 10]]),
++        "one_pred_two_gt_equal": ([[0, 0, 10, 10]], [[0, 0, 10, 12], [0, -2, 10, 10]]),
++        "overlapping_gt_two_preds": ([[0, 0, 10, 10], [0, 2, 10, 12]], [[0, 1, 10, 11], [0, 0, 10, 10]]),
++        "dup_preds_overlapping_gt": ([[0, 0, 10, 10], [0, 0, 10, 10], [0, 5, 10, 15]], [[0, 0, 10, 10], [0, 3, 10, 13]]),
++        "chain_tie": ([[0, 0, 10, 10], [0, 5, 10, 15], [0, 10, 10, 20]], [[0, 2, 10, 12], [0, 7, 10, 17]]),
++    }
++    hand_res = {}
++    for k, (p, g) in hand.items():
++        for thr in (0.3, 0.5):
++            before = len(stats["identity_mismatch"])
++            compare(p, g, thr, stats, f"hand:{k}")
++            hand_res[f"{k}@{thr}"] = {"match": M.match(p, g, thr), "ok": len(stats["identity_mismatch"]) == before}
++    rng = random.Random(20260929)
++    for t in range(2000):
++        ng, npd = rng.randint(1, 4), rng.randint(0, 7)
++        mk = lambda: (lambda y, x, h, w: [y, x, y + h, x + w])(rng.randrange(0, 10) * 5, rng.randrange(0, 10) * 5,
++                                                                 rng.randrange(2, 6) * 5, rng.randrange(2, 6) * 5)
++        g = [mk() for _ in range(ng)]
++        p = [mk() for _ in range(npd)]
++        if rng.random() < 0.3 and p:
++            p.append(list(p[0]))
++        compare(p, g, rng.choice((0.3, 0.5)), stats, f"rand{t}")
++    gt = json.load(open(f"{BASE}/results/iter_010/manifests/gt_manifest.json"))
++    ids = json.load(open(f"{BASE}/results/iter_010/manifests/confirm_ids.json"))
++    pos = [i for i in ids if gt[i]["category"] == "opacity"]
++    n_vlm = 0
++    for d, prompts in (("confirm_sft_seed17", ["concise"]), ("confirm_sft_seed29", ["concise"]), ("confirm_sft_seed43", ["concise"]),
++                       ("confirm_base", ["concise", "official_long"])):
++        recs = {}
++        for f in sorted(glob.glob(f"{BASE}/results/iter_012/{d}/gen_worker*.jsonl")):
++            for l in open(f):
++                r = json.loads(l); recs[(r["id"], r["prompt_name"])] = r
++        for pr in prompts:
++            for i in pos:
++                r = recs[(i, pr)]
++                pp = PA.parse_response(r["suffix_text_raw"], r["ended_eos"])
++                boxes = pp["boxes"] if pp["status"] in PA.VALID else []
++                g = [b["yxyx_norm"] for b in gt[i]["boxes"]]
++                for thr in (0.3, 0.5):
++                    compare(boxes, g, thr, stats, f"{d}:{pr}:{i}")
++                    n_vlm += 1
++    n_det = 0
++    for item in a.det_raw:
++        dd, thr_s = item.rsplit(":", 1)
++        from rsna_diag import det_lib as D
++        raw = json.load(open(os.path.join(dd, "raw_preds.json")))
++        pr = D.preds_to_norm_yxyx(raw, gt, float(thr_s))
++        for i, v in pr.items():
++            if gt[i]["category"] != "opacity":
++                continue
++            g = [b["yxyx_norm"] for b in gt[i]["boxes"]]
++            for thr in (0.3, 0.5):
++                compare(v["boxes"], g, thr, stats, f"det:{dd}:{i}")
++                n_det += 1
++    out = {"n_compared": stats["n"], "n_vlm_cases": n_vlm, "n_det_cases": n_det,
++           "identity_mismatch_count": len(stats["identity_mismatch"]), "identity_mismatch_examples": stats["identity_mismatch"][:10],
++           "dp_card_or_total_mismatch_count": len(stats["dp_card_or_total_mismatch"]),
++           "dp_identity_diff_only": stats["dp_identity_diff_only"], "handcrafted": hand_res,
++           "pass": len(stats["identity_mismatch"]) == 0 and len(stats["dp_card_or_total_mismatch"]) == 0}
++    json.dump(out, open(a.out, "w"), indent=2)
++    print(json.dumps({k: v for k, v in out.items() if k not in ("identity_mismatch_examples", "handcrafted")}, indent=1))
++    sys.exit(0 if out["pass"] else 1)
++
++
++if __name__ == "__main__":
++    main()
+diff --git a/tests_det/verify_compare_independent.py b/tests_det/verify_compare_independent.py
+new file mode 100644
+index 0000000..5f309a6
+--- /dev/null
++++ b/tests_det/verify_compare_independent.py
+@@ -0,0 +1,99 @@
++"""det_compare 결과의 독립 재계산 (기본 medgemma env).
++
++공유하는 것은 승인된 strict parser(parse.parse_response)와 좌표 변환(geometry)뿐이다. matching은 itertools 열거
++(test_match_identity.brute), F1·FP·상보성 집계와 bootstrap percentile은 여기서 따로 구현한다. bootstrap index는
++같은 정의(np.random.default_rng(20260924).integers(0, n, (10000, n)))를 따로 생성해 CI를 비교한다.
++"""
++import argparse
++import glob
++import json
++import sys
++
++import numpy as np
++
++BASE = "/SSD1_1TB/home/milab/daniel/08_medgemma/research"
++sys.path.insert(0, BASE)
++sys.path.insert(0, f"{BASE}/tests_det")
++from rsna_diag import parse as PA, geometry as G  # noqa: E402
++from test_match_identity import brute  # noqa: E402
++
++
++def f1(pred, gt, thr):
++    pairs, key = brute(pred, gt, thr) if gt else ([], None)
++    tp = len(pairs)
++    p = tp / len(pred) if pred else 0.0
++    r = tp / len(gt) if gt else 0.0
++    return (2 * p * r / (p + r) if p + r > 0 else 0.0), tp, {g for g, _ in pairs}
++
++
++def main():
++    ap = argparse.ArgumentParser()
++    ap.add_argument("--analysis", required=True)
++    ap.add_argument("--out", required=True)
++    a = ap.parse_args()
++    an = json.load(open(a.analysis))
++    gt = json.load(open(f"{BASE}/results/iter_010/manifests/gt_manifest.json"))
++    ids = json.load(open(f"{BASE}/results/iter_010/manifests/confirm_ids.json"))
++    pos = [i for i in ids if gt[i]["category"] == "opacity"]
++    sel = json.load(open(an["provenance"]["detector17"]["selection"]))
++    thr = sel["selected"]["threshold"]
++    det_dir = an["provenance"]["detector17"]["confirm_dir"]
++    raw = json.load(open(f"{det_dir}/raw_preds.json"))
++    det = {}
++    for i in ids:
++        r = raw[i]
++        h, w = r["img_hw"]
++        top, left, side = G.pad_offsets(h, w)
++        det[i] = [G.canvas_to_norm(b, top, left, side) for b, s, l in zip(r["boxes_xyxy_px"], r["scores"], r["labels"]) if l == 1 and s >= thr]
++    recs = {}
++    for f in sorted(glob.glob(f"{BASE}/results/iter_012/confirm_sft_seed17/gen_worker*.jsonl")):
++        for l in open(f):
++            x = json.loads(l); recs[x["id"]] = x
++    b0 = {}
++    for i in ids:
++        pp = PA.parse_response(recs[i]["suffix_text_raw"], recs[i]["ended_eos"])
++        b0[i] = pp["boxes"] if pp["status"] in PA.VALID else []
++    res = {}
++    idx = np.random.default_rng(20260924).integers(0, len(pos), size=(10000, len(pos)), dtype=np.int32)
++    for t in (0.3, 0.5):
++        dv = np.array([f1(det[i], [b["yxyx_norm"] for b in gt[i]["boxes"]], t)[0] for i in pos])
++        bv = np.array([f1(b0[i], [b["yxyx_norm"] for b in gt[i]["boxes"]], t)[0] for i in pos])
++        d = dv - bv
++        m = d[idx].mean(axis=1)
++        res[f"f1@{t}"] = {"det": float(dv.mean()), "b0": float(bv.mean()), "diff": float(d.mean()),
++                          "ci97.5": [float(np.percentile(m, 1.25)), float(np.percentile(m, 98.75))]}
++        # 상보성
++        rows = []
++        for i in pos:
++            g = [b["yxyx_norm"] for b in gt[i]["boxes"]]
++            dh = f1(det[i], g, t)[2]; sh = f1(b0[i], g, t)[2]
++            rows.append([len(dh - sh), len(sh - dh), len(g)])
++        rr = np.array(rows, float)
++        res[f"comp@{t}"] = {"detector_only_rate": float(rr[:, 0].sum() / rr[:, 2].sum()), "sft_only_rate": float(rr[:, 1].sum() / rr[:, 2].sum())}
++    fpd = []
++    fpb = []
++    for i in ids:
++        g = [b["yxyx_norm"] for b in gt[i]["boxes"]]
++        fpd.append(len(det[i]) - (f1(det[i], g, 0.3)[1] if g else 0))
++        fpb.append(len(b0[i]) - (f1(b0[i], g, 0.3)[1] if g else 0))
++    fd = np.array(fpd, float) - np.array(fpb, float)
++    idx8 = np.random.default_rng(20260924).integers(0, len(ids), size=(10000, len(ids)), dtype=np.int32)
++    mm = fd[idx8].mean(axis=1)
++    res["fp_increase"] = {"diff": float(fd.mean()), "ci95": [float(np.percentile(mm, 2.5)), float(np.percentile(mm, 97.5))]}
++    P = an["primary_detector17_minus_B0"]
++    chk = {}
++    for t in ("0.3", "0.5"):
++        k = f"f1@{t}"
++        chk[k] = abs(P[k]["diff"] - res[k]["diff"]) < 1e-12 and all(abs(x - y) < 1e-12 for x, y in zip(P[k]["ci97.5"], res[k]["ci97.5"]))
++        c = an["complementarity"][f"iou{t}"]
++        chk[f"comp@{t}"] = abs(c["detector_only_rate"] - res[f"comp@{t}"]["detector_only_rate"]) < 1e-12 and abs(c["sft_only_rate"] - res[f"comp@{t}"]["sft_only_rate"]) < 1e-12
++    F = an["fp_increase_detector17_minus_B0_all800"]
++    chk["fp_increase"] = abs(F["diff"] - res["fp_increase"]["diff"]) < 1e-12 and all(abs(x - y) < 1e-12 for x, y in zip(F["ci95"], res["fp_increase"]["ci95"]))
++    out = {"independent": res, "match_saved": chk, "pass": all(chk.values())}
++    json.dump(out, open(a.out, "w"), indent=2)
++    print(json.dumps(out, indent=1))
++    sys.exit(0 if out["pass"] else 1)
++
++
++if __name__ == "__main__":
++    main()

@@ -971,3 +971,37 @@ Claude 계정의 /usage 또는 Settings > Usage에서 제한을 확인한 뒤 �
 - ⏹ 중단: 정지 요청 (리뷰 후 처리 중)
 - 📁 원본: `agent/runs/iter_034/`
 
+## iter_035 — RSNA 전용 detector와 SFT 비교 (3번째 시도) · 2026-09-29 14:59
+
+- ▶ 실행 시작 (orchestrator 897e01c)
+- 🧭 **계획** (GPT normal): VinDr 승인 대기 동안 RSNA detector의 재개 LR·실행 수명·평가 검증을 복구하고 기존 LoRA와 비교한다. 호환되는 부분 학습은 살리되, 정확도·상보성·비용 차이는 완료 전까지 미판정이다.
+  - 대안: 1) RSNA 전용 detector와 SFT 비교: 재개와 평가 결함을 복구해 이미 승인된 비교를 완료한다. · 2) 현재 grounding 방법 개선: 전용 비교군 대비 필요성이 미확인이라 새 loss·continuation 투자는 보류한다. · 3) 다른 연구 질문 또는 외부 전이: VinDr는 승인 통지 후 재검토하며 언어·근거 과제는 별도 정답과 사용 목적이 필요하다.
+  - 1순위 선택 근거: 사용자가 승인한 비교 질문과 복구 범위가 명확하다. 부분 학습의 호환성을 검증해 재사용하면서 본 비교를 완료하는 것이 추가 정보 이득이 가장 크며 새 권한은 필요하지 않다.
+- ▶ **결정**: 자동 진행 (smart) — 1순위로 진행
+- ⏳ 사용 한도 도달 (Claude 구현/실험) → 대기
+- ↻ 끊겼던 Claude 세션을 이어서 진행
+- ▶ 사용 한도가 풀려 재개 (Claude 구현/실험, 191분 대기)
+- 💾 **개발 이력 체크포인트** `615c61ec51cfe9d84d564bfcaab434a3a5c78cb1`: implementation_finished (검증 승인 아님)
+- 🔧 **Claude** (heavy): 재개 결함을 고쳐 모든 gate를 통과한 뒤 detector(seed17/29)를 학습하고 잠긴 validation 선택으로 개발800에서 LoRA SFT와 비교했습니다. detector는 F1@0.5에서 유리하고(+0.067, 97.5% CI>0), F1@0.3에서는 SFT가 점추정상 높으며(−0.049, CI가 0 포함), 오류는 양방향 12~13%로 상보적이고 단독 latency는 약 70배 빠릅니다. 개발 집단이므로 독립 확인은 아닙니다. [자체 검증 PASS, 파일 1056개 변경]
+  - 브랜치 `approach/rsna-detector-comparison`에서 계속
+  - ⚠ 권한 거부 1건
+- 🔍 **리뷰** (GPT normal): [CONTINUE / success] VinDr 승인 대기 중 RSNA 양성400명에서 detector는 LoRA SFT보다 F1@0.5가 0.067 높고 약 70배 빨랐지만, IoU0.3 오류는 양방향 12~13% 상보적이었다. 외부 일반화·새 기여는 미확인이다.
+  - 접근법 판단: 승인된 비교 진단에서 실제 학습·평가를 완료하고 trade-off와 상보성을 확인했다. 전반적 우위·완전 수렴·신규 기여를 뜻하지 않는다.
+  - 목표 진전: 실행 유효성: detector17 7,800 update와 detector29 11,400 update, 잠긴 validation 선택, 개발800 비교 및 동일 GPU 비용 측정을 완료했다. 성능: detector는 IoU0.5와 latency에서 유리하지만 두 F1·FP를 함께 요구한 전반적 우위 기준은 충족하지 못했다. 가설: 선택점에 따른 정확도 trade-off와 양방향 오류 상보성이 실제 출력에서 확인됐다. 신규 기여: 강한 비교군과 다음 질문의 근거를 확보했으나 새 방법·실용 결합·VLM 고유 효용·외부 일반화는 미검증이다.
+  - 판정 범위: 전반적 우위와 완전 수렴은 현재 RSNA 개발 집단, Faster R-CNN v2 두 seed, 고정 validation 선택과 기존 MedGemma SFT 출력의 비교 범위에서 미확정이다. 실행 실패나 detector 설계 기각은 아니다. 코드 재사용 불승인은 남은 운영·검증 경로에 적용하며 현재 주수치를 무효화하지 않는다.
+  - 재사용 전 수정: det_jobs.py는 추가 인자를 무시하고 기존 out_dir의 result.json을 덮어쓴다. 이번 --help 오사용에서도 발생했다. 인자 검증, 원자적 소유권, 고유 launch 기록과 재실행 보호가 필요하다.
+  - 재사용 전 수정: det_train.py는 --extend 중에도 이전 complete.json을 유지한다. 연장 checkpoint가 갱신된 뒤 중단되면 다음 실행의 verify_complete가 이전 hash와 현재 checkpoint의 불일치로 재개를 막는다. 연장 시작·중단·재개 상태를 분리하고 실제 extension 중단 검사를 추가해야 한다.
+  - 재사용 전 수정: det_eval.py에는 동일 out_dir의 동시 실행을 막는 lock이 없다. load_verified 및 already_complete 경로는 현재 source digest·batch·입력 영상 연결을 대조하지 않는다. 현재 결과는 별도 hash 대조로 확인했지만 다음 실행 전에 경로 자체를 보완해야 한다.
+  - 재사용 전 수정: det_select/det_compare는 선택 LOCK, cap 문제, 필수 학습·검증 완료를 자동으로 강제하지 않는다. 이번 선택과 잠금은 독립 확인했으나 이후 직접 CLI에서도 동일 gate가 필요하다.
+  - 재사용 전 수정: det_latency.py는 공식 tensor·저장 suffix 불일치에도 결과를 쓰고 정상 종료할 수 있다. 검사 실패를 성공으로 취급하지 않도록 하고 기존 산출물 덮어쓰기를 막아야 한다.
+  - 추후 개선: seed29의 epoch38 수렴 판단에 0.01 기준을 사후 적용했다. epoch26→38 utility는 0.747→0.748, F1@0.5는 0.396→0.3913으로 뚜렷한 상승 근거는 약하지만 완전 수렴으로 단정하지 않는다.
+  - 추후 개선: production 재개 검사는 control/input과 첫 update loss를 gate로 삼고 이후 수치 차이는 참고로만 기록한다. 결정적 모드의 parameter/optimizer 일치 근거와 구분해 보고해야 한다.
+  - 추후 개선: seed29 선행 시작은 단계별 자원 사용 원칙에서 벗어났다. 사전 trigger가 실제 충족되고 개발800 전에 포함 여부를 잠갔으므로 현재 비교를 무효화하지 않는다.
+  - 추후 개선: 층별 CI는 탐색적이며 다중 비교 보정과 외부 재현이 없다. 작은 병변·단일 병변에서 SFT가 본질적으로 우수하다고 일반화하지 않는다.
+  - 추후 개선: iter_031 E402의 F−O 시간 차이 4.788초는 추가 F 호출 자체의 비용 12.015초와 다르다. 보고서의 추가 비용 표현을 구분해야 한다.
+  - 추후 개선: SOP 수준 연결, 사전학습 노출, SFT 학습 시간의 정확한 구성 및 외부 일반화는 미확인이다.
+  - 다음: 강한 detector 비교를 바탕으로 연구 방향을 재검토하고, 저장 출력으로 상보성의 원인을 구분하는 진단을 우선 검토한다. 현 방법 개선·원인 진단·언어와 근거가 필요한 다른 질문의 가치와 비용을 비교하고, confidence 선택·0.3~0.5 위치 오차·실제 미검출을 분리했을 때 다음 투자가 어떻게 달라지는지 정한다. 기존 validation 선택·주metric·개발800 지위는 유지하며 이 집단을 다시 독립 확인으로 부르지 않는다. 새 GPU 실행 전에 실제 사용할 경로의 reuse_issues만 고치고 관련 회귀 검사를 수행한다. 완료된 detector/SFT 학습·continuation 진단은 반복하지 않는다. 새 loss나 ensemble을 자동 시작하지 말고, 의미 있는 잔여 실패 조건과 강한 비교군을 구별할 근거가 있을 때 방법 개발로 넘어간다. VinDr 승인 통지 전 다운로드·외부 평가·반복 승인 질문은 하지 않으며 MRI F139와 reserve는 보존한다.
+- 📚 논문 추천: TIDE: A General Toolbox for Identifying Object Detection Errors — PAPERS.md
+- 🏁 **마일스톤**: RSNA에서 detector의 위치 정밀도·속도 이점과 SFT의 상보적 검출을 확인했다 — JOURNEY.md
+- 📁 원본: `agent/runs/iter_035/`
+

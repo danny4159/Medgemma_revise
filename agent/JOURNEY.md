@@ -189,3 +189,19 @@ QA 형식 실패를 의미 능력 손실로 오해하지 않도록 실제 출력
 - 접근법: RSNA 부분 누락 위험 진단 (`approach/rsna-partial-omission-risk`), 시도: iter_030, iter_031
 - 커밋: 5bdcbe2f56b219de1e5319c8a890061ec672a774, 8dad463392de9bb0e9fe7d93d64b9c374492de9b
 - 자세히: DECISIONS.md의 iter_031, `agent/runs/iter_031/review.md`
+
+## 🏁 RSNA에서 detector의 위치 정밀도·속도 이점과 SFT의 상보적 검출을 확인했다
+
+*iter_035 · 2026-09-29 22:04 · 판정: CONTINUE / success*
+
+실제 전용 detector 비교로 기존 LoRA SFT의 강점과 잔여 차이를 구체화했다.
+**고민:** 직접 SFT가 base보다 크게 개선됐지만 전용 detector 대비 가치가 확인되지 않았다.
+**시도:** VinDr 승인 대기 동안 같은 annotation budget의 RSNA 비교를 선택했다. iter_033·034는 실행·재개 결함으로 비교를 끝내지 못했다.
+**개발:** LR·RNG 재개와 평가 연결을 복구하고 detector17 26 epoch, detector29 38 epoch를 완료했다.
+**결과:** 양성400명에서 detector17−SFT17의 F1@0.5는 +0.0669 [0.0122, 0.1220], F1@0.3은 −0.0491 [−0.1000, 0.0018]이었다.
+**관찰:** IoU0.3에서 detector-only/SFT-only GT는 71/589·77/589개였고, 단독 평균 추론은 detector가 약70배 빨랐다.
+**의미:** 전반적 우위를 선언할 수는 없지만 위치 정밀도·confidence·미검출을 구분할 근거가 생겼다. 개발 집단의 관찰이며 외부 일반화와 새 contribution은 다음 판단으로 남는다.
+
+- 접근법: RSNA 전용 detector와 SFT 비교 (`approach/rsna-detector-comparison`), 시도: iter_033, iter_034, iter_035
+- 커밋: a60224c1f7d54e4f59e8c4dc16285d62faf004b5, bc80f2deede564fb56b4222e530eda5621b31069, 615c61ec51cfe9d84d564bfcaab434a3a5c78cb1
+- 자세히: DECISIONS.md의 iter_035, `agent/runs/iter_035/review.md`

@@ -160,3 +160,24 @@ RSNA seed17 grounding SFT의 nonempty 개발 출력 C201/E402에서 마지막 �
 - 미해결: 추가 FP를 억제하면서 회복을 유지하는 선택 기준이 강한 단순 baseline보다 유리한가?
 - 미해결: 다른 seed·환자·원천 데이터에서 재현되는가? 임상적 완전성과의 관계는 미확인이다.
 
+## rsna-detector-sft-localization-tradeoff — observed
+
+기존 RSNA 개발800명 중 양성400명에서, 동일 annotation budget으로 학습하고 validation에서 선택한 Faster R-CNN v2 seed17은 MedGemma 1.5 grounding SFT seed17보다 F1@0.5가 0.06688 높았다(97.5% CI [0.01221, 0.12197]). F1@0.3 차이는 −0.04911로 불확정이었다. IoU0.3에서 detector-only/SFT-only GT는 71/589·77/589개였다. 현재 선택점의 정확도 차이와 오류 상보성에 관한 관찰이며, detector의 전반적 우위나 VLM 고유 능력·외부 일반화를 입증하지 않는다.
+
+- 적용 목표 시작: iter_003
+- 최신 리뷰: agent/runs/iter_035/review.json
+- 근거: research/results/iter_035/confirm800/{det17,det29}/raw_preds.json 및 research/results/iter_012/confirm_sft_seed17/gen_worker*.jsonl: 리뷰에서 별도 좌표 변환·matching·환자 bootstrap으로 두 detector seed의 주수치를 재계산했다.
+- 근거: research/results/iter_035/confirm800/analysis.json: detector17-only 71개/63명, SFT-only 77개/70명; 비율 95% CI는 각각 [0.09315, 0.14865], [0.10204, 0.16035].
+- 근거: detector29−B0의 F1@0.3/0.5 차이는 −0.05683/+0.05775로 같은 방향이었다.
+- 근거: research/results/iter_035/latency/rep*.json: 동일 GPU L64×3의 평균 end-to-end 시간은 detector 0.06178초, B0 4.29965초였다.
+- 사용·평가 검증: 리뷰 SHA 615c61ec51cfe9d84d564bfcaab434a3a5c78cb1의 변경 파일과 현재 파일 bytes가 모두 일치했다.
+- 사용·평가 검증: 선택 LOCK의 파일 hash, 두 seed의 선택 checkpoint·원시 예측·shard hash와 추론 source digest를 대조했다.
+- 사용·평가 검증: V400 저장 후보에서 선택 규칙을 독립 적용해 seed17 epoch18/threshold0.70, seed29 epoch26/threshold0.60을 재현했다.
+- 사용·평가 검증: 학습 canonical 로그 7,800/11,400 update의 연속성·유한 loss·digest와 실제 LR 감소 경계를 확인했다.
+- 사용·평가 검증: latency_tensorcheck_L64.json의 공식 입력 64/64 일치, 저장 suffix 64/64×3 재현 및 전체3,600명 입력 감사 결과를 확인했다.
+- 미해결: SFT-only 병변이 detector의 confidence 선택, 위치 오차, 실제 미검출 중 무엇으로 설명되는가?
+- 미해결: FP budget을 맞춰도 조건별 차이가 유지되는가? detector의 validation FP budget1.0에서는 SFT-only 비율이 3.9%까지 감소했다.
+- 미해결: seed29의 수렴 판정에는 사후 0.01 기준이 사용됐으므로 완전 수렴은 확정할 수 없다.
+- 미해결: VinDr 승인 후 target 차이를 통제한 외부 평가에서도 같은 경향이 유지되는가?
+- 미해결: 이 차이가 실제 언어·근거 과제의 효용이나 새로운 post-training 방법으로 연결되는가?
+

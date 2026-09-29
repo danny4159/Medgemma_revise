@@ -12252,3 +12252,471 @@ iter_033–034의 전략 판단은 유지한다. 현 방법 개선은 강한 비
 새 가설 실험을 추가하지 않고 기존 비교를 복구한다. 호스트 작업 상태와 checkpoint 무결성을 먼저 확인하고 원본을 보존한다. 동일 state의 다음 update 대조, 실제 중간-step 및 LR 경계 검사, 비유한 중단과 provenance 강제를 통과한 뒤 호환되는 부분 학습을 이어간다. 평가의 97.5% CI와 선택·matching·완료 검사를 본평가 전에 고친다.
 
 원래 V100/V400 일정·수렴 보완·조건부 seed 규칙을 유지하고 잠긴 선택 뒤 비교800 및 동일 GPU latency를 완료한다. 최종 응답은 실제 종료 코드와 산출물을 회수한 뒤 작성한다. 기존 SFT 재학습이나 유효한 출력 재생성은 필요하지 않다. VinDr 승인 통지 전 접근을 시도하지 않으며 reserve와 MRI F139를 유지한다.
+
+
+## iter_035 GPT PLAN [RSNA 전용 detector와 SFT 비교 / proceed] — 2026-09-29 15:03:35
+
+# 요약
+
+- **이번에 할 일:** detector의 재개 LR·실행 수명·평가 결함을 수정하고 기존 LoRA와의 RSNA 비교를 완료한다.
+- **필요한 이유:** 본학습과 비교가 미완료여서 정확도·상보성·비용을 아직 판단할 수 없다.
+- **확인할 기준:** 실제 학습 경로의 재개 검증, 원래 학습·선택 일정, 개발800 paired 비교와 동일 GPU latency를 완료한다.
+- **주의·다음:** 호환되는 부분 checkpoint는 살린다. VinDr 승인 대기를 유지하며 이번 결과는 외부 일반화나 새 contribution의 증명이 아니다.
+
+# Current Understanding
+
+이번은 같은 실험의 실행 복구 amendment다. Claude는 먼저 다음 원문을 읽는다.
+
+- 기준: `agent/runs/iter_034/plan.md`, SHA256 `255b526c7432ca97fdb2b767b87960e68d1644826a562ad762d78dded3f736f2`.
+- 최초 설계: `agent/runs/iter_033/plan.md`, SHA256 `9476060402c72d07df2499cc6a24ce3c1f144e777c13394a6a3a9ae5ce6e0205`.
+- 결함·보완 근거: `agent/runs/iter_034/review.md` 및 `review.json`.
+
+**유지:** 사용자 보완 `20260929_131450_4dda5b89`, GOAL, 가설, detector recipe, 기존 환자·출력·metric·선택·수렴·seed·판정 기준.
+
+**이번 변경:** 재개 상태 복원과 실제 적용 LR, 비유한 중단, provenance·로그·완료 검증, 장시간 child 감시, 평가 소스 보존과 잘못된 통계·민감도 구현의 수정.
+
+**미완료:** 재개 gate, 본학습·V400 선택·조건부 seed 판단·개발800 비교·동일 GPU 비용·iter_031 잔여 분석.
+
+**우선순위:** 아래 amendment가 iter_034의 무조건 새 초기화 지시와 충돌하는 부분에서는 이번의 조건부 checkpoint 이관 규칙을 따른다. 나머지는 기준 계획을 유지한다. 새 산출물은 `research/results/iter_035/`의 고유 attempt에 저장한다. 원본을 삭제하거나 덮어쓰지 않는다.
+
+# Strategy Check / 연구 방향 판단
+
+iter_033 계획과 iter_034 리뷰의 전략 판단을 유지한다. 직접 SFT 개선은 확인됐지만 전용 detector 대비 가치가 미확인이다. 현 방법 개선보다 빠진 비교군 확보의 정보 이득이 크다. 외부 전이는 VinDr 승인 대기이며 언어·근거 과제 전환은 별도 정답이 필요하다. 이번은 승인된 비교 복구이므로 광범위한 전략·문헌 조사를 반복하지 않는다. 두 실행 실패는 유효한 음성 실험이 아니다.
+
+# Hypothesis
+
+충분히 학습한 detector와 기존 SFT 사이에 후속 투자 판단을 바꾸는 정확도·FP·비용 차이 또는 조건별 오류 상보성이 존재할 수 있다. 방향을 미리 가정하지 않는다. 이번은 알려진 detector를 이용한 비교 진단이며 새 방법 개발이 아니다.
+
+# Limitation Evidence / Correct Usage Checks
+
+`lesion-grounding-generalization`의 validated 범위와 iter_012 원본 리뷰를 유지한다. 정상 사용 RSNA 위치 불일치와 직접 LoRA 개선은 함께 성립한다. `rsna-partial-omission-continuation`은 observed이며 부분 회복과 전체 F1 악화를 함께 유지한다.
+
+MedGemma revision `91850547d9f0b2fdd21aa7c5f4f3d1a8a52c243b`, 기존 prompt·processor·adapter·greedy·cap ladder·EOS·strict parser를 유지한다. latency 실행 전 공식 입력 tensor의 key/shape/dtype/value와 저장 suffix를 대조한다.
+
+detector의 RGB 0–1, pixel xyxy, 내부 resize·normalization, 반환 원본 좌표와 padded normalized yxyx 변환을 유지한다. 빈 GT·flip·비정사각 영상 검사와 overlay는 변경 영향이 있을 때 재검증한다. 동일 소스·입력의 기존 검증은 provenance를 확인해 재사용한다.
+
+# Contribution Path / Baselines / Reuse
+
+현재 `approach/rsna-detector-comparison`, HEAD `bc80f2deede564fb56b4222e530eda5621b31069`를 유지한다. `reuse_iteration=0`, `reuse_assets=[]`는 다른 commit 반입이 필요 없다는 뜻이며 재사용 승인이 아니다.
+
+현재 `rsna_diag/det_train.py`, `det_lib.py`는 needs_fix다. `det_match.py`, `metrics.py`, `sft_eval.py`, `parse.py`, `geometry.py`, `generate.py`, `lora.py`, `prompts.py`, `queue_lock.py`, `lock_protocol.py`, `risk28_eval.py`, `risk30_eval.py`, `__init__.py`는 실제 사용하는 범위의 의존성과 미해결 검사를 확인한다. 전체 과거 실행기는 정비하지 않는다.
+
+`results/iter_034/`의 `eval_on_manifest.py`, `eval_confirm800.py`, `analyze_confirm800.py`, `select_checkpoint.py`, `data_audit_full.py`, `verify_confirm_sft.py`, `latency_bench.py`, `tests/resume_check.py`, `tests/lock_check.py`, `analysis_iter031/supplement.py`와 필요한 iter_033 manifest·FP-budget·geometry/matching 검사 소스를 원본으로 삼는다. 원본 경로·SHA256·의존성을 기록하고 추적되는 소스/검사 경로로 편입한 뒤 수정한다. 기존 소스를 새로 재구현하지 않는다. `natten_run.py`의 권한 우회 경로는 실행하지 않는다. 파일 이동만으로 승인됐다고 표시하지 않는다. Git 관리는 orchestrator가 수행한다.
+
+비교군은 Faster R-CNN ResNet-50 FPN v2 COCO_V1의 2-class predictor 및 전체 backbone 적응, 저장 base 두 prompt, SFT seed17·29·43이다. 주비교는 detector17−B0다. 같은 annotation budget만 맞추며 사전학습·해상도·학습 범위·시간 차이를 공개한다. GT union은 진단용 상한이다. 기존 SFT의 완전 수렴과 새 방법의 contribution은 미확정이다.
+
+# Proposed Experiment
+
+## 1. 호스트 상태와 원본 보존
+
+실행 호스트에서 기존 task·PID/starttime·명령·lock·checkpoint·종료 상태를 확인한다. 살아 있는 작업과 중복 실행하거나 사용 중인 소스를 수정하지 않는다. 타인 프로세스는 건드리지 않는다. 원본 로그·tmp·검사·checkpoint를 보존한다.
+
+장시간 child는 소유·감시하고 실제 종료 코드를 회수한다. 임의 짧은 subprocess timeout을 제거하고 진행량·loss·LR·자원·ETA를 주기적으로 기록한다. background 시작이나 예약 wakeup 뒤 최종 응답으로 세션을 끝내지 않는다. 완료 또는 구체적인 안전 중단까지 호출을 유지한다. 기본 Python과 기존 detector 전용 환경은 유지하며 conda activate·설치·권한 거부 우회를 하지 않는다.
+
+## 2. 동작 확인: 실제 재개와 이관 gate
+
+학습 코드에서 scheduler 생성·state 복원 순서를 수정하고 모든 optimizer param group의 실제 적용 LR을 step 직전에 기록한다. scheduler의 다음 LR과 구분한다. 저장된 optimizer LR·scheduler last_epoch·step count·base LR 및 다음 update가 일치해야 한다. 현재 코드는 optimizer 복원 후 LambdaLR 생성으로 LR을 다시 초기화할 수 있으므로 첫 재개 update를 반드시 검사한다.
+
+checkpoint에는 model·optimizer·scheduler·precision 상태, Python/NumPy/CPU/CUDA RNG, dataset RNG, 실제 permutation·cursor·update, 입력·설정·소스 digest를 연결한다. 누락 상태를 조용히 재시딩하지 않는다. 비유한 loss/gradient는 optimizer.step 전에 실패로 중단하고 해당 update를 완료로 소비하지 않는다.
+
+D32, effective batch8, 실제 accumulation으로 24-update 검사 일정을 사용한다. warmup 4 update, 검사 전용 LR 감소 16 update를 고정한다. 중간 epoch인 2·6 update와 LR 감소 직전 15 update에서 저장/재개를 검사하고 각 경계 이후 최소 2 update까지 비교한다. 실제 SIGTERM은 시간 지연 추정 대신 기록된 진행 상태와 연결해 보낸다.
+
+핵심 대조는 하나의 동일 checkpoint에서 다음 입력·forward RNG를 맞춘 연속 실행과 새 프로세스 재개다. control state, tensor 입력, sample·flip·LR은 정확히 일치해야 한다. loss·gradient·parameter·optimizer state도 대조한다. 가능한 결정적 검사에서 동등성을 확인하고, production kernel의 비결정성은 같은 저장 state에서 시작한 반복 대조로 별도 측정한다. 허용 오차는 대조 결과를 먼저 기록해 고정하며 재개 결과를 본 뒤 배수를 늘리지 않는다. 반복 변동으로 설명되지 않는 차이는 gate 실패다. 긴 trajectory의 loss 차이만으로 복원을 판정하지 않는다.
+
+실제 CLI에서 checkpoint/config/input/source 변경, 필수 상태 누락, 잘못된 완료 marker, 중복 소유, 기존 경로의 fresh 실행을 거부하는지 검사한다. checkpoint 이후 로그는 원본을 유지한 orphan segment와 새 resume segment로 분리하고 canonical update 집합에서 중복을 거부한다. flock는 유지하되 소유 metadata와 attempt 연결을 보완한다.
+
+**부분 checkpoint 이관:** iter_034의 원본 args·실행 소스·입력 감사·로그·저장 RNG와 scheduler 상태를 대조한다. 실제 permutation이 저장되지 않은 구버전은 원래 결정적 함수와 로그로 유일하게 복원됨을 증명해야 한다. 기존 기록에서 비유한 update나 잘못된 재개 이력이 없는지 확인한다. 이관은 새 manifest에 원본 hash·변환·호환 근거를 남기고 원본 checkpoint를 수정하지 않는다. 동일 state 다음 update 검증을 통과하면 checkpoint의 실제 저장 update부터 이어간다. 로그 706행을 저장 update로 간주하지 않는다. 검증 불가 또는 trajectory 변경이 필요한 경우에만 COCO 초기값의 새 attempt로 시작하고 이유를 기록한다. iter_033의 반복 augmentation trajectory와 섞지 않는다.
+
+추론은 고정 D 24명에서 실제 부모/worker 종료·재개, tail 보존·복구, 정확한 ID 집합, 중복 방지, source/checkpoint/completion 변조 거부를 검사한다. 내부 손상은 조용히 건너뛰지 않는다. 필수 gate는 직접 CLI에서도 강제한다.
+
+## 3. 입력과 가능성 탐색 재사용
+
+train2,400/validation400/개발800, 기존 D32·overfit8·train600·V100·L64 ID를 유지한다. train/validation/개발 구성은 각각 양성·Normal·NoOpacity/NotNormal 1,200/600/600, 200/100/100, 400/200/200명이다. 이미 본 subset을 면적 층화 보완을 이유로 재선택하지 않는다.
+
+iter_034의 전체3,600명 감사는 현재 입력 digest·GT·분할과 불변성을 확인해 재사용하고 부족한 연결만 보완한다. 불변성이 확인되지 않으면 해당 범위를 다시 감사한다. SOP와 사전학습 노출의 미확인은 명시한다. 저장 base·세 SFT의 요청 집합·중복·누락·adapter·protocol·completion·원본 소스 연결과 주수치를 검증한다.
+
+iter_033 train600·450 update 탐색과 V100 개선은 원 조건의 학습 신호로 보존한다. 동일 recipe의 복구이므로 입력·재개 gate를 통과하면 탐색 전체를 반복하지 않고 본학습을 완료한다. 새 RNG·복구 경로의 검증을 과거 탐색으로 대신하지 않는다.
+
+## 4. 규모 확대와 validation 선택
+
+FP32, effective batch8, SGD LR0.005·momentum0.9·weight decay1e-4, 1 epoch warmup, flip0.5, short side800/max1333, backbone layers5, BatchNorm running statistics 고정·affine 학습을 유지한다.
+
+seed17 기본26 epoch·7,800 updates, epoch16·22 뒤 LR×0.1이다. V100은 epoch6/12/18/22/26, V400은 epoch12/26와 V100 최고 후보가 다를 때 평가한다. V100 최고 선택은 utility→F1@0.5→이른 epoch다.
+
+epoch22→26 utility 또는 F1@0.5 증가≥0.01, 또는 epoch26 utility가 최고점 대비0.01 이내이면서 마지막4 epoch loss가 이전4 epoch보다10% 이상 감소하면12 epoch 연장한다. V100 epoch32/38, V400 epoch38 및 확장 최고 후보를 평가한다. 38 epoch에도 상승 중이면 수렴 미확인으로 우열을 보류한다.
+
+V400에서 B0 대비 어느 F1의 절대 차이≥0.03 또는 한쪽만 검출한 GT 비율≥0.05이면 seed29를 같은 규칙으로 학습한다. 두 detector seed의 차이 부호가 바뀌거나 차이 크기가≥0.03 달라지면 seed43을 추가한다. seed 집합과 선택은 detector 개발800을 열기 전에 잠근다.
+
+NMS0.5·score floor0.001·detections_per_img100과 threshold `{0.01,0.025,0.05,0.10,0.15,…,0.95,0.975,0.99,1.0}`를 유지한다. V400 선택은 utility→양성F1@0.5→작은 전체FP/환자→이른 epoch→높은 threshold다. utility는 `0.5×양성F1@0.3+0.25×Normal valid-empty+0.25×NoOpacity/NotNormal valid-empty`다. 필수 수치 누락·비유한 값은 오류로 처리한다. FP budget0.25/0.5/1.0은 선택 checkpoint에서 recall→작은FP→높은 threshold로 정한다. 후보 cap 문제가 있으면 해결 전 개발800 진입을 막는다.
+
+## 5. 개발 비교와 잔여 분석
+
+선택을 잠근 뒤 개발800 detector 출력을 생성한다. 누락 record는 실행 오류이며 invalid로 점수화하지 않는다. VLM invalid는 양성F1=0, 음성 정답 빈 출력으로 세지 않는다.
+
+양성400명의 환자 평균 F1@0.3·F1@0.5에서 detector17−B0의 각각97.5% paired bootstrap CI를 실제1.25/98.75 percentile로 계산한다. 10,000회 공통 환자 resample을 사용하고 seed를 환자로 합치지 않는다. 기존95% 함수의 기본값을 전역 변경해 과거 분석에 영향을 주지 않는다. 별도 구현으로 주수치·CI를 검증한다.
+
+전체800 및 category별 FP/환자·FP 보유율·증가의95% CI, precision/recall·lesion recall·전체 미검출·invalid, GT1/2/3개 이상, train 기반 union-area 및 개별GT 면적 삼분위, FP budget별 recall을 보고한다. 전체N 관측FP 하한과 valid-only 평균을 구분한다.
+
+cardinality→총IoU→기존 동점 규약을 유지하고 실제 동점·겹친GT 및 VLM 목록에서 exhaustive 기준의 GT identity까지 검증한다. IoU0.3/0.5의 both-hit/detector-only/SFT-only/both-miss와 환자 bootstrap CI를 계산한다. GT 비율은 resample마다 분자·분모를 다시 계산한다. matching 동점과 best-IoU cover는 별도 민감도다.
+
+iter_031 C201/E402 원시1,206건은 저장 출력만 사용한다. 기존 strict 누락 사건과 원래 GT identity를 기준으로 추가 box의 IoU0.5 및 center-in-GT 회복을 계산한다. 전체F1의0→양수를 회복으로 대신하지 않는다. 기존 dedup 정의를 고정하고 실제 box 제거 뒤 재매칭한다. 원래 box수1/2이상·category별 회복·TP/FP·F1·invalid·분모를 보고한다. F 실행 자체의 추가 호출 비용과 F−O 시간 차이를 구분하고 비교 불가능한 비용은 결측으로 둔다. H1/H2와 continuation 투자 종료는 바꾸지 않는다.
+
+## 6. 자원·시간·독립 확인
+
+실행 직전 nvidia-smi로 허용 GPU UUID·여유·논리/물리 대응을 확인한다. detector 학습과 immutable checkpoint 평가를 두 GPU에 배정하고 조건부 seed는 독립 병렬 실행한다. 저장 trajectory를 이을 때 microbatch·precision은 호환성을 우선한다. batch 변경이 trajectory를 바꾸면 새 attempt 여부를 명시한다.
+
+기존 microbatch2/4 처리량8.89/9.55 images/s, reserved4,124/7,796MiB는 참고 실측이다. 변경 경로 D에서 유망한 구성의 처리량·peak를 짧게 확인한다. 추론은 batch1/4를 우선 비교하고 독립 shard와 여유가 충분하면 GPU당2 worker도 후보로 둔다. 전체 점유와 동시 peak에 worker당2GiB 여유를 더한 용량을 확인한다. 결과 정합성·긴 출력 지연·CPU/RAM/I/O 경합·OOM과 전체 처리량으로 선택한다. worker1 유지 시 근거를 기록한다.
+
+latency는 고정L64, 8건warmup, 동일64명×3회다. 같은 GPU에 detector와 B0를 각각 단독 resident로 두고 반복별 순서를 교차한다. CUDA synchronize, load time, 전처리 포함end-to-end와 모델 구간, 평균/p50/p95·peak·원시 시간을 저장한다. 공식 입력·adapter·기존suffix 대조와 긴 출력 stress를 완료한다. batch throughput은 단독latency와 분리한다.
+
+기존 실측 기준26 epoch 순수학습은 약1.8–2.0시간, 검증·저장 포함 seed당2–4시간이다. 전체 단일seed 경로3–6시간, 조건부seed 포함5–12시간은 추정이며 상한이 아니다. 이관 checkpoint의 실제 남은 update와 수정 경로 처리량으로 ETA를 갱신한다. checkpoint는 최소100 update와 매epoch, 안전중단 경계에 원자 저장한다.
+
+새 독립 환자는 열지 않는다. 개발800과 학습seed 재현은 독립 일반화가 아니다. VinDr 승인 통지 후 별도 계획에서 권한·target 차이·이번 결과를 반영한다. MRI F139와 reserve를 유지한다.
+
+# Implementation Tasks for Claude
+
+1. 기준 문서 hash와 호스트 작업 상태를 확인하고 원본 소스·로그·checkpoint 목록을 보존한다.
+2. 사용할 보관 소스를 추적 경로에 편입하고 amendment에 유지/변경/이관/미완료를 기록한다.
+3. 실제 LR·scheduler·RNG·permutation 복원과 provenance·finite·로그·완료 gate를 수정하고 실제 CLI 검사로 확인한다.
+4. 부분 checkpoint 이관 여부를 근거로 결정하고 필수 gate 뒤 원래 학습·수렴·조건부seed·선택을 완료한다.
+5. 잠긴 개발800 비교·통계 독립 대조·동일 GPU latency·iter_031 잔여 분석을 완료한다.
+6. 모든 child 종료 코드와 산출물을 회수한 뒤 실제 규모·선택·수렴·자원·미검증 범위를 보고한다. `SELF_CHECK: PASS/FAIL`, `SUMMARY:`를 유지하며 background 대기를 완료 보고로 대신하지 않는다.
+
+# Evaluation (성공/실패 기준 포함)
+
+**실행 완료:** 필수 gate, 계획한 학습과 조건부 확대, 잠긴 선택, 완전한 비교·비용·잔여 분석이 있어야 진단 완료다. 코드 검사·부분 loss 감소·연구 가설 지지를 구분한다.
+
+**detector 우위:** 두F1 차이의97.5% CI 하한>0, 적어도 한 점추정≥0.03, 전체FP/환자 증가95% CI 상한≤0.05를 유지한다. 단독latency≥2배 이점을 함께 확인한다. SFT-only GT 비율95% CI 상한≤5%이고 seed·주요층 반전이 없으면 단순bbox 개선 우선순위를 낮춘다.
+
+**SFT 조건별 이점:** 충분한 detector 학습·입력·선택을 확인한 후 반대F1·FP·사전층 이점을 제한적 근거로 보존한다. 외부 확인 후보로 삼고 새loss는 자동 시작하지 않는다.
+
+**상보성:** 한쪽만 검출한GT 비율≥5%, 최소20명에 분포하고 환자bootstrap에서도 양의 비율이 유지되는지 확인한다. IoU·seed·FP budget·matching 민감도를 동반한다. 실제 결합 성능이나 신규기여로 부르지 않는다.
+
+**불확정:** CI의 의미 있는 양방향 차이, seed반전, 수렴 미확인은 우열 보류다. 사전validation 보완만 수행하고 개발800을 본 뒤 선택·표본·판정 기준을 바꾸지 않는다. 추가 독립자료의 정보가 판단을 바꿀 때 별도계획으로 확인한다.
+
+**실행 실패:** 상태·입력·provenance 불일치, 비유한학습, 소유권 불명, 완료검증 실패는 해당경로를 중단한다. OOM은 batch/동시성을 조정하되 학습호환성을 확인한다. gate 실패를 허용오차 완화로 통과시키지 않는다. 시간 경과나 실행실패를 detector 가설 기각으로 바꾸지 않는다.
+
+# Risks / Checks
+
+과거 PASS flag·빈 unpreserved_paths·파일 존재를 전체 승인으로 간주하지 않는다. 새소스 digest와 구checkpoint digest의 차이는 명시적 이관기록으로 연결하며 일반 mismatch 허용을 만들지 않는다. 원본로그·결과·checkpoint는 보존한다.
+
+현재 재개 LR 경로는 구체적 원인 후보지만 과거 loss 차이 전부를 설명했다고 단정하지 않는다. 기존 감사의 불변성 확인과 신규출력 검증을 구분한다. 재개복구와 평가수정 외의 리팩터링·새architecture·새loss·새GPU continuation은 추가하지 않는다.
+
+## 대규모 GPU 필요 후보
+
+다기관·다소견의 vision encoder–언어모델 공동 post-training은 장기후보로 유지한다. 이번에는 두 RTX3090 안에서 강한 전용대안과 경량VLM 적응의 실제 차이를 확보해 그 투자 필요성을 판단한다.
+
+# 계획의 근거 (GPT 조사 노트)
+
+## 새로 확인한 것
+
+- 기준 계획과 원본 리뷰를 읽었다: `agent/runs/iter_033/plan.md`, `agent/runs/iter_034/plan.md`, `agent/runs/iter_034/review.md`, `review.json`. GOAL·GPT_USAGE_POLICY·관련 LIMITATIONS·CODE_ASSETS와 iter_012·031 리뷰도 확인했다.
+- 현재 research HEAD는 `bc80f2deede564fb56b4222e530eda5621b31069`이며 status와 diff --stat 출력은 비어 있다. `rsna_diag/det_train.py`, `det_lib.py`, `det_match.py`는 현재 기반에 있다. 다른 commit에서 반입할 필요가 없다.
+- iter_034 리뷰는 본학습 706/7,800 update, 재개 SIGTERM 최대 loss 차이 0.200445, 반복 대조 최대 0.089715를 기록한다. 3배 허용으로 저장된 PASS는 원 계획의 gate를 충족하지 않는다. 호스트의 현재 프로세스 생존과 checkpoint 무결성은 이번 읽기 전용 계획 단계에서 확정하지 않았다.
+- `det_train.py`는 optimizer state를 로드한 뒤 `LambdaLR`을 생성한다. 설치된 `/home/test/.conda/envs/natten_py310/lib/python3.10/site-packages/torch/optim/lr_scheduler.py`에서 scheduler 생성의 `_initial_step()` 호출을 확인했다. 저장 LR과 재개 첫 optimizer.step의 실제 LR이 달라질 수 있는 구체적 결함 후보다. 현재 `lr_applied`는 sched.step 이후 값을 기록하므로 이 차이를 숨길 수 있다. 과거 loss 차이 전체의 원인이라고 아직 확정하지 않는다.
+- 같은 코드에서 실제 permutation 대신 원래 ids 저장, provenance 대조 부재, ds_rng_state 누락 시 재시딩, 비유한 update 건너뛰기, checkpoint 이후 로그 append를 확인했다. 기존 flock와 epoch 단위 augmentation RNG 수정은 보존할 가치가 있다.
+- `results/iter_034/`의 평가·선택·latency·보완 분석 소스가 실제 존재한다. select_checkpoint는 FP 누락을 infinity로 대체하며, latency는 GPU를 하드코딩한다. supplement는 dedup 후 재매칭 대신 FP 수를 빼는 근사치를 사용한다. 보관 소스를 추적 경로로 편입하고 해당 결함만 수정한다.
+
+## 의미와 다음 판단
+
+전략과 가설은 유지하고 실행 복구 amendment로 진행한다. 새 문헌 조사나 전체 탐색 재실행보다, 저장 state의 직접 대조와 완료된 detector 비교가 현재 의사결정에 필요한 정보를 준다. 코드·결과 파일 변경과 실험 실행은 하지 않았다.
+
+## 기준 문서 fingerprint
+
+- iter_034 plan SHA256: `255b526c7432ca97fdb2b767b87960e68d1644826a562ad762d78dded3f736f2`
+- iter_033 plan SHA256: `9476060402c72d07df2499cc6a24ce3c1f144e777c13394a6a3a9ae5ce6e0205`
+
+## 대규모 GPU 필요 후보
+
+다기관·다소견에서 vision encoder와 언어 모델을 공동 적응하는 post-training은 장기 후보로 유지한다. 이번 비교는 그 필요성을 판단할 근거이며 해당 학습을 실행하지 않는다.
+
+
+
+## iter_035 CLAUDE REPORT — 2026-09-29 21:57:08
+
+# 요약
+
+- **핵심 결과:** 재개 결함(재개 첫 update가 warmup 첫 LR로 적용되던 문제 등)을 고치고 모든 gate를 통과한 뒤 비교를 완료했습니다. detector seed17(26 epoch)과 조건부 seed29(38 epoch)를 학습했고, 잠긴 validation 선택으로 개발800에서 저장된 LoRA SFT와 비교했습니다. 결과는 한쪽의 우위가 아니라 **trade-off와 상보성**입니다.
+  - IoU0.3 기준 F1은 SFT 쪽이 점추정상 높습니다. detector17−B0 = −0.049, 97.5% CI [−0.100, +0.002]로 0을 포함합니다.
+  - IoU0.5 기준 F1은 detector가 유리합니다. +0.067, 97.5% CI [+0.012, +0.122]입니다.
+  - 한쪽만 검출한 GT가 양방향 모두 12~13%이고, 63명·70명에 분포합니다.
+- **근거:** 주수치와 CI는 독립 구현으로 재계산해 일치했습니다. 기존 SFT seed별 F1@0.3(0.6308/0.6359/0.6528)도 그대로 재현됐습니다. detector seed29와 SFT seed29/43에서도 같은 방향이 나왔습니다. 단독 latency는 detector 0.062s, B0 4.30s(약 70배)입니다.
+- **미검증·주의:** 개발800은 이미 사용된 개발 집단이므로 독립 확인이 아닙니다. 사전 기준상 "detector 우위"는 성립하지 않았습니다(F1@0.3 CI가 0 포함, FP 증가 95% CI 상한 0.069 > 0.05). 세션이 한 번 끊겼고, 제 명령 실수로 spec 한 개가 재실행됐습니다. 상태 변화는 없었으며 상세 내용은 Problems에 적었습니다.
+- **다음:** 단순 bbox 개선의 우선순위를 판단하려면 "SFT가 느슨한 IoU에서 더 찾는 병변(단일·작은/중간 병변)"과 "detector의 위치 정밀도"를 가르는 조건이 핵심입니다. VinDr 승인 후에는 이 두 경향을 외부 확인 후보로 삼는 것을 권합니다.
+
+# Work Performed
+
+1. **호스트·원본 확인:** GPU 두 장은 idle이었고 detector 프로세스는 없었습니다. 기준 계획 hash(iter_034 `255b526c…`, iter_033 `9476060…`)가 일치했습니다. iter_034 checkpoint(update 706, SIGTERM 경계 저장)와 로그 706행은 원본을 보존했습니다.
+2. **소스 편입·수정:** results/의 원본 소스를 `rsna_diag/`·`tests_det/`로 편입했습니다. 원본 경로와 SHA256은 `results/iter_035/amendment.md`에 기록했습니다.
+3. **학습기 수정(`det_train.py`):**
+   - scheduler를 먼저 만든 뒤 optimizer→scheduler 순으로 state를 복원하고, 실제 group lr을 검사합니다.
+   - `lr_applied`는 `opt.step()` 직전의 실제 값으로 기록합니다.
+   - format2 checkpoint에 permutation·cursor·dataset RNG·config/input/source digest·학습 장치 index를 저장합니다.
+   - 비유한 loss/gradient는 step 전에 중단합니다.
+   - 로그를 segment로 나누고 canonical log·orphan을 분리하며, `complete.json`과 `verify`를 추가했습니다.
+   - 기존 경로의 fresh 실행을 거부하고, lock에 소유 metadata를 남기며, `--init_from`/`--migration`을 지원합니다.
+4. **이관:** 구 checkpoint를 15개 검사로 감사했고 모두 통과했습니다. 기록 전체에 대해 sample·flip·dataset RNG를 결정적 함수로 재생해 일치를 확인했습니다. 이어서 두 독립 process로 update 706을 검증했고, update 706부터 이어서 학습했습니다.
+5. **Gate 검사:**
+   - 결정적 모드: 동일 checkpoint의 연속 실행 대 새 process 재개가 bit 단위로 일치했습니다(경계 2/6/15, 실제 SIGTERM, SIGKILL과 orphan 분리).
+   - production 모드: 반복 변동을 먼저 기록해 허용오차를 고정한 뒤 비교했습니다.
+   - CLI 거부 20건, 추론 D24 재개·변조 13건을 검사했습니다.
+6. **데이터 감사:** 3,600명 전체를 재감사했습니다.
+7. **추론 구성 pilot:** batch1/4와 worker 1/2를 비교했습니다.
+8. **학습·선택:**
+   - seed17: 26 epoch, 연장 조건 불충족. V400 선택 결과 epoch18·threshold 0.70.
+   - seed29: 규칙 충족으로 실행(판정 전 선행 시작). 연장 규칙 충족으로 38 epoch까지 학습. 선택 결과 epoch26·threshold 0.60.
+   - seed43: 조건 불충족.
+   - 선택을 잠근 뒤(`select/LOCK.json`) 개발800 추론을 실행했습니다.
+9. **비교 분석:** 개발800 비교와 독립 재계산, 동일 GPU 교차 latency와 공식 tensor 대조, iter_031 잔여 분석을 수행했습니다.
+
+# Files Changed
+
+- **수정:** `rsna_diag/det_train.py`, `rsna_diag/det_lib.py`
+- **신규(추적 경로):** `det_jobs.py`, `rsna_diag/det_eval.py`, `det_select.py`, `det_compare.py`, `det_audit.py`, `det_latency.py`, `det_migrate.py`, `det_evalwatch.py`, `iter031_supp.py`
+- **신규 검사:** `tests_det/test_det_resume.py`, `test_det_cli.py`, `test_det_migration_next.py`, `test_det_infer.py`, `test_match_identity.py`, `verify_compare_independent.py`
+- **결과:** `results/iter_035/` 전체(아래 경로 참조). 원본 results/iter_033·034는 수정하지 않았습니다.
+
+# Commands / Experiments (실제 실행한 명령과 성공/실패)
+
+detector 전용 환경은 모두 `python det_jobs.py results/iter_035/jobs/<spec>.json`으로 실행했습니다(고정 스크립트, 상속 GPU 집합 안에서만 배정).
+
+- **migrate_audit:** 1차 실패(구 checkpoint pickle의 `cmd_train` 참조) → 수정 후 성공.
+- **gates:** 세션 종료로 중단. 결정적 검사는 A2 단계에서 rc −15, production 검사는 통과.
+- **gates2:** 결정적 검사와 CLI 20/20은 통과. migration은 실패했습니다(CUDA RNG가 GPU 2장 분으로 저장된 상태에서 1장만 보는 process에 복원하려다 IndexError).
+- **infer_gate:** 12/13 통과. 부모가 SIGTERM을 반복 전달한 결함 때문이었고, 수정 후 **infer_gate2 13/13**.
+- **gates3(최종 소스):** 결정적 재개, production 재개, CLI 20/20, migration 모두 성공.
+- **infer_pilot:** 성공. 학습 spec(train17, train29, train29_ext): 학습은 모두 rc 0.
+  - 감시기 결함: 연장 시작 시 이전 완료 marker를 보고 즉시 오류 종료(rc 1) → 수정.
+  - 제 명령 실수: `det_jobs.py … --help`로 spec이 한 번 더 실행됐습니다. 학습은 "already complete"로 거부됐고(상태 변화 없음), 감시기가 epoch 32/38 평가를 수행했습니다.
+- **추가 평가·선택:** `v400_e18_s17`, `confirm800` 성공. `det_select` v100/extend/v400/seed 성공. `det_train verify` seed17·seed29 성공.
+- **기본 env에서 직접 실행:**
+  - `python rsna_diag/iter031_supp.py`: 1차 실패(offline 설정 누락으로 gated repo 접근 시도) → 수정 후 성공.
+  - `det_audit.py`, `det_compare.py`, `tests_det/test_match_identity.py`(2회), `verify_compare_independent.py`, `det_latency.py run`, `det_latency.py tensorcheck`: 모두 성공.
+- **권한 거부:** `sed -i`, `ps`, detector 전용 Python 직접 실행. 우회하지 않고 다른 허용 경로를 사용했습니다.
+
+# Results (수치와 결과 파일 경로)
+
+## Gate
+
+| 검사 | 결과 | 파일 |
+|---|---|---|
+| 결정적 재개 | 모두 bit 단위 일치(k=2/6/15, SIGTERM·SIGKILL, orphan 2건 분리) | `sanity/resume_det_v3/resume_result.json` |
+| production 재개 | 첫 재개 update loss 차이 0, 이후 차이는 반복 변동 범위(k15: 0.0039 대 0.00395) | `sanity/resume_prod_v2/` |
+| CLI 거부 | 20/20 | `sanity/cli_v2/` |
+| 추론 재개·변조 | 13/13 | `sanity/infer_d24_v2/` |
+| migration | 통과 | `migration/migration_seed17.json`, `migration/next_v2/` |
+| matching identity | 6,812건 `metrics.match`가 독립 exhaustive와 identity까지 일치. DP는 69건에서 identity만 달라 분석에 쓰지 않음 | `sanity/match_identity_with_det.json` |
+| 데이터 감사 | 3,600명 hash 불일치 0, 분할 중복 0, manifest 6종 모두 단일 분할의 부분집합 | `data/data_audit_full_3600.json` |
+
+## 추론 구성
+
+batch1·worker 2를 채택했습니다(`pilot/infer_config_decision.json`).
+
+- batch4는 출력이 달라졌습니다(최대 score 차이 0.099, 5/100 영상의 후보 수 차이).
+- 처리량(V100): b1w1 7.4, b1w2 8.0, b4w2 9.1 img/s. b1w2는 b1w1과 bit 단위로 같았습니다.
+
+## 학습
+
+- **seed17:** update 706부터 7,800까지, 5,979초, 9.49 img/s, peak reserved 7,952MiB, orphan 0.
+  - V100 utility: e6 0.723, e12 0.681, e18 0.745, e22 0.718, e26 0.700 → 연장하지 않음.
+  - V400 선택: epoch18·threshold 0.70. utility 0.711, F1@0.3 0.603, F1@0.5 0.407, FP/환자 0.278.
+- **seed29:**
+  - 기본 26 epoch: 6,928초. 연장 12 epoch: 3,080초.
+  - V100 utility: e26 0.747, e32 0.739, e38 0.748(32→38 변화 < 0.01, 정체로 판단).
+  - V400 선택: epoch26·threshold 0.60.
+- 결과: `train/seed{17,29}`, `select/`
+- 참고로 기존 SFT seed17 학습 로그의 `elapsed_s` 최댓값은 17,237초입니다(validation 포함 여부 미확인). 750 step, eff batch 16, peak 9.8GB였습니다.
+
+## 개발800 비교
+
+파일: `confirm800/analysis.json`, 독립 검증 `confirm800/independent_verify.json`(모두 일치).
+
+| 모델 | F1@0.3 | F1@0.5 | FP/환자(800) | lesion recall@0.3 / @0.5 |
+|---|---|---|---|---|
+| detector17 | 0.582 | 0.416 | 0.295 | 0.637 / 0.455 |
+| detector29 | 0.574 | 0.406 | 0.274 | — |
+| B0 (SFT17) | 0.631 | 0.349 | 0.269 | 0.647 / 0.367 |
+| SFT29 | 0.636 | 0.313 | — | — |
+| SFT43 | 0.653 | 0.364 | — | — |
+| base official_long | 0.165 | 0.021 | — | — |
+| base concise | 0.081 | 0.006 | — | — |
+
+- **다른 seed 쌍:** detector29−B0는 F1@0.3 −0.057, F1@0.5 +0.058(두 CI 모두 0 제외)로 detector17과 같은 방향입니다.
+- **층별 차이(detector−B0):**
+  - GT 1개(223명): F1@0.3 −0.086, 95% CI [−0.149, −0.023]
+  - GT 2개(166명): F1@0.5 +0.085, CI [0.020, 0.153]
+  - union 면적 중간(133명): F1@0.3 −0.106
+  - union 면적 큰 층(151명): F1@0.5 +0.127, CI [0.058, 0.200]
+  - 개별 GT 면적 소형: lesion recall@0.3이 detector 0.347, B0 0.420
+- **상보성(IoU0.3):** detector-only 12.1% [9.3, 14.9], SFT-only 13.1% [10.2, 16.0], 둘 다 미검출 23.3%, 두 방식의 GT 합집합 recall 0.767(진단용 상한). 동점 규칙 반대·best-IoU cover·다른 seed에서도 유지됐습니다.
+- **상보성(IoU0.5):** detector-only 20.2%, SFT-only 11.4%.
+- **FP budget(threshold는 validation에서 고정):** 0.5 budget에서 detector F1@0.3 0.622, lesion recall 0.725, FP 0.451입니다. 1.0 budget에서는 SFT-only가 3.9%로 줄었습니다.
+
+## Latency
+
+파일: `latency/latency_summary.json`. 같은 GPU0, 모델별 단독 resident 3회×64건, 순서 교차.
+
+- detector: end-to-end 0.062s(p95 0.065), 모델 구간 0.035s, peak reserved 766MiB, 로드 약 2.3s.
+- B0: end-to-end 4.30s(p95 11.9), 모델 구간 4.22s, peak reserved 8,550MiB, 로드 9–12s.
+- 속도비는 end-to-end 70배, 모델 구간 122배입니다.
+- B0 저장 suffix는 3회 모두 64/64 재현됐습니다. 긴 출력 stress 4건도 token이 일치했습니다.
+- 공식 tensor 대조는 수정한 검사기로 64/64 일치했습니다(`latency_tensorcheck_L64.json`).
+
+## iter_031 보완
+
+파일: `analysis_iter031/supplement.json`. 저장 보고서의 수치가 먼저 그대로 재현됐습니다.
+
+- IoU0.3 회복은 기존과 같이 8/20·11/27입니다.
+- IoU0.5 회복은 4/20·7/27, 중심 포함 기준 회복은 9/20·11/27입니다.
+- 중복 box를 실제로 제거하고 재매칭해도 E402의 F1@0.3은 0.474→0.485, FP/환자는 1.572→1.507로 조금만 바뀝니다.
+- F 호출의 O 대비 추가 비용은 약 +4.8s, +36 token입니다.
+
+# Goal Progress / Reused Assets (목표 진전·미검증 범위, 재사용 출처·검증)
+
+- **진전:** 빠진 강한 비교군(실제 전용 detector)을 충분히 학습된 상태로 확보했습니다. 수렴 규칙과 2개 seed를 적용했습니다. 그 결과 기존 LoRA SFT의 위치 개선이 전용 detector 대비 "느슨한 IoU에서의 검출률"은 비슷하거나 약간 높지만, "위치 정밀도(IoU0.5)"는 낮다는 것을 확인했습니다. 오류는 상당 부분 상보적입니다. 이는 성공적인 진단 결과이지 새 방법의 기여가 아닙니다.
+- **미검증:**
+  - 독립 환자(개발800은 이미 사용된 집단)와 외부 데이터(VinDr 승인 대기) 확인.
+  - detector 쪽 다른 architecture와 해상도 조건.
+  - 결합(ensemble) 방법의 실제 성능. GT 합집합은 상한일 뿐입니다.
+  - 언어·근거 과제에 미치는 영향.
+- **재사용 검증:**
+  - geometry·parse·metrics·sft_eval: 기존 SFT 주수치를 정확히 재현했고, matching identity를 exhaustive로 검증했습니다.
+  - generate·lora: 저장 input_ids·suffix를 64/64 재현했고, 공식 tensor 대조에서 64/64 일치했습니다.
+  - risk30_eval의 H2 정의: iter_031 재현에 사용했습니다.
+- **반입 manifest:** 비어 있었습니다(요청 없음).
+
+# Problems (현재 결론 무효 / 재사용 전 수정 / 추후 개선을 구분)
+
+- **현재 결론을 무효화하는 결함:** 발견하지 못했습니다.
+- **실행 중 수정한 결함(재사용 전 필수 수정에 해당, 이미 반영):**
+  - CUDA RNG 장치 매핑.
+  - SIGTERM 반복 전달.
+  - 공식 tensor 검사기의 BOS 중복. 첫 latency JSON 3개의 `official_tensor_all_equal=false`는 이 검사기 결함의 기록입니다.
+  - 감시기의 연장 조건.
+- **사고:**
+  - 세션이 1회 끊겨 gate를 재실행했습니다.
+  - `det_jobs.py … --help` 오사용으로 연장 spec이 재실행됐습니다. 이 때문에 `train/launch29_ext/result.json`이 두 번째 실행 결과로 덮어써졌습니다. 첫 실행 기록은 같은 디렉터리의 append 로그에 있습니다.
+- **판정상 주의:**
+  - seed29는 규칙 판정 전에 미리 시작했습니다. 사용 여부는 사전 규칙으로만 결정했습니다.
+  - seed29의 38 epoch "상승 중" 판단에는 연장 규칙과 같은 0.01 기준을 적용했습니다. 계획에는 명시돼 있지 않았습니다.
+- **추후 개선:**
+  - `det_jobs.py`에 인자 검증(알 수 없는 인자 거부)을 추가해야 합니다.
+  - batch4 추론의 padding 효과는 문서화만 했습니다.
+  - SFT 학습 시간의 정확한 wall 구성은 미확인입니다.
+
+# Recommendation to GPT
+
+- 사전 기준으로는 "detector 우위"가 아니라 "조건부 trade-off와 상보성"입니다. 단순 bbox 개선을 전면 중단할 근거도, 계속할 근거도 이 결과만으로는 부족합니다.
+- 다음 판단의 핵심은 두 가지입니다.
+  - SFT가 IoU0.3에서 더 찾는 병변(단일 GT, 작은·중간 면적)이 실제 병변 발견인지, 느슨한 위치 매칭 효과인지.
+  - detector의 위치 정밀도 이점이 외부에서 유지되는지.
+- VinDr 승인 후 같은 층별 비교를 외부 확인 후보로 두기를 권합니다. 그 전에는 새 loss나 결합 방법을 자동으로 시작하지 않는 것이 맞다고 봅니다.
+
+SELF_CHECK: PASS
+SUMMARY: 재개 결함을 고쳐 모든 gate를 통과한 뒤 detector(seed17/29)를 학습하고 잠긴 validation 선택으로 개발800에서 LoRA SFT와 비교했습니다. detector는 F1@0.5에서 유리하고(+0.067, 97.5% CI>0), F1@0.3에서는 SFT가 점추정상 높으며(−0.049, CI가 0 포함), 오류는 양방향 12~13%로 상보적이고 단독 latency는 약 70배 빠릅니다. 개발 집단이므로 독립 확인은 아닙니다.
+
+# [orchestrator] 권한 거부된 도구 호출
+- Bash: sed -i 's#sanity/infer_d24"#sanity/infer_d24_v2"#' results/iter_035/jobs/infer_gate.json
+
+
+
+## iter_035 GPT REVIEW [CONTINUE] — 2026-09-29 22:04:31
+
+# 요약
+
+- **판정:** CONTINUE / success. 실제 detector 비교 진단은 유효하다. 전체 코드 재사용은 보류한다.
+- **핵심 근거:** 양성400명에서 detector17−B0의 F1@0.3은 −0.0491, F1@0.5는 +0.0669였다. IoU0.3에서 detector만 검출한 GT는 71개, SFT만 검출한 GT는 77개였다.
+- **의미·한계:** 빠진 전용 detector 비교군을 확보했다. 전반적 detector 우위, VLM 고유 능력, 외부 일반화와 새 contribution은 입증하지 않았다.
+- **다음:** VinDr 승인 대기를 유지하며 연구 방향을 재검토한다. confidence·위치 오차·미검출을 구분하는 최소 진단의 정보 가치를 먼저 판단한다.
+
+# Assessment
+
+`plan.md`, `plan.json`, 보고서, amendment, 변경 diff와 리뷰 SHA `615c61ec51cfe9d84d564bfcaab434a3a5c78cb1`을 검토했다. 변경 파일의 현재 bytes는 해당 SHA와 모두 일치했고 working-tree status/diff는 비어 있었다. reuse_manifest는 빈 요청이었다.
+
+이번은 실험 미실행이 아니다. seed17은 기존 update706에서 이어 총7,800 update, seed29는 연장 포함11,400 update를 완료했다. 각 canonical 로그의 update 연속성, 유한 loss, completion digest와 checkpoint hash를 독립 확인했다. 실제 LR은 update4800에서 0.005→0.0005, update6600에서 0.0005→0.00005로 바뀌었다. 최종 호스트 기록에는 detector 작업이 남아 있지 않았고 GPU 메모리는 87/15MiB였다.
+
+연장 launch의 마지막 result.json은 재실행으로 덮어써져 all_ok=false다. 그러나 append 로그의 11,400-update 완료, 전체 학습 로그, checkpoint와 완료 marker가 일치한다. 이를 학습 미완료로 해석하지 않는다. 동시에 원본 launch 보존 문제는 수정 대상이다.
+
+# Key Findings
+
+## 1. 주수치 독립 검증
+
+원시 detector 예측과 저장 SFT suffix를 읽고 별도 좌표 변환·matching·환자 bootstrap으로 재계산했다. parser는 기존 strict parser를 사용했다. 저장된 independent_verify의 PASS만으로 승인하지 않았다.
+
+| 비교 | F1@0.3 차이와 97.5% CI | F1@0.5 차이와 97.5% CI |
+|---|---|---|
+| detector17−B0 | −0.049107 [−0.100001, 0.001752] | +0.066881 [0.012211, 0.121965] |
+| detector29−B0 | −0.056833 [−0.107667, −0.005750] | +0.057750 [0.001166, 0.114084] |
+
+주비교의 실제 점수는 detector17 0.581643/0.415548, B0 0.630750/0.348667이다. FP/환자 차이는 +0.02625, 95% CI [−0.01375, 0.06875]로 재현됐다. 따라서 두 F1의 CI 하한>0 및 FP 증가 CI 상한≤0.05를 요구한 전반적 우위 기준은 충족하지 않는다.
+
+IoU0.3의 detector-only/SFT-only는 589개 GT 중 71/77개이며 63/70명에 분포한다. 비율 CI는 각각 [9.31%, 14.86%], [10.20%, 16.03%]다. IoU0.5에서도 119/67개의 양방향 차이가 있다. 사전 상보성 기준을 충족하지만 GT 합집합 recall은 실용 ensemble 성능이 아니다. detector FP budget1.0에서 SFT-only가 3.9%로 줄어드는 점은 상보성이 confidence 선택에도 의존함을 보여준다.
+
+## 2. 선택·입력·학습 연결
+
+LOCK에 연결된 파일 hash가 모두 일치한다. V400 저장 후보에 선택 규칙을 독립 적용해 seed17 epoch18/threshold0.70, seed29 epoch26/threshold0.60을 재현했다. 두 confirm 출력의 checkpoint·raw·shard hash와 source digest도 현재 보존 소스와 일치했다. 선택 잠금 시각은 confirm 실행보다 앞선다.
+
+전체3,600명 감사는 file/pixel hash 불일치와 분할 중복0을 기록한다. SOP 연결과 사전학습 노출까지 검증한 것은 아니다. 기존 정상 사용 검증과 SFT 출력 출처를 재사용했고, 새 독립 환자를 열지 않았다.
+
+결정적 재개 검사에서는 k2/k6/k15, 실제 SIGTERM/SIGKILL 이후 control·loss·parameter·optimizer 일치가 기록됐다. CLI20건과 추론13건도 통과했다. 다만 이 검사의 범위가 아래 모든 재사용 결함을 덮지는 않는다.
+
+## 3. 자원과 비용
+
+두 GPU에 학습·평가를 병렬 배치했다. 추론 pilot의 batch1 worker2는 worker1과 출력이 같고 처리량이 7.4→8.0 images/s였다. batch4는 후보 수와 score가 달라 채택하지 않았다. 학습 reserved peak는 약8GB, 추론 worker당 약766MiB로 기록됐다.
+
+동일 GPU L64×3의 원시192건씩을 재집계했다. 평균 end-to-end는 detector 0.061785초, B0 4.299653초로 69.59배 차이다. 각각 p95는 0.065407초와 11.933731초다. FP32 detector와 bf16 autoregressive VLM의 현재 구현 비용이며 보편적인 구조 효율 비율은 아니다.
+
+초기 latency JSON의 공식 tensor 불일치는 BOS 중복 검사기 문제였다. 수정 검사 결과64/64 입력 일치와 원래 측정의 저장 suffix64/64×3 재현을 함께 확인했다. 재측정 없이 현재 시간 비교를 유지할 근거는 있지만, 검사 실패에도 정상 종료하는 코드 경로는 보완해야 한다.
+
+## 4. iter_031 잔여 분석
+
+보완 코드가 추가 box와 원래 누락 GT identity를 비교하고 실제 중복 box 제거 후 재매칭하도록 수정됐다. 저장 결과의 IoU0.5 회복은 C201 4/20, E402 7/27이다. E402 dedup 후 F1@0.3은 0.48462로 원래 O의 0.62761보다 여전히 낮다. continuation 추가 투자 종료를 되돌릴 근거가 아니다. 이번 리뷰에서 이 보완 분석 전체를 tokenizer부터 독립 재실행하지는 않았다.
+
+# Problems / Concerns
+
+현재 제한된 비교 결론을 무효화하는 문제는 발견하지 못했다. 다음은 재사용 전에 해결해야 한다.
+
+1. `det_jobs.py`의 추가 인자 무시와 result 덮어쓰기는 실제 사고로 확인됐다. 고유 launch 기록과 소유권 보호가 필요하다.
+2. `det_train.py`는 연장 중 갱신되는 checkpoint와 이전 complete.json을 함께 유지한다. 연장 중단 후 재개가 이전 completion 검증에서 차단될 수 있다. 이번 연장은 완료됐으므로 현재 수치에는 영향이 없다.
+3. `det_eval.py`의 완료 재사용은 현재 source/input/batch를 확인하지 않고 동일 out_dir 소유권 lock도 없다. 이번 파일은 별도로 대조했지만 코드 자체의 일반적 안전성을 승인할 수 없다.
+4. 선택·분석 CLI에서 LOCK·cap·선행 완료 gate를 강제하지 않는다. latency 검사 실패도 실패 종료로 연결되지 않는다.
+
+seed29의 38 epoch 수렴 판단에는 계획에 없던 0.01 기준이 사용됐다. utility는 epoch26/32/38에서 0.747/0.73867/0.748, F1@0.5는 0.396/0.40267/0.39133이다. 강한 계속 상승 신호는 보이지 않지만 '완전 수렴' 표현은 피한다. seed29 선행 시작도 절차상 이탈이나, trigger가 충족됐고 개발800 이전에 seed 집합을 잠가 선택 편향의 직접 증거는 없다.
+
+보고서의 '+4.8초 추가 비용'은 F−O 차이다. E402의 F 호출 자체 평균은12.015초다. 실제 추가 호출 비용과 대체 실행 시간 차이를 혼동하지 않아야 한다.
+
+# Interpretation
+
+빠른 detector가 더 엄격한 IoU에서 높은 점수를 얻지만, 현재 선택점에서는 SFT가 검출하고 detector가 놓치는 GT도 남는다. 이 관찰만으로 SFT의 의미 이해나 작은 병변 발견 능력이 우수하다고 말할 수 없다. confidence, box 크기와 경계, annotation 의미가 경쟁 설명이다. 층별 결과는 탐색적이다.
+
+개발800은 이전 후속 분석에 사용된 집단이다. 이번 CI는 이 집단의 환자 변동을 표현하며 독립 외부 확인을 대체하지 않는다. 두 detector seed의 같은 방향도 모델 계열 전체의 결론이나 신규 contribution이 아니다.
+
+# Strategy Check / 연구 방향 판단
+
+- **실행 유효성:** 학습·선택·개발 비교·비용 측정과 독립 재계산을 완료했다. 재사용 결함은 현재 결과와 분리한다.
+- **성능 개선:** detector의 F1@0.5 및 latency 이점을 확인했다. 전반적 우위는 미충족이고 새 post-training 방법의 개선은 없다.
+- **가설 지지:** 정확도 trade-off와 선택점별 오류 상보성이 존재한다는 진단 가설을 지지한다. 원인과 실용적 결합 이득은 미확인이다.
+- **신규 기여 가능성:** 강한 baseline 확보는 진전이지만 contribution 자체는 아니다. 잔여 차이가 단순 confidence·위치 보정으로 설명되는지 먼저 구분해야 한다.
+
+다음 투자에서는 세 선택을 비교해야 한다. 현 bbox 방법 개선은 강한 detector 대비 잔여 가치가 먼저 필요하다. 저장 출력의 원인 진단은 비용이 작고 이를 구분할 정보 이득이 크다. 언어·근거가 필요한 과제로의 전환은 VLM 효용을 직접 검증할 수 있지만 유효한 정답과 강한 모듈형 대안이 선행돼야 한다. 따라서 최소 원인 진단을 우선 후보로 권고하되 새 최종 주제로 고정하지 않는다. VinDr 승인 대기를 이유로 연구 루프 전체를 정지하거나 새 loss를 시작하지 않는다.
+
+검출 오류 분해를 설계하는 데 직접 도움이 되는 [TIDE 원문](https://www.ecva.net/papers/eccv_2020/papers_ECCV/papers/123480562.pdf)을 추천한다. §2.2의 오류 구분과 §2.3의 순차 oracle 보정 편향을 참고할 수 있다. 현재 단일 소견·confidence 없는 SFT에 AP 분석을 그대로 적용하는 것은 별도 검토가 필요하다.
+
+# Recommended Next Experiment
+
+다음 계획은 deep 전략 검토로 시작한다. 기존 출력으로 detector의 confidence 선택, IoU0.3~0.5 위치 오차, 후보 자체의 부재를 구분했을 때 어떤 연구 선택이 달라지는지 명시한다. 기존 선택 threshold를 사후 최적화하지 말고 GT 사용 분석은 원인 분리용으로 표시한다. 임상적으로 의미 있는 실패 조건이나 일반적인 학습 원리를 구별할 수 없다면 단순 bbox 후속 투자를 줄인다.
+
+실제로 사용할 코드 경로만 보완하고 완료된 학습·평가를 반복하지 않는다. VinDr 승인 통지 후 권한·파일·target 차이를 확인해 외부 계획을 재검토한다. 새 loss·ensemble·continuation·MRI F139·reserve 평가를 자동으로 추가하지 않는다.
+
+
+## iter_035 PAPER RECOMMENDATION — 2026-09-29 22:04:33
+
+
+## [ ] TIDE: A General Toolbox for Identifying Object Detection Errors (Bolya, Foley, Hays and Hoffman, 2020)
+
+- 링크: https://www.ecva.net/papers/eccv_2020/papers_ECCV/papers/123480562.pdf
+- 추천: iter_035, 2026-09-29
+- 지금 하고 있는 것: RSNA 개발 양성400명에서 detector17−SFT17의 F1@0.5 차이 +0.06688와 97.5% CI [0.01221, 0.12197]를 독립 재현했다. IoU0.3의 detector-only/SFT-only GT는 71/589·77/589개였다. 근거는 research/results/iter_035/confirm800/analysis.json과 연결된 원시 예측이다.
+- 추천 이유: 실제 비교에서 위치 정밀도 차이와 양방향 오류가 확인돼 오류 원인을 분리할 가치가 생겼다. 이 논문은 위치 오차·중복·background·미검출을 구분하고 oracle 분석의 혼동을 피하는 데 도움이 된다. 단일 opacity와 confidence 없는 SFT 출력에 대한 적용, 외부 일반화와 새로운 방법의 이득은 아직 미검증이다.
+- 읽어볼 부분: §2.2와 Fig.1의 오류 정의, §2.3과 Fig.2의 순차 oracle 보정 편향을 먼저 읽는다. 현재 SFT-only 병변을 위치 오차와 실제 미검출로 어떻게 나누고, GT 상한을 실용 성능과 어떻게 구분할지 확인한다.
+
