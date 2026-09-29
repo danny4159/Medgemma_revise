@@ -1,0 +1,177 @@
+# 요약
+
+- **이번에 할 일:** iter_030의 실행·평가 결함을 수정하고 C201 및 사전 조건부 E402의 부분 누락 진단을 완료한다.
+- **필요한 이유:** D24 생성은 작동했지만 재개 검사가 미완료이고 C201은 실행하지 않아 종료 신호와 후보 회복의 가치를 판단하지 못했다.
+- **확인할 기준:** 원래 H1/H2 기준을 유지한다. 정상 사용·재개 gate 통과 후 위험 분별력, 추가 TP와 FP·invalid·비용을 함께 평가한다.
+- **주의·다음:** 기존 SFT 성과와 원본 산출물을 보존한다. C/E는 개발 자료이며 새 학습·reserve·MRI F139·독립 확인은 이번 범위에 포함하지 않는다.
+
+# Current Understanding
+
+iter_009에서 정상 사용 조건의 RSNA 위치 불일치를 검증했고 iter_012의 직접 LoRA SFT가 확인 양성 400명에서 F1@0.3 0.631–0.653을 달성했다. 이 성과는 유효하다. 이후 QA 형식·evidence 인터페이스·사분면 선택 결과는 일반적인 공간 전이 부재를 확정하지 못했다. 이번에는 그 과제를 반복하지 않는다.
+
+iter_029의 빈 출력에서는 entropy가 강한 baseline이었다. iter_030은 비어 있지 않은 검출 목록의 부분 누락으로 질문을 좁혔다. C201/E402의 엄격한 사건은 20/27명이다. 이 수는 기존 개발 출력에서 얻은 관찰이며 독립 근거가 아니다.
+
+iter_030 리뷰는 D24의 2·4 worker 각 48건 정합성을 확인했으나 재개 검사는 28/48건에서 중단됐고 C201은 미실행이었다. 현재 가설은 미판정이다. 이번 계획은 복구 후 원래 진단을 완료하는 것으로, 표본·prompt·score 방향·확대 및 성공 기준을 바꾸지 않는다.
+
+사용자 보완의 적용을 유지한다. 유지할 것은 RSNA SFT 성과·checkpoint·기존 결과·GOAL이다. 보류할 것은 사분면 추가 탐색·새 loss·학습·MRI/longitudinal·reserve다. 이번 변경은 실행·평가 결함과 새 결과 경로에 한정한다.
+
+# Strategy Check / 연구 방향 판단
+
+iter_030 계획 및 리뷰의 전략 판단을 유지한다. 아직 유효한 본진단이 없고 새 대규모 투자도 아니므로 전면 재검토를 반복할 필요가 없다.
+
+중요한 능력은 반환된 영역이 그럴듯한 경우에도 주석 영역이 더 남았는지 판단하는 집합 완전성이다. 현재 방법 개선은 강한 빈 출력 baseline 때문에 추가 가치가 불분명하다. 부분 누락 진단은 같은 checkpoint·영상·소견을 유지하면서 종료 신호와 단순 후보 증가를 적은 추가 비용으로 구분한다. 외부 확인이나 다른 질문으로의 전환보다 먼저 완료할 가치가 있다.
+
+C/E에서 단순 baseline이 충분하거나 후보 회복이 작으면 새 loss를 자동 추가하지 않는다. 외부 확인과 다른 GOAL 내 질문을 다시 비교한다. H1/H2가 양성이어도 신규 기여가 확정되는 것은 아니다.
+
+# Hypothesis
+
+- H1: 마지막 opacity 직후 계속/닫기 margin Q는 박스 수·일반 token uncertainty·seed 불일치보다 부분 누락 정보를 더 제공한다.
+- H2: 마지막 닫기 선택을 한 번 continuation으로 바꾸면 기존 박스를 보존하면서 완전 비중첩 GT에 대응하는 추가 후보가 나온다.
+- 경쟁 설명: 개수 prior, 희귀 cardinality 학습 부족, 경계 오차, 주석 범위, 단순 후보 수 증가가 효과를 설명할 수 있다.
+
+H1과 H2를 별도 판정한다. 후보 회복은 완전한 내부 시각 표현이나 종료의 유일한 인과 역할을 증명하지 않는다.
+
+# Limitation Evidence / Correct Usage Checks
+
+대상 id는 validated `lesion-grounding-generalization`이다. 원본 근거는 `agent/runs/iter_009/review.md`, `agent/runs/iter_012/review.md`다. 부분 누락·종료 원인이라는 세부 주장은 아직 validated가 아니다.
+
+모델 revision은 `91850547d9f0b2fdd21aa7c5f4f3d1a8a52c243b`, B0는 `results/iter_012/train/lr2e-4_s17/epoch_05/adapter.pt`다. 원 계획의 file SHA `5f542af96df705e567bf4cfb000398b09313db2456c577e772bd76481799cf29`와 tensor digest `e13f3c4461b826a060c90dfe4e4ee4c2ebac36a08f84be1a45a37495816cec11`를 실행 시 대조한다.
+
+실제 D 입력에서 보존된 공식 구성과 실행 wrapper의 전체 tensor key·shape·dtype·value를 비교한다. 공통 key만 비교하지 않는다. processor·chat template·generation 설정, uint8/RGB·padding·좌표 연결을 기록하고 M0 adapter 비활성 경로도 소수 D 사례에서 확인한다. D24 원래 suffix와 EOS 재현은 100% 요구한다. 원 계획의 C overlay 18명 검사를 확인하고 미완료분만 수행한다. 주석은 생성 입력과 분리하며 overlay 인상에 따른 사례별 정답 수정은 하지 않는다.
+
+# Contribution Path / Baselines / Reuse
+
+기여는 미확정이다. 가까운 선행의 관계는 `agent/runs/iter_030/plan.md`와 `think/`의 PatchGate·MedGrounder·ObjectTransforms 조사 기록을 유지한다. 이번에는 선행 방법을 재현하거나 이겼다고 주장하지 않는다. 단순 continuation 완화와 일반 uncertainty로 충분한지를 먼저 판별한다.
+
+O는 기존 seed17 직접 SFT concise greedy 출력이다. F는 같은 입력에서 마지막 닫기 분기만 한 번 변경한다. Q는 해당 위치의 `logit(23179)−logit(236775)`이며 보정된 종료 확률로 부르지 않는다.
+
+baseline 순서는 −박스 수, −출력 token 수, 첫 token entropy, EOS 제외 평균 선택 token NLL, EOS 제외 평균 entropy, EOS NLL, 닫기 분기 선택 token NLL, seed29/43 최대 박스 수−B0 박스 수, seed29/43의 B0 미대응 박스 비율 평균이다. seed 기하 대응은 IoU≥0.3 최대 cardinality matching이며 빈 seed 출력의 미대응 비율은 0이다. C에서 Q를 제외한 최고 AUROC B*를 선택하고 동점은 이 순서를 따른다. E에서는 재선택하지 않는다.
+
+기존 M0·B29·B43 출력도 참고 비교한다. B0 nonempty에 조건화한 모집단임을 밝힌다. token score의 원래 생성 중 추출 비용, F의 추가 생성, seed baseline의 추가 학습·두 번 추론 비용을 구분한다. GT oracle은 실용 비교군이 아니다. 후속 방법에는 충분한 직접 SFT 및 detector/encoder+head와의 공정한 비교가 필요하지만 이번 복구에 새 학습을 넣지 않는다.
+
+현재 브랜치와 HEAD `5bdcbe2f56b219de1e5319c8a890061ec672a774`를 유지한다. 필요한 소스가 이미 있으므로 reuse_assets는 비어 있다. `rsna_diag/{geometry,parse,metrics,__init__}.py`는 기존 제한 승인 범위에서 사용한다. `risk30_source.py`, `risk30.py`, `risk30_eval.py`, `run_iter030_{launch,eval,decide_c,decide_e,correction029}.py`, `test_rsna_iter030.py`와 실제 의존 `generate.py`, `lora.py`, `prompts.py`, `queue_lock.py`, `lock_protocol.py`, `risk28.py`, `risk28_eval.py`는 이번 호출 경로의 결함을 수정·검증한다. 과거 실행기 전체의 정비나 승인으로 확대하지 않는다.
+
+# Proposed Experiment
+
+## 1. 실행 상태와 호환성 확인
+
+실행 호스트에서 관련 parent/worker의 PID·starttime·명령·lock 소유권·종료 코드를 확인한다. 살아 있는 작업과 중복 실행하거나 그 작업이 사용하는 소스를 변경하지 않는다. 다른 사용자 프로세스에는 손대지 않는다.
+
+iter_030의 attempt·protocol·raw·report·실패 로그는 그대로 보존한다. v1/v2→v3 및 이번 수정의 코드·입력·score 의미 변경을 호환성 문서로 연결한다. 과거 protocol을 현재 코드로 다시 잠그지 않는다. 완료 D 출력은 원래 실행 코드와 provenance가 확인된 요청만 읽기 전용으로 재사용한다. 이번 산출물은 `results/iter_031/`의 고유 attempt에 저장하며 기존 파일 덮어쓰기를 거부한다.
+
+## 2. 동작 확인
+
+D24는 기존 C의 한 박스 12명·두 박스 12명을 유지한다. 새 표본을 선택하지 않는다. 공식 입력·adapter·원래 suffix·분기 위치를 확인한다. 마지막 suffix `[23131,236775,15947,106]`와 tokenizer 연결을 검증한다.
+
+F는 기존 generation/cache 경로에서 마지막 opacity 뒤 236775 대신 23179를 딱 한 번 강제한다. **강제 직전에** 현재 suffix가 잠긴 O prefix와 일치하는지 검사하고 불일치하면 실패한다. 개입 전 logits에서 Q를 계산한다. 이후 greedy와 cap ladder 1000→2000→4000은 원래대로 유지한다. O prefix 좌표 bytes 보존을 검사한다.
+
+모든 step의 vocabulary score를 누적 저장하지 않는다. 동일 logits에서 필요한 FP32 scalar를 추출하고 선택한 6명의 대표 step만 독립 CPU float64 계산에 연결한다. 동일 logits의 수치 대조 오차는 1e-4 이내로 요구한다. 생성 구현 변경 시 D의 원래 suffix와 기존 scalar 의미가 유지되는지 확인한다. 검사 실패를 사후 허용 오차 확대로 통과시키지 않는다.
+
+실제 O/F를 포함한 고정 24요청에서 정상 실행과 통제된 중단·재개를 비교한다. parent 정상 종료 신호와 강제 종료 후 잔존 child 확인, 손상 tail 보존·복구, 완료 입력 변조, duplicate/missing/extra, 타 protocol·checkpoint·source 연결 거부를 검사한다. 최종 token 일치와 scalar 1e-4 이내, 예상 행렬 완전성 및 모든 자식 종료 수집을 요구한다. 기존 28/48 결과를 완료 검사로 세지 않는다.
+
+## 3. 가능성 탐색 — C201
+
+학습은 0건, actor seed는 17 하나다. 고정 C201에 O/F 각 201요청을 완료한다. 호환성이 검증된 D 결과는 재사용하며 중복 계산하지 않는다. 사건은 O의 IoU≥0.3 최대 cardinality matching TP≥1이면서, 모든 O 박스와 교집합 면적 0인 GT가 적어도 하나 있는 경우다. 원래 20사건과 일치하는지 확인한다.
+
+C에서 B*를 고정한다. 다음 중 하나면 E 진입을 허용한다.
+
+- Q−B* AUROC 점차이≥0.03이고 한 박스 층 Q AUROC≥0.60.
+- 엄격한 사건 회복률≥0.20.
+- 위 점기준은 미달하지만 Q−B* 95% CI 상한≥0.05와 한 박스 층 Q AUROC 상한≥0.65를 모두 만족하거나, 회복≥1건이고 회복률 95% Wilson 상한≥0.25.
+
+세 번째는 정밀도 보완 경로로 표시한다. 정의 불가·퇴화 통계로 확대하지 않는다. 모든 조건이 미달하면 E GPU 실행을 보류한다. D의 개별 회복 관찰로 이 기준을 대체하지 않는다.
+
+## 4. 규모 확대 — E402
+
+검증된 C report·B*·decision digest를 잠근 뒤 O/F 각 402요청을 실행한다. C gate는 launcher·직접 worker·evaluator 모두에서 강제한다. E의 B*를 임의 CLI 문자열로 바꿀 수 없게 한다. E 원래 엄격 사건은 27명이다. 표본·prompt·score 방향·threshold를 변경하지 않는다.
+
+정식 요청은 C/E 합계 최대 1,206건이며 재사용된 D 요청은 이 안에서 한 번만 센다. 동작·수치·재개·자원 검사는 별도 집계한다. C/E 모두 기존 개발 자료이며 독립 확인으로 부르지 않는다.
+
+## 5. 독립 확인
+
+이번에는 실행하지 않는다. 양성 결과나 판단을 바꿀 중요한 불확실성이 남으면 다음 전략 판단에서 새 환자·같은 target의 외부 자료와 강한 비교군을 설계한다. reserve·MRI F139를 자동 개방하지 않는다.
+
+## 6. GPU·시간·checkpoint
+
+실행 직전 nvidia-smi로 허용 GPU 0,1의 UUID·전체 점유·여유를 확인하고 여유가 큰 장치부터 쓴다. 상속된 CUDA_VISIBLE_DEVICES의 허용 집합과 자식 논리 index를 명시적으로 대응시킨다.
+
+기존 D24의 2/4 worker 비교는 252.67/146.24초, 11.40/19.69요청/분, token·비교 scalar 차이 0이었다. 이를 기본 근거로 재사용한다. 다만 score 메모리 경로를 변경하므로 동작 검사와 겹치는 고정 D O/F 24요청으로 두 구성의 정합성·처리량을 짧게 연결 확인한다. 긴 출력은 cap 4000까지 별도 자원 stress로 검증하고 과학적 표본에 포함하지 않는다.
+
+GPU당 2 worker를 우선 후보로 두되 각 worker의 실제 peak와 다른 점유에 worker당 최소 2GiB 여유를 더해 24GiB 이내일 때만 사용한다. allocated·reserved·GPU 전체 peak, 긴 출력 지연, CPU/RAM/I/O 경합과 OOM을 기록한다. 조건 미달이면 GPU당 1 worker로 낮추고 근거를 남긴다. 병렬 구성을 성능 점수로 선택하지 않는다.
+
+과거 처리량을 단순 적용하면 정식 최대 1,206요청은 약 61–106분이다. 이는 짧은 D 분포에 근거한 추정이며 긴 F·검사·로딩 비용을 포함한 전체 초기 예상은 1–3시간이다. 실측 길이와 잔여 요청으로 갱신하며 시간 상한으로 사용하지 않는다.
+
+요청별 원자적 claim, worker별 append 결과, 원자적 completion, 단일 launcher 소유권을 사용한다. 완료 요청도 현재 입력·source·adapter·protocol을 재검증한다. 재개 시 검증된 과거 attempt를 참조하고 새 attempt에는 미완료 요청만 배정한다. parent 종료 시 소유 child 종료·회수를 끝내고 종료 코드를 기록한다. 백그라운드 작업을 남긴 채 완료 보고하지 않는다.
+
+# Implementation Tasks for Claude
+
+1. 실행 상태와 현재 소스·결과·checkpoint를 확인하고 원본 보존 및 호환성 연결부터 작성한다.
+2. risk30 생성 경로의 필수 protocol, 요청 재구성, 개입 전 prefix 검사, scalar 추출, 허용 GPU 매핑과 실행 수명 관리를 보완한다.
+3. source manifest·audit·원본 suffix·GT 출처·D 검증·checkpoint·실제 실행/평가/decision 코드 의존성을 잠근다. GT audit은 평가용으로 분리하고 생성 payload에 섞지 않는다. 모든 재개·완료 경로에서 필수 digest를 강제한다.
+4. 평가기의 중복 덮어쓰기, E CI 수준, ceil Capture, bootstrap, 한 박스 층 비교, 전체 비용 분석을 수정한다. 기존 fixture 실행 시 과거 결과 경로에 쓰지 않도록 출력 경로를 명시한다.
+5. iter_029 correction은 검증된 수치·GPU 출력을 재사용한다. 원시 출력→C 선택/calibration→E report→독립 검증→decision의 digest 연결과 덮어쓰기 거부만 새 경로에서 보완한다. 이미 완료된 부호 교정이나 본실험을 반복하지 않는다.
+6. 실제 통합 경로의 입력·수치·재개·변조·단계 우회 거부 fixture를 완료한다. D gate 통과 후 같은 호출 안에서 C201 및 조건부 E402로 진행한다.
+7. 원시 token·scalar·환자별 배열에서 별도 matching·통계 계산으로 핵심 결과와 decision을 대조한다. 최종 보고에는 단계, 요청 수, 재사용량, 자원 실측, 확대 여부와 사유, H1/H2 각각의 판정 및 독립 확인 미실행을 적는다.
+
+# Evaluation (성공/실패 기준 포함)
+
+## 통계와 사건
+
+AUROC와 Capture@ceil(0.2N)를 사용한다. C201은 41명, E402는 81명 검토 예산이다. 경계 동점은 기대 포착 수로 처리하고 사건 분모를 표시한다. B* 선택 순서와 score 방향을 고정한다.
+
+C 주비교 CI는 95%, E Q−B* 주비교는 97.5%로 1.25/98.75 percentile을 사용한다. 10,000회 paired 환자 bootstrap, seed 30017을 유지한다. 한 박스 층 Q AUROC 95% CI 및 Q−B*도 필수 보고한다. AUROC resample에서 단일 class이면 같은 paired index를 함께 거부하고 재표집하며 거부 횟수를 남긴다. 원 집단에 class가 하나뿐이면 정의 불가로 표시하고 확대 근거로 쓰지 않는다. 퇴화 CI를 정확한 영점으로 해석하지 않는다.
+
+F 회복은 원래 완전 비중첩 GT 중 하나 이상이 추가 박스와 IoU≥0.3 일대일 matching되는 경우다. 기존 박스의 반복은 추가 TP가 아니다. 회복률은 엄격한 사건 전체를 분모로 사용하고 95% Wilson CI를 계산한다. F invalid·비EOS는 회복 실패다.
+
+전체 O/F의 F1@0.3·F1@0.5, recall, FP/환자, 추가 TP/FP, 중복, invalid, 출력 길이·latency와 환자 paired 95% CI를 보고한다. invalid를 분모에서 제거하지 않는다. operational F1·recall은 invalid에 0을 부여하고, 파싱 불가능한 FP 개수는 별도 미정으로 명시한다. 유효 응답 FP 수의 전체 환자당 합은 하한 성격임을 밝히며 invalid율을 반드시 병기한다. O fallback은 보조 정책으로만 별도 보고한다. 이 평가 보완 규약은 C/F 결과 집계 전에 잠근다.
+
+FN@0.3 존재·교집합 0 GT 존재, GT 양성·O 한 박스/두 박스 층, IoU≥0.5·predicted-center-in-GT 민감도 분석을 유지한다. 모든 층의 환자·사건 수를 보고한다.
+
+## 양성
+
+H1은 E에서 Q−B*≥0.05, 97.5% CI 하한>0, 한 박스 층 Q AUROC 95% CI 하한>0.5, Capture 차이≥0일 때 제한적 양성이다. H2는 E 회복률≥0.25이고 95% Wilson 하한>0.10일 때 제한적 양성이다.
+
+H1 양성은 종료 분기의 추가 위험 정보, H2 양성은 추가 후보 회복을 지지한다. 전체 F1·FP·invalid가 나쁘면 검출 개선을 주장하지 않는다. 후속 선택·중단 원리의 연구 가치를 충분한 SFT·모듈형 대안과 비교한다.
+
+## 음성
+
+Q−B* 97.5% CI 상한<0.05이고 한 박스 층에서도 유용한 분별 근거가 없으면 현재 margin의 추가 투자를 보류한다. 한 박스 층의 불확실성은 별도로 표시하고 전반적 무정보로 확대하지 않는다. H2 Wilson 상한<0.25이면 현재 단일 continuation의 실용 크기 회복 가설을 약화한다.
+
+단순 baseline이 충분하거나 두 진단의 정보 이득이 낮으면 이번 설계 투자를 종료하고 외부 확인 또는 다른 GOAL 내 질문을 비교한다. 새 head/loss는 자동 실행하지 않는다.
+
+## 불확정·실행 실패
+
+C의 불확정은 위 사전 기준으로만 E 확대에 연결한다. E에서도 CI가 기준을 가로지르면 불확정으로 보고한다. 추가 seed·prompt·reserve는 자동 투입하지 않으며, 새 표본이 중요한 의사결정을 실제로 바꿀지를 다음 계획에서 판단한다.
+
+정상 입력·adapter·O suffix·F 개입 전 prefix·행렬·provenance·완료 검증 실패는 execution_failed로 처리한다. 정상 개입 이후의 F invalid·반복·FP 증가는 유효한 음성 관찰이며 실행 오류와 구분한다. 준비 검사 통과만으로 유효한 가설 검증이나 목표 달성을 선언하지 않는다.
+
+# Risks / Checks
+
+- 사건은 annotation에 대한 기하학적 미포괄이다. 임상적 완전성이나 정상 여부를 뜻하지 않는다.
+- 엄격한 사건 수는 C20/E27로 작다. 작은 효과의 부재·외부 일반화·모든 공간 능력을 주장하지 않는다.
+- 개수 confound를 통제하기 위해 전체 모집단과 한 박스 층을 함께 유지한다. GT 개수로 inference eligibility를 만들지 않는다.
+- Q는 서로 다른 token 직렬화의 국소 margin이다. 전체 문자열 확률비나 유일한 종료 원인으로 해석하지 않는다.
+- 원본 보존과 재사용 승인은 별개다. 과거 코드·protocol·fixture를 덮어쓰지 않고 실제 사용 경로만 검증한다.
+- CPU 보완은 현재 GPU 진입 blocker 해소 목적이다. gate 통과 뒤 본진단을 실행하며 주변 리팩터링으로 반복을 끝내지 않는다.
+
+## 대규모 GPU 필요 후보
+
+다기관 다중 병변 자료에서 영상 encoder·집합 완전성·decoder 종료를 공동 학습하는 post-training을 후보로 보존한다. 현재 필요성은 미확정이다. 이번 단순 대조, 충분한 경량 SFT와 모듈형 대안으로 설명되지 않는 중요한 잔여 조건이 남을 때 검토한다.
+
+# 계획의 근거 (GPT 조사 노트)
+
+## 새로 확인한 것
+
+- `agent/GOAL.md`, `agent/REPORTING_STYLE.md`, `agent/LIMITATIONS.md`, `agent/CODE_ASSETS.md`, iter_009·012의 원본 리뷰와 iter_030의 계획·리뷰·Claude 보고서를 읽었다. 이번 라운드는 읽기 전용이며 코드 변경·파일 생성·실험 실행을 하지 않았다.
+- 현재 research HEAD는 `5bdcbe2f56b219de1e5319c8a890061ec672a774`다. `git status --short`와 `git diff --stat` 출력은 비어 있다. `git ls-files`로 risk30 모듈·launcher·평가·decision·fixture 파일이 현재 브랜치에 있음을 확인했다. 다른 커밋에서 선별 반입할 파일은 없다.
+- `rsna_diag/risk30_eval.py`의 load_all은 중복 요청을 덮어쓰며, h1_report는 E에서도 95% CI를 계산한다. bootstrap의 단일 class 표본 처리와 H2 전체 비용 집계도 보완이 필요하다. `run_iter030_decide_c.py`와 `run_iter030_decide_e.py`의 수치 기준은 원 계획과 연결되지만 입력 report·선행 decision의 출처를 강제하지 않는다.
+- `run_iter030_launch.py`는 worker stdout/stderr와 launch_result를 덮어쓸 수 있다. Claude 보고서의 '백그라운드 실행 중' 문장은 현재 상태의 증거가 아니다. 실행 호스트에서 PID/starttime·lock·종료 상태 확인이 필요하다.
+- iter_030 리뷰에 따르면 D24 각 48요청의 2/4 worker token·주요 scalar 차이는 0이다. wall-clock은 252.67→146.24초, 처리량은 11.40→19.69요청/분이다. 약 8.340GiB/프로세스 allocated peak는 긴 출력·reserved·GPU 전체 점유를 포함한 안전성 증거가 아니다. 재개 검사는 28/48건에서 끝났고 C201은 미실행이다.
+
+## 의미
+
+새 문헌 조사나 새 loss 선택보다 현재 진단 완료의 정보 이득이 크다. iter_030의 전략 판단을 유지하며 실험 실행 실패를 과학적 음성 결과로 바꾸지 않는다. D24 결과는 복구·병렬 선택의 근거로만 쓰고 C의 확대 기준을 대체하지 않는다. 기존 RSNA SFT 개선은 유지되며 부분 누락 원인·새 기여는 미확정이다.
+
+## 남은 확인
+
+실제 공식 입력 전체 tensor 대조, adapter와 원래 suffix 연결, 개입 전 prefix 강제 검사, 독립 float64 score 검증, 통제된 중단·재개, 긴 출력 메모리 및 완전한 C/E 평가가 필요하다. 이들은 구현 단계에서 실행할 검증이며 완료했다고 간주하지 않는다. 선행연구의 새 사실을 추가하지 않았으며 iter_030 계획과 조사 노트를 기존 출처로 유지한다.

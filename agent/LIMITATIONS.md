@@ -143,3 +143,20 @@ SPIDER T2의 동일 volume slice-pair를 사용하는 iter_021 최종 prompt와 
 - 미해결: 부분적인 질의 반응과 신뢰할 만한 전체 선택을 구분하는 최소 진단이 다음 투자 판단을 바꾸는가?
 - 미해결: 다른 seed·독립 환자·다른 원천 데이터에서의 재현은 미검증이다. E200은 개발 자료다.
 
+## rsna-partial-omission-continuation — observed
+
+RSNA seed17 grounding SFT의 nonempty 개발 출력 C201/E402에서 마지막 닫기 token을 한 번 continuation으로 바꾸면, 엄격한 부분 누락 사건의 8/20·11/27에서 누락 GT와 대응하는 추가 후보가 생성됐다. 그러나 E402 전체의 환자 평균 F1@0.3은 0.6276에서 0.4738로 하락했다. 후보 회복은 관찰됐지만 실용적 검출 개선, 종료의 유일한 인과 역할, 일반적인 능력 전이를 입증하지 않는다.
+
+- 적용 목표 시작: iter_003
+- 최신 리뷰: agent/runs/iter_031/review.json
+- 근거: research/results/iter_031/{C201,E402}/attempt1/gen_worker*.jsonl: 원시 1,206건의 token과 별도 JSON 해석·최대 cardinality matching으로 회복 8/20·11/27을 재현했다.
+- 근거: research/results/iter_031/E402/report.json: 회복률 0.4074, Wilson 95% CI 약 [0.245, 0.593]; F1@0.3 차이 -0.15377, 저장 paired 95% CI [-0.16951, -0.13735].
+- 근거: E402의 추가 FP는 환자당 1.0373이며, Q−선택 token NLL AUROC 차이는 -0.001086, 독립 재계산한 97.5% CI [-0.005157, 0.002590]이다.
+- 사용·평가 검증: C/E 603명의 원본 seed17 suffix, 현재 영상 file/RGB pixel hash, audit GT와 iter_010 GT manifest를 대조해 불일치 0을 확인했다.
+- 사용·평가 검증: O token 재현·F 개입 전 token prefix·강제 token·기존 bbox 보존·EOS를 원시 출력에서 확인했다.
+- 사용·평가 검증: sanity/sanity.json은 D 6명의 공식 chat 구성과 wrapper 전체 tensor 일치 및 adapter 활성 재생성 2건을 기록한다.
+- 사용·평가 검증: 독립 float64 score 대조와 계획한 전체 재개·긴 출력 검증은 미완료다. C/E는 개발 자료다.
+- 미해결: 추가 후보 수와 비용을 맞춘 단순 대안에서도 같은 회복이 나타나는가?
+- 미해결: 추가 FP를 억제하면서 회복을 유지하는 선택 기준이 강한 단순 baseline보다 유리한가?
+- 미해결: 다른 seed·환자·원천 데이터에서 재현되는가? 임상적 완전성과의 관계는 미확인이다.
+

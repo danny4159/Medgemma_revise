@@ -173,3 +173,19 @@ QA 형식 실패를 의미 능력 손실로 오해하지 않도록 실제 출력
 - 접근법: RSNA 영역 질의 전이 진단 (`approach/rsna-spatial-transfer`), 시도: iter_023, iter_024, iter_025, iter_026, iter_027
 - 커밋: 3271c85f34c135081bba28352baa31468125f842, d60460f8be761e11e1dbce306aa571173e4229db, 89b2975a679c6eed3d9a356d2c01d85b7950a1bf, b8be58c9f3c92266e885ca8c3f5384dbe412b4bd, ed966685298f152e194069d4de3d856e065886bc
 - 자세히: DECISIONS.md의 iter_027, `agent/runs/iter_027/review.md`
+
+## 🏁 RSNA 누락 후보는 이어쓰기로 일부 회복되지만 전체 검출 성능은 악화됐다
+
+*iter_031 · 2026-09-29 09:49 · 판정: CONTINUE / success*
+
+기존 SFT가 반환한 목록을 늘리면 일부 누락은 회복되지만, FP 비용 때문에 전체 검출은 나빠진다는 관찰을 확보했다.
+**고민:** iter_012의 RSNA SFT 개선 이후에도 반환된 목록 밖에 병변이 남는 경우를 어떻게 구분할지 미해결이었다.
+**시도:** 빈 출력에서는 entropy가 강한 baseline이었으므로, nonempty 목록의 종료 분기와 부분 누락으로 질문을 좁혔다.
+**개발:** iter_030의 미완료 실행을 이어 C201·E402에서 원래 출력과 단일 continuation 개입을 비교했다.
+**결과:** 누락 사건은 C 8/20, E 11/27에서 회복됐지만 E 전체 F1@0.3은 0.6276→0.4738로 하락했다.
+**결과:** Q의 baseline 대비 AUROC 차이는 -0.0011로 추가 이득 기준을 충족하지 못했다.
+**의미:** 단순히 더 생성하는 것으로 충분한 검출 개선은 얻지 못했다. 후보 회복의 활용 가치와 다른 연구 질문을 비교할 근거가 생겼으며, 독립 일반화·신규 기여는 남아 있다.
+
+- 접근법: RSNA 부분 누락 위험 진단 (`approach/rsna-partial-omission-risk`), 시도: iter_030, iter_031
+- 커밋: 5bdcbe2f56b219de1e5319c8a890061ec672a774, 8dad463392de9bb0e9fe7d93d64b9c374492de9b
+- 자세히: DECISIONS.md의 iter_031, `agent/runs/iter_031/review.md`
