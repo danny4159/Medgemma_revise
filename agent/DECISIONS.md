@@ -968,5 +968,6 @@ Claude 계정의 /usage 또는 Settings > Usage에서 제한을 확인한 뒤 �
   - 재사용 전 수정: iter_031 supplement의 IoU0.5 회복은 누락 GT의 추가 검출 대신 전체 F1의 0→양수로 정의됐다. 중복 제거도 box 재매칭 없이 FP에서 중복 수를 뺀 근사치이며 중심 포함 민감도는 없다. 실제 추가 실행 비용과 F−O 시간 차이도 구분해야 한다.
   - 추후 개선: SOPInstanceUID 연결, 사전학습 데이터 노출 및 외부 일반화는 미확인이다. 현재 승인된 RSNA 비교 범위와 별도로 기록한다.
   - 다음: 실행 수명과 재개 검증을 먼저 복구해 승인된 RSNA detector–SFT 비교를 완료한다. 호스트의 task·PID/starttime·lock·checkpoint·종료 상태를 확인하고 살아 있는 작업은 중복 실행하지 않는다. 원본 로그·checkpoint·tmp·검사를 보존하고, 새 attempt에서 동일 저장 state의 다음 update 및 warmup·LR 감소 경계 정합성을 검사한다. 임의 3배 허용은 제거하고 비유한 중단·실제 적용 LR·입력/설정/source 검증·로그 재개 정책을 보완한다. 기존 부분 checkpoint는 무결성과 학습 조건의 호환성이 확인될 때만 재사용하며 무조건 처음부터 재학습하지 않는다. 실제 사용하는 평가 소스를 추적 경로에 보존하고 97.5% CI·matching·선택·추론 재개 gate를 완료한다. 이후 원래 학습량·validation·조건부 seed 규칙과 비교800·동일 GPU latency를 수행하고 실제 종료까지 감시한다. iter_031 잔여 분석은 저장 출력으로만 보완한다. VinDr 승인 통지 전 외부 평가, 새 loss·continuation·MRI F139·reserve는 열지 않는다.
+- ⏹ 중단: 정지 요청 (리뷰 후 처리 중)
 - 📁 원본: `agent/runs/iter_034/`
 
