@@ -39,6 +39,7 @@
 - iter_031 [CONTINUE] (normal/standard/normal) <RSNA 부분 누락 위험 진단: success> 💾8dad463392de9bb0e9fe7d93d64b9c374492de9b RSNA E402에서 continuation은 누락 사건 11/27을 회복했지만 F1은 0.628→0.474로 악화됐다. Q의 추가 이득과 신규 기여는 미확인이며, 본진단 재실행보다 다음 연구 투자 판단이 필요하다. → 다음: 본진단을 종료하고, 후보 회복의 활용 가치와 다른 연구 질문을 비교하는 전략 판단을 수행한다. 기존 출력으로 누락된 층별·민감도·비용 분석을 새 경로에서 보완하되 C/E GPU 본실험은 재생성하지 않는다. 다음 deep 계획에서는 후보 수·비용을 맞춘 단순 대안과의 최소 진단, 동일 opacity의 외부 확인, 다른 GOAL 내 질문을 정보 이득·사용 가치·선행 대비 차별성으로 비교한다. H2 양성만으로 gated continuation·새 head/loss·학습을 예약하지 않는다. 회복과 FP 비용을 함께 개선할 구체적인 근거가 있을 때만 후속 방법에 투자하고, 없으면 현재 설계 투자를 종료한다. 이미 수행한 QA·사분면 전이 진단을 새 과제로 반복하지 말고 사용자 보완 이력과 미해결 범위를 명시한다. 실행기 수정은 선택한 후속 경로에 한정하며 MRI F139·reserve는 유지한다.
 - iter_032 [사용자 보완으로 전환 → iter_033] 기존 기록 보존, 성공·실패 판정 아님 (계획 확인)
 - iter_033 [CONTINUE] (deep/standard/normal) <RSNA 전용 detector와 SFT 비교: execution_failed> 💾a60224c1f7d54e4f59e8c4dc16285d62faf004b5 VinDr 대기 중 RSNA detector 탐색 F1@0.3은 0→0.411로 올랐지만 본학습·비교가 중단됐다. 기존 LoRA 대비 우열은 미판정이며 실행 복구 후 비교를 완료해야 한다. → 다음: 실행 수명과 필수 검증을 복구한 뒤 승인된 RSNA detector–SFT 비교를 완료한다. 실행 호스트에서 기존 task·PID/starttime·lock·checkpoint·종료 상태를 먼저 확인하고 살아 있는 작업은 중복 실행하지 않는다. results/의 핵심 소스와 원본 산출물을 보존·버전 연결한 뒤 임의의 짧은 subprocess timeout과 조기 최종 응답 문제를 해결한다. 실제 cmd_train 경로의 중간-step 재개·RNG·LR·소유권·provenance를 검증하고 augmentation 수정이 기존 학습 조건에 미치는 영향을 실행 전에 명시한다. 변경 영향을 받지 않는 탐색 출력은 재사용하며, 필요 시 detector만 새 attempt로 학습하고 기존 SFT를 재학습하지 않는다. 원래 V100/V400 일정·수렴·조건부 seed·선택 규칙을 유지하고 97.5% paired CI, 오류 상보성·FP 비용·층별 지표·공정한 latency까지 완료한다. iter_031 잔여 분석은 저장 출력으로 마무리한다. 새 loss·continuation·MRI F139·reserve는 열지 않고, VinDr는 사용자 승인 통지 후 별도 재검토한다.
+- iter_034 [CONTINUE] (normal/standard/normal) <RSNA 전용 detector와 SFT 비교: execution_failed> 💾bc80f2deede564fb56b4222e530eda5621b31069 VinDr 승인 대기 중 RSNA detector는 706/7,800 update에서 중단됐고 재개 gate에도 결함이 남았다. 기존 LoRA 대비 정확도·상보성·비용 차이는 아직 미판정이다. → 다음: 실행 수명과 재개 검증을 먼저 복구해 승인된 RSNA detector–SFT 비교를 완료한다. 호스트의 task·PID/starttime·lock·checkpoint·종료 상태를 확인하고 살아 있는 작업은 중복 실행하지 않는다. 원본 로그·checkpoint·tmp·검사를 보존하고, 새 attempt에서 동일 저장 state의 다음 update 및 warmup·LR 감소 경계 정합성을 검사한다. 임의 3배 허용은 제거하고 비유한 중단·실제 적용 LR·입력/설정/source 검증·로그 재개 정책을 보완한다. 기존 부분 checkpoint는 무결성과 학습 조건의 호환성이 확인될 때만 재사용하며 무조건 처음부터 재학습하지 않는다. 실제 사용하는 평가 소스를 추적 경로에 보존하고 97.5% CI·matching·선택·추론 재개 gate를 완료한다. 이후 원래 학습량·validation·조건부 seed 규칙과 비교800·동일 GPU latency를 수행하고 실제 종료까지 감시한다. iter_031 잔여 분석은 저장 출력으로만 보완한다. VinDr 승인 통지 전 외부 평가, 새 loss·continuation·MRI F139·reserve는 열지 않는다.
 
 ## 이전 목표들의 접근법 (참고용, 현재 목표의 재평가 횟수에는 안 들어감)
 
@@ -60,13 +61,13 @@
 - RSNA 빈 출력의 미검출 위험 진단 [approach/rsna-empty-output-risk]: 2회 (iter_028, iter_029), 유효한 실험 2회, 미분류 0회, 최근 판정: improve, 커밋: 9d5739203730647fd401caccc3deccd6ecbab317, 0a47e99642921fb22fa49219e58805381e9eb25f
 - RSNA 부분 누락 위험 진단 [approach/rsna-partial-omission-risk]: 2회 (iter_030, iter_031), 유효한 실험 1회, 미분류 0회, 최근 판정: success, 커밋: 5bdcbe2f56b219de1e5319c8a890061ec672a774, 8dad463392de9bb0e9fe7d93d64b9c374492de9b
 - RSNA SFT의 외부 opacity 전이 진단 [approach/external-opacity-transfer]: 1회 (iter_032), 유효한 실험 0회, 미분류 0회, 최근 판정: 사용자 보완으로 전환 (검증 미완료), 커밋: 없음
-- RSNA 전용 detector와 SFT 비교 [approach/rsna-detector-comparison]: 1회 (iter_033), 유효한 실험 0회, 미분류 0회, 최근 판정: execution_failed, 커밋: a60224c1f7d54e4f59e8c4dc16285d62faf004b5
+- RSNA 전용 detector와 SFT 비교 [approach/rsna-detector-comparison]: 2회 (iter_033, iter_034), 유효한 실험 0회, 미분류 0회, 최근 판정: execution_failed, 커밋: a60224c1f7d54e4f59e8c4dc16285d62faf004b5, bc80f2deede564fb56b4222e530eda5621b31069
 
 현재 연구 브랜치: approach/rsna-detector-comparison (코드 위치: /SSD1_1TB/home/milab/daniel/08_medgemma/research)
 
 ### 최근 계획의 대안 순위
 
-1. RSNA 전용 detector와 SFT 비교: 동일 annotation의 실제 대안과 비교해 내부 grounding의 다음 투자 가치를 판단한다.
-2. 기존 grounding 방법 개선: detector 대비 잔여 이점이나 구별되는 실패 조건이 확인될 때까지 새 loss·head·continuation 투자를 보류한다.
-3. 외부 opacity 전이 진단: VinDr 승인 통지 후 detector 결과와 target 차이를 반영해 보존된 계획을 재검토한다.
-4. 언어·근거 연결 과제로 전환: VLM이 필요한 사용 목적과 유효한 정답·강한 모듈형 baseline을 갖춘 별도 질문으로 구체화한다.
+1. RSNA 전용 detector와 SFT 비교: 알려진 실행 결함을 수정하고 승인된 정확도·상보성·비용 비교를 완료한다.
+2. 기존 grounding 방법 개선: 강한 detector 대비 잔여 이점이나 구별되는 실패 조건이 확인될 때까지 추가 loss·head 투자를 보류한다.
+3. 외부 opacity 전이 진단: VinDr 승인 통지 후 현재 비교 결과와 target 차이를 반영해 보존된 계획을 재검토한다.
+4. 언어·근거 연결 과제로 전환: 실제 detector 비교 뒤 VLM이 필요한 사용 과제와 강한 모듈형 대안을 구체화한다.
