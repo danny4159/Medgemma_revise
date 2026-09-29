@@ -1005,3 +1005,33 @@ Claude 계정의 /usage 또는 Settings > Usage에서 제한을 확인한 뒤 �
 - 🏁 **마일스톤**: RSNA에서 detector의 위치 정밀도·속도 이점과 SFT의 상보적 검출을 확인했다 — JOURNEY.md
 - 📁 원본: `agent/runs/iter_035/`
 
+## iter_036 — RSNA 전용 detector와 SFT 비교 (4번째 시도) · 2026-09-29 22:11
+
+- 🧭 **계획** (GPT deep): VinDr 승인 대기 중 RSNA detector–SFT 상보성을 confidence 선택·위치 오차·후보 부재로 분해한다. 저장 출력으로 판단하고, 후처리의 영향이 투자 결정을 바꿀 때만 GPU 추적을 추가하며 신규 기여는 미확정으로 둔다.
+  - 대안: 1) RSNA 전용 detector와 SFT 비교: 저장 출력의 상보성을 분해하고 필요한 경우에만 중간 후보를 추적해 다음 투자 조건을 정한다. · 2) 언어·근거가 필요한 연구 질문으로 전환: VLM의 효용을 직접 검증할 가치가 있지만 정답·사용 과제·강한 모듈형 비교군을 먼저 확보해야 한다. · 3) 현재 grounding 방법 개선: confidence·위치 차이로 설명되지 않는 잔여 실패가 확인되기 전에는 새 loss·ensemble 학습의 투자 근거가 부족하다. · 4) 외부 opacity 전이 확인: VinDr 승인 통지 후 실제 권한과 target 차이를 확인하고 이번 진단 결과를 반영해 재계획한다.
+  - 1순위 선택 근거: 완료된 강한 비교군과 저장 원시 출력으로 다음 투자를 구분할 수 있다. 조건부 GPU 추적도 기존 checkpoint와 허용된 두 GPU 안에서 수행하므로 추가 권한이나 사용자 가치 선택이 필요하지 않다.
+- ▶ **결정**: 자동 진행 (smart) — 1순위로 진행
+- ⏳ 사용 한도 도달 (Claude 구현/실험) → 대기
+- ↻ 끊겼던 Claude 세션을 이어서 진행
+- ▶ 사용 한도가 풀려 재개 (Claude 구현/실험, 69분 대기)
+- 💾 **개발 이력 체크포인트** `f9bfbc250058ce1785f819dd404b1148998918b9`: implementation_finished (검증 승인 아님)
+- 🔧 **Claude** (standard): 개발800에서 SFT-only GT의 92–99%는 detector 후보가 confidence threshold에 걸러진 경우이고 후보 coverage 부재(R)는 0.17%/1.2%뿐이라 GPU 추적은 조건 미달로 미실행했다. 다만 계획의 V400을 개발800으로 대체했고 overlay 육안 검토와 층별 분석·protocol 잠금이 남아 FAIL로 표시한다. [자체 검증 FAIL, 파일 15개 변경]
+  - 브랜치 `approach/rsna-detector-comparison`에서 계속
+- 🔍 **리뷰** (GPT normal): [CONTINUE / improve] VinDr 승인 대기 중 RSNA 양성400명에서 SFT-only GT의92–97%가 detector threshold 아래 후보와 연결됐다. 큰 후보 발견 차이는 약화됐지만 FP 비용 비교와 외부 재현은 남는다.
+  - 접근법 판단: 핵심 선택 효과와 GPU 미진입 판단은 재현됐지만 진단 완료 요건 일부가 빠졌다. 저장 출력으로 비용 비교·provenance·보고 오류만 보완하고 같은 자료의 진단을 불필요하게 확대하지 않는다.
+  - 목표 진전: 실행 유효성: 저장된 실제 출력으로 H_selection과 큰 잔여 coverage 차이 여부를 해석 가능하게 검증했다. 성능 개선: 새 학습·추론 방법이나 새로운 개선은 없다. 가설 지지: SFT-only GT의92.0–97.4%가 detector threshold 아래의 대응 후보와 연결되고 두 detector의 R 상한이5% 미만이어서 큰 후보 발견 차이라는 설명을 약화한다. 신규 기여 가능성: 단순 bbox 상보성을 새 표현 학습의 근거로 삼을 이유가 줄었다. FP 비용을 통제한 실용적 선택 개선, 외부 재현, 언어·근거 효용 및 새로운 post-training 원리는 미검증이다.
+  - 판정 범위: 미완료는 iter_036 저장 출력 진단의 사전 validation 검사·FP budget별 비용 비교·일부 위치 및 FP 분해·자동 provenance 보호에 적용된다. 개발800의 핵심 threshold 제외 관찰은 유효하다. 의료 VLM 전체, 경량 적응, detector 설계 또는 외부 일반화의 실패로 확대하지 않는다.
+  - 재사용 전 수정: V400에 저장 SFT 출력이 없다는 설명을 정정해야 한다. results/iter_012/train/lr2e-4_s17/epoch_05/val_gen/gen_worker0.jsonl에는 선택된 SFT17 adapter digest와 일치하고 validation_ids 전체를 포함하는400건이 있다. 완료 기록도 missing0·duplicate0이다. 사전 V400 검사를 수행한 것으로 소급 기록하지 말고 실제 실행 순서를 보존한다.
+  - 재사용 전 수정: det_error_audit.load_detector는 docstring과 달리 LOCK.json을 읽거나 검증하지 않는다. 기존 load_verified는 source·현재 영상·batch 조건을 자동 대조하지 않으며 raw_candidates_norm의 zip은 길이 불일치를 조용히 자를 수 있다. 비유한 값·길이·입력 연결을 fail-closed로 검사하고 분석 config와 입력 hash를 보존해야 한다.
+  - 재사용 전 수정: 사전 고정 FP budget0.25/0.5/1.0별 양쪽 detector의 F1@0.3/0.5·lesion recall·전체 및 category FP·상보성·R 표가 미완료다. iter_035의 일부 표를 출처와 함께 재사용하되 빠진 비교만 보완해야 한다.
+  - 재사용 전 수정: GT·후보 index, 기준 이상 후보의 최고 score, 원래 IoU0.3 쌍의 IoU0.5 통과와 독립 재매칭 결과를 저장하지 않는다. 현재 transfer_rate는 GT의 독립 재매칭 비율이므로 동일 bbox 쌍의 정밀도 변화로 표현하면 안 된다. FP 중복과 대응 경쟁의 통합도 계획 변경으로 명시해야 한다.
+  - 재사용 전 수정: GPU 확대 결정이 criterion_a만 사용하고 cap에 따른 criterion_b를 구현하지 않았다. 현재 cap100 도달0건이라 이번 결정에는 영향이 없지만, 다른 입력에서 재사용하기 전에 보완해야 한다.
+  - 재사용 전 수정: 독립 검증 스크립트의 고정 출력 덮어쓰기, 분석·overlay 출력의 동시 소유권 및 재사용 검증을 보완해야 한다. iter_035의 미사용 학습·latency 실행기 결함도 해결된 것으로 간주하지 않는다.
+  - 추후 개선: 개발800은 반복 분석된 집단이다. bootstrap과 seed 민감도는 새 환자·기관의 독립 확인을 대체하지 않는다.
+  - 추후 개선: 선택 출력만 그린 overlay는 threshold 아래 대응 후보를 보여주지 않는다. 후속 시각 감사에는 해당 GT·후보 index·score를 함께 표시하는 것이 좋다.
+  - 추후 개선: 후처리 이전 후보, annotation 경계 모호성, 사전학습 노출, SOP 수준 연결 및 seed29 완전 수렴은 미확인이다.
+  - 추후 개선: 이번 리뷰에서 fixture 재실행은 read-only 환경의 torch 초기화 문제로 완료하지 못했다. 저장된18/18 기록과 별도의 원시 수치 재계산을 구분해 보존한다.
+  - 다음: 저장 출력의 필수 비교만 마무리하고, 이번 관찰을 반영해 다음 연구 투자를 선택한다. 기준은 agent/runs/iter_036/plan.md이며 threshold·seed·개발800 지위·metric·GPU 확대 기준은 유지한다. V400 출력 부재 설명을 정정하고 기존 선택 adapter의 V400 출처를 확인하되 사전 검사를 소급한 것으로 기록하지 않는다. 이미 재현된800명 주분해를 다시 실험하지 말고 고정 FP budget별 양쪽 detector 비용·성능 표, 원래 대응쌍과 재매칭의 구분, 실제 사용할 loader의 provenance 및 cap gate만 보완한다. 검증된 기존 표는 출처를 연결해 재사용한다. 그 후 현재 bbox 방법 개선·표준 선택 진단·언어와 근거가 필요한 다른 질문의 정보 이득과 비용을 비교한다. 큰 후보 coverage 차이를 전제로 새 loss·ensemble을 자동 시작하지 않는다. VinDr 승인 통지 전 외부 다운로드·평가·반복 승인 질문은 하지 않고, continuation·MRI F139·reserve는 유지한다.
+- 🏁 **마일스톤**: RSNA에서 SFT만 검출한 병변 대부분은 detector의 낮은 score 후보에도 있었다 — JOURNEY.md
+- 📁 원본: `agent/runs/iter_036/`
+

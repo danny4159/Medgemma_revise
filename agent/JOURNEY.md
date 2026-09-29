@@ -205,3 +205,19 @@ QA 형식 실패를 의미 능력 손실로 오해하지 않도록 실제 출력
 - 접근법: RSNA 전용 detector와 SFT 비교 (`approach/rsna-detector-comparison`), 시도: iter_033, iter_034, iter_035
 - 커밋: a60224c1f7d54e4f59e8c4dc16285d62faf004b5, bc80f2deede564fb56b4222e530eda5621b31069, 615c61ec51cfe9d84d564bfcaab434a3a5c78cb1
 - 자세히: DECISIONS.md의 iter_035, `agent/runs/iter_035/review.md`
+
+## 🏁 RSNA에서 SFT만 검출한 병변 대부분은 detector의 낮은 score 후보에도 있었다
+
+*iter_036 · 2026-09-29 23:40 · 판정: CONTINUE / improve*
+
+RSNA의 detector–SFT 상보성을 큰 후보 발견 능력 차이로 해석할 근거가 약해졌다.
+**고민:** 직접 LoRA SFT는 개선됐지만, 빠르고 정밀한 전용 detector 대비 어떤 가치가 남는지 불분명했다.
+**시도:** iter_035는 양성400명에서 양방향 상보성을 확인했다. 이를 바로 새 loss나 ensemble의 근거로 삼지 않고 저장 후보를 분해했다.
+**개발:** 고정 threshold와 GT 일대일 matching을 유지하며 선택 제외·대응 경쟁·인접 위치 오차를 구분했다.
+**결과:** SFT-only GT의75/77개·80/87개가 두 detector의 threshold 아래 대응 후보와 연결됐다.
+**결과:** IoU0.3 대응 후보가 없는 잔여량은1/589·7/589이고97.5% CI 상한은0.68%·2.24%였다. 리뷰에서 원시 출력과 CI를 독립 재현했다.
+**의미:** 큰 후보 coverage 차이를 전제로 한 추가 학습의 우선순위를 낮춘다. FP 비용의 전체 비교·코드 보완과 외부 재현은 남으며, 실용적 detector 우위나 새로운 contribution을 확정하지 않는다.
+
+- 접근법: RSNA 전용 detector와 SFT 비교 (`approach/rsna-detector-comparison`), 시도: iter_033, iter_034, iter_035, iter_036
+- 커밋: a60224c1f7d54e4f59e8c4dc16285d62faf004b5, bc80f2deede564fb56b4222e530eda5621b31069, 615c61ec51cfe9d84d564bfcaab434a3a5c78cb1, f9bfbc250058ce1785f819dd404b1148998918b9
+- 자세히: DECISIONS.md의 iter_036, `agent/runs/iter_036/review.md`

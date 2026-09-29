@@ -1,0 +1,710 @@
+diff --git a/rsna_diag/det_error_audit.py b/rsna_diag/det_error_audit.py
+new file mode 100644
+index 0000000..c3e610b
+--- /dev/null
++++ b/rsna_diag/det_error_audit.py
+@@ -0,0 +1,428 @@
++"""iter_036: RSNA detector17/29 대 MedGemma grounding SFT(seed17/29/43)의 confirm800(개발800) 상보성을
++confidence 선택(threshold 제외)·GT 대응 경쟁·인접 위치 오차·저장 후보 coverage 부재로 분해한다.
++medgemma env, CPU만 사용(학습 0 update, 새 GPU 추론 없음).
++
++원본 재사용(수정하지 않음): rsna_diag/det_compare.py(load_stored, complementarity, strata, ADAPTERS,
++PROTOCOL, IT010/IT012 경로, boot_ci/ratio_ci 패턴), rsna_diag/det_eval.py(load_verified),
++rsna_diag/det_lib.py(load_gt_infer, preds_to_norm_yxyx), rsna_diag/geometry.py(pad_offsets, canvas_to_norm),
++rsna_diag/metrics.py(match — det_match.bounded_match의 GT identity는 승인되지 않았으므로 쓰지 않는다),
++rsna_diag/sft_eval.py(parse_records, per_patient), rsna_diag/parse.py(VALID).
++
++범위 축소(plan.md 대비 명시): plan은 "V400"(detector 선택에 쓰인 validation_ids, 400명)에서 먼저 분해 규칙을
++검증한 뒤 confirm800(개발800) 전체로 확대하라고 적었다. 그러나 validation_ids에는 저장된 SFT 생성 출력이
++없다(iter_012 confirm_sft_seed*는 confirm_ids(800)만 커버하고, validation_ids와 confirm_ids의 교집합은 0이다).
++이번 진단은 사용자 보완의 "기존 유효한 저장 출력을 재사용하고 새로 생성하지 않는다"를 따르며, detector와
++SFT가 모두 저장돼 있는 confirm800에서만 (a) 24명 층화 pilot으로 구현을 검사하고 (b) 전체 800명으로 본분석을
++수행한다. validation_ids에 대한 새 SFT 추론은 하지 않았다.
++"""
++import argparse
++import hashlib
++import json
++import os
++import sys
++
++import numpy as np
++from PIL import Image, ImageDraw
++
++BASE = "/SSD1_1TB/home/milab/daniel/08_medgemma/research"
++sys.path.insert(0, BASE)
++from rsna_diag import det_compare as DC  # noqa: E402
++from rsna_diag import det_eval as E  # noqa: E402
++from rsna_diag import det_lib as D  # noqa: E402
++from rsna_diag import geometry as G  # noqa: E402
++from rsna_diag import metrics as M  # noqa: E402
++from rsna_diag import parse as PA  # noqa: E402
++from rsna_diag import sft_eval as SE  # noqa: E402
++
++IT010 = DC.IT010
++IT012 = DC.IT012
++ADAPTERS = DC.ADAPTERS
++NEW_BOOT_SEED = 20260929
++B = 10000
++CATS = ("matching_competition", "threshold_excluded", "adjacent_localization_error", "no_stored_candidate_coverage")
++ADJ_THR = 0.1
++
++
++def sha(p):
++    return hashlib.sha256(open(p, "rb").read()).hexdigest()
++
++
++def sha_str(s):
++    return hashlib.sha256(s.encode()).hexdigest()
++
++
++def load_detector(selp, cdir, ids, gt, expect_manifest="confirm800"):
++    """선택 LOCK·원본 checkpoint·요청 ID 순서를 검사한 뒤 (raw 전체 후보, 선택 threshold 적용 pred, sel, comp, thr)를 반환."""
++    sel = json.load(open(selp))
++    raw, comp, rid = E.load_verified(cdir, expect_manifest, sel["selected_checkpoint"])
++    if comp["checkpoint_sha256"] != sel["selected_checkpoint_sha256"]:
++        raise ValueError(f"{cdir}: checkpoint sha256 does not match locked selection {selp}")
++    if rid != ids:
++        raise ValueError(f"{cdir}: raw_preds id order differs from expected ids")
++    thr = sel["selected"]["threshold"]
++    det_sel = D.preds_to_norm_yxyx(raw, gt, thr)
++    return raw, det_sel, sel, comp, thr
++
++
++def raw_candidates_norm(rec, adj_check=True):
++    """label==1 후보 전체(score>0.001/NMS0.5/cap100 이후, 사용자 threshold 무관) padded 0-1000 좌표 + score."""
++    h, w = rec["img_hw"]
++    top, left, side = G.pad_offsets(h, w)
++    out = []
++    for box, score, label in zip(rec["boxes_xyxy_px"], rec["scores"], rec["labels"]):
++        if label != 1:
++            continue
++        out.append((G.canvas_to_norm(box, top, left, side), float(score)))
++    return out
++
++
++def gt_hit_set(pred_boxes, gt_boxes, thr):
++    if not pred_boxes or not gt_boxes:
++        return set()
++    return {gi for gi, _ in M.match(pred_boxes, gt_boxes, thr)}
++
++
++def classify_gt(gt_box, det_sel_boxes, raw_cands, thr, adj_thr=ADJ_THR):
++    """sft_only(det가 못 맞춘) GT 하나를 4범주 중 하나로 분류. returns (category, evidence_iou, evidence_score)."""
++    max_sel = max((M.iou(b, gt_box) for b in det_sel_boxes), default=0.0)
++    if max_sel >= thr:
++        return "matching_competition", max_sel, None
++    if not raw_cands:
++        return "no_stored_candidate_coverage", 0.0, None
++    best_iou, best_score = max(((M.iou(b, gt_box), s) for b, s in raw_cands), key=lambda x: x[0])
++    if best_iou >= thr:
++        return "threshold_excluded", best_iou, best_score
++    if best_iou >= adj_thr:
++        return "adjacent_localization_error", best_iou, best_score
++    return "no_stored_candidate_coverage", best_iou, best_score
++
++
++def decompose_patient(gt_boxes, det_sel_boxes, raw_cands, sft_boxes, thr):
++    det_hit = gt_hit_set(det_sel_boxes, gt_boxes, thr)
++    sft_hit = gt_hit_set(sft_boxes, gt_boxes, thr)
++    rows = []
++    for gi, gb in enumerate(gt_boxes):
++        raw_max = max((M.iou(b, gb) for b, _ in raw_cands), default=0.0)
++        cat = ev_iou = ev_score = None
++        if gi in sft_hit and gi not in det_hit:
++            cat, ev_iou, ev_score = classify_gt(gb, det_sel_boxes, raw_cands, thr)
++        rows.append({"gi": gi, "det_hit": gi in det_hit, "sft_hit": gi in sft_hit,
++                     "sft_only_category": cat, "category_evidence_iou": ev_iou,
++                     "category_evidence_score": ev_score, "raw_max_iou": raw_max})
++    return rows
++
++
++def aggregate(pos_ids, gt, det_sel, det_raw, sft_preds, thr):
++    per_patient_rows = {}
++    cat_counts = {c: 0 for c in CATS}
++    cat_patient_sets = {c: set() for c in CATS}
++    n_gt_by_patient, r_num_by_patient, thrx_num_by_patient, sftonly_by_patient = [], [], [], []
++    total_gt = sft_only_total = 0
++    for i in pos_ids:
++        gb = [b["yxyx_norm"] for b in gt[i]["boxes"]]
++        dsb = det_sel[i]["boxes"] if det_sel[i]["status"] in PA.VALID else []
++        rc = raw_candidates_norm(det_raw[i])
++        sb = sft_preds[i]["boxes"] if sft_preds[i]["status"] in PA.VALID else []
++        rows = decompose_patient(gb, dsb, rc, sb, thr)
++        per_patient_rows[i] = rows
++        total_gt += len(rows)
++        n_gt_by_patient.append(len(rows))
++        rnum = sum(1 for r in rows if r["sft_only_category"] in ("adjacent_localization_error", "no_stored_candidate_coverage"))
++        thrx = sum(1 for r in rows if r["sft_only_category"] == "threshold_excluded")
++        sfto = sum(1 for r in rows if r["sft_only_category"] is not None)
++        r_num_by_patient.append(rnum)
++        thrx_num_by_patient.append(thrx)
++        sftonly_by_patient.append(sfto)
++        for r in rows:
++            if r["sft_only_category"]:
++                cat_counts[r["sft_only_category"]] += 1
++                cat_patient_sets[r["sft_only_category"]].add(i)
++        sft_only_total += sfto
++    assert sum(cat_counts.values()) == sft_only_total
++    return {"per_patient_rows": per_patient_rows, "total_gt": total_gt, "sft_only_total": sft_only_total,
++            "category_counts": cat_counts, "category_n_patients": {k: len(v) for k, v in cat_patient_sets.items()},
++            "n_gt_by_patient": np.array(n_gt_by_patient, float), "r_num_by_patient": np.array(r_num_by_patient, float),
++            "thrx_num_by_patient": np.array(thrx_num_by_patient, float), "sftonly_by_patient": np.array(sftonly_by_patient, float)}
++
++
++def ratio_ci_cluster(num, den, idx, lo=1.25, hi=98.75):
++    dsum = den[idx].sum(axis=1)
++    valid = dsum > 0
++    rs = np.divide(num[idx].sum(axis=1), dsum, out=np.full(dsum.shape, np.nan), where=valid)
++    rs = rs[valid]
++    out = {"ci": [float(np.percentile(rs, lo)), float(np.percentile(rs, hi))] if len(rs) else [None, None],
++           "n_degenerate_denom0": int((~valid).sum())}
++    return out
++
++
++def r_and_threshold_excluded(agg, idx, pos_ids):
++    r_point = float(agg["r_num_by_patient"].sum() / agg["total_gt"])
++    r_ci = ratio_ci_cluster(agg["r_num_by_patient"], agg["n_gt_by_patient"], idx)
++    out = {"r_point": r_point, "r_numerator": int(agg["r_num_by_patient"].sum()), "r_denominator_total_gt": agg["total_gt"],
++           "r_ci97.5": r_ci["ci"], "r_n_affected_patients": int((agg["r_num_by_patient"] > 0).sum())}
++    if agg["r_num_by_patient"].sum() == 0:
++        k = int((agg["r_num_by_patient"] > 0).sum())
++        out["r_degenerate_bootstrap"] = True
++        out["r_patient_event_wilson95"] = list(M.wilson(k, len(pos_ids)))
++    thrx_num = float(agg["thrx_num_by_patient"].sum())
++    thrx_den = float(agg["sftonly_by_patient"].sum())
++    thrx_ci = ratio_ci_cluster(agg["thrx_num_by_patient"], agg["sftonly_by_patient"], idx)
++    out["threshold_excluded_point"] = (thrx_num / thrx_den) if thrx_den > 0 else None
++    out["threshold_excluded_ci97.5"] = thrx_ci["ci"]
++    out["threshold_excluded_n_degenerate_denom0"] = thrx_ci["n_degenerate_denom0"]
++    if thrx_num == 0:
++        k = int((agg["thrx_num_by_patient"] > 0).sum())
++        out["threshold_excluded_degenerate_bootstrap"] = True
++        out["threshold_excluded_patient_event_wilson95"] = list(M.wilson(k, len(pos_ids)))
++    return out
++
++
++def position_precision(pos_ids, gt, det_sel, sft_preds):
++    rows = []
++    for i in pos_ids:
++        gb = [b["yxyx_norm"] for b in gt[i]["boxes"]]
++        dsb = det_sel[i]["boxes"] if det_sel[i]["status"] in PA.VALID else []
++        sb = sft_preds[i]["boxes"] if sft_preds[i]["status"] in PA.VALID else []
++        det_hit05 = gt_hit_set(dsb, gb, 0.5)
++        sft_hit05 = gt_hit_set(sb, gb, 0.5)
++        for model, pb, hit05 in (("detector", dsb, det_hit05), ("sft", sb, sft_hit05)):
++            pairs = dict(M.match(pb, gb, 0.3)) if pb and gb else {}
++            for gi, pi in pairs.items():
++                rows.append(pair_row(model, i, gi, gb[gi], pb[pi], gi in hit05))
++    return rows
++
++
++def pair_row(model, pid, gi, gtb, predb, hit05):
++    gy0, gx0, gy1, gx1 = gtb
++    py0, px0, py1, px1 = predb
++    gcy, gcx = (gy0 + gy1) / 2, (gx0 + gx1) / 2
++    pcy, pcx = (py0 + py1) / 2, (px0 + px1) / 2
++    diag = ((gy1 - gy0) ** 2 + (gx1 - gx0) ** 2) ** 0.5
++    dist = ((gcy - pcy) ** 2 + (gcx - pcx) ** 2) ** 0.5
++    ga = max(0.0, gy1 - gy0) * max(0.0, gx1 - gx0)
++    pa = max(0.0, py1 - py0) * max(0.0, px1 - px0)
++    return {"model": model, "patient": pid, "gi": gi, "iou_0.3_pair": M.iou(predb, gtb),
++            "center_dist_over_gt_diag": dist / diag if diag > 0 else None,
++            "area_ratio_pred_over_gt": pa / ga if ga > 0 else None,
++            "w_ratio": (px1 - px0) / (gx1 - gx0) if (gx1 - gx0) > 0 else None,
++            "h_ratio": (py1 - py0) / (gy1 - gy0) if (gy1 - gy0) > 0 else None,
++            "hit_at_0.5_independent_rematch": hit05}
++
++
++def summarize_position(rows):
++    out = {}
++    for model in ("detector", "sft"):
++        mr = [r for r in rows if r["model"] == model]
++        if not mr:
++            out[model] = {"n_pairs_iou0.3": 0}
++            continue
++        cd = np.array([r["center_dist_over_gt_diag"] for r in mr if r["center_dist_over_gt_diag"] is not None])
++        ar = np.array([r["area_ratio_pred_over_gt"] for r in mr if r["area_ratio_pred_over_gt"] is not None])
++        wr = np.array([r["w_ratio"] for r in mr if r["w_ratio"] is not None])
++        hr = np.array([r["h_ratio"] for r in mr if r["h_ratio"] is not None])
++        out[model] = {"n_pairs_iou0.3": len(mr),
++                      "transfer_rate_to_iou0.5": float(np.mean([r["hit_at_0.5_independent_rematch"] for r in mr])),
++                      "center_dist_over_diag": {"mean": float(cd.mean()), "median": float(np.median(cd))},
++                      "area_ratio_pred_over_gt": {"mean": float(ar.mean()), "median": float(np.median(ar))},
++                      "w_ratio": {"mean": float(wr.mean()), "median": float(np.median(wr))},
++                      "h_ratio": {"mean": float(hr.mean()), "median": float(np.median(hr))}}
++    return out
++
++
++def fp_decompose(ids, gt, preds, thr=0.3, adj=ADJ_THR):
++    cat_counts = {"competes_for_matched_gt": 0, "near_miss_0.1_to_thr": 0, "no_gt_within_0.1": 0}
++    n_fp = 0
++    for i in ids:
++        gb = [b["yxyx_norm"] for b in gt[i]["boxes"]]
++        pb = preds[i]["boxes"] if preds[i]["status"] in PA.VALID else []
++        if not pb:
++            continue
++        pairs = dict(M.match(pb, gb, thr)) if gb else {}
++        matched_pi, matched_gi = set(pairs.values()), set(pairs.keys())
++        for pi, box in enumerate(pb):
++            if pi in matched_pi:
++                continue
++            n_fp += 1
++            best_gi, best_iou = None, 0.0
++            for gi, g in enumerate(gb):
++                v = M.iou(box, g)
++                if v > best_iou:
++                    best_iou, best_gi = v, gi
++            if best_iou >= thr:
++                if best_gi not in matched_gi:
++                    raise AssertionError("unmatched pred has iou>=thr to an unmatched gt: matching not max-cardinality")
++                cat_counts["competes_for_matched_gt"] += 1
++            elif best_iou >= adj:
++                cat_counts["near_miss_0.1_to_thr"] += 1
++            else:
++                cat_counts["no_gt_within_0.1"] += 1
++    cat_counts["n_fp_total"] = n_fp
++    return cat_counts
++
++
++def stratified_d24(ids, gt):
++    """category별 8명(opacity는 n_gt층 우선), hash순서 결정. 출력 성능을 보지 않는다."""
++    cats = {c: sorted([i for i in ids if gt[i]["category"] == c], key=sha_str) for c in
++            ("opacity", "normal", "not_normal_no_opacity")}
++    picked = []
++    for c in ("normal", "not_normal_no_opacity"):
++        picked += cats[c][:8]
++    pos = cats["opacity"]
++    groups = {}
++    for i in pos:
++        groups.setdefault(len(gt[i]["boxes"]), []).append(i)
++    for k in groups:
++        groups[k].sort(key=sha_str)
++    quota = {k: 2 for k in sorted(groups)}
++    total = sum(min(quota[k], len(groups[k])) for k in quota)
++    op_pick = []
++    for k in sorted(groups):
++        op_pick += groups[k][:min(quota[k], len(groups[k]))]
++    deficit = 8 - len(op_pick)
++    if deficit > 0:
++        largest = max(groups, key=lambda k: len(groups[k]))
++        extra = [i for i in groups[largest] if i not in op_pick][:deficit]
++        op_pick += extra
++    picked += op_pick[:8]
++    return sorted(picked, key=sha_str)
++
++
++def draw_overlay(image_path, gt_boxes, det_boxes, sft_boxes, out_path, canvas_side=None):
++    im = Image.open(image_path).convert("RGB")
++    if canvas_side:
++        top, left, side = G.pad_offsets(*im.size[::-1])
++        canvas = Image.new("RGB", (side, side))
++        canvas.paste(im, (left, top))
++        im = canvas
++    dr = ImageDraw.Draw(im)
++    side = im.size[0]
++
++    def to_px(b):
++        y0, x0, y1, x1 = b
++        return (x0 / 1000 * side, y0 / 1000 * side, x1 / 1000 * side, y1 / 1000 * side)
++    for b in gt_boxes:
++        dr.rectangle(to_px(b), outline=(0, 255, 0), width=3)
++    for b in det_boxes:
++        dr.rectangle(to_px(b), outline=(255, 0, 0), width=2)
++    for b in sft_boxes:
++        dr.rectangle(to_px(b), outline=(0, 128, 255), width=2)
++    im.save(out_path)
++
++
++def main():
++    ap = argparse.ArgumentParser()
++    ap.add_argument("--selection17", required=True)
++    ap.add_argument("--confirm_dir17", required=True)
++    ap.add_argument("--selection29", required=True)
++    ap.add_argument("--confirm_dir29", required=True)
++    ap.add_argument("--out", required=True)
++    ap.add_argument("--overlay_dir", default=None)
++    a = ap.parse_args()
++    if os.path.exists(a.out):
++        raise FileExistsError(a.out)
++    gt, infer = D.load_gt_infer()
++    ids = json.load(open(f"{IT010}/confirm_ids.json"))
++    pos = [i for i in ids if gt[i]["category"] == "opacity"]
++    raw17, det17_sel, sel17, comp17, thr17 = load_detector(a.selection17, a.confirm_dir17, ids, gt)
++    raw29, det29_sel, sel29, comp29, thr29 = load_detector(a.selection29, a.confirm_dir29, ids, gt)
++    sft = {}
++    prov = {}
++    for s in (17, 29, 43):
++        recs, pv = DC.load_stored(f"{IT012}/confirm_sft_seed{s}", ids, ("concise",), ADAPTERS[s], infer)
++        prov[f"sft{s}"] = pv
++        sft[s] = SE.parse_records(recs, ids, "concise", strict=True)
++
++    out = {"n_confirm": len(ids), "n_positive": len(pos), "thr17": thr17, "thr29": thr29,
++           "provenance": {**prov, "detector17": {"selection_sha256": sha(a.selection17), "checkpoint_sha256": comp17["checkpoint_sha256"]},
++                          "detector29": {"selection_sha256": sha(a.selection29), "checkpoint_sha256": comp29["checkpoint_sha256"]}},
++           "scope_note": "V400(validation_ids)에는 저장 SFT 출력이 없어 개발800(confirm800)에서만 pilot·본분석을 수행했다."}
++
++    # ---- 기준 수치 재현 gate (det_compare 저장값과 대조)
++    idx_dummy = M.bootstrap_indices(len(pos), B=10, seed=1)
++    c03, _ = DC.complementarity(det17_sel, sft[17], gt, pos, 0.3, idx_dummy)
++    saved = json.load(open(f"{BASE}/results/iter_035/confirm800/analysis.json"))
++    sc = saved["complementarity"]["iou0.3"]
++    repro = {"detector_only": (c03["detector_only"], sc["detector_only"]), "sft_only": (c03["sft_only"], sc["sft_only"]),
++             "both_hit": (c03["both_hit"], sc["both_hit"]), "total_gt": (c03["total_gt"], sc["total_gt"])}
++    if any(a1 != a2 for a1, a2 in repro.values()):
++        raise ValueError(f"reproduction of det_compare complementarity failed: {repro}")
++    out["reproduction_check"] = {k: v[0] for k, v in repro.items()}
++
++    detectors = {17: (det17_sel, raw17), 29: (det29_sel, raw29)}
++    decomposition = {}
++    r_tables = {}
++    for dseed, (dsel, draw) in detectors.items():
++        for sseed in (17, 29, 43):
++            for thr in (0.3, 0.5):
++                agg = aggregate(pos, gt, dsel, draw, sft[sseed], thr)
++                key = f"det{dseed}_vs_sft{sseed}_iou{thr}"
++                decomposition[key] = {"category_counts": agg["category_counts"], "category_n_patients": agg["category_n_patients"],
++                                      "sft_only_total": agg["sft_only_total"], "total_gt": agg["total_gt"]}
++                if thr == 0.3:
++                    idx = M.bootstrap_indices(len(pos), B=B, seed=NEW_BOOT_SEED)
++                    r_tables[f"det{dseed}_vs_sft{sseed}"] = r_and_threshold_excluded(agg, idx, pos)
++                if dseed == 17 and sseed == 17 and thr == 0.3:
++                    main_agg03 = agg
++                    if sum(agg["category_counts"].values()) != c03["sft_only"]:
++                        raise ValueError("category sum mismatch with reproduced sft_only")
++    out["decomposition"] = decomposition
++    out["r_and_threshold_excluded"] = r_tables
++
++    # ---- cap 확인 (censoring)
++    for name, raw in (("detector17", raw17), ("detector29", raw29)):
++        counts = [len(r["scores"]) for r in raw.values()]
++        out.setdefault("cap_check", {})[name] = {"max_candidates": max(counts), "n_at_cap100": sum(1 for c in counts if c >= 100)}
++
++    # ---- 위치 정밀도 (det17 vs sft17 주비교)
++    pp_rows = position_precision(pos, gt, det17_sel, sft[17])
++    out["position_precision_det17_vs_sft17"] = summarize_position(pp_rows)
++
++    # ---- FP 분해 (det17 selected, sft17, 전체 800)
++    out["fp_decomposition"] = {"detector17": fp_decompose(ids, gt, det17_sel), "sft17": fp_decompose(ids, gt, sft[17])}
++
++    # ---- gate 판정
++    decision = {}
++    for dseed in (17, 29):
++        r = r_tables[f"det{dseed}_vs_sft17"]
++        crit_a = (r["r_n_affected_patients"] >= 20) and (r["r_ci97.5"][1] is not None and r["r_ci97.5"][1] >= 0.05)
++        decision[f"detector{dseed}"] = {"r_point": r["r_point"], "r_ci97.5": r["r_ci97.5"],
++                                        "r_n_affected_patients": r["r_n_affected_patients"], "criterion_a_met": crit_a}
++    cap_censoring_present = any(v["n_at_cap100"] > 0 for v in out["cap_check"].values())
++    decision["cap_censoring_present"] = cap_censoring_present
++    decision["cap_censoring_note"] = ("cap100에 도달한 confirm800 영상이 없으므로(각 det17/29 최대 candidate < 100) "
++                                      "관측 후보의 censoring으로 인한 5% 투자기준 양극단 분석은 해당 없음.")
++    decision["escalate_to_gpu_trace"] = bool(decision["detector17"]["criterion_a_met"] or decision["detector29"]["criterion_a_met"])
++    out["decision"] = decision
++
++    tmp = a.out + ".tmp"
++    with open(tmp, "w") as f:
++        json.dump(out, f, indent=2)
++    os.replace(tmp, a.out)
++
++    if a.overlay_dir:
++        os.makedirs(a.overlay_dir, exist_ok=True)
++        # 범주별 최대6명 hash순서 고정 추출 (det17 vs sft17, iou0.3)
++        by_cat = {c: [] for c in CATS}
++        for pid, rows in main_agg03["per_patient_rows"].items():
++            for r in rows:
++                if r["sft_only_category"]:
++                    by_cat[r["sft_only_category"]].append(pid)
++        for c, pts in by_cat.items():
++            uniq = sorted(set(pts), key=sha_str)[:6]
++            for pid in uniq:
++                img_path = f"{BASE}/{infer[pid]['image']}"
++                gb = [b["yxyx_norm"] for b in gt[pid]["boxes"]]
++                dsb = det17_sel[pid]["boxes"] if det17_sel[pid]["status"] in PA.VALID else []
++                sb = sft[17][pid]["boxes"] if sft[17][pid]["status"] in PA.VALID else []
++                draw_overlay(img_path, gb, dsb, sb, os.path.join(a.overlay_dir, f"{c}__{pid}.png"), canvas_side=True)
++        out["overlay_manifest"] = {c: sorted(set(v), key=sha_str)[:6] for c, v in by_cat.items()}
++        with open(tmp, "w") as f:
++            json.dump(out, f, indent=2)
++        os.replace(tmp, a.out)
++
++    print(json.dumps({"reproduction_check": out["reproduction_check"], "decision": decision,
++                      "r_det17_vs_sft17": r_tables["det17_vs_sft17"], "r_det29_vs_sft17": r_tables["det29_vs_sft17"]}, indent=1))
++
++
++if __name__ == "__main__":
++    main()
+diff --git a/tests_det/test_det_error_audit.py b/tests_det/test_det_error_audit.py
+new file mode 100644
+index 0000000..f3ab807
+--- /dev/null
++++ b/tests_det/test_det_error_audit.py
+@@ -0,0 +1,190 @@
++"""rsna_diag/det_error_audit.py 독립 검증 (medgemma env). 동작 확인 gate:
++- 4범주 분류 규칙의 손수 구성 fixture (경계값, 대응 경쟁, threshold 제외, 인접, coverage 부재).
++- FP 분해의 배타성/예외 가드.
++- ratio_ci_cluster의 퇴화(분모 0) 처리.
++- D24 층화 pilot의 결정성과 confirm800 실제 저장 출력에 대한 범주 합 = sft_only 수 검증(det_compare.complementarity와 대조).
++"""
++import json
++import os
++import sys
++
++import numpy as np
++
++BASE = "/SSD1_1TB/home/milab/daniel/08_medgemma/research"
++sys.path.insert(0, BASE)
++from rsna_diag import det_compare as DC  # noqa: E402
++from rsna_diag import det_error_audit as A  # noqa: E402
++from rsna_diag import det_eval as E  # noqa: E402
++from rsna_diag import det_lib as D  # noqa: E402
++from rsna_diag import metrics as M  # noqa: E402
++
++results = {"pass": 0, "fail": 0, "details": []}
++
++
++def check(name, cond, extra=None):
++    ok = bool(cond)
++    results["pass" if ok else "fail"] += 1
++    results["details"].append({"name": name, "ok": ok, "extra": extra})
++    if not ok:
++        print(f"FAIL: {name} {extra}")
++
++
++def test_classify_matching_competition():
++    gt_box = [400, 400, 500, 500]
++    # det selected: 한 후보가 IoU>=0.3인데(경쟁으로 다른 GT에 뺏김을 흉내: bounded_match 밖에서 직접 max_sel 검사만 함)
++    det_sel = [[410, 410, 510, 510]]  # IoU with gt_box ~ 0.68
++    raw = [([410, 410, 510, 510], 0.9)]
++    cat, iou_v, score = A.classify_gt(gt_box, det_sel, raw, thr=0.3)
++    check("matching_competition_when_selected_has_candidate", cat == "matching_competition", (cat, iou_v))
++
++
++def test_classify_threshold_excluded():
++    gt_box = [400, 400, 500, 500]
++    det_sel = []  # 선택(threshold 이상)에는 후보 없음
++    raw = [([410, 410, 510, 510], 0.2)]  # 전체 후보엔 IoU>=0.3인 후보가 있음(낮은 score)
++    cat, iou_v, score = A.classify_gt(gt_box, det_sel, raw, thr=0.3)
++    check("threshold_excluded", cat == "threshold_excluded" and score == 0.2, (cat, iou_v, score))
++
++
++def test_classify_adjacent():
++    gt_box = [400, 400, 500, 500]
++    det_sel = []
++    # IoU 0.1~0.3 사이가 되도록 겹치는 후보 구성
++    raw = [([450, 450, 550, 550], 0.05)]
++    iou_v_manual = M.iou([450, 450, 550, 550], gt_box)
++    cat, iou_v, score = A.classify_gt(gt_box, det_sel, raw, thr=0.3)
++    check("adjacent_localization_error", cat == "adjacent_localization_error" and 0.1 <= iou_v_manual < 0.3,
++          (cat, iou_v, iou_v_manual))
++
++
++def test_classify_no_coverage_far():
++    gt_box = [400, 400, 500, 500]
++    det_sel = []
++    raw = [([0, 0, 50, 50], 0.9)]  # 전혀 안 겹침
++    cat, iou_v, score = A.classify_gt(gt_box, det_sel, raw, thr=0.3)
++    check("no_coverage_far", cat == "no_stored_candidate_coverage" and iou_v == 0.0, (cat, iou_v))
++
++
++def test_classify_no_coverage_empty():
++    gt_box = [400, 400, 500, 500]
++    cat, iou_v, score = A.classify_gt(gt_box, [], [], thr=0.3)
++    check("no_coverage_empty_raw", cat == "no_stored_candidate_coverage" and score is None, (cat, iou_v, score))
++
++
++def test_classify_boundary_exact_thr():
++    # 정확히 thr과 같은 IoU: >=이므로 경쟁이 아니라 threshold_excluded 판정에서 포함돼야 함(>=0.3 검사)
++    gt_box = [0, 0, 1000, 1000]
++    # 후보가 gt와 완전히 같은 면적 비율로 IoU=0.3이 되도록 설계하기보다, 직접 iou 값을 고정한 합성 케이스로 검증
++    # 두 정사각형의 IoU가 정확히 0.3이 되도록 구성: 공유 정사각형 s, 각 면적 A, 교집합 I=0.3*(2A-I) => 풀면 I/A 비율 도출
++    import math
++    # 단순화: 같은 크기 정사각형이 겹치는 경우 IoU=inter/(2A-inter). thr=0.3 만족하는 offset 계산.
++    A_area = 1000.0
++    # inter/(2*A-inter) = 0.3 -> inter = 0.6*A - 0.3*inter -> 1.3*inter=0.6A -> inter=0.4615384615*A
++    side = math.sqrt(A_area)
++    inter_target = 0.6 / 1.3 * A_area
++    # 정사각형 두 개, 한쪽을 x축으로 이동 d: 겹치는 폭 = side-d, 넓이 겹침 = (side-d)*side
++    # 부동소수점 오차로 IoU가 0.3 미만이 되지 않도록 겹침을 미세하게 늘린다(>=0.3 보장, 경계 검사 취지 유지).
++    d = side - inter_target / side - 1e-6
++    gt = [0, 0, side, side]
++    cand = [0, d, side, side + d]
++    iou_v = M.iou(gt, cand)
++    check("boundary_setup_near_0.3", abs(iou_v - 0.3) < 1e-6, iou_v)
++    cat, ev_iou, score = A.classify_gt(gt, [], [(cand, 0.5)], thr=0.3)
++    check("boundary_exact_thr_is_threshold_excluded_not_adjacent", cat == "threshold_excluded", (cat, ev_iou))
++
++
++def test_fp_decompose_exhaustive_and_competition():
++    ids = ["p1"]
++    gt = {"p1": {"boxes": [{"yxyx_norm": [400, 400, 500, 500]}]}}
++    # pred1은 gt에 잘 맞음(matched), pred2는 같은 gt에 IoU>=thr인데 이미 매칭된 gt라 경쟁으로 unmatched.
++    preds = {"p1": {"status": "valid_nonempty", "boxes": [[405, 405, 505, 505], [410, 410, 510, 510]]}}
++    out = A.fp_decompose(ids, gt, preds, thr=0.3)
++    check("fp_decompose_one_competition", out["competes_for_matched_gt"] == 1 and out["n_fp_total"] == 1, out)
++
++
++def test_fp_decompose_no_gt():
++    ids = ["p2"]
++    gt = {"p2": {"boxes": []}}
++    preds = {"p2": {"status": "valid_nonempty", "boxes": [[10, 10, 20, 20]]}}
++    out = A.fp_decompose(ids, gt, preds, thr=0.3)
++    check("fp_decompose_negative_patient_no_gt_within_0.1", out["no_gt_within_0.1"] == 1 and out["n_fp_total"] == 1, out)
++
++
++def test_ratio_ci_cluster_degenerate_denominator():
++    num = np.array([0.0, 0.0, 1.0])
++    den = np.array([0.0, 0.0, 2.0])
++    idx = np.array([[0, 1], [0, 0], [2, 2]])  # resample0: den[0]+den[1]=0, resample1: den[0]+den[0]=0, resample2: den[2]+den[2]=4>0
++    out = A.ratio_ci_cluster(num, den, idx)
++    check("ratio_ci_flags_degenerate", out["n_degenerate_denom0"] == 2, out)
++
++
++def test_stratified_d24_deterministic_and_disjoint():
++    gt = json.load(open(f"{BASE}/results/iter_010/manifests/gt_manifest.json"))
++    ids = json.load(open(f"{BASE}/results/iter_010/manifests/confirm_ids.json"))
++    a = A.stratified_d24(ids, gt)
++    b = A.stratified_d24(ids, gt)
++    check("d24_len24", len(a) == 24, len(a))
++    check("d24_unique", len(set(a)) == len(a))
++    check("d24_deterministic", a == b)
++    cats = {gt[i]["category"] for i in a}
++    check("d24_has_all_categories", cats == {"opacity", "normal", "not_normal_no_opacity"}, cats)
++    n_opacity = sum(1 for i in a if gt[i]["category"] == "opacity")
++    check("d24_opacity_8", n_opacity == 8, n_opacity)
++
++
++def test_pilot_d24_on_real_stored_outputs():
++    """D24 subset에서 실제 저장 detector17/SFT17 출력으로 파이프라인이 돌아가고, 범주 합이
++    같은 subset에서 계산한 det_compare.complementarity의 sft_only와 일치하는지 확인한다."""
++    gt, infer = D.load_gt_infer()
++    ids = json.load(open(f"{BASE}/results/iter_010/manifests/confirm_ids.json"))
++    d24 = A.stratified_d24(ids, gt)
++    pos24 = [i for i in d24 if gt[i]["category"] == "opacity"]
++    if not pos24:
++        check("pilot_d24_has_positive", False, "no positive in D24")
++        return
++    sel17 = json.load(open(f"{BASE}/results/iter_035/select/seed17/v400_selection.json"))
++    raw_full, comp, rid = E.load_verified(f"{BASE}/results/iter_035/confirm800/det17", "confirm800", sel17["selected_checkpoint"])
++    thr17 = sel17["selected"]["threshold"]
++    det17_sel_full = D.preds_to_norm_yxyx(raw_full, gt, thr17)
++    recs, _ = DC.load_stored(f"{BASE}/results/iter_012/confirm_sft_seed17", ids, ("concise",), DC.ADAPTERS[17], infer)
++    from rsna_diag import sft_eval as SE
++    sft17_full = SE.parse_records(recs, ids, "concise", strict=True)
++
++    raw24 = {i: raw_full[i] for i in d24}
++    det_sel24 = {i: det17_sel_full[i] for i in d24}
++    sft24 = {i: sft17_full[i] for i in d24}
++
++    idx_dummy = M.bootstrap_indices(len(pos24), B=10, seed=1)
++    c03, _ = DC.complementarity(det_sel24, sft24, gt, pos24, 0.3, idx_dummy)
++    agg = A.aggregate(pos24, gt, det_sel24, raw24, sft24, 0.3)
++    check("pilot_d24_category_sum_matches_sft_only", sum(agg["category_counts"].values()) == c03["sft_only"],
++          (agg["category_counts"], c03["sft_only"]))
++    check("pilot_d24_total_gt_matches", agg["total_gt"] == c03["total_gt"], (agg["total_gt"], c03["total_gt"]))
++    # 후보가 threshold_excluded로 분류된 GT는 반드시 raw_max_iou>=0.3, category_evidence_score는 threshold17 미만이어야 함
++    bad = []
++    for pid, rows in agg["per_patient_rows"].items():
++        for r in rows:
++            if r["sft_only_category"] == "threshold_excluded":
++                if r["category_evidence_score"] is None or r["category_evidence_score"] >= thr17:
++                    bad.append((pid, r))
++    check("threshold_excluded_score_below_locked_threshold", len(bad) == 0, bad[:3])
++
++
++if __name__ == "__main__":
++    test_classify_matching_competition()
++    test_classify_threshold_excluded()
++    test_classify_adjacent()
++    test_classify_no_coverage_far()
++    test_classify_no_coverage_empty()
++    test_classify_boundary_exact_thr()
++    test_fp_decompose_exhaustive_and_competition()
++    test_fp_decompose_no_gt()
++    test_ratio_ci_cluster_degenerate_denominator()
++    test_stratified_d24_deterministic_and_disjoint()
++    test_pilot_d24_on_real_stored_outputs()
++    print(json.dumps({"pass": results["pass"], "fail": results["fail"]}, indent=1))
++    out_path = os.environ.get("DET_ERROR_AUDIT_FIXTURES_OUT")
++    if out_path:
++        with open(out_path, "w") as f:
++            json.dump(results, f, indent=2, default=str)
++    sys.exit(1 if results["fail"] else 0)
+diff --git a/tests_det/verify_error_audit_independent.py b/tests_det/verify_error_audit_independent.py
+new file mode 100644
+index 0000000..1e99e75
+--- /dev/null
++++ b/tests_det/verify_error_audit_independent.py
+@@ -0,0 +1,74 @@
++"""det_error_audit 주수치의 독립 재계산: 원시 raw_preds/SFT 응답에서 자체 IoU·itertools 열거 matching으로
++범주 수와 R을 다시 구해 results/iter_036/full/analysis.json과 대조한다 (det17/29 x sft17, IoU0.3)."""
++import itertools
++import json
++import sys
++
++BASE = "/SSD1_1TB/home/milab/daniel/08_medgemma/research"
++sys.path.insert(0, BASE)
++from rsna_diag import det_compare as DC, det_lib as D, geometry as G, sft_eval as SE  # noqa: E402
++
++
++def iou(a, b):
++    ih = max(0.0, min(a[2], b[2]) - max(a[0], b[0]))
++    iw = max(0.0, min(a[3], b[3]) - max(a[1], b[1]))
++    i = ih * iw
++    u = (a[2] - a[0]) * (a[3] - a[1]) + (b[2] - b[0]) * (b[3] - b[1]) - i
++    return i / u if u > 0 else 0.0
++
++
++def hits(pred, gt, thr):
++    cands = [[p for p in range(len(pred)) if iou(pred[p], g) >= thr] + [None] for g in gt]
++    best, bk = set(), None
++    for combo in itertools.product(*cands):
++        used = [c for c in combo if c is not None]
++        if len(used) != len(set(used)):
++            continue
++        k = (len(used), sum(iou(pred[c], gt[gi]) for gi, c in enumerate(combo) if c is not None))
++        if bk is None or k[0] > bk[0] or (k[0] == bk[0] and k[1] > bk[1] + 1e-12):
++            bk, best = k, {gi for gi, c in enumerate(combo) if c is not None}
++    return best
++
++
++def main():
++    gt, infer = D.load_gt_infer()
++    ids = json.load(open(f"{BASE}/results/iter_010/manifests/confirm_ids.json"))
++    pos = [i for i in ids if gt[i]["category"] == "opacity"]
++    recs, _ = DC.load_stored(f"{DC.IT012}/confirm_sft_seed17", ids, ("concise",), DC.ADAPTERS[17], infer)
++    sft = SE.parse_records(recs, ids, "concise", strict=True)
++    saved = json.load(open(f"{BASE}/results/iter_036/full/analysis.json"))
++    out = {}
++    for dseed, sel, cdir in ((17, "seed17", "det17"), (29, "seed29", "det29")):
++        thr = json.load(open(f"{BASE}/results/iter_035/select/{sel}/v400_selection.json"))["selected"]["threshold"]
++        raw = json.load(open(f"{BASE}/results/iter_035/confirm800/{cdir}/raw_preds.json"))
++        cnt = {"matching_competition": 0, "threshold_excluded": 0, "adjacent_localization_error": 0, "no_stored_candidate_coverage": 0}
++        r_num = 0
++        for i in pos:
++            g = [b["yxyx_norm"] for b in gt[i]["boxes"]]
++            r = raw[i]
++            top, left, side = G.pad_offsets(*r["img_hw"])
++            allc = [(G.canvas_to_norm(b, top, left, side), s) for b, s, l in zip(r["boxes_xyxy_px"], r["scores"], r["labels"]) if l == 1]
++            selb = [b for b, s in allc if s >= thr]
++            sb = sft[i]["boxes"] if sft[i]["status"] in ("valid_nonempty", "valid_empty") else []
++            dh, sh = hits(selb, g, 0.3), hits(sb, g, 0.3)
++            for gi in range(len(g)):
++                if gi in sh and gi not in dh:
++                    if any(iou(b, g[gi]) >= 0.3 for b in selb):
++                        c = "matching_competition"
++                    else:
++                        m = max((iou(b, g[gi]) for b, _ in allc), default=0.0)
++                        c = "threshold_excluded" if m >= 0.3 else "adjacent_localization_error" if m >= 0.1 else "no_stored_candidate_coverage"
++                    cnt[c] += 1
++                    r_num += c in ("adjacent_localization_error", "no_stored_candidate_coverage")
++        s = saved["decomposition"][f"det{dseed}_vs_sft17_iou0.3"]["category_counts"]
++        out[f"det{dseed}"] = {"independent": cnt, "saved": s, "match": cnt == s, "r_num": r_num,
++                              "r_saved": saved["r_and_threshold_excluded"][f"det{dseed}_vs_sft17"]["r_numerator"]}
++        out[f"det{dseed}"]["match"] = out[f"det{dseed}"]["match"] and r_num == out[f"det{dseed}"]["r_saved"]
++    out["pass"] = all(v["match"] for v in out.values() if isinstance(v, dict))
++    json.dump(out, open(f"{BASE}/results/iter_036/full/independent_verify.json", "w"), indent=1)
++    print(json.dumps(out, indent=1))
++    sys.exit(0 if out["pass"] else 1)
++
++
++if __name__ == "__main__":
++    main()

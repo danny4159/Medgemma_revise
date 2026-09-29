@@ -162,22 +162,21 @@ RSNA seed17 grounding SFT의 nonempty 개발 출력 C201/E402에서 마지막 �
 
 ## rsna-detector-sft-localization-tradeoff — observed
 
-기존 RSNA 개발800명 중 양성400명에서, 동일 annotation budget으로 학습하고 validation에서 선택한 Faster R-CNN v2 seed17은 MedGemma 1.5 grounding SFT seed17보다 F1@0.5가 0.06688 높았다(97.5% CI [0.01221, 0.12197]). F1@0.3 차이는 −0.04911로 불확정이었다. IoU0.3에서 detector-only/SFT-only GT는 71/589·77/589개였다. 현재 선택점의 정확도 차이와 오류 상보성에 관한 관찰이며, detector의 전반적 우위나 VLM 고유 능력·외부 일반화를 입증하지 않는다.
+기존 RSNA 개발800명 중 양성400명·GT589개의 고정 비교에서 detector17의 SFT17 대비 F1@0.5 이점(+0.06688)은 유지된다. 다만 IoU0.3의 SFT-only GT는 detector17에서 75/77개, detector29에서 80/87개가 저장 후보에는 있으나 선택 threshold 아래에 있었다. SFT17이 검출했지만 detector 저장 후보에 IoU≥0.3 대응이 없는 잔여량 R은 각각 1/589·7/589였다. 현재 선택점의 상보성은 주로 threshold 제외와 연결되며, 큰 후보 coverage 차이라는 설명은 약화된다. 이는 개발 자료·post-NMS 후보의 관찰이고 실용적인 detector 우위, confidence 교정의 성공, VLM 고유 능력 또는 외부 일반화를 입증하지 않는다.
 
 - 적용 목표 시작: iter_003
-- 최신 리뷰: agent/runs/iter_035/review.json
-- 근거: research/results/iter_035/confirm800/{det17,det29}/raw_preds.json 및 research/results/iter_012/confirm_sft_seed17/gen_worker*.jsonl: 리뷰에서 별도 좌표 변환·matching·환자 bootstrap으로 두 detector seed의 주수치를 재계산했다.
-- 근거: research/results/iter_035/confirm800/analysis.json: detector17-only 71개/63명, SFT-only 77개/70명; 비율 95% CI는 각각 [0.09315, 0.14865], [0.10204, 0.16035].
-- 근거: detector29−B0의 F1@0.3/0.5 차이는 −0.05683/+0.05775로 같은 방향이었다.
-- 근거: research/results/iter_035/latency/rep*.json: 동일 GPU L64×3의 평균 end-to-end 시간은 detector 0.06178초, B0 4.29965초였다.
-- 사용·평가 검증: 리뷰 SHA 615c61ec51cfe9d84d564bfcaab434a3a5c78cb1의 변경 파일과 현재 파일 bytes가 모두 일치했다.
-- 사용·평가 검증: 선택 LOCK의 파일 hash, 두 seed의 선택 checkpoint·원시 예측·shard hash와 추론 source digest를 대조했다.
-- 사용·평가 검증: V400 저장 후보에서 선택 규칙을 독립 적용해 seed17 epoch18/threshold0.70, seed29 epoch26/threshold0.60을 재현했다.
-- 사용·평가 검증: 학습 canonical 로그 7,800/11,400 update의 연속성·유한 loss·digest와 실제 LR 감소 경계를 확인했다.
-- 사용·평가 검증: latency_tensorcheck_L64.json의 공식 입력 64/64 일치, 저장 suffix 64/64×3 재현 및 전체3,600명 입력 감사 결과를 확인했다.
-- 미해결: SFT-only 병변이 detector의 confidence 선택, 위치 오차, 실제 미검출 중 무엇으로 설명되는가?
-- 미해결: FP budget을 맞춰도 조건별 차이가 유지되는가? detector의 validation FP budget1.0에서는 SFT-only 비율이 3.9%까지 감소했다.
-- 미해결: seed29의 수렴 판정에는 사후 0.01 기준이 사용됐으므로 완전 수렴은 확정할 수 없다.
-- 미해결: VinDr 승인 후 target 차이를 통제한 외부 평가에서도 같은 경향이 유지되는가?
-- 미해결: 이 차이가 실제 언어·근거 과제의 효용이나 새로운 post-training 방법으로 연결되는가?
+- 최신 리뷰: agent/runs/iter_036/review.json
+- 근거: research/results/iter_036/full/analysis.json: detector17/SFT17 분해는 대응 경쟁1·threshold 제외75·인접 위치 오차1·IoU0.1 미만 후보 coverage 부재0, detector29/SFT17은 각각0·80·7·0이다.
+- 근거: 원시 detector 2×800건과 SFT 3×800건을 리뷰에서 별도 JSON 해석·좌표 변환·열거 matching으로 재계산했다. 6개 조합의 범주 수와 R 및 threshold 제외 비율의 10,000회 환자 bootstrap CI가 저장 결과와 일치했다.
+- 근거: R의 97.5% CI는 detector17 [0, 0.006768], detector29 [0.003367, 0.022375]이며 영향 환자는 각각1명·7명이다. threshold 제외 비율 CI는 각각 [0.926829, 1]·[0.85, 0.977011]이다.
+- 근거: research/results/iter_035/confirm800/analysis.json: detector17의 validation FP budget1.0 선택점은 개발800에서 FP/환자1.0075, 양성 F1@0.3 0.584433이었다. 후보 회복이 실용 성능 개선을 뜻하지 않는다.
+- 사용·평가 검증: 리뷰 SHA f9bfbc250058ce1785f819dd404b1148998918b9의 신규 소스3개가 현재 파일과 일치하며, 기존 parser·metric·geometry·평가 의존 소스는 iter_035 승인·검토 시점과 동일하다.
+- 사용·평가 검증: 선택 LOCK의5개 파일 hash, 두 detector의 checkpoint·raw_preds·shard hash, 추론 source digest·batch1·1,600개 shard record의 입력 연결을 확인했다.
+- 사용·평가 검증: 기존 protocol의 입력 manifest·split hash와 개발800 영상 file hash를 확인했고 불일치가 없었다. SFT3개 seed의 원시 shard provenance는 iter_035와 동일하며 2,400개 응답의 JSON 좌표와 EOS가 유효했다.
+- 사용·평가 검증: 6개 조합에서 GT·prediction 순서를 뒤집은 matching의 검출 GT 집합 변화는0명이었다. 기존 정상 사용 검증은 재사용했으며 공식 GPU 예제를 재실행하지 않았다.
+- 미해결: 고정 FP budget별 양쪽 detector의 실제 FP 비용과 F1@0.3/0.5·상보성을 함께 비교해도 실용적 차이가 유지되는가? 이번 계획의 전체 표는 미완료다.
+- 미해결: 후처리 전 후보는 미추적이다. 다만 현재 R·영향 환자 수와 cap 관찰은 사전 GPU 확대 조건을 충족하지 않는다.
+- 미해결: 표준 선택·calibration이 강한 기준점보다 실제 효용을 높이는지는 검증하지 않았다.
+- 미해결: VinDr 승인 후 target 차이를 통제한 외부 평가와 언어·근거 과제에서도 이 관찰이 유효한가?
+- 미해결: seed29 완전 수렴, 사전학습 노출 및 SOP 수준 독립성에 대한 기존 불확실성은 남는다.
 
