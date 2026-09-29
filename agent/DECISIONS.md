@@ -898,11 +898,42 @@ Claude 계정의 /usage 또는 Settings > Usage에서 제한을 확인한 뒤 �
 - ⏹ 중단: Ctrl+C (계획 확인 중)
 - 📁 원본: `agent/runs/iter_032/`
 
-## iter_033 — ? (1번째 시도) · 2026-09-29 13:15
+## iter_033 — RSNA 전용 detector와 SFT 비교 (1번째 시도) · 2026-09-29 13:15
 
 사용자 보완 원문: agent/runs/iter_033/intervention.json
 
 - ▶ 실행 시작 (orchestrator f2a0aa1)
 - ⏹ 중단: 오류: codex 실행 준비 실패 (errno=2): No such file or directory. 로그: /SSD1_1TB/home/milab/daniel/08_medgemma/agent/runs/iter_033/plan_codex.log (GPT 사고 라운드 1 중)
+- ↻ 재실행: '계획' 단계부터 이어서 (orchestrator 88d7c21)
+- 🔎 **사고 라운드 1** (GPT deep): VinDr 승인 대기 동안 RSNA detector 비교를 우선한다. 기존 2,400명 학습 자료와 LoRA 출력은 활용 가능하며, 공식 detector 실행 환경과 충분한 학습·평가 규약을 추가 확인한다.
+  - 스스로 던진 질문: 기본 medgemma 환경을 변경하지 않고 공식 Faster R-CNN을 실행할 경로를 확정할 수 있는가? 기존 natten_py310을 별도 subprocess로 사용하는 범위와 구현 단계의 import·CUDA NMS/ROIAlign·가중치 검증 gate를 어떻게 명시할 것인가? · COCO 사전학습 detector를 RSNA train 2,400명에 충분히 적응시키기 위한 한 가지 학습 recipe와 제한된 validation 선택은 무엇인가? 탐색 subset·1개 seed에서 본학습·수렴 보완·조건부 seed 확대를 결정할 기준을 어떻게 고정할 것인가? · 기존 SFT 출력을 유지하면서 detector confidence/NMS 선택, 많은 후보의 matching, 작은·복수 병변 오류 상보성, 공정한 latency 측정을 어떤 사전 규약과 규모로 연결할 것인가?
+- 🧭 **계획** (GPT deep): VinDr 승인 대기 동안 같은 RSNA 학습 2,400명으로 전용 detector를 확보해 기존 LoRA와 정확도·오류 상보성·비용을 비교한다. 기존 confirm은 개발 비교이며 신규 기여·외부 전이는 아직 미검증이다.
+  - 대안: 1) RSNA 전용 detector와 SFT 비교: 동일 annotation의 실제 대안과 비교해 내부 grounding의 다음 투자 가치를 판단한다. · 2) 기존 grounding 방법 개선: detector 대비 잔여 이점이나 구별되는 실패 조건이 확인될 때까지 새 loss·head·continuation 투자를 보류한다. · 3) 외부 opacity 전이 진단: VinDr 승인 통지 후 detector 결과와 target 차이를 반영해 보존된 계획을 재검토한다. · 4) 언어·근거 연결 과제로 전환: VLM이 필요한 사용 목적과 유효한 정답·강한 모듈형 baseline을 갖춘 별도 질문으로 구체화한다.
+  - 1순위 선택 근거: 사용자가 승인한 RSNA detector 비교가 다음 투자 판단에 가장 직접적인 정보를 준다. 공식 구현·보존 자료·재사용 출처를 확인했고, 남은 환경과 학습 불확실성은 구현 단계의 gate로 처리할 수 있다. 같은 승인이나 VinDr 접근 상태를 다시 묻지 않는다.
+- ▶ **결정**: 자동 진행 (smart) — 1순위로 진행
+- 💾 **개발 이력 체크포인트** `a60224c1f7d54e4f59e8c4dc16285d62faf004b5`: implementation_finished (검증 승인 아님)
+- 🔧 **Claude** (standard): (요약 없음) [자체 검증 없음, 파일 56개 변경]
+  - 새 브랜치 `approach/rsna-detector-comparison` ← 68117cf (68117cf)
+  - ⚠ 권한 거부 11건
+- 🔍 **리뷰** (GPT normal): [CONTINUE / execution_failed] VinDr 대기 중 RSNA detector 탐색 F1@0.3은 0→0.411로 올랐지만 본학습·비교가 중단됐다. 기존 LoRA 대비 우열은 미판정이며 실행 복구 후 비교를 완료해야 한다.
+  - 접근법 판단: 탐색 학습 신호는 확인했지만 실행 수명 관리와 필수 gate 미완료로 계획한 detector–SFT 비교를 끝내지 못했다.
+  - 목표 진전: 실행 측면에서는 detector 탐색 450 update와 V100 실제 검출을 확인했다. 양성 50명의 F1@0.3은 epoch0/3/6에서 0/0.3367/0.4113으로 상승했고 별도 재집계도 일치했다. 이는 학습 신호이며 SFT 대비 성능 개선은 아니다. 본학습·비교 미완료로 정확도·오류 상보성·비용에 관한 주가설은 검증하지 못했다. 신규 기여와 외부 일반화 역시 미검증이다. 승인된 비교를 복구해 완료할 가치는 유지된다.
+  - 판정 범위: iter_033의 Faster R-CNN v2 RSNA 적응·비교 파이프라인에 한정한다. train600 탐색은 실행됐으나 train2400 본학습, V400 선택, 개발 비교800 및 공정한 latency 비교가 미완료다. detector 계열의 성능 실패나 기존 MedGemma SFT 성과의 기각이 아니다.
+  - 현재 결론 무효: 계획한 본학습·V400 선택·개발 비교800·latency 비교가 미완료다. 리뷰 시 full_seed17 로그는 594 update였으며 계획은 기본 7,800 update다.
+  - 현재 결론 무효: 약 2시간을 예상한 본학습 subprocess에 timeout=590을 설정했고 latency에도 짧은 timeout을 사용했다. ScheduleWakeup 뒤 최종 응답을 반환했으며, 로그 말미에 두 background task가 stopped로 기록됐다.
+  - 현재 결론 무효: 계획상 필수인 실제 학습 재개·부모 종료·입력/checkpoint/completion 변조 거부와 provenance gate가 확보되지 않은 채 본학습에 진입했다. 따라서 현재 자료로 완전한 baseline 비교의 실행 유효성을 승인할 수 없다.
+  - 재사용 전 수정: detector_lib.py, run_detector.py, 평가·선택·latency 코드와 tests가 Git 제외 경로 results/iter_033에만 있다. commit.json의 unpreserved_paths가 비어 있어도 이 소스들은 리뷰 SHA에 없다. 원본을 보존하고 추적되는 소스 경로로 편입해 실행 당시 bytes·결과와 연결해야 한다.
+  - 재사용 전 수정: 실행 호스트에서 PID/starttime·lock·자식 종료 코드·checkpoint를 확인해야 한다. 리뷰 sandbox의 ps로 호스트 생존 여부를 확정할 수 없다. 살아 있는 작업을 중복 실행하거나 사용 중인 소스를 수정하지 않는다.
+  - 재사용 전 수정: 본학습 cmd_train은 매 update에 augmentation RNG를 같은 epoch seed로 다시 초기화한다. 의도한 연속 난수열과 다르며, 별도 resume_test는 이 실제 학습 loop를 검사하지 않는다. 기존 checkpoint와 수정 recipe의 호환성을 명시해야 한다.
+  - 재사용 전 수정: resume_test의 최대 loss 차이 1.36082를 반복 변동 0.55219의 3배 이내라는 사후 조건으로 통과시켰다. 실제 별도 프로세스 재개, 저장 상태·optimizer·scheduler·LR·sample 순서의 정확한 대조가 필요하다.
+  - 재사용 전 수정: train.lock 생성이 원자적이지 않고 PID만 검사한다. checkpoint에 입력·protocol digest 검증이 없으며 --fresh는 같은 경로를 재사용할 수 있다. pilot_mb2 로그에는 update 0–74가 반복돼 있다. 소유권·attempt·완료·덮어쓰기 방지를 보완해야 한다.
+  - 재사용 전 수정: infer_resume_test는 같은 프로세스에서 파일을 다시 쓰는 모의 검사다. 실제 부모 종료와 변조 입력 거부를 시험하지 않으며, 재추론 근사 일치가 변조 거부를 대신할 수 없다.
+  - 재사용 전 수정: data audit은 현재 영상 60개 표본만 검사했다. 전체 입력·SOP/pixel 중복·원본 GT·저장 SFT 출력 연결과 필수 digest를 확인하고, 면적 층화가 빠진 현재 subset의 대표성을 평가해야 한다. 기존 subset을 결과에 맞춰 다시 선택하지 않는다.
+  - 재사용 전 수정: 최종 분석은 주차이의 97.5% CI 대신 95% CI를 계산한다. 중복 record는 계수만 하고 거부하지 않으며 source/completion 연결을 검사하지 않는다. FP 차이 CI, 1/2/3개 이상 GT·개별 작은 병변·FP budget 결과와 조건부 seed/수렴 decision도 완료해야 한다.
+  - 재사용 전 수정: threshold 선택은 FP 입력을 생략하면 FP=0으로 대체한다. 사전 checkpoint×threshold 동점 규칙과 선택 잠금, 평가 진입 gate를 강제해야 한다.
+  - 재사용 전 수정: latency 결과 저장 디렉터리 생성, 실제 공식 입력·adapter·저장 token 일치, 동일 GPU 단독 resident·동기화·긴 출력·측정 구간을 검증해야 한다. iter_031 저장 출력 보완 분석도 미완료다.
+  - 추후 개선: RSNA 개발 비교가 완료돼도 외부 일반화와 VLM 언어·근거 연결 과제의 가치는 별도 검증이 필요하다. VinDr 승인 통지 전 다운로드·외부 평가를 하지 않는다.
+  - 추후 개선: 대규모 architecture·hyperparameter 탐색과 주변 과거 pipeline 정비는 이번 복구 범위에 추가하지 않는다.
+  - 다음: 실행 수명과 필수 검증을 복구한 뒤 승인된 RSNA detector–SFT 비교를 완료한다. 실행 호스트에서 기존 task·PID/starttime·lock·checkpoint·종료 상태를 먼저 확인하고 살아 있는 작업은 중복 실행하지 않는다. results/의 핵심 소스와 원본 산출물을 보존·버전 연결한 뒤 임의의 짧은 subprocess timeout과 조기 최종 응답 문제를 해결한다. 실제 cmd_train 경로의 중간-step 재개·RNG·LR·소유권·provenance를 검증하고 augmentation 수정이 기존 학습 조건에 미치는 영향을 실행 전에 명시한다. 변경 영향을 받지 않는 탐색 출력은 재사용하며, 필요 시 detector만 새 attempt로 학습하고 기존 SFT를 재학습하지 않는다. 원래 V100/V400 일정·수렴·조건부 seed·선택 규칙을 유지하고 97.5% paired CI, 오류 상보성·FP 비용·층별 지표·공정한 latency까지 완료한다. iter_031 잔여 분석은 저장 출력으로 마무리한다. 새 loss·continuation·MRI F139·reserve는 열지 않고, VinDr는 사용자 승인 통지 후 별도 재검토한다.
 - 📁 원본: `agent/runs/iter_033/`
 
