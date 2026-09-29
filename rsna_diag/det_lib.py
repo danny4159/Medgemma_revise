@@ -5,6 +5,7 @@ iter_033의 results/iter_033/detector_lib.py를 원본으로 하고, iter_034에
 d562f8b2059c24678a7bafc8798aa541b47a6a72c2e582aed96346c38d53a394):
 - RSNADetDataset.__getitem__이 실제 적용한 flip 여부를 target["flip"]으로 반환한다 (재개 로그 검증용).
 그 외 dataset/model/optimizer/scheduler/rng/checkpoint 유틸리티 로직은 원본과 동일하다.
+iter_035: flip_p·min_size·max_size를 인자로 노출했다(기본값 0.5/800/1333은 기존 동작·torchvision 기본값과 동일).
 """
 import hashlib
 import json
@@ -37,11 +38,12 @@ def load_gt_infer():
 class RSNADetDataset(Dataset):
     """원본 uint8 영상(RGB 복제, 값 보존) + pixel xyxy GT box(opacity=label1). horizontal flip만 augmentation."""
 
-    def __init__(self, ids, gt, infer, train_aug=False, seed=0):
+    def __init__(self, ids, gt, infer, train_aug=False, seed=0, flip_p=0.5):
         self.ids = list(ids)
         self.gt = gt
         self.infer = infer
         self.train_aug = train_aug
+        self.flip_p = flip_p
         self.rng = random.Random(seed)
 
     def __len__(self):
@@ -59,7 +61,7 @@ class RSNADetDataset(Dataset):
         h, w = rgb.shape[:2]
         g = self.gt[pid]
         boxes = [b["xyxy_px"] for b in g["boxes"]]
-        do_flip = self.train_aug and self.rng.random() < 0.5
+        do_flip = self.train_aug and self.rng.random() < self.flip_p
         if do_flip:
             rgb = np.ascontiguousarray(rgb[:, ::-1, :])
             boxes = [[w - x1, y0, w - x0, y1] for x0, y0, x1, y1 in boxes]
@@ -81,13 +83,14 @@ def collate_fn(batch):
     return imgs, targets, dims
 
 
-def build_model(num_classes=2, trainable_backbone_layers=5):
+def build_model(num_classes=2, trainable_backbone_layers=5, min_size=800, max_size=1333):
     from torchvision.models.detection import fasterrcnn_resnet50_fpn_v2, FasterRCNN_ResNet50_FPN_V2_Weights
     from torchvision.models.detection.faster_rcnn import FastRCNNPredictor
 
     weights = FasterRCNN_ResNet50_FPN_V2_Weights.COCO_V1
     model = fasterrcnn_resnet50_fpn_v2(weights=weights, trainable_backbone_layers=trainable_backbone_layers,
-                                       box_score_thresh=0.001, box_nms_thresh=0.5, box_detections_per_img=100)
+                                       box_score_thresh=0.001, box_nms_thresh=0.5, box_detections_per_img=100,
+                                       min_size=min_size, max_size=max_size)
     in_features = model.roi_heads.box_predictor.cls_score.in_features
     model.roi_heads.box_predictor = FastRCNNPredictor(in_features, num_classes)
     return model
@@ -135,12 +138,17 @@ def full_rng_state():
     }
 
 
-def restore_rng_state(state):
+def restore_rng_state(state, cuda_map=None):
+    """cuda_map=(저장 당시 학습 장치 index, 현재 학습 장치 index): 저장 process와 현재 process가 보는 GPU 수가
+    다를 수 있으므로 학습에 쓰인 장치의 CUDA generator만 옮긴다. None이면 기존처럼 전체 장치를 복원한다."""
     random.setstate(state["python"])
     np.random.set_state(state["numpy"])
     torch.set_rng_state(state["torch_cpu"])
     if state["torch_cuda"] is not None and torch.cuda.is_available():
-        torch.cuda.set_rng_state_all(state["torch_cuda"])
+        if cuda_map is None:
+            torch.cuda.set_rng_state_all(state["torch_cuda"])
+        else:
+            torch.cuda.set_rng_state(state["torch_cuda"][cuda_map[0]], device=cuda_map[1])
 
 
 def optimizer_state_to_device(optimizer, device):
