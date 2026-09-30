@@ -1,0 +1,187 @@
+# 요약
+
+- **이번에 할 일:** PadChest-GR의 정식 접근 확보 후 문장–영역 대응을 검증할 수 있는 사례와 평가 단위를 점검한다.
+- **필요한 이유:** 기존 RSNA 비교는 마무리됐고, 문장별 다중 영역 예측 자체는 이미 선행연구가 다룬다. 실제로 구분할 새 실패 조건이 필요하다.
+- **확인할 기준:** 원본 주석·환자 분할·좌표가 연결되고, 단순 category·위치 대응 이후에도 평가할 사례가 남는지 확인한다.
+- **주의·다음:** 접근 신청과 실제 이용 가능 여부 확인이 선행 조건이다. 이번은 setup이며 모델 한계 검증·학습·연구 목표 달성이 아니다. 적격성 결과를 바탕으로 별도 GPU diagnostic을 확정한다.
+
+# Current Understanding
+
+기준 기록은 `agent/runs/iter_037/review.md`와 이번 `think/round_01.json`이다. 후자의 SHA256은 `648ee516e0e374a492380eab2c650622ed3489ac081814d3ad841b71c8f0ea03`이다. 기존 RSNA의 위치 정밀도·FP·미검출 trade-off와 직접 SFT 성과는 유지한다.
+
+**유지:** GOAL, MedGemma 1.5, 기존 checkpoint·결과·분할, VinDr 승인 대기, continuation 추가 투자 종료, MRI F139·CheXpert F105·reserve 보존.
+
+**변경:** round_01의 실행 후보 diagnostic을 바로 시작하지 않고 자료 적격성 setup으로 좁힌다. PadChest-GR을 우선 자료로 선택하며 MedGrounder를 가까운 선행 방법에 추가한다.
+
+**보류:** 새 loss·ensemble·calibration, 기존 RSNA 출력 재생성, uMedGround 합성 보고서를 실제 보고서 대응 정답으로 사용하는 설계.
+
+현재 권한·로컬 파일이 확인되지 않았다. 사용자에게는 별도 접근 신청 여부만 묻는다. 신청 동의나 신청 완료를 데이터 이용 승인으로 간주하지 않는다. 권한이 확보되기 전 Claude의 자료 다운로드·실험 실행을 시작하지 않으며, 대기 상태를 실행 실패나 완료로 기록하지 않는다.
+
+# Strategy Check / 연구 방향 판단
+
+중요한 과제는 소견 문장을 올바른 영상 근거에 연결해 보고서를 검토할 수 있게 하는 것이다. 검출 성능과 문장–영역 대응 능력은 구분되지만 그 구분 자체가 기여는 아니다.
+
+현재 방법 개선은 큰 후보 coverage 차이라는 설명이 약해졌고 같은 개발 집단의 추가 분석 가치가 낮다. 기존 전이 진단 연장은 형식·oracle 경쟁 설명을 반복할 가능성이 크다. 새로운 문장–영역 질문은 더 직접적인 언어적 사용 목적이 있으나 적격 주석과 단순 baseline 이후의 잔여 문제가 미확인이다.
+
+따라서 큰 학습 투자가 아니라 자료 적격성을 결정할 최소 작업을 선택한다. 접근할 수 없거나, 주석상 대응이 모호하거나, 단순 정보로 과제가 대부분 해소되면 이 후보의 자동 연장을 중단한다. GOAL을 변경하거나 모든 grounding 연구를 기각하는 판단은 아니다.
+
+# Hypothesis
+
+이번 setup의 검증 대상은 자료에 관한 가설이다.
+
+**H_data:** 같은 영상에 서로 다른 소견 문장과 근거 영역 집합이 존재하고, 세부 category·location만으로 대응이 유일해지지 않는 사례를 원본 주석에서 식별할 수 있다.
+
+**경쟁 설명:** 겉보기 다중 대응이 사실은 넓은 category 묶음, 동일 소견의 중복 표현, 양측 소견의 하나의 영역 집합, 경계 주석 차이 또는 이전 영상이 필요한 문장으로 설명된다.
+
+H_data가 충족돼도 MedGemma의 결합 오류나 새 방법의 필요성을 입증하지 않는다. 실제 출력 가설은 다음 diagnostic에서 검증한다.
+
+# Limitation Evidence / Correct Usage Checks
+
+`rsna-evidence-interface-sensitivity`와 `rsna-region-selection-transfer`는 기존 진단의 교훈을 연결하는 observed 주장이다. 관련 LIMITATIONS 항목과 iter_016–018·025·027 리뷰 원문을 확인했다. 형식 실패를 의미 손실로 바꾸거나 oracle 해석 실패를 통제된 공간 능력 결함으로 해석하면 안 된다.
+
+새 문장–영역 결합 한계는 아직 validated가 아니다. 기존 `lesion-grounding-generalization`의 validated 상태를 새 질문에 전용하지 않는다. CPU 자료 점검만으로 한계 상태를 승격하지 않는다.
+
+PadChest-GR의 문장별 box 집합을 유지한다. 빈 box에는 음성 문장과 비국소적 양성 소견이 섞일 수 있으므로 별도 상태로 보존한다. 같은 영상의 다른 문장에 연결된 box라는 이유만으로 확정 오답을 만들지 않는다. 해부학적 중첩과 동일 소견의 표현 차이를 먼저 검사한다.
+
+# Contribution Path / Baselines / Reuse
+
+가까운 선행 방법과 자료 선택 근거는 research_notes의 원문 링크를 따른다. 후속 비교는 다음 설명을 구분해야 한다.
+
+1. category·location oracle로 대응이 유일하면 언어–영상 결합의 잔여 난도는 작을 수 있다. 이는 실제 detector나 언어 파서 성능이 아니라 단순 정보의 설명 범위다.
+2. 문장별 독립 MedGemma도 실패하면 개별 인식·grounding이 우선 문제다.
+3. 독립 처리는 성공하고 공동 처리만 실패하면 결합·간섭 후보다. 이때 특징·prefix 재사용을 허용한 독립 처리의 비용을 비교한다.
+4. 실제 detector+VLM, 의료 image–text matching 또는 MedGrounder가 잔여 문제를 해결하면 해당 모듈형 구성을 강한 baseline으로 유지한다.
+5. 방법 개발은 정상 사용 진단과 강한 직접 SFT 이후의 잔여 문제에 한정한다. 새 decoder·set loss·혼합 SFT라는 이름만으로 기여를 주장하지 않는다.
+
+현재 연구 HEAD `755ec06e17606936422f1595f7bf62dc53085e59`의 파일 목록과 CODE_ASSETS를 확인했다. 이번 setup에는 과거 GPU 실행기·detector 분석기·RSNA parser를 사용하지 않는다. 따라서 `reuse_assets=[]`이며 미사용 경로의 결함 수정도 범위에 넣지 않는다. 새 브랜치 기반은 orchestrator의 자동 승인본 선택을 따른다.
+
+공개 MedGrounder 변환 코드는 schema 참고 자료다. 실제 파일의 공식 schema를 확인하고, 중복 key·split 누락·extra annotation 보존을 강제하는 최소 자료 전용 adapter를 작성한다. 외부 코드를 가져오게 된다면 라이선스·정확한 revision·변경 내역을 별도로 기록한다.
+
+# Proposed Experiment
+
+## 0. 권한·입력 조건
+
+사용자가 승인된 이용 권한과 자료 위치를 제공한 뒤 시작한다. 신규 신청만 진행 중이면 실행을 보류한다. 계정 정보·비밀번호·토큰을 요청하지 않는다. 공식 배포 외 mirror로 접근 절차를 우회하지 않는다.
+
+필요 입력은 grounded report 원본 JSON, 환자·study·image·공식 split을 연결할 metadata, 영상 및 좌표·extra annotation 설명이다. 공개 코드의 파일명은 참고일 뿐 실제 배포 버전을 확인한다. 필요한 metadata가 없으면 추정한 환자 ID나 임의 split으로 대체하지 않는다.
+
+## 1. 동작 확인 — CPU 자료 검증
+
+학습·모델 요청 수는 0, training seed·epoch는 해당 없음이다. schema별 fixture와 train의 서로 다른 주석 유형을 확인한다. 양성 단일 영역·복수 영역·box 없는 양성·음성·동일 category 복수 문장·extra annotation·progression을 포함하고, 존재하지 않는 유형은 부재로 기록한다.
+
+공식 train/validation/test의 환자·study 연결을 검사한다. test는 ID·split·중복 확인에 필요한 metadata만 사용하고 문장·box 내용은 집계·선택에 사용하지 않는다. 원본 파일 hash, schema version, 이미지 크기·bit depth·좌표 단위·방향을 기록한다. 좌표 변환은 synthetic fixture와 원본 train overlay로 확인한다.
+
+## 2. 가능성 탐색 — train 주석의 적격성 집계
+
+공식 train 전체의 주석을 사용한다. cheap metadata census이므로 임의 소표본으로 희귀 유형을 놓치지 않는다. 모델 출력·GPU 생성·새 annotation은 만들지 않는다.
+
+환자·영상·문장·box를 각각 별도 단위로 집계한다. 한 영상의 다수 문장을 독립 환자처럼 세지 않는다. 다음 층을 중첩 가능하게 보고한다.
+
+- 서로 다른 category의 복수 소견.
+- 동일 broad category이나 세부 label로 구분되는 문장.
+- 세부 label은 같지만 location으로 구분되는 문장.
+- label·location만으로는 대응을 구분하지 못하는 후보.
+- 같은 근거 집합의 중복 표현, 복수 box를 갖는 단일 소견, 경계·판독자 차이로 모호한 경우.
+- 이전 영상 또는 임상 문맥이 필요한 문장, box 없는 양성, 명시적 음성.
+
+문장→영역은 집합 관계로 유지한다. 일대일 Hungarian matching이나 문장마다 하나의 box를 강제하지 않는다. official·extra annotation을 합쳐 임의 정답을 만들지 않는다. 후보에서 양쪽 주석이 얼마나 일치하는지 별도로 보고하고, 일치하지 않는 경우를 숨기지 않는다.
+
+단순 정보의 설명 범위를 category-only, category+location 순서로 계산한다. annotation label을 쓰므로 oracle 분석이라고 표시한다. 텍스트에서 실제 label 추출이 성공했다고 주장하지 않는다. 동일 label의 후보가 여러 개라는 사실만으로 문장 의미가 식별 가능하다고 판단하지 않는다.
+
+## 3. 규모 확대 — 이번 setup의 종료 산출물
+
+train 집계 후 GPU diagnostic의 실행 가능 여부를 판정한다. 적격 환자 수, 유형별 수, 주석 모호성, 사용 가능한 비교군, 보존할 validation/test 구조를 보고한다. 환자별 이항 오류율의 대략적 95% 최대 반폭 `0.98/sqrt(n)`을 참고 정밀도로 제시하되 paired 효과나 임상 모집단의 보장으로 쓰지 않는다. 예를 들어 n≈96은 약 ±10 pp 수준이며, 이를 모든 실험의 고정 표본 상한으로 사용하지 않는다.
+
+정밀도에 비해 자료가 적으면 중요한 희귀 현상의 탐색과 일반적 한계 주장을 구분한다. 표본 수를 채우려고 문장을 복제하거나 합성 보고서를 섞지 않는다. 새로운 학습·GPU 생성으로 자동 확대하지 않는다.
+
+## 4. 독립 확인 및 다음 GPU 진입 조건
+
+이번에는 독립 모델 확인을 수행하지 않는다. 다음 diagnostic 진입에는 실제 권한, 검증된 영상·주석, 식별 가능한 대상, 고정된 parser·prompt·metric, 문장별 독립 처리와 모듈형 baseline, 표본별 정밀도 계획이 필요하다. 자료 감사의 실제 결과를 읽고 이를 한 번의 후속 계획으로 확정한다.
+
+후속 GPU 계획은 두 RTX 3090을 사용한다. 시작 직전 nvidia-smi와 허용 장치 mapping을 확인하고, 동일 development 요청으로 GPU당 1 worker 대비 유망한 batch 확대 또는 GPU당 2 worker를 비교한다. MedGemma bf16의 8–10 GB는 참고값이며, 긴 출력·KV cache·동시 peak와 worker당 2 GB 여유를 실제 측정한다. 처리량·출력 정합성·OOM·CPU/I/O 경합으로 배치를 선택한다. 이 setup에서 측정하지 않은 성능이나 메모리를 실측치로 보고하지 않는다.
+
+## 비용·재개
+
+이번 GPU 사용량은 0이다. 실제 blocker는 접근 권한과 정답 구조 미확정이며, GPU 회피가 목적은 아니다. 권한 확보 후 schema·집계는 CPU 작업이다. 영상 검증 시간은 개발 영상 수와 실측 decode/hash 처리량으로 산출한다. 46 GB 전체 전송이 필요한 경우 저장 공간·전송률을 확인해 비용을 별도 기록하며 임의 시간 상한을 두지 않는다.
+
+결과는 `research/results/iter_038/`의 새 경로에 저장한다. 입력 hash와 audit config가 일치할 때만 완료된 단위를 재사용한다. 고유 임시 파일과 단일 소유권으로 final artifact를 확정한다. 이전 결과·checkpoint·protocol은 덮어쓰지 않는다.
+
+# Implementation Tasks for Claude
+
+1. 실제 이용 권한·파일이 확보됐는지 먼저 확인한다. 신청 대기이면 자료 접근이나 빈 파이프라인 개발을 진행하지 않는다.
+2. 원본 schema와 split을 읽고 이번 자료에 필요한 최소 loader·검증·집계만 구현한다. 알려진 field의 누락을 정상 기본값으로 조용히 바꾸지 않는다.
+3. duplicate ID·split 충돌·잘못된 좌표·비유한 값·누락 영상·환자 중복을 검사한다. 이미 허용된 원본을 변경하지 않는다.
+4. 집합형 문장–영역 관계, 빈 box의 의미, official/extra annotation과 progression을 보존한다. test 내용이 탐색 집계에 들어가지 않도록 분리한다.
+5. train 적격성 표와 단순 정보 oracle 표, 모호 사례의 원본 연결을 만든다. 모델 성능이나 임상적 정답을 새로 판정하지 않는다.
+6. `source_manifest`, `eligibility_report`, `baseline_requirements`, `audit_checks`와 한국어 보고서를 남긴다. 원시 자료는 Git에 넣지 않으며, 구현 소스의 보존·브랜치 관리는 orchestrator에 맡긴다.
+7. 재사용할 새 GPU 실행 경로는 이번에 만들지 않는다. 자료 결과와 연결된 다음 진단 제안 또는 후보 보류 이유로 마무리한다.
+
+# Evaluation (성공/실패 기준 포함)
+
+**setup 완료 기준:** 권한·원본·환자 split·좌표 연결을 검증했고, train의 적격·부적격·모호 집단을 재현 가능하게 집계했으며, 그 결과가 GPU 진단 진행 여부를 구분한다. 후보가 부적격이라는 결론도 유효한 자료 판단이다. 실제 모델 출력을 평가하지 않았으므로 `valid_experiment=true`나 새 한계 validated를 주장하지 않는다.
+
+**양성 자료 결과:** 주석상 구분 가능한 잔여 후보가 있고, 필요한 정밀도와 비교군을 확보할 가능성이 있다. 다음은 고정된 실제 출력 diagnostic이다. 새 post-training의 유망성을 뜻하지 않는다.
+
+**음성 자료 결과:** 단순 category·location으로 대응이 대부분 유일해지거나, 잔여 후보가 중복 표현·주석 모호성·시간 정보에 의존한다. 이번 결합 후보의 우선순위를 낮추고 다른 질문을 비교한다. 손실 함수 변경이나 synthetic benchmark 확대를 자동 시작하지 않는다.
+
+**불확정 자료 결과:** 권한 미확보, field 의미 불명확, 환자 연결 누락 또는 적격 표본 부족이다. 해결 가능한 한 가지 자료 확인이 판단을 바꿀 때만 추가 작업을 제안한다. 접근 대기나 코드 검사 성공을 과학적 실험 결과로 포장하지 않는다.
+
+자료 파서의 별도 집계와 원본 train 사례 확인으로 주요 수치를 교차 검증한다. missing split, 중복 key, annotation 집합 분리, 입력 변조 후 기존 결과 재사용 거부를 검사한다. 주변 과거 코드의 전수 테스트는 하지 않는다.
+
+# Risks / Checks
+
+- 새로운 자료 접근에는 사용자의 별도 결정과 실제 이용 조건 충족이 필요하다. 현재 RSNA 실행 권한이나 VinDr 신청을 PadChest-GR 권한으로 확대하지 않는다.
+- annotation label·location oracle은 진단용이다. 실용적인 detector+VLM 성능으로 보고하지 않는다.
+- 문장 순서·box 수·region ID에서 정답이 새지 않도록 후속 진단에서 대조해야 한다. 번호 표시와 crop은 자체적으로 입력을 바꾸므로 정상 사용 검사가 필요하다.
+- 보고서의 빈 box와 임상적 음성은 다르다. 다른 문장의 영역도 해당 문장에 대해 확정 음성이라고 가정하지 않는다.
+- 영어 번역, annotation 경계, 모델의 PadChest 사전학습 노출 가능성을 기록한다. 환자 split 독립성과 사전학습 미노출은 별개다.
+- 과거 생성기와 detector 분석기의 미해결 결함은 해결된 것으로 표시하지 않는다. 실제 재사용을 결정할 때 해당 SHA·의존성과 검증 조건을 지정한다.
+- VinDr 승인 전 다운로드·평가·반복 승인 질문을 하지 않는다. 이번 신규 접근 결정을 위한 질문과 구분한다.
+
+## 대규모 GPU 필요 후보
+
+광범위한 image–report–region 공동 post-training과 시각 encoder·언어 모델 공동 적응을 장기 후보로 남긴다. 현재 필요성은 미입증이다. 우선 실제 출력 진단과 강한 경량·모듈형 baseline으로 잔여 문제를 확인하고, 그 후 현재 두 GPU의 LoRA·adapter와 대규모 학습의 비용·기대 이득을 비교한다.
+
+# 계획의 근거 (GPT 조사 노트)
+
+## 이번 판단
+
+추가 사고 라운드는 종료한다. **PadChest-GR의 정식 접근 확보 후, 문장–영역 대응 진단에 쓸 수 있는지 최소 자료 점검을 수행하는 조건부 setup**을 선택한다. 모델 한계 진단이나 방법 개발을 바로 시작할 근거는 아직 없다. 공식 접근 신청은 현재 확인된 권한 밖이므로 사용자 결정이 필요하다. VinDr 승인 여부를 다시 묻는 요청은 아니다.
+
+이전 노트 `agent/runs/iter_038/think/round_01.json`을 직접 읽었다. SHA256은 `648ee516e0e374a492380eab2c650622ed3489ac081814d3ad841b71c8f0ea03`이다. 이번 변경은 후보의 자료·선행연구 적합성을 판정한 것이며, 기존 실험의 가설이나 판정 기준 변경이 아니다.
+
+## 질문 1 — uMedGround 배포본은 적격한가?
+
+공식 README는 자료 배포를 안내하지만 `ln_data` 목록·readme·하위 경로 조회는 이번에도 실패했다. GitHub API의 로컬 조회도 DNS 오류로 실패했다. 실제 레코드의 대응 cardinality와 환자 분할을 검증했다고 말할 수 없다.
+
+원논문은 MRG-MS-CXR을 원래 MIMIC 보고서와 연결한 자료로, MRG-ChestX-ray8을 짧은 phrase에서 GPT-4로 확장한 984개 합성 보고서 자료로 설명한다. 전자는 원천 접근 확인이 필요하고, 후자는 실제 다중 소견 보고서의 결합 정답을 대신하지 못한다. 따라서 이번 주자료에서는 제외한다. 조회 실패를 자료 부재나 단일 box 구조의 증거로 사용하지 않는다. [uMedGround 공식 저장소](https://github.com/Cocofeat/uMedGround), [원논문 §IV-A·IV-C](https://arxiv.org/html/2404.06798v3).
+
+## 질문 2 — PadChest-GR과 MS-CXR 중 무엇이 맞는가?
+
+MS-CXR 공식 설명을 이번에는 확인했다. 1,162 image–sentence pair이며 한 문장에 여러 box, 한 영상에 여러 병리 주석이 가능하다. 그러나 수집 단계에서 같은 study의 target pathology를 설명하는 문장을 하나로 제한한다. 따라서 복수 box가 있다는 사실만으로 동일 category의 서로 다른 문장–영역 결합을 시험할 수 있다고 판단하면 안 된다. v1.1.0은 환자별 70:15:15 split을 제공한다. 파일에는 credentialing·교육·DUA가 필요하고 영상은 MIMIC-CXR에서 별도로 확보해야 한다. 이번 동일-category 결합 질문의 주자료로는 우선순위가 낮다. [MS-CXR 공식 설명·접근 조건](https://physionet.org/content/ms-cxr/1.1.0/).
+
+PadChest-GR은 영상별 소견 문장과 영역 집합을 제공하며, 논문은 동일 category의 문장이 둘 이상인 study가 224개라고 보고한다. 이는 후보가 존재한다는 근거일 뿐, 세부 category·위치 규칙 이후에도 어려운 대응이 충분하다는 증거는 아니다. 문장은 원보고서를 분해·번역한 것이며 원문 그대로인 자유서술과 구분해야 한다. official/extra annotation이 있고, extra annotation과의 median IoU는 0.530으로 경계 불확실성을 무시할 수 없다. box 없는 양성 소견도 있으므로 빈 box를 임상적 음성으로 취급하지 않는다. [PadChest-GR 주석 정의·분할·변동성](https://arxiv.org/html/2411.05085v2).
+
+BIMCV 공식 페이지의 검색 반환 본문은 무료 연구 이용, 정식 접근 신청, 재배포·재식별 금지 약속 및 배포 크기 46 GB를 명시한다. 직접 페이지 열기는 timeout이 있었으므로 신청 절차 전체를 완료·검증했다고 보고하지 않는다. [PadChest-GR 공식 신청 페이지](https://bimcv.cipf.es/bimcv-projects/padchest-gr/).
+
+`legacy/`와 `research/`의 파일명 검색에서 padchest/ms-cxr/mimic/grounded_reports/master_table 일치 항목은 없었다. 사용자 Dataset 디렉터리의 상위 목록에도 해당 자료는 없었다. 검색 범위 밖의 보유 자료나 사용자의 기존 권한까지 부정하는 결과는 아니다.
+
+## 질문 3 — 기존 방법과 무엇을 구분해야 하는가?
+
+MedRPG는 영상과 phrase에서 box를 예측하고 region–phrase contrastive alignment를 학습한다. 그러므로 단순 phrase grounding loss는 가까운 기존 방법과 겹친다. [MedRPG 원논문 및 저자 설명](https://conferences.miccai.org/2023/papers/408-Paper0377.html).
+
+MAIRA-2는 phrase grounding과 grounded report generation을 함께 다루며, MS-CXR 비교에서 split 교집합을 사용한다. 원논문의 학습은 frozen image encoder와 adapter·언어 모델 학습이며 16 A100을 사용했다. 그 전체 학습의 재현을 현재 baseline의 필수 조건으로 삼지는 않지만, 공개 checkpoint 비교 시 훈련 자료와 평가 노출을 확인해야 한다. [MAIRA-2 §2.3·3.1](https://arxiv.org/html/2406.04449v1).
+
+이번에 새로 확인한 **Generalised Medical Phrase Grounding**은 이미 문장별 0개·1개·여러 영역, groundability, confidence 및 보고서 생성기와의 모듈형 결합을 다룬다. 따라서 round_01의 다중 대응 후보를 이 과제 형식만으로 차별화할 수 없다. 논문의 MedGrounder와 문장별 독립 실행을 가까운 대안으로 추가한다. [GMPG 원논문](https://arxiv.org/html/2512.01085v1), [공식 구현·가중치 안내](https://github.com/Claire1217/GMPG).
+
+결정적 비교는 다음과 같다. 클래스·위치 정보로 대응이 거의 유일하면 복잡한 결합 방법의 필요성이 약하다. 개별 문장 처리도 실패하면 먼저 인식·grounding 문제다. 개별 처리는 성공하고 공동 처리만 실패하면 결합·간섭 후보지만, 공통 prefix를 재사용한 독립 실행이 정확도와 비용을 모두 해결하는지 확인해야 한다. 그 대안 이후의 잔여 이득 없이 새로운 post-training을 자동 시작하지 않는다.
+
+## 코드·보존 및 이번 실행 범위
+
+현재 HEAD는 `755ec06e17606936422f1595f7bf62dc53085e59`이고 status/diff는 깨끗했다. `CODE_ASSETS.md`의 iter_037 항목과 원본 review.json/code_assets를 확인했다. 기존 geometry·parser·metrics 승인은 RSNA 범위이며, det37의 provenance·finalize·cap 결함은 미해결이다. 이번 자료 점검에는 이 실행 경로가 필요하지 않아 반입·정비하지 않는다.
+
+MedGrounder의 공개 `prepare_padchest_csv.py`에서는 StudyID/ImageID, findings의 sentence_en·abnormal·labels·locations·boxes·progression, master_table의 split 연결을 확인했다. 다만 duplicate key를 dictionary로 덮어쓸 수 있고 missing split을 warning만 남기므로 그대로 승인·반입하지 않는다. schema 참고이며 실제 배포본 확인을 대체하지 않는다. [공개 변환 코드](https://raw.githubusercontent.com/Claire1217/GMPG/main/prepare_padchest_csv.py).
+
+이번 라운드에서 파일 생성·수정, 데이터 다운로드, 모델 로딩, GPU 실행은 하지 않았다. 문헌은 조사 근거이며 실제 긍정적 실험 근거가 없어 논문 추천으로 처리하지 않는다.
+
+이전 사고 라운드 노트: agent/runs/iter_038/think/
