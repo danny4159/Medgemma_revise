@@ -11,7 +11,9 @@
 
 ## 환경
 - Python: conda env `medgemma` (python 3.11). orchestrator가 PATH를 이 env로 맞춰 두므로
-  그냥 `python ...`으로 실행하면 된다. `conda activate`, `pip install`은 하지 않는다.
+  기본 실험은 `python ...`으로 실행한다. 필요한 패키지 설치·별도 환경 생성은 자율적으로 허용한다.
+  환경별 Python 절대경로나 `conda run -p ...`로 대상을 명시한다. 실행 중인 기본 환경은 변경하지
+  않고 실험별 격리 환경을 우선한다. 설치·검증·재현 기록 기준은 `agent/RESOURCE_POLICY.md`를 따른다.
 - `HF_HOME=/SSD1_1TB/home/milab/daniel/08_medgemma/hf_cache` (모델 캐시, 수정 금지)
 - 모델: `google/medgemma-1.5-4b-it` (bf16 약 8~10GB VRAM)
 - GPU: RTX 3090 24GB x2 (0, 1). 두 장 모두 마음껏 써도 된다 (사용자 허락).
