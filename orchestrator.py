@@ -914,6 +914,8 @@ PLAN_DEFAULTS = {
     "experiment_role": "legacy", "research_question": "", "contribution_path": "",
     "baseline_plan": "", "reuse_iteration": 0, "continuation_reason": "",
     "limitation_ids": [], "reuse_assets": [],
+    # legacy는 저장된 옛 계획에만 사용. 새 계획은 스키마의 none/pilot/full을 명시한다.
+    "method_stage": "legacy", "research_track": "", "related_iterations": [], "decision_contract": {},
 }
 REVIEW_DEFAULTS = {
     "verdict": "CONTINUE", "approach_status": "", "approach_note": "", "commit_worthy": False,
@@ -1049,15 +1051,55 @@ def limitations_text():
 
 
 def method_gate_errors(n, plan):
-    if plan.get("experiment_role") not in {"method", "confirmatory"}:
-        return []
+    """기존 계획은 유지하고 새 계획의 결정 계약·pilot 근거를 검사한다.
+
+    필드 존재/근거 상태 검사는 과학적 타당성·신규성 심사를 대신하지 않는다.
+    """
+    role = plan.get("experiment_role")
+    stage = plan.get("method_stage", "legacy")
+    errors = []
+    if stage != "legacy":
+        if stage not in {"none", "pilot", "full"}:
+            errors.append("잘못된 method_stage입니다.")
+        if (role == "method" and stage not in {"pilot", "full"}
+                or role == "confirmatory" and stage != "full"
+                or role not in {"method", "confirmatory"} and stage != "none"):
+            errors.append("method는 pilot/full, confirmatory는 full, setup/diagnostic은 none이어야 합니다.")
+        for key in ("research_track", "research_question", "contribution_path", "baseline_plan"):
+            if not isinstance(plan.get(key), str) or not plan[key].strip():
+                errors.append(f"새 계획의 {key}가 비어 있습니다.")
+        contract = plan.get("decision_contract")
+        if not isinstance(contract, dict):
+            contract = {}
+        keys = ["success_action", "failure_action", "inconclusive_action", "scope_budget", "stop_rule"]
+        if role in {"method", "confirmatory"}:
+            keys += ["mechanism_hypothesis", "intervention_test"]
+        for key in keys:
+            if not isinstance(contract.get(key), str) or not contract[key].strip():
+                errors.append(f"decision_contract.{key}에 구체적인 판단·범위가 필요합니다.")
+        related = plan.get("related_iterations", [])
+        if not isinstance(related, list) or any(type(i) is not int or i < 1 or i >= n
+                                              or not (iter_dir(i) / "plan.json").exists() for i in related):
+            errors.append("related_iterations는 실제 존재하는 이전 반복 번호여야 합니다.")
+    if role not in {"method", "confirmatory"}:
+        return errors
     identities = plan.get("limitation_ids", [])
     if not identities:
-        return ["방법 개발·확인 실험은 검증된 한계 주장 limitation_ids를 지정해야 합니다."]
+        return errors + ["방법 개발·확인 실험은 근거가 있는 limitation_ids를 지정해야 합니다."]
     entries = limitation_registry(upto=n - 1)
-    return [f"한계 {identity}: 현재 목표에서 재현 확인(validated)된 근거가 없습니다. 진단 계획이 먼저 필요합니다."
-            for identity in identities if entries.get(identity, {}).get("status") != "validated"
-            or entries.get(identity, {}).get("goal_start") != goal_start(n)]
+    pilot = role == "method" and stage == "pilot"
+    for identity in identities:
+        entry = entries.get(identity, {})
+        allowed = {"observed", "validated"} if pilot else {"validated"}
+        if entry.get("status") not in allowed or entry.get("goal_start") != goal_start(n):
+            errors.append(f"한계 {identity}: 현재 목표의 {'observed/validated' if pilot else 'validated'} 근거가 필요합니다.")
+        if pilot:
+            source = entry.get("review_iteration")
+            review = load_review(source) if type(source) is int and 0 < source < n else None
+            if (not review or review.get("skipped") or review.get("valid_experiment") is not True or review.get("blocking_issues")
+                    or not entry.get("evidence") or not entry.get("usage_checks")):
+                errors.append(f"한계 {identity}: pilot도 이전 유효한 실험 리뷰·사용법 검사·blocking 없음이 필요합니다.")
+    return errors
 
 
 def approach_key(plan):

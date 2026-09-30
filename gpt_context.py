@@ -14,6 +14,29 @@ def history_context(records):
         "아래는 탐색용 색인이다. 이전 사실을 근거로 선택/기각하기 전 해당 plan/review 원문을 확인한다.",
         "새 방향·목표 변경·현재 설명과의 모순은 과거 관련 기록까지 넓혀 확인한다.",
     ]
+    # approach_id가 바뀌거나 실행이 실패해도 진단 체류 이력이 사라지지 않는다.
+    active = [r for r in records if r.get("plan") and not r.get("superseded")]
+    streak = []
+    for r in reversed(active):
+        if r["plan"].get("experiment_role") not in {"setup", "diagnostic"}:
+            break
+        streak.append(r["n"])
+    lines.append(_json({"strategy_overview": {
+        "diagnostic_setup_streak": list(reversed(streak)),
+        "note": "계획 역할의 연속 기록(실행 실패·준비 포함), 유효 실험 수나 낭비 판정이 아님. 횟수로 강제 중단하지 않는다.",
+    }}))
+    tracks = {}
+    for r in active:
+        track = r["plan"].get("research_track")
+        if track:
+            tracks.setdefault(track, []).append(r)
+    for track, group in tracks.items():
+        last = group[-1]
+        lines.append(_json({"research_track": track, "iters": [r["n"] for r in group],
+                            "related_iterations": last["plan"].get("related_iterations", []),
+                            "decision_contract": last["plan"].get("decision_contract", {}),
+                            "last_next_task": last["review"].get("next_task"),
+                            "source": f"agent/runs/iter_{last['n']:03d}/"}))
     groups = {}
     for r in records:
         plan = r["plan"]
