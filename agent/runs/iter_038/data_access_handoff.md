@@ -12,6 +12,8 @@
 
 디렉터리: `/SSD1_1TB/home/milab/daniel/08_medgemma/research/results/datasets/padchest_gr/raw/`
 
+조건부 영상 다운로드가 필요할 때 접근 방법은 같은 데이터 디렉터리의 `../ACCESS_PRIVATE.md`를 읽는다. 해당 파일은 Git 제외이며 내용·링크를 공개 기록으로 복사하지 않는다.
+
 | 파일 | bytes | SHA256 |
 |---|---:|---|
 | grounded_reports_20240819.json | 6287733 | efa16513850dc10f87073debb9c4b3ae1d0a1ae611f01b5705e808179854b14b |

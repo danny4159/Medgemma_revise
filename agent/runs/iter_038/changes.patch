@@ -1,0 +1,311 @@
+diff --git a/padchest_audit038.py b/padchest_audit038.py
+new file mode 100644
+index 0000000..34a93d6
+--- /dev/null
++++ b/padchest_audit038.py
+@@ -0,0 +1,305 @@
++"""iter_038 PadChest-GR 자료 감사 (CPU only, 모델/영상 미사용).
++
++- 원본(raw/)은 읽기만 한다. 입력 sha256을 고정값과 대조한다.
++- validation/test는 ID·split 연결과 개수만 사용하고 findings 내용(abnormal/boxes/labels/문장)은 읽지 않는다.
++- 결과는 results/iter_038/audit/ 에 쓴다 (Git 제외 경로). 문장 원문은 저장하지 않는다.
++"""
++import argparse
++import hashlib
++import itertools
++import json
++import math
++import os
++import sys
++import zipfile
++from collections import Counter, defaultdict
++
++import pandas as pd
++
++RAW = "results/datasets/padchest_gr/raw"
++JSON_NAME = "grounded_reports_20240819.json"
++ZIP_NAME = "master_table.csv.zip"
++PINNED = {
++    JSON_NAME: "efa16513850dc10f87073debb9c4b3ae1d0a1ae611f01b5705e808179854b14b",
++    ZIP_NAME: "3e1d27c603f7b89d36dec0b69d03b45714deb5e6aa866ba0e008987c2f40d9ba",
++}
++FINDING_KEYS = {"sentence_en", "sentence_es", "abnormal"}
++POS_KEYS = {"boxes", "extra_boxes", "labels", "locations", "progression"}
++IOU_OVERLAP = 0.5  # 사전 고정: 두 finding의 box 집합이 이 값 이상 겹치면 '해부학적 중첩'으로 표시
++
++
++def sha256(path):
++    h = hashlib.sha256()
++    with open(path, "rb") as f:
++        for b in iter(lambda: f.read(1 << 20), b""):
++            h.update(b)
++    return h.hexdigest()
++
++
++def iou(a, b):
++    ix = max(0.0, min(a[2], b[2]) - max(a[0], b[0]))
++    iy = max(0.0, min(a[3], b[3]) - max(a[1], b[1]))
++    inter = ix * iy
++    u = (a[2] - a[0]) * (a[3] - a[1]) + (b[2] - b[0]) * (b[3] - b[1]) - inter
++    return inter / u if u > 0 else 0.0
++
++
++def set_overlap(A, B):
++    """두 box 집합의 최대 pairwise IoU."""
++    return max((iou(a, b) for a in A for b in B), default=0.0)
++
++
++def best_match_mean(A, B):
++    """A의 각 box에 대해 B 중 최대 IoU의 평균 (official vs extra 일치도)."""
++    if not A or not B:
++        return None
++    return sum(max(iou(a, b) for b in B) for a in A) / len(A)
++
++
++def valid_box(b):
++    return (len(b) == 4 and all(isinstance(v, (int, float)) and math.isfinite(v) for v in b)
++            and 0 <= b[0] < b[2] <= 1 and 0 <= b[1] < b[3] <= 1)
++
++
++def main():
++    ap = argparse.ArgumentParser()
++    ap.add_argument("--out", default="results/iter_038/audit")
++    a = ap.parse_args()
++    os.makedirs(a.out, exist_ok=True)
++    checks = {}
++
++    # 1. provenance
++    shas = {n: sha256(os.path.join(RAW, n)) for n in PINNED}
++    checks["pinned_sha256_match"] = shas == PINNED
++    if not checks["pinned_sha256_match"]:
++        print("sha mismatch", shas)
++        sys.exit(2)
++    z = zipfile.ZipFile(os.path.join(RAW, ZIP_NAME))
++    checks["zip_crc_ok"] = z.testzip() is None
++    checks["zip_members"] = z.namelist()
++    m = pd.read_csv(z.open("master_table.csv"), dtype=str)
++    reports = json.load(open(os.path.join(RAW, JSON_NAME)))
++
++    # 2. ID / split 연결
++    ids = [r["ImageID"] for r in reports]
++    checks["n_reports"] = len(reports)
++    checks["dup_ImageID_reports"] = len(ids) - len(set(ids))
++    checks["master_rows"] = len(m)
++    checks["master_unique_ImageID"] = int(m.ImageID.nunique())
++    checks["master_unique_PatientID"] = int(m.PatientID.nunique())
++    img_split = m.groupby("ImageID").split.nunique()
++    checks["image_split_conflicts"] = int((img_split > 1).sum())
++    pat_split = m.groupby("PatientID").split.nunique()
++    checks["patient_split_conflicts"] = int((pat_split > 1).sum())
++    study_split = m.groupby("StudyID").split.nunique()
++    checks["study_split_conflicts"] = int((study_split > 1).sum())
++    img2split = m.drop_duplicates("ImageID").set_index("ImageID").split.to_dict()
++    img2pat = m.drop_duplicates("ImageID").set_index("ImageID").PatientID.to_dict()
++    img2study = m.drop_duplicates("ImageID").set_index("ImageID").StudyID.to_dict()
++    checks["report_without_split"] = sum(i not in img2split for i in ids)
++    checks["master_image_not_in_reports"] = len(set(m.ImageID) - set(ids))
++    checks["study_mismatch_report_vs_master"] = sum(
++        r["StudyID"] != img2study.get(r["ImageID"]) for r in reports)
++    split_cnt = Counter(img2split[i] for i in ids if i in img2split)
++    checks["report_split_counts"] = dict(split_cnt)
++    pats = defaultdict(set)
++    for i in ids:
++        pats[img2split[i]].add(img2pat[i])
++    checks["patients_per_split"] = {k: len(v) for k, v in pats.items()}
++    checks["patient_overlap_between_splits"] = {
++        f"{a_}|{b_}": len(pats[a_] & pats[b_]) for a_, b_ in itertools.combinations(sorted(pats), 2)}
++    # 이전 영상(prior) 연결: 참조 ID의 존재만 (내용 미사용)
++    checks["reports_with_prior"] = sum(r.get("PreviousImageID") is not None for r in reports)
++
++    # 3. train만 내용 접근
++    train = [r for r in reports if img2split[r["ImageID"]] == "train"]
++    checks["n_train_images"] = len(train)
++    mt = m[m.split == "train"]
++    lab2grp_df = mt.groupby("label").label_group.nunique()
++    checks["label_to_group_not_unique"] = int((lab2grp_df > 1).sum())
++    lab2grp = mt.drop_duplicates("label").set_index("label").label_group.to_dict()
++
++    schema_issue = Counter()
++    bad_box = 0
++    n_find = Counter()
++    per_img = {}  # ImageID -> list of eligible finding dicts
++    master_lab_rows = mt.groupby("ImageID").size().to_dict()
++    lab_rows_from_json = Counter()
++    unmapped = 0
++    for r in train:
++        elig = []
++        for f in r["findings"]:
++            n_find["all"] += 1
++            missing = FINDING_KEYS - set(f)
++            if missing:
++                schema_issue[f"missing:{sorted(missing)}"] += 1
++                continue
++            if f["abnormal"] is False:
++                n_find["negative"] += 1
++                extra_k = set(f) - FINDING_KEYS
++                if extra_k:
++                    schema_issue[f"neg_extra:{sorted(extra_k)}"] += 1
++                # master_table에서 label 행 수를 세기 위한 대응은 label 없는 음성이라 제외
++                continue
++            miss = POS_KEYS - set(f)
++            if miss:
++                schema_issue[f"pos_missing:{sorted(miss)}"] += 1
++                continue
++            lab_rows_from_json[r["ImageID"]] += len(f["labels"])
++            for l in f["labels"]:
++                if l not in lab2grp:
++                    unmapped += 1
++            if not f["boxes"]:
++                n_find["positive_nobox"] += 1
++                continue
++            if not all(valid_box(b) for b in f["boxes"] + f["extra_boxes"]):
++                bad_box += 1
++            n_find["eligible"] += 1
++            elig.append(f)
++        per_img[r["ImageID"]] = elig
++    checks["schema_issues_train"] = dict(schema_issue)
++    checks["invalid_box_findings_train"] = bad_box
++    checks["unmapped_labels_train"] = unmapped
++    checks["train_finding_counts"] = dict(n_find)
++    # JSON labels 행 수와 master 행 수 대응 (음성/normal 행은 master에 별도 존재 가능하므로 참고용)
++    checks["train_master_rows"] = int(len(mt))
++    checks["train_json_positive_label_rows"] = int(sum(lab_rows_from_json.values()))
++    checks["eligible_findings"] = n_find["eligible"]
++
++    # 4. 영상 내 다중 finding 및 oracle 식별성
++    multi = {i: fs for i, fs in per_img.items() if len(fs) >= 2}
++    checks["images_eligible_ge1"] = sum(1 for fs in per_img.values() if fs)
++    checks["images_eligible_ge2"] = len(multi)
++    checks["patients_eligible_ge2"] = len({img2pat[i] for i in multi})
++
++    def keys(f):
++        labs = frozenset(f["labels"])
++        grp = frozenset(lab2grp[l] for l in f["labels"])
++        locs = frozenset(f["locations"])
++        return grp, labs, locs
++
++    # finding 단위: 같은 영상 내 다른 finding과 key가 같은지
++    lvl_names = ["category_only", "exact_labels", "labels_locations"]
++    ambiguous = {n: 0 for n in lvl_names}
++    ambiguous_imgs = {n: set() for n in lvl_names}
++    fnd_total = 0
++    # pair 단위: 처음 구별되는 수준
++    pair_rel = Counter()
++    resid_pairs = []  # (ImageID, subtype, max_iou, official_vs_extra)
++    for i, fs in multi.items():
++        ks = [keys(f) for f in fs]
++        fnd_total += len(fs)
++        for n, idx in (("category_only", (0,)), ("exact_labels", (1,)), ("labels_locations", (1, 2))):
++            sig = [tuple(k[j] for j in idx) for k in ks]
++            c = Counter(sig)
++            for s in sig:
++                if c[s] > 1:
++                    ambiguous[n] += 1
++            if any(v > 1 for v in c.values()):
++                ambiguous_imgs[n].add(i)
++        for (a_, ka), (b_, kb) in itertools.combinations(list(zip(fs, ks)), 2):
++            if ka[0].isdisjoint(kb[0]):
++                rel = "diff_broad_category"
++            elif ka[1] != kb[1]:
++                rel = "same_broad_category_diff_label"
++            elif ka[2] != kb[2]:
++                rel = "same_labels_diff_location"
++            else:
++                bs_a, bs_b = a_["boxes"], b_["boxes"]
++                mi = set_overlap(bs_a, bs_b)
++                if sorted(map(tuple, bs_a)) == sorted(map(tuple, bs_b)):
++                    rel = "same_labels_same_locations__identical_boxes"
++                elif mi >= IOU_OVERLAP:
++                    rel = "same_labels_same_locations__overlapping_boxes"
++                else:
++                    rel = "same_labels_same_locations__distinct_boxes"
++                resid_pairs.append((i, rel, mi, best_match_mean(a_["boxes"], a_["extra_boxes"]),
++                                    best_match_mean(b_["boxes"], b_["extra_boxes"])))
++            pair_rel[rel] += 1
++    checks["train_findings_in_multi_images"] = fnd_total
++    checks["findings_ambiguous_by_level"] = ambiguous
++    checks["images_with_ambiguity_by_level"] = {n: len(s) for n, s in ambiguous_imgs.items()}
++    checks["patients_with_ambiguity_by_level"] = {
++        n: len({img2pat[i] for i in s}) for n, s in ambiguous_imgs.items()}
++    checks["pair_relation_counts"] = dict(pair_rel)
++    img_by_rel = defaultdict(set)
++    pair_by_img = defaultdict(set)
++    for i, fs in multi.items():
++        ks = [keys(f) for f in fs]
++        for (a_, ka), (b_, kb) in itertools.combinations(list(zip(fs, ks)), 2):
++            if ka[0].isdisjoint(kb[0]):
++                rel = "diff_broad_category"
++            elif ka[1] != kb[1]:
++                rel = "same_broad_category_diff_label"
++            elif ka[2] != kb[2]:
++                rel = "same_labels_diff_location"
++            else:
++                rel = "same_labels_same_locations"
++            pair_by_img[i].add(rel)
++            img_by_rel[rel].add(i)
++    checks["images_with_pair_relation"] = {k: len(v) for k, v in img_by_rel.items()}
++    # 영상의 가장 세밀한 필요 수준 (모든 pair 중 가장 어려운 관계)
++    order = ["diff_broad_category", "same_broad_category_diff_label",
++             "same_labels_diff_location", "same_labels_same_locations"]
++    hardest = Counter(max(rels, key=order.index) for rels in pair_by_img.values())
++    checks["images_by_hardest_pair_relation"] = dict(hardest)
++
++    # 5. 잔여(같은 labels+locations) 후보의 official vs extra 주석 일치도
++    res_ious = [x[2] for x in resid_pairs]
++    res_agree = [v for x in resid_pairs for v in (x[3], x[4]) if v is not None]
++    checks["residual_pairs"] = len(resid_pairs)
++    checks["residual_images"] = len({x[0] for x in resid_pairs})
++    checks["residual_pairs_max_iou_ge_0.5"] = sum(v >= IOU_OVERLAP for v in res_ious)
++    checks["residual_official_vs_extra_mean_best_iou"] = (
++        sum(res_agree) / len(res_agree) if res_agree else None)
++    allagree = []
++    for fs in per_img.values():
++        for f in fs:
++            v = best_match_mean(f["boxes"], f["extra_boxes"])
++            if v is not None:
++                allagree.append(v)
++    checks["all_eligible_official_vs_extra_mean_best_iou"] = (
++        sum(allagree) / len(allagree) if allagree else None)
++    checks["eligible_findings_with_extra_boxes"] = len(allagree)
++
++    # 6. handoff 예비 집계 재현 (sorted tuple 기준)
++    exact_tuple_rep = 0
++    exact_tuple_loc_rep = 0
++    for fs in multi.values():
++        t1 = Counter(tuple(sorted(f["labels"])) for f in fs)
++        t2 = Counter((tuple(sorted(f["labels"])), tuple(sorted(f["locations"]))) for f in fs)
++        exact_tuple_rep += any(v > 1 for v in t1.values())
++        exact_tuple_loc_rep += any(v > 1 for v in t2.values())
++    checks["handoff_repro"] = {
++        "eligible_findings(4341)": n_find["eligible"],
++        "images_ge2(1163)": len(multi),
++        "images_sorted_label_tuple_repeat(20)": exact_tuple_rep,
++        "images_sorted_label_and_location_tuple_repeat(0)": exact_tuple_loc_rep,
++    }
++    # 정렬 tuple 대신 label의 부분 중첩(공유 label 존재) 기준 pair
++    share_lab = 0
++    for fs in multi.values():
++        for f1, f2 in itertools.combinations(fs, 2):
++            if set(f1["labels"]) & set(f2["labels"]):
++                share_lab += 1
++    checks["pairs_sharing_at_least_one_label"] = share_lab
++
++    # 7. 좌표 fixture
++    checks["box_convention"] = "x1,y1,x2,y2 normalized [0,1] (train 전 box에서 valid_box 검사)"
++    checks["image_size_bitdepth_orientation"] = "미확인: 영상 미다운로드"
++
++    priv = [{"ImageID": x[0], "rel": x[1], "max_iou": x[2]} for x in resid_pairs]
++    with open(os.path.join(a.out, f"residual_pairs_private.{os.getpid()}.tmp"), "w") as f:
++        json.dump(priv, f)
++    os.replace(os.path.join(a.out, f"residual_pairs_private.{os.getpid()}.tmp"),
++               os.path.join(a.out, "residual_pairs_private.json"))
++    tmp = os.path.join(a.out, f"audit_checks.{os.getpid()}.tmp")
++    with open(tmp, "w") as f:
++        json.dump({"inputs_sha256": shas, "iou_overlap_threshold": IOU_OVERLAP, "checks": checks},
++                  f, indent=1, default=str)
++    os.replace(tmp, os.path.join(a.out, "audit_checks.json"))
++    print(json.dumps(checks, indent=1, default=str))
++
++
++if __name__ == "__main__":
++    main()

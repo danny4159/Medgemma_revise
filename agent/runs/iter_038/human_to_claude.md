@@ -1,0 +1,1 @@
+사용자 접근 승인과 단계적 다운로드 진행 승인을 반영한다. agent/runs/iter_038/data_access_handoff.md를 먼저 읽고 받은 raw metadata를 독립 검증하라. GOAL과 iter_038 계획 및 full review는 유지한다. 본 영상은 주석 적격성과 영상 확인 필요성을 검토한 뒤에만 받으며 과거 검사 영상은 받지 않는다. 현재는 setup으로 학습을 시작하지 않는다.
