@@ -47,6 +47,7 @@
 - iter_039 [CONTINUE] (deep/standard/normal) <소견 문장–영상 근거 결합 진단: inconclusive> 💾ca8be7658402eadbc0c501e877d76b1024ed2683 PadChest-GR 96명에서 개별·공동 grounding F1은 0.295·0.234였다. 개별 능력 기준 미달로 공동 결합 가설은 불확정이며 확대를 보류한다. 영상 변환은 리뷰에서 검증했다. → 다음: 공동 결합 loss 투자를 보류하고, 문장별 grounding의 정확도·비용 개선 또는 다른 연구 질문으로 전환할 방향을 선택한다. 이번 리뷰가 확인한 전처리 근거를 반영해 변환 규약 확인이나 같은 E96 재생성을 반복하지 않는다. 다음 deep 계획에서 문장별 독립 처리, 과제별 직접 SFT, MedGrounder류 모듈형 대안을 비교하고 실제 사용상 부족함과 최소 가치 있는 개선 폭을 구체화한다. 이번 observed 근거를 연결하고 경쟁 설명을 구분할 작은 개입이 성립하면 method_stage=pilot으로 별도 계획하되, 성립하지 않으면 GOAL 안의 다른 질문으로 전환한다. E288·F120은 자동 실행하지 않는다. 후속 진단을 택할 경우에는 어떤 결과가 방법 시험과 투자 종료를 가르는지, 필요한 표본·비용·종료 조건을 한 번의 한정 계획으로 명시한다. 실제 사용할 경로의 reuse_issues만 먼저 수정하고 기존 결과·checkpoint·VinDr 대기·MRI 및 reserve 보존을 유지한다.
 - iter_040 [CONTINUE] (deep/standard/normal) <문장 대조 grounding pilot: inconclusive> 💾18fdae2eec4f4ab3605845fdaeafd1959d9d725f PadChest-GR V96에서 직접 SFT는 F1 0.098→0.556으로 개선됐지만 문장 대조는 CE 대비 −0.005였다. 비교는 유효하나 baseline 수렴·독립 재현은 미확인이라 추가 투자를 보류한다. → 다음: 현재 문장 대조 설계의 추가 투자를 보류하고, 확보한 직접 SFT와 모듈형 대안의 실용 가치 비교로 전환할지 결정한다. 다음 deep 계획에서는 기존 B/C checkpoint를 사용하는 한정 비교와 GOAL 안의 다른 질문을 비교하고, 정확도·추론 비용·annotation budget 중 필요한 이점과 종료 기준을 먼저 고정한다. 모듈형 비교를 선택하면 현재 환경에서 실행 가능한 공식 경로와 데이터 중복을 확인하고, 불가능하면 환경 정비만으로 반복을 소비하지 말고 다른 후보로 전환한다. 원 계획의 CE 감소 조건을 충족하지 않았으므로 epoch8·T610·추가 seed·H192를 자동 실행하지 않는다. 새로운 투자를 결정할 때만 실제 사용할 코드의 reuse_issues를 함께 보완한다. 기존 결과·RSNA checkpoint·VinDr 승인 대기·F120 및 MRI reserve 보존을 유지한다.
 - iter_041 [CONTINUE] (deep/standard/normal) <소견 문장–영상 근거 결합 진단: inconclusive> 💾85320c89689b70f05b6e8c06c01ec8c4c7af2710 PadChest 개발96명에서 C의 F1은 독립 0.578→공동 0.381/0.354로 하락했다. 관찰은 유효하지만 비용 구간 검증이 빠져 방법 pilot 진입은 미확정이다. → 다음: 현재 공동 처리 방법 투자를 보류하고 다른 연구 질문으로의 전환을 우선 검토한다. 정확도 손실은 확인했지만 비용 근거가 원 계획의 투자 기준을 완결하지 못했고, 계획은 이 경우 같은 진단의 자동 연장을 금지한다. 다음 deep 계획에서 language-conditioned-grounding의 기존 자산을 활용할 실행 가능한 모듈형 비교와 GOAL 안의 대안을 비교해 하나를 선택한다. 근거 없이 추가 prompt·seed·환자·공동 학습을 실행하지 않는다. 현재 판정 오류는 기존 결과를 보존한 별도 정정으로 처리하며 인프라 수정만으로 연구 반복을 소비하지 않는다. 향후 새로운 실용 근거로 공동 방법 pilot을 재검토한다면 공동 직접 CE를 강한 대조군으로 포함하고 비용 불확실성·최소 가치 기준·종료 조건을 먼저 고정한다. VinDr 승인 대기와 RSNA 자산, H192·F120·test·MRI reserve 보존을 유지한다.
+- iter_042 [CONTINUE] (deep/standard/normal) <소견 부재 거부와 grounding 보존 진단: inconclusive> 💾e7ee15464cf404a44a877997661b9f50dd8c3096 PadChest 양성29·음성40에서 presence gate는 C의 음성 오출력을 39→1건으로 줄였다. 양성 F1 보존은 불확정이며 새 방법 pilot 기준도 미달해 현재 투자를 보류한다. → 다음: 현재 부재 거부 방법 투자를 보류하고 다른 연구 질문으로의 전환을 선택한다. 단순 presence gate 이후의 구체적인 부족함이 입증되지 않았고 고정 후보 전수 평가를 완료했으므로 같은 진단의 환자·prompt·질환·seed 추가나 negative SFT를 자동 실행하지 않는다. 다음 deep 계획 한 번에서 language-conditioned-grounding의 실행 가능한 모듈형 비교와 GOAL 안의 다른 후보를 기존 유효 근거·강한 baseline·정확도 또는 비용 가치로 비교해 하나를 선택한다. 새 최소 방법 시험은 연결 가능한 observed/validated 근거와 단순 대안의 부족함, 경쟁 설명을 구분할 개입 및 종료 기준이 있을 때만 계획한다. MedGrounder 환경 정비나 주변 코드 수정만으로 별도 반복을 소비하지 않는다. 실제 사용할 경로의 reuse_issues만 해결하고 RSNA 자산·VinDr 승인 대기·H192/F120/test/MRI reserve 보존을 유지한다.
 
 ## 이전 목표들의 접근법 (참고용, 현재 목표의 재평가 횟수에는 안 들어감)
 
@@ -71,12 +72,13 @@
 - RSNA 전용 detector와 SFT 비교 [approach/rsna-detector-comparison]: 5회 (iter_033, iter_034, iter_035, iter_036, iter_037), 유효한 실험 3회, 미분류 0회, 최근 판정: improve, 커밋: a60224c1f7d54e4f59e8c4dc16285d62faf004b5, bc80f2deede564fb56b4222e530eda5621b31069, 615c61ec51cfe9d84d564bfcaab434a3a5c78cb1, f9bfbc250058ce1785f819dd404b1148998918b9, 755ec06e17606936422f1595f7bf62dc53085e59
 - 소견 문장–영상 근거 결합 진단 [approach/sentence-evidence-binding]: 3회 (iter_038, iter_039, iter_041), 유효한 실험 2회, 미분류 0회, 최근 판정: inconclusive, 커밋: 1c295feb3a2ed3bac76a95fe7ff1566ccfe71955, ca8be7658402eadbc0c501e877d76b1024ed2683, 85320c89689b70f05b6e8c06c01ec8c4c7af2710
 - 문장 대조 grounding pilot [approach/query-contrast-grounding]: 1회 (iter_040), 유효한 실험 1회, 미분류 0회, 최근 판정: inconclusive, 커밋: 18fdae2eec4f4ab3605845fdaeafd1959d9d725f
+- 소견 부재 거부와 grounding 보존 진단 [approach/grounding-presence-retention]: 1회 (iter_042), 유효한 실험 1회, 미분류 0회, 최근 판정: inconclusive, 커밋: e7ee15464cf404a44a877997661b9f50dd8c3096
 
-현재 연구 브랜치: approach/sentence-evidence-binding (코드 위치: /SSD1_1TB/home/milab/daniel/08_medgemma/research)
+현재 연구 브랜치: approach/grounding-presence-retention (코드 위치: /SSD1_1TB/home/milab/daniel/08_medgemma/research)
 
 ### 최근 계획의 대안 순위
 
-1. 소견 문장–영상 근거 결합 진단: 새 B/C checkpoint로 과거 개별 능력 부족의 해석 제한을 줄이고, 정확도·실제 병렬 비용을 한정 비교한다.
-2. 직접 SFT와 MedGrounder 실용 비교: 중요한 비교지만 공식 실행 경로의 필수 의존성이 부족하다. 이번에는 환경 정비 반복이나 임의 대체 구현으로 진행하지 않는다.
-3. 현재 문장 대조 방법 개선: 대조항의 추가 이득과 baseline 수렴 근거가 부족해 epoch·계수·seed 탐색의 우선순위가 낮다.
-4. 다른 보고서 근거·불확실성 질문으로 전환: GOAL과 연결되지만 새 정답·강한 baseline의 확인 비용이 있다. 이번 한정 비교가 투자 근거를 주지 못하면 다음 전략 판단에서 우선 검토한다.
+1. 소견 부재 거부와 grounding 보존 진단: 실제 명시적 음성 reference와 기존 checkpoint로 양성 grounding·부재 거부·단순 gate의 충분성을 한 번 비교한다.
+2. 직접 SFT와 MedGrounder 실용 비교: 중요한 비교이나 공식 의존성·가중치 실행 경로가 해결되지 않았다. 이번을 환경 정비 반복으로 만들지 않는다.
+3. 현재 공동 grounding 방법 개선: 공동 정확도 손실은 확인됐지만 원 계획의 비용 투자 기준이 미완결이므로 보류를 유지한다.
+4. 새 보고서 생성·다른 의료 과제로 전환: GOAL에는 맞지만 새 정답·권한·baseline 확보 비용이 크다. 이번 한정 판단이 불확정이면 재검토하되 MRI·longitudinal로 자동 전환하지 않는다.

@@ -202,3 +202,23 @@ RSNA seed17 grounding SFT의 nonempty 개발 출력 C201/E402에서 마지막 �
 - 미해결: device-seconds와 처리량 비율의 계획된 불확실성 검사가 없어 정확도·비용 방법 pilot의 투자 기준 충족은 미확정이다.
 - 미해결: MedGrounder 등 문장 조건부 모듈형 baseline과 vision/prefix caching 대비 효용은 미검증이다.
 
+## padchest-presence-grounding-interface — observed
+
+PadChest-GR의 새 개발 집단 흉수 양성 29명·보고서상 음성 40명에서, 직접 SFT C의 중립 grounding 출력은 음성 valid nonempty 20건·invalid 20건·valid empty 0건이었다. M0는 각각 7·0·33건이었다. 그러나 M0/C presence gate를 적용하면 C의 음성 nonempty는 각각 1/40로 감소했다. 양성 F1@0.3은 C_short 0.4080, C_neutral 및 P0 gate 0.3851, PC gate 0.3678이었다. 현재 인터페이스의 부재 거부 문제는 관찰됐지만 단순 gate 이후의 중요한 잔여 문제, 양성 성능 보존, 일반적인 SFT 유발 능력 손상은 확정하지 않는다.
+
+- 적용 목표 시작: iter_003
+- 최신 리뷰: agent/runs/iter_042/review.json
+- 근거: research/results/iter_042/eval/report_E.json 및 report_E_per_patient.json: 리뷰에서 E_M0/E_C 원시 출력 414건의 환자별 F1@0.3·0.5, 음성 분류 및 paired CI를 독립 재계산해 일치 확인.
+- 근거: 중립 질의의 C−M0 음성 false-box 차이 +0.325, 97.5% CI [0.150, 0.500]. 존재 전제 질의에서는 −0.025, CI [−0.100, 0.000].
+- 근거: P0/PC gate의 C_short 대비 양성 F1 차이는 −0.02299/−0.04023이며 95% CI는 각각 [−0.13218, 0.07471]/[−0.15517, 0.06322].
+- 근거: research/results/iter_042/data/review_private.json: 출력 전 적격성 검토와 제외 사유. 음성 reference는 영상 재판독이 아닌 제공 보고서의 명시적 부재 진술이다.
+- 사용·평가 검증: 리뷰 SHA e7ee15464cf404a44a877997661b9f50dd8c3096의 대상 소스 21개가 작업 파일과 일치하고 반입 파일 12개의 blob이 원본 SHA와 일치했다.
+- 사용·평가 검증: D/E 원본 ZIP 영상 75개의 PNG·uint16·uint8·padding 후 입력 hash를 검증했다. E의 환자·study·영상·원본 pixel hash는 기존 제외 manifest와 겹치지 않았다.
+- 사용·평가 검증: 고정 prompt·caps 1000/2000/4000·요청/record/config/adapter 연결과 본실험 completion을 확인했다. 두 모델에서 각 1건의 G_short 비EOS 출력은 invalid로 유지했다.
+- 사용·평가 검증: 공식 template와 전처리 경로는 iter_039 검증을 동일 소스 범위에서 재사용했다. E 이전에 고정한 parser를 유지했으며 label 오류와 정상 빈 출력을 구분했다.
+- 사용·평가 검증: C_neutral의 음성 label 오류 20건도 label을 무시하면 nonempty였다. 형식 오류를 성공적인 부재 거부로 계산하지 않았다.
+- 미해결: 단일 target·단일 SFT seed·작은 개발 집단이다. 독립 환자·기관·모델 재현과 사전학습 미노출은 확인하지 않았다.
+- 미해결: 중립 질의의 적응 전후 차이가 미학습 지시·label 형식·양성-only 학습 분포 중 무엇에 기인하는지는 미확정이다.
+- 미해결: presence gate의 양성 손실이 사전 허용 폭 0.05 이내인지와 실제 두 단계 latency는 미확정이다.
+- 미해결: 현재 사전 규칙은 투자 보류다. 이 불확실성만으로 환자·prompt·seed·학습을 자동 추가하지 않는다.
+

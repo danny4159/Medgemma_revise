@@ -1175,3 +1175,29 @@ Claude 계정의 /usage 또는 Settings > Usage에서 제한을 확인한 뒤 �
   - 다음: 현재 공동 처리 방법 투자를 보류하고 다른 연구 질문으로의 전환을 우선 검토한다. 정확도 손실은 확인했지만 비용 근거가 원 계획의 투자 기준을 완결하지 못했고, 계획은 이 경우 같은 진단의 자동 연장을 금지한다. 다음 deep 계획에서 language-conditioned-grounding의 기존 자산을 활용할 실행 가능한 모듈형 비교와 GOAL 안의 대안을 비교해 하나를 선택한다. 근거 없이 추가 prompt·seed·환자·공동 학습을 실행하지 않는다. 현재 판정 오류는 기존 결과를 보존한 별도 정정으로 처리하며 인프라 수정만으로 연구 반복을 소비하지 않는다. 향후 새로운 실용 근거로 공동 방법 pilot을 재검토한다면 공동 직접 CE를 강한 대조군으로 포함하고 비용 불확실성·최소 가치 기준·종료 조건을 먼저 고정한다. VinDr 승인 대기와 RSNA 자산, H192·F120·test·MRI reserve 보존을 유지한다.
 - 📁 원본: `agent/runs/iter_041/`
 
+## iter_042 — 소견 부재 거부와 grounding 보존 진단 (1번째 시도) · 2026-09-30 22:50
+
+- 🧭 **계획** (GPT deep): 공동 처리 투자는 보류하고, 기존 SFT가 실제 부재 소견에도 box를 반환하는지 한정 검증한다. 중립 질의·presence gate로 해결되면 추가 방법 투자를 멈추며, 신규 기여는 미확정이다.
+  - 대안: 1) 소견 부재 거부와 grounding 보존 진단: 실제 명시적 음성 reference와 기존 checkpoint로 양성 grounding·부재 거부·단순 gate의 충분성을 한 번 비교한다. · 2) 직접 SFT와 MedGrounder 실용 비교: 중요한 비교이나 공식 의존성·가중치 실행 경로가 해결되지 않았다. 이번을 환경 정비 반복으로 만들지 않는다. · 3) 현재 공동 grounding 방법 개선: 공동 정확도 손실은 확인됐지만 원 계획의 비용 투자 기준이 미완결이므로 보류를 유지한다. · 4) 새 보고서 생성·다른 의료 과제로 전환: GOAL에는 맞지만 새 정답·권한·baseline 확보 비용이 크다. 이번 한정 판단이 불확정이면 재검토하되 MRI·longitudinal로 자동 전환하지 않는다.
+  - 1순위 선택 근거: 승인된 PadChest 자료와 기존 모델만으로 미검증된 실제 사용 조건을 평가할 수 있다. 새로운 학습이나 외부 권한 없이 단순 해결책의 충분성을 판별하며, 결과별 종료 결정도 명확하다.
+- ▶ **결정**: 자동 진행 (smart) — 1순위로 진행
+- 💾 **개발 이력 체크포인트** `e7ee15464cf404a44a877997661b9f50dd8c3096`: implementation_finished (검증 승인 아님)
+- 🔧 **Claude** (standard): PadChest E(양성29·음성40)에서 M0·SFT C 모두 존재 전제 질의에서 음성 39–40/40에 box를 냈고 C 적응 악화 근거는 없다. presence gate는 39/40→1/40으로 줄였지만 양성 F1 손실 CI(하한 −0.13)가 사전 기준을 못 넘어 사전 판정은 불확정/보류다. 엄격 독립 재계산은 parser 정의 차이로 불일치했고 관대 변형은 일치하며, 독립 확인과 실제 latency는 미검증이다. [자체 검증 FAIL, 파일 947개 변경]
+  - 새 브랜치 `approach/grounding-presence-retention` ← 68117cf (68117cf)
+- 🔍 **리뷰** (GPT normal): [CONTINUE / inconclusive] PadChest 양성29·음성40에서 presence gate는 C의 음성 오출력을 39→1건으로 줄였다. 양성 F1 보존은 불확정이며 새 방법 pilot 기준도 미달해 현재 투자를 보류한다.
+  - 접근법 판단: 유효한 비교지만 단순 gate의 양성 보존과 새 방법 필요성 모두 사전 기준을 충족하지 못해 현재 설계 투자를 보류한다.
+  - 목표 진전: 실행 유효성과 주요 수치 재현을 확인했다. presence gate는 음성 false-box를 C_short의 39/40에서 1/40로 줄였지만 양성 F1 보존의 사전 비열등 기준은 충족하지 못했다. 중립 grounding에서 C의 잔여 오류는 관찰됐으나 두 gate 이후 큰 오류·손실은 입증되지 않아 방법 pilot 진입 근거가 부족하다. 새로운 학습 방법, 독립 일반화, 실제 비용 우위 및 신규 contribution은 검증하지 않았다.
+  - 판정 범위: 불확정은 MedGemma 1.5 M0와 iter_040 seed17 C의 PadChest-GR 흉수 개발 집단 양성 29명·음성 40명, 고정 두 grounding prompt와 두 presence gate에서의 방법 투자 기준 충족 여부에 적용된다. 실제 출력 비교는 유효하다. 일반적인 부재 판별 능력, 모든 SFT·경량 학습 또는 의료 grounding 전체를 기각하지 않는다.
+  - 재사용 전 수정: pg42_eval.py와 rsna_diag/metrics.py를 포함한 평가 의존성, 원본 metadata·제외 manifest·selection_summary를 실행 전 잠금 및 결과 provenance에 연결해야 한다. 현재 값은 리뷰에서 별도로 검증했다.
+  - 재사용 전 수정: pg42_eval.py는 report를 먼저 확정하고 per_patient를 나중에 기록한다. 동시 실행·중간 중단 시 산출물 묶음의 일관성과 원본 보존을 보장해야 한다. build 역시 selection_lock 생성 전 중단된 부분 산출물을 덮어쓸 수 있다.
+  - 재사용 전 수정: pg42_verify.py의 tolerant 모드는 첫 JSON 뒤의 상충 목록을 무시할 수 있으며 pipeline의 ambiguity·ID 처리와 완전히 같지 않다. 허용 문법을 명시하고 여분 괄호·복수 답·ID 변형 회귀검사를 추가해야 한다.
+  - 재사용 전 수정: pg42_dcheck.py의 구성 선택은 GPU당 2 GiB만 차감한다. worker당 2 GiB와 다른 점유를 반영하도록 고치고 pg41_run.py의 실제 여유 순 배정을 구현해야 한다. 이번 실제 점유에는 충분한 여유가 있었다.
+  - 재사용 전 수정: required_checks의 음성 불확실성·시간 비교·부분 부재·번역·복합 소견 fixture는 43개 검사만으로 모두 충족되지 않는다. 현재 의미 검토 기록을 유지하고 해당 자료 경로를 다시 사용할 때 누락 검사를 보완해야 한다.
+  - 추후 개선: CPU/RAM/I/O 경합, p95 latency와 최악 출력 길이의 사전 메모리 검사는 미완료다. 현재 안전한 실행을 모든 긴 출력 조건으로 일반화하지 않는다.
+  - 추후 개선: 보고서의 'RSNA 대신 PadChest'는 오기다. 원 계획부터 PadChest였다. 또한 'SFT가 만든 악화가 아니다'는 G_short에 한정해야 하며 G_neutral의 양성 차이 근거를 함께 남겨야 한다.
+  - 추후 개선: 재개 검사는 max-requests에 의한 정상 중단 후 인위적 부분 행 복구다. 실행 중 강제 종료·동시 worker 장애 전체를 검증한 것으로 표현하지 않는다.
+  - 추후 개선: 비공개 원문이 있는 results/iter_042_tmp_review.txt는 공개 산출물에 포함하지 않도록 관리한다. 검토 과정에서 삭제하거나 수정하지 않았다.
+  - 추후 개선: 보고서 기반 음성 reference, 양성 hedge, 단일 seed·target 및 사전학습 노출의 불확실성을 유지한다. 실제 두 단계 pipeline latency는 미측정이다.
+  - 다음: 현재 부재 거부 방법 투자를 보류하고 다른 연구 질문으로의 전환을 선택한다. 단순 presence gate 이후의 구체적인 부족함이 입증되지 않았고 고정 후보 전수 평가를 완료했으므로 같은 진단의 환자·prompt·질환·seed 추가나 negative SFT를 자동 실행하지 않는다. 다음 deep 계획 한 번에서 language-conditioned-grounding의 실행 가능한 모듈형 비교와 GOAL 안의 다른 후보를 기존 유효 근거·강한 baseline·정확도 또는 비용 가치로 비교해 하나를 선택한다. 새 최소 방법 시험은 연결 가능한 observed/validated 근거와 단순 대안의 부족함, 경쟁 설명을 구분할 개입 및 종료 기준이 있을 때만 계획한다. MedGrounder 환경 정비나 주변 코드 수정만으로 별도 반복을 소비하지 않는다. 실제 사용할 경로의 reuse_issues만 해결하고 RSNA 자산·VinDr 승인 대기·H192/F120/test/MRI reserve 보존을 유지한다.
+- 📁 원본: `agent/runs/iter_042/`
+

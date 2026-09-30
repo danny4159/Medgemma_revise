@@ -15528,3 +15528,425 @@ iter_039에서는 미적응 모델의 낮은 독립 성능이 해석을 제한�
 현재 비용 판정은 기존 산출물을 보존한 별도 정정으로 처리한다. 새로운 근거로 공동 방법 pilot을 다시 선택한다면 공동 직접 CE를 강한 대조군으로 두고, 정확도 보존과 실제 비용 개선을 구분하는 최소 개입 및 종료 기준을 사전에 명시한다. full 확대는 별도 판단이다.
 
 VinDr 승인 통지 전 외부 다운로드·평가는 진행하지 않는다. 기존 RSNA checkpoint·detector 결과, test와 MRI reserve를 유지한다.
+
+
+## iter_042 GPT PLAN [소견 부재 거부와 grounding 보존 진단 / proceed] — 2026-09-30 22:50:51
+
+# 요약
+
+- **이번에 할 일:** 기존 M0와 직접 SFT C가 흉수 양성 영상에서는 위치를 찾고, 명시적 음성 영상에서는 빈 결과를 반환하는지 비교한다.
+- **필요한 이유:** 지금까지의 PadChest grounding 평가는 양성 소견 중심이었다. 위치 출력의 개선이 부재 거부까지 보존한다는 근거는 없다.
+- **확인할 기준:** 중립 질의와 두 presence gate 이후에도 큰 음성 오출력 또는 양성 손실이 남는지 판단한다.
+- **주의·다음:** 최종 후보 전수 비교 한 번으로 종료한다. 양성이면 최소 방법 시험의 후보이며, 불확정이면 추가 진단을 자동 확대하지 않는다.
+
+# Current Understanding
+
+iter_040에서 직접 SFT C의 V96 F1@0.3은 0.57795였지만 문장 대조의 추가 효과는 불확정이었다. iter_041에서는 공동 요청의 정확도 손실을 확인했으나 비용 불확실성 검사가 완결되지 않았다. 공동 방법 투자는 보류한다.
+
+이번은 공동 요청 계획의 복구나 비용 CI 재실험이 아니다. 양성 문장만 사용한 적응 이후 실제 부재 소견에 대한 출력 행동을 묻는 별도 diagnostic이다. 기존 observed 한계는 자산과 이력을 연결하는 근거이며, 새 specificity 결함의 증거로 대신 쓰지 않는다.
+
+유지할 것은 GOAL, MedGemma 1.5, RSNA SFT·detector 결과, continuation 투자 종료, VinDr 승인 대기와 기존 reserve다. 바꿀 것은 평가할 사용 조건뿐이다. 학습·checkpoint 선택·과거 판정은 바꾸지 않는다.
+
+# Strategy Check / 연구 방향 판단
+
+중요한 사용 과제는 요청한 finding이 실제 영상에 있을 때만 근거 영역을 제공하는 것이다. 존재하지 않는 소견에도 box를 반환하면 grounding을 검증 가능한 근거로 활용하기 어렵다. 다만 일반적인 hallucination이나 zero-box 처리는 이미 연구된 문제다.
+
+강한 직접 SFT 확보와 공동 방법 보류 이후이므로 전략을 재검토한다.
+
+1. 현재 방법 개선은 공동 직접 CE 및 비용 근거가 부족해 우선하지 않는다.
+2. 전문 모듈형 비교는 가치가 있지만 MedGrounder의 공식 실행 의존성이 해결되지 않았다. 미실행을 성능 열세로 해석하거나 RSNA opacity detector로 대체하지 않는다.
+3. 이번 specificity 진단은 승인된 원본과 기존 checkpoint로 실행 가능하다. 동일 질의·실제 양성/음성 영상과 간단한 presence gate로 다음 방법 시험의 필요성을 한 번 판단한다.
+4. 새 보고서·다른 데이터 과제는 정답과 baseline 확보 비용이 더 크다. 이번 판단 이후에도 근거가 없으면 방향 전환 후보로 검토한다.
+
+`language-conditioned-grounding` track을 유지한다. iter_038 setup, iter_039 diagnostic, iter_040 method pilot, iter_041 diagnostic과 과거 RSNA 전이·모듈형 비교를 연결한다. 해결된 질문은 양성 grounding의 적응 가능성과 현재 공동 요청 손실이다. 남은 질문은 실제 부재 거부와 단순 대안의 충분성이다.
+
+iter_039 주요 생성 wall 약4.21시간, iter_040 네 학습 trajectory 약2.54 GPU-hours, iter_041 일부 큐 loading 포함 약1.123 GPU-hours는 서로 포함 범위·단위가 달라 합산하지 않는다. 이미 여러 준비·진단을 수행했으므로 이번은 유한한 후보 전수 비교로 종료한다.
+
+# Hypothesis
+
+- **H_specificity:** C는 양성 위치 출력의 이득을 얻었지만 부재 영상에서도 box를 반환한다.
+- **H_adaptation:** C의 음성 오출력은 M0보다 커졌다. 이 차이는 측정 대상이며 사전 사실이 아니다.
+- **H_prompt:** 존재를 전제하는 요청 문구가 차이를 설명하며 중립 질의로 해소된다.
+- **H_modular:** 단순 presence 확인 후 C의 box를 반환하면 충분하다.
+- **H_competence:** canonical 질의에서 양성 grounding 자체가 낮다면 specificity 보존 문제를 분리해 해석하기 어렵다.
+
+학습하지 않은 문구와 양성-only 학습 분포는 경쟁 설명으로 남긴다. 내부 시각 표현의 손상이나 임상적 환각 원인을 단정하지 않는다.
+
+# Limitation Evidence / Correct Usage Checks
+
+연결할 기존 id는 `padchest-sentence-grounding-and-joint-retention`이다. iter_039–041 원본 리뷰의 정상 입력·좌표·실제 출력 검증을 재사용한다. iter_041 비용 판정의 blocking issue는 유지하며 이번 gate에 사용하지 않는다. 새 specificity 주장은 아직 candidate 수준이다.
+
+모델 revision `91850547d9f0b2fdd21aa7c5f4f3d1a8a52c243b`, bf16, 공식 chat template, uint16 값 보존 변환, RGB 복제, 중앙 square padding과 yxyx/0–1000 좌표를 유지한다. 과거 변환 논쟁을 다시 실험하지 않고 새 영상의 연결·hash·좌표를 검사한다.
+
+음성은 label 부재, 빈 bbox, 정상으로 보이는 crop으로 만들지 않는다. 원본 abnormal=false 문장에서 현재 영상의 pleural effusion 부재가 명시된 경우만 허용한다. 한쪽 흉수만 부정한 경우, 불확실성, 과거/변화 비교, 번역 불일치와 대상 범위가 모호한 경우는 제외한다. 영문·스페인어 원문과 주변 findings를 출력 눈가림 상태에서 검토하고 이유를 비공개 기록에 남긴다. 이는 새 임상 재판독이 아니며 제공된 report reference에 대한 평가다.
+
+# Contribution Path / Baselines / Reuse
+
+[MedGrounder/GMPG](https://arxiv.org/html/2512.01085v1)는 non-groundable 문장과 zero/multiple boxes를 이미 다룬다. 이번에는 음성 문구가 답을 알려주는 평가를 피하고, 같은 target 질의에 영상이 달라질 때의 반응을 측정한다. [Counterfactual grounding verifier](https://arxiv.org/html/2606.28520v1)와 [CORAL](https://arxiv.org/abs/2607.03647) 때문에 grounding 기반 사실 검증·영상 대조 자체도 신규성으로 주장하지 않는다.
+
+비교 모델은 미적응 M0와 `results/iter_040/train2/C_s17/epoch_03`이다. C adapter tensor digest는 `419ae81f5ef455d39742b158537373da6e26061b362d13205ab28b4a50905ba8`이다. 새 seed·B/M checkpoint 선택을 추가하지 않는다.
+
+실용 대안은 M0-presence→C-grounding과 C-presence→C-grounding이다. 동일 원본 영상과 target을 허용한다. positive-only annotation으로 학습된 C와 추가 학습 없는 M0의 차이를 명시한다. 향후 method pilot에는 같은 positive annotation budget의 positive+negative 직접 CE와 이 두 단계 대안을 필수로 포함해야 한다.
+
+새 approach branch는 orchestrator가 관리한다. 자동 기반과 JSON reuse_assets의 12개 파일을 사용한다. 소스 SHA와 실제 blob은 확인했다. 입력·순수 metric 승인 범위는 iter_039 review.json, runner 결함과 보조 검증 범위는 iter_041 review.json을 따른다. 전체 snapshot 승인이 아니다.
+
+# Proposed Experiment
+
+## 1. 출력 보기 전 자료 확정
+
+원본은 `results/datasets/padchest_gr/raw/grounded_reports_20240819.json`과 `master_table.csv.zip`이다. 기존 pinned SHA를 검증하고 official train만 사용한다.
+
+E 후보에서 iter_039 전체 manifest의 D24/E288/F120 및 iter_040 train/eval manifest의 환자를 모두 제외한다. 환자·study·영상 ID와 decoded pixel 중복도 확인한다. 기존 H192·F120·test의 findings나 출력을 새로 열지 않는다.
+
+- 음성 후보: abnormal=false이고 effusion을 명시한 현재 부재 문장. metadata상 41영상이며 위 의미 검토를 통과해야 한다.
+- 양성 후보: 모든 pleural-effusion target 문장이 해당 label 하나만 포함하고 유효한 공식 boxes를 가지며 progression=None이고 기존 temporal regex에 걸리지 않는 영상. metadata상 30영상이다. 추가 혼합 target 문장이 있으면 영상 전체를 제외한다. target의 모든 공식 box를 모으고 동일 좌표 중복만 제거한다.
+- 환자당 한 영상은 `sha256('iter042-v1|' + PatientID + '|' + ImageID)` 순서로 고른다. 결과에 따른 교체는 금지한다.
+
+최종 적격 후보 전원을 E로 사용한다. 이 집단은 프로젝트 학습·기존 평가 환자와 분리한 새 개발 진단이며 독립 confirmatory test로 부르지 않는다. 사전학습 노출은 미확인이다.
+
+양성 24명·음성 32명 이상일 때 실행한다. 이는 bounded 지표의 최악 95% 반폭이 각각 약0.20·0.17인 큰 효과 진단의 최소 정밀도다. 기대 후보 30/41명도 작은 차이를 판별하기에는 부족하다. 미달이면 사례를 추가 정의하거나 reserve를 열지 않고 자료 제약으로 종료한다.
+
+## 2. 요청 조건
+
+모든 E 영상에 같은 target `pleural effusion`을 사용한다. 원본 보고서·부재 표현·GT·집단명은 추론 입력에 넣지 않는다. 각 모델에서 다음 세 조건을 독립 대화로 생성한다.
+
+- **G_short:** 기존 `prompt_I_short('Pleural effusion.', 'qA')`를 그대로 사용한다.
+- **G_neutral:** `Identify all visible regions of pleural effusion in this chest radiograph. Pleural effusion may be present or absent. If it is absent, return []. Otherwise, return one entry per separate visible region.` 뒤에 기존 `_SHORT_TAIL`과 `Use qA as the label of every entry.`를 붙인다.
+- **P:** `Is pleural effusion present in this chest radiograph? Answer only yes or no.`
+
+M0/C×세 조건으로 환자당 6요청이다. greedy와 기존 EOS 재시도 caps 1000/2000/4000을 유지한다. P도 길이를 임의 축소해 invalid를 만들지 않는다. JSON 및 yes/no parser는 E 출력 전에 고정한다. P는 공백·대소문자·종결부호만 정규화하고 설명문·상충 답변을 임의 추론하지 않는다.
+
+두 단계 출력은 P가 yes이면 해당 영상의 C G_neutral, no이면 []로 정의한다. P가 invalid이면 최종 결과도 invalid다. P0-gate와 PC-gate를 모두 보고하며 E에서 유리한 쪽만 선택하지 않는다. 이는 baseline 출력의 결정적 조합 평가다. 실제 조건부 pipeline latency를 측정한 것으로 표현하지 않는다.
+
+## 3. 동작 확인
+
+기존 T305/D24 중 출력 눈가림 적격성 검토를 통과한 양성 3명·음성 최대3명을 D로 고른다. 현재 후보는 양성20·음성3영상이다. D는 train 노출 가능성이 있는 구현 검사이며 효과 추정에 합치지 않는다. 적격 음성이 줄면 모두 사용하고 최소1명이 없으면 자료 경로를 보류한다.
+
+template·adapter·영상 tensor 연결, empty/nonempty/invalid 분류, 좌표 왕복, target ID와 원본 GT 연결을 검사한다. 명백한 구현 오류만 수정한다. D 성능을 보고 prompt 후보를 탐색하지 않는다.
+
+## 4. 가능성 탐색과 규모 확대
+
+동작·자료 gate 통과 후 고정 E 전수를 한 번 실행한다. 작은 E를 먼저 보고 유리한 경우 나머지를 여는 절차는 쓰지 않는다. 전체 후보가 최대71명이고 큰 효과만 판별할 수 있어 추가 중간 평가의 선택 편향보다 전수 비교의 가치가 높다.
+
+이번 diagnostic의 본실험은 이 E 비교다. 학습·epoch·validation milestone은 해당하지 않는다. 다른 질환·추가 환자·H192·F120·추가 seed로 확대하지 않는다.
+
+## 5. GPU 배치·비용·재개
+
+실행 직전 nvidia-smi로 상속된 허용 장치와 실제 여유를 확인한다. 논리/물리 대응을 기록하고 여유가 큰 장치부터 배정한다.
+
+D에서 총2 worker와 총4 worker를 같은 요청으로 비교한다. 각 모델 큐를 두 GPU에 나누며 4 worker이면 GPU당2개다. 과거 약17.8GB 점유는 참고값이며 새 M0 출력의 KV cache·긴 출력 peak와 다른 점유까지 확인한다. 예상 동시 peak와 worker당2GiB 여유가 용량을 넘으면 4 worker를 시작하지 않는다.
+
+D의 처리량·긴 출력 지연·전체 GPU peak·OOM·CPU/RAM/I/O·token 정합성으로만 구성을 선택한다. E 정확도는 구성 선택에 사용하지 않는다. 4 worker가 안전하거나 빠르지 않으면 2 worker를 쓰고 이유를 기록한다. worker 수와 GPU 수를 분리하고 배정 변경으로 prompt·caps·metric을 바꾸지 않는다.
+
+기본 신규 생성은 `6×N_E + 12×N_D`, 현재 후보 기준 최대498건이다. 과거 iter_039의 864요청/9,628초와 iter_041의 더 빠른 짧은 출력 처리량을 고려한 GPU 실행 예상은 약0.5–2시간이다. 입력 준비·재시도·회귀검사를 분리 집계하고 D 실측으로 ETA를 갱신한다. 시간 상한은 두지 않는다.
+
+새 결과는 `research/results/iter_042/` 아래에 저장한다. request ID·worker별 JSONL·원자적 claim·부분 행 원본·protocol·완료 digest를 보존한다. 중단 뒤 완료 요청도 현재 모델·입력·설정과 대조하며 살아 있는 작업을 중복 실행하지 않는다.
+
+## 6. 독립 확인
+
+이번에는 수행하지 않는다. 진단 양성도 method pilot 후보일 뿐이다. 방법과 강한 mixed-CE baseline을 정한 별도 계획에서 annotation budget·수렴·독립 집단을 결정한다.
+
+# Implementation Tasks for Claude
+
+1. 관련 원문과 reuse_manifest를 읽고 선택한 모듈만 반입·검증한다. 과거 trainer·downloader·비용 판정기를 정비하지 않는다.
+2. 별도 iter042 builder에서 제외 목록, 의미 적격성, 환자 선택과 실제 영상 hash를 잠근다. 원문·식별자·공유 링크는 Git/공개 로그에 넣지 않는다.
+3. 기존 pg41 runner helper를 사용하되 새 driver는 completion 존재만으로 skip하지 않는다. 호출자가 요구한 모델·adapter·요청과 protocol을 먼저 대조한다. 사용하지 않는 과거 generate CLI는 호출하지 않는다.
+4. 평가 GT·source·metric·selection lock·output digest를 연결하고 결과를 원자적으로 기록한다. []와 invalid를 분리한다. unknown ID·잘못된 좌표를 정상 empty로 바꾸지 않는다.
+5. empty GT, nonempty GT, invalid, gate invalid, 복수 box matching과 bootstrap의 fixture를 만든다. pg41_verify의 empty-GT F1 관례를 음성 정확도에 그대로 쓰지 않는다. 양성 matching만 제한 재사용한다.
+6. D에서 실제 중단·재개와 변조 거부, 2/4 worker 정합성을 검사한 뒤 E를 실행한다. 검사 요청과 폐기 attempt 비용도 기록한다.
+7. 보고서에 실행 유효성, 성능 비교, 가설 지지, 신규성 미확인을 구분한다. iter_041의 비용 pilot 판정은 원 리뷰대로 보류임을 출처와 함께 명시하고 과거 파일을 수정하지 않는다.
+
+# Evaluation (성공/실패 기준 포함)
+
+## 지표와 불확실성
+
+- 양성: 환자 평균 F1@0.3, 보조 F1@0.5·recall·FP/환자·valid/EOS.
+- 음성: false-box rate=valid nonempty/전체 음성, valid-empty rate, invalid rate를 별도로 보고한다. invalid는 성공적 거부가 아니다. 보수적 실패율 `(nonempty+invalid)/N`도 병기한다.
+- presence: sensitivity·specificity·invalid와 두 단계 결과.
+- C−M0: 같은 환자의 양성 F1 차이와 음성 false-box rate 차이를 주비교로 보고한다. 각각 환자 paired bootstrap 10,000회, seed20261001, 97.5% CI를 사용한다. 단일 비율은 Wilson 95% CI를 함께 보고해 0/1 경계의 퇴화 bootstrap을 피한다.
+- prompt 및 gate 비교는 95% paired CI와 원시 성공/실패 수를 보고한다. 결과 기반 threshold 선택은 없다.
+
+최소 가치 있는 단순 개선은 음성 false-box rate 15 pp 감소와 양성 F1 손실 5 pp 이내다. 이는 탐색 투자 기준이며 임상 허용 기준이 아니다. 성능을 합친 하나의 점수로 양성·음성 trade-off를 숨기지 않는다.
+
+## 다음 행동
+
+**단순 해결책 지지:** G_neutral 또는 사전 고정 gate에서 C G_short 대비 false-box rate가 15 pp 이상 감소하고 감소 CI 하한이 0보다 크며, 양성 F1 차이의 CI 하한이 −0.05 이상이면 유효한 단순 개선으로 기록한다. 음성 오류율 Wilson 상한까지 0.20 이하이면 현재 큰 specificity 문제의 방법 투자를 보류하고 baseline을 보존한다. 실제 latency 이득은 주장하지 않는다.
+
+**최소 방법 pilot 후보:** C G_neutral의 양성 F1@0.3≥0.40, grounding invalid≤5%, 음성 false-box rate≥0.25 및 Wilson 하한>0.10이 모두 필요하다. 두 gate 각각에서도 (a) false-box rate≥0.25 및 Wilson 하한>0.10, 또는 (b) C G_neutral 대비 양성 F1 손실≥0.10이고 손실 CI 하한>0 중 하나가 확인돼야 한다. 그러면 단순 대안의 구체적 부족함을 기록하고 positive+negative 직접 CE를 강한 대조군으로 하는 작은 method pilot을 다음 계획에서 검토한다. 방법 신규성이나 full 확대를 확정하지 않는다.
+
+**적응 악화 해석:** C−M0 음성 false-box 차이가 15 pp 이상이고 97.5% CI 하한>0이면 현재 적응 조건의 악화 관찰을 지지한다. 이 조건이 없으면 문제를 SFT가 만든 것으로 부르지 않는다. 잔여 specificity 문제와 적응 악화는 별도 결론이다.
+
+**음성·불확정:** 중립 질의에서 중요한 오출력이 남지 않거나, 양성 competence가 낮거나, gate 효과·손실의 CI가 경계를 가로지르면 현재 설계 투자를 보류한다. 기존 후보 전수를 이미 사용했으므로 같은 진단에 환자·prompt를 추가하지 않는다. 정확도 비교가 유효한 불확정과 입력/실행 실패를 구분한다.
+
+# Risks / Checks
+
+- `abnormal=false`는 모든 질환의 부재를 뜻하지 않는다. target-specific 현재 부재만 인정한다. 영어 keyword 집계는 적격성 검토의 대체물이 아니다.
+- compound positive 문장의 box를 흉수만의 정답으로 쓰지 않는다. 모든 target 문장의 범위·box 완결성을 출력 전에 확인한다.
+- canonical 질의는 C의 학습 문장과 분포가 다를 수 있다. 양성 competence와 두 문구의 결과를 함께 보고하며 낮은 성능을 specificity 손상으로 오해하지 않는다.
+- C는 positive-only T305에서 학습됐다. 실패가 확인돼도 간단한 negative 포함 CE로 해결될 가능성이 높고, 그 baseline 없는 새 loss 주장은 허용하지 않는다.
+- 단일 target·작은 개발 집단·단일 SFT seed다. 모델 내부 원인, 다른 질환·기관·모델 일반화와 임상 안전성은 판단하지 않는다.
+- MedGrounder 미실행과 두 단계 pipeline의 실제 latency 미측정 범위를 유지한다. 요청 시간 합으로 device-seconds CI나 사용자 완료 지연을 대체하지 않는다.
+- 환경 설치·hf_cache 변경·VinDr 다운로드·기존 결과 덮어쓰기와 reserve 개방은 하지 않는다.
+
+## 대규모 GPU 필요 후보
+
+다기관의 실제 positive/explicit-negative 영상–질의–영역 자료로 모델 전체를 적응하고, 여러 모델·seed에서 localization과 부재 거부의 공동 보존을 검증하는 연구는 후보로 보존한다. 폭넓은 학습·주석 비용이 필요하며 이번 진단이나 두 3090의 LoRA 가능성 전체를 대신 기각하는 근거로 쓰지 않는다.
+
+# 계획의 근거 (GPT 조사 노트)
+
+## 새로 확인한 것
+
+- GOAL, GPT_USAGE_POLICY, REPORTING_STYLE, INDEX, LIMITATIONS의 관련 항목, CODE_ASSETS와 iter_039–041 원본 리뷰·관련 계획을 확인했다. iter_041의 정확도 관찰은 유효하지만 비용 CI 오류로 방법 pilot 진입은 보류다. 이 판정을 유지한다.
+- iter_041 plan SHA256: `e9786ff168532ae432a03be8aa9d64e84308bc69ff08d8cd03e3002fd28eb87f`. iter_040 plan SHA256: `1e37d04e0c26b5fabcc6803bdfd41fd7c71cc2829a75a81e0c756ba3592bfc21`. 이번은 두 계획의 실행 복구가 아니라 별도 질문이다.
+- 원본 PadChest-GR metadata를 읽기 전용으로 집계했다. train의 abnormal=false 문장은 2,401개다. effusion을 명시한 음성 후보는 50영상이고, 기존 iter_039 전체 432명과 iter_040 T305·평가 manifest 환자를 제외하면 41영상이다. 이 50영상에 양성 pleural-effusion label이 함께 있는 사례는 0이었다. abnormal=false 항목에는 문장과 abnormal 필드만 있으므로 부재 범위의 별도 검토가 필요하다.
+- 같은 제외 후 양성 pleural-effusion 영상은 71개다. 해당 target 문장의 labels가 pleural effusion 하나이고 boxes가 있으며 progression=None인 후보는 31개였다. 모든 target 문장에 기존 temporal regex까지 적용한 보수적 후보는 30개다. 이는 자료 가능성 집계이며 최종 적격성·환자/영상 중복·임상 reference 검증은 아니다.
+- 기존 T305/D24 안에는 동작 확인용 양성 후보 20영상·음성 후보 3영상이 있다. H192·F120을 동작 확인에 사용하지 않는다.
+- research HEAD는 `85320c89689b70f05b6e8c06c01ec8c4c7af2710`이며 작업 트리는 깨끗하다. 선별 반입할 12개 파일의 실제 blob 일치를 확인했다. 자동 기반 후보 iter_006에는 해당 파일들이 없다. 모듈 승인 범위와 needs_fix는 iter_039/040/041 review.json의 code_assets를 확인했다.
+
+## 선행연구와 대안의 의미
+
+- [MedGrounder 공식 코드](https://github.com/aehrc/MedGrounder)와 [GMPG 논문](https://arxiv.org/html/2512.01085v1)은 zero/one/multiple-region grounding과 non-groundable 문장을 이미 다룬다. 단순 빈 출력 학습은 새 기여가 아니다. 공식 코드에는 PadChest 적응 checkpoint도 있으므로 향후 비교 시 train 중복을 확인해야 한다. 현재 실행 제약은 `research/results/iter_040/medgrounder/feasibility.json`에 보존돼 있다. 이번에는 설치·환경 혼합으로 이를 우회하지 않는다.
+- [Counterfactual Visual Grounding Uncertainty](https://arxiv.org/html/2606.28520v1)는 grounding verifier와 entity perturbation으로 hallucination을 평가한다. 따라서 grounding을 사실 검증에 쓰는 아이디어 자체도 신규성이 아니다. 이번 진단의 가치는 우리 실제 SFT 자산이 부재 거부를 보존하는지와 단순 presence gate의 충분성을 결정하는 데 있다.
+- [CORAL 연구](https://arxiv.org/abs/2607.03647)는 영상 교체 대조 평가와 hard-negative LoRA 학습을 다룬다. 일반적인 영상 의존성 검사나 contrastive loss로 기여를 주장하지 않는다.
+- [PadChest-GR 제공자 설명](https://www.microsoft.com/en-us/research/blog/padchest-gr-a-bilingual-grounded-radiology-reporting-benchmark-for-chest-x-rays/)은 양성·음성 문장 구성과 양성 finding의 box annotation 절차를 설명한다. 음성 문장 원문은 reference 확인에만 쓰고 추론 입력에는 넣지 않는다.
+
+## 선택과 남은 한계
+
+공동 방법 개선은 원 계획의 보류 조건을 유지한다. 모듈형 전문 grounder 비교는 실행 경로가 막혀 있다. 새 데이터 수집보다 현재 승인된 영상과 직접 SFT를 활용해 specificity를 한 번 확인하는 편이 판단 비용이 작다. iter_018의 부분 evidence에 따른 QA 손상과는 개입·질문이 다르며 그 불확정 결과를 재시도하지 않는다. 이번 선택은 새 한계의 확증이나 방법 개발 승인이 아니다. 신규성, 외부 일반화, 다른 질환 및 mixed positive/negative SFT 대비 효용은 남는다.
+
+코드 수정·파일 생성·모델 실행은 하지 않았다.
+
+
+
+## iter_042 CLAUDE REPORT — 2026-09-30 23:34:58
+
+# 요약
+
+- **핵심 결과:** 계획한 RSNA 대신 PadChest 개발 집단 E(양성 29명·음성 40명)에서 M0와 직접 SFT C의 부재 거부를 비교했다. C는 존재 전제 질의(G_short)에서 음성 40명 중 39명에 box를 냈고, M0도 40/40이었다. C−M0 false-box 차이는 −0.025로 적응 악화 근거가 없다(97.5% CI [−0.100, 0.000]).
+- **presence gate:** 음성 false-box가 39/40에서 1/40으로 줄었다. 양성 F1@0.3은 0.408에서 0.385(P0 gate)와 0.368(PC gate)로 바뀌었다. 하지만 양성 F1 차이의 95% CI 하한이 −0.132로, 사전 기준(−0.05)을 넘지 못했다.
+- **사전 고정 판정:** `inconclusive_or_negative_hold`이며 method pilot 후보 조건도 충족하지 못했다.
+- **주의:** 표본이 작아 큰 효과만 판별할 수 있다. 단일 target, 단일 SFT seed, 개발 자료이며 독립 확인은 하지 않았다.
+- **다음:** 사전 규칙상 같은 진단을 확대하지 않는다. 보류 여부는 GPT 리뷰에서 판단한다.
+
+# Work Performed
+
+- 반입된 12개 파일을 확인했다. `pg42_*` 신규 코드는 별도 함수로 만들어 과거 양성 문장쌍 선택 함수와 분리했다.
+- **후보 열거:** official train에서 iter_039/040의 환자·study·영상 737개를 제외했다. 음성 후보 41건과 양성 후보 30건을 얻었다(계획 예상과 일치).
+- **출력 눈가림 검토(`review_private.json`):**
+  - 음성 1건 제외: "significant"만 부정한 부분 부재.
+  - 양성 1건 제외: 2011년 과거 보고를 언급한 문장.
+  - 최종 E는 양성 29명·음성 40명으로, gate(24/32)를 통과했다.
+  - 양성 GT box는 overlay 3장으로 눈으로 확인했다. 명백한 누락·좌표 오류는 없었다.
+- **사전 flag:** 양성 hedged 8건, 음성 bare "effusion" 19건. 이 둘을 제외한 민감도 분석을 미리 정했다.
+- **D 동작 확인:** 양성 3명·음성 3명. 요청 36건씩을 2 worker와 4 worker로 실행했고, 변조 거부와 중단·재개 검사도 했다.
+- **본실험:** E_M0와 E_C를 각 207건, 4 worker로 실행하고 평가와 독립 재계산을 했다.
+
+# Files Changed
+
+새 파일:
+- `pg42_data.py`, `pg42_spec.py`, `pg42_build.py`, `pg42_driver.py`, `pg42_eval.py`
+- `pg42_verify.py`, `pg42_dcheck.py`, `pg42_overlay.py`, `test_pg42.py`
+
+반입 파일 12개는 수정하지 않았다. `pg41_run.py`는 그대로 호출했다.
+
+결과는 `results/iter_042/`에 저장했다: `data/`, `requests/`, `protocol/`, `gen/`, `eval/`, `tests/`, `decisions/`.
+- `data/`와 `review_private.json`에는 원문과 ID가 있어 private이다(git 제외).
+- 임시 출력 `results/iter_042_tmp_review.txt`(원문 포함)는 삭제 권한이 없어 남아 있다. 비공개 처리가 필요하다.
+
+# Commands / Experiments (실제 실행한 명령과 성공/실패)
+
+| 명령 | 결과 |
+|---|---|
+| `python pg42_build.py` | 성공. E 양성 29/음성 40, 요청 D 18×2·E 207×2 |
+| `python pg42_overlay.py` | 성공. 양성 29명 GT overlay 확인 |
+| `python test_pg42.py` | 43/43 통과 |
+| `pg42_driver.py` D_M0/D_C, 2w·4w 각 1회 | 4건 모두 성공, `verify_completion` 통과 |
+| `python pg42_dcheck.py compare` | 성공 |
+| `python pg42_dcheck.py tamper` | 변조·누락·다른 모델 protocol·중복 4종 모두 거부 |
+| `pg42_driver.py --kind D_C --name D_C_resume --max-requests 3` | 미완료로 종료(예상) |
+| torn tail 추가 후 `pg42_driver.py` 재개 | 성공, 18건 완료 |
+| `pg42_driver.py` E_M0, E_C (각 4 worker) | 성공, completion 재검증 통과 |
+| `python pg42_eval.py` | 성공 |
+| `python pg42_verify.py` (엄격) | 불일치 발견(아래 Problems 참조) |
+| `python pg42_verify.py --tolerant` | 성공, 불일치 0 |
+
+# Results (수치와 결과 파일 경로)
+
+**실행 구성 선택** (`decisions/d_worker_config.json`)
+- D 2 worker: 135.6초, 4 worker: 90.5초(모델 M0·C 합계, 로딩 포함).
+- 두 모델 모두 2w와 4w의 token 불일치 0, OOM 0.
+- 4w GPU peak 17,836MiB(24,576MiB 중, 여유 약 6.7GB)라서 4 worker를 채택했다.
+- 중단·재개: 재개 결과가 원 실행과 token 일치 0건 불일치(`tests/resume_result.json`). 부분 행 원본은 `.partial.*.bin`으로 보존했다.
+
+**E 생성 비용**
+- E_M0: wall 618초, generate 구간 합 863초.
+- E_C: wall 1,085초, generate 구간 합 1,386초.
+- 각 모델에서 요청 1건이 4,000 token까지 재시도했고, G_short 1건이 EOS로 끝나지 못했다(invalid 처리).
+
+**주요 결과** (`eval/report_E.json`)
+
+| 시스템 | 양성 F1@0.3 | 음성 false-box(valid nonempty) | 음성 valid-empty | 음성 invalid |
+|---|---|---|---|---|
+| M0_short | 0.017 | 40/40 | 0 | 0 |
+| M0_neutral | 0.129 | 7/40 | 33 | 0 |
+| C_short | 0.408 | 39/40 | 0 | 1 |
+| C_neutral | 0.385 | 20/40 | 0 | 20 |
+| gate_P0 | 0.385 | 1/40 | 39 | 0 |
+| gate_PC | 0.368 | 1/40 | 39 | 0 |
+
+- **presence:** 양성 sensitivity M0 28/29, C 26/29. 음성 specificity는 두 모델 모두 39/40이었다.
+- **C−M0 (97.5% CI):**
+  - G_short: 양성 F1 +0.391 [0.218, 0.569]. false-box −0.025 [−0.100, 0.000].
+  - G_neutral: 양성 F1 +0.256 [0.101, 0.423]. false-box +0.325 [0.150, 0.500].
+- **C_neutral의 label 형식 문제:**
+  - G_neutral 전체 21건이 label을 "qA"가 아니라 소견명으로 써서 unknown_id(invalid)가 됐다. 음성 20건, 양성 1건이다.
+  - label을 무시하면 C_neutral의 음성 box는 40/40이다(`lenient_false_box`).
+  - 따라서 사전 정의된 false-box 0.50은 형식 오류에 가려진 하한이다.
+- **사전 고정 결정** (`decision`): `outcome = inconclusive_or_negative_hold`.
+  - simple_solution: 세 후보 모두 `supported=false`. C_neutral은 잔여 오류가 크고, gate는 양성 F1 CI 하한 −0.132/−0.155가 기준을 넘지 못했다.
+  - pilot: C_neutral의 grounding invalid가 30.4%로 기준(5%)을 넘고 F1 0.385<0.40이라 core를 통과하지 못했다.
+  - 적응 악화: G_short는 미지지, G_neutral은 +0.325로 기준 충족. 그러나 이 차이는 C의 label 형식 오류(invalid)가 섞인 값이다.
+- **민감도** (사전 고정): 양성 non-hedged 21명에서 C_short 0.429, C_neutral 0.444. 음성 명시적 "pleural"만 21명에서 C_short 21/21, gate_P0 0/21.
+
+**독립 검증**
+- 엄격 재계산(`eval/verify_E.json`)은 report와 불일치했다(양성 F1 최대 0.5, 음성 1.0).
+- 원인: M0 출력 10건에 여분의 `]`가 붙어 엄격 재계산은 invalid, pipeline은 완결 목록을 추출.
+- 같은 규칙으로 맞춘 관대 변형(`eval/verify_E_tolerant.json`)은 환자별 F1·false-box·invalid 모두 최대 차이 0, presence 수치도 일치했다.
+- 주 CI의 재계산 값은 `verify_E*.json`에 있다(별도 난수 seed).
+
+# Goal Progress / Reused Assets (목표 진전·미검증 범위, 재사용 출처·검증)
+
+**진전 (관찰 범위 내)**
+- 양성 문장만으로 학습한 C는 존재 전제 질의에서 부재 영상에도 거의 항상 box를 낸다.
+- 그러나 M0도 같다. 따라서 이 결함은 SFT가 만든 악화가 아니다.
+- 미적응 M0의 presence 확인과 C의 presence 확인은 모두 이 개발 집단에서 부재 거부를 크게 개선했다(39/40→1/40). 양성 F1 손실은 점추정 −0.02~−0.04였다.
+- 이 손실의 상한은 n=29에서 CI 하한 −0.13까지라 사전 기준으로는 미확정이다.
+
+**미검증**
+- 독립 확인 집단, 다른 target·기관, 다른 SFT seed, 실제 pipeline latency.
+- MedGrounder 비교, positive+negative 직접 CE 대조군은 실행하지 않았다.
+
+**재사용 검증**
+- **반입 blob·import:** 12개 파일 blob 일치와 import 정상, 기존 산출물은 읽기 전용으로 썼다.
+- **eligibility 분리:** fixture 43/43과 눈가림 검토 기록.
+- **provenance:** protocol에 GT manifest, selection lock, review, 스펙 소스를 hash 잠금.
+- **평가 소스:** protocol에 잠그지 않고 `report_E.json`의 provenance digest에 기록했다.
+- **completion:** 존재만으로 건너뛰지 않고 `verify_completion`으로 재검증한다. 변조 거부와 다른 모델 protocol 거부를 확인했다.
+- **양성 matching:** 기존 함수와 별도 구현의 환자별 값 일치.
+- **음성·presence parser:** fixture.
+- **GPU 배치:** 허용 GPU 0/1, 여유 순 배정 대신 pg41_run의 `worker % gpu` 배정을 썼다(두 GPU가 모두 여유가 커서 차이 없음). 메모리 gate 거부는 기록하지 않았다.
+
+# Problems (현재 결론 무효 / 재사용 전 수정 / 추후 개선을 구분)
+
+- **현재 결론 무효:** 없음.
+- **해석 주의:**
+  - C_neutral의 invalid 21건은 label 지시("Use qA") 무시라는 형식 문제다. 내용(부재 거부) 오류와 구분해야 한다. 사전 parser 규칙을 유지해 보고했으므로, 사후에 규칙을 바꾸지 않았다.
+  - 양성 F1 손실 CI가 넓어(n=29) gate의 비용 판단은 정밀도가 부족하다.
+  - E 표본이 작고, 사전학습 노출은 미확인이다.
+- **재사용 전 수정:**
+  - `pg42_verify.py`의 엄격 모드와 pipeline parser는 stray token을 다르게 처리한다(정의 차이).
+  - 음성 GT는 report 문장 기반이며 영상 재판독이 아니다. bare "effusion" 19건은 흉수로 해석한 것이다.
+  - `results/iter_042_tmp_review.txt` 정리 필요.
+- **추후 개선:** 요청 시간 합은 device-seconds CI나 사용자 지연을 대체하지 않는다. 실제 두 단계 pipeline latency는 측정하지 않았다.
+
+# Recommendation to GPT
+
+- 사전 규칙상 결과는 "불확정/보류"다. 같은 진단에 환자·prompt를 추가하지 않기로 계획에 명시돼 있다.
+- 다만 관찰은 다음 투자 판단에 쓸 만하다. 단순 presence gate(추가 학습 없음)가 이 개발 집단에서 부재 오출력을 39/40→1/40으로 줄였고 양성 손실은 작았다. 그러므로 negative 포함 SFT 또는 새 loss 투자의 필요성은 약해졌다.
+- 판단할 점은 세 가지다: (1) G_neutral 형식 오류를 형식 문제로 볼지, (2) gate의 양성 손실을 더 정밀하게 볼 후속 표본이 필요한지, (3) 위치 출력 연구를 언어·근거 연결 과제로 옮길지.
+- 논문 추천 조건(개선 효과 재현 등)은 충족하지 않는다고 본다.
+
+SELF_CHECK: FAIL
+SUMMARY: PadChest E(양성29·음성40)에서 M0·SFT C 모두 존재 전제 질의에서 음성 39–40/40에 box를 냈고 C 적응 악화 근거는 없다. presence gate는 39/40→1/40으로 줄였지만 양성 F1 손실 CI(하한 −0.13)가 사전 기준을 못 넘어 사전 판정은 불확정/보류다. 엄격 독립 재계산은 parser 정의 차이로 불일치했고 관대 변형은 일치하며, 독립 확인과 실제 latency는 미검증이다.
+
+
+## iter_042 GPT REVIEW [CONTINUE] — 2026-09-30 23:42:18
+
+# 요약
+
+- **판정:** CONTINUE / inconclusive. 실제 비교는 유효하며 현재 방법 투자를 보류한다.
+- **핵심 근거:** presence gate는 음성 false-box를 39/40에서 1/40로 줄였지만, 양성 F1 차이의 CI가 허용 손실 −0.05를 넘어서지 못했다.
+- **의미·한계:** 중립 grounding의 잔여 오류는 확인했다. 단순 gate 이후에도 새 방법이 필요한지는 입증하지 못했다.
+- **다음:** 고정 후보 전수 진단을 종료한다. 같은 진단을 확대하지 않고 다음 연구 투자 방향을 선택한다.
+
+# Assessment
+
+검토 SHA는 `e7ee15464cf404a44a877997661b9f50dd8c3096`이다. 대상 소스 21개와 현재 작업 파일이 일치했고, 선별 반입 12개 파일의 blob도 원본과 일치했다. `unpreserved_paths`는 비어 있다. 계획·plan.json·보고서·diff·reuse_manifest·관련 소스·원시 출력·검사 기록과 의심 구간의 실행 로그를 확인했다. execution_amendment는 없다.
+
+원 계획은 처음부터 PadChest였다. 보고서의 ‘RSNA 대신’은 계획 변경이 아닌 오기다. E 양성 29명·음성 40명은 사전 최소 24/32를 충족한다. M0/C 각 207건, 총 414건의 본생성을 완료했고 worker 종료 코드는 모두 0이다. 학습과 독립 확인은 미실행이다.
+
+`SELF_CHECK: FAIL`은 엄격 보조 parser와 기존 parser의 차이를 반영한다. 기존 평가 규칙을 사후 변경한 것은 아니며, 리뷰의 독립 재계산으로 현재 수치를 확인했으므로 실행 실패로 판정하지 않는다.
+
+# Key Findings
+
+## 실제 출력과 독립 재계산
+
+| 시스템 | 양성 F1@0.3, n=29 | 음성 nonempty / empty / invalid, n=40 |
+|---|---:|---|
+| M0_short | 0.01724 | 40 / 0 / 0 |
+| M0_neutral | 0.12874 | 7 / 33 / 0 |
+| C_short | 0.40805 | 39 / 0 / 1 |
+| C_neutral | 0.38506 | 20 / 0 / 20 |
+| P0 gate | 0.38506 | 1 / 39 / 0 |
+| PC gate | 0.36782 | 1 / 39 / 0 |
+
+원시 JSON을 별도로 해석하고 GT를 canvas로 변환한 뒤 최대 matching으로 F1@0.3·0.5를 재계산했다. 저장 환자별 점수·음성 집계와 일치했다. seed20261001, 환자 paired bootstrap 10,000회로 모든 저장 비교 CI도 재현했다.
+
+P0/PC gate의 C_short 대비 양성 F1 차이는 각각 −0.02299와 −0.04023이다. 95% CI는 [−0.13218, 0.07471], [−0.15517, 0.06322]다. 두 gate 모두 음성 false-box 감소는 0.95이고 감소 CI 하한은 0.875다. 잔여 1/40의 Wilson 상한은 0.12881이다. 음성 개선은 크지만 사전 양성 보존 기준을 충족하지 못했다.
+
+C_neutral 대비 P0 gate의 양성 환자별 F1은 모두 동일했다. PC gate의 평균 손실은 0.01724였다. 따라서 단순 gate 이후 큰 양성 손실 또는 큰 음성 오류라는 pilot 조건도 충족하지 않는다. C_neutral 자체도 F1 0.38506<0.40, invalid 21/69>5%로 core gate를 통과하지 못한다. `inconclusive_or_negative_hold`는 계획과 일치한다.
+
+presence sensitivity는 M0 28/29, C 26/29이며 specificity는 모두 39/40이다. 사전 민감도 분석에서 명시적 pleural 음성 21명의 P0 gate false-box는 0건이었다. 이 부분집단으로 원래 판정 기준을 교체하지 않는다.
+
+## 입력·출처·사용법
+
+원본 metadata에서 후보 양성 30·음성 41건을 재현했다. 최종 E의 환자·study·영상·문장·GT 연결을 확인했고 기존 제외 manifest와 환자·영상·원본 pixel 중복은 없었다. 출력 전 의미 검토 기록과 음성 영어·스페인어 문장을 확인했다. 양성 1건의 과거 보고 언급과 음성 1건의 부분 부재 진술 제외는 기록돼 있다. 양성 hedge 8건과 bare effusion 음성 19건의 해석 범위는 유지한다.
+
+D/E 원본 ZIP 영상 75개에서 raw PNG, uint16 pixel, uint8 변환, padding 후 요청 pixel hash를 검증했다. 대표 GT overlay도 확인했다. 이는 임상 재판독이나 annotation 완결성의 독립 증명은 아니다.
+
+450개 고유 D/E 요청의 prompt·target·caps를 명세와 대조했다. 본실험 414건의 record·요청·protocol·config·adapter 및 worker file digest가 일치했다. 공식 template·값 보존 전처리는 iter_039의 검증과 동일 소스 범위에서 재사용했다. 각 모델 G_short 1건은 1000/2000/4000 재시도 후에도 비EOS였으며 invalid로 포함됐다.
+
+## 자원과 완료
+
+D의 2 worker와 4 worker wall 합은 135.61초와 90.47초였다. 공통 36건의 token은 모두 같아 약 1.50배 처리량 개선을 확인했다. E는 두 GPU에 각 2 worker를 배치했다. 관측 peak는 M0 17,674/17,537 MiB, C 17,836/17,829 MiB로 이번 조건에서는 worker당 2 GiB 여유를 확보했다.
+
+E 두 큐의 wall 합은 1,702.92초다. D 비교·재개 완료 큐와 부분 실행을 포함한 기록된 launcher wall 합은 약 2,034.47초, 33.9분이다. 준비·CPU 검사 시간과 구분한다. E의 loading 포함 GPU 점유 구간 합은 약 0.648 GPU-hours이며 실제 조건부 gate 서비스 latency는 아니다.
+
+# Problems / Concerns
+
+현재 수치와 투자 보류 결론을 무효화하는 문제는 발견하지 못했다. 다음 해석과 재사용 문제는 남는다.
+
+- C_neutral의 음성 20건은 unknown label 때문에 invalid지만 label을 무시하면 box가 있다. valid false-box 0.50을 부재 거부 성공률 0.50으로 읽으면 안 된다. 보수적 실패율은 40/40이다.
+- 보고서의 ‘SFT가 만든 악화가 아니다’는 G_short에 한정해야 한다. G_neutral에서는 C−M0 false-box +0.325, 97.5% CI [0.150, 0.500]로 사전 악화 관찰 기준을 충족했다. 다만 형식·질의 적응과 내부 능력 손상을 구분해야 한다.
+- 엄격 verifier는 M0의 여분 닫기 괄호를 invalid로 처리했다. 기존 parser는 완결 목록을 추출한다. 현재 불일치는 설명됐지만 tolerant verifier가 뒤의 상충 JSON까지 무시할 수 있으므로 일반 재사용 전 보완이 필요하다.
+- 평가 소스와 일부 의존성은 실행 전 protocol에 잠기지 않았다. 현재 digest·GT·원시 수치는 리뷰에서 확인했으나, required_checks 전체 완료로 표현할 수 없다.
+- report와 per_patient의 묶음 완료 보호, build 중단 복구, worker당 메모리 기준 및 GPU 여유 순 배정은 재사용 전 수정한다. CPU/RAM/I/O 계측은 미완료다.
+
+# Interpretation
+
+존재 전제 질의에서 M0/C가 거의 항상 box를 반환한다는 관찰은 유효하다. 중립 질의만으로 M0의 부재 거부는 크게 바뀌지만 C의 정상 빈 출력은 회복되지 않았다. 이는 현재 인터페이스와 적응 조건의 차이다. 일반적인 시각적 forgetting 또는 모든 소견 판별 능력 상실은 증명하지 않는다.
+
+presence gate의 음성 개선은 실제 관찰이다. 그러나 작은 양성 표본에서 허용 손실 이내라는 근거가 부족하므로 검증된 해법으로 부르지 않는다. 반대로 넓은 CI를 단순 baseline의 실패로 간주해 새 loss 투자를 정당화해서도 안 된다.
+
+# Strategy Check / 연구 방향 판단
+
+- **실행 유효성:** 본생성·입력·출처·독립 수치 검증을 완료했다. valid_experiment=true다.
+- **성능 개선:** 추가 학습 없는 gate의 음성 오류 감소를 확인했다. 정확도 보존과 실제 비용까지 포함한 실용 개선은 불확정이다.
+- **가설 지지:** 현재 grounding 질의의 부재 거부 문제는 관찰됐다. 적응 악화는 prompt에 따라 다르며, 두 gate 이후 큰 잔여 문제는 입증되지 않았다.
+- **신규 기여 가능성:** 직접 negative CE와 presence gate, 계획에서 확인한 MedGrounder류 zero/multiple-box 방법을 넘어설 근거는 없다. 이번 결과는 새 방법이나 full 확대를 승인하지 않는다.
+
+`language-conditioned-grounding` track의 iter_038 준비, iter_039 진단, iter_040 방법 pilot, iter_041 공동 요청 진단과 이번 결과를 연결한다. 직접 SFT의 양성 grounding 개선과 공동 요청 손실은 이미 확인된 질문이다. 이번에는 실제 부재 영상의 반응과 단순 gate의 작동 범위를 추가로 확인했다. 남은 핵심은 강한 단순 대안 이후에도 중요한 정확도·비용 문제가 있는지다.
+
+과거 기록의 약 4.21시간 생성 wall, 약 2.54 GPU-hours 학습, 일부 큐 약 1.123 GPU-hours와 이번 비용은 집계 범위가 달라 단일 누적 GPU 비용으로 합치지 않는다. 준비·복구를 유효 실험 횟수로 세지 않지만, 이미 여러 차례 진단을 수행했다는 기회비용은 다음 선택에 반영한다.
+
+현재 개선 연장은 pilot gate 미달이고, 같은 진단의 정밀도 확대는 원 decision_contract가 보류하도록 정했다. 따라서 다른 연구 질문으로의 전환 검토가 우선이다. 이는 모든 presence 방법을 기각한다는 뜻이 아니다. 향후 새로운 유효 근거가 단순 대안의 구체적인 부족함을 보여줄 때만 별도 최소 방법 시험을 재검토한다.
+
+이번 방향의 방법 투자 판정이 불확정이고 양성 보존까지 확인된 해법이 없으므로 논문 추천은 보류한다.
+
+# Recommended Next Experiment
+
+현재 부재 거부 설계 투자를 보류하고 다음 deep 계획에서 연구 질문 하나를 선택한다. 같은 E의 prompt 수정·추가 환자·질환·seed 또는 negative SFT를 자동 실행하지 않는다.
+
+실행 가능한 문장 조건부 모듈형 비교와 GOAL 안의 다른 후보를 기존 유효 근거, 강한 baseline, 실제 사용 가치 및 비용으로 비교한다. 최소 방법 시험을 선택하려면 연결할 한계, 단순 대안의 부족함, 구분할 경쟁 설명과 종료 조건을 구체화한다. 이 조건이 없으면 다른 질문으로 전환하고 같은 진단의 연장으로 결정을 미루지 않는다.
+
+실제 사용할 코드 경로만 보완한다. 기존 RSNA·PadChest 결과와 checkpoint, continuation 투자 종료, VinDr 승인 대기 및 H192/F120/test/MRI reserve 보존은 유지한다.
