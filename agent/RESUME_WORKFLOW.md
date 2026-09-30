@@ -58,7 +58,9 @@ LIMITATIONS.md는 초기 LIMITATIONS.json과 review.json의 limitation_updates�
 candidate/observed를 validated로 자동 승격하지 않는다. GPT 리뷰가 실제 출력의 독립 평가,
 사용법·평가 검증과 오류 범위를 근거로 갱신하며 원본 리뷰에 이력이 남는다.
 
-method/confirmatory 계획은 현재 목표에서 validated인 limitation_ids를 지정해야 한다.
+method full/confirmatory 계획은 현재 목표에서 validated인 limitation_ids를 지정해야 한다.
+method pilot은 RESEARCH_POLICY의 최소 방법 실험 기준(이전 유효한 실험 리뷰·사용법 검사·blocking 없는
+observed/validated 근거와 명시적 decision_contract)을 따른다. 본격 확대는 별도 리뷰·계획이 필요하다.
 없으면 --auto에서도 구현 전에 중단한다. --replan으로 diagnostic 계획을 요청한다.
 이 검사는 GPT 판단의 과학적 정확성을 보장하지는 않으며, 근거 없는 단계 진입을 막는 제어다.
 CPU 준비·문헌 검색·head probe만으로 실제 MedGemma 한계를 검증했다고 판단하지 않는다.

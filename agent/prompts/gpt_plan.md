@@ -17,8 +17,9 @@ think_more는 전체 계획을 쓰지 않고 조사 노트에 새 사실·의미
 - 연구 목표, 지금까지의 반복 요약, 직전 리뷰를 먼저 읽는다.
 - 한계 색인에서 관련 id를 고르고 agent/LIMITATIONS.md의 해당 항목과 리뷰 원문을 읽는다.
   한계 주장·사용법 검증·미확인 원인을 구분하고
-  limitation_ids에 이번 과제의 대상을 적는다. method/confirmatory는 validated 주장이 있어야 한다.
-  없으면 공식 사용법·평가 무결성을 통제한 실제 출력 diagnostic을 우선한다.
+  limitation_ids에 이번 과제의 대상을 적는다. method full/confirmatory는 validated 주장이 있어야 한다.
+  최소 method pilot은 이전 유효한 실험 리뷰·사용법 검사·blocking 없는 observed/validated 근거로 가능하다.
+  candidate/준비뿐이면 실제 출력 diagnostic을 먼저 한다. diagnostic으로 이름만 바꿔 gate를 피하지 않는다.
 - 중단 후 보완 지시가 있으면 이전 계획을 그대로 이어가지 말고 유지·보류·변경 항목을 명시한다.
   이미 확인한 사실을 다시 조사하기 전에 원본 기록을 읽고, 모순이 있으면 이유를 설명한다.
 - 필요하면 코드, 결과 파일, docs를 직접 열어 현재 상태를 확인한다.
@@ -32,6 +33,16 @@ think_more는 전체 계획을 쓰지 않고 조사 노트에 새 사실·의미
 - 검증 방법과 성공/실패 판단 기준을 미리 정한다.
 - Evaluation에는 양성 / 음성 / 불확정 각각에서 알게 될 것과 다음 행동을 명시한다.
   모든 결과가 다른 loss를 시도하는 것으로 이어진다면 이번 실험의 정보 이득을 재검토한다.
+- RESEARCH_POLICY의 '진단에서 최소 방법 실험으로의 전환'을 적용한다. method_stage는 method의
+  pilot/full, confirmatory의 full, 그 외 none이다. pilot 전에 논문 수준 증명을 요구하지 않지만
+  중요한 실패·단순 대안의 부족함·경쟁 설명을 구분하는 최소 개입을 제시해야 한다.
+- research_track은 큰 질문이 같으면 유지하고 related_iterations로 다른 approach의 과거 근거도
+  연결한다. Strategy Check에 해결된 질문/남은 핵심 불확실성/다음 결정을 바꿀 증거를 적는다.
+  새 id로 과거 체류 시간을 숨기지 않는다. 과거 기록 수정·모든 원본 전수 독해는 필요 없다.
+- decision_contract에 결과별 행동·범위/비용·종료점을 고정한다. method에는 기전 가설과 개입
+  대조도 필수다. 진단의 다음 결정은 최소 방법 시험/한정 보완/투자 보류·전환 중 하나다.
+  가장 가까운 방법과 구별할 주장을 contribution_path에, 실제 정확도·비용 trade-off와 최소 가치
+  있는 개선 폭을 baseline_plan/Evaluation에 적는다. 추가 진단에는 결정을 바꿀 증거와 종료점이 필요하다.
 - agent/RESEARCH_POLICY.md를 따른다. research_question, experiment_role, contribution_path,
   baseline_plan에 이번 실험과 연구 목표·실제 VLM 출력 검증 사이의 연결을 명시한다.
   iter_011 이후 새 계획은 Proposed Experiment에 동작 확인 → 가능성 탐색 → 규모 확대 → 독립 확인을 구분한다.

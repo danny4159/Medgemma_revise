@@ -236,3 +236,11 @@ GPT 사용량은 `plan_usage.json`, `review_usage.json`에 남긴다. 기존 텍
 표시값 기반 참고치이며, 캐시·입출력 토큰 구분이나 과금·구독 소진율로 환산하지 않는다.
 실제 구독 잔여량은 Codex CLI `/status` 또는 계정 usage dashboard에서 확인한다.
 `python orchestrator.py --status`는 연구 진행 상태 조회이며 구독 잔여량 조회와 다르다.
+# 진단에서 방법 개발로 넘어가는 기준 (2026-09-30)
+
+새 계획은 `research_track`·`related_iterations`로 큰 질문의 이력을 연결하고,
+`decision_contract`에 결과별 다음 행동·비용·종료 결정을 남긴다. 방법 개발은
+`method_stage=pilot`(유효한 실제 관찰 기반 최소 대조 실험)과 `full`(validated 근거 기반 확대)을
+구분한다. pilot도 사용법 검증·이전 full review·현재 결론의 무결성이 필요하며 자동 확대하지 않는다.
+새 필드는 과거 계획에 소급 요구하지 않는다. 실행 중 iter_039의 실험·판정 기준은 유지한다.
+상세 기준은 `agent/RESEARCH_POLICY.md`를 따른다. 기계 검사는 신규성·과학적 타당성을 보장하지 않는다.
