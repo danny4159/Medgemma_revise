@@ -15020,3 +15020,511 @@ GPU 병렬 구성은 실측 근거가 있다. 24요청에서 2→4 worker의 wal
 현재 대조 설계 투자를 보류한다. 다음 계획은 기존 B/C와 실행 가능한 문장 조건부 모듈형 대안의 비교가 연구 결정을 바꿀지 먼저 판단한다. 비교를 택한다면 사용 목적, 데이터 중복, 최소 가치 있는 정확도 또는 비용 차이와 종료 결정을 명시한다. 해당 비교가 성립하지 않으면 GOAL 안의 다른 질문으로 전환한다.
 
 epoch8·T610·추가 seed·H192·F120은 자동 승인하지 않는다. 실제 선택한 실행 경로의 provenance·gate·재개 결함만 보완하고, 과거 결과와 checkpoint는 유지한다. VinDr 승인 대기, 기존 RSNA 비교 성과, continuation 투자 종료와 MRI reserve 보존도 유지한다.
+
+
+## iter_041 GPT PLAN [소견 문장–영상 근거 결합 진단 / proceed] — 2026-09-30 21:34:03
+
+# 요약
+
+- **이번에 할 일:** 기존 직접 SFT B/C에서 독립 grounding과 두 문장 공동 grounding을 비교한다. 독립 요청의 실제 병렬 비용도 측정한다.
+- **필요한 이유:** iter_039의 개별 능력 부족은 iter_040의 직접 SFT로 상당 부분 해소됐다. 적응 후 공동 요청의 성능은 아직 평가하지 않았다.
+- **확인할 기준:** 공동 요청의 중요한 내용상 손실과 독립 처리의 비용 부담이 함께 남는지다.
+- **주의·다음:** V96 개발 비교 한 번으로 종료한다. 양성이어도 작은 방법 pilot의 근거이며, 내부 원인·모듈형 우위·새 contribution은 미확정이다.
+
+# Current Understanding
+
+iter_039는 M0의 I-long/J-long F1@0.3=0.2951/0.2344를 관찰했지만 개별 능력이 낮아 공동 결합 가설을 판정하지 못했다. iter_040은 동일 I-short에서 B=0.5559, C=0.5780을 확보했다. 추가 문장 대조 M은 C보다 좋아지지 않았고 baseline 수렴도 미확인이므로 현재 loss 확대는 보류한다.
+
+기준 원문은 `agent/runs/iter_039/plan.md`, `review.md`, `agent/runs/iter_040/plan.md`, `review.md`, 각 `review.json`이다. plan SHA256은 research_notes에 기록했다. 이번은 과거 E288/H192/F 확대의 재개가 아니라 적응된 모델을 대상으로 하는 새 진단이다. 기존 판정이나 기준을 소급 변경하지 않는다.
+
+**유지:** GOAL, MedGemma 1.5, 기존 RSNA SFT·detector 성과, VinDr 승인 대기, continuation 투자 종료, 원본 데이터·결과·checkpoint를 유지한다.
+
+**변경:** M0의 낮은 절대 성능 아래 비교에서 고정 B/C의 독립·공동 요청과 실제 병렬 비용 비교로 옮긴다.
+
+**보류:** 추가 학습, 문장 대조 계수 탐색, T610, 추가 seed, H192, F120, test 및 MRI reserve 사용을 보류한다. 기존 일회성 영상 변환 검증과 RSNA 분석을 반복하지 않는다.
+
+# Strategy Check / 연구 방향 판단
+
+중요한 사용 과제는 한 영상의 여러 양성 소견 문장에 대응하는 근거 영역을 정확하고 효율적으로 반환하는 것이다. 임상 진단·정상 판정·보고서 생성 성능과 구분한다.
+
+강한 직접 SFT 확보 후이므로 전략을 재검토한다.
+
+1. **현재 방법 개선:** M의 추가 이득 근거가 약하다. baseline이 상승 중이라는 이유만으로 같은 loss를 확대하지 않는다.
+2. **원인·능력 전이 진단:** 새 B/C는 이전의 개별 능력 제한을 바꾼다. 공동 요청 손실과 독립 처리 비용을 함께 보면 후속 방법의 필요 여부를 결정할 수 있다. 이번 선택이다.
+3. **다른 연구 질문:** 보고서 근거·불확실성 과제는 후보지만 정답과 강한 baseline을 새로 확인해야 한다. 기존 질문에서 얻을 마지막 한정 정보의 비용보다 현재 준비 비용이 크다.
+
+MedGrounder 비교를 먼저 검토했으나 기본 환경과 기존 detector 환경에서 공식 경로의 필수 의존성이 충족되지 않았다. 설치·환경 혼합·후처리 임의 재구현을 이번에 하지 않는다. 미실행을 성능 열세로 취급하지 않는다.
+
+`language-conditioned-grounding` track을 유지한다. 직접 연결된 iter_038은 setup, iter_039는 유효 diagnostic, iter_040은 유효 method pilot이다. RSNA 전이·detector 비교와 실행 복구 이력도 related_iterations로 연결한다. iter_039 주요 생성 wall 합 약4.21시간, iter_040 train2 네 trajectory 약2.54 GPU-hours는 일부 비용이며 track 총비용이 아니다.
+
+해결된 질문은 직접 SFT의 적응 가능성과 현재 대조항의 제한된 추가 효과다. 남은 질문은 적응된 독립 능력의 공동 요청 유지와 실제 비용이다. 이번 결과가 불확정이어도 같은 진단의 자동 확대를 하지 않는다.
+
+# Hypothesis
+
+- **H_retention:** 문장별 직접 SFT 이후에도 공동 요청에서 근거가 누락되거나 다른 문장에 배정될 수 있다.
+- **H_interface:** 차이는 공동 요청 형식 미학습, ID·순서, 형식·출력 길이로 설명될 수 있다. 이번 비교만으로 이 설명을 제거하지 못한다.
+- **H_simple:** 독립 요청을 병렬 처리하면 정확도를 유지하면서 추가 방법을 정당화할 정도의 비용 부담도 남지 않는다.
+
+이번 역할은 diagnostic이다. 새 방법이나 학습 loss를 구현하지 않는다. 후속 학습을 택할 경우 공동 형식의 직접 CE를 먼저 강한 대조군으로 포함해야 한다.
+
+# Limitation Evidence / Correct Usage Checks
+
+대상은 observed 상태의 `padchest-sentence-grounding-and-joint-retention`이다. iter_040 review의 valid_experiment=true, blocking_issues=[], evidence·usage_checks를 확인했다. 이 상태를 validated로 올렸다고 가정하지 않는다.
+
+MedGemma revision `91850547d9f0b2fdd21aa7c5f4f3d1a8a52c243b`, bf16, 공식 chat template, 기존 uint16→uint8 값 보존 변환, RGB 복제, 중앙 square padding, yxyx/0–1000 좌표를 유지한다. 새 windowing·flip·crop을 도입하지 않는다.
+
+원본 문장·GT·환자·study·영상 hash와 selection lock을 연결한다. 기존 D24/V96을 다시 선별하지 않는다. B/C 학습 자료의 눈가림 적격성 검토가 규칙 검사로 대체됐다는 과거 한계는 유지하며, 이번 결과에 맞춰 학습 자료나 checkpoint를 변경하지 않는다.
+
+기본 Python은 상속된 medgemma 환경을 사용한다. 시작 시 sys.executable을 기록하고 login shell의 PATH 변경을 피한다. pip install, conda activate, 환경 간 PYTHONPATH 혼합은 하지 않는다.
+
+# Contribution Path / Baselines / Reuse
+
+## 비교군과 필요한 증거
+
+- **C, 주분석:** `results/iter_040/train2/C_s17/epoch_03`. adapter tensor digest는 `419ae81f5ef455d39742b158537373da6e26061b362d13205ab28b4a50905ba8`이다.
+- **B, 민감도 분석:** `results/iter_040/train2/B_lr1e-4_s17/epoch_05`. digest는 `4a140948ff79092888d9d753a602f0595b7fec6909265913a091d83a6f839b79`이다.
+- **독립 I:** 기존 I-short 두 요청과 결과의 단순 결합이다. 동일 영상을 각 요청에 제공하고 실제 병렬 처리를 허용한다.
+- **공동 J_AB/J_BA:** `pg39_spec.prompt_J_short`를 사용한다. 반전은 문장 순서만 바꾸며 각 문장에 붙은 qA/qB ID와 GT는 유지한다.
+- **그룹 교환 oracle:** 공동 예측의 qA/qB 전체 그룹을 교환했을 때의 최대 점수다. 오류 분해용이며 실용 방법이 아니다.
+
+[MedGrounder](https://github.com/aehrc/MedGrounder)와 [해당 논문](https://arxiv.org/html/2512.01085v1)은 가까운 문장별 grounding 대안이다. 실행하지 못한 상태에서는 모듈형 대비 우위나 전체 최선의 비용을 주장하지 않는다. RSNA opacity detector를 다소견 문장 조건부 비교군으로 대신 사용하지 않는다.
+
+정확도 차이 0.05는 현재 C F1 약0.58의 약9%에 해당하는 절대 손실로, 개발 단계의 투자 판단 기준이다. 임상적 허용 한계로 해석하지 않는다. 비용 기준은 device-seconds 25%와 실제 지연 또는 처리량 20%다. 작은 비용 차이만으로 별도 학습 방법을 개발할 가치는 낮다는 판단에 따른다.
+
+## 코드 재사용
+
+기존 `approach/sentence-evidence-binding`을 이어간다. HEAD `ca8be7658402eadbc0c501e877d76b1024ed2683`의 pg39 prompt·data·metric 구성요소를 사용한다. JSON reuse_assets의 다섯 파일만 iter_040에서 반입한다. 출처 blob과 현재 파일의 일치 및 대상 브랜치에서의 충돌 부재를 확인했다.
+
+기존 pg39 evaluator의 순수 점수 계산을 재사용하고 이번 조건·입력 잠금·비용 비교를 위한 얇은 실행·평가 경로를 추가한다. pg40_train/decide, downloader, 과거 RSNA trainer와 미사용 pipeline은 정비하지 않는다.
+
+새 결과는 모두 `research/results/iter_041/` 아래에 저장한다. 과거 protocol을 수정하지 않고, 저장 출력 검증 시 원본 SHA의 소스와 연결한다. 브랜치·커밋 관리는 orchestrator가 수행한다.
+
+# Proposed Experiment
+
+## 1. 분할·모델·규약 고정
+
+기존 D24는 동작·자원 검사, 기존 E96=V96은 개발 비교로 사용한다. 환자당 기존 두 문장과 모든 box를 유지한다. share-group×multi-box 층과 작은 영역을 포함하며 결과를 보고 사례를 제외하지 않는다.
+
+B/C checkpoint, D/V manifest, 원본 GT, source SHA, generation config, prompt 함수, parser, metric과 판정식을 실행 전에 잠근다. C를 주분석으로 선택한 것은 이미 알려진 개발 성능을 활용한 결정이므로 선택 편향을 명시한다. B를 함께 보고하고 유리한 checkpoint로 대표를 바꾸지 않는다.
+
+## 2. 동작 확인
+
+D24의 C에서 I_A/I_B/J_AB/J_BA를 구성한다. I는 기존 caps 1000/2000/4000, J는 2000/4000/8000을 유지하고 EOS까지 허용된 재시도를 수행한다. cap 소진은 invalid에 포함하며 임의 출력 단축으로 비용을 줄이지 않는다.
+
+D24 중 층을 포함한 hash 순서의 D8에서 B의 같은 네 조건을 확인한다. 이 표본은 성능 선택용이 아니다. 같은 adapter의 독립 로드, template·tensor, 문장 순서와 ID, GT 좌표 왕복 및 JSON parser를 확인한다. prompt 보정 후보를 탐색하지 않는다. 명백한 구현 오류만 고친 뒤 protocol을 새 버전으로 잠근다.
+
+학습된 단일 요청은 기존 경로와 결과를 대조한다. adapter·입력 연결이 틀리거나 평가 변경의 영향을 격리하지 못하면 본비교를 중단하고 실행 문제로 보고한다.
+
+## 3. GPU 구성과 실제 비용 측정
+
+실행 직전 nvidia-smi로 허용된 0,1의 물리/논리 대응과 여유를 확인한다. 여유가 큰 장치부터 배정하며 다른 사용자의 프로세스는 건드리지 않는다.
+
+D24의 C 96요청을 총2 worker와 총4 worker로 각각 실행한다. 같은 GPU의 두 worker는 현재 전체 점유와 긴 출력 peak에 worker당 최소2GiB를 더해도 용량 안에 들어갈 때만 허용한다. 기존 17,836MiB 관찰을 공동 출력의 안전성으로 자동 전용하지 않는다.
+
+구성 선택은 D의 처리량·메모리·오류와 token 정합성으로만 한다. V96 점수로 구성을 고르지 않는다. 4 worker가 느리거나 안전 여유가 없으면 2 worker를 사용하고 이유를 기록한다. token 차이는 입력·배치·수치 경로를 조사하고 정합성이 확보된 구성으로 고정한다.
+
+C의 주비교에서는 독립 두 요청을 같은 환자 작업으로 묶어 실제 dispatch부터 둘 다 완료할 때까지 측정한다. J도 같은 환자 단위로 측정한다. 동일 총 GPU·worker 구성의 I/J 큐를 분리해 전체 처리량을 비교하고, 고정된 교차 순서로 실행 순서 편향을 줄인다.
+
+loading 포함/제외 wall, 환자당 device-seconds, 전체 환자 처리량, median/p95 완료 지연, 재시도 포함 token, GPU별 allocated/reserved/전체 점유 및 CPU/RAM/I/O를 기록한다. 요청 wall 합이나 두 요청 wall의 max를 실제 병렬 지연으로 대체하지 않는다. device-seconds는 정해진 큐가 장치를 점유한 시간을 합산하며 worker가 겹친 시간을 중복 합산하지 않는다. 정밀한 커널 연산량과는 구분한다.
+
+## 4. 가능성 탐색: 고정 V96 비교
+
+- B/C 각각 J_AB와 J_BA를 V96 전체에서 생성한다: 384요청.
+- 기존 B/C의 독립 I-short 384요청은 provenance 확인 후 정확도 기준점으로 재사용한다.
+- C의 I-short 192요청만 비용 계측을 위해 다시 실행한다. 새로운 성능 후보로 선택하지 않고 기존 token과 대조한다. 불일치가 있으면 원인을 보고하며 기존·신규 수치를 선택적으로 섞지 않는다.
+- 기존 M0 결과는 맥락 설명에만 사용한다. M/C_compute나 long prompt를 추가 생성하지 않는다.
+
+기본 신규 생성은 D192+B 동작32+V576=800요청이다. 중단 복구 검사와 재시도 비용은 별도로 기록한다. 모든 기본 비교를 끝내기 전에 결과가 좋아 보인다는 이유로 종료하지 않는다.
+
+## 5. 규모 확대·독립 확인
+
+이번에는 학습 확대와 신규 환자 확대를 하지 않는다. 이미 생성·검증된 V96과 paired 설계를 사용해 적응 후 공동 처리 문제의 투자 가치를 확인한다. iter_039 short 차이의 CI 반폭은 약0.042였지만 적응된 모델의 분산을 보장하지 않으므로 정밀도 추정으로만 참고한다.
+
+V96에서 결정되지 않으면 이번 질문의 투자를 보류한다. H192·F120을 자동 소모하지 않는다. 양성일 때도 다음 별도 계획에서 공동 직접 CE와 최소 보존 개입의 pilot 필요성을 판단한다. 독립 확인과 full 방법 개발은 이번 실행에 포함되지 않는다.
+
+## 6. 예상 비용·재개
+
+과거 C 독립192요청은 4 worker wall376.64초, 평균 generate6.37초/요청이었다. 공동 출력·검사·loading을 고려해 GPU 실행 초기 ETA를 약0.5–2시간으로 둔다. 긴 비EOS 출력이 많으면 더 길 수 있으며 D 실측으로 갱신한다. 이는 임의 timeout이나 중단 상한이 아니다.
+
+요청마다 완료 record를 원자적으로 보존하고 worker별 파일·claim을 사용한다. 중단 시 기존 부분 행의 바이트를 별도 보존한 뒤 해당 worker 소유 파일만 복구한다. 현재 입력·코드·config가 바뀌면 기존 결과에 이어 쓰지 않는다. launcher는 child 종료와 전체 예상 요청 집합을 확인한 뒤에만 완료를 기록한다.
+
+# Implementation Tasks for Claude
+
+1. 기준 plan/review와 reuse_manifest를 읽고 기존 브랜치·반입 자산·B/C adapter hash를 확인한다. source SHA와 필수 의존성의 연결을 기록한다.
+2. 기존 D24/V96을 읽어 이번 요청·평가 manifest와 protocol을 생성한다. H192/F 요청은 생성하지 않는다.
+3. 실제 사용할 runner의 completion 검증, 현재 영상 재검증, GT·평가 소스 digest, 단일 소유권과 부분 행 보존을 보완한다. 과거 산출물은 수정하지 않는다.
+4. 기존 생성 회귀검사를 이번 경로·상속 GPU에 맞게 적용한다. 합성 fixture로 GT/영상/config/adapter 변조, 중복·누락, ID 반전, 부분 행·동시 claim을 검사한다. 실제 작은 요청으로 중단·재개 결과 정합성을 확인한다.
+5. D의 adapter·입력·병렬 검사를 수행한 뒤 고정 V96 비교를 완료한다. GPU당 worker 수는 실측으로 확정한다.
+6. 환자별 원시 점수·CI·오류 분해·실제 비용을 저장하고 별도 parser/좌표/matching 구현으로 재계산한다. pg40_verify의 기존 승인 범위를 공동 출력 전체로 자동 확대하지 않는다.
+7. 사전 판정과 적용 범위를 report에 기록한다. 결과가 불확정이면 원인과 보류 결정을 명시하고 추가 실험을 시작하지 않는다.
+
+# Evaluation (성공/실패 기준 포함)
+
+## 지표
+
+주지표는 문장별 최대 cardinality 일대일 matching F1@IoU0.3을 환자 안에서 평균한 뒤 환자 간 평균한 값이다. C의 Δ_AB=I−J_AB, Δ_BA=I−J_BA를 두 주대조로 정한다. 환자 paired bootstrap10,000회, seed20260930, 각97.5% CI를 사용한다. B는 별도 민감도 분석이다.
+
+F1@0.5, recall, FP/문장, 빈 예측, invalid, 최종 truncation, 독립 성공 문장의 공동 손실·반대 회복을 함께 보고한다. 누락된 qA/qB 그룹은 해당 문장의 빈 출력으로 평가한다. invalid 공동 요청은 두 문장 모두 주점수0으로 포함한다.
+
+작은 영역, 복수 box, share-group, cross-IoU<0.1 층을 기존 정의로 보고한다. 그룹 교환 oracle의 이득은 배정 오류 설명의 상한이지 해법 성능이 아니다. 모든 조건에서 valid·EOS인 동일 환자 subset의 민감도 분석을 추가하되 주분모를 대체하지 않는다.
+
+## 양성: 최소 방법 시험 후보
+
+C의 두 Δ가 각각0.05 이상이며97.5% CI 하한>0, B의 두 Δ도 양수이고, 공통 valid/EOS subset에서도 두 손실이 양수여야 한다. 형식·truncation 비중과 순서 효과를 별도로 공개한다.
+
+추가로 독립 처리의 device-seconds/J 비율≥1.25이고, p95 환자 지연/I 대 J≥1.20 또는 독립 처리량/J≤0.80이어야 정확도·비용 방법 pilot의 우선 후보가 된다. 비용 비율의 환자 또는 고정 block resampling 구간도 보고하며 경계에 걸리면 확정하지 않는다.
+
+후속 pilot은 공동 요청 직접 CE와 독립답변 보존 개입을 비교하는 범위로 검토한다. 공동 형식 미학습이라는 설명을 통제하기 전 내부 결합 결함을 주장하지 않는다. MedGrounder 미실행 상태에서 모듈형 우위나 full 진입을 선언하지 않는다.
+
+## 음성·실용 대안 충분
+
+C의 두 Δ CI 상한이0.05 미만이면 중요한 공동 손실을 현재 조건에서 지지하지 못한다. 두 순서에서 손실 상한이0.02 이하면 제한된 정확도 유지의 더 강한 근거로 별도 표시한다.
+
+공동 손실이 있어도 독립 병렬 처리의 비용 부담이 사전 기준보다 작으면 독립 처리 baseline을 보존하고 현재 공동 처리 방법 투자를 보류한다. 일반적인 문장 grounding·학습 가능성의 기각으로 확대하지 않는다.
+
+## 불확정·종료
+
+CI가 기준을 가로지르거나 checkpoint·순서·내용상 분석이 불일치하면 불확정이다. 비용 계측이 경계 수준이거나 안정적 비교를 제공하지 못해도 투자 근거는 미확정이다. 이번에는 추가 표본·prompt·seed로 연장하지 않는다. 기존 자산을 보존하고 다른 연구 질문을 다음 전략 판단의 우선 후보로 둔다.
+
+실행 오류는 execution_failed 범위로 구분한다. 준비·테스트만 완료한 경우 valid_experiment=true로 보고하지 않는다. 이번 진단의 종료는 연구 목표 달성이 아니다.
+
+# Risks / Checks
+
+- B/C는 문장별 요청으로 학습됐으므로 공동 요청 손실은 인터페이스 전이의 관찰이다. 내부 시각 능력의 결함으로 일반화하지 않는다.
+- V96은 이미 모델 선택에 쓰인 개발 자료다. 새 조건 생성만으로 독립 test가 되지 않는다.
+- 정확도는 기존 출력 재사용, 비용은 실제 재계측이라는 역할 차이를 명시한다. 과거 wall과 새로운 wall을 다른 실행 조건인 채 직접 비교하지 않는다.
+- 두 문장의 양성 grounding을 전체 보고서, 정상 소견, 임상 reasoning 성능으로 확대하지 않는다.
+- 독립 요청의 vision/prefix caching을 측정하지 않았다면 절감 가능량은 미측정으로 남긴다. 현재 병렬 baseline을 최적화의 절대 하한으로 부르지 않는다.
+- MedGrounder 미실행·사전학습 노출·단일 기관·단일 seed의 한계를 유지한다. 새로운 데이터 권한이나 package 설치를 묵시적으로 허용하지 않는다.
+- test 노출 인계의 과거 결함은 test를 사용하지 않는 이번 진단의 선행 정비로 만들지 않는다. F120 및 다른 reserve를 열지 않는다.
+
+## 대규모 GPU 필요 후보
+
+다중 소견·보고서 공동 post-training에서 개별 질의의 근거를 보존하도록 vision encoder와 언어 모델을 함께 적응하는 후보를 남긴다. 현재 필요성은 미입증이다. 독립 처리, 공동 직접 SFT와 실행 가능한 모듈형 baseline 이후에도 중요한 잔여 문제가 재현될 때 대규모 학습을 검토한다.
+
+# 계획의 근거 (GPT 조사 노트)
+
+## 새로 확인한 사실
+
+- `agent/GOAL.md`, `agent/GPT_USAGE_POLICY.md`, `agent/INDEX.md`, `agent/LIMITATIONS.md`의 관련 항목, `agent/CODE_ASSETS.md`, iter_039·040의 plan/review와 review.json/code_assets를 확인했다. RSNA 방향의 기회비용 판단에는 iter_037 review 원문을 사용했다.
+- iter_040의 유효한 결과는 B/C/C_compute/M F1@0.3=0.555903/0.577951/0.564931/0.572743이다. M−C=-0.005208이며 baseline 상승 때문에 리뷰 판정은 inconclusive다. 보고서·summary의 negative를 후속 판정 근거로 복사하지 않는다.
+- B와 C adapter의 실제 파일 SHA256이 각 protocol과 일치했다. 경로는 `results/iter_040/train2/B_lr1e-4_s17/epoch_05`와 `results/iter_040/train2/C_s17/epoch_03`이다.
+- `results/iter_040/gen/C/completion.json`은 독립 192요청을 4 worker로 376.64초에 완료했음을 기록한다. `tests/gen_throughput.json`의 24요청 비교는 2→4 worker에서 135.56→75.31초, token 일치, 최대 GPU 점유 17,836MiB다. 공동 요청은 길이가 달라 안전성과 처리량을 다시 확인해야 한다.
+- [MedGrounder 공식 저장소](https://github.com/aehrc/MedGrounder)는 Chest ImaGenome 사전학습 checkpoint와 PadChest 적응 checkpoint를 구분한다. [공식 추론 notebook](https://raw.githubusercontent.com/aehrc/MedGrounder/main/inference.ipynb)은 OmegaConf·torchvision·ensemble_boxes 등을 사용한다. 지난 feasibility.json의 누락을 현재 기본 medgemma 환경의 module 탐색으로 재확인했다. 기존 detector용 natten_py310에도 albumentations·ensemble_boxes·opt_einsum·nltk가 없다. 설치·환경 혼합 없이 바로 실행 가능한 공식 경로를 확보하지 못했다. 모듈 존재 확인은 실제 import·모델 실행 검증과 다르다.
+- 첫 shell 조회에서는 login shell이 Python 경로를 바꿨다. login=false에서는 상속된 `/home/test/.conda/envs/medgemma/bin/python`을 확인했다. Claude는 실행 시작 시 sys.executable을 기록하고 상속 PATH를 보존해야 한다.
+- [Generalised Medical Phrase Grounding](https://arxiv.org/html/2512.01085v1)은 문장별 0개·1개·복수 영역과 모듈형 보고서 grounding을 다룬다. 따라서 문장 분리·복수 box·모듈 결합 자체는 새로운 기여가 아니다.
+
+## 선택과 한계
+
+현재 문장 대조 loss 확대는 새 근거가 약하다. MedGrounder 비교는 현 환경에서 바로 성립하지 않는다. 반면 적응 후 공동 요청은 새 checkpoint 때문에 과거와 다른 식별력을 가지며, 기존 출력 재사용으로 적은 추가 생성만 필요하다. 이 한정 비교를 선택하되, 공동 형식 미학습이라는 경쟁 설명을 유지한다. V96은 개발 자료이고 이번 결과를 독립 재현이나 전체 의료 VLM 결함으로 표현하지 않는다.
+
+## 원본과 재사용
+
+iter_039 plan SHA256은 `bff448aa81ae912fb1b2591e60dc07f6080591b8fbe6286c09c2913a351c4260`, iter_040 plan은 `1e37d04e0c26b5fabcc6803bdfd41fd7c71cc2829a75a81e0c756ba3592bfc21`이다. 이번은 두 계획의 미완료 확대를 실행하는 amendment가 아니라 모델 조건과 투자 기준을 명시한 새 진단이다. 기존 sentence-evidence-binding 브랜치 HEAD는 `ca8be7658402eadbc0c501e877d76b1024ed2683`이며 필요한 추가 다섯 파일의 출처·충돌 부재를 확인했다. 파일 수정·생성·모델 실험은 수행하지 않았다.
+
+
+
+## iter_041 CLAUDE REPORT — 2026-09-30 22:33:59
+
+# Work Performed
+
+# 요약
+
+- **핵심 결과:** 두 문장을 한 요청으로 묻는 공동 grounding에서 정확도가 크게 떨어졌다. V96 개발 집합에서 C의 환자 평균 F1@0.3은 독립 I 0.578, 공동 J_AB 0.381, J_BA 0.354다. 그 결과 사전 규칙상 "방법 pilot 우선 후보"로 판정됐다. 이는 확정이 아니고 개발 자료 한 번의 관찰이다.
+- **근거:** C의 Δ_AB=0.197(97.5% CI [0.120, 0.273]), Δ_BA=0.224([0.143, 0.301])다. B도 0.168/0.201로 같은 방향이다. 두 경우 모두 valid 응답 100%, truncation 0이다. 독립 재계산은 환자별 점수가 100% 일치했다.
+- **비용:** 독립 처리(두 요청)가 J보다 device-seconds 1.33배(J_AB)/1.31배(J_BA), 처리량은 J의 0.756/0.760배(같은 4 worker)다. 환자 p95 지연 비율은 1.07/1.02로 사전 기준 1.20에 못 미쳤다. 비용 기준은 처리량 경로로 충족됐다.
+- **주의:** J 출력은 문장당 거의 항상 box 1개다(J 응답 188/192가 1개). GT가 복수 box인 문장은 F1이 I 0.545→J 0.22로 특히 낮다. 단일 box 환자 60명에서도 손실이 남는다(CI 하한 >0). 공동 형식을 학습하지 않은 인터페이스 효과가 배제되지 않았다.
+- **다음:** 방법 pilot 여부는 GPT가 결정한다. 후속 pilot을 한다면 공동 형식의 직접 CE 대조군을 먼저 넣어야 한다.
+
+## 상세
+
+- 기존 브랜치 `approach/sentence-evidence-binding`을 유지하고 iter_040의 다섯 파일을 반입했다.
+  - 반입 파일: `pg40_run.py`, `pg40_verify.py`, `pg40_gen_test.py`, `rsna_diag/lora.py`, `rsna_diag/queue_lock.py`.
+  - 각 blob이 매니페스트의 SHA와 일치함을 직접 계산해 확인했다.
+  - 다섯 파일과 새 파일 전체를 import 확인했다.
+  - 반입한 `pg40_run.py`는 수정하지 않고, iter_040 출력 검증 전용으로 보존했다.
+- 새 runner `pg41_run.py`를 만들었다(`pg40_run.py` 복사 후 수정).
+  - 평가 GT manifest·selection lock·`pg41_rules.py`·`pg39_spec.py`를 protocol에 hash로 잠근다.
+  - 부분 행 복구 시 잘라낸 원본 바이트를 `.partial.*.bin`으로 보존한다.
+  - record에 `t_start`, worker 타이밍 파일을 추가했다.
+  - `verify_completion`이 현재 영상 file/pixel hash, record 필드와 요청 행의 일치, config·adapter digest, worker 파일 집합을 재검증한다.
+  - launcher가 device-seconds를 기록한다(GPU별 요청 구간의 합집합을 합산해 겹침을 중복 계산하지 않는다).
+- 요청 파일을 만들었다.
+  - `pg41_build.py`로 D24(96)·D8/B(32)·V96 J_AB(96)·J_BA(96)·I-cost(192)를 생성했다.
+  - 기존 요청과 대조해 I-short 256건, J-short(AB) 128건의 prompt·영상 hash가 모두 일치했다.
+  - J_BA는 문장 순서만 바꾸고 qA/qB ID와 targets는 유지했다.
+- 판정 규칙은 `pg41_rules.py`에 결과를 보기 전에 고정하고 protocol에 잠갔다.
+- 도달 단계는 "동작 확인 + V96 가능성 탐색"이다. 학습·신규 환자 확대·H192·F120·test는 사용하지 않았다.
+
+# Files Changed
+
+새 파일만 만들었다(모두 untracked, 기존 파일 수정 없음).
+
+- 실행·검증: `pg41_run.py`, `pg41_build.py`, `pg41_rules.py`, `pg41_eval.py`, `pg41_verify.py`, `pg41_post.py`, `pg41_d24_config.py`, `pg41_gen_test.py`, `run_iter041.py`
+- 테스트: `test_pg41.py`, `test_pg41_eval.py`
+- 반입 5개: `pg40_run.py`, `pg40_verify.py`, `pg40_gen_test.py`, `rsna_diag/lora.py`, `rsna_diag/queue_lock.py`
+- 결과: `results/iter_041/` 아래(requests, protocol, gen, eval, decisions, tests, summary.json)
+
+# Commands / Experiments (실제 실행한 명령과 성공/실패)
+
+모두 성공했다.
+
+- `python pg41_build.py --out-dir results/iter_041/requests`
+- `python test_pg41.py ...`: 29/29 PASS (합성 fixture)
+- `python test_pg41_eval.py ...`: 19/19 PASS
+- `python pg41_gen_test.py`: 11/11 PASS (GPU, B adapter, D8 32요청)
+- `python run_iter041.py --stage d24`: D24 C 96요청을 2 worker와 4 worker로 실행
+- `python pg41_d24_config.py`
+- `python run_iter041.py --stage v96 --workers 4 --peak-gb 9`: 큐 순서 C:J_AB → C:I-cost → C:J_BA → B:J_AB → B:J_BA
+- `python pg41_eval.py --config results/iter_041/eval/config_V96.json ...`
+- `python pg41_verify.py ...`
+- `python pg41_post.py ...`
+
+GPU 구성 선택은 D24 실측으로만 했다.
+
+| 구성 | wall | 처리량 | peak/GPU | token |
+|---|---|---|---|---|
+| 2 worker | 376.6초 | 15.3 req/min | 8,963/8,891 MiB | 기준 |
+| 4 worker | 226.0초 | 25.5 req/min | 17,836/17,765 MiB | 2w와 불일치 0/96 |
+
+4 worker는 1.67배 빠르고 GPU당 여유가 약 6.7GB라 worker당 2GB 이상을 확보했다. 그래서 4 worker(GPU당 2)를 채택했고 OOM은 없었다.
+
+V96 생성은 총 576요청이고 5개 큐가 모두 종료 코드 0으로 끝났다. 큐 wall은 271~362초다.
+
+# Results (수치와 결과 파일 경로)
+
+**정확도** (V96 96명, F1@0.3 환자 평균, `results/iter_041/eval/report_V96.json`)
+
+| 모델 | I | J_AB | J_BA | Δ_AB (97.5% CI) | Δ_BA (97.5% CI) |
+|---|---|---|---|---|---|
+| C(주분석) | 0.5780 | 0.3811 | 0.3542 | 0.197 [0.120, 0.273] | 0.224 [0.143, 0.301] |
+| B(민감도) | 0.5559 | 0.3880 | 0.3550 | 0.168 [0.098, 0.240] | 0.201 [0.126, 0.275] |
+
+- C의 공통 valid/EOS subset은 96명 전체다(모든 응답이 valid·EOS). B도 같다.
+- 기존 iter_040 C/B의 I 수치를 그대로 재현했고, 새 판정은 이 값을 기준점으로 썼다.
+- F1@0.5는 C의 I 0.291, J_AB 0.135, J_BA 0.116이다.
+- 순서 효과는 J_AB−J_BA 0.027(95% CI [−0.055, 0.107])로 불확정이다.
+- C의 문장 단위로는 I가 완전 성공한 101문장 중 J_AB에서 48문장, J_BA에서 52문장을 잃었다. 잃은 원인은 대부분 위치·개수(44/49건)였다. 다른 문장에 배정된 경우는 4/2건이다.
+- 그룹 교환 oracle의 이득은 C에서 +0.042/+0.030이다. 배정 오류는 설명의 일부일 뿐이다.
+- 사후 분석(`post_hoc_count_V96.json`, 판정에 쓰지 않음):
+  - C의 GT 복수 box 문장은 I 0.545, J_AB 0.216, J_BA 0.255다.
+  - GT 단일 box 문장은 I 0.589, J_AB 0.434, J_BA 0.386이다.
+  - 두 문장 모두 GT 단일 box인 환자 60명의 Δ_AB는 0.147 [0.044, 0.258], Δ_BA는 0.189 [0.092, 0.289]다.
+
+**비용** (같은 4 worker·2 GPU 큐, C, `report_V96.json`의 `cost`)
+
+- 독립 I 대 J_AB/J_BA:
+  - device-seconds 비율은 1.326/1.311이다.
+  - 요청 wall 합 비율의 환자 bootstrap 95% CI는 [1.28, 1.42]/[1.27, 1.42]다.
+  - 처리량 비율은 0.756/0.760이다.
+  - p95 지연 비율은 1.069/1.024이고 CI는 [1.000, 1.198]/[0.972, 1.147]이다.
+- 사전 규칙 결과: accuracy=positive, cost_burden=true(처리량 경로), cost_boundary=false, overall=`positive_method_pilot_candidate`.
+- I 재실행 192요청의 token은 저장된 기존 출력과 불일치 0이다.
+- 실행 순서는 사전 고정한 J_AB, I, J_BA 한 번뿐이다. 순서 편향은 통제하지 못했고, 반복 측정은 하지 않았다.
+
+**검증**
+
+- `verify_V96.json`: 별도 parser·좌표 변환·augmenting-path matching으로 재계산했다. 환자별 F1은 C/B 모두 최대 차이 0이고, F1@0.5도 일치했다.
+- 단, CI의 bootstrap RNG는 기존 평가와 같은 seed 설정을 써서 CI 일치가 RNG 독립 검증은 아니다.
+- 저장 위치: `results/iter_041/tests/`에 `fixtures_pg41.json`, `fixtures_pg41_eval.json`, `gen_test.json`. 결정은 `decisions/d24_worker_config.json`, 요약은 `results/iter_041/summary.json`.
+
+# Goal Progress / Reused Assets (목표 진전·미검증 범위, 재사용 출처·검증)
+
+**목표 진전**
+
+- 직접 SFT B/C가 문장별 요청에서는 잘 되지만, 같은 모델을 공동 요청에 그대로 쓰면 크게 떨어진다는 것을 처음으로 확인했다.
+- 이 손실은 공동 요청이 학습되지 않은 형식일 가능성이 크다(J가 문장당 box 1개로 수렴). 그래서 공동 형식을 학습한 CE 대조군이 다음에 필요하다.
+- 독립 병렬 처리는 정확도를 유지하지만 J보다 처리량이 약 24% 낮고 device-seconds가 약 31~33% 더 든다. 지연(p95)에서는 불리하지 않다.
+
+**미검증·미확인**
+
+- V96은 checkpoint 선택에 일부 쓰인 개발 자료이고, 독립 환자·seed·다른 기관의 확인은 없다.
+- 공동 형식을 학습한 대조군(공동 직접 CE)이 없어 결합 결함과 형식 미학습을 구분하지 못했다.
+- MedGrounder 등 모듈형 baseline은 이번에 실행하지 않았다.
+- vision/prefix caching은 측정하지 않았다. CPU/RAM/I/O 자원은 기록하지 않았다.
+- device-seconds 자체의 CI는 없다(요청 wall 합 기반 proxy만 있음).
+- 처리량 비율(0.756/0.760)은 기준 0.80에 가까우며 신뢰구간을 계산하지 않았다.
+- iter_031의 남은 층별·오검출 비용 분석은 이번 계획 범위 밖이라 하지 않았다.
+
+**재사용 출처·검증**
+
+- 출처 커밋 `18fdae2e`의 다섯 파일이 blob 일치임을 확인했다.
+- iter_040 protocol은 수정하지 않았다. iter_040 출력은 그 protocol과 원 코드 hash로 재검증한 뒤 썼고, 현재 영상 file/pixel hash를 추가로 확인했다.
+- `pg40_run.verify_completion`은 영상 hash를 검사하지 않아 `pg41_eval.load_verified`에서 따로 확인했다.
+- B/C adapter의 파일 hash와 tensor digest는 protocol 생성과 worker 로드 시 확인했다. 독립 로드 경로(trainer 방식)와 6요청(I·J_AB·J_BA 각 2건)의 token이 일치했다.
+- B로 기존 V96 I-short 8요청을 새 runner로 재생성한 결과가 저장된 iter_040 출력과 token 일치했다.
+- 중단·재개(SIGKILL 후 부분 행 삽입)는 D8 32요청, 2 worker에서 확인했다. 토큰이 기준과 동일했고 원본 바이트가 보존됐다.
+
+# Problems (현재 결론 무효 / 재사용 전 수정 / 추후 개선을 구분)
+
+- **현재 결론 무효:** 없음.
+- **재사용 전 수정**
+  - `pg41_gen_test.py`의 "4 worker" 검사는 `--peak-gb 10`(필요 24,576MiB > 여유 24,489MiB)이라 실제로는 launcher가 거부해서 PASS가 형식적이다. 4 worker의 실검증은 D24 stage(peak-gb 9)에서 했다.
+  - 재개 검사는 D8 32요청, 2 worker 한 번뿐이라 4 worker 재개는 미검증이다.
+  - 평가 GT manifest는 protocol에 hash로 잠갔지만, `pg41_eval.py` 자체는 잠그지 않고 report에 digest만 남긴다.
+- **추후 개선**
+  - 비용 측정을 반복(순서 교차)하고, 처리량·device-seconds의 구간 추정을 추가할 수 있다.
+  - iter_031 층별·오검출 비용 분석은 미수행이다.
+
+# Recommendation to GPT
+
+- **계속(한정 pilot 검토):** 사전 규칙상 "방법 pilot 우선 후보"다. 다만 손실의 주된 형태가 box 개수 1로의 수렴이고 공동 형식이 학습되지 않았으므로, 후속은 공동 요청 직접 CE 대조군을 먼저 넣은 최소 pilot이어야 한다.
+- **확대 주의:** 비용 이득은 device-seconds 약 1.3배, 처리량 약 1.3배로 크지 않다. 처리량 비율이 기준(0.80)에 가까워, 정확도 결과 없이 비용만으로 투자를 정당화하기는 약하다.
+- **전환 조건:** 공동 직접 CE가 I와 비슷한 정확도(손실 <0.05)를 회복하면 독립 병렬 baseline을 유지하고 방법 투자는 보류한다.
+- **VinDr:** 승인 통지 전이라 다운로드나 외부 평가는 하지 않았다.
+
+SELF_CHECK: PASS
+SUMMARY: C·B 직접 SFT의 공동 두 문장 grounding은 V96에서 F1@0.3이 독립 0.578→0.381/0.354(C, Δ 0.197/0.224, 97.5% CI 하한 >0.12)로 크게 하락했고, 독립 병렬 처리는 device-seconds 1.31~1.33배·처리량 0.76배라 사전 규칙상 방법 pilot 후보다. 다만 공동 형식 미학습(문장당 box 1개)과 개발 자료 한 번이라는 한계가 있고 공동 직접 CE 대조군은 미검증이다.
+
+# [orchestrator] 권한 거부된 도구 호출
+- Bash: python - <<'EOF'
+import json
+def rd(p): return [json.loads(l) for l in open(p)]
+tr=rd('results/iter_040/data/manifest_train_private.jsonl'); ev=rd('results/iter_040/data/manifest_eval_private.jsonl'); m39=rd('results/iter_039/data/manifest_private.jsonl')
+from collections import Counter
+print(Counter((r['set'],r['subset']) for r in m39))
+print(Counter((r.get('set'),r.get('subset'),r.get('eval_set')) for r in ev))
+print(Counter((r.get('set'),r.get('subset')) for r in tr))
+d24={r['PatientID'] for r in m39 if r['subset']=='D24'}
+print(len(d24), len(d24&{r['PatientID'] for r in tr}), len(d24&{r['PatientID'] for r in ev}))
+print(list(ev[0].keys()))
+EOF
+- Bash: nvidia-smi --query-gpu=index,memory.used,memory.total --format=csv; echo $CUDA_VISIBLE_DEVICES; which python; git ls-files | head -50
+- Bash: sed -i 's/"--peak-gb", type=float, default=10.0/"--peak-gb", type=float, default=9.0/' run_iter041.py; grep -n "peak-gb" run_iter041.py | head -3; cut -c1-300 results/iter_041/tests/gen_test.log
+- Bash: timeout 100 tail -f /dev/null; cut -c1-300 results/iter_041/tests/gen_test.log
+- Bash: python - <<'PYEOF'
+import json,glob,collections,os
+import pg41_run as R
+import pg39_spec as S
+res={}
+toks={}
+for w in (2,4):
+    d=f'results/iter_041/gen/D24_C_{w}w'
+    comp=json.load(open(d+'/completion.json'))
+    recs=R.verify_completion(d,'results/iter_041/requests/requests_D24_C.jsonl','results/iter_041/protocol/protocol_D24_C.json')
+    toks[w]={r['request_id']:r['suffix_ids'] for r in recs}
+    mx={}
+    for l in open(d+'/resource_log.jsonl'):
+        for g in json.loads(l)['gpu']:
+            i,u,_=[x.strip() for x in g.split(',')]; mx[i]=max(mx.get(i,0),int(u))
+    c=comp['cost']
+    res[w]={'launcher_wall_s':comp['wall_s'],'req_per_min_incl_load':96/comp['wall_s']*60,'first_start_to_last_end_s':c['first_request_start_to_last_end_s'],
+      'req_per_min_gen_only':96/c['first_request_start_to_last_end_s']*60,'devsec_generate':c['device_seconds_generate_union'],'devsec_incl_load':c['device_seconds_incl_loading_union'],
+      'peak_gpu_mib':mx,'max_peak_alloc_gb_per_req':max(r['peak_mem_alloc_gb_max'] for r in recs),'max_out_tokens':max(r['n_output_tokens'] for r in recs),
+      'n_retry':c['n_records_with_retry'],'sum_request_wall_s':c['sum_request_wall_s'],'n_valid_eos':sum(r['ended_eos'] for r in recs)}
+    st=collections.Counter((r['cond'],S.parse_ids(r['suffix_text_raw'],r['ended_eos'],set(r['targets']))['status']) for r in recs)
+    res[w]['status']={f'{k[0]}|{k[1]}':v for k,v in st.items()}
+res['token_identical_2w_vs_4w']=toks[2]==toks[4]
+res['n_token_mismatch']=sum(toks[2][k]!=toks[4][k] for k in toks[2])
+res['speedup_wall_incl_load']=res[2]['launcher_wall_s']/res[4]['launcher_wall_s']
+res['speedup_gen_only']=res[2]['first_start_to_last_end_s']/res[4]['first_start_to_last_end_s']
+res['free_before_mib']={w:json.load(open(f'results/iter_041/gen/D24_C_{w}w/launch_children.json'))['free_mib_before'] for w in (2,4)}
+res['note']='D24 C 96요청(I qA/qB, J-AB, J-BA). 구성 선택은 이 D 처리량·메모리·오류·token 정합성으로만 함(V96 점수 미사용).'
+os.makedirs('results/iter_041/decisions',exist_ok=True)
+json.dump(res,open('results/iter_041/decisions/d24_worker_config.json','x'),indent=1)
+print(json.dumps(res,indent=1))
+PYEOF
+- Bash: python - <<'PYEOF'
+import json,os
+R='results/iter_041'
+def src(gen,req,proto,ver): return {'gen':gen,'req':req,'proto':proto,'verifier':ver}
+oldreq='results/iter_040/requests/requests_V96.jsonl'
+cfg={'subset':'V96','manifest':'results/iter_040/data/manifest_eval_private.jsonl','selection_lock':'results/iter_040/data/selection_lock.json',
+ 'queue_order':['V96_C_JAB','V96_C_Icost','V96_C_JBA','V96_B_JAB','V96_B_JBA'],
+ 'models':{}}
+for m in 'CB':
+    d={'I':src(f'results/iter_040/gen/{m}',oldreq,f'results/iter_040/protocol/protocol_{m}.json','pg40'),
+       'JAB':src(f'{R}/gen/V96_{m}_JAB',f'{R}/requests/requests_V96_JAB.jsonl',f'{R}/protocol/protocol_V96_{m}_JAB.json','pg41'),
+       'JBA':src(f'{R}/gen/V96_{m}_JBA',f'{R}/requests/requests_V96_JBA.jsonl',f'{R}/protocol/protocol_V96_{m}_JBA.json','pg41')}
+    if m=='C': d['Icost']=src(f'{R}/gen/V96_C_Icost',f'{R}/requests/requests_V96_Icost.jsonl',f'{R}/protocol/protocol_V96_C_Icost.json','pg41')
+    cfg['models'][m]=d
+os.makedirs(f'{R}/eval',exist_ok=True)
+json.dump(cfg,open(f'{R}/eval/config_V96.json','x'),indent=1)
+PYEOF
+ls results/iter_041/eval
+- Bash: git hash-object pg40_run.py pg40_verify.py pg40_gen_test.py rsna_diag/lora.py rsna_diag/queue_lock.py
+
+
+
+## iter_041 GPT REVIEW [CONTINUE] — 2026-09-30 22:41:17
+
+# 요약
+
+- **판정:** 유효한 실험이지만 전체 투자 판정은 inconclusive다. 공동 정확도 손실은 확인했고, 방법 pilot 진입은 보류한다.
+- **핵심 근거:** 개발 V96에서 C의 F1@0.3은 독립 0.57795, 공동 AB/BA 0.38108/0.35417이다. 원시 출력 재계산으로 일치했다.
+- **의미·한계:** 출력 형식 오류나 잘림으로 설명되지 않는 손실이다. 공동 형식 미학습과 내부 원인은 구분하지 못했으며 비용 기준의 불확실성 검사가 빠졌다.
+- **다음:** 원 계획의 종료 조건을 적용한다. 같은 진단을 자동 확대하지 않고 다음 연구 투자 대안을 선택한다.
+
+# Assessment
+
+`plan.md`, `plan.json`, 보고서, `commit.json`, 구현 전후 diff, `reuse_manifest.json`, 새 소스와 원시 결과를 검토했다. execution_amendment.md는 없었다. 리뷰 대상은 `85320c89689b70f05b6e8c06c01ec8c4c7af2710`이며 저장 대상 16개 파일은 작업 파일과 일치했다. unpreserved_paths는 비어 있다.
+
+V96의 다섯 생성 큐는 모두 exit code 0으로 완료됐다. 신규 576요청과 기존 B/C 독립 출력 384요청을 확인했다. 정확도 가설의 해석 가능한 검증을 완료했으므로 valid_experiment=true다. 다만 보고서의 `positive_method_pilot_candidate`는 계획된 비용 불확실성 검사를 충족하지 않아 인정하지 않는다.
+
+# Key Findings
+
+## 정확도와 입력 무결성
+
+별도 리뷰 코드로 순수 JSON을 읽고 GT 좌표를 변환한 뒤 bitmask 기반 최대 matching을 계산했다. B/C 768개 정확도 평가 출력의 환자별 F1@0.3은 저장 점수와 최대 차이 0이었다. 환자 bootstrap 10,000회도 독립 재계산했다.
+
+| 모델 | 독립 I | 공동 AB | 공동 BA | I−AB, 97.5% CI | I−BA, 97.5% CI |
+|---|---:|---:|---:|---|---|
+| C | 0.577951 | 0.381076 | 0.354167 | 0.196875 [0.120486, 0.273090] | 0.223785 [0.143056, 0.301215] |
+| B | 0.555903 | 0.388021 | 0.355035 | 0.167882 [0.098435, 0.239937] | 0.200868 [0.125866, 0.274653] |
+
+보조 검증기를 실제 출력에 적용해 F1@0.5도 확인했다. C의 I/AB/BA는 0.291146/0.135417/0.116319였다. 모든 정확도 평가 출력이 valid·EOS여서 공통 valid/EOS subset은 전체 96명이다.
+
+평가 소스 digest와 manifest·selection_lock이 일치했다. 기존 출력의 protocol 코드는 iter_040 출처 SHA와 대조했다. 기존·신규 총 960건의 요청·record·config·adapter 연결을 검사했으며 V96 영상 96개의 현재 file/pixel hash도 일치했다. manifest 문장으로 모든 평가 prompt를 재구성했고 순서 반전 시 ID가 유지됨을 확인했다. train–V96 환자·영상 교집합은 모두 0이었다. C 독립 재실행 192건은 기존 token과 전부 같았다.
+
+## 비용과 GPU 운영
+
+원시 요청 타임스탬프에서 GPU별 구간 합집합을 다시 계산했다. C의 I/J_AB/J_BA device-seconds는 679.809/512.591/518.719초로 저장 결과와 일치했다. 처리량은 각각 16.749/22.167/22.042환자/분이다. I/J 비용 비율 1.326/1.311과 처리량 비율 0.756/0.760은 유효한 단회 점추정치다. p95 지연 비율 1.069/1.024는 사전 1.20 기준에 못 미친다.
+
+D24의 동일 96요청으로 2/4 worker를 비교했다. wall은 376.6→226.0초, 속도 향상은 1.67배였고 token 불일치가 없었다. 4 worker의 GPU 전체 peak 약17.8GB는 worker당 2GB 여유를 확보하는 범위였다. 두 GPU를 활용한 구성 선택은 타당하다. 다만 여유 순 배정과 CPU/RAM/I/O 기록은 미완료다.
+
+D24 두 구성과 V96 다섯 큐의 loading 포함 device 시간 합은 약1.123 GPU-hours다. D8 및 추가 회귀검사까지 포함한 총비용은 아니다.
+
+# Problems / Concerns
+
+## 현재 투자 결론을 막는 문제
+
+`pg41_eval.py`의 `cost_analysis`는 요청 wall 합을 환자 bootstrap한 CI를 계산한다. 코드 자체도 이것이 device-seconds의 CI가 아니라고 명시한다. 그러나 최종 `boundary`는 이 CI를 device-seconds 기준 1.25와 대조하고, 처리량 기준 0.80은 CI 없이 점추정치만 사용한다.
+
+따라서 `cost_boundary=false`와 방법 pilot 양성 판정은 원 계획을 구현하지 못했다. 계획은 비용 비율의 환자 또는 block 구간을 보고하고 안정적 비교가 안 되면 투자를 보류하도록 했다. 정확도 손실과 비용 점추정치는 보존하되 결합 투자 판정은 불확정으로 정정해야 한다.
+
+## 재사용과 보고 범위
+
+합성 검사 29/29, 평가 검사 19/19, 생성 검사 11/11 기록을 확인했다. 그러나 생성 검사의 4 worker 항목은 실제 실행 성공이 아니라 메모리 gate 거부를 허용한 PASS다. 실제 4 worker 근거는 별도 D24 실행에 있다. 이를 구분해야 한다.
+
+`run_iter041.py`는 completion 존재만으로 작업을 건너뛰고 기존 protocol의 요청 모델 일치를 검사하지 않는다. 이번 자료는 리뷰에서 확인했지만 일반 재개 승인에는 부족하다. 평가 소스·결과 provenance와 원자적 저장도 보완이 필요하다. 전체 스냅샷 재사용은 승인하지 않으며 `pg41_verify.py`의 보조 재계산 범위만 별도 승인한다.
+
+사후 분석의 188/192는 공동 요청 수가 아니라 각 순서에서 box 1개를 출력한 문장 수다. 이 개수 편향은 관찰이며 형식 미학습이라는 원인의 증명은 아니다.
+
+# Interpretation
+
+iter_039에서는 미적응 모델의 낮은 독립 성능이 해석을 제한했다. iter_040의 직접 SFT 이후 이번 비교에서는 두 checkpoint와 두 순서 모두에서 공동 손실이 남았다. 이는 적응된 문장별 능력이 현재 공동 인터페이스에서 그대로 유지되지 않는다는 새로운 제한적 근거다.
+
+출력 길이와 파싱 오류는 이번 차이의 설명에서 약화됐다. 공동 요청 형식 미학습, 개수·위치 오류, 문장 배정 오류는 여전히 남는다. 공동 직접 CE 대조 없이 이를 내부 결합 능력의 결함으로 부를 수 없다. 또한 V96은 개발 자료이고 B/C는 독립 seed 재현이 아니다.
+
+# Strategy Check / 연구 방향 판단
+
+- **실행 유효성:** 실제 생성·입력·평가를 검증했다. 정확도 비교는 유효하다.
+- **성능 개선:** 이번에는 개선 방법을 시험하지 않았다. 독립 처리 기준점을 보존했다.
+- **가설 지지:** 현재 공동 형식의 정확도 손실은 지지된다. 비용 부담의 사전 기준 충족과 내부 원인은 미확정이다.
+- **신규 기여 가능성:** 공동 직접 CE와 강한 문장 조건부 모듈형 대조가 없어 판단할 수 없다.
+
+`language-conditioned-grounding` track에서 iter_038 setup, iter_039 진단, iter_040 method pilot, iter_041 진단을 함께 본다. 접근법 이름 변경으로 이력을 초기화하지 않는다. 과거 plan의 iter_039 생성 wall 약4.21시간과 iter_040 네 학습 trajectory 약2.54 GPU-hours는 단위와 포함 범위가 달라 이번 비용에 단순 합산하지 않는다. 전체 누적 비용은 미집계다.
+
+해결된 질문은 직접 SFT의 적응 가능성과 적응 후 현재 공동 요청의 손실이다. 남은 핵심 질문은 강한 단순 대안으로 해결되지 않는 실용적 부족함이 있는가다. 다음 결정을 바꿀 근거는 실행 가능한 모듈형 대조 또는 별도 근거를 갖춘 공동 직접 SFT·비용 비교이지, 같은 V96 prompt 진단의 반복이 아니다.
+
+현재 loss 개선, 비용 진단 연장, 다른 질문 전환을 비교하면 원 계획의 불확정 종료 규칙에 따라 현 공동 방법 투자를 보류하고 전환을 우선한다. observed 한계가 원천적으로 method pilot을 금지하는 것은 아니다. 이번 사전 투자 조건이 완결되지 않았다는 판단이다.
+
+비용 근거가 불확정이고 공동 방법의 개선은 시험하지 않았으므로 이번에는 논문 추천을 보류한다.
+
+# Recommended Next Experiment
+
+다음 deep 계획에서 기존 자산을 활용할 실행 가능한 모듈형 비교와 GOAL 내 다른 질문을 비교해 하나를 선택한다. 이번 실험은 여기서 종료하며 H192·F120·추가 prompt·seed·학습으로 자동 연장하지 않는다.
+
+현재 비용 판정은 기존 산출물을 보존한 별도 정정으로 처리한다. 새로운 근거로 공동 방법 pilot을 다시 선택한다면 공동 직접 CE를 강한 대조군으로 두고, 정확도 보존과 실제 비용 개선을 구분하는 최소 개입 및 종료 기준을 사전에 명시한다. full 확대는 별도 판단이다.
+
+VinDr 승인 통지 전 외부 다운로드·평가는 진행하지 않는다. 기존 RSNA checkpoint·detector 결과, test와 MRI reserve를 유지한다.

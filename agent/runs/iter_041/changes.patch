@@ -1,0 +1,2842 @@
+diff --git a/pg40_gen_test.py b/pg40_gen_test.py
+new file mode 100644
+index 0000000..28a6797
+--- /dev/null
++++ b/pg40_gen_test.py
+@@ -0,0 +1,160 @@
++"""iter_040 생성 runner(adapter·부분 행 복구·완료 검증) GPU 검사. GPU 두 장이 비어 있을 때만 실행한다.
++
++python pg40_gen_test.py --adapter <dir with adapter.pt> --out results/iter_040/tests/gen_test.json
++"""
++import argparse
++import json
++import os
++import signal
++import subprocess
++import sys
++import time
++
++import pg40_run as R
++
++BASE = "results/iter_040/tests/gen"
++RES = []
++
++
++def check(name, ok, detail=None):
++    RES.append({"name": name, "pass": bool(ok), "detail": detail})
++    print(("PASS " if ok else "FAIL ") + name, json.dumps(detail, default=str)[:400], flush=True)
++
++
++def run(cmd, **kw):
++    return subprocess.run([sys.executable, "pg40_run.py"] + cmd, capture_output=True, text=True, **kw)
++
++
++def toks(out_dir):
++    d = {}
++    import glob
++    for fn in sorted(glob.glob(os.path.join(out_dir, "gen_worker*.jsonl"))):
++        for r in R.read_records(fn):
++            d[r["request_id"]] = r["suffix_ids"]
++    return d
++
++
++def resource_peak(out_dir):
++    mx = {}
++    p = os.path.join(out_dir, "resource_log.jsonl")
++    if os.path.exists(p):
++        for l in open(p):
++            for g in json.loads(l)["gpu"]:
++                i, u, _ = [x.strip() for x in g.split(",")]
++                mx[i] = max(mx.get(i, 0), int(u))
++    return mx
++
++
++def main():
++    ap = argparse.ArgumentParser()
++    ap.add_argument("--adapter", required=True)
++    ap.add_argument("--out", required=True)
++    ap.add_argument("--n", type=int, default=24)
++    a = ap.parse_args()
++    if os.path.exists(a.out):
++        sys.exit("output exists")
++    os.makedirs(BASE, exist_ok=True)
++    rows = [json.loads(l) for l in open("results/iter_040/requests/requests_V48.jsonl")]
++    # 긴 문장·복수 box 사례를 포함하도록 multi-box/긴 문장 우선 + 나머지
++    man = {json.loads(l)["PatientID"]: json.loads(l) for l in open("results/iter_040/data/manifest_eval_private.jsonl")}
++    rows.sort(key=lambda r: (-(len(man[r["patient"]]["gt_boxes_xyxy_norm"][r["targets"][0]]) > 1), -len(r["prompt"])))
++    sub = rows[:a.n]
++    req = f"{BASE}/requests_test{a.n}.jsonl"
++    if os.path.exists(req):
++        sys.exit(f"{req} exists (new attempt path required)")
++    with open(req, "w") as f:
++        for r in sub:
++            f.write(json.dumps(r) + "\n")
++    proto = f"{BASE}/protocol_adapter.json"
++    R.make_protocol(req, proto, adapter=a.adapter)
++    # 1) 2 worker (GPU당 1)
++    d2, d4 = f"{BASE}/w2", f"{BASE}/w4"
++    t = time.time()
++    r2 = run(["launch", "--requests", req, "--protocol", proto, "--out-dir", d2, "--workers", "2", "--gpus", "0,1", "--peak-gb", "10"])
++    w2 = time.time() - t
++    check("launch_2_workers_completes_with_completion_json", r2.returncode == 0 and os.path.exists(f"{d2}/completion.json"), {"wall_s": w2, "err": r2.stderr[-300:]})
++    recs2 = R.verify_completion(d2, req, proto)
++    check("verify_completion_passes_adapter_records", len(recs2) == a.n and all(x["adapter_digest"] for x in recs2))
++    # 2) 4 worker (GPU당 2)
++    t = time.time()
++    r4 = run(["launch", "--requests", req, "--protocol", proto, "--out-dir", d4, "--workers", "4", "--gpus", "0,1", "--peak-gb", "10"])
++    w4 = time.time() - t
++    ok4 = r4.returncode == 0 and os.path.exists(f"{d4}/completion.json")
++    check("launch_4_workers_completes_or_refused_by_memory_margin", ok4 or "free" in (r4.stdout + r4.stderr), {"wall_s": w4, "out": (r4.stdout + r4.stderr)[-200:]})
++    same = None
++    if ok4:
++        t2, t4 = toks(d2), toks(d4)
++        same = t2 == t4
++        check("token_identical_2_vs_4_workers", same, {"n": len(t2)})
++        check("throughput_recorded", True, {"req_per_min_2w_wall": a.n / w2 * 60, "req_per_min_4w_wall": a.n / w4 * 60, "peak_mib_2w": resource_peak(d2),
++                                            "peak_mib_4w": resource_peak(d4)})
++    # 3) adapter 독립 로드 경로(학습기와 같은 apply_lora+load_lora_state, dropout 0.05 eval)로 생성한 token과 일치
++    import torch
++    from rsna_diag import generate as G, lora
++    torch_, proc, model = G.load_model()
++    blob = torch_.load(os.path.join(a.adapter, "adapter.pt"), map_location="cpu", weights_only=True)
++    lora.apply_lora(model, 16, 32, 0.05)
++    lora.load_lora_state(model, blob["state"])
++    model.eval()
++    env = G.env_info(torch_, proc, model)
++    eos = env["eos_token_id"]
++    eos_ids = set(eos if isinstance(eos, list) else [eos])
++    ref = {}
++    for r in sub[:6]:
++        image, aff, px = G.load_image(r["image"])
++        inp = G.build_inputs(proc, image, r["prompt"])
++        at = G.generate(torch_, proc, model, inp, r["caps"][0], eos_ids)
++        ref[r["request_id"]] = at["suffix_ids"]
++    t2 = toks(d2)
++    check("adapter_generation_equals_trainer_style_load_path_tokens", all(ref[k] == t2[k] for k in ref), {"n": len(ref)})
++    del model
++    torch_.cuda.empty_cache()
++    # 4) 강제 종료 후 재개 + 부분 행 복구
++    d3 = f"{BASE}/kill"
++    cmd = [sys.executable, "pg40_run.py", "launch", "--requests", req, "--protocol", proto, "--out-dir", d3, "--workers", "2", "--gpus", "0,1", "--peak-gb", "10"]
++    p = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, start_new_session=True)
++    t0 = time.time()
++    while time.time() - t0 < 900:
++        n = sum(len(R.read_records(os.path.join(d3, f))) for f in os.listdir(d3) if f.startswith("gen_worker") and f.endswith(".jsonl")) if os.path.isdir(d3) else 0
++        if n >= 6:
++            break
++        time.sleep(3)
++    os.killpg(p.pid, signal.SIGKILL)
++    p.wait()
++    time.sleep(3)
++    partial_files = [os.path.join(d3, f) for f in os.listdir(d3) if f.startswith("gen_worker") and f.endswith(".jsonl")]
++    n_before = sum(len(R.read_records(f)) for f in partial_files)
++    with open(partial_files[0], "a") as f:
++        f.write('{"request_id": "torn", "x": ')  # 부분 행 시뮬레이션
++    check("killed_before_completion", not os.path.exists(f"{d3}/completion.json") and 6 <= n_before < a.n, {"n_before": n_before})
++    r3 = subprocess.run(cmd, capture_output=True, text=True)
++    check("relaunch_after_kill_completes", r3.returncode == 0 and os.path.exists(f"{d3}/completion.json"), {"err": r3.stderr[-300:]})
++    recs3 = R.verify_completion(d3, req, proto)
++    tk3, tk2 = toks(d3), toks(d2)
++    check("resumed_run_no_duplicates_and_tokens_equal_baseline", len(recs3) == a.n == len(tk3) and tk3 == tk2)
++    check("partial_row_repaired_with_log", any(os.path.exists(f + ".repair.log") for f in partial_files))
++    # 5) 변조 거부
++    import shutil
++    dt = f"{BASE}/tamper"
++    shutil.copytree(d2, dt, ignore=shutil.ignore_patterns("*.lock", "claims"))
++    fn = os.path.join(dt, "gen_worker0.jsonl")
++    lines = open(fn).read().splitlines()
++    rec = json.loads(lines[0])
++    rec["suffix_text_raw"] = rec["suffix_text_raw"] + " "
++    lines[0] = json.dumps(rec)
++    open(fn, "w").write("\n".join(lines) + "\n")
++    try:
++        R.verify_completion(dt, req, proto)
++        rej = False
++    except R.RunError:
++        rej = True
++    check("modified_record_rejected_by_completion_verification", rej)
++    dt2 = f"{BASE}/rerun_completed"
++    r5 = run(["launch", "--requests", req, "--protocol", proto, "--out-dir", d2, "--workers", "2", "--gpus", "0,1"])
++    check("rerun_into_completed_dir_refused", r5.returncode != 0)
++    json.dump({"results": RES, "n_pass": sum(x["pass"] for x in RES), "n": len(RES)}, open(a.out, "w"), indent=1, default=str)
++    print(f"{sum(x['pass'] for x in RES)}/{len(RES)} PASS")
++
++
++if __name__ == "__main__":
++    main()
+diff --git a/pg40_run.py b/pg40_run.py
+new file mode 100644
+index 0000000..35bb684
+--- /dev/null
++++ b/pg40_run.py
+@@ -0,0 +1,435 @@
++"""iter_040 생성 runner + launcher (pg39_run 기반, adapter·단계 gate·부분 행 복구 추가; worker 수와 GPU 수 분리).
++
++iter_040 변경: (1) --adapter 지원 (protocol에 adapter digest 잠금, record에 adapter_digest), (2) protocol의 gate(decision artifact 경로+sha, run=true 필요),
++(3) JSONL 읽기가 다른 worker가 쓰는 중인 마지막 부분 행을 무시하고 자신의 파일의 부분 행은 시작 시 복구(잘라냄) + 로그, (4) launcher --gpus 부분집합,
++(5) completion에 worker별 wall/요청 시간 집계와 실제 launcher wall을 구분해 기록. 기존 iter_039 결과·protocol은 읽지도 쓰지도 않는다.
++
++
++worker:  CUDA_VISIBLE_DEVICES=<물리 gpu> python pg40_run.py worker --requests R --protocol P --out-dir D --worker K
++launcher: python pg40_run.py launch --requests R --protocol P --out-dir D --workers N [--peak-gb 14]
++- 소유권: launch.lock (flock, 프로세스 종료 시 자동 해제) / worker{K}.lock / 요청별 claims/<rid>.claim (flock: 죽은 소유자의 claim은 자동 회수).
++- 재개: 시작 시와 claim 직후 모든 기존 record를 요청 행·prompt·config·protocol·현재 영상 pixel hash·record digest와 대조한다.
++  중복·잉여·변조는 중단한다. 기존 결과는 덮어쓰지 않는다 (out-dir이 completion을 가지면 재실행 거부).
++- GT/labels는 읽지 않는다.
++"""
++import argparse
++import fcntl
++import glob
++import hashlib
++import json
++import os
++import subprocess
++import sys
++import time
++
++from rsna_diag import generate as G
++
++CODE_FILES = ["pg40_run.py", "pg39_spec.py", "pg39_data.py", "rsna_diag/generate.py", "rsna_diag/geometry.py",
++              "rsna_diag/parse.py", "rsna_diag/prompts.py", "rsna_diag/lora.py", "rsna_diag/queue_lock.py"]
++RUNNER = "pg40_run_v1"
++
++
++class RunError(RuntimeError):
++    pass
++
++
++def sha_bytes(b):
++    return hashlib.sha256(b).hexdigest()
++
++
++def file_sha(p):
++    h = hashlib.sha256()
++    with open(p, "rb") as f:
++        for b in iter(lambda: f.read(1 << 22), b""):
++            h.update(b)
++    return h.hexdigest()
++
++
++def canon(o):
++    return json.dumps(o, sort_keys=True, ensure_ascii=False, default=str)
++
++
++def read_requests(path):
++    rows = [json.loads(l) for l in open(path) if l.strip()]
++    ids = [r["request_id"] for r in rows]
++    if len(ids) != len(set(ids)):
++        raise RunError("duplicate request_id in requests file")
++    return rows
++
++
++def row_digest(row):
++    return sha_bytes(canon(row).encode())
++
++
++# ---------------- protocol ----------------
++def gate_ok(path):
++    d = json.load(open(path))
++    return d.get("run") is True
++
++
++def make_protocol(requests_path, out_path, adapter=None, gate=None, extra=None):
++    """잠금: 코드 파일 hash, 요청 파일 hash, 영상 hash 목록 digest, 생성 config digest."""
++    rows = read_requests(requests_path)
++    core, cdig = static_config()
++    d = {"runner": RUNNER, "code": {f: file_sha(f) for f in CODE_FILES}, "requests_sha256": file_sha(requests_path),
++         "requests_path": requests_path, "n_requests": len(rows),
++         "images_digest": sha_bytes(canon(sorted({(r["image"], r["image_file_sha256"], r["input_pixel_sha256"])
++                                                   for r in rows})).encode()),
++         "generation_config_digest": cdig, "generation_config": core, "extra": extra or {}, "adapter": None, "gate": None}
++    if adapter:
++        import torch
++        from rsna_diag import lora
++        blob = torch.load(os.path.join(adapter, "adapter.pt"), map_location="cpu", weights_only=True)
++        dg = lora.state_digest(blob["state"])
++        if dg != blob["digest"]:
++            raise RunError("adapter digest mismatch (file corrupted)")
++        d["adapter"] = {"path": adapter, "digest": dg, "file_sha256": file_sha(os.path.join(adapter, "adapter.pt"))}
++    if gate:
++        if not gate_ok(gate):
++            raise RunError(f"gate decision does not permit this stage: {gate}")
++        d["gate"] = {"decision_path": gate, "decision_sha256": file_sha(gate)}
++    if os.path.exists(out_path):
++        raise RunError(f"protocol exists: {out_path}")
++    tmp = out_path + f".{os.getpid()}.tmp"
++    json.dump(d, open(tmp, "w"), indent=1)
++    os.replace(tmp, out_path)
++    return d
++
++
++def static_config():
++    env = G.static_env()
++    core = {k: env[k] for k in G.CFG_KEYS}
++    core.update({"caps_IC": [1000, 2000, 4000], "caps_J": [2000, 4000, 8000], "do_sample": False, "runner": RUNNER})
++    return core, sha_bytes(canon(core).encode())
++
++
++def verify_protocol(path, requests_path):
++    p = json.load(open(path))
++    bad = [f for f, h in p["code"].items() if file_sha(f) != h]
++    if bad:
++        raise RunError(f"code changed since protocol lock: {bad}")
++    if file_sha(requests_path) != p["requests_sha256"]:
++        raise RunError("requests file changed since protocol lock")
++    if p.get("adapter") and file_sha(os.path.join(p["adapter"]["path"], "adapter.pt")) != p["adapter"]["file_sha256"]:
++        raise RunError("adapter file changed since protocol lock")
++    if p.get("gate") and (file_sha(p["gate"]["decision_path"]) != p["gate"]["decision_sha256"] or not gate_ok(p["gate"]["decision_path"])):
++        raise RunError("stage gate decision missing/changed/not permitting")
++    return sha_bytes(canon(p).encode()), p
++
++
++# ---------------- record validation ----------------
++def record_digest(rec):
++    return sha_bytes(canon({k: v for k, v in rec.items() if k != "record_digest"}).encode())
++
++
++def read_records(path):
++    """완결된 행(개행으로 끝난 행)만 읽는다. 다른 worker가 쓰는 중인 마지막 부분 행은 무시한다. 중간 행이 깨져 있으면 예외."""
++    out = []
++    if os.path.exists(path):
++        with open(path, "rb") as f:
++            data = f.read()
++        for ln in data.split(b"\n")[:-1]:
++            if ln.strip():
++                out.append(json.loads(ln))
++    return out
++
++
++def repair_tail(path):
++    """자신의 파일 끝에 개행 없는 부분 행이 있으면(이전 프로세스 비정상 종료) 잘라내고 잘라낸 바이트 수를 반환한다."""
++    if not os.path.exists(path):
++        return 0
++    with open(path, "rb") as f:
++        data = f.read()
++    tail = data.rsplit(b"\n", 1)[-1] if b"\n" in data else data
++    if not data.endswith(b"\n") and tail:
++        with open(path, "r+b") as f:
++            f.truncate(len(data) - len(tail))
++        with open(path + ".repair.log", "a") as f:
++            f.write(json.dumps({"ts": time.time(), "truncated_bytes": len(tail)}) + "\n")
++        return len(tail)
++    return 0
++
++
++def validate_records(files, rows_by_id, pdig, cdig, px, adig=None):
++    """files {path: [records]}. returns {request_id: record}. 이상이 있으면 RunError."""
++    done = {}
++    for fn, recs in files.items():
++        for r in recs:
++            rid = r.get("request_id")
++            row = rows_by_id.get(rid)
++            if row is None:
++                raise RunError(f"unexpected record {rid} in {fn}")
++            if rid in done:
++                raise RunError(f"duplicate record {rid} in {fn}")
++            if r.get("record_digest") != record_digest(r):
++                raise RunError(f"record digest mismatch (tampered?) {rid} in {fn}")
++            if r.get("row_digest") != row_digest(row) or r.get("prompt_sha256") != row["prompt_sha256"]:
++                raise RunError(f"request row/prompt mismatch {rid}")
++            if r.get("adapter_digest") != adig:
++                raise RunError(f"adapter digest mismatch {rid}")
++            if r.get("protocol_digest") != pdig or r.get("config_digest") != cdig:
++                raise RunError(f"protocol/config mismatch {rid}")
++            if r.get("input_pixel_sha256") != row["input_pixel_sha256"] or px(row["image"]) != row["input_pixel_sha256"]:
++                raise RunError(f"input pixel hash mismatch {rid}")
++            done[rid] = r
++    return done
++
++
++# ---------------- worker ----------------
++def try_flock(path):
++    fd = os.open(path, os.O_CREAT | os.O_RDWR)
++    try:
++        fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
++    except BlockingIOError:
++        os.close(fd)
++        return None
++    os.ftruncate(fd, 0)
++    os.write(fd, json.dumps({"pid": os.getpid(), "ts": time.time()}).encode())
++    return fd
++
++
++def worker_main(a):
++    pdig, proto = verify_protocol(a.protocol, a.requests)
++    rows = read_requests(a.requests)
++    rows_by_id = {r["request_id"]: r for r in rows}
++    os.makedirs(a.out_dir, exist_ok=True)
++    if os.path.exists(os.path.join(a.out_dir, "completion.json")):
++        raise RunError("completion.json exists: refuse to rerun into a completed out-dir")
++    wl = try_flock(os.path.join(a.out_dir, f"worker{a.worker}.lock"))
++    if wl is None:
++        sys.exit(f"worker {a.worker} already running")
++    torch, proc, model = G.load_model()
++    adig = None
++    if proto.get("adapter"):
++        adig = G.load_adapter(torch, model, proto["adapter"]["path"])
++        if adig != proto["adapter"]["digest"]:
++            sys.exit("loaded adapter digest != protocol")
++    env = G.env_info(torch, proc, model)
++    core = {k: env[k] for k in G.CFG_KEYS}
++    core.update({"caps_IC": [1000, 2000, 4000], "caps_J": [2000, 4000, 8000], "do_sample": False, "runner": RUNNER})
++    cdig = sha_bytes(canon(core).encode())
++    if cdig != proto["generation_config_digest"]:
++        sys.exit("runtime generation config digest != protocol")
++    eos = env["eos_token_id"]
++    eos_ids = set(eos if isinstance(eos, list) else [eos])
++    envp = os.path.join(a.out_dir, f"gen_worker{a.worker}.jsonl.env.json")
++    if not os.path.exists(envp):
++        json.dump({"env": env, "config_digest": cdig, "protocol_digest": pdig, "worker": a.worker,
++                   "physical_cuda_visible_devices": os.environ.get("CUDA_VISIBLE_DEVICES")}, open(envp, "w"),
++                  indent=1, default=str)
++    cache = {}
++
++    def px(path):
++        if path not in cache:
++            cache[path] = G.load_image(path)[2]
++        return cache[path]
++
++    def read_all():
++        return {f: read_records(f) for f in sorted(glob.glob(os.path.join(a.out_dir, "gen_worker*.jsonl")))}
++
++    out = os.path.join(a.out_dir, f"gen_worker{a.worker}.jsonl")
++    repair_tail(out)
++    done = validate_records(read_all(), rows_by_id, pdig, cdig, px, adig)
++    cdir = os.path.join(a.out_dir, "claims")
++    os.makedirs(cdir, exist_ok=True)
++    log = open(out + ".log", "a")
++    t0, n_new = time.time(), 0
++    for row in sorted(rows, key=lambda r: r["order_key"]):
++        if row["request_id"] in done:
++            continue
++        if a.max_requests is not None and n_new >= a.max_requests:
++            break
++        fd = try_flock(os.path.join(cdir, row["request_id"] + ".claim"))
++        if fd is None:
++            continue
++        try:
++            done = validate_records(read_all(), rows_by_id, pdig, cdig, px, adig)
++            if row["request_id"] in done:
++                continue
++            tw = time.time()
++            try:
++                image, aff, pxs = G.load_image(row["image"])
++                inp = G.build_inputs(proc, image, row["prompt"])
++                ids_in = inp["input_ids"][0].tolist()
++                attempts = []
++                for cap in row["caps"]:
++                    at = G.generate(torch, proc, model, inp, cap, eos_ids)
++                    if attempts:
++                        at["prefix_matches_previous"] = at["suffix_ids"][:len(attempts[-1]["suffix_ids"])] == attempts[-1]["suffix_ids"]
++                    attempts.append(at)
++                    if at["ended_eos"]:
++                        break
++            except torch.cuda.OutOfMemoryError as e:
++                log.write(json.dumps({"event": "oom", "rid": row["request_id"], "err": str(e)[:200]}) + "\n")
++                log.flush()
++                raise
++            fin = attempts[-1]
++            for at in attempts:
++                at["suffix_text_raw"] = proc.tokenizer.decode(at["suffix_ids"], skip_special_tokens=False)
++            rec = {"request_id": row["request_id"], "row_digest": row_digest(row), "cond": row["cond"],
++                   "patient": row["patient"], "targets": row["targets"], "kind": row["kind"],
++                   "prompt_sha256": row["prompt_sha256"], "image": row["image"],
++                   "input_pixel_sha256": pxs, "pad_affine_top_left_side": list(aff),
++                   "n_input_tokens": len(ids_in), "input_ids_sha256": sha_bytes(json.dumps(ids_in).encode()),
++                   "suffix_ids": fin["suffix_ids"], "suffix_text_raw": fin["suffix_text_raw"],
++                   "n_output_tokens": fin["n_new"], "finish_reason": fin["finish_reason"], "ended_eos": fin["ended_eos"],
++                   "final_cap": fin["cap"],
++                   "attempts": [{k: v for k, v in at.items() if k != "suffix_ids"} for at in attempts],
++                   "runtime_s_total": sum(at["runtime_s"] for at in attempts), "wall_s": time.time() - tw,
++                   "peak_mem_alloc_gb_max": max(at["peak_mem_alloc_gb"] for at in attempts),
++                   "peak_mem_reserved_gb_max": max(at["peak_mem_reserved_gb"] for at in attempts),
++                   "protocol_digest": pdig, "config_digest": cdig, "adapter_digest": adig, "worker": a.worker, "ts": time.time(),
++                   "gpu_uuid": env.get("gpu_uuid")}
++            rec["record_digest"] = record_digest(rec)
++            with open(out, "a") as f:
++                f.write(json.dumps(rec) + "\n")
++                f.flush()
++                os.fsync(f.fileno())
++            done[row["request_id"]] = rec
++            n_new += 1
++            log.write(json.dumps({"event": "done", "rid": row["request_id"], "cond": row["cond"], "n_out": rec["n_output_tokens"],
++                                  "finish": rec["finish_reason"], "runtime_s": round(rec["runtime_s_total"], 1),
++                                  "peak_gb": round(rec["peak_mem_alloc_gb_max"], 2), "elapsed": round(time.time() - t0, 1)}) + "\n")
++            log.flush()
++        finally:
++            os.close(fd)
++    print(f"worker {a.worker}: finished; {n_new} new requests", flush=True)
++
++
++# ---------------- launcher ----------------
++def gpu_free_mib():
++    r = subprocess.run(["nvidia-smi", "--query-gpu=index,memory.used,memory.total", "--format=csv,noheader,nounits"],
++                       capture_output=True, text=True, check=True)
++    return {int(l.split(",")[0]): (int(l.split(",")[2]) - int(l.split(",")[1])) for l in r.stdout.strip().splitlines()}
++
++
++def allowed_gpus():
++    v = os.environ.get("CUDA_VISIBLE_DEVICES")
++    if not v:
++        raise RunError("CUDA_VISIBLE_DEVICES not set; refusing to pick devices")
++    return [int(x) for x in v.split(",")]
++
++
++def verify_completion(out_dir, requests_path, protocol_path):
++    """평가 진입점용: completion 내용·요청 집합·record digest를 다시 검증한다. returns records list."""
++    comp = json.load(open(os.path.join(out_dir, "completion.json")))
++    pdig, proto = verify_protocol(protocol_path, requests_path)
++    rows = read_requests(requests_path)
++    rows_by_id = {r["request_id"]: r for r in rows}
++    if comp.get("protocol_digest") != pdig or any(c != 0 for c in comp["exit_codes"]):
++        raise RunError("completion protocol/exit code invalid")
++    recs = []
++    for fn in sorted(glob.glob(os.path.join(out_dir, "gen_worker*.jsonl"))):
++        if comp["worker_file_sha256"].get(os.path.basename(fn)) != file_sha(fn):
++            raise RunError(f"worker file changed after completion: {fn}")
++        recs += read_records(fn)
++    ids = [r["request_id"] for r in recs]
++    if len(ids) != len(set(ids)) or set(ids) != set(rows_by_id) or len(ids) != comp["n_requests"]:
++        raise RunError("completion: request set mismatch (missing/duplicate/extra)")
++    want_ad = (proto.get("adapter") or {}).get("digest")
++    for r in recs:
++        if r["record_digest"] != record_digest(r) or r["row_digest"] != row_digest(rows_by_id[r["request_id"]]):
++            raise RunError("completion: record digest mismatch")
++        if r.get("adapter_digest") != want_ad or r.get("protocol_digest") != pdig:
++            raise RunError("completion: adapter/protocol digest mismatch in record")
++    return recs
++
++
++def launch_main(a):
++    pdig, proto = verify_protocol(a.protocol, a.requests)
++    os.makedirs(a.out_dir, exist_ok=True)
++    if os.path.exists(os.path.join(a.out_dir, "completion.json")):
++        raise RunError("completion.json exists in out-dir; use a new attempt dir")
++    lk = try_flock(os.path.join(a.out_dir, "launch.lock"))
++    if lk is None:
++        sys.exit("another launcher owns this out-dir")
++    gpus = allowed_gpus()
++    if a.gpus:
++        sel = [int(x) for x in a.gpus.split(",")]
++        if not set(sel) <= set(gpus):
++            sys.exit(f"--gpus {sel} not within inherited allowed set {gpus}")
++        gpus = sel
++    free = gpu_free_mib()
++    per = {}
++    for k in range(a.workers):
++        g = gpus[k % len(gpus)]
++        per.setdefault(g, []).append(k)
++    for g, ws in per.items():
++        need = len(ws) * (a.peak_gb + 2.0) * 1024
++        if free[g] < need:
++            sys.exit(f"gpu {g}: free {free[g]}MiB < need {need:.0f}MiB for workers {ws}")
++    mapping = {k: gpus[k % len(gpus)] for k in range(a.workers)}
++    json.dump({"mapping_worker_to_physical_gpu": mapping, "free_mib_before": free, "allowed": gpus,
++               "peak_gb_assumed": a.peak_gb}, open(os.path.join(a.out_dir, "launch_children.json"), "w"), indent=1)
++    procs = {}
++    t0 = time.time()
++    for k in range(a.workers):
++        env = dict(os.environ, CUDA_VISIBLE_DEVICES=str(mapping[k]))
++        cmd = [sys.executable, "pg40_run.py", "worker", "--requests", a.requests, "--protocol", a.protocol,
++               "--out-dir", a.out_dir, "--worker", str(k)]
++        if a.max_requests is not None:
++            cmd += ["--max-requests", str(a.max_requests)]
++        procs[k] = subprocess.Popen(cmd, env=env, stdout=open(os.path.join(a.out_dir, f"worker{k}.stdout"), "a"),
++                                    stderr=open(os.path.join(a.out_dir, f"worker{k}.stderr"), "a"))
++    rl = open(os.path.join(a.out_dir, "resource_log.jsonl"), "a")
++    while any(p.poll() is None for p in procs.values()):
++        time.sleep(15)
++        used = subprocess.run(["nvidia-smi", "--query-gpu=index,memory.used,utilization.gpu", "--format=csv,noheader,nounits"],
++                              capture_output=True, text=True).stdout.strip().splitlines()
++        rl.write(json.dumps({"t": round(time.time() - t0, 1), "gpu": used}) + "\n")
++        rl.flush()
++    codes = [procs[k].returncode for k in range(a.workers)]
++    wall = time.time() - t0
++    rows = read_requests(a.requests)
++    recs = []
++    for fn in sorted(glob.glob(os.path.join(a.out_dir, "gen_worker*.jsonl"))):
++        recs += read_records(fn)
++    n_done = len({r["request_id"] for r in recs})
++    allr = [r for r in recs]
++    cost = {"sum_request_wall_s": sum(r["wall_s"] for r in allr), "sum_generate_runtime_s": sum(r["runtime_s_total"] for r in allr),
++            "n_records_with_retry": sum(len(r["attempts"]) > 1 for r in allr),
++            "new_tokens_all_attempts": sum(at["n_new"] for r in allr for at in r["attempts"]),
++            "new_tokens_final": sum(r["n_output_tokens"] for r in allr)}
++    res = {"cost": cost, "exit_codes": codes, "wall_s": wall, "n_records": len(recs), "n_unique": n_done, "n_requests": len(rows),
++           "workers": a.workers, "mapping": mapping, "protocol_digest": pdig}
++    if a.max_requests is None and all(c == 0 for c in codes) and n_done == len(rows) == len(recs):
++        res["worker_file_sha256"] = {os.path.basename(f): file_sha(f)
++                                     for f in sorted(glob.glob(os.path.join(a.out_dir, "gen_worker*.jsonl")))}
++        tmp = os.path.join(a.out_dir, f"completion.{os.getpid()}.tmp")
++        json.dump(res, open(tmp, "w"), indent=1)
++        os.replace(tmp, os.path.join(a.out_dir, "completion.json"))
++        print("completion written", json.dumps({k: res[k] for k in ("exit_codes", "wall_s", "n_unique")}))
++    else:
++        json.dump(res, open(os.path.join(a.out_dir, f"partial_{int(time.time())}.json"), "w"), indent=1)
++        print("NOT complete", json.dumps({k: res[k] for k in ("exit_codes", "wall_s", "n_unique", "n_requests")}))
++        sys.exit(1)
++
++
++def main():
++    ap = argparse.ArgumentParser()
++    sub = ap.add_subparsers(dest="cmd", required=True)
++    w = sub.add_parser("worker")
++    l = sub.add_parser("launch")
++    pp = sub.add_parser("protocol")
++    pp.add_argument("--requests", required=True)
++    pp.add_argument("--out", required=True)
++    pp.add_argument("--adapter", default=None, help="adapter 디렉터리 (adapter.pt 포함)")
++    pp.add_argument("--gate", default=None, help="run=true decision artifact (후속 단계만)")
++    for s in (w, l):
++        s.add_argument("--requests", required=True)
++        s.add_argument("--protocol", required=True)
++        s.add_argument("--out-dir", required=True)
++        s.add_argument("--max-requests", type=int, default=None)
++    w.add_argument("--worker", type=int, required=True)
++    l.add_argument("--workers", type=int, required=True)
++    l.add_argument("--gpus", default=None, help="허용 집합 안의 부분집합 (예: 0 또는 0,1)")
++    l.add_argument("--peak-gb", type=float, default=14.0)
++    a = ap.parse_args()
++    if a.cmd == "protocol":
++        make_protocol(a.requests, a.out, adapter=a.adapter, gate=a.gate)
++        return
++    (worker_main if a.cmd == "worker" else launch_main)(a)
++
++
++if __name__ == "__main__":
++    main()
+diff --git a/pg40_verify.py b/pg40_verify.py
+new file mode 100644
+index 0000000..46408da
+--- /dev/null
++++ b/pg40_verify.py
+@@ -0,0 +1,175 @@
++"""iter_040 독립 재계산 (pg39_spec/pg39_eval/rsna_diag.parse·metrics를 쓰지 않는 별도 구현).
++원시 생성 record(gen_worker*.jsonl)의 suffix_text_raw에서 strict JSON 목록을 직접 해석하고, 정규화 GT는 원본 normalized xyxy와 영상 크기에서 다시 계산한다.
++문장별 최대 cardinality one-to-one matching은 증강 경로(augmenting path) 알고리즘으로 계산한다 (F1은 cardinality에만 의존).
++대상: 순수 JSON 목록으로 출력하는 학습 모델(B/C/M/C_compute). M0의 복잡한 출력 형식은 iter_039 검증 범위를 따른다.
++
++python pg40_verify.py --subset V96 --model M=results/iter_040/gen/M --model C=... --report results/iter_040/eval/v96_MC.json --out results/iter_040/eval/verify_v96_MC.json
++"""
++import argparse
++import glob
++import json
++import os
++import re
++import sys
++
++import numpy as np
++
++EVAL_MANIFEST = "results/iter_040/data/manifest_eval_private.jsonl"
++EOT = "<end_of_turn>"
++
++
++def canvas(box, h, w):
++    side = max(h, w)
++    top = (side - h) // 2 if h < w else 0
++    left = (side - w) // 2 if w < h else 0
++    x0, y0, x1, y1 = box[0] * w, box[1] * h, box[2] * w, box[3] * h
++    return [(y0 + top) * 1000 / side, (x0 + left) * 1000 / side, (y1 + top) * 1000 / side, (x1 + left) * 1000 / side]
++
++
++def iou(a, b):
++    ih = min(a[2], b[2]) - max(a[0], b[0])
++    iw = min(a[3], b[3]) - max(a[1], b[1])
++    if ih <= 0 or iw <= 0:
++        return 0.0
++    i = ih * iw
++    u = (a[2] - a[0]) * (a[3] - a[1]) + (b[2] - b[0]) * (b[3] - b[1]) - i
++    return i / u
++
++
++def max_matching(pred, gt, thr):
++    adj = [[j for j, p in enumerate(pred) if iou(g, p) >= thr] for g in gt]
++    owner = {}
++
++    def aug(u, seen):
++        for v in adj[u]:
++            if v in seen:
++                continue
++            seen.add(v)
++            if v not in owner or aug(owner[v], seen):
++                owner[v] = u
++                return True
++        return False
++    return sum(aug(u, set()) for u in range(len(gt)))
++
++
++def f1(pred, gt, thr):
++    tp = max_matching(pred, gt, thr) if pred and gt else 0
++    if tp == 0:
++        return 0.0
++    p, r = tp / len(pred), tp / len(gt)
++    return 2 * p * r / (p + r)
++
++
++def parse(raw, ended, allowed):
++    """returns (valid, {id: [boxes]}, n_fp_ignored). 순수 JSON 목록만 인정 (그 밖은 invalid=점수 0)."""
++    t = raw[:-len(EOT)] if raw.endswith(EOT) else raw
++    if not ended:
++        return False, {}, 0
++    try:
++        arr = json.loads(t.strip())
++    except Exception:
++        return False, {}, 0
++    if not isinstance(arr, list):
++        return False, {}, 0
++    out = {"qA": [], "qB": []}
++    for e in arr:
++        if not isinstance(e, dict) or set(e) != {"box_2d", "label"}:
++            return False, {}, 0
++        b, lab = e["box_2d"], e["label"]
++        if not (isinstance(b, list) and len(b) == 4 and all(isinstance(v, (int, float)) and not isinstance(v, bool) for v in b) and isinstance(lab, str)):
++            return False, {}, 0
++        if not (0 <= b[0] < b[2] <= 1000 and 0 <= b[1] < b[3] <= 1000):
++            return False, {}, 0
++        m = re.fullmatch(r"\s*q([abAB])\s*", lab)
++        if not m:
++            return False, {}, 0
++        pid = "q" + m.group(1).upper()
++        if pid in allowed:
++            out[pid].append([float(v) for v in b])
++    return True, out, 0
++
++
++def load_man(subset):
++    out = {}
++    for l in open(EVAL_MANIFEST):
++        r = json.loads(l)
++        if subset == "V96" and r["eval_set"] == "V96" or subset == "V48" and r["eval_set"] == "V96" and r["is_V48"] or subset == "H192" and r["eval_set"] == "H192":
++            out[r["PatientID"]] = r
++    return out
++
++
++def patient_f1(gen_dir, man, thr):
++    recs = []
++    for fn in sorted(glob.glob(os.path.join(gen_dir, "gen_worker*.jsonl"))):
++        for ln in open(fn):
++            if ln.strip():
++                recs.append(json.loads(ln))
++    by = {}
++    for r in recs:
++        if r["patient"] not in man:
++            continue
++        m = man[r["patient"]]
++        h, w = m["image_meta"]["h"], m["image_meta"]["w"]
++        t = r["targets"][0]
++        gt = [canvas(b, h, w) for b in m["gt_boxes_xyxy_norm"][t]]
++        ok, groups, _ = parse(r["suffix_text_raw"], r["ended_eos"], set(r["targets"]))
++        pred = groups.get(t, []) if ok else []
++        by.setdefault(r["patient"], {})[t] = (f1(pred, gt, thr), ok, len(pred), len(gt))
++    assert all(set(v) == {"qA", "qB"} for v in by.values()) and set(by) == set(man), "coverage"
++    return by
++
++
++def boot(vals, level, B=10000, seed=20260930):
++    idx = np.random.default_rng(seed).integers(0, len(vals), size=(B, len(vals)), dtype=np.int32)
++    m = vals[idx].mean(axis=1)
++    a = (1 - level) / 2 * 100
++    return [float(vals.mean()), float(np.percentile(m, a)), float(np.percentile(m, 100 - a))]
++
++
++def main():
++    ap = argparse.ArgumentParser()
++    ap.add_argument("--subset", required=True)
++    ap.add_argument("--model", action="append", required=True, help="NAME=gen_dir")
++    ap.add_argument("--report", required=True)
++    ap.add_argument("--pairs", nargs="*", default=[])
++    ap.add_argument("--out", required=True)
++    a = ap.parse_args()
++    if os.path.exists(a.out):
++        sys.exit("output exists")
++    man = load_man(a.subset)
++    pids = sorted(man)
++    rep = json.load(open(a.report))
++    res = {"models": {}, "pairs": {}, "compare_with_report": {}}
++    vec3, vec5 = {}, {}
++    for m in a.model:
++        n, g = m.split("=", 1)
++        b3, b5 = patient_f1(g, man, 0.3), patient_f1(g, man, 0.5)
++        vec3[n] = np.array([np.mean([b3[p][t][0] for t in ("qA", "qB")]) for p in pids])
++        vec5[n] = np.array([np.mean([b5[p][t][0] for t in ("qA", "qB")]) for p in pids])
++        inval = sum(not b3[p][t][1] for p in pids for t in ("qA", "qB"))
++        fp = float(np.mean([b3[p][t][2] - 0 for p in pids for t in ("qA", "qB")]))
++        res["models"][n] = {"f1_03_ci95": boot(vec3[n], 0.95), "f1_05_mean": float(vec5[n].mean()), "n_invalid_sentences": inval}
++        rp = rep["models"][n]["summary"]
++        res["compare_with_report"][n] = {"f1_03_abs_diff": abs(res["models"][n]["f1_03_ci95"][0] - rp["f1_03"][0]),
++                                         "f1_03_ci_abs_diff": max(abs(x - y) for x, y in zip(res["models"][n]["f1_03_ci95"], rp["f1_03"])),
++                                         "f1_05_abs_diff": abs(res["models"][n]["f1_05_mean"] - rp["f1_05"][0]),
++                                         "invalid_count_vs_report": [inval, round(rp["invalid_rate"] * 2 * len(pids))]}
++    for pr in a.pairs:
++        x, y = pr.split(":")
++        d = vec3[x] - vec3[y]
++        res["pairs"][pr] = {"f1_03_diff_ci975": boot(d, 0.975), "f1_03_diff_ci95": boot(d, 0.95), "f1_05_diff": float((vec5[x] - vec5[y]).mean())}
++        rp = rep["pairs"][pr]["f1_03"]
++        res["compare_with_report"][pr] = {"diff_abs": abs(res["pairs"][pr]["f1_03_diff_ci975"][0] - rp["diff_mean_ci975"][0]),
++                                          "ci975_abs_diff": max(abs(u - v) for u, v in zip(res["pairs"][pr]["f1_03_diff_ci975"], rp["diff_mean_ci975"])),
++                                          "ci95_abs_diff": max(abs(u - v) for u, v in zip(res["pairs"][pr]["f1_03_diff_ci95"], rp["diff_mean_ci95"]))}
++    mx = max(v for c in res["compare_with_report"].values() for k, v in c.items() if isinstance(v, float))
++    res["max_abs_diff_vs_report"] = mx
++    res["all_match_1e-9"] = bool(mx < 1e-9 and all(c["invalid_count_vs_report"][0] == c["invalid_count_vs_report"][1]
++                                                    for c in res["compare_with_report"].values() if "invalid_count_vs_report" in c))
++    os.makedirs(os.path.dirname(a.out), exist_ok=True)
++    json.dump(res, open(a.out, "w"), indent=1)
++    print(json.dumps(res, indent=1)[:2500])
++
++
++if __name__ == "__main__":
++    main()
+diff --git a/pg41_build.py b/pg41_build.py
+new file mode 100644
+index 0000000..beb2d76
+--- /dev/null
++++ b/pg41_build.py
+@@ -0,0 +1,143 @@
++"""iter_041 요청 파일 생성 (CPU only). 기존 iter_039 D24 / iter_040 V96 manifest를 그대로 읽고 새 요청만 만든다. GT는 읽지 않는다.
++
++조건: I-short(qA,qB 각 1요청) / J-short(AB: qA→qB 순) / J-short-rev(BA: qB→qA 순, 문장에 붙은 qA/qB ID는 유지).
++파일:
++  requests_D24_C.jsonl   D24 x {I-short qA,qB, J-short, J-short-rev} = 96   (동작 확인 + 2/4 worker 구성 선택, C adapter)
++  requests_D8_B.jsonl    D8  x 같은 4조건 = 32                            (동작 확인, B adapter)
++  requests_V96_JAB.jsonl / requests_V96_JBA.jsonl  V96 x 1 = 96씩         (B, C 모두 사용)
++  requests_V96_Icost.jsonl  V96 I-short 192 (C 비용 계측용 재실행, 새 request_id)
++
++python pg41_build.py --out-dir results/iter_041/requests
++"""
++import argparse
++import hashlib
++import json
++import os
++import sys
++
++import pg39_spec as S
++from rsna_diag import generate as G
++
++M39 = "results/iter_039/data/manifest_private.jsonl"
++M40_EVAL = "results/iter_040/data/manifest_eval_private.jsonl"
++LOCK40 = "results/iter_040/data/selection_lock.json"
++OLD_REQ = {"D": "results/iter_039/requests_v2/requests_D.jsonl", "E96": "results/iter_039/requests_v2/requests_E96.jsonl",
++           "V96I": "results/iter_040/requests/requests_V96.jsonl"}
++COND_AB, COND_BA = "J-short", "J-short-rev"
++
++
++def sha_file(p):
++    h = hashlib.sha256()
++    with open(p, "rb") as f:
++        for b in iter(lambda: f.read(1 << 22), b""):
++            h.update(b)
++    return h.hexdigest()
++
++
++def rd(p):
++    return [json.loads(l) for l in open(p) if l.strip()]
++
++
++def order_key(patient, tag):
++    return hashlib.sha256(f"iter041|{patient}".encode()).hexdigest() + "_" + tag
++
++
++def mk(kind, m, cond, targets, prompt, caps, tag):
++    imp = m["image_meta"]["path"]
++    psha = hashlib.sha256(prompt.encode()).hexdigest()
++    fsha = sha_file(imp)
++    px = G.load_image(imp)[2]
++    return {"request_id": S.request_id(kind, m["PatientID"], cond, targets, psha, fsha), "kind": kind, "patient": m["PatientID"],
++            "image_id": m["ImageID"], "cond": cond, "targets": targets, "prompt": prompt, "prompt_sha256": psha, "caps": caps,
++            "image": imp, "image_file_sha256": fsha, "input_pixel_sha256": px, "order_key": order_key(m["PatientID"], tag)}
++
++
++def rows_for(kind, m, conds, i_kind=None):
++    s = m["sentences"]
++    out = []
++    ik = i_kind or kind
++    if "I" in conds:
++        for pid in ("qA", "qB"):
++            out.append(mk(ik, m, "I-short", [pid], S.prompt_I_short(s[pid], pid), S.CAPS_IC, f"I_{pid}"))
++    if "AB" in conds:
++        out.append(mk(kind, m, COND_AB, ["qA", "qB"], S.prompt_J_short([("qA", s["qA"]), ("qB", s["qB"])]), S.CAPS_J, "JAB"))
++    if "BA" in conds:
++        out.append(mk(kind, m, COND_BA, ["qA", "qB"], S.prompt_J_short([("qB", s["qB"]), ("qA", s["qA"])]), S.CAPS_J, "JBA"))
++    return out
++
++
++def d8_select(dm):
++    """D24에서 층을 포함한 hash 순서의 D8: share1 두 환자 전부 + share0_multi1 앞 3 + share0_multi0 앞 3 (환자 hash 오름차순)."""
++    h = lambda m: hashlib.sha256(f"D8|{m['PatientID']}".encode()).hexdigest()
++    by = {}
++    for m in sorted(dm, key=h):
++        by.setdefault(m["stratum"], []).append(m)
++    sel = by["share1_multi0"] + by["share1_multi1"] + by["share0_multi1"][:3] + by["share0_multi0"][:3]
++    assert len(sel) == 8
++    return sel
++
++
++def main():
++    ap = argparse.ArgumentParser()
++    ap.add_argument("--out-dir", required=True)
++    a = ap.parse_args()
++    if os.path.exists(a.out_dir) and os.listdir(a.out_dir):
++        sys.exit("out-dir not empty")
++    os.makedirs(a.out_dir, exist_ok=True)
++    lock = json.load(open(LOCK40))
++    if sha_file(M40_EVAL) != lock["manifest_eval_sha256"] or sha_file(M39) != lock["iter039_manifest_sha256"]:
++        sys.exit("manifest hash != selection_lock")
++    dm = [m for m in rd(M39) if m["subset"] == "D"]
++    vm = [m for m in rd(M40_EVAL) if m["eval_set"] == "V96"]
++    assert len(dm) == 24 and len(vm) == 96 and len({m["PatientID"] for m in vm}) == 96
++    files = {}
++    files["requests_D24_C.jsonl"] = [r for m in dm for r in rows_for("D24", m, ("I", "AB", "BA"))]
++    files["requests_D8_B.jsonl"] = [r for m in d8_select(dm) for r in rows_for("D8", m, ("I", "AB", "BA"))]
++    files["requests_V96_JAB.jsonl"] = [r for m in vm for r in rows_for("V96", m, ("AB",))]
++    files["requests_V96_JBA.jsonl"] = [r for m in vm for r in rows_for("V96", m, ("BA",))]
++    files["requests_V96_Icost.jsonl"] = [r for m in vm for r in rows_for("V96cost", m, ("I",))]
++    # 기존 요청과의 대조: I-short는 (환자,target)별 prompt·영상 hash가 기존과 같아야 하고, J-short(AB)는 iter_039 E96/D 요청과 같아야 한다.
++    old = {}
++    for k, p in OLD_REQ.items():
++        for r in rd(p):
++            old[(r["patient"], r["cond"], tuple(r["targets"]))] = r
++    chk = {"I_short_vs_old": 0, "J_short_AB_vs_old": 0, "mismatch": []}
++    for fn, rows in files.items():
++        for r in rows:
++            key = (r["patient"], r["cond"], tuple(r["targets"]))
++            if r["cond"] in ("I-short", "J-short") and key in old:
++                o = old[key]
++                same = all(o[k] == r[k] for k in ("prompt_sha256", "image_file_sha256", "input_pixel_sha256", "caps", "image"))
++                chk["I_short_vs_old" if r["cond"] == "I-short" else "J_short_AB_vs_old"] += 1
++                if not same:
++                    chk["mismatch"].append([fn, r["request_id"]])
++    for fn, rows in files.items():
++        ids = [r["request_id"] for r in rows]
++        assert len(ids) == len(set(ids)), fn
++        with open(os.path.join(a.out_dir, fn), "x") as f:
++            for r in sorted(rows, key=lambda r: r["order_key"]):
++                f.write(json.dumps(r) + "\n")
++    # J-short-rev는 AB와 같은 문장·ID를 순서만 바꾼 것이어야 한다.
++    for m in vm[:3] + dm[:3]:
++        ab = rows_for("x", m, ("AB",))[0]["prompt"]
++        ba = rows_for("x", m, ("BA",))[0]["prompt"]
++        s = m["sentences"]
++        assert ab.index(f'qA: "{s["qA"]}"') < ab.index(f'qB: "{s["qB"]}"')
++        assert ba.index(f'qB: "{s["qB"]}"') < ba.index(f'qA: "{s["qA"]}"') and 'qA: "' in ba and 'qB: "' in ba
++    summ = {"counts": {k: len(v) for k, v in files.items()}, "d8_patients": [m["PatientID"] for m in d8_select(dm)],
++            "d8_strata": [m["stratum"] for m in d8_select(dm)], "old_request_crosscheck": chk,
++            "file_sha256": {k: sha_file(os.path.join(a.out_dir, k)) for k in files},
++            "manifest_sha256": {M39: sha_file(M39), M40_EVAL: sha_file(M40_EVAL)},
++            "planned_generation_requests": {"D24_C_two_configs(2w+4w)": 2 * len(files["requests_D24_C.jsonl"]),
++                                            "D8_B": len(files["requests_D8_B.jsonl"]),
++                                            "V96_J_B_and_C": 2 * (len(files["requests_V96_JAB.jsonl"]) + len(files["requests_V96_JBA.jsonl"])),
++                                            "V96_I_cost_C": len(files["requests_V96_Icost.jsonl"])}}
++    summ["planned_total"] = sum(summ["planned_generation_requests"].values())
++    json.dump(summ, open(os.path.join(a.out_dir, "summary.json"), "x"), indent=1)
++    print(json.dumps(summ, indent=1))
++    if chk["mismatch"]:
++        sys.exit("old request mismatch")
++
++
++if __name__ == "__main__":
++    main()
+diff --git a/pg41_d24_config.py b/pg41_d24_config.py
+new file mode 100644
+index 0000000..23991d1
+--- /dev/null
++++ b/pg41_d24_config.py
+@@ -0,0 +1,56 @@
++"""iter_041 D24 2 worker vs 4 worker 비교 (처리량·GPU 점유·token 정합성·형식). V96 점수는 사용하지 않는다.
++
++python pg41_d24_config.py --out results/iter_041/decisions/d24_worker_config.json
++"""
++import argparse
++import collections
++import json
++import os
++import sys
++
++import pg39_spec as S
++import pg41_run as R
++
++REQ = "results/iter_041/requests/requests_D24_C.jsonl"
++PROTO = "results/iter_041/protocol/protocol_D24_C.json"
++
++
++def main():
++    ap = argparse.ArgumentParser()
++    ap.add_argument("--out", required=True)
++    a = ap.parse_args()
++    if os.path.exists(a.out):
++        sys.exit("output exists")
++    res, toks = {}, {}
++    for w in (2, 4):
++        d = "results/iter_041/gen/D24_C_%dw" % w
++        comp = json.load(open(d + "/completion.json"))
++        recs = R.verify_completion(d, REQ, PROTO)
++        toks[w] = {r["request_id"]: r["suffix_ids"] for r in recs}
++        mx = {}
++        for l in open(d + "/resource_log.jsonl"):
++            for g in json.loads(l)["gpu"]:
++                i, u, _ = [x.strip() for x in g.split(",")]
++                mx[i] = max(mx.get(i, 0), int(u))
++        c = comp["cost"]
++        st = collections.Counter("%s|%s" % (r["cond"], S.parse_ids(r["suffix_text_raw"], r["ended_eos"], set(r["targets"]))["status"]) for r in recs)
++        res[w] = {"launcher_wall_s": comp["wall_s"], "req_per_min_incl_load": 96 / comp["wall_s"] * 60,
++                  "first_start_to_last_end_s": c["first_request_start_to_last_end_s"],
++                  "req_per_min_gen_only": 96 / c["first_request_start_to_last_end_s"] * 60,
++                  "devsec_generate": c["device_seconds_generate_union"], "devsec_incl_load": c["device_seconds_incl_loading_union"],
++                  "peak_gpu_mib": mx, "max_peak_alloc_gb_per_req": max(r["peak_mem_alloc_gb_max"] for r in recs),
++                  "max_out_tokens": max(r["n_output_tokens"] for r in recs), "n_retry": c["n_records_with_retry"],
++                  "sum_request_wall_s": c["sum_request_wall_s"], "n_eos": sum(r["ended_eos"] for r in recs), "status": dict(st),
++                  "free_mib_before": json.load(open(d + "/launch_children.json"))["free_mib_before"]}
++    res["n_token_mismatch_2w_vs_4w"] = sum(toks[2][k] != toks[4][k] for k in toks[2])
++    res["same_request_set"] = set(toks[2]) == set(toks[4])
++    res["speedup_wall_incl_load"] = res[2]["launcher_wall_s"] / res[4]["launcher_wall_s"]
++    res["speedup_gen_only"] = res[2]["first_start_to_last_end_s"] / res[4]["first_start_to_last_end_s"]
++    res["note"] = "D24 C 96요청(I qA/qB, J-AB, J-BA). 구성 선택은 이 D 처리량·메모리·오류·token 정합성으로만 한다(V96 점수 미사용)."
++    os.makedirs(os.path.dirname(a.out), exist_ok=True)
++    json.dump(res, open(a.out, "x"), indent=1)
++    print(json.dumps(res, indent=1))
++
++
++if __name__ == "__main__":
++    main()
+diff --git a/pg41_eval.py b/pg41_eval.py
+new file mode 100644
+index 0000000..0dfc554
+--- /dev/null
++++ b/pg41_eval.py
+@@ -0,0 +1,317 @@
++"""iter_041 평가: 독립 I-short(기존 iter_040 출력, 출처 protocol로 재검증) vs 공동 J-short AB/BA(신규) 비교 + 실제 병렬 비용.
++
++입력은 config JSON(각 조건의 gen dir·requests·protocol·검증기). 모든 completion은 검증기(old=pg40_run, new=pg41_run) 통과 후에만 사용한다.
++평가 manifest/selection lock/평가 소스(pg41_eval.py, pg41_rules.py, pg39_spec.py)의 digest를 report에 기록하고, 사전 규칙(pg41_rules)으로 판정한다.
++GT는 이 파일에서만 읽는다. 결과는 새 경로에만 쓴다(존재하면 거부).
++
++python pg41_eval.py --config results/iter_041/eval/config_V96.json --out results/iter_041/eval/report_V96.json
++"""
++import argparse
++import hashlib
++import json
++import os
++import sys
++
++import numpy as np
++
++import pg39_eval as E39
++import pg39_spec as S
++import pg40_run as R40
++import pg41_rules as RULES
++import pg41_run as R41
++from rsna_diag import metrics, parse
++
++SMALL_AREA = E39.SMALL_AREA
++
++
++def fsha(p):
++    return R41.file_sha(p)
++
++
++def load_verified(src):
++    """src: {gen, req, proto, verifier}. returns records (completion·요청 집합·digest·현재 영상 hash 검증 통과)."""
++    mod = R40 if src["verifier"] == "pg40" else R41
++    recs = mod.verify_completion(src["gen"], src["req"], src["proto"])
++    rows = R41.read_requests(src["req"])
++    if src["verifier"] == "pg40":  # 기존 검증기는 현재 영상 hash를 재검증하지 않으므로 여기서 추가 검사
++        from rsna_diag import generate as G
++        seen = {}
++        for r in rows:
++            if r["image"] not in seen:
++                if fsha(r["image"]) != r["image_file_sha256"] or G.load_image(r["image"])[2] != r["input_pixel_sha256"]:
++                    raise R41.RunError(f"current image hash mismatch {r['image']}")
++                seen[r["image"]] = 1
++    return recs
++
++
++def load_manifest(path, lock_path, subset):
++    lock = json.load(open(lock_path))
++    key = "manifest_eval_sha256"
++    if fsha(path) != lock[key]:
++        raise R41.RunError("eval manifest hash != selection_lock")
++    out = {}
++    for l in open(path):
++        r = json.loads(l)
++        if r["eval_set"] == subset:
++            out[r["PatientID"]] = r
++    return out
++
++
++def entry(rec, man):
++    m = man[rec["patient"]]
++    gt = E39.gt_canvas(m)
++    p = S.parse_ids(rec["suffix_text_raw"], rec["ended_eos"], set(rec["targets"]))
++    sc = S.score_request(p["status"], p["groups"], rec["targets"], gt)
++    ent = {"status": p["status"], "valid": p["status"] in parse.VALID, "eos": rec["ended_eos"], "scores": sc, "groups": p["groups"],
++           "n_out": rec["n_output_tokens"], "wall": rec["wall_s"], "t_start": rec.get("t_start"), "ts": rec["ts"],
++           "caps_used": len(rec["attempts"]), "tokens_all_attempts": sum(a["n_new"] for a in rec["attempts"]), "other_id": p["other_id_boxes"]}
++    if len(rec["targets"]) == 2:
++        ent["swap_f1_03"] = S.swap_score(p["groups"], gt) if ent["valid"] else 0.0
++        ent["swap_sent"] = {"qA": S.sent_metrics(p["groups"].get("qB", []), gt["qA"], 0.3)["f1"] if ent["valid"] else 0.0,
++                            "qB": S.sent_metrics(p["groups"].get("qA", []), gt["qB"], 0.3)["f1"] if ent["valid"] else 0.0}
++    return ent
++
++
++def model_tab(recsI, recsAB, recsBA, man):
++    tab = {}
++    for r in recsI:
++        tab.setdefault(r["patient"], {}).setdefault("I", {})[r["targets"][0]] = entry(r, man)
++    for r in recsAB:
++        tab.setdefault(r["patient"], {})["AB"] = entry(r, man)
++    for r in recsBA:
++        tab.setdefault(r["patient"], {})["BA"] = entry(r, man)
++    for p, v in tab.items():
++        assert set(v["I"]) == {"qA", "qB"} and "AB" in v and "BA" in v, p
++    return tab
++
++
++def sc(tab, p, c, key="f1_03"):
++    if c == "I":
++        return float(np.mean([tab[p]["I"][t]["scores"][t][key] for t in ("qA", "qB")]))
++    return float(np.mean([tab[p][c]["scores"][t][key] for t in ("qA", "qB")]))
++
++
++def sent(tab, p, c, t, key="f1_03"):
++    return tab[p]["I"][t]["scores"][t][key] if c == "I" else tab[p][c]["scores"][t][key]
++
++
++def ents(tab, p, c):
++    return list(tab[p]["I"].values()) if c == "I" else [tab[p][c]]
++
++
++def eval_model(tab, man):
++    pids = sorted(tab)
++    X = {c: np.array([sc(tab, p, c) for p in pids]) for c in ("I", "AB", "BA")}
++    X5 = {c: np.array([sc(tab, p, c, "f1_05") for p in pids]) for c in ("I", "AB", "BA")}
++    rep = {"n_patients": len(pids)}
++    rep["mean_f1_03"] = {c: E39.ci(X[c]) for c in X}
++    rep["mean_f1_05"] = {c: E39.ci(X5[c]) for c in X5}
++    rep["delta_I_minus_JAB"] = {"ci975": E39.pci(X["I"], X["AB"], 0.975), "ci95": E39.pci(X["I"], X["AB"])}
++    rep["delta_I_minus_JBA"] = {"ci975": E39.pci(X["I"], X["BA"], 0.975), "ci95": E39.pci(X["I"], X["BA"])}
++    rep["order_effect_JAB_minus_JBA"] = {"ci95": E39.pci(X["AB"], X["BA"])}
++    rep["delta_f1_05_I_minus_JAB_JBA"] = [float((X5["I"] - X5["AB"]).mean()), float((X5["I"] - X5["BA"]).mean())]
++    # 형식
++    fmt = {}
++    for c in X:
++        es = [e for p in pids for e in ents(tab, p, c)]
++        st = {}
++        for e in es:
++            st[e["status"]] = st.get(e["status"], 0) + 1
++        fmt[c] = {"n_requests": len(es), "valid_rate": float(np.mean([e["valid"] for e in es])),
++                  "final_truncation_rate": float(np.mean([not e["eos"] for e in es])),
++                  "retried_rate": float(np.mean([e["caps_used"] > 1 for e in es])), "status_counts": st,
++                  "other_id_requests": int(sum(e["other_id"] > 0 for e in es))}
++    rep["format"] = fmt
++    # 공통 valid/EOS subset
++    def ok(p):
++        return all(e["valid"] and e["eos"] for c in ("I", "AB", "BA") for e in ents(tab, p, c))
++    keep = [i for i, p in enumerate(pids) if ok(p)]
++    rep["common_valid_eos_subset"] = {"n": len(keep)}
++    if len(keep) >= 5:
++        rep["common_valid_eos_subset"].update({"delta_AB": E39.pci(X["I"][keep], X["AB"][keep], 0.975),
++                                               "delta_BA": E39.pci(X["I"][keep], X["BA"][keep], 0.975)})
++    # 문장 단위 손실/회복
++    for c in ("AB", "BA"):
++        a = np.array([[sent(tab, p, "I", t), sent(tab, p, c, t)] for p in pids for t in ("qA", "qB")])
++        i_ok, j_ok = a[:, 0] >= 1 - 1e-12, a[:, 1] >= 1 - 1e-12
++        lost = {"invalid_or_truncated": 0, "empty": 0, "assigned_to_other_sentence": 0, "localization_or_count": 0}
++        for p in pids:
++            for t in ("qA", "qB"):
++                if sent(tab, p, "I", t) >= 1 - 1e-12 and sent(tab, p, c, t) < 1 - 1e-12:
++                    e = tab[p][c]
++                    if not e["valid"]:
++                        lost["invalid_or_truncated"] += 1
++                    elif not e["groups"].get(t):
++                        lost["empty"] += 1
++                    elif e["swap_sent"][t] >= 1 - 1e-12:
++                        lost["assigned_to_other_sentence"] += 1
++                    else:
++                        lost["localization_or_count"] += 1
++        rep[f"loss_recovery_I_vs_J{c}"] = {
++            "sentences": int(len(a)), "I_full_success": int(i_ok.sum()), "J_full_success": int(j_ok.sum()),
++            "success_lost": int((i_ok & ~j_ok).sum()), "success_gained": int((~i_ok & j_ok).sum()),
++            "lost_by_cause": lost, "discordance_wilson95": list(metrics.wilson(int((i_ok != j_ok).sum()), len(a)))}
++        swp = np.array([max(X[c][i], tab[p][c]["swap_f1_03"]) for i, p in enumerate(pids)])
++        rep[f"swap_oracle_J{c}"] = {"orig": float(X[c].mean()), "best_of_swap": float(swp.mean()), "gain_ci95": E39.pci(swp, X[c]),
++                                    "patients_improved": int((swp > X[c] + 1e-12).sum()), "note": "오류 분해용 상한, 실용 방법 아님"}
++    # 층별
++    man_p = {p: man[p] for p in pids}
++    cross = {p: S.cross_iou_max(*(E39.gt_canvas(man_p[p])[k] for k in ("qA", "qB"))) for p in pids}
++    small = lambda p: any((b[2] - b[0]) * (b[3] - b[1]) < SMALL_AREA for k in ("qA", "qB") for b in man_p[p]["gt_boxes_xyxy_norm"][k])
++    strata = {"multi_box": lambda p: any(len(man_p[p]["gt_boxes_xyxy_norm"][k]) > 1 for k in ("qA", "qB")),
++              "share_group": lambda p: man_p[p]["stratum"].startswith("share1"), "small_box": small,
++              "cross_iou_lt_0.1": lambda p: cross[p] < 0.1, "cross_iou_ge_0.1(overlap)": lambda p: cross[p] >= 0.1}
++    rep["strata"] = {}
++    for s, fn in strata.items():
++        kp = [i for i, p in enumerate(pids) if fn(p)]
++        d = {"n": len(kp)}
++        if len(kp) >= 5:
++            d.update({"I_f1": float(X["I"][kp].mean()), "delta_AB_ci95": E39.pci(X["I"][kp], X["AB"][kp]),
++                      "delta_BA_ci95": E39.pci(X["I"][kp], X["BA"][kp])})
++        rep["strata"][s] = d
++    # 오검출/미검출/빈 예측
++    for c in X:
++        scs = [e["scores"][t] for p in pids for e in ents(tab, p, c) for t in e["scores"]]
++        rep[f"box_stats_{c}"] = {"recall_03_mean": float(np.mean([s_["recall_03"] for s_ in scs])),
++                                 "fp_per_sentence_03": float(np.mean([s_["fp_03"] for s_ in scs])),
++                                 "empty_pred_rate": float(np.mean([s_["empty"] for s_ in scs])),
++                                 "pred_boxes_per_sentence": float(np.mean([s_["n_pred"] for s_ in scs])),
++                                 "gt_boxes_per_sentence": float(np.mean([s_["n_gt"] for s_ in scs]))}
++    rep["_per_patient_f1_03"] = {p: {c: float(X[c][i]) for c in X} for i, p in enumerate(pids)}
++    rep["_X"] = {c: X[c] for c in X}
++    return rep
++
++
++def pct(x, q):
++    return float(np.percentile(np.asarray(x, float), q))
++
++
++def cost_rows(recs, mode):
++    """queue별 환자 지연(첫 요청 시작 ~ 환자 요청 모두 종료)과 요청 wall 합. mode: I(2요청/환자) 또는 J(1요청/환자)."""
++    by = {}
++    for r in recs:
++        by.setdefault(r["patient"], []).append(r)
++    n_req = 2 if mode == "I" else 1
++    assert all(len(v) == n_req for v in by.values()), "requests per patient"
++    pids = sorted(by)
++    lat = np.array([max(r["ts"] for r in by[p]) - min(r["t_start"] for r in by[p]) for p in pids])
++    wsum = np.array([sum(r["wall_s"] for r in by[p]) for p in pids])
++    tok = np.array([sum(a["n_new"] for r in by[p] for a in r["attempts"]) for p in pids])
++    return pids, lat, wsum, tok
++
++
++def cost_analysis(src_I, src_J):
++    """src_I/J: {recs, completion}. I와 J 큐의 worker·GPU 구성이 같은지 확인하고 비율을 계산."""
++    out = {}
++    cI, cJ = src_I["comp"], src_J["comp"]
++    same_cfg = cI["workers"] == cJ["workers"] and cI["mapping"] == cJ["mapping"]
++    pi, latI, wI, tI = cost_rows(src_I["recs"], "I")
++    pj, latJ, wJ, tJ = cost_rows(src_J["recs"], "J")
++    assert pi == pj
++    n = len(pi)
++    CI, CJ = cI["cost"], cJ["cost"]
++
++    def thr(c):
++        return n / c["first_request_start_to_last_end_s"] * 60
++
++    idx = metrics.bootstrap_indices(n, RULES.BOOT_B, RULES.BOOT_SEED)
++    dev_proxy = wI[idx].mean(axis=1) / wJ[idx].mean(axis=1)
++    lat_ratio = np.array([np.percentile(latI[i], 95) / np.percentile(latJ[i], 95) for i in idx])
++    out = {"same_worker_gpu_config": bool(same_cfg), "workers": [cI["workers"], cJ["workers"]], "n_patients": n,
++           "device_seconds_generate_union": [CI["device_seconds_generate_union"], CJ["device_seconds_generate_union"]],
++           "device_seconds_incl_loading_union": [CI["device_seconds_incl_loading_union"], CJ["device_seconds_incl_loading_union"]],
++           "device_seconds_per_patient": [CI["device_seconds_generate_union"] / n, CJ["device_seconds_generate_union"] / n],
++           "devsec_ratio_I_over_J": CI["device_seconds_generate_union"] / CJ["device_seconds_generate_union"],
++           "devsec_ratio_incl_loading": (CI["device_seconds_incl_loading_union"] / CJ["device_seconds_incl_loading_union"]
++                                         if CI["device_seconds_incl_loading_union"] and CJ["device_seconds_incl_loading_union"] else None),
++           "request_wall_sum_ratio_I_over_J": float(wI.sum() / wJ.sum()),
++           "request_wall_ratio_bootstrap_ci95": [float(np.percentile(dev_proxy, 2.5)), float(np.percentile(dev_proxy, 97.5))],
++           "latency_s": {"I": {"median": pct(latI, 50), "p95": pct(latI, 95), "mean": float(latI.mean())},
++                         "J": {"median": pct(latJ, 50), "p95": pct(latJ, 95), "mean": float(latJ.mean())}},
++           "p95_latency_ratio_I_over_J": pct(latI, 95) / pct(latJ, 95),
++           "p95_latency_ratio_bootstrap_ci95": [float(np.percentile(lat_ratio, 2.5)), float(np.percentile(lat_ratio, 97.5))],
++           "median_latency_ratio_I_over_J": pct(latI, 50) / pct(latJ, 50),
++           "throughput_patients_per_min": [thr(CI), thr(CJ)], "throughput_ratio_I_over_J": thr(CI) / thr(CJ),
++           "throughput_incl_loading_patients_per_min": [n / CI["launcher_wall_s_incl_loading"] * 60, n / CJ["launcher_wall_s_incl_loading"] * 60],
++           "tokens_per_patient_all_attempts": [float(tI.mean()), float(tJ.mean())],
++           "retried_requests": [CI["n_records_with_retry"], CJ["n_records_with_retry"]],
++           "note": "device_seconds=GPU별 요청 구간 합집합(겹침 중복 합산 없음)의 GPU 합. 실제 커널 연산량이 아님. 비율 CI는 요청 wall 합 기반 환자 bootstrap이며 device-seconds 자체의 구간이 아니다."}
++    return out
++
++
++def load_res_peak(dirpath):
++    mx = {}
++    p = os.path.join(dirpath, "resource_log.jsonl")
++    if os.path.exists(p):
++        for l in open(p):
++            for g in json.loads(l)["gpu"]:
++                i, u, _ = [x.strip() for x in g.split(",")]
++                mx[i] = max(mx.get(i, 0), int(u))
++    return mx
++
++
++def main():
++    ap = argparse.ArgumentParser()
++    ap.add_argument("--config", required=True)
++    ap.add_argument("--out", required=True)
++    a = ap.parse_args()
++    if os.path.exists(a.out):
++        sys.exit("output exists")
++    cfg = json.load(open(a.config))
++    man = load_manifest(cfg["manifest"], cfg["selection_lock"], cfg["subset"])
++    rep = {"config": cfg, "config_sha256": fsha(a.config),
++           "source_digests": {f: fsha(f) for f in ("pg41_eval.py", "pg41_rules.py", "pg39_spec.py", "pg39_eval.py", "pg41_run.py",
++                                                    "pg40_run.py", cfg["manifest"], cfg["selection_lock"])},
++           "models": {}}
++    data = {}
++    for m, srcs in cfg["models"].items():
++        data[m] = {}
++        for k, s in srcs.items():
++            recs = load_verified(s)
++            comp = json.load(open(os.path.join(s["gen"], "completion.json")))
++            data[m][k] = {"recs": recs, "comp": comp}
++        tab = model_tab(data[m]["I"]["recs"], data[m]["JAB"]["recs"], data[m]["JBA"]["recs"], man)
++        assert set(tab) == set(man), "patients != manifest subset"
++        rep["models"][m] = eval_model(tab, man)
++    # C 재실행 I(Icost)와 기존 I의 token 대조
++    if "Icost" in data.get("C", {}):
++        old = {(r["patient"], r["targets"][0]): r["suffix_ids"] for r in data["C"]["I"]["recs"]}
++        new = {(r["patient"], r["targets"][0]): r["suffix_ids"] for r in data["C"]["Icost"]["recs"]}
++        rep["C_I_rerun_vs_stored"] = {"n_compared": len(new), "token_mismatch": sum(old[k] != new[k] for k in new), "keys_equal": set(old) == set(new)}
++        rep["cost"] = {}
++        for c in ("JAB", "JBA"):
++            rep["cost"][f"I_over_{c}"] = cost_analysis(data["C"]["Icost"], data["C"][c])
++        rep["cost"]["peak_gpu_mib"] = {"Icost": load_res_peak(cfg["models"]["C"]["Icost"]["gen"]),
++                                       "JAB": load_res_peak(cfg["models"]["C"]["JAB"]["gen"]), "JBA": load_res_peak(cfg["models"]["C"]["JBA"]["gen"])}
++        rep["cost"]["queue_order"] = cfg.get("queue_order")
++    # 판정
++    C, B = rep["models"]["C"], rep["models"]["B"]
++    cs = C["common_valid_eos_subset"]
++    cm = [cs.get("delta_AB", [-1])[0], cs.get("delta_BA", [-1])[0]]
++    acc = RULES.accuracy_class(C["delta_I_minus_JAB"]["ci975"], C["delta_I_minus_JBA"]["ci975"], B["delta_I_minus_JAB"]["ci975"][0],
++                               B["delta_I_minus_JBA"]["ci975"][0], cm[0], cm[1])
++    ca, cb = rep["cost"]["I_over_JAB"], rep["cost"]["I_over_JBA"]
++    cost = RULES.cost_class([ca["devsec_ratio_I_over_J"], cb["devsec_ratio_I_over_J"]],
++                            [ca["p95_latency_ratio_I_over_J"], cb["p95_latency_ratio_I_over_J"]],
++                            [ca["throughput_ratio_I_over_J"], cb["throughput_ratio_I_over_J"]])
++    strad = lambda ci, t: ci[0] < t <= ci[1]
++    boundary = bool(any(strad(x["request_wall_ratio_bootstrap_ci95"], RULES.DEVSEC_RATIO_MIN) for x in (ca, cb)) or
++                    (any(strad(x["p95_latency_ratio_bootstrap_ci95"], RULES.P95_LAT_RATIO_MIN) for x in (ca, cb)) and
++                     not all(x["throughput_ratio_I_over_J"] <= RULES.THROUGHPUT_RATIO_MAX for x in (ca, cb))))
++    same_cfg = ca["same_worker_gpu_config"] and cb["same_worker_gpu_config"]
++    rep["decision"] = {"accuracy": acc, "cost": cost, "cost_boundary": boundary, "cost_queues_same_config": same_cfg,
++                       "overall": RULES.overall(acc, cost, boundary) if same_cfg else "uncertain_hold_no_extension",
++                       "B_deltas_point": [B["delta_I_minus_JAB"]["ci975"][0], B["delta_I_minus_JBA"]["ci975"][0]],
++                       "C_common_subset_deltas_point": cm,
++                       "scope": "V96 개발 자료 한 번의 비교. 독립 확인·내부 원인·모듈형 우위·신규 기여 판정이 아님."}
++    perp = {m: rep["models"][m].pop("_per_patient_f1_03") for m in rep["models"]}
++    for m in rep["models"]:
++        rep["models"][m].pop("_X")
++    os.makedirs(os.path.dirname(a.out), exist_ok=True)
++    json.dump({**rep, "_per_patient_f1_03": perp}, open(a.out, "x"), indent=1, default=str)
++    print(json.dumps({"models": {m: {k: rep["models"][m][k] for k in ("mean_f1_03", "delta_I_minus_JAB", "delta_I_minus_JBA", "common_valid_eos_subset")}
++                                 for m in rep["models"]}, "decision": rep["decision"]}, indent=1, default=str)[:6000])
++
++
++if __name__ == "__main__":
++    main()
+diff --git a/pg41_gen_test.py b/pg41_gen_test.py
+new file mode 100644
+index 0000000..65ed2fe
+--- /dev/null
++++ b/pg41_gen_test.py
+@@ -0,0 +1,179 @@
++"""iter_041 생성 runner(adapter·부분 행 보존 복구·완료 검증·2/4 worker) GPU 검사. pg40_gen_test 기반(출처 SHA 18fdae2e).
++GPU는 상속된 CUDA_VISIBLE_DEVICES 안에서만 쓰며(launch 기본), 하드코딩하지 않는다. 결과 경로는 --base 인자.
++
++python pg41_gen_test.py --adapter <dir> --requests results/iter_041/requests/requests_D8_B.jsonl --base results/iter_041/tests/gen --out results/iter_041/tests/gen_test.json
++"""
++import argparse
++import json
++import os
++import signal
++import subprocess
++import sys
++import time
++
++import pg41_run as R
++
++BASE = None
++RES = []
++
++
++def check(name, ok, detail=None):
++    RES.append({"name": name, "pass": bool(ok), "detail": detail})
++    print(("PASS " if ok else "FAIL ") + name, json.dumps(detail, default=str)[:400], flush=True)
++
++
++def run(cmd, **kw):
++    return subprocess.run([sys.executable, "pg41_run.py"] + cmd, capture_output=True, text=True, **kw)
++
++
++def toks(out_dir):
++    d = {}
++    import glob
++    for fn in sorted(glob.glob(os.path.join(out_dir, "gen_worker*.jsonl"))):
++        for r in R.read_records(fn):
++            d[r["request_id"]] = r["suffix_ids"]
++    return d
++
++
++def resource_peak(out_dir):
++    mx = {}
++    p = os.path.join(out_dir, "resource_log.jsonl")
++    if os.path.exists(p):
++        for l in open(p):
++            for g in json.loads(l)["gpu"]:
++                i, u, _ = [x.strip() for x in g.split(",")]
++                mx[i] = max(mx.get(i, 0), int(u))
++    return mx
++
++
++def main():
++    ap = argparse.ArgumentParser()
++    ap.add_argument("--adapter", required=True)
++    ap.add_argument("--out", required=True)
++    ap.add_argument("--requests", required=True)
++    ap.add_argument("--base", required=True)
++    ap.add_argument("--old-gen", required=True, help="iter_040 gen dir of the same adapter (old-path token comparison)")
++    ap.add_argument("--old-requests", required=True)
++    ap.add_argument("--old-protocol", required=True)
++    ap.add_argument("--lock", nargs="*", default=[])
++    a = ap.parse_args()
++    if os.path.exists(a.out):
++        sys.exit("output exists")
++    global BASE
++    BASE = a.base
++    os.makedirs(BASE, exist_ok=True)
++    sub = [json.loads(l) for l in open(a.requests)]
++    a.n = len(sub)
++    req = a.requests
++    proto = f"{BASE}/protocol_adapter.json"
++    R.make_protocol(req, proto, adapter=a.adapter, lock=a.lock)
++    # 1) 2 worker (GPU당 1)
++    d2, d4 = f"{BASE}/w2", f"{BASE}/w4"
++    t = time.time()
++    r2 = run(["launch", "--requests", req, "--protocol", proto, "--out-dir", d2, "--workers", "2", "--peak-gb", "10"])
++    w2 = time.time() - t
++    check("launch_2_workers_completes_with_completion_json", r2.returncode == 0 and os.path.exists(f"{d2}/completion.json"), {"wall_s": w2, "err": r2.stderr[-300:]})
++    recs2 = R.verify_completion(d2, req, proto)
++    check("verify_completion_passes_adapter_records", len(recs2) == a.n and all(x["adapter_digest"] for x in recs2))
++    # 2) 4 worker (GPU당 2)
++    t = time.time()
++    r4 = run(["launch", "--requests", req, "--protocol", proto, "--out-dir", d4, "--workers", "4", "--peak-gb", "10"])
++    w4 = time.time() - t
++    ok4 = r4.returncode == 0 and os.path.exists(f"{d4}/completion.json")
++    check("launch_4_workers_completes_or_refused_by_memory_margin", ok4 or "free" in (r4.stdout + r4.stderr), {"wall_s": w4, "out": (r4.stdout + r4.stderr)[-200:]})
++    same = None
++    if ok4:
++        t2, t4 = toks(d2), toks(d4)
++        same = t2 == t4
++        check("token_identical_2_vs_4_workers", same, {"n": len(t2)})
++        check("throughput_recorded", True, {"req_per_min_2w_wall": a.n / w2 * 60, "req_per_min_4w_wall": a.n / w4 * 60, "peak_mib_2w": resource_peak(d2),
++                                            "peak_mib_4w": resource_peak(d4)})
++    # 3) adapter 독립 로드 경로(학습기와 같은 apply_lora+load_lora_state, dropout 0.05 eval)로 생성한 token과 일치
++    import torch
++    from rsna_diag import generate as G, lora
++    torch_, proc, model = G.load_model()
++    blob = torch_.load(os.path.join(a.adapter, "adapter.pt"), map_location="cpu", weights_only=True)
++    lora.apply_lora(model, 16, 32, 0.05)
++    lora.load_lora_state(model, blob["state"])
++    model.eval()
++    env = G.env_info(torch_, proc, model)
++    eos = env["eos_token_id"]
++    eos_ids = set(eos if isinstance(eos, list) else [eos])
++    ref = {}
++    pick = [r for c in ("I-short", "J-short", "J-short-rev") for r in [x for x in sub if x["cond"] == c][:2]]
++    for r in pick:
++        image, aff, px = G.load_image(r["image"])
++        inp = G.build_inputs(proc, image, r["prompt"])
++        at = G.generate(torch_, proc, model, inp, r["caps"][0], eos_ids)
++        ref[r["request_id"]] = at["suffix_ids"]
++    t2 = toks(d2)
++    check("adapter_generation_equals_trainer_style_load_path_tokens", all(ref[k] == t2[k] for k in ref), {"n": len(ref), "conds": sorted({r["cond"] for r in pick})})
++    del model
++    torch_.cuda.empty_cache()
++    # 3b) 기존 iter_040 경로(pg40_run)로 생성·저장된 같은 adapter의 I-short 출력과 token 대조 (기존 요청 8건 재실행)
++    old_rows = [json.loads(l) for l in open(a.old_requests)]
++    old_rows = sorted(old_rows, key=lambda r: r["order_key"])[:8]
++    reqo = f"{BASE}/requests_oldpath8.jsonl"
++    with open(reqo, "x") as f:
++        for r in old_rows:
++            f.write(json.dumps(r) + "\n")
++    protoo = f"{BASE}/protocol_oldpath8.json"
++    R.make_protocol(reqo, protoo, adapter=a.adapter, lock=a.lock)
++    do = f"{BASE}/oldpath8"
++    ro = run(["launch", "--requests", reqo, "--protocol", protoo, "--out-dir", do, "--workers", "2", "--peak-gb", "10"])
++    old_tok = {}
++    for fn in sorted(os.listdir(a.old_gen)):
++        if fn.startswith("gen_worker") and fn.endswith(".jsonl"):
++            for r in R.read_records(os.path.join(a.old_gen, fn)):
++                old_tok[r["request_id"]] = r["suffix_ids"]
++    new_tok = toks(do)
++    check("same_adapter_new_runner_tokens_equal_stored_iter040_output", ro.returncode == 0 and len(new_tok) == 8 and all(new_tok[k] == old_tok[k] for k in new_tok), {"n": len(new_tok), "err": ro.stderr[-200:]})
++    # 4) 강제 종료 후 재개 + 부분 행 복구
++    d3 = f"{BASE}/kill"
++    cmd = [sys.executable, "pg41_run.py", "launch", "--requests", req, "--protocol", proto, "--out-dir", d3, "--workers", "2", "--peak-gb", "10"]
++    p = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, start_new_session=True)
++    t0 = time.time()
++    while time.time() - t0 < 900:
++        n = sum(len(R.read_records(os.path.join(d3, f))) for f in os.listdir(d3) if f.startswith("gen_worker") and f.endswith(".jsonl")) if os.path.isdir(d3) else 0
++        if n >= 6:
++            break
++        time.sleep(3)
++    os.killpg(p.pid, signal.SIGKILL)
++    p.wait()
++    time.sleep(3)
++    partial_files = [os.path.join(d3, f) for f in os.listdir(d3) if f.startswith("gen_worker") and f.endswith(".jsonl")]
++    n_before = sum(len(R.read_records(f)) for f in partial_files)
++    with open(partial_files[0], "a") as f:
++        f.write('{"request_id": "torn", "x": ')  # 부분 행 시뮬레이션
++    check("killed_before_completion", not os.path.exists(f"{d3}/completion.json") and 6 <= n_before < a.n, {"n_before": n_before})
++    r3 = subprocess.run(cmd, capture_output=True, text=True)
++    check("relaunch_after_kill_completes", r3.returncode == 0 and os.path.exists(f"{d3}/completion.json"), {"err": r3.stderr[-300:]})
++    recs3 = R.verify_completion(d3, req, proto)
++    tk3, tk2 = toks(d3), toks(d2)
++    check("resumed_run_no_duplicates_and_tokens_equal_baseline", len(recs3) == a.n == len(tk3) and tk3 == tk2)
++    check("partial_row_repaired_with_log_and_original_bytes_preserved", any(os.path.exists(f + ".repair.log") for f in partial_files) and any(fn.find(".partial.") >= 0 for fn in os.listdir(d3)))
++    # 5) 변조 거부
++    import shutil
++    dt = f"{BASE}/tamper"
++    shutil.copytree(d2, dt, ignore=shutil.ignore_patterns("*.lock", "claims"))
++    fn = os.path.join(dt, "gen_worker0.jsonl")
++    lines = open(fn).read().splitlines()
++    rec = json.loads(lines[0])
++    rec["suffix_text_raw"] = rec["suffix_text_raw"] + " "
++    lines[0] = json.dumps(rec)
++    open(fn, "w").write("\n".join(lines) + "\n")
++    try:
++        R.verify_completion(dt, req, proto)
++        rej = False
++    except R.RunError:
++        rej = True
++    check("modified_record_rejected_by_completion_verification", rej)
++    dt2 = f"{BASE}/rerun_completed"
++    r5 = run(["launch", "--requests", req, "--protocol", proto, "--out-dir", d2, "--workers", "2"])
++    check("rerun_into_completed_dir_refused", r5.returncode != 0)
++    json.dump({"results": RES, "n_pass": sum(x["pass"] for x in RES), "n": len(RES)}, open(a.out, "w"), indent=1, default=str)
++    print(f"{sum(x['pass'] for x in RES)}/{len(RES)} PASS")
++
++
++if __name__ == "__main__":
++    main()
+diff --git a/pg41_post.py b/pg41_post.py
+new file mode 100644
+index 0000000..c033f1c
+--- /dev/null
++++ b/pg41_post.py
+@@ -0,0 +1,58 @@
++"""iter_041 사후(post hoc) 기술 분석: 저장된 V96 출력만 사용, 새 생성 없음. 판정에 쓰지 않는다.
++공동 요청 손실이 GT box 개수(단일/복수)와 예측 box 개수에 어떻게 나뉘는지 본다 (인터페이스·개수 설명 vs 위치 설명 구분용 관찰).
++
++python pg41_post.py --config results/iter_041/eval/config_V96.json --out results/iter_041/eval/post_hoc_count_V96.json
++"""
++import argparse
++import collections
++import json
++import os
++import sys
++
++import numpy as np
++
++import pg41_eval as E
++import pg39_eval as E39
++
++
++def main():
++    ap = argparse.ArgumentParser()
++    ap.add_argument("--config", required=True)
++    ap.add_argument("--out", required=True)
++    a = ap.parse_args()
++    if os.path.exists(a.out):
++        sys.exit("output exists")
++    cfg = json.load(open(a.config))
++    man = E.load_manifest(cfg["manifest"], cfg["selection_lock"], cfg["subset"])
++    out = {"note": "사후 기술 통계(판정 비사용). 문장 단위, F1@0.3, invalid는 0."}
++    for m in ("C", "B"):
++        d = {k: E.load_verified(s) for k, s in cfg["models"][m].items() if k != "Icost"}
++        tab = E.model_tab(d["I"], d["JAB"], d["JBA"], man)
++        pids = sorted(tab)
++        rows = []
++        for p in pids:
++            for t in ("qA", "qB"):
++                ngt = len(man[p]["gt_boxes_xyxy_norm"][t])
++                rows.append({"ngt": ngt, "I": E.sent(tab, p, "I", t), "AB": E.sent(tab, p, "AB", t), "BA": E.sent(tab, p, "BA", t),
++                             "npI": tab[p]["I"][t]["scores"][t]["n_pred"], "npAB": tab[p]["AB"]["scores"][t]["n_pred"],
++                             "npBA": tab[p]["BA"]["scores"][t]["n_pred"]})
++        r = {}
++        for name, sel in (("gt_1box", lambda x: x["ngt"] == 1), ("gt_multi", lambda x: x["ngt"] > 1)):
++            xs = [x for x in rows if sel(x)]
++            r[name] = {"n_sentences": len(xs), "f1": {c: float(np.mean([x[c] for x in xs])) for c in ("I", "AB", "BA")},
++                       "mean_pred_boxes": {c: float(np.mean([x["np" + c] for x in xs])) for c in ("I", "AB", "BA")}}
++        r["pred_box_count_distribution"] = {c: dict(collections.Counter(x["np" + c] for x in rows)) for c in ("I", "AB", "BA")}
++        # 환자 단위: 두 문장 모두 GT 1 box인 환자만의 Δ (개수 요인 통제)
++        keep = [i for i, p in enumerate(pids) if all(len(man[p]["gt_boxes_xyxy_norm"][t]) == 1 for t in ("qA", "qB"))]
++        X = {c: np.array([E.sc(tab, p, c) for p in pids]) for c in ("I", "AB", "BA")}
++        r["patients_both_sentences_single_gt_box"] = {"n": len(keep), "mean_f1": {c: float(X[c][keep].mean()) for c in X},
++                                                      "delta_AB_ci975": E39.pci(X["I"][keep], X["AB"][keep], 0.975),
++                                                      "delta_BA_ci975": E39.pci(X["I"][keep], X["BA"][keep], 0.975)}
++        out[m] = r
++    os.makedirs(os.path.dirname(a.out), exist_ok=True)
++    json.dump(out, open(a.out, "x"), indent=1)
++    print(json.dumps(out, indent=1))
++
++
++if __name__ == "__main__":
++    main()
+diff --git a/pg41_rules.py b/pg41_rules.py
+new file mode 100644
+index 0000000..1935552
+--- /dev/null
++++ b/pg41_rules.py
+@@ -0,0 +1,43 @@
++"""iter_041 사전 판정 규칙 (결과를 보기 전에 고정; 생성 protocol에 hash 잠금). 계획: agent/runs/iter_041/plan.md 'Evaluation'.
++
++- 개발 단계 투자 판단 기준이며 임상 허용 한계가 아니다.
++- 정확도: C 주분석의 Δ_AB = F1(I) - F1(J_AB), Δ_BA = F1(I) - F1(J_BA)  (F1@0.3, 환자 평균; invalid는 문장 점수 0 포함).
++- 비용: I(독립 두 요청 병렬) 대 J(공동 한 요청)의 동일 worker/GPU 구성 큐 비교.
++"""
++DELTA_MIN = 0.05            # 공동 손실 최소 기준 (C 현재 F1 ~0.58의 약 9%)
++DELTA_STRONG_NEG = 0.02     # 두 순서 CI 상한이 이 이하이면 '제한된 정확도 유지' 강한 근거
++DEVSEC_RATIO_MIN = 1.25     # 독립 device-seconds / J
++P95_LAT_RATIO_MIN = 1.20    # 독립 p95 환자 지연 / J
++THROUGHPUT_RATIO_MAX = 0.80  # 독립 처리량 / J 처리량
++BOOT_B = 10000
++BOOT_SEED = 20260930
++MAIN_LEVEL = 0.975
++
++
++def accuracy_class(c_ab, c_ba, b_ab_mean, b_ba_mean, common_ab_mean, common_ba_mean):
++    """c_ab/c_ba: C의 [mean, lo, hi] (97.5% CI). b_*_mean: B Δ 점추정. common_*: C의 공통 valid/EOS subset Δ 점추정.
++    returns dict(class in {positive, negative, strong_negative, uncertain})."""
++    pos = (c_ab[0] >= DELTA_MIN and c_ba[0] >= DELTA_MIN and c_ab[1] > 0 and c_ba[1] > 0
++           and b_ab_mean > 0 and b_ba_mean > 0 and common_ab_mean > 0 and common_ba_mean > 0)
++    neg = c_ab[2] < DELTA_MIN and c_ba[2] < DELTA_MIN
++    strong = c_ab[2] <= DELTA_STRONG_NEG and c_ba[2] <= DELTA_STRONG_NEG
++    cls = "positive" if pos else ("negative" if neg else "uncertain")
++    return {"class": cls, "strong_negative": bool(neg and strong)}
++
++
++def cost_class(devsec_ratio, p95_ratio, thr_ratio):
++    """각 인자는 두 J 순서(AB, BA) 모두에 대한 값의 리스트. 두 순서에서 모두 충족해야 한다 (보수적)."""
++    ok_dev = all(v >= DEVSEC_RATIO_MIN for v in devsec_ratio)
++    ok_lat = all(v >= P95_LAT_RATIO_MIN for v in p95_ratio) or all(v <= THROUGHPUT_RATIO_MAX for v in thr_ratio)
++    return {"devsec_ratio_ge_1.25_both": ok_dev, "p95_or_throughput_criterion_both": ok_lat, "cost_burden": bool(ok_dev and ok_lat)}
++
++
++def overall(acc, cost, cost_boundary):
++    """acc: accuracy_class 결과, cost: cost_class 결과, cost_boundary: 비용 비율 구간이 기준을 가로지르는지.
++    positive_method_pilot_candidate: 정확도 손실과 비용 부담이 함께 있음 (확정 아님; 비용 경계면 uncertain).
++    independent_baseline_preserved: 정확도 손실이 없거나(음성) 비용 부담이 기준 미만."""
++    if acc["class"] == "positive" and cost["cost_burden"] and not cost_boundary:
++        return "positive_method_pilot_candidate"
++    if acc["class"] == "negative" or (acc["class"] == "positive" and not cost["cost_burden"] and not cost_boundary):
++        return "independent_baseline_preserved_hold_joint_investment"
++    return "uncertain_hold_no_extension"
+diff --git a/pg41_run.py b/pg41_run.py
+new file mode 100644
+index 0000000..3384a5d
+--- /dev/null
++++ b/pg41_run.py
+@@ -0,0 +1,508 @@
++"""iter_041 생성 runner + launcher (pg40_run 기반; pg40_run.py는 iter_040 산출물 검증용으로 수정하지 않고 보존).
++
++pg40_run 대비 iter_041 변경: (1) protocol에 평가 GT manifest·selection lock·평가 소스 등 임의 파일 digest 잠금(--lock),
++(2) 부분 행 복구 시 잘라낸 원본 바이트를 별도 파일(.partial.<ts>.bin)로 보존, (3) record에 t_start·worker 타이밍 파일(모델 로딩/종료 시각) 추가,
++(4) verify_completion이 현재 영상 file/pixel hash, record 필드-요청 행 일치, 잠금 파일, worker 파일 hash를 모두 재검증,
++(5) launcher가 wall·GPU별 점유 구간(device-seconds)을 completion에 기록. iter_039/iter_040 결과·protocol은 읽기만 한다.
++
++worker:  CUDA_VISIBLE_DEVICES=<물리 gpu> python pg41_run.py worker --requests R --protocol P --out-dir D --worker K
++launcher: python pg41_run.py launch --requests R --protocol P --out-dir D --workers N [--peak-gb 14]
++- 소유권: launch.lock (flock, 프로세스 종료 시 자동 해제) / worker{K}.lock / 요청별 claims/<rid>.claim (flock: 죽은 소유자의 claim은 자동 회수).
++- 재개: 시작 시와 claim 직후 모든 기존 record를 요청 행·prompt·config·protocol·현재 영상 pixel hash·record digest와 대조한다.
++  중복·잉여·변조는 중단한다. 기존 결과는 덮어쓰지 않는다 (out-dir이 completion을 가지면 재실행 거부).
++- GT/labels는 읽지 않는다.
++"""
++import argparse
++import fcntl
++import glob
++import hashlib
++import json
++import os
++import subprocess
++import sys
++import time
++
++from rsna_diag import generate as G
++
++CODE_FILES = ["pg41_run.py", "pg39_spec.py", "pg39_data.py", "rsna_diag/generate.py", "rsna_diag/geometry.py",
++              "rsna_diag/parse.py", "rsna_diag/prompts.py", "rsna_diag/lora.py", "rsna_diag/queue_lock.py"]
++RUNNER = "pg41_run_v1"
++
++
++class RunError(RuntimeError):
++    pass
++
++
++def sha_bytes(b):
++    return hashlib.sha256(b).hexdigest()
++
++
++def file_sha(p):
++    h = hashlib.sha256()
++    with open(p, "rb") as f:
++        for b in iter(lambda: f.read(1 << 22), b""):
++            h.update(b)
++    return h.hexdigest()
++
++
++def canon(o):
++    return json.dumps(o, sort_keys=True, ensure_ascii=False, default=str)
++
++
++def read_requests(path):
++    rows = [json.loads(l) for l in open(path) if l.strip()]
++    ids = [r["request_id"] for r in rows]
++    if len(ids) != len(set(ids)):
++        raise RunError("duplicate request_id in requests file")
++    return rows
++
++
++def row_digest(row):
++    return sha_bytes(canon(row).encode())
++
++
++# ---------------- protocol ----------------
++def gate_ok(path):
++    d = json.load(open(path))
++    return d.get("run") is True
++
++
++def make_protocol(requests_path, out_path, adapter=None, gate=None, extra=None, lock=None):
++    """잠금: 코드 파일 hash, 요청 파일 hash, 영상 hash 목록 digest, 생성 config digest, 추가 잠금 파일(GT manifest·평가 소스 등)."""
++    rows = read_requests(requests_path)
++    core, cdig = static_config()
++    locked = {f: file_sha(f) for f in (lock or [])}
++    d = {"runner": RUNNER, "locked_files": locked, "code": {f: file_sha(f) for f in CODE_FILES}, "requests_sha256": file_sha(requests_path),
++         "requests_path": requests_path, "n_requests": len(rows),
++         "images_digest": sha_bytes(canon(sorted({(r["image"], r["image_file_sha256"], r["input_pixel_sha256"])
++                                                   for r in rows})).encode()),
++         "generation_config_digest": cdig, "generation_config": core, "extra": extra or {}, "adapter": None, "gate": None}
++    if adapter:
++        import torch
++        from rsna_diag import lora
++        blob = torch.load(os.path.join(adapter, "adapter.pt"), map_location="cpu", weights_only=True)
++        dg = lora.state_digest(blob["state"])
++        if dg != blob["digest"]:
++            raise RunError("adapter digest mismatch (file corrupted)")
++        d["adapter"] = {"path": adapter, "digest": dg, "file_sha256": file_sha(os.path.join(adapter, "adapter.pt"))}
++    if gate:
++        if not gate_ok(gate):
++            raise RunError(f"gate decision does not permit this stage: {gate}")
++        d["gate"] = {"decision_path": gate, "decision_sha256": file_sha(gate)}
++    if os.path.exists(out_path):
++        raise RunError(f"protocol exists: {out_path}")
++    tmp = out_path + f".{os.getpid()}.tmp"
++    json.dump(d, open(tmp, "w"), indent=1)
++    os.replace(tmp, out_path)
++    return d
++
++
++def static_config():
++    env = G.static_env()
++    core = {k: env[k] for k in G.CFG_KEYS}
++    core.update({"caps_IC": [1000, 2000, 4000], "caps_J": [2000, 4000, 8000], "do_sample": False, "runner": RUNNER})
++    return core, sha_bytes(canon(core).encode())
++
++
++def verify_protocol(path, requests_path):
++    p = json.load(open(path))
++    bad = [f for f, h in p["code"].items() if file_sha(f) != h]
++    if bad:
++        raise RunError(f"code changed since protocol lock: {bad}")
++    badl = [f for f, h in p.get("locked_files", {}).items() if file_sha(f) != h]
++    if badl:
++        raise RunError(f"locked file changed since protocol lock: {badl}")
++    if file_sha(requests_path) != p["requests_sha256"]:
++        raise RunError("requests file changed since protocol lock")
++    if p.get("adapter") and file_sha(os.path.join(p["adapter"]["path"], "adapter.pt")) != p["adapter"]["file_sha256"]:
++        raise RunError("adapter file changed since protocol lock")
++    if p.get("gate") and (file_sha(p["gate"]["decision_path"]) != p["gate"]["decision_sha256"] or not gate_ok(p["gate"]["decision_path"])):
++        raise RunError("stage gate decision missing/changed/not permitting")
++    return sha_bytes(canon(p).encode()), p
++
++
++# ---------------- record validation ----------------
++def record_digest(rec):
++    return sha_bytes(canon({k: v for k, v in rec.items() if k != "record_digest"}).encode())
++
++
++def read_records(path):
++    """완결된 행(개행으로 끝난 행)만 읽는다. 다른 worker가 쓰는 중인 마지막 부분 행은 무시한다. 중간 행이 깨져 있으면 예외."""
++    out = []
++    if os.path.exists(path):
++        with open(path, "rb") as f:
++            data = f.read()
++        for ln in data.split(b"\n")[:-1]:
++            if ln.strip():
++                out.append(json.loads(ln))
++    return out
++
++
++def repair_tail(path):
++    """자신의 파일 끝에 개행 없는 부분 행이 있으면(이전 프로세스 비정상 종료) 잘라내고 잘라낸 바이트 수를 반환한다."""
++    if not os.path.exists(path):
++        return 0
++    with open(path, "rb") as f:
++        data = f.read()
++    tail = data.rsplit(b"\n", 1)[-1] if b"\n" in data else data
++    if not data.endswith(b"\n") and tail:
++        ts = time.time()
++        keep = f"{path}.partial.{int(ts)}.{os.getpid()}.bin"
++        with open(keep, "xb") as f:  # 원본 바이트 보존 (덮어쓰기 금지)
++            f.write(tail)
++            f.flush()
++            os.fsync(f.fileno())
++        with open(path, "r+b") as f:
++            f.truncate(len(data) - len(tail))
++        with open(path + ".repair.log", "a") as f:
++            f.write(json.dumps({"ts": ts, "truncated_bytes": len(tail), "preserved_as": keep,
++                                "preserved_sha256": sha_bytes(tail)}) + "\n")
++        return len(tail)
++    return 0
++
++
++def validate_records(files, rows_by_id, pdig, cdig, px, adig=None):
++    """files {path: [records]}. returns {request_id: record}. 이상이 있으면 RunError."""
++    done = {}
++    for fn, recs in files.items():
++        for r in recs:
++            rid = r.get("request_id")
++            row = rows_by_id.get(rid)
++            if row is None:
++                raise RunError(f"unexpected record {rid} in {fn}")
++            if rid in done:
++                raise RunError(f"duplicate record {rid} in {fn}")
++            if r.get("record_digest") != record_digest(r):
++                raise RunError(f"record digest mismatch (tampered?) {rid} in {fn}")
++            if r.get("row_digest") != row_digest(row) or r.get("prompt_sha256") != row["prompt_sha256"]:
++                raise RunError(f"request row/prompt mismatch {rid}")
++            if r.get("adapter_digest") != adig:
++                raise RunError(f"adapter digest mismatch {rid}")
++            if r.get("protocol_digest") != pdig or r.get("config_digest") != cdig:
++                raise RunError(f"protocol/config mismatch {rid}")
++            if r.get("input_pixel_sha256") != row["input_pixel_sha256"] or px(row["image"]) != row["input_pixel_sha256"]:
++                raise RunError(f"input pixel hash mismatch {rid}")
++            if any(r.get(k) != row[k] for k in ("cond", "patient", "targets", "kind", "image")):
++                raise RunError(f"record identity fields != request row {rid}")
++            done[rid] = r
++    return done
++
++
++# ---------------- worker ----------------
++def try_flock(path):
++    fd = os.open(path, os.O_CREAT | os.O_RDWR)
++    try:
++        fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
++    except BlockingIOError:
++        os.close(fd)
++        return None
++    os.ftruncate(fd, 0)
++    os.write(fd, json.dumps({"pid": os.getpid(), "ts": time.time()}).encode())
++    return fd
++
++
++def worker_main(a):
++    pdig, proto = verify_protocol(a.protocol, a.requests)
++    rows = read_requests(a.requests)
++    rows_by_id = {r["request_id"]: r for r in rows}
++    os.makedirs(a.out_dir, exist_ok=True)
++    if os.path.exists(os.path.join(a.out_dir, "completion.json")):
++        raise RunError("completion.json exists: refuse to rerun into a completed out-dir")
++    wl = try_flock(os.path.join(a.out_dir, f"worker{a.worker}.lock"))
++    if wl is None:
++        sys.exit(f"worker {a.worker} already running")
++    t_proc_start = time.time()
++    torch, proc, model = G.load_model()
++    adig = None
++    if proto.get("adapter"):
++        adig = G.load_adapter(torch, model, proto["adapter"]["path"])
++        if adig != proto["adapter"]["digest"]:
++            sys.exit("loaded adapter digest != protocol")
++    t_model_ready = time.time()
++    env = G.env_info(torch, proc, model)
++    core = {k: env[k] for k in G.CFG_KEYS}
++    core.update({"caps_IC": [1000, 2000, 4000], "caps_J": [2000, 4000, 8000], "do_sample": False, "runner": RUNNER})
++    cdig = sha_bytes(canon(core).encode())
++    if cdig != proto["generation_config_digest"]:
++        sys.exit("runtime generation config digest != protocol")
++    eos = env["eos_token_id"]
++    eos_ids = set(eos if isinstance(eos, list) else [eos])
++    envp = os.path.join(a.out_dir, f"gen_worker{a.worker}.jsonl.env.json")
++    if not os.path.exists(envp):
++        json.dump({"env": env, "config_digest": cdig, "protocol_digest": pdig, "worker": a.worker,
++                   "physical_cuda_visible_devices": os.environ.get("CUDA_VISIBLE_DEVICES")}, open(envp, "w"),
++                  indent=1, default=str)
++    cache = {}
++
++    def px(path):
++        if path not in cache:
++            cache[path] = G.load_image(path)[2]
++        return cache[path]
++
++    def read_all():
++        return {f: read_records(f) for f in sorted(glob.glob(os.path.join(a.out_dir, "gen_worker*.jsonl")))}
++
++    out = os.path.join(a.out_dir, f"gen_worker{a.worker}.jsonl")
++    repair_tail(out)
++    done = validate_records(read_all(), rows_by_id, pdig, cdig, px, adig)
++    cdir = os.path.join(a.out_dir, "claims")
++    os.makedirs(cdir, exist_ok=True)
++    log = open(out + ".log", "a")
++    t0, n_new = time.time(), 0
++    for row in sorted(rows, key=lambda r: r["order_key"]):
++        if row["request_id"] in done:
++            continue
++        if a.max_requests is not None and n_new >= a.max_requests:
++            break
++        fd = try_flock(os.path.join(cdir, row["request_id"] + ".claim"))
++        if fd is None:
++            continue
++        try:
++            done = validate_records(read_all(), rows_by_id, pdig, cdig, px, adig)
++            if row["request_id"] in done:
++                continue
++            tw = time.time()
++            t_start_req = tw
++            try:
++                image, aff, pxs = G.load_image(row["image"])
++                inp = G.build_inputs(proc, image, row["prompt"])
++                ids_in = inp["input_ids"][0].tolist()
++                attempts = []
++                for cap in row["caps"]:
++                    at = G.generate(torch, proc, model, inp, cap, eos_ids)
++                    if attempts:
++                        at["prefix_matches_previous"] = at["suffix_ids"][:len(attempts[-1]["suffix_ids"])] == attempts[-1]["suffix_ids"]
++                    attempts.append(at)
++                    if at["ended_eos"]:
++                        break
++            except torch.cuda.OutOfMemoryError as e:
++                log.write(json.dumps({"event": "oom", "rid": row["request_id"], "err": str(e)[:200]}) + "\n")
++                log.flush()
++                raise
++            fin = attempts[-1]
++            for at in attempts:
++                at["suffix_text_raw"] = proc.tokenizer.decode(at["suffix_ids"], skip_special_tokens=False)
++            rec = {"request_id": row["request_id"], "row_digest": row_digest(row), "cond": row["cond"],
++                   "patient": row["patient"], "targets": row["targets"], "kind": row["kind"],
++                   "prompt_sha256": row["prompt_sha256"], "image": row["image"],
++                   "input_pixel_sha256": pxs, "pad_affine_top_left_side": list(aff),
++                   "n_input_tokens": len(ids_in), "input_ids_sha256": sha_bytes(json.dumps(ids_in).encode()),
++                   "suffix_ids": fin["suffix_ids"], "suffix_text_raw": fin["suffix_text_raw"],
++                   "n_output_tokens": fin["n_new"], "finish_reason": fin["finish_reason"], "ended_eos": fin["ended_eos"],
++                   "final_cap": fin["cap"],
++                   "attempts": [{k: v for k, v in at.items() if k != "suffix_ids"} for at in attempts],
++                   "runtime_s_total": sum(at["runtime_s"] for at in attempts), "wall_s": time.time() - tw, "t_start": t_start_req,
++                   "peak_mem_alloc_gb_max": max(at["peak_mem_alloc_gb"] for at in attempts),
++                   "peak_mem_reserved_gb_max": max(at["peak_mem_reserved_gb"] for at in attempts),
++                   "protocol_digest": pdig, "config_digest": cdig, "adapter_digest": adig, "worker": a.worker, "ts": time.time(),
++                   "gpu_uuid": env.get("gpu_uuid")}
++            rec["record_digest"] = record_digest(rec)
++            with open(out, "a") as f:
++                f.write(json.dumps(rec) + "\n")
++                f.flush()
++                os.fsync(f.fileno())
++            done[row["request_id"]] = rec
++            n_new += 1
++            log.write(json.dumps({"event": "done", "rid": row["request_id"], "cond": row["cond"], "n_out": rec["n_output_tokens"],
++                                  "finish": rec["finish_reason"], "runtime_s": round(rec["runtime_s_total"], 1),
++                                  "peak_gb": round(rec["peak_mem_alloc_gb_max"], 2), "elapsed": round(time.time() - t0, 1)}) + "\n")
++            log.flush()
++        finally:
++            os.close(fd)
++    tp = os.path.join(a.out_dir, f"worker{a.worker}.timing.{int(t_proc_start)}.{os.getpid()}.json")
++    json.dump({"worker": a.worker, "pid": os.getpid(), "t_proc_start": t_proc_start, "t_model_ready": t_model_ready,
++               "t_end": time.time(), "n_new": n_new, "load_s": t_model_ready - t_proc_start,
++               "physical_cuda_visible_devices": os.environ.get("CUDA_VISIBLE_DEVICES")}, open(tp, "x"), indent=1)
++    print(f"worker {a.worker}: finished; {n_new} new requests", flush=True)
++
++
++# ---------------- launcher ----------------
++def gpu_free_mib():
++    r = subprocess.run(["nvidia-smi", "--query-gpu=index,memory.used,memory.total", "--format=csv,noheader,nounits"],
++                       capture_output=True, text=True, check=True)
++    return {int(l.split(",")[0]): (int(l.split(",")[2]) - int(l.split(",")[1])) for l in r.stdout.strip().splitlines()}
++
++
++def allowed_gpus():
++    v = os.environ.get("CUDA_VISIBLE_DEVICES")
++    if not v:
++        raise RunError("CUDA_VISIBLE_DEVICES not set; refusing to pick devices")
++    return [int(x) for x in v.split(",")]
++
++
++def verify_completion(out_dir, requests_path, protocol_path):
++    """평가 진입점용: completion 내용·요청 집합·record digest를 다시 검증한다. returns records list."""
++    comp = json.load(open(os.path.join(out_dir, "completion.json")))
++    pdig, proto = verify_protocol(protocol_path, requests_path)
++    rows = read_requests(requests_path)
++    rows_by_id = {r["request_id"]: r for r in rows}
++    if comp.get("protocol_digest") != pdig or any(c != 0 for c in comp["exit_codes"]):
++        raise RunError("completion protocol/exit code invalid")
++    recs = []
++    for fn in sorted(glob.glob(os.path.join(out_dir, "gen_worker*.jsonl"))):
++        if comp["worker_file_sha256"].get(os.path.basename(fn)) != file_sha(fn):
++            raise RunError(f"worker file changed after completion: {fn}")
++        recs += read_records(fn)
++    ids = [r["request_id"] for r in recs]
++    if len(ids) != len(set(ids)) or set(ids) != set(rows_by_id) or len(ids) != comp["n_requests"]:
++        raise RunError("completion: request set mismatch (missing/duplicate/extra)")
++    want_ad = (proto.get("adapter") or {}).get("digest")
++    files_now = sorted(os.path.basename(f) for f in glob.glob(os.path.join(out_dir, "gen_worker*.jsonl")))
++    if files_now != sorted(comp["worker_file_sha256"]):
++        raise RunError("completion: worker file set differs from completion record")
++    img_ok = {}
++    for r in recs:
++        row = rows_by_id[r["request_id"]]
++        if r["record_digest"] != record_digest(r) or r["row_digest"] != row_digest(row):
++            raise RunError("completion: record digest mismatch")
++        if r.get("adapter_digest") != want_ad or r.get("protocol_digest") != pdig:
++            raise RunError("completion: adapter/protocol digest mismatch in record")
++        if r.get("config_digest") != proto["generation_config_digest"]:
++            raise RunError("completion: generation config digest mismatch in record")
++        if r.get("prompt_sha256") != row["prompt_sha256"] or sha_bytes(row["prompt"].encode()) != row["prompt_sha256"]:
++            raise RunError("completion: prompt hash mismatch")
++        if any(r.get(k) != row[k] for k in ("cond", "patient", "targets", "kind", "image")):
++            raise RunError("completion: record identity fields != request row")
++        if row["image"] not in img_ok:  # 현재 영상 file/pixel hash 재검증
++            if file_sha(row["image"]) != row["image_file_sha256"]:
++                raise RunError(f"completion: current image file hash mismatch {row['image']}")
++            img_ok[row["image"]] = G.load_image(row["image"])[2]
++        if img_ok[row["image"]] != row["input_pixel_sha256"] or r["input_pixel_sha256"] != row["input_pixel_sha256"]:
++            raise RunError(f"completion: current image pixel hash mismatch {row['image']}")
++    return recs
++
++
++def _union_len(iv):
++    iv = sorted(iv)
++    tot, cur_s, cur_e = 0.0, None, None
++    for s_, e_ in iv:
++        if cur_e is None or s_ > cur_e:
++            if cur_e is not None:
++                tot += cur_e - cur_s
++            cur_s, cur_e = s_, e_
++        else:
++            cur_e = max(cur_e, e_)
++    if cur_e is not None:
++        tot += cur_e - cur_s
++    return tot
++
++
++def occupancy(recs, out_dir, mapping, launcher_wall_s):
++    """GPU별로 worker 요청 구간(t_start~ts)의 합집합 길이(겹침은 중복 합산 안 함)와 worker 프로세스 구간(모델 로딩 포함)의 합집합을 합산한다."""
++    gpu_of = {k: mapping[k] for k in mapping}
++    req_iv, proc_iv = {}, {}
++    for r in recs:
++        g = gpu_of[r["worker"]]
++        req_iv.setdefault(g, []).append((r["t_start"], r["ts"]))
++    for fn in glob.glob(os.path.join(out_dir, "worker*.timing.*.json")):
++        t = json.load(open(fn))
++        g = gpu_of[t["worker"]]
++        proc_iv.setdefault(g, []).append((t["t_proc_start"], t["t_end"]))
++    tmin = min(s_ for iv in req_iv.values() for s_, _ in iv)
++    tmax = max(e_ for iv in req_iv.values() for _, e_ in iv)
++    return {"device_seconds_generate_union": sum(_union_len(iv) for iv in req_iv.values()),
++            "device_seconds_incl_loading_union": sum(_union_len(iv) for iv in proc_iv.values()) if proc_iv else None,
++            "n_gpus_used": len(req_iv), "first_request_start_to_last_end_s": tmax - tmin,
++            "launcher_wall_s_incl_loading": launcher_wall_s}
++
++
++def launch_main(a):
++    pdig, proto = verify_protocol(a.protocol, a.requests)
++    os.makedirs(a.out_dir, exist_ok=True)
++    if os.path.exists(os.path.join(a.out_dir, "completion.json")):
++        raise RunError("completion.json exists in out-dir; use a new attempt dir")
++    lk = try_flock(os.path.join(a.out_dir, "launch.lock"))
++    if lk is None:
++        sys.exit("another launcher owns this out-dir")
++    gpus = allowed_gpus()
++    if a.gpus:
++        sel = [int(x) for x in a.gpus.split(",")]
++        if not set(sel) <= set(gpus):
++            sys.exit(f"--gpus {sel} not within inherited allowed set {gpus}")
++        gpus = sel
++    free = gpu_free_mib()
++    per = {}
++    for k in range(a.workers):
++        g = gpus[k % len(gpus)]
++        per.setdefault(g, []).append(k)
++    for g, ws in per.items():
++        need = len(ws) * (a.peak_gb + 2.0) * 1024
++        if free[g] < need:
++            sys.exit(f"gpu {g}: free {free[g]}MiB < need {need:.0f}MiB for workers {ws}")
++    mapping = {k: gpus[k % len(gpus)] for k in range(a.workers)}
++    json.dump({"mapping_worker_to_physical_gpu": mapping, "free_mib_before": free, "allowed": gpus,
++               "peak_gb_assumed": a.peak_gb}, open(os.path.join(a.out_dir, "launch_children.json"), "w"), indent=1)
++    procs = {}
++    t0 = time.time()
++    for k in range(a.workers):
++        env = dict(os.environ, CUDA_VISIBLE_DEVICES=str(mapping[k]))
++        cmd = [sys.executable, "pg41_run.py", "worker", "--requests", a.requests, "--protocol", a.protocol,
++               "--out-dir", a.out_dir, "--worker", str(k)]
++        if a.max_requests is not None:
++            cmd += ["--max-requests", str(a.max_requests)]
++        procs[k] = subprocess.Popen(cmd, env=env, stdout=open(os.path.join(a.out_dir, f"worker{k}.stdout"), "a"),
++                                    stderr=open(os.path.join(a.out_dir, f"worker{k}.stderr"), "a"))
++    rl = open(os.path.join(a.out_dir, "resource_log.jsonl"), "a")
++    while any(p.poll() is None for p in procs.values()):
++        time.sleep(15)
++        used = subprocess.run(["nvidia-smi", "--query-gpu=index,memory.used,utilization.gpu", "--format=csv,noheader,nounits"],
++                              capture_output=True, text=True).stdout.strip().splitlines()
++        rl.write(json.dumps({"t": round(time.time() - t0, 1), "gpu": used}) + "\n")
++        rl.flush()
++    codes = [procs[k].returncode for k in range(a.workers)]
++    wall = time.time() - t0
++    rows = read_requests(a.requests)
++    recs = []
++    for fn in sorted(glob.glob(os.path.join(a.out_dir, "gen_worker*.jsonl"))):
++        recs += read_records(fn)
++    n_done = len({r["request_id"] for r in recs})
++    allr = [r for r in recs]
++    cost = {"sum_request_wall_s": sum(r["wall_s"] for r in allr), "sum_generate_runtime_s": sum(r["runtime_s_total"] for r in allr),
++            "n_records_with_retry": sum(len(r["attempts"]) > 1 for r in allr),
++            "new_tokens_all_attempts": sum(at["n_new"] for r in allr for at in r["attempts"]),
++            "new_tokens_final": sum(r["n_output_tokens"] for r in allr)}
++    cost.update(occupancy(recs, out_dir=a.out_dir, mapping=mapping, launcher_wall_s=wall))
++    res = {"cost": cost, "exit_codes": codes, "wall_s": wall, "n_records": len(recs), "n_unique": n_done, "n_requests": len(rows),
++           "workers": a.workers, "mapping": mapping, "protocol_digest": pdig}
++    if a.max_requests is None and all(c == 0 for c in codes) and n_done == len(rows) == len(recs):
++        res["worker_file_sha256"] = {os.path.basename(f): file_sha(f)
++                                     for f in sorted(glob.glob(os.path.join(a.out_dir, "gen_worker*.jsonl")))}
++        tmp = os.path.join(a.out_dir, f"completion.{os.getpid()}.tmp")
++        json.dump(res, open(tmp, "w"), indent=1)
++        os.replace(tmp, os.path.join(a.out_dir, "completion.json"))
++        print("completion written", json.dumps({k: res[k] for k in ("exit_codes", "wall_s", "n_unique")}))
++    else:
++        json.dump(res, open(os.path.join(a.out_dir, f"partial_{int(time.time())}.json"), "w"), indent=1)
++        print("NOT complete", json.dumps({k: res[k] for k in ("exit_codes", "wall_s", "n_unique", "n_requests")}))
++        sys.exit(1)
++
++
++def main():
++    ap = argparse.ArgumentParser()
++    sub = ap.add_subparsers(dest="cmd", required=True)
++    w = sub.add_parser("worker")
++    l = sub.add_parser("launch")
++    pp = sub.add_parser("protocol")
++    pp.add_argument("--requests", required=True)
++    pp.add_argument("--out", required=True)
++    pp.add_argument("--adapter", default=None, help="adapter 디렉터리 (adapter.pt 포함)")
++    pp.add_argument("--gate", default=None, help="run=true decision artifact (후속 단계만)")
++    pp.add_argument("--lock", nargs="*", default=[], help="추가로 hash 잠글 파일 (GT manifest, selection lock, 평가 소스 등)")
++    for s in (w, l):
++        s.add_argument("--requests", required=True)
++        s.add_argument("--protocol", required=True)
++        s.add_argument("--out-dir", required=True)
++        s.add_argument("--max-requests", type=int, default=None)
++    w.add_argument("--worker", type=int, required=True)
++    l.add_argument("--workers", type=int, required=True)
++    l.add_argument("--gpus", default=None, help="허용 집합 안의 부분집합 (예: 0 또는 0,1)")
++    l.add_argument("--peak-gb", type=float, default=14.0)
++    a = ap.parse_args()
++    if a.cmd == "protocol":
++        make_protocol(a.requests, a.out, adapter=a.adapter, gate=a.gate, lock=a.lock)
++        return
++    (worker_main if a.cmd == "worker" else launch_main)(a)
++
++
++if __name__ == "__main__":
++    main()
+diff --git a/pg41_verify.py b/pg41_verify.py
+new file mode 100644
+index 0000000..731dbe7
+--- /dev/null
++++ b/pg41_verify.py
+@@ -0,0 +1,170 @@
++"""iter_041 독립 재계산: pg39_spec/pg39_eval/rsna_diag.parse·metrics를 쓰지 않는 별도 구현.
++원시 record의 suffix_text_raw에서 순수 JSON 목록을 직접 해석(공동 출력은 label qA/qB로 그룹 분리; 문장에 붙은 ID는 순서 반전과 무관),
++GT는 원본 normalized xyxy + 영상 크기에서 다시 canvas 좌표로 변환, 문장별 matching은 augmenting path 알고리즘. 환자별 점수를 report의 저장값과 대조.
++질의 형식이 순수 JSON이 아닌 응답은 invalid(점수 0)로 처리하며, report의 파이프라인 판정과 다른 record 수를 함께 보고한다.
++
++python pg41_verify.py --report results/iter_041/eval/report_V96.json --out results/iter_041/eval/verify_V96.json
++"""
++import argparse
++import glob
++import json
++import os
++import re
++import sys
++
++import numpy as np
++
++EOT = "<end_of_turn>"
++
++
++def canvas(box, h, w):
++    side = max(h, w)
++    top = (side - h) // 2 if h < w else 0
++    left = (side - w) // 2 if w < h else 0
++    x0, y0, x1, y1 = box[0] * w, box[1] * h, box[2] * w, box[3] * h
++    return [(y0 + top) * 1000 / side, (x0 + left) * 1000 / side, (y1 + top) * 1000 / side, (x1 + left) * 1000 / side]
++
++
++def iou(a, b):
++    ih = min(a[2], b[2]) - max(a[0], b[0])
++    iw = min(a[3], b[3]) - max(a[1], b[1])
++    if ih <= 0 or iw <= 0:
++        return 0.0
++    i = ih * iw
++    return i / ((a[2] - a[0]) * (a[3] - a[1]) + (b[2] - b[0]) * (b[3] - b[1]) - i)
++
++
++def max_matching(pred, gt, thr):
++    adj = [[j for j, p in enumerate(pred) if iou(g, p) >= thr] for g in gt]
++    owner = {}
++
++    def aug(u, seen):
++        for v in adj[u]:
++            if v in seen:
++                continue
++            seen.add(v)
++            if v not in owner or aug(owner[v], seen):
++                owner[v] = u
++                return True
++        return False
++    return sum(aug(u, set()) for u in range(len(gt)))
++
++
++def f1(pred, gt, thr):
++    tp = max_matching(pred, gt, thr) if pred and gt else 0
++    if tp == 0:
++        return 0.0
++    p, r = tp / len(pred), tp / len(gt)
++    return 2 * p * r / (p + r)
++
++
++def parse(raw, ended, allowed):
++    t = raw[:-len(EOT)] if raw.endswith(EOT) else raw
++    if not ended:
++        return False, {}
++    try:
++        arr = json.loads(t.strip())
++    except Exception:
++        return False, {}
++    if not isinstance(arr, list):
++        return False, {}
++    out = {"qA": [], "qB": []}
++    for e in arr:
++        if not isinstance(e, dict) or set(e) != {"box_2d", "label"}:
++            return False, {}
++        b, lab = e["box_2d"], e["label"]
++        if not (isinstance(b, list) and len(b) == 4 and all(isinstance(v, (int, float)) and not isinstance(v, bool) for v in b) and isinstance(lab, str)):
++            return False, {}
++        if not (0 <= b[0] < b[2] <= 1000 and 0 <= b[1] < b[3] <= 1000):
++            return False, {}
++        m = re.fullmatch(r"\s*q([abAB])\s*", lab)
++        if not m:
++            return False, {}
++        pid = "q" + m.group(1).upper()
++        if pid in allowed:
++            out[pid].append([float(v) for v in b])
++    return True, out
++
++
++def read_dir(d):
++    recs = []
++    for fn in sorted(glob.glob(os.path.join(d, "gen_worker*.jsonl"))):
++        for ln in open(fn):
++            if ln.strip():
++                recs.append(json.loads(ln))
++    return recs
++
++
++def per_patient(recs, man, thr):
++    """{patient: {cond_key: F1 (문장 평균)}} cond_key: I (두 요청), AB, BA."""
++    acc = {}
++    inval = {}
++    for r in recs:
++        m = man[r["patient"]]
++        h, w = m["image_meta"]["h"], m["image_meta"]["w"]
++        ok, g = parse(r["suffix_text_raw"], r["ended_eos"], set(r["targets"]))
++        key = "I" if len(r["targets"]) == 1 else ("AB" if r["cond"] == "J-short" else "BA")
++        vals = []
++        for t in r["targets"]:
++            gt = [canvas(b, h, w) for b in m["gt_boxes_xyxy_norm"][t]]
++            vals.append(f1(g.get(t, []) if ok else [], gt, thr))
++        acc.setdefault((r["patient"], key), []).extend(vals)
++        inval.setdefault(key, []).append(not ok)
++    return {k: float(np.mean(v)) for k, v in acc.items()}, {k: int(sum(v)) for k, v in inval.items()}
++
++
++def boot(vals, level, B=10000, seed=20260930):
++    vals = np.asarray(vals, float)
++    idx = np.random.default_rng(seed).integers(0, len(vals), size=(B, len(vals)), dtype=np.int32)
++    m = vals[idx].mean(axis=1)
++    a = (1 - level) / 2 * 100
++    return [float(vals.mean()), float(np.percentile(m, a)), float(np.percentile(m, 100 - a))]
++
++
++def main():
++    ap = argparse.ArgumentParser()
++    ap.add_argument("--report", required=True)
++    ap.add_argument("--out", required=True)
++    a = ap.parse_args()
++    if os.path.exists(a.out):
++        sys.exit("output exists")
++    rep = json.load(open(a.report))
++    cfg = rep["config"]
++    man = {}
++    for l in open(cfg["manifest"]):
++        r = json.loads(l)
++        if r["eval_set"] == cfg["subset"]:
++            man[r["PatientID"]] = r
++    pids = sorted(man)
++    res = {"models": {}, "compare": {}}
++    for m, srcs in cfg["models"].items():
++        recs = []
++        for k in ("I", "JAB", "JBA"):
++            recs += read_dir(srcs[k]["gen"])
++        assert len(recs) == 192 + 96 + 96, len(recs)
++        pp3, inv = per_patient(recs, man, 0.3)
++        pp5, _ = per_patient(recs, man, 0.5)
++        X = {c: np.array([pp3[(p, c)] for p in pids]) for c in ("I", "AB", "BA")}
++        X5 = {c: np.array([pp5[(p, c)] for p in pids]) for c in ("I", "AB", "BA")}
++        r_ = {"f1_03_mean": {c: float(X[c].mean()) for c in X}, "f1_05_mean": {c: float(X5[c].mean()) for c in X5},
++              "delta_AB_ci975": boot(X["I"] - X["AB"], 0.975), "delta_BA_ci975": boot(X["I"] - X["BA"], 0.975),
++              "invalid_requests_strict_json": inv}
++        res["models"][m] = r_
++        rp = rep["_per_patient_f1_03"][m]
++        mx = max(abs(rp[p][c] - X[c][i]) for i, p in enumerate(pids) for c in X)
++        rm = rep["models"][m]
++        res["compare"][m] = {"max_abs_patient_f1_diff": float(mx),
++                             "mean_f1_max_abs_diff": max(abs(rm["mean_f1_03"][c][0] - X[c].mean()) for c in X),
++                             "f1_05_max_abs_diff": max(abs(rm["mean_f1_05"][c][0] - X5[c].mean()) for c in X5),
++                             "delta_ci975_max_abs_diff_vs_report(rng differs)": max(
++                                 max(abs(u - v) for u, v in zip(r_["delta_AB_ci975"], rm["delta_I_minus_JAB"]["ci975"])),
++                                 max(abs(u - v) for u, v in zip(r_["delta_BA_ci975"], rm["delta_I_minus_JBA"]["ci975"]))),
++                             "invalid_pipeline_rate_vs_strict": {c: [rm["format"][c]["valid_rate"], 1 - inv[c] / rm["format"][c]["n_requests"]] for c in X}}
++    res["patient_f1_match_1e-9"] = bool(all(v["max_abs_patient_f1_diff"] < 1e-9 for v in res["compare"].values()))
++    os.makedirs(os.path.dirname(a.out), exist_ok=True)
++    json.dump(res, open(a.out, "x"), indent=1)
++    print(json.dumps(res, indent=1)[:3000])
++
++
++if __name__ == "__main__":
++    main()
+diff --git a/rsna_diag/lora.py b/rsna_diag/lora.py
+new file mode 100644
+index 0000000..c596bdd
+--- /dev/null
++++ b/rsna_diag/lora.py
+@@ -0,0 +1,85 @@
++"""표준 LoRA (peft 미설치·설치 금지). y = W x + (alpha/r) B A x. 언어모델 attention/MLP 선형층만 (iter_010).
++
++- A: kaiming_uniform(a=sqrt(5)) (loralib 표준), B: 0 -> 초기 항등. base weight는 동결·불변.
++- LoRA 파라미터는 fp32 master, 연산은 fp32 후 base 출력 dtype으로 cast해 더한다.
++"""
++import hashlib
++import math
++
++import torch
++import torch.nn as nn
++
++TARGET_SUFFIXES = ("q_proj", "k_proj", "v_proj", "o_proj", "gate_proj", "up_proj", "down_proj")
++LM_LAYER_PREFIX = "model.language_model.layers."
++
++
++class LoRALinear(nn.Module):
++    def __init__(self, base: nn.Linear, r=16, alpha=32, dropout=0.05):
++        super().__init__()
++        self.base, self.r, self.alpha, self.scaling = base, r, alpha, alpha / r
++        dev = base.weight.device
++        self.lora_A = nn.Parameter(torch.empty(r, base.in_features, dtype=torch.float32, device=dev))
++        self.lora_B = nn.Parameter(torch.zeros(base.out_features, r, dtype=torch.float32, device=dev))
++        nn.init.kaiming_uniform_(self.lora_A, a=math.sqrt(5))
++        self.drop = nn.Dropout(dropout)
++
++    def forward(self, x):
++        y = self.base(x)
++        z = (self.drop(x).to(torch.float32) @ self.lora_A.t()) @ self.lora_B.t() * self.scaling
++        return y + z.to(y.dtype)
++
++
++def apply_lora(model, r=16, alpha=32, dropout=0.05, seed=None):
++    """LM layer의 대상 선형층을 LoRALinear로 교체하고 다른 모든 파라미터를 동결한다. returns 교체한 모듈 이름 목록."""
++    if seed is not None:
++        torch.manual_seed(seed)
++    for p in model.parameters():
++        p.requires_grad_(False)
++    names = []
++    for name, mod in list(model.named_modules()):
++        if name.startswith(LM_LAYER_PREFIX) and name.rsplit(".", 1)[-1] in TARGET_SUFFIXES and isinstance(mod, nn.Linear):
++            parent = model.get_submodule(name.rsplit(".", 1)[0])
++            setattr(parent, name.rsplit(".", 1)[1], LoRALinear(mod, r, alpha, dropout))
++            names.append(name)
++    if not names:
++        raise RuntimeError("no LoRA target modules found")
++    return names
++
++
++def lora_params(model):
++    return {n: p for n, p in model.named_parameters() if p.requires_grad}
++
++
++def lora_state_dict(model):
++    return {n: p.detach().to("cpu", torch.float32).clone() for n, p in model.named_parameters() if "lora_" in n}
++
++
++def load_lora_state(model, state, strict=True):
++    own = {n: p for n, p in model.named_parameters() if "lora_" in n}
++    if strict and set(own) != set(state):
++        raise ValueError(f"lora keys mismatch: missing {sorted(set(own) - set(state))[:3]} extra {sorted(set(state) - set(own))[:3]}")
++    with torch.no_grad():
++        for n, p in own.items():
++            p.copy_(state[n].to(p.device, p.dtype))
++
++
++def state_digest(state):
++    h = hashlib.sha256()
++    for n in sorted(state):
++        t = state[n].detach().to("cpu", torch.float32).contiguous()
++        h.update(n.encode())
++        h.update(str(tuple(t.shape)).encode())
++        h.update(t.numpy().tobytes())
++    return h.hexdigest()
++
++
++def base_digest(model):
++    """LoRA를 제외한 모든 파라미터의 (이름, shape, 첫/마지막 1M 원소 합 등이 아닌) 전체 hash. 동결 검증용 (느리지만 정확)."""
++    h = hashlib.sha256()
++    for n, p in model.named_parameters():
++        if "lora_" in n:
++            continue
++        h.update(n.replace(".base.", ".").encode())  # LoRA 적용 전후 이름을 같게 정규화
++        h.update(p.detach().to("cpu").contiguous().view(torch.uint8).numpy().tobytes() if p.dtype != torch.bfloat16
++                 else p.detach().to("cpu").contiguous().view(torch.int16).numpy().tobytes())
++    return h.hexdigest()
+diff --git a/rsna_diag/queue_lock.py b/rsna_diag/queue_lock.py
+new file mode 100644
+index 0000000..cbfbbbf
+--- /dev/null
++++ b/rsna_diag/queue_lock.py
+@@ -0,0 +1,72 @@
++"""실행 lock과 원자적 작업 claim (iter_010). flock 기반: 소유 프로세스가 종료되어야만 커널이 lock을 놓는다.
++
++- try_lock은 원자적이다 (경쟁하는 여러 프로세스 중 하나만 성공). 살아 있는 소유자의 lock은 절대 빼앗지 않는다.
++- 소유자가 죽으면 커널이 lock을 해제하므로, 다음 acquire가 '종료가 확인된 소유자의 claim 회수'가 된다.
++  파일에 남은 이전 소유자 정보(pid/host/시작시각)는 prev로 반환해 로그에 남긴다 (파일은 삭제하지 않는다).
++- 같은 host의 로컬 파일시스템을 가정한다 (NFS 등 flock 의미가 다른 곳에서는 쓰지 않는다).
++"""
++import fcntl
++import json
++import os
++import socket
++import time
++
++
++def proc_start(pid):
++    """/proc/<pid>/stat의 starttime (clock ticks). 없으면 None."""
++    try:
++        with open(f"/proc/{pid}/stat") as f:
++            s = f.read()
++        return int(s[s.rindex(")") + 2:].split()[19])
++    except (FileNotFoundError, ProcessLookupError, ValueError, IndexError):
++        return None
++
++
++def my_info(**extra):
++    pid = os.getpid()
++    return {"pid": pid, "start": proc_start(pid), "host": socket.gethostname(), "ts": time.time(), **extra}
++
++
++def _read(fd):
++    os.lseek(fd, 0, os.SEEK_SET)
++    txt = os.read(fd, 65536).decode(errors="replace")
++    try:
++        return json.loads(txt) if txt.strip() else None
++    except ValueError:
++        return None
++
++
++class Lock:
++    def __init__(self, path, fd, info):
++        self.path, self.fd, self.info = path, fd, info
++
++    def release(self):
++        if self.fd is not None:
++            os.ftruncate(self.fd, 0)
++            os.lseek(self.fd, 0, os.SEEK_SET)
++            os.write(self.fd, json.dumps({"released": True, "by": self.info}).encode())
++            fcntl.flock(self.fd, fcntl.LOCK_UN)
++            os.close(self.fd)
++            self.fd = None
++
++
++def try_lock(path, info):
++    """returns (Lock 또는 None, prev, reclaimed).
++
++    None이면 다른 살아 있는 프로세스가 보유 중이다 (prev=현재 파일의 소유자 정보, 읽을 수 있으면).
++    reclaimed=True: 이전 소유자가 release 없이 종료(kill 등)한 lock을 이어받았다 (prev=그 소유자 정보).
++    """
++    fd = os.open(path, os.O_CREAT | os.O_RDWR)
++    try:
++        fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
++    except BlockingIOError:
++        prev = _read(fd)
++        os.close(fd)
++        return None, prev, False
++    prev = _read(fd)
++    reclaimed = isinstance(prev, dict) and not prev.get("released") and "pid" in prev
++    os.ftruncate(fd, 0)
++    os.lseek(fd, 0, os.SEEK_SET)
++    os.write(fd, json.dumps(info).encode())
++    os.fsync(fd)
++    return Lock(path, fd, info), prev, reclaimed
+diff --git a/run_iter041.py b/run_iter041.py
+new file mode 100644
+index 0000000..9226a3a
+--- /dev/null
++++ b/run_iter041.py
+@@ -0,0 +1,78 @@
++"""iter_041 실행 driver (순차 launcher 호출, 재개 가능: 완료된 job은 건너뛰고, 진행 중이던 job은 같은 out-dir에서 이어 실행).
++
++stage d24: D24 x C adapter 96요청을 2 worker(GPU당 1)와 4 worker(GPU당 2)로 각각 실행 (처리량·메모리·token 정합성 비교; V96 점수는 쓰지 않음).
++stage v96: 고정 큐 순서 C:JAB -> C:Icost -> C:JBA -> B:JAB -> B:JBA 를 --workers 구성으로 실행.
++protocol은 새로 만들고(존재하면 hash 재검증 후 재사용), 평가 GT manifest·selection lock·pg41_rules.py를 --lock으로 잠근다.
++
++python run_iter041.py --stage d24
++python run_iter041.py --stage v96 --workers 4 --peak-gb 10
++"""
++import argparse
++import json
++import os
++import subprocess
++import sys
++
++R = "results/iter_041"
++ADAPTER = {"C": "results/iter_040/train2/C_s17/epoch_03", "B": "results/iter_040/train2/B_lr1e-4_s17/epoch_05"}
++LOCK = ["results/iter_039/data/manifest_private.jsonl", "results/iter_040/data/manifest_eval_private.jsonl",
++        "results/iter_040/data/selection_lock.json", "pg41_rules.py", "pg39_spec.py"]
++
++
++def sh(cmd):
++    print(">>", " ".join(cmd), flush=True)
++    return subprocess.run(cmd).returncode
++
++
++def ensure_protocol(req, proto, adapter):
++    if os.path.exists(proto):
++        return True
++    return sh([sys.executable, "pg41_run.py", "protocol", "--requests", req, "--out", proto, "--adapter", adapter, "--lock"] + LOCK) == 0
++
++
++def job(name, req, model, workers, peak, out_dir):
++    proto = f"{R}/protocol/protocol_{name}.json"
++    os.makedirs(f"{R}/protocol", exist_ok=True)
++    if os.path.exists(f"{out_dir}/completion.json"):
++        print("skip (complete):", out_dir)
++        return 0
++    if not ensure_protocol(req, proto, ADAPTER[model]):
++        return 1
++    return sh([sys.executable, "pg41_run.py", "launch", "--requests", req, "--protocol", proto, "--out-dir", out_dir,
++               "--workers", str(workers), "--peak-gb", str(peak)])
++
++
++def main():
++    ap = argparse.ArgumentParser()
++    ap.add_argument("--stage", required=True, choices=["d24", "v96"])
++    ap.add_argument("--workers", type=int, default=4)
++    ap.add_argument("--peak-gb", type=float, default=9.0)
++    a = ap.parse_args()
++    rq = f"{R}/requests"
++    if a.stage == "d24":
++        # 같은 protocol(=같은 요청·adapter)을 두 out-dir에서 사용: protocol 이름은 job 이름 공유
++        req = f"{rq}/requests_D24_C.jsonl"
++        proto = f"{R}/protocol/protocol_D24_C.json"
++        os.makedirs(f"{R}/protocol", exist_ok=True)
++        if not ensure_protocol(req, proto, ADAPTER["C"]):
++            sys.exit(1)
++        for w in (2, 4):
++            out = f"{R}/gen/D24_C_{w}w"
++            if os.path.exists(f"{out}/completion.json"):
++                continue
++            if sh([sys.executable, "pg41_run.py", "launch", "--requests", req, "--protocol", proto, "--out-dir", out,
++                   "--workers", str(w), "--peak-gb", str(a.peak_gb)]) != 0:
++                sys.exit(f"D24 {w}w failed")
++        return
++    order = [("V96_C_JAB", "V96_JAB", "C"), ("V96_C_Icost", "V96_Icost", "C"), ("V96_C_JBA", "V96_JBA", "C"),
++             ("V96_B_JAB", "V96_JAB", "B"), ("V96_B_JBA", "V96_JBA", "B")]
++    for name, rqn, model in order:
++        rc = job(name, f"{rq}/requests_{rqn}.jsonl", model, a.workers, a.peak_gb, f"{R}/gen/{name}")
++        if rc != 0:
++            sys.exit(f"{name} failed rc={rc}")
++    json.dump({"queue_order": [o[0] for o in order], "workers": a.workers, "peak_gb_assumed": a.peak_gb},
++              open(f"{R}/gen/v96_run_order.json", "x"), indent=1)
++
++
++if __name__ == "__main__":
++    main()
+diff --git a/test_pg41.py b/test_pg41.py
+new file mode 100644
+index 0000000..b619ef1
+--- /dev/null
++++ b/test_pg41.py
+@@ -0,0 +1,192 @@
++"""iter_041 CPU 합성 fixture: pg41_run의 completion 검증·잠금·부분 행·claim 및 ID 반전 처리를 검사한다.
++
++python test_pg41.py --out results/iter_041/tests/fixtures_pg41.json --work results/iter_041/tests/cpu
++"""
++import argparse
++import copy
++import glob
++import json
++import os
++import shutil
++import subprocess
++import sys
++
++import pg39_spec as S
++import pg41_run as R
++
++RES = []
++
++
++def check(name, ok, detail=None):
++    RES.append({"name": name, "pass": bool(ok), "detail": detail})
++    print(("PASS " if ok else "FAIL ") + name, json.dumps(detail, default=str)[:300], flush=True)
++
++
++def raises(fn, exc=R.RunError):
++    try:
++        fn()
++    except exc as e:
++        return str(e)[:120]
++    return None
++
++
++def make_rec(row, pdig, cdig, adig, worker=0, t=1000.0):
++    rec = {"request_id": row["request_id"], "row_digest": R.row_digest(row), "cond": row["cond"], "patient": row["patient"],
++           "targets": row["targets"], "kind": row["kind"], "prompt_sha256": row["prompt_sha256"], "image": row["image"],
++           "input_pixel_sha256": row["input_pixel_sha256"], "pad_affine_top_left_side": [0, 0, 1], "n_input_tokens": 1,
++           "input_ids_sha256": "x", "suffix_ids": [1], "suffix_text_raw": "[]<end_of_turn>", "n_output_tokens": 1,
++           "finish_reason": "eos", "ended_eos": True, "final_cap": row["caps"][0], "attempts": [{"n_new": 1}],
++           "runtime_s_total": 1.0, "wall_s": 1.0, "t_start": t, "peak_mem_alloc_gb_max": 1.0, "peak_mem_reserved_gb_max": 1.0,
++           "protocol_digest": pdig, "config_digest": cdig, "adapter_digest": adig, "worker": worker, "ts": t + 1, "gpu_uuid": "u"}
++    rec["record_digest"] = R.record_digest(rec)
++    return rec
++
++
++def build(work, rows, name, lock=None, mutate_rows=None):
++    d = os.path.join(work, name)
++    os.makedirs(d, exist_ok=True)
++    req = os.path.join(d, "requests.jsonl")
++    with open(req, "w") as f:
++        for r in (mutate_rows(copy.deepcopy(rows)) if mutate_rows else rows):
++            f.write(json.dumps(r) + "\n")
++    proto = os.path.join(d, "protocol.json")
++    p = R.make_protocol(req, proto, lock=lock)
++    pdig, _ = R.verify_protocol(proto, req)
++    rr = R.read_requests(req)
++    out = os.path.join(d, "gen")
++    os.makedirs(out)
++    recs = [make_rec(r, pdig, p["generation_config_digest"], None) for r in rr]
++    with open(os.path.join(out, "gen_worker0.jsonl"), "w") as f:
++        for r in recs:
++            f.write(json.dumps(r) + "\n")
++    comp = {"exit_codes": [0], "n_requests": len(recs), "protocol_digest": pdig,
++            "worker_file_sha256": {"gen_worker0.jsonl": R.file_sha(os.path.join(out, "gen_worker0.jsonl"))}}
++    json.dump(comp, open(os.path.join(out, "completion.json"), "w"))
++    return d, req, proto, out, recs, comp
++
++
++def rewrite(out, recs, redigest=True):
++    with open(os.path.join(out, "gen_worker0.jsonl"), "w") as f:
++        for r in recs:
++            if redigest:
++                r["record_digest"] = R.record_digest(r)
++            f.write(json.dumps(r) + "\n")
++    comp = json.load(open(os.path.join(out, "completion.json")))
++    comp["worker_file_sha256"] = {"gen_worker0.jsonl": R.file_sha(os.path.join(out, "gen_worker0.jsonl"))}
++    json.dump(comp, open(os.path.join(out, "completion.json"), "w"))
++
++
++def main():
++    ap = argparse.ArgumentParser()
++    ap.add_argument("--out", required=True)
++    ap.add_argument("--work", required=True)
++    a = ap.parse_args()
++    if os.path.exists(a.out) or (os.path.exists(a.work) and os.listdir(a.work)):
++        sys.exit("output or work dir exists")
++    os.makedirs(a.work, exist_ok=True)
++    rows = [json.loads(l) for l in open("results/iter_041/requests/requests_V96_JAB.jsonl")][:4]
++    lock_f = os.path.join(a.work, "lockme.txt")
++    open(lock_f, "w").write("gt manifest stand-in")
++    d, req, proto, out, recs, comp = build(a.work, rows, "base", lock=[lock_f])
++    check("valid_synthetic_completion_passes", len(R.verify_completion(out, req, proto)) == 4)
++
++    # 1 record 내용 변조 (digest 유지)
++    bad = copy.deepcopy(recs)
++    bad[0]["suffix_text_raw"] = "[x]"
++    rewrite(out, bad, redigest=False)
++    check("tampered_record_content_rejected", raises(lambda: R.verify_completion(out, req, proto)))
++    rewrite(out, copy.deepcopy(recs))
++    # 2 duplicate / missing / extra
++    rewrite(out, recs + [recs[0]])
++    check("duplicate_record_rejected", raises(lambda: R.verify_completion(out, req, proto)))
++    rewrite(out, recs[:3])
++    check("missing_record_rejected", raises(lambda: R.verify_completion(out, req, proto)))
++    ex = copy.deepcopy(recs[0])
++    ex["request_id"] = "unexpected"
++    rewrite(out, recs + [ex])
++    check("extra_record_rejected", raises(lambda: R.verify_completion(out, req, proto)))
++    rewrite(out, copy.deepcopy(recs))
++    check("restored_completion_passes_again", len(R.verify_completion(out, req, proto)) == 4)
++    # 3 record 필드가 요청 행과 다름 (조건·target·pixel·adapter·config)
++    for k, v in (("cond", "J-short-rev"), ("targets", ["qA"]), ("input_pixel_sha256", "0" * 64), ("adapter_digest", "abc"),
++                 ("config_digest", "0" * 64), ("prompt_sha256", "0" * 64)):
++        b2 = copy.deepcopy(recs)
++        b2[1][k] = v
++        rewrite(out, b2)
++        check(f"record_field_mismatch_rejected:{k}", raises(lambda: R.verify_completion(out, req, proto)))
++    rewrite(out, copy.deepcopy(recs))
++    # 4 completion 변조: exit code, worker file set
++    c0 = json.load(open(os.path.join(out, "completion.json")))
++    c1 = dict(c0, exit_codes=[1])
++    json.dump(c1, open(os.path.join(out, "completion.json"), "w"))
++    check("nonzero_exit_code_rejected", raises(lambda: R.verify_completion(out, req, proto)))
++    json.dump(c0, open(os.path.join(out, "completion.json"), "w"))
++    shutil.copy(os.path.join(out, "gen_worker0.jsonl"), os.path.join(out, "gen_worker9.jsonl"))
++    check("unlisted_worker_file_rejected", raises(lambda: R.verify_completion(out, req, proto)))
++    os.remove(os.path.join(out, "gen_worker9.jsonl"))
++    # 5 잠금 파일(GT manifest 대용)·요청 파일·코드 hash 변경
++    open(lock_f, "a").write("x")
++    check("locked_file_change_rejected", raises(lambda: R.verify_completion(out, req, proto)))
++    open(lock_f, "w").write("gt manifest stand-in")
++    check("locked_file_restored_passes", len(R.verify_completion(out, req, proto)) == 4)
++    p = json.load(open(proto))
++    p2 = dict(p, code=dict(p["code"], **{"pg39_spec.py": "0" * 64}))
++    proto2 = os.path.join(d, "protocol_badcode.json")
++    json.dump(p2, open(proto2, "w"))
++    check("code_hash_change_rejected", raises(lambda: R.verify_protocol(proto2, req)))
++    with open(req, "a") as f:
++        f.write("\n")
++    check("requests_file_change_rejected", raises(lambda: R.verify_completion(out, req, proto)))
++    # 6 현재 영상 file/pixel hash가 요청 행과 다름 (요청 자체의 hash가 틀린 경우)
++    for k in ("image_file_sha256", "input_pixel_sha256"):
++        def mut(rs, k=k):
++            rs[0][k] = "0" * 64
++            return rs
++        d2, req2, proto2_, out2, _, _ = build(a.work, rows, f"badimg_{k}", mutate_rows=mut)
++        check(f"current_image_hash_mismatch_rejected:{k}", raises(lambda: R.verify_completion(out2, req2, proto2_)))
++    # 7 부분 행 원본 바이트 보존
++    pf = os.path.join(a.work, "partial.jsonl")
++    with open(pf, "wb") as f:
++        f.write(b'{"a": 1}\n{"request_id": "torn", "x": ')
++    n = R.repair_tail(pf)
++    kept = glob.glob(pf + ".partial.*.bin")
++    check("partial_row_truncated_and_bytes_preserved", n > 0 and len(kept) == 1 and open(kept[0], "rb").read() == b'{"request_id": "torn", "x": '
++          and open(pf, "rb").read() == b'{"a": 1}\n' and os.path.exists(pf + ".repair.log"))
++    with open(pf, "ab") as f:
++        f.write(b'{"partial')
++    check("read_records_ignores_in_progress_tail", R.read_records(pf) == [{"a": 1}])
++    # 8 단일 소유권 / claim
++    lk = os.path.join(a.work, "x.lock")
++    fd = R.try_flock(lk)
++    check("second_claim_on_same_file_refused_while_held", fd is not None and R.try_flock(lk) is None)
++    os.close(fd)
++    check("claim_reacquirable_after_owner_release", R.try_flock(lk) is not None)
++    # 9 완료된 out-dir 재실행 거부 (worker는 모델 로딩 전에 거부해야 한다)
++    r = subprocess.run([sys.executable, "pg41_run.py", "worker", "--requests", req2, "--protocol", proto2_, "--out-dir", out2,
++                        "--worker", "0"], capture_output=True, text=True, timeout=120)
++    check("worker_rerun_into_completed_dir_refused_before_model_load", r.returncode != 0 and "completion.json exists" in r.stderr, r.stderr[-150:])
++    # 10 ID 반전: J-short-rev는 문장 순서만 바뀌고 ID·targets 유지, 채점은 라벨 기준
++    rr = [json.loads(l) for l in open("results/iter_041/requests/requests_V96_JBA.jsonl")][:5]
++    ok_ids = all(r["targets"] == ["qA", "qB"] and r["prompt"].index('qB: "') < r["prompt"].index('qA: "') and r["cond"] == "J-short-rev" for r in rr)
++    check("reversed_prompt_lists_qB_first_keeps_ids_and_targets", ok_ids)
++    raw1 = '[{"box_2d": [10, 10, 100, 100], "label": "qA"}, {"box_2d": [500, 500, 600, 600], "label": "qB"}]<end_of_turn>'
++    raw2 = '[{"box_2d": [500, 500, 600, 600], "label": "qB"}, {"box_2d": [10, 10, 100, 100], "label": "qA"}]<end_of_turn>'
++    g1 = S.parse_ids(raw1, True, {"qA", "qB"})["groups"]
++    g2 = S.parse_ids(raw2, True, {"qA", "qB"})["groups"]
++    check("group_assignment_by_label_independent_of_listing_order", g1 == g2 and g1["qA"] == [[10, 10, 100, 100]] and g1["qB"] == [[500, 500, 600, 600]])
++    # 11 요청 파일: 중복 request_id 거부
++    dup = os.path.join(a.work, "dup.jsonl")
++    with open(dup, "w") as f:
++        f.write(json.dumps(rows[0]) + "\n" + json.dumps(rows[0]) + "\n")
++    check("duplicate_request_id_in_requests_file_rejected", raises(lambda: R.read_requests(dup)))
++    # 12 occupancy: 겹치는 worker 구간은 중복 합산하지 않는다
++    recs_o = [{"worker": 0, "t_start": 0, "ts": 10}, {"worker": 1, "t_start": 5, "ts": 15}, {"worker": 2, "t_start": 100, "ts": 110}]
++    o = R.occupancy(recs_o, os.path.join(a.work, "none"), {0: 0, 1: 0, 2: 1}, 200.0)
++    check("device_seconds_union_no_double_count", abs(o["device_seconds_generate_union"] - (15 + 10)) < 1e-9, o)
++    json.dump({"results": RES, "n_pass": sum(x["pass"] for x in RES), "n": len(RES)}, open(a.out, "x"), indent=1, default=str)
++    print(f"{sum(x['pass'] for x in RES)}/{len(RES)} PASS")
++    sys.exit(0 if all(x["pass"] for x in RES) else 1)
++
++
++if __name__ == "__main__":
++    main()
+diff --git a/test_pg41_eval.py b/test_pg41_eval.py
+new file mode 100644
+index 0000000..9ba5811
+--- /dev/null
++++ b/test_pg41_eval.py
+@@ -0,0 +1,75 @@
++"""iter_041 판정 규칙·비용 계산·평가 함수 합성 fixture (CPU).
++
++python test_pg41_eval.py --out results/iter_041/tests/fixtures_pg41_eval.json
++"""
++import argparse
++import json
++import sys
++
++import numpy as np
++
++import pg39_spec as S
++import pg41_eval as E
++import pg41_rules as RU
++
++RES = []
++
++
++def check(name, ok, detail=None):
++    RES.append({"name": name, "pass": bool(ok), "detail": detail})
++    print(("PASS " if ok else "FAIL ") + name, json.dumps(detail, default=str)[:250], flush=True)
++
++
++def rec(patient, targets, t0, t1, wall=None, n=10, worker=0):
++    return {"patient": patient, "targets": targets, "t_start": t0, "ts": t1, "wall_s": wall if wall is not None else t1 - t0,
++            "attempts": [{"n_new": n}], "worker": worker}
++
++
++def main():
++    ap = argparse.ArgumentParser()
++    ap.add_argument("--out", required=True)
++    a = ap.parse_args()
++    # 판정 규칙
++    ci = lambda m, lo, hi: [m, lo, hi]
++    pos = RU.accuracy_class(ci(.08, .03, .13), ci(.07, .02, .12), .06, .05, .07, .06)
++    check("rule_positive", pos["class"] == "positive")
++    check("rule_positive_needs_lower_ci_gt0", RU.accuracy_class(ci(.08, -.01, .13), ci(.07, .02, .12), .06, .05, .07, .06)["class"] == "uncertain")
++    check("rule_positive_needs_B_positive", RU.accuracy_class(ci(.08, .03, .13), ci(.07, .02, .12), -.01, .05, .07, .06)["class"] == "uncertain")
++    check("rule_positive_needs_common_subset_positive", RU.accuracy_class(ci(.08, .03, .13), ci(.07, .02, .12), .06, .05, -.01, .06)["class"] == "uncertain")
++    check("rule_point_below_0.05_not_positive", RU.accuracy_class(ci(.04, .01, .07), ci(.07, .02, .12), .06, .05, .07, .06)["class"] == "uncertain")
++    neg = RU.accuracy_class(ci(.01, -.02, .04), ci(0.0, -.03, .03), 0, 0, 0, 0)
++    check("rule_negative_both_ci_upper_lt_0.05", neg["class"] == "negative" and not neg["strong_negative"])
++    check("rule_strong_negative_upper_le_0.02", RU.accuracy_class(ci(0, -.03, .02), ci(0, -.03, .015), 0, 0, 0, 0)["strong_negative"])
++    check("rule_one_order_crossing_is_uncertain", RU.accuracy_class(ci(.01, -.02, .04), ci(.06, .01, .11), .0, .0, .0, .0)["class"] == "uncertain")
++    c_ok = RU.cost_class([1.3, 1.4], [1.25, 1.3], [0.9, 0.9])
++    check("cost_burden_true_with_p95_route", c_ok["cost_burden"])
++    check("cost_burden_true_with_throughput_route", RU.cost_class([1.3, 1.4], [1.0, 1.0], [0.7, 0.75])["cost_burden"])
++    check("cost_burden_false_if_one_order_below_dev", not RU.cost_class([1.3, 1.1], [1.5, 1.5], [0.5, 0.5])["cost_burden"])
++    check("overall_positive_candidate", RU.overall(pos, c_ok, False) == "positive_method_pilot_candidate")
++    check("overall_boundary_is_uncertain", RU.overall(pos, c_ok, True) == "uncertain_hold_no_extension")
++    check("overall_negative_preserves_independent", RU.overall(neg, c_ok, False).startswith("independent_baseline_preserved"))
++    check("overall_accuracy_loss_without_cost_holds", RU.overall(pos, RU.cost_class([1.0, 1.0], [1, 1], [1, 1]), False).startswith("independent"))
++    # 환자 지연·비용: I는 두 요청을 한 환자 작업으로 묶는다
++    recs_I = [rec("p1", ["qA"], 0, 10), rec("p1", ["qB"], 1, 14, worker=1), rec("p2", ["qA"], 20, 25), rec("p2", ["qB"], 21, 30, worker=1)]
++    pids, lat, wsum, tok = E.cost_rows(recs_I, "I")
++    check("patient_latency_is_first_start_to_last_end_not_wall_max_or_sum", list(lat) == [14.0, 10.0] and list(wsum) == [10 + 13, 5 + 9] and pids == ["p1", "p2"], [list(lat), list(wsum)])
++    try:
++        E.cost_rows(recs_I[:3], "I")
++        ok = False
++    except AssertionError:
++        ok = True
++    check("missing_request_in_patient_unit_rejected", ok)
++    # 채점: J 공동 출력에서 문장 그룹, 교환 oracle
++    gt = {"qA": [[100, 100, 200, 200]], "qB": [[500, 500, 600, 600]]}
++    swapped = {"qA": [[500, 500, 600, 600]], "qB": [[100, 100, 200, 200]]}
++    check("swap_score_recovers_group_assignment_error", S.swap_score(swapped, gt) == 1.0 and S.sent_metrics(swapped["qA"], gt["qA"], 0.3)["f1"] == 0.0)
++    # 판정 함수 통합: 입력 순서가 바뀐 JBA도 targets는 [qA,qB]
++    rows = [json.loads(l) for l in open("results/iter_041/requests/requests_V96_JBA.jsonl")][:3]
++    check("JBA_rows_targets_and_cond", all(r["targets"] == ["qA", "qB"] and r["cond"] == "J-short-rev" for r in rows))
++    json.dump({"results": RES, "n_pass": sum(x["pass"] for x in RES), "n": len(RES)}, open(a.out, "x"), indent=1, default=str)
++    print(f"{sum(x['pass'] for x in RES)}/{len(RES)} PASS")
++    sys.exit(0 if all(x["pass"] for x in RES) else 1)
++
++
++if __name__ == "__main__":
++    main()
