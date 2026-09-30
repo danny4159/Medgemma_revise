@@ -136,3 +136,4 @@
   - 모듈 rsna_diag/__init__.py, rsna_diag/geometry.py, rsna_diag/parse.py, rsna_diag/metrics.py, rsna_diag/sft_eval.py: approved — 현재 RSNA 좌표 변환·응답 해석·matching·집계 범위의 기존 승인을 유지한다. 신규 데이터나 전체 실행기 승인은 포함하지 않는다.; 검증: 현재 분석 manifest의 소스 hash 일치.; 관련 iter_012 protocol hash 일치.; 별도 좌표 변환·열거 matching을 이용한 V400·개발800 수치 재계산 일치.
 - iter_038: 커밋 `1c295feb3a2ed3bac76a95fe7ff1566ccfe71955` (재사용 미승인: 리뷰 확인 필요), 리뷰: `agent/runs/iter_038/review.md`
   - 모듈 padchest_audit038.py: needs_fix — 현재 고정 입력의 집계는 재현됐지만 범용 자료 검증기로 승인하기에는 오류 차단과 결과 보존이 부족하다. 실제 재사용할 때만 보완한다.; 검증: 리뷰 SHA 1c295feb3a2ed3bac76a95fe7ff1566ccfe71955의 소스와 작업 파일이 일치했다.; 원본 JSON·CSV를 별도 구현으로 읽어 finding 수, 다중 소견 영상 수, oracle별 중복 수, pair 관계와 annotation IoU 평균을 재현했다.; 현재 입력의 JSON 중복 key, ImageID별 환자·study·split 연결 충돌, 필수 연결 필드 공백은 모두 0이었다.; Claude의 fixture 성공 기록을 확인했고 리뷰에서 순수 함수 검사 4건을 메모리에서 수행해 통과했다.
+- iter_039: 커밋 `ca8be7658402eadbc0c501e877d76b1024ed2683` (재사용 미승인: 리뷰 확인 필요), 리뷰: `agent/runs/iter_039/review.md`
