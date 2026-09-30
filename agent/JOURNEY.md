@@ -221,3 +221,19 @@ RSNA의 detector–SFT 상보성을 큰 후보 발견 능력 차이로 해석할
 - 접근법: RSNA 전용 detector와 SFT 비교 (`approach/rsna-detector-comparison`), 시도: iter_033, iter_034, iter_035, iter_036
 - 커밋: a60224c1f7d54e4f59e8c4dc16285d62faf004b5, bc80f2deede564fb56b4222e530eda5621b31069, 615c61ec51cfe9d84d564bfcaab434a3a5c78cb1, f9bfbc250058ce1785f819dd404b1148998918b9
 - 자세히: DECISIONS.md의 iter_036, `agent/runs/iter_036/review.md`
+
+## 🏁 문장별 grounding은 직접 SFT로 크게 개선됐지만 문장 대조의 추가 이득은 확인되지 않았다
+
+*iter_040 · 2026-09-30 21:25 · 판정: CONTINUE / inconclusive*
+
+PadChest-GR 개발96명에서 직접 SFT의 큰 개선을 확인해, 낮은 기본 성능과 추가 방법의 필요성을 구분했다.
+**고민:** iter_039에서는 개별 grounding이 낮아 공동 요청 손실의 원인을 확정하기 어려웠다.
+**시도:** 먼저 직접 SFT를 확보하고, 동일 학습량 CE와 유사 학습 비용 CE를 대조군으로 두었다.
+**개발:** T305·seed17에서 문장 교체 likelihood 대조를 추가하고 실제 생성으로 비교했다.
+**결과:** 동일 I-short F1@0.3은 M0 0.098에서 B 0.556으로 상승했다. M−C는 −0.005, 97.5% CI [−0.038, 0.027]이었다.
+**한계:** baseline 생성 성능은 계속 상승했고 V96은 개발 자료다. 독립 재현·모듈형 우위·새 기여는 미확인이다.
+**의미:** 직접 SFT 자산은 보존하되 현재 대조 설계의 자동 확대를 보류하고 다음 실용 비교의 가치를 판단한다.
+
+- 접근법: 문장 대조 grounding pilot (`approach/query-contrast-grounding`), 시도: iter_040
+- 커밋: 18fdae2eec4f4ab3605845fdaeafd1959d9d725f
+- 자세히: DECISIONS.md의 iter_040, `agent/runs/iter_040/review.md`

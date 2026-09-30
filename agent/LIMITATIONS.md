@@ -182,21 +182,22 @@ RSNA seed17 grounding SFT의 nonempty 개발 출력 C201/E402에서 마지막 �
 
 ## padchest-sentence-grounding-and-joint-retention — observed
 
-MedGemma 1.5 revision 91850547d9f0b2fdd21aa7c5f4f3d1a8a52c243b의 고정 PadChest-GR 개발 E96에서 문장별 독립 grounding I-long의 환자 평균 F1@0.3은 0.2951이었다. 공동 요청 J-long은 0.2344로 독립 요청보다 0.0608 낮았지만, 개별 능력 기준 0.40을 충족하지 못했고 short 차이도 불확정이었다. 현재 문장·prompt·전처리 조건의 낮은 grounding 성능 관찰이며, 일반적인 공동 결합 능력 결함이나 내부 원인을 확정하지 않는다.
+고정 PadChest-GR 개발 V96에서 MedGemma 1.5의 문장별 grounding 저하는 직접 SFT로 상당 부분 개선됐다. 동일 I-short 조건의 F1@0.3은 M0 0.09844에서 T305·seed17 직접 SFT B 0.55590으로 상승했다. 추가 문장 대조 M은 CE 대조 C 및 C_compute보다 뚜렷하게 개선되지 않았다. 기존 M0 I-long 0.29514와 J-long 0.23438의 관찰은 유지되지만, 적응 이후 공동 요청 성능은 평가하지 않았다. 일반적인 문장 결합 결함이나 내부 원인은 여전히 미확인이다.
 
 - 적용 목표 시작: iter_003
-- 최신 리뷰: agent/runs/iter_039/review.json
-- 근거: research/results/iter_039/gen/E96/gen_worker*.jsonl: 96명×9조건 요청 864건, 고유 요청 집합 일치, worker 종료 코드 모두 0.
-- 근거: research/results/iter_039/eval/report_E96.json: I-long 0.295139, 95% CI [0.232639, 0.359418]; J-long 0.234375.
-- 근거: 리뷰의 별도 JSON 해석·최대 이분 matching·환자 bootstrap에서 모든 환자×조건 점수가 저장 결과와 일치했다. long I−J=0.060764, 97.5% CI [0.001736, 0.121528]; short I−J=0.011632, 97.5% CI [-0.032296, 0.052951].
-- 근거: 제공자 영상 변환 설명: https://github.com/auriml/Rx-thorax-automatic-captioning#dicom-to-png-preprocessing
-- 사용·평가 검증: D24·E96의 원본 영상 120개에서 PNG hash, uint16 pixel hash, uint16→uint8 변환, 저장 pixel hash, padded input hash, affine, 환자·split·문장·GT 연결을 대조해 불일치 0을 확인했다.
-- 사용·평가 검증: 리뷰 환경 Pillow 10.2.0은 16-bit PNG를 int32로 읽고 실행 환경 Pillow 12.3.0은 uint16로 읽었다. PNG bit depth와 값 범위를 확인한 뒤 uint16로 정규화하여 재검증했다.
-- 사용·평가 검증: 제공자 문서는 windowing된 값을 0–65535 PNG로 저장한다고 설명한다. 실제 120개 변환은 uint16에 대한 img_as_ubyte와 일치했다. 과거 검증된 값 보존 경로를 유지하며 추가 ×255는 적용하지 않았다.
-- 사용·평가 검증: sanity/sanity_pg39_v2.json의 세 조건에서 공식 pipeline과 wrapper의 tensor 및 생성 텍스트 일치를 확인했다.
-- 사용·평가 검증: D에서 허용된 label 형식 수정 1회 후 E96 prompt를 고정했다. 요청을 manifest에서 재구성해 일치함을 확인했다. 최종 비EOS 8건은 invalid로 포함했다.
-- 미해결: 낮은 개별 점수가 소견 종류·작은 영역·annotation 경계와 과제 적응 부족에 얼마나 의존하는가?
-- 미해결: 과제별 직접 SFT와 문장 조건부 모듈형 baseline을 넘는 정확도 또는 비용 개선 여지가 있는가?
-- 미해결: 공동 요청 손실이 개별 grounding을 충분히 확보한 조건에서도 남는가?
-- 미해결: E288·F120은 미실행이다. 독립 환자 재현, 외부 기관 일반화 및 사전학습 미노출은 확인하지 않았다.
+- 최신 리뷰: agent/runs/iter_040/review.json
+- 근거: research/results/iter_040/eval/v96_B.json: 동일 I-short의 B−M0=0.457465, 97.5% CI [0.378472, 0.533854].
+- 근거: research/results/iter_040/gen/{B,C,C_compute,M}/gen_worker*.jsonl: 모델별 192건, 총 768건의 원시 생성.
+- 근거: 리뷰 독립 재계산: B/C/C_compute/M F1@0.3=0.555903/0.577951/0.564931/0.572743. 환자별 저장 점수와 차이 0.
+- 근거: M−C=-0.005208, 97.5% CI [-0.038194, 0.026910]; M−C_compute=0.007813, CI [-0.034722, 0.048611].
+- 근거: agent/runs/iter_039/review.json: 기존 long 조건의 정상 사용·영상 변환 검증과 제한된 관찰.
+- 사용·평가 검증: 리뷰에서 V96 manifest와 iter_039 원본 행의 일치, selection_lock의 train/eval manifest hash 일치를 확인했다.
+- 사용·평가 검증: T305와 V96의 영상 401개에서 현재 pixel hash 불일치 0, T/V/H의 환자·영상·study 교집합 0을 확인했다.
+- 사용·평가 검증: V96 요청의 문장·ID prompt를 재구성했고 불일치 0이었다.
+- 사용·평가 검증: 학습 모델 768건의 요청 집합·record/row/protocol/config/adapter digest와 adapter 파일 hash를 대조했다. 불일치 0이며 모두 EOS 종료였다.
+- 사용·평가 검증: 별도 JSON 해석·좌표 변환·최대 matching·환자 bootstrap으로 F1@0.3, F1@0.5, FP와 주비교 CI를 재계산했다.
+- 미해결: V96은 checkpoint 선택에 일부 사용된 개발 자료다. 독립 환자·다른 seed·외부 기관 재현은 미실행이다.
+- 미해결: B의 V48 생성 성능은 epoch2→5에서 상승했으므로 수렴한 baseline에 대한 방법 기각은 성립하지 않는다.
+- 미해결: 직접 SFT 이후의 공동 요청 유지 능력과 강한 문장 조건부 모듈형 baseline 대비 효용은 미확인이다.
+- 미해결: 대조항의 작은 활성도가 추가 효과 부재를 설명할 수 있지만, 전체 문장 대조 방법이나 시각적 근거 활용 능력의 한계로 일반화할 수 없다.
 

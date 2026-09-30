@@ -1,0 +1,241 @@
+# 요약
+
+- **이번에 할 일:** PadChest-GR에서 강한 직접 SFT를 확보하고, 문장–영역 대응을 대조하는 작은 학습 개입을 비교한다.
+- **필요한 이유:** E96의 문장별 독립 grounding F1@0.3은 0.295였다. 공동 요청 손실보다 개별 능력 개선의 가능성과 비용을 먼저 판단할 가치가 있다.
+- **확인할 기준:** 같은 positive 학습량과 같은 학습 비용의 CE baseline을 각각 넘어서는 실제 생성 개선이다.
+- **주의·다음:** 알려진 대조 학습의 적용 자체는 contribution이 아니다. 이번은 method pilot이며 full 학습·추가 seed·외부 확인은 리뷰 후 별도 계획한다.
+
+# Current Understanding
+
+기준 기록은 `agent/runs/iter_039/plan.md`, `review.md`, `review.json`, `research/results/iter_039/data/selection_summary.json`이다. iter_039 plan SHA256은 `bff448aa81ae912fb1b2591e60dc07f6080591b8fbe6286c09c2913a351c4260`이다. 이번은 원래 공동 요청 실험의 복구가 아니라 새로운 최소 방법 비교다.
+
+**유지:** GOAL, MedGemma 1.5, 기존 RSNA SFT·detector 결과와 checkpoint, VinDr 승인 대기, continuation 추가 투자 종료, MRI·CheXpert reserve, PadChest test 비사용을 유지한다. iter_039의 영상 변환 근거를 다시 미확인으로 돌리지 않는다.
+
+**보류:** 공동 결합 loss, 원래 E288/F120 자동 확대, RSNA의 추가 geometry loss 탐색을 보류한다.
+
+**변경:** 두 소견을 함께 생성하는 과제에서 문장별 독립 생성의 학습 비교로 옮긴다. 새 결과는 `research/results/iter_040/`에 저장한다. 기존 E96은 개발 자료다. 원래 E192를 사용한다면 이번 사전 조건에 따른 H192로 용도를 명시하며, 원래 9조건 E288 실험을 재개한 것으로 기록하지 않는다.
+
+**미확인:** 직접 SFT 이후 잔여 문제의 크기, 문장 대조의 추가 가치, 모듈형 방법 대비 trade-off, 신규 기여다. 과거 PadChest 접근 인계를 학습 효과의 승인이나 검증으로 해석하지 않는다. 이번 계획과 method pilot gate에 따라 새 실험을 수행한다.
+
+# Strategy Check / 연구 방향 판단
+
+중요한 사용 과제는 영상의 여러 양성 소견 중 사용자가 지정한 문장의 근거 영역을 정확하게 반환하는 것이다. 보고서 생성·임상 진단·음성 소견 판별까지 이번 결과로 설명하지 않는다.
+
+확인된 사실은 정상 사용 조건의 낮은 개별 grounding, RSNA에서 직접 SFT가 효과적이었다는 점, 단순 검출에서는 빠른 detector가 강한 대안이라는 점이다. 미확인 경쟁 설명은 과제 적응 부족, 문장 조건부 구별 부족, annotation 경계 차이와 추가 계산량이다.
+
+1. **방법 개선:** 강한 직접 SFT 이후 최소 대조 개입을 시험하면 과제 적응만으로 충분한지와 추가 학습 신호의 가치를 같은 실험에서 판단할 수 있다. 이번 선택이다.
+2. **원인·전이 진단:** 기존 공동 요청·좌표 인터페이스 진단은 개별 능력과 형식에 의해 해석이 제한됐다. 같은 E96의 prompt·변환 탐색을 반복할 정보 가치는 낮다.
+3. **다른 질문 전환:** 가능하지만 지금은 실제 관찰과 재사용 가능한 입력·모델 경로가 있다. 한정 pilot에서 추가 가치가 없으면 질문 전환을 우선한다.
+
+`research_track=language-conditioned-grounding`은 처음 부여하는 안정된 식별자다. 과거 기록은 수정하지 않고, RSNA 질의 전이·detector 비교와 iter_038–039를 related_iterations로 연결한다. 새 branch로 과거 체류를 초기화하지 않는다. 최근 진단·준비의 긴 연속 기록에는 실행 복구가 포함되며 유효 실험 수와 구분한다. 직접 연결된 iter_038은 setup, iter_039는 유효 diagnostic 1회다. iter_039의 주요 생성 실행 wall 합은 약 4.21시간이며 다른 반복까지 포함한 track 총비용은 이번에 재집계하지 않았으므로 숫자를 만들지 않는다.
+
+해결된 질문은 현재 입력·평가 경로의 유효성과 낮은 base grounding의 존재다. 남은 핵심은 직접 적응 이후 문장 조건부 대조가 실제 출력을 더 개선하는지다. 이를 구분할 증거가 이번 matched comparison이다.
+
+가장 가까운 원리는 [기존 referring expression 대조 학습](https://aclanthology.org/2020.acl-main.586/)이다. 이번 적용을 새 원리라고 부르지 않는다. 방법 효과가 없으면 이 설계를 중단하고, 효과가 있어도 기존 원리와 구별되는 실패 조건·일반화 근거가 없다면 논문 기여 투자를 보류할 수 있다.
+
+# Hypothesis
+
+**H_method:** 직접 문장별 SFT에 동일 영상의 문장–정답 집합 likelihood 대조를 추가하면, 같은 positive presentation 및 같은 학습 비용의 CE보다 실제 생성 F1@0.3이 높아진다.
+
+**H_adaptation:** 직접 SFT와 추가 CE만으로 개선이 설명된다. 이 경우 새 대조 설계의 우선순위는 낮다.
+
+**H_format:** 차이가 형식·EOS 준수에 집중되고 유효 출력의 영역 대응은 개선되지 않는다. 이 경우 문장–시각 근거 결합의 개선으로 해석하지 않는다.
+
+대조는 실제 문장과 실제 annotation 집합만 사용한다. 다른 문장에 속한 영역을 해당 환자의 정상 영역이나 병변 부재로 취급하지 않는다.
+
+# Limitation Evidence / Correct Usage Checks
+
+대상은 `padchest-sentence-grounding-and-joint-retention`이다. iter_039 review.json의 `valid_experiment=true`, `blocking_issues=[]`, evidence와 usage_checks를 확인했다. 2026-09-30 정책의 observed 근거 경로를 사용하는 `method_stage=pilot`이며 validated 또는 full로 표시하지 않는다.
+
+E96 I-long=0.295139, J-long=0.234375다. 공동 처리의 일반적 결함은 입증하지 못했지만, 단순 문장별 독립 처리도 정확도 문제를 해결하지 못했다. 직접 SFT가 그 문제를 해결할 가능성은 이번 baseline에서 평가한다.
+
+모델 revision은 `91850547d9f0b2fdd21aa7c5f4f3d1a8a52c243b`로 고정한다. bf16 base, 공식 chat template, 기존 값 보존 uint16→uint8 변환, RGB 복제, 중앙 square padding, 모델의 yxyx/0–1000 좌표를 유지한다. GT는 원본 normalized xyxy에서 변환한다. 라이브러리·processor·generation config를 기록한다.
+
+새 영상은 같은 변환 규약으로 hash·범위·affine·원본 GT 연결을 검사한다. 기존 120개 영상 검증 전체를 반복하지 않는다. 새 경로와 변경된 학습 prefix·target·mask의 회귀 검사는 수행한다.
+
+# Contribution Path / Baselines / Reuse
+
+## 비교군
+
+- **M0:** 기존 I-long/I-short 원시 출력. 동일 입력·prompt·parser가 연결되는 경우에만 재사용한다.
+- **B:** PadChest 문장별 직접 LoRA SFT. 두 LR와 생성 validation으로 확보한다.
+- **C:** B에서 CE만 추가 학습한다. M과 positive presentation·데이터 순서·초기 상태를 맞춘다.
+- **C_compute:** C의 동일 trajectory를 M의 실제 학습 비용까지 연장한다. 추가 데이터나 annotation은 사용하지 않는다.
+- **M:** B에서 CE와 문장 대조를 함께 학습한다. 추론은 C와 동일한 단일 문장 요청이다.
+
+[MedGrounder](https://arxiv.org/html/2512.01085v1)는 별도 문장 조건부 모듈형 대안이다. [공식 구현](https://github.com/aehrc/MedGrounder)의 Chest ImaGenome-only checkpoint와 공식 전처리·후처리를 사용할 수 있으면 V96 및 실행된 H192에 적용한다. threshold 후보는 공식 0.8과 V48에서만 선택하는 0.2/0.4/0.6으로 고정하고, WBF는 공식 설정을 따른다. 원본 영상·전체 문장 입력을 제공하며 추론량·사전학습·추가 annotation 차이를 기록한다. 공식 train 환자가 포함된 PadChest 적응 checkpoint는 이번 비누수 비교에 사용하지 않는다.
+
+공개 checkpoint·필수 의존성·입력 검증이 막히면 원인과 미실행을 보고한다. pip install·환경 교체·임의 재구현으로 우회하지 않는다. 직접 SFT 대비 방법 효과는 별도로 평가하되, 모듈형 우위·전체 최선·full 진입을 선언하지 않는다.
+
+## 재사용
+
+`reuse_assets`에 명시한 iter_039의 16개 파일과 iter_012의 10개 파일을 사용한다. 현재 branch의 존재와 새 branch 기반의 존재를 구분한다. 파일 충돌·누락은 구현 전 중단 사유이며 새 구현으로 대체하지 않는다.
+
+LoRA·assistant-only mask·checkpoint/RNG 코드를 재사용하고 문장별 입력과 이번 평가 일정에 맞게 필요한 부분만 일반화한다. 과거 RSNA trainer CLI의 고정 manifest·매 epoch 전체 validation·선택 규칙을 그대로 실행하지 않는다. 기존 GIoU loss·truncated branch·과거 pipeline은 사용하지 않는다.
+
+사용하지 않는 downloader, test 공개 이력 정리, 과거 접근법의 실행기 전체 정비는 이번 선행조건으로 만들지 않는다. test는 계속 사용하지 않는다.
+
+# Proposed Experiment
+
+## 1. 사전 분할과 잠금
+
+기존 적격성 규칙과 환자당 한 영상·두 원문 finding 선택을 유지한다. train pool 922명에서 D24와 E288의 환자를 제외한 610명을 새 학습 후보로 연결한다. hash·환자·영상 중복 확인으로 수가 달라지면 모델 실행 전에 이유와 실제 수를 기록한다.
+
+- **T305:** 610명의 절반을 기존 share-group×multi-box 층에 비례 배분하고 seed 20260930의 hash 순서로 선택한다. 각 환자의 두 문장을 모두 사용한다. 작은·희귀·복수 영역 사례를 제거하지 않는다. 절반을 먼저 사용하는 이유는 직접 SFT와 후보의 가능성을 비교하면서 후속 데이터 규모 효과를 검증할 나머지를 보존하기 위해서다.
+- **V96:** 기존 E96을 개발 validation으로 사용한다. 그 안의 비례 층화 V48을 LR·checkpoint·모듈형 threshold 선택에 사용한다. V48은 독립 평가가 아니다.
+- **H192:** 기존 E288 중 미생성 192명을 조건부 pilot 평가 집단으로 보존한다. 원래 공동 요청 조건은 실행하지 않는다. 새 후보·선택 규칙·parser를 고정한 뒤에만 연다.
+- **F120 및 test:** 사용하지 않는다. 남은 학습 후보 305명도 이번 pilot에서 자동 추가하지 않는다.
+
+새로 사용하는 train 문장에 시간 비교·번역·영역 대응의 명백한 부적격 여부를 출력에 눈가림해 검토한다. 제외는 사전 규칙으로만 적용하며 수와 이유를 기록한다. 쌍을 사용할 수 없다고 유리한 다른 쌍으로 교체하지 않는다. 표본·GT·입력 hash·선택 확률·분할을 private manifest에 잠근다.
+
+## 2. 동작 확인
+
+T305에서 층을 포함한 8개 환자 쌍으로 학습 입력·target·mask·gradient·저장·재개를 검사한다. 이 자료는 학습 자료이며 overfit 결과를 일반화 근거로 쓰지 않는다.
+
+필수 검사는 prefix/tensor 일치, LoRA 초기 항등·base 동결, CE 수치 대조, 대조 가중치 0의 환원, 문장과 ID 교체 fixture, effective-batch 평균·gradient accumulation, 중간 optimizer step 재개다. parser·coordinate·matching 및 protocol 변조 거부도 확인한다.
+
+현재 모델의 긴 문장·복수 box를 포함해 메모리를 측정한다. 입력 길이 초과 사례를 조용히 자르거나 제외하지 않는다. CPU 준비만 완료하고 끝내지 않으며, 실제 blocker가 없다면 GPU baseline 학습으로 진행한다.
+
+## 3. 강한 직접 SFT B
+
+M0에서 시작해 언어층 LoRA rank16/alpha32/dropout0.05, frozen bf16 base, AdamW weight_decay0.01, gradient clip1, assistant JSON+EOS CE를 사용한다. optimizer 세부값과 target layer는 기존 검증 판본을 유지한다.
+
+학습 prompt는 기존 I-short이고 target label은 요청의 qA 또는 qB다. 모든 GT box를 기존 결정적 좌표 정렬로 직렬화한다. 설명문·합성 reasoning·teacher 예측은 추가하지 않는다.
+
+seed17에서 LR 1e-4와 2e-4 두 trajectory를 5 epoch 학습한다. effective batch는 8환자 쌍, 즉 16 positive 문장이다. T305라면 epoch당 39 updates, trajectory당 195 updates다. 마지막 불완전 batch도 정확히 정규화한다. microbatch는 실측으로 정한다.
+
+V48의 두 문장 생성은 epoch2·5에만 수행한다. 각 LR에서 epoch5−epoch2 F1@0.3이 0.02 이상이고 동일 V48 CE가 5% 이상 감소하면 두 LR 모두 epoch8까지 한 번 연장하고 epoch8을 평가한다. 기존 schedule의 연장 구간을 명시적으로 사용하며 이미 지나간 LR을 다시 쓰지 않는다.
+
+V48 평균 F1@0.3으로 LR·checkpoint를 선택하고, 동률은 F1@0.5, 낮은 invalid, 이른 checkpoint 순으로 정한다. 선택된 B를 V96에서 평가한다. 계속 상승 중인 baseline이면 이후 결과를 수렴한 baseline 대비 개선으로 표현하지 않는다. 그 경우 pilot은 불확정으로 제한하고 full 진입을 보류한다.
+
+B의 출력 valid율이 95% 미만이거나 미해결 truncation이 2%를 넘으면 새로운 의미 대조 학습을 시작하지 않는다. 동작 검사로 설명되지 않는 실패를 보고하고 현재 결과를 형식 문제와 구분한다.
+
+## 4. 최소 개입 M과 대조 C
+
+두 군은 선택된 B의 동일 adapter에서 시작한다. optimizer는 두 군 모두 새로 초기화한다. LR은 선택 LR의 0.1배로 고정하고 같은 3 epoch 상당의 positive presentation을 수행한다. seed와 환자 쌍 순서는 동일하게 고정한다.
+
+환자 쌍을 `(qA, YA), (qB, YB)`라 하자. 대조 적용 자격은 YA와 YB 사이 모든 cross-IoU가 0.1 미만인 것이다. overlap 또는 동일 집합인 쌍은 두 군 모두 CE 학습에 남기되 대조항만 0으로 한다. 이 필터의 빈도·소견·box 수 분포를 기록한다. 적용 사례가 없으면 M을 무의미하게 실행하지 않고 이 설계의 적용 불가로 끝낸다.
+
+`ell(q,Y)`는 해당 영상과 문장 q를 입력했을 때 동일 target 문자열 Y의 assistant token 평균 log-likelihood다. target에는 JSON과 EOS가 포함된다. 정답 ID·출력 길이로 맞고 틀림을 구분하지 못하도록, YA를 평가하는 두 prompt에는 모두 YA의 동일 출력 ID를 지시한다. YB도 대칭으로 처리한다.
+
+`L_pair = 0.5 * [relu(0.1 - ell(qA,YA) + ell(qB,YA)) + relu(0.1 - ell(qB,YB) + ell(qA,YB))]`
+
+`L_M = L_CE + 0.1 * mean_patient(L_pair)`이며 비적격 환자는 L_pair=0이다. 계수·margin을 이번 pilot에서 탐색하지 않는다. C는 동일 CE만 사용한다. 차이는 추가 문장 조건부 항뿐이다. likelihood는 teacher forcing의 전체 target에서 계산하며 과거 truncated branch 최적화를 사용하지 않는다.
+
+이 항은 annotation 대응의 상대적 선호를 학습한다. 해당 문장이 영상에서 거짓이라는 임상 label이나 다른 병변이 없다는 label을 만들지 않는다. likelihood 개선만으로 시각적 grounding 향상을 판정하지 않는다.
+
+## 5. 계산량 대조
+
+가능성 탐색 전에 동일 T 입력·동일 장치 조건의 안정 구간에서 M/C의 GPU 학습 시간 비율 r을 측정한다. loading·validation을 제외한 학습 시간과 forward/backward token 수를 함께 기록한다.
+
+C trajectory는 M과 같은 positive presentation 시점의 checkpoint를 보존한 뒤 `ceil(r × M_updates)`까지 이어 C_compute를 만든다. 기준 시점부터 추가한 update 수가 아니라 B 이후 총 update 수에 r을 적용한다. 같은 T305를 반복하며 annotation을 늘리지 않는다. 실제 누적 학습 시간이 M과 5% 이상 다르면 더 저렴한 C 쪽을 update 단위로 보완해 비용 차이를 좁힌다. C에 더 많은 비용이 들어간 경우에는 보존하고 보수적 비교로 표시한다.
+
+M의 학습 비용이 C의 3배를 초과하면 이번 설계의 비용 기준 미달로 기록한다. 이는 실행 시간 상한이 아니라 효과와 함께 판단할 방법 비용 기준이다. 수치 오류·OOM은 비용 실패와 구분한다.
+
+M·C·C_compute는 고정 endpoint에서 V96을 평가한다. 결과를 보고 M checkpoint·lambda·margin을 새로 고르지 않는다.
+
+## 6. 조건부 H192와 pilot 종료
+
+V96에서 M−C 및 M−C_compute가 모두 양수이고, 두 차이 중 작은 점추정치가 0.025 이상이며, 그 차이의 97.5% CI 상한이 0.05 이상일 때 H192를 검토한다. 정확도·FP·비용 guardrail을 먼저 통과해야 한다.
+
+V96 paired 분산으로 H192에서 예상되는 CI 반폭을 계산한다. 97.5% 반폭이 0.05 이하로 예상되어 효과 0.05에 관한 판단을 개선할 수 있을 때만 잠긴 M·C·C_compute의 H192를 한 번 생성한다. 조건을 만족한 명확한 양성 pilot도 같은 조건으로 H192에서 점검한다. decision artifact를 먼저 저장하고 요청을 생성한다.
+
+H192는 환자별 두 문장×세 모델로 최대 1,152건이다. 문헌 수치와 직접 비교하지 않고 같은 evaluator로 평가한다. V96과 H192는 별도로 보고하며 선택에 사용한 V96을 합쳐 독립 유의성을 주장하지 않는다. H192 결과를 본 뒤 학습·threshold·prompt를 바꾸지 않는다.
+
+이번 규모 확대는 미리 정한 pilot의 정밀도 확인이다. method_stage=full 전환이 아니다. T610, 여러 seed, F120 및 다른 데이터셋은 실행하지 않는다. 결과 리뷰가 후속 full 계획 여부를 결정한다.
+
+## 7. GPU·예상 시간·재개
+
+실행 직전 nvidia-smi로 허용 장치와 물리/논리 대응·여유 메모리를 확인한다. 여유가 큰 GPU부터 배정한다. 학습은 독립 LR 또는 M/C를 두 GPU에 나눈다.
+
+기존 학습은 대략 10–12GiB급이었으므로 학습 프로세스 두 개와 각각 2GiB 여유를 같은 24GB GPU에 넣을 수 있다고 가정하지 않는다. 먼저 microbatch1과 유망한 microbatch2를 짧게 비교한다. gradient accumulation·effective batch·결과 조건은 유지한다. 전체 메모리와 처리량이 허용할 때만 학습 동시성을 높인다.
+
+추론은 기존 총4-worker의 1.69배 이득을 근거로 우선 후보로 삼는다. 새 adapter와 긴 출력·복수 box를 포함한 D24 요청에서 안전 여유와 공통 token·parser 결과를 확인한다. 조건이 달라졌거나 peak가 증가하면 총2/4 worker를 비교한다. GPU별 실제 점유에 worker당 2GiB를 더한 값이 용량 이내여야 한다. 처리량 이득이 없으면 총2 worker를 쓰고 근거를 남긴다.
+
+과거 직접 SFT의 16-example update median 12.365초를 적용하면 초기 두 LR의 합계 390 updates는 약1.34 GPU-hours다. 새 문장 길이·대조항·평가 비용에 따라 달라지는 추정이다. iter_039의 5.38 req/min을 적용한 기본 약1,152건 생성은 약3.6시간이다. 짧은 학습 출력은 더 빠를 수 있지만 미리 보장하지 않는다. 기본 전체 5–8시간, H192 포함 8–12시간을 초기 ETA로 두고 동작 확인 실측으로 갱신한다. 임의 종료 deadline은 없다.
+
+GPU별 peak, 학습 examples/s, 생성 req/min, retry 포함 token, 모델 loading 포함/제외 wall, p95 latency와 CPU/RAM/I/O 경합을 기록한다. 실제 동시 처리 latency를 측정하지 않았다면 두 요청 wall의 max를 latency로 부르지 않는다.
+
+checkpoint에는 adapter·optimizer·RNG·학습 위치·누적 token·데이터/소스/config digest를 저장한다. 정기 update와 epoch 경계에 저장하고 immutable 이전 checkpoint를 보존한다. 실행 소유권·원자적 claim·worker별 출력·부분 기록 복구·완료 검증을 갖춘다. 기존 결과·live claim은 삭제하지 않는다.
+
+# Implementation Tasks for Claude
+
+1. 이번 계획, iter_039 리뷰와 반입 manifest를 읽고 이전 GPU 작업의 종료·잠금을 확인한다. 새 branch·commit 관리는 orchestrator에 맡긴다.
+2. 실제 사용할 runner·평가기·build 경로의 provenance, 동시 읽기·부분 행 복구, 단계 gate, retry 비용 집계만 수정한다. 기존 결과를 새 protocol로 덮어쓰지 않는다.
+3. T305/V48/V96/H192의 private manifest를 만들고 환자·영상·pixel hash 분리를 검사한다. F120/test 요청은 만들지 않는다.
+4. 기존 LoRA·target mask·trainer를 문장별 입력에 연결한다. 실제 사용하는 함수와 제외한 RSNA 전용 경로를 보고서에 명시한다.
+5. CE 환원·likelihood·gradient·중간-step 재개·평가 상태 보존을 실제 GPU로 검사한다. 검사 실패를 무시하고 학습하지 않는다.
+6. B의 두 LR와 조건부 연장, M/C/C_compute, 조건부 H192를 사전 decision artifact 순서로 실행한다. 생성을 loss만으로 대체하지 않는다.
+7. MedGrounder 공식 pretrained 경로의 접근·환경·입력 검증이 가능하면 동일 과제의 모듈형 비교를 수행한다. 불가능하면 원인과 미실행 범위를 분리한다.
+8. 별도 parser·matching·환자 bootstrap으로 주요 수치를 독립 재계산한다. 실행 유효성, 성능 개선, 기전 지지, 신규 기여 가능성을 나눠 보고한다.
+
+# Evaluation (성공/실패 기준 포함)
+
+## 지표와 비교
+
+주지표는 기존과 같은 문장별 maximum-cardinality one-to-one matching F1@IoU0.3이다. 환자 안의 두 문장을 평균한 뒤 환자 평균을 사용한다. M−C와 M−C_compute를 공동 주비교로 하고 각각 97.5% patient paired bootstrap CI를 보고한다. bootstrap은 10,000회, seed20260930이다. V96 CI는 모델 선택이 포함된 개발 결과임을 명시한다.
+
+보조 지표는 F1@0.5, recall, FP/문장, 빈 예측, invalid, truncation, union IoU다. 다중 box·작은 box·broad category 공유와 대조 적용 가능 여부를 사전 층으로 보고한다. invalid는 점수0에 포함하며, 공통 valid/EOS subset은 해석 보조로만 쓴다.
+
+문장 구별의 변화는 서로 분리된 GT 쌍에서 정답 쌍 대비 교차 쌍의 생성 대응 점수로 추가 요약한다. 이 지표와 teacher-forced margin은 보조 근거이며 실제 F1을 대신하지 않는다. 그룹 재배정 oracle이나 GT box 제공을 실용 baseline으로 쓰지 않는다.
+
+## 최소 가치와 guardrail
+
+동일 추론 인터페이스에서 F1@0.3의 최소 가치 있는 추가 개선을 **0.05**로 둔다. 이는 현재 base 0.295 수준과 별도 학습·유지 비용을 고려한 이번 투자 기준이며 다른 과제의 고정 문턱이 아니다.
+
+- M−C와 M−C_compute가 각각 0.05 이상이고 해당 97.5% CI 하한이 0보다 높아야 명확한 양성으로 본다.
+- F1@0.5 점추정치 손실은 각 대조군 대비 0.02 이내여야 한다.
+- FP/문장 증가가 0.05를 넘으면 비용 guardrail 실패로 본다. 이는 100문장당 추가 FP 5개를 허용 한도로 정한 연구 투자 기준이다.
+- 최종 invalid/truncation이 2pp 이상 증가하면 양성 판정을 보류한다.
+- M의 추론 GPU 시간은 동일 처리 구성에서 C의 1.10배 이내, 학습 비용은 presentation-matched C의 3배 이내여야 한다. 실제 비용과 정확도의 trade-off를 함께 보고한다.
+
+## 결과별 행동
+
+**양성:** 조건을 충족하면 문장 대조의 제한된 추가 가치가 관찰된 것이다. H192를 실행했다면 H192를 우선 근거로 판단한다. 내부 원인·새 원리·외부 일반화는 확정하지 않는다. 다음 full 계획 전에 강한 모듈형 비교, seed 재현, 차별화할 실패 조건과 validated 승격 근거를 리뷰한다.
+
+**음성:** 학습이 해석 가능하고 중요한 효과 0.05를 CI 상한으로 배제하거나, C_compute가 개선을 설명하거나, FP·비용 악화가 분명하면 현재 대조 설계의 투자를 중단한다. B/C의 유효한 개선과 코드·음성 결과는 보존한다. 다른 loss를 자동 다음 과제로 지정하지 않는다.
+
+**불확정:** baseline이 계속 상승 중이면 적응 부족 가능성을 남긴다. 그 보완은 사전 5→8 epoch까지만 수행한다. 효과 정밀도 부족은 위 H192 조건으로 한 번 보완한다. 이후에도 미해결이면 현재 설계 투자를 보류하고 다른 연구 질문과 기회비용을 비교한다. 유효한 작은 pilot의 불확정을 전체 경량 학습 실패로 일반화하지 않는다.
+
+**실행 실패:** 데이터·mask·좌표·수치·provenance 검사가 실패해 해석 가능한 M/C 비교를 못 했으면 valid_experiment=false다. 코드 검사나 overfit 통과를 방법 성공으로 보고하지 않는다.
+
+# Risks / Checks
+
+- 이번 모집단은 두 양성 소견과 정답 box가 있는 영상이다. 음성 소견·전체 보고서·임상 정상 판별로 일반화하지 않는다.
+- disjoint annotation은 문장 의미가 완전히 배타적이라는 증명이 아니다. 겹치는 쌍은 CE에 유지하고 대조에서만 제외한다. 적용 범위와 제외 분포를 공개 수치로 보고한다.
+- 문장 대조의 이득이 해부학적 단어 prior나 형식 적응에서 올 수 있다. 시각 정보 사용의 내부 원인을 입증했다고 쓰지 않는다.
+- V96은 개발 자료이며 H192도 공식 train에서 보존한 이번 학습 비사용 집단이다. 모델 사전학습 미노출·외부 기관 독립성을 보장하지 않는다.
+- 공개 PadChest 적응 MedGrounder checkpoint를 V96/H192의 비누수 비교군으로 사용하지 않는다. 서로 다른 pretraining과 해상도·confidence 후처리를 숨기지 않는다.
+- 계획 도구와 실제 medgemma 실행 환경을 구분한다. package 조회 실패만으로 모델 환경을 바꾸거나 설치하지 않는다.
+- 새 결과의 정확성과 재사용 안전성에 필요한 수정만 수행한다. 미사용 downloader·과거 pipeline 정비를 반복의 주성과로 삼지 않는다.
+- private 문장·식별자·접근 링크·test 노출 기록을 Git·Telegram·공개 보고서에 재전파하지 않는다.
+- VinDr 승인 통지 전 다운로드·평가·반복 질문을 하지 않는다.
+
+## 대규모 GPU 필요 후보
+
+문장 조건부 영역 집합의 구별이 경량 언어층 적응 이후에도 중요한 한계로 남으면, vision encoder와 언어층을 함께 학습하는 다기관 문장–영역 post-training을 후보로 보존한다. 다양한 양성·음성·중첩 소견과 큰 해상도 학습은 현재 두 GPU보다 큰 자원이 필요할 수 있다. 이번 pilot은 그 필요성을 증명하지 않으며, 직접 SFT·모듈형 대안 이후의 실제 잔여 문제를 확인한 뒤 투자 가치를 판단한다.
+
+# 계획의 근거 (GPT 조사 노트)
+
+## 새로 확인한 것
+
+- GOAL, GPT 사용량·보고 지침, INDEX, LIMITATIONS의 대상 항목, iter_039 plan/review.json/review.md, 관련 CODE_ASSETS와 실제 코드를 확인했다. iter_012 직접 SFT 결과, iter_014의 기각 범위, iter_037·038의 후속 판단도 확인했다.
+- iter_039는 valid_experiment=true, blocking_issues=[]다. E96 I-long F1@0.3=0.295139, 95% CI [0.232639, 0.359418]이며, 사용법·영상 변환·정답 연결·독립 평가 검증이 있다. 공동 결합 원인을 확정하지 않고 문장별 성능 문제를 pilot 근거로 사용한다.
+- selection_summary.json의 train 적격 pool은 922명이다. D24와 E288을 제외하면 610명이 남는다. 이는 새 train 자료 후보 수이며 실제 새 manifest에서 환자·영상 hash 중복을 확인해야 한다. validation 적격 142명 중 F120은 보존한다.
+- 현재 research HEAD는 ca8be7658402eadbc0c501e877d76b1024ed2683이며 status/diff는 깨끗했다. 새 브랜치의 자동 기반 후보는 과거 승인 iter_006이고, 확인한 SHA는 68117cfd08429ffc3cb9b77e14fb1db3221d86ab다. 필요한 선별 반입 26개 blob과 trainer 의존성을 확인했다.
+- iter_012 lr2e-4_s17/train_log.jsonl의 같은 epoch 내 연속 step에서 median은 12.365초, p90은 12.905초였고 step당 16 examples였다. 새 문장 조건부 학습 비용의 참고값이며 이번 실측을 대신하지 않는다.
+- iter_039의 4-worker E96 처리량은 864건/9,628.29초, 약 5.38 req/min이다. 2→4 worker 비교는 1.69배 개선과 48/48 token 일치를 확인했다. 새 adapter·짧은 출력에서는 다시 안전성과 정합성을 확인한다.
+
+## 선행 방법과 선택의 의미
+
+[Words Aren’t Enough, Their Order Matters](https://aclanthology.org/2020.acl-main.586/)는 referring expression grounding의 negative 대조 학습을 이미 다룬다. 따라서 문장 교체 대조 자체를 새 기여로 주장하지 않는다. 이번 pilot은 알려진 원리의 추가 가치와 적용 조건을 실제 의료 VLM 생성에서 검증하는 단계다.
+
+[MedGrounder 원논문](https://arxiv.org/html/2512.01085v1)과 [공식 구현](https://github.com/aehrc/MedGrounder)은 문장별 0·1·복수 영역 예측, Chest ImaGenome pretrain, PadChest-GR 적응 checkpoint를 구분한다. 공식 train에서 뽑은 이번 개발 집단에는 PadChest로 학습된 checkpoint의 누수 문제가 있으므로 Chest ImaGenome-only 판본만 비누수 모듈형 비교 후보로 삼는다. 서로 다른 사전학습과 annotation budget은 별도로 보고한다.
+
+공식 구현의 공개 weight 링크와 requirements를 확인했지만 실제 weight 다운로드·환경 호환성은 검증하지 않았다. 계획 도구의 Python에서 torch 등이 조회되지 않았으나 이는 과거 GPU 실행 환경과 다르므로 실행 환경의 결함으로 단정하지 않는다. Claude는 지정된 medgemma 환경에서 확인하며 pip install이나 환경 교체를 하지 않는다.
+
+## 남은 불확실성과 종료점
+
+직접 SFT만으로 얼마나 해결되는지, 대조가 실제 영역 선택을 개선하는지, 단순 추가 학습과 구별되는지는 미확인이다. 후보 하나와 강한 CE 대조로 시험하고, 양성이어도 독립 seed·외부 자료·신규성 입증을 별도 full 계획으로 남긴다. 논문은 조사 근거이며 이번 단계에서 사용자 추천으로 처리하지 않는다.
+
+이번 조사는 읽기 전용이었다. 파일 수정, 다운로드, 모델·실험 실행은 하지 않았다.

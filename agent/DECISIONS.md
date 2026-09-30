@@ -1118,3 +1118,33 @@ Claude 계정의 /usage 또는 Settings > Usage에서 제한을 확인한 뒤 �
   - 다음: 공동 결합 loss 투자를 보류하고, 문장별 grounding의 정확도·비용 개선 또는 다른 연구 질문으로 전환할 방향을 선택한다. 이번 리뷰가 확인한 전처리 근거를 반영해 변환 규약 확인이나 같은 E96 재생성을 반복하지 않는다. 다음 deep 계획에서 문장별 독립 처리, 과제별 직접 SFT, MedGrounder류 모듈형 대안을 비교하고 실제 사용상 부족함과 최소 가치 있는 개선 폭을 구체화한다. 이번 observed 근거를 연결하고 경쟁 설명을 구분할 작은 개입이 성립하면 method_stage=pilot으로 별도 계획하되, 성립하지 않으면 GOAL 안의 다른 질문으로 전환한다. E288·F120은 자동 실행하지 않는다. 후속 진단을 택할 경우에는 어떤 결과가 방법 시험과 투자 종료를 가르는지, 필요한 표본·비용·종료 조건을 한 번의 한정 계획으로 명시한다. 실제 사용할 경로의 reuse_issues만 먼저 수정하고 기존 결과·checkpoint·VinDr 대기·MRI 및 reserve 보존을 유지한다.
 - 📁 원본: `agent/runs/iter_039/`
 
+## iter_040 — 문장 대조 grounding pilot (1번째 시도) · 2026-09-30 18:03
+
+- 🧭 **계획** (GPT deep): PadChest-GR에서 강한 직접 SFT를 확보하고 문장–영역 대조 학습의 추가 이득을 같은 학습량·계산량과 비교한다. 최소 방법 pilot이며, 신규 기여와 본격 확대는 결과 리뷰 뒤 판단한다.
+  - 대안: 1) 문장 대조 grounding pilot: 직접 SFT와 계산량 대조를 확보한 뒤 문장 조건부 학습 신호의 추가 가치를 실제 생성으로 시험한다. · 2) 기존 checkpoint의 원인·능력 전이 진단: 이미 여러 인터페이스 진단이 있고 공동 요청은 개별 능력 부족으로 막혔다. 이번에는 새로운 무학습 진단보다 직접 적응·최소 개입의 정보 가치가 높다. · 3) 다른 연구 질문으로 전환: GOAL 안에서 가능하지만 새 자료·정답·사용법 근거를 확보해야 한다. 이번 한정 pilot에서 단순 SFT 이후 추가 가치가 없으면 우선 검토한다.
+  - 1순위 선택 근거: 현재 목표의 blocking 없는 observed 근거와 정상 사용 검사가 확보됐다. 직접 SFT·계산량 대조로 경쟁 설명을 구분하는 작은 학습 개입을 두 GPU에서 시험할 수 있다. 새 데이터 권한이나 추가 유료 자원이 필요하지 않으며, 성공을 자동 full 투자로 연결하지 않는다.
+- ▶ **결정**: 자동 진행 (smart) — 1순위로 진행
+- 💾 **개발 이력 체크포인트** `18fdae2eec4f4ab3605845fdaeafd1959d9d725f`: implementation_finished (검증 승인 아님)
+- 🔧 **Claude** (standard): PadChest-GR 문장별 직접 SFT B는 V96 F1@0.3 0.556(M0 0.098)이었지만 문장 대조 M은 CE만 추가한 C 대비 −0.005(CI [−0.038, 0.027])로 개선이 없어 사전 규칙상 negative이며 H192는 실행하지 않았고, MedGrounder는 환경 문제로 미실행이다. [자체 검증 PASS, 파일 2023개 변경]
+  - 새 브랜치 `approach/query-contrast-grounding` ← 68117cf (68117cf)
+  - ⚠ 권한 거부 8건
+- 🔍 **리뷰** (GPT normal): [CONTINUE / inconclusive] PadChest-GR V96에서 직접 SFT는 F1 0.098→0.556으로 개선됐지만 문장 대조는 CE 대비 −0.005였다. 비교는 유효하나 baseline 수렴·독립 재현은 미확인이라 추가 투자를 보류한다.
+  - 접근법 판단: 현재 endpoint의 문장 대조 효과는 작지만 B의 생성 성능이 계속 상승했으므로 계획상 불확정으로 제한하며, 이 설계의 추가 투자는 보류한다.
+  - 목표 진전: 실제 학습과 생성 비교는 유효하며 직접 SFT의 큰 개발 성능 개선을 확인했다. 문장 대조는 동일 presentation 및 유사 학습 비용의 CE를 넘는 추가 이득을 보이지 않았다. 다만 baseline의 생성 성능이 계속 상승했으므로 원 계획에 따라 전체 pilot 판정은 inconclusive로 제한한다. 일반적인 문장 구별 신호 부족 가설은 약화됐지만 내부 원인은 확정되지 않았다. 독립 평가, 모듈형 비교, 새로운 contribution은 미검증이다.
+  - 판정 범위: PadChest-GR의 두 양성 소견 문장을 가진 T305·개발 V96, seed17, rank16 언어층 LoRA, 직접 SFT 이후 margin 0.1·lambda 0.1의 문장 대조와 추가 CE 비교에 한정한다. 현재 endpoint의 추가 효과는 작지만 baseline 수렴은 확인되지 않았다. 모든 문장 대조 학습·의료 grounding·경량 적응의 실패로 확대하지 않는다.
+  - 재사용 전 수정: pg40_eval.py는 평가 manifest를 selection_lock과 대조하지 않고 평가 코드·GT·결과 digest를 연결하지 않는다. 현재 입력은 리뷰에서 별도로 확인했지만 required_checks 완료 주장은 정정해야 한다.
+  - 재사용 전 수정: pg40_decide.py는 baseline 상승 조건을 최종 판정에 전달하지 않는다. epoch8 미실행이면 상승 상태를 null로 남기며, C_compute 대비 점추정치가 0 이하라는 이유만으로 negative를 만들 수도 있다. 정밀도·수렴 조건을 원 계획과 일치시켜야 한다.
+  - 재사용 전 수정: 후속 학습은 decision artifact 없이 실행할 수 있고 H192 요청·protocol gate는 임의의 run=true JSON도 허용한다. 결정의 단계·입력·모델·근거 hash를 검증해야 한다.
+  - 재사용 전 수정: pg40_run.verify_completion은 현재 영상 hash와 record의 config/input provenance 전체를 재검사하지 않는다. 현재 완료 자료는 독립 검사에서 일치했다.
+  - 재사용 전 수정: pg40_train.py는 epoch checkpoint를 validation보다 먼저 저장한다. validation 중 중단하면 재개 시 해당 validation이 누락될 수 있다. validation 전후 adapter·optimizer·RNG 보존 검사도 required_checks와 연결해 완료해야 한다.
+  - 재사용 전 수정: 새 train 문장의 출력 눈가림 적격성 검토는 규칙 검사로 대체됐다. 향후 해당 자료를 재사용할 때 정해진 기준으로 검토하고 제외가 필요하면 별도 데이터 버전과 영향 범위를 남겨야 한다.
+  - 재사용 전 수정: build·평가·decision 출력의 단일 소유권과 중단 복구가 일관되지 않다. 실제 재사용 경로에 한정해 원본 보존과 변조 거부를 보완해야 한다.
+  - 추후 개선: 보고서의 학습 peak 9.8GB는 M에 맞지 않는다. M의 실제 peak allocated는 10.567GiB이며 C/B는 9.783GiB였다. 후속 메모리 계획에는 실제 값과 전체 GPU 점유를 사용한다.
+  - 추후 개선: 학습 step_time에는 data wait가 포함되므로 순수 GPU 연산 시간과 구분한다. 실패 실행·검사·validation을 포함한 전체 비용 합계는 별도 정리가 필요하다.
+  - 추후 개선: GPU 여유 순 배정, CPU/RAM/I/O 경합과 p95 latency 기록은 후속 실행 준비에서 보완한다.
+  - 추후 개선: MedGrounder는 환경 의존성 문제로 미실행이다. 이번 내부 대조의 무효 사유는 아니지만 모듈형 대안 대비 우위는 주장할 수 없다.
+  - 추후 개선: V96 모델 선택 편향, 단일 seed, 사전학습 노출과 외부 일반화의 불확실성은 유지된다.
+  - 다음: 현재 문장 대조 설계의 추가 투자를 보류하고, 확보한 직접 SFT와 모듈형 대안의 실용 가치 비교로 전환할지 결정한다. 다음 deep 계획에서는 기존 B/C checkpoint를 사용하는 한정 비교와 GOAL 안의 다른 질문을 비교하고, 정확도·추론 비용·annotation budget 중 필요한 이점과 종료 기준을 먼저 고정한다. 모듈형 비교를 선택하면 현재 환경에서 실행 가능한 공식 경로와 데이터 중복을 확인하고, 불가능하면 환경 정비만으로 반복을 소비하지 말고 다른 후보로 전환한다. 원 계획의 CE 감소 조건을 충족하지 않았으므로 epoch8·T610·추가 seed·H192를 자동 실행하지 않는다. 새로운 투자를 결정할 때만 실제 사용할 코드의 reuse_issues를 함께 보완한다. 기존 결과·RSNA checkpoint·VinDr 승인 대기·F120 및 MRI reserve 보존을 유지한다.
+- 🏁 **마일스톤**: 문장별 grounding은 직접 SFT로 크게 개선됐지만 문장 대조의 추가 이득은 확인되지 않았다 — JOURNEY.md
+- 📁 원본: `agent/runs/iter_040/`
+
