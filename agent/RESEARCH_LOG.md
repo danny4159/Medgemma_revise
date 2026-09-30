@@ -16464,3 +16464,354 @@ M0 strict parser 실패를 수정한 verify_v2는 기존 pipeline 평가값을 �
 D 자료에서 입력·좌표·후처리와 처리량을 확인하고 설정을 고정한 뒤, 보호된 reserve를 열지 않는 개발 비교를 수행한다. 정확도·FP·latency·메모리에서 무엇이 다음 투자 선택을 바꿀지와 종료 조건을 먼저 정한다. 비교가 실용적 잔여 이점을 보여줄 때만 최소 방법 시험을 검토한다. 이점이 없거나 한정 비교 뒤에도 중요한 판단이 남으면 track을 보류하고 GOAL 안의 다른 질문으로 전환한다.
 
 iter_041 비용 정정은 원 판정과 blocker를 보존한 별도 결과로 처리한다. 원자료로 충분한지 먼저 확인하고, 필요할 때만 최소 재측정 비용을 비교한다. 이번 21쌍의 추가 진단이나 joint SFT·새 loss를 이미 결정된 후속 과제로 두지 않는다. VinDr 승인 통지 전 다운로드·외부 평가는 하지 않으며 RSNA 자산과 H192/F120/test/MRI reserve를 유지한다.
+
+
+## iter_044 GPT PLAN [문장 grounding의 모듈형 대안 비교 / proceed] — 2026-10-01 01:33:33
+
+# 요약
+
+- **이번에 할 일:** MedGrounder를 격리 환경에 구성하고 기존 직접 SFT C와 문장 grounding의 정확도·오검출·추론 비용을 비교한다.
+- **필요한 이유:** 직접 SFT의 개선은 확인했지만 강한 시각적 모듈형 대안 대비 투자 가치는 아직 모른다.
+- **확인할 기준:** 고정 V96의 paired 정확도와 동일 작업량의 반복 비용 측정이다. 실용적인 C 이점이 있을 때만 동일 annotation budget의 후속 비교를 검토한다.
+- **주의·다음:** 이번은 diagnostic이다. 비적응 MedGrounder 대비 우위는 새 방법이나 VLM 고유 능력의 증명이 아니다. 경계가 남으면 track을 보류한다.
+
+# Current Understanding
+
+iter_040~043의 원 계획·리뷰를 이어받는다. C는 V96에서 F1@0.3=0.57795, F1@0.5=0.29115, FP/문장=0.55208이다. 문장 대조의 추가 이득은 입증되지 않았고 baseline 수렴도 미확인이다. 공동 요청 손실은 크지만 joint 형식 직접 SFT와 모듈형 비교는 미실행이다. presence gate 이후의 방법 필요성과 환자별 영상 구별 문제도 사전 투자 기준을 충족하지 못했다.
+
+**유지:** GOAL, MedGemma 1.5 revision, RSNA SFT·detector 자산, VinDr 승인 대기, 기존 split·원 판정·checkpoint, H192/F120/test/MRI reserve를 유지한다. 과거 일회성 보완을 반복하지 않는다.
+
+**변경:** 새 loss·새 prompt 진단 대신 실제 모듈형 비교를 수행한다. 환경 구성은 최신 RESOURCE_POLICY의 승인에 따라 격리 경로에서 진행한다. 과거 iter_040의 설치 금지는 적용하지 않는다.
+
+**보류:** joint SFT, text-only SFT, 21쌍 추가 진단, negative SFT, T610·추가 seed·reserve 개방을 실행하지 않는다.
+
+이번은 새 비교 계획이며 iter_043의 재실행이 아니다. iter_041 비용 정정 부분만 기존 계획을 기준으로 하는 한정 보완이다. 기준은 `agent/runs/iter_041/plan.md`, SHA256 `e9786ff168532ae432a03be8aa9d64e84308bc69ff08d8cd03e3002fd28eb87f`다. 원 가설·정확도·비용 문턱은 유지하고, 잘못 연결된 CI에 대한 판정만 별도 경로에 명시한다.
+
+# Strategy Check / 연구 방향 판단
+
+중요한 사용 과제는 영상과 사용자가 지정한 소견 문장으로부터 해당 영역을 반환하는 것이다. 임상 진단·보고서 생성·부재 판별 전체를 이번 양성 문장 과제로 대표하지 않는다.
+
+사용자 정책의 세 선택을 비교한다.
+
+1. **iter_041 정정·joint SFT:** timing 원자료는 남아 있고 정확도 관찰은 유효하다. 그러나 조건당 한 번 실행한 비동기 큐에서 반복 실행의 변동성을 복원할 수는 없다. 올바른 정정 기록은 저비용으로 남길 수 있지만, 새 timing과 joint 학습까지 투자해도 모듈형 대안이라는 질문이 남는다.
+2. **강한 모듈형 비교군 확보 — 이번 선택:** 공식 모델과 가중치 경로가 있고 격리 설치도 승인됐다. 기존 C 출력을 재사용하면서 실제 모듈형 모델의 성능·비용을 측정하면 track 유지 여부를 직접 바꿀 수 있다.
+3. **track 보류·전환:** 최근 진단의 누적 기회비용을 고려하면 타당한 종료 선택이다. 다만 지금은 중요한 비교 공백을 실제로 해소할 실행 경로가 있어 한 번의 고정 비교를 우선한다. 비교가 불확정이어도 주변 진단으로 연장하지 않는다.
+
+`language-conditioned-grounding`을 유지한다. iter_038 setup, iter_039 진단, iter_040 방법 pilot, iter_041~043 진단의 누적 이력을 이어받는다. 과거 생성 wall 약4.21시간, iter_040 학습 약2.54 GPU-hours, iter_041 주요 큐 약1.123 GPU-hours, iter_043 launcher wall 약68.82분은 포함 범위가 달라 단일 총비용으로 합산하지 않는다.
+
+해결된 질문은 직접 적응의 효과, 현재 공동 형식 손실, 단순 retrieval 이상의 C 성능이다. 남은 핵심은 강한 모듈형 대안 대비 실용적 이점이다. 이번 비교 후 허용되는 다음 선택은 적응 예산을 맞춘 한정 baseline 비교 또는 track 보류·전환이다. 새 loss를 기본 다음 행동으로 두지 않는다.
+
+# Hypothesis
+
+- **H_modular:** 문장 조건부 모듈형 모델이 C의 정확도를 거의 유지하면서 추론 비용을 크게 줄인다.
+- **H_residual:** C는 모듈형 모델보다 연구 투자를 정당화할 정확도 이점을 보이고 비용도 허용 범위에 있다.
+- **H_budget:** C의 우위는 PadChest T305 적응 여부로 설명될 수 있다. 이번 비적응 비교만으로 이 설명을 제거하지 못한다.
+
+공식 모델 실행 자체가 목표는 아니다. 다음 투자 선택을 바꾸는 비교가 목표다.
+
+# Limitation Evidence / Correct Usage Checks
+
+`padchest-sentence-grounding-and-joint-retention`의 observed 근거와 iter_040~043 원 리뷰를 연결한다. iter_041에는 비용 결합 판정 blocker가 있으므로 이번 계획은 이를 이용해 method gate를 통과하려는 계획이 아니다. `experiment_role=diagnostic`, `method_stage=none`이다.
+
+C의 모델·adapter·공식 chat template·greedy·I-short·caps 1000/2000/4000을 유지한다. 기존 C adapter digest는 `419ae81f5ef455d39742b158537373da6e26061b362d13205ab28b4a50905ba8`이며 원본 protocol과 실제 파일을 다시 연결한다.
+
+MedGrounder 정상 사용 검사는 다음을 포함한다.
+
+- 공식 코드 revision과 두 checkpoint의 정확한 파일·hash·출처를 잠근다. `medgrounder_pretrain_imagenome.pth`와 `medgrounder_finetune_ms.pth`의 학습 범위를 확인한다. 이름만으로 검증 완료를 선언하지 않는다.
+- PadChest 적응 checkpoint는 V96가 official train에서 추출됐으므로 주비교에 사용하지 않는다. 사전학습 전체의 환자 미노출까지 증명했다고 표현하지 않는다.
+- 공식 evaluation 경로를 기준으로 한다. notebook의 resize·normalization과 혼합하지 않는다. 평가 wrapper는 D24/V96 manifest만 읽고 공식 test loader를 만들지 않는다.
+- uint16 원본의 bit depth·범위와 `/256` 변환을 확인한다. Pillow의 mode 차이로 RGB 직접 변환 시 saturation이 생기지 않도록 기존 iter_039의 검증된 pixel 근거와 대조한다. 출력 점수로 windowing을 선택하지 않는다.
+- 공식 validation transform의 resize·padding·normalization을 사용한다. 실제 integer resize 크기와 padding을 기록해 original normalized xyxy로 역변환한다.
+- 실제 tensor의 cxcywh, confidence softmax, threshold 적용 후 WBF 순서를 검증한다. 주석의 xyxy 설명만 믿지 않는다. WBF 내부의 공식 clipping은 기록하며 추가 clipping으로 오류를 감추지 않는다.
+- checkpoint 부재·키 불일치·비정상 tensor·누락 입력은 fatal error다. 공식 evaluator의 random initialization fallback과 자료 누락 후 계속 진행하는 동작은 허용하지 않는다.
+
+공식 출처는 [저장소](https://github.com/aehrc/MedGrounder), [평가기](https://raw.githubusercontent.com/aehrc/MedGrounder/main/evaluation.py), [dataset](https://raw.githubusercontent.com/aehrc/MedGrounder/main/dataloaders/dataset.py), [모델](https://raw.githubusercontent.com/aehrc/MedGrounder/main/model/medgrounder.py), [WBF](https://raw.githubusercontent.com/aehrc/MedGrounder/main/utils/box_utils.py)다.
+
+# Contribution Path / Baselines / Reuse
+
+가장 가까운 방법은 MedGrounder의 모듈형 문장 grounding이다. [원논문](https://arxiv.org/html/2512.01085v1)은 문장별 복수 영역과 비groundable 문장을 다루며, 이번 비교는 그 전체 주장 중 양성 문장 위치 출력만 평가한다.
+
+비교군은 다음과 같다.
+
+- **C:** iter_040 seed17 직접 추가 CE checkpoint. 기존 V96 출력 192건을 주정확도 결과로 재사용한다. timing 재생성 결과를 더 좋은 성능 후보로 선택하지 않는다.
+- **MG-P:** Chest ImaGenome pretrained checkpoint.
+- **MG-MS:** MS-CXR adapted checkpoint. PadChest 학습이 없다는 출처 확인을 선행한다.
+- **MG-selected:** D24에서만 선택한 checkpoint·threshold 조합. 주대조는 C와 MG-selected다. MG-P와 MG-MS의 잠긴 운영점도 V96에서 모두 보고한다.
+
+두 모델에 같은 원본 영상과 전체 문장을 제공한다. C에 필요한 출력 지시와 MG의 raw phrase 입력은 각 모델의 정상 인터페이스다. 원본 해상도·모델 입력 해상도·사전학습·T305 적응·D24 선택량·추론 비용을 표로 남긴다. 동일 epoch·동일 annotation budget·zero-shot 공정성으로 포장하지 않는다. oracle는 사용하지 않는다.
+
+재사용은 `reuse_assets`의 14개 파일로 제한한다. 현재 HEAD `b50aa230a86c6d5b6c6b280fe718170ce4ecf220`와 파일 blob 일치를 확인했다. 새 branch의 기반은 자동 선택하고 필요한 모듈은 선별 반입한다. `pg43_run`과 순수 geometry·metric 경로는 제한 승인 범위를 사용한다. `pg43_eval.verify_import`는 protocol/config 검증을 보완한 뒤 helper로 재사용하며 과거 main CLI는 실행하지 않는다. `pg41_verify`는 C의 순수 JSON 보조 채점에만 사용한다. 과거 runner·trainer 전체를 정비하지 않는다.
+
+# Proposed Experiment
+
+## 1. 환경·출처 구성
+
+`research/results/environments/medgrounder_iter044/`에 전용 환경을 만들고 외부 코드·가중치·추가 cache는 `research/results/iter_044/external/` 아래에 둔다. 기존 medgemma 환경과 hf_cache는 변경하지 않는다. 설치 전 디스크·드라이버·CUDA/PyTorch 호환성을 확인한다.
+
+공식 [requirements](https://raw.githubusercontent.com/aehrc/MedGrounder/main/requirements.txt)를 출발점으로 Python 3.11, torch 2.5.1/torchvision 0.20.1, transformers 4.49.0 등의 호환성을 확인한다. 충돌은 전용 환경에서 해결하고 변경 이유를 남긴다. 절대 Python 경로로 import·GPU 가용성·작은 실제 입력을 검사한다.
+
+외부 Git full SHA, checkpoint 배포 URL·파일 ID·SHA256, text encoder revision, package 목록, 이용 조건과 학습 데이터 출처를 보존한다. 공개 코드의 라이선스 표기가 불명확하면 확인 범위를 그대로 남기며 코드·가중치 재배포 권한을 추정하지 않는다. 실제 추가 접근 승인이나 금지 조건이 있을 때만 해당 범위를 보류한다. 미설치를 과학적 제외 근거로 쓰지 않는다.
+
+두 checkpoint 중 하나가 실행 불가하면 공식 배포·호환성 경로의 실제 시도와 오류를 기록한다. 가능한 모델의 결과는 제한된 비교로 남길 수 있지만 빠진 강한 비교군을 숨겨 C의 방법 필요성을 승인하지 않는다.
+
+## 2. 고정 자료·평가기
+
+`results/iter_043/data/manifest_private.json`의 D24/V96와 연결된 iter_039·040 selection lock을 사용한다. T305는 학습하지 않고 provenance·비중복 확인에만 사용한다. D24는 48문장, V96는 192문장이다. 기존 환자당 두 문장·전체 GT·층·희귀 및 복수 영역 사례를 유지한다.
+
+원본 metadata, 환자·study·영상·pixel hash, C 요청·출력·adapter, 외부 코드·checkpoint, 새 평가 소스·의존성·판정 규칙을 모델 출력 평가 전에 잠근다. reserve는 ID 제외 확인에 필요한 기존 요약만 사용하고 새 영상·GT·출력을 열지 않는다.
+
+공통 주평가는 original normalized xyxy에서 수행한다. C 출력은 기존 canvas affine으로 역변환하고 MG 출력은 실제 640 transform affine으로 역변환한다. 기존 C canvas 평가와 original 좌표 평가의 matching·F1 불변성을 검사한다. official MedGrounder aggregate metric을 기존 F1 대신 사용하지 않는다.
+
+## 3. 동작 확인
+
+D24 중 기존 층을 반영한 고정 D8으로 양 모델의 실제 입력·출력을 검사한다. 공식 MG 함수 호출과 wrapper tensor·출력의 일치, checkpoint strict load, confidence·WBF·좌표 왕복, empty·복수 box·비정상 box fixture를 검사한다. category mapping을 이유로 환자를 조용히 제외하지 않는다.
+
+C는 기존 출력과 token·parser·EOS를 대조한다. MG는 batch 변경 시 box·score 오차와 threshold 통과 여부·최종 matching 정합성을 검사한다. 작은 수치 오차가 출력 집합을 바꾸면 더 빠른 구성을 자동 선택하지 않는다.
+
+중단·재개·변조 검사는 실제 사용할 경로에서 수행한다. 준비 성공만으로 valid_experiment=true를 선언하지 않는다.
+
+## 4. 가능성 탐색과 운영점 잠금
+
+두 MG checkpoint를 D24의 48문장에서 실행한다. raw logits·5개 query box를 저장하고 threshold 0.2/0.4/0.6/0.8을 공식 순서로 적용한다. WBF는 `run_wbf=true`, IoU 0.1, skip threshold 0.0, NMS false를 유지한다. threshold별 재평가는 저장 출력으로 수행한다.
+
+각 checkpoint에서 D24 환자 평균 F1@0.3 최대 운영점을 선택한다. 동률은 F1@0.5, 낮은 FP/문장, 높은 threshold 순이다. 두 checkpoint의 대표 선택도 같은 순서를 쓰고 완전 동률이면 MG-MS를 선택한다. 공식 threshold 0.8 결과도 보조 표로 보존한다. D24가 양성 문장 집단이라는 점과 이 선택으로 부재 거부 성능을 주장할 수 없음을 명시한다.
+
+정확도가 낮다는 이유로 정상 동작한 MG를 중단하지 않는다. 기술 gate 통과 후 두 checkpoint의 V96 384문장 출력을 모두 생성한다. V96를 보고 checkpoint·threshold·전처리·WBF를 바꾸지 않는다.
+
+## 5. GPU 구성·비용 본측정
+
+실행 직전 nvidia-smi로 허용 GPU 0,1의 실제 여유·물리/논리 대응을 확인한다. 두 MG checkpoint의 독립 D 작업은 두 GPU에 병렬 배정할 수 있다.
+
+D24에서 C는 총2 worker와 총4 worker를 비교한다. MG-selected는 GPU당1 worker의 batch1과 batch4를 우선 비교한다. batch4가 안전하지 않으면 batch2로 낮춘다. batch 확대가 이득이 없고 메모리가 허용하면 GPU당2 worker를 한 번 비교한다. 이 조건부 세 번째 MG 구성은 48 forward를 추가하며 실행 전에 이유를 기록한다.
+
+전체 처리량, GPU별 allocated/reserved peak와 전체 점유, 긴 출력 p95, OOM·오류, CPU/RAM/I/O를 기록한다. 동시 peak와 다른 프로세스 점유에 worker당 최소2GiB를 더해 실제 용량 안에 들어야 한다. C의 과거 약17.8GiB 관측을 MG나 새 batch의 안전성으로 대신하지 않는다. 더 적은 worker가 빠르거나 필요한 경우 실측 이유를 남긴다.
+
+비용 비교는 선택된 두 시스템의 동일 V96 작업으로 한다. 각 작업은 96환자×두 문장이다. 모델을 준비하고 고정 D 입력으로 warm-up한 뒤, 6개 paired block에서 C와 MG를 순차 실행한다. 블록별 선행 시스템은 C/MG/C/MG/C/MG로 균형화한다. 시스템별로 두 GPU 전체를 사용할 수 있고 D에서 고른 구성을 유지한다. 두 시스템을 동시에 돌려 서로의 처리량을 오염시키지 않는다.
+
+각 block은 동일 환자 순서와 동일 입력 집합을 사용한다. 읽기·정상 전처리·dispatch·GPU 실행·후처리 완료까지 end-to-end wall을 측정한다. 양쪽에 동일하게 decoded-image cache를 허용하되 prediction·시각 feature·prefix 결과 cache는 사용하지 않는다. 전처리 제외 model-only 시간과 cold loading 시간도 따로 보고한다. 필요 없는 부가 호출을 MG에 넣거나 C의 길이를 줄이지 않는다.
+
+비용 단위는 다음으로 고정한다.
+
+- throughput: 전체96환자의 두 문장이 모두 완료될 때까지의 wall로 계산한 환자/분.
+- device-seconds: 각 GPU의 측정 작업 시작부터 해당 GPU의 마지막 작업 완료까지 장치 구간을 합산한다. 같은 GPU의 worker overlap을 중복 합산하지 않는다. 요청 active interval union도 보조로 보고하되 둘을 혼용하지 않는다.
+- latency: 환자 작업 dispatch부터 두 문장의 후처리가 끝날 때까지 실제 측정한다. 요청 두 개의 max를 사후 구성한 값으로 대체하지 않는다.
+- 메모리·token·재시도·오류: 모든 block에서 기록한다.
+
+6개 paired block은 시스템 순서를 각각3번 선행시키면서 실행 변동성을 측정하기 위한 규모다. 각 block의 비용 비율을 log 변환하고 평균±t(5) 기반95% CI를 주구간으로 사용한다. raw block 비율·범위도 공개한다. 이는 고정 V96 workload의 실행 변동성 구간이며 신규 환자·다른 장비 일반화 구간이 아니다. 요청 단위 bootstrap을 device 시간 CI로 대신하지 않는다. 경계가 남으면 추가 block을 실행하지 않는다.
+
+C timing 출력은 원래192개 정확도 출력과 token을 대조한다. 불일치는 임의로 섞거나 좋은 결과를 선택하지 않고 실행 구성 차이로 조사한다. MG 역시 반복별 집합·score 정합성을 확인한다.
+
+## 6. iter_041 한정 정정
+
+`results/iter_044/legacy041_correction/`에 원 plan SHA, review blocker, 원 report hash와 timing 파일 목록을 연결한다. 정확도 수치와 비용 점추정은 유지한다. device 시간·throughput의 유효한 반복 구간은 unavailable로 표시하고 결합 투자 판정은 unresolved로 둔다.
+
+원 기준 1.25 device 비율, 1.20 p95 또는0.80 throughput을 바꾸지 않는다. 이번 MG 비용 문턱으로 옛 joint 판정을 대체하지 않는다. 단회 timing을 복제·환자 resampling해 해결된 것으로 만들지 않는다. 원본 report와 blocking_issues는 수정하지 않는다. 이번에는 I/J 재생성이나 joint SFT를 실행하지 않는다.
+
+회귀검사는 요청 wall 합과 장치 interval union이 다른 fixture, CI 부재 시 양성 판정 금지, 기존 정확도·비용 점추정 불변을 포함한다.
+
+## 7. 규모·시간·재개·독립 확인
+
+기본 신규 forward/생성은2976건이다. MG 후보 D/V480건, 구성 비교 C96+MG96건, timing2304건이다. warm-up·실제 재개 검사·길이 재시도와 조건부 MG 구성48건은 별도 집계한다. 학습량·training seed·epoch는 해당하지 않는다.
+
+과거 C 처리량16.75환자/분 기준 timing 본체는약34분이다. 전체 GPU 실행 초기 ETA는약1–3시간이며 D 실측으로 갱신한다. 설치·다운로드·빌드 시간은 별도 보고하고 임의 deadline을 만들지 않는다.
+
+모든 신규 결과는 `results/iter_044/`에 저장한다. 요청/블록별 고유 ID, 원자적 claim, worker별 출력, source/config digest, 단위 완료와 전체 completion을 사용한다. 실패한 timing block은 원본을 보존하고 기술 실패 사유가 확인된 경우에만 전체 paired block을 새 attempt로 재측정한다. 느리거나 불리하다는 이유로 block을 제외하지 않는다.
+
+이번 비교는 개발 자료의 고정 진단이며 독립 확인은 없다. H192/F120/test를 자동 개방하지 않는다. 동일 T305 적응 비교와 방법 pilot은 리뷰 후 별도 계획이다.
+
+# Implementation Tasks for Claude
+
+1. 기준 기록과 reuse manifest를 확인하고 선별 반입 코드의 현재 호출 경로를 검증한다.
+2. 외부 모델을 격리 환경에 구성하고 checkpoint·dependency·입력 provenance를 잠근다. 실패 시 실제 명령·오류·복구를 보존한다.
+3. 기존 C import 검증을 보완하고 공통 original-coordinate evaluator와 독립 검증기를 연결한다.
+4. 공식 MG 평가 함수를 사용하는 manifest wrapper를 구현한다. random fallback·silent sample drop·test loader 호출을 차단한다.
+5. D24 운영점·자원 선택과 V96 비교를 수행하고, 잠긴 구성으로6개 paired timing block을 완료한다.
+6. iter_041의 비용 판정 정정 artifact를 별도 생성한다. 옛 소스 전체 복구·정비는 하지 않는다.
+7. 정확도·FP·비용 CI·실행 무결성 및 decision을 독립 재계산한다. 평가 산출물 묶음 digest와 completion을 마지막에 확정한다.
+8. 보고서에 실제 표본·checkpoint·환경·요청 수·비용·실패·판정·다음 투자 범위를 남긴다. 코드 작성·환경 성공·유효 비교·방법 기여를 구분한다.
+
+# Evaluation (성공/실패 기준 포함)
+
+## 지표와 불확실성
+
+주지표는 문장별 최대 cardinality 일대일 matching F1@IoU0.3을 환자 안에서 평균한 뒤 환자 간 평균한 값이다. F1@0.5, recall, FP/문장, empty, invalid, C의 EOS·truncation과 기존 small/multi-box/share-group 층을 함께 보고한다. MG의 모델 한계인 query 수를 숨기거나 GT를 그 수에 맞춰 자르지 않는다.
+
+C−MG-selected의 F1@0.3/0.5와 FP 차이는 환자 paired bootstrap10000회, seed4401, 각97.5% CI를 사용한다. 두 MG checkpoint의 보조 비교는 같은 분모로 보고하며 유리한 쪽을 V96에서 재선택하지 않는다. 비용은 앞 절의6개 paired block과95% CI를 사용한다. 개발 자료 선택 편향은 CI로 해소되지 않는다.
+
+## 사전 가치 기준
+
+정확도 보존 폭0.03은 C≈0.578의 약5% 상대 차이다. 새로운 투자 후보의 최소 F1 개선0.05는 약9% 상대 개선이다. FP 증가 허용0.10/문장은 열 문장당 한 개 추가 오검출이며 현재 C의0.552/문장과 함께 보고한다. 비용2배는 장기 inference 부담을 고려한 이번 연구 투자 경계다. 임상 허용 기준이나 모든 과제의 공통 문턱이 아니다.
+
+**모듈형 대안 지지:** MG−C의 F1@0.3 및0.5 CI 하한이 모두−0.03 이상이고, FP/문장 차이의 CI 상한이0.10 이하이며, MG/C device-seconds 비율 CI 상한≤0.50, throughput 비율 CI 하한≥2.0, p95 latency 비율 CI 상한≤1.20이면 현재 사용 목적의 모듈형 대안을 지지한다. 내부 grounding 방법 투자를 보류하고 track 전환을 권고한다. 이 결과를 임상적으로 충분한 정확도의 증명으로 부르지 않는다.
+
+**C 잔여 이점 지지:** C−MG의 F1@0.3 점차이≥0.05이며 CI 하한>0, F1@0.5 CI 하한≥−0.03, FP 차이 CI 상한≤0.10이고 C/MG device 비용 및 p95 latency 비율 CI 상한이 각각2.0 이하이면 후속 동일 T305 적응 baseline 비교를 검토한다. 두 checkpoint 확보·정상 입력 검증이 모두 완료돼야 이 결정을 내린다. target 적응 예산이라는 경쟁 설명이 남으므로 새 방법 pilot은 아직 승인하지 않는다.
+
+**불확정·혼합 결과:** 어느 기준도 완결되지 않으면 현재 track을 보류한다. 추가 환자·threshold·prompt·seed·timing 반복으로 자동 연장하지 않는다. 특히 C의 비적응 모델 대비 점수 우위만 있고 비용이 크게 높으면 그것만으로 방법 투자를 이어가지 않는다.
+
+**실행 실패:** checkpoint·입력·좌표·provenance·출력 정합성 문제가 비교를 무효화하면 execution_failed 범위를 명시한다. 준비만 성공했거나 중요한 비교군이 빠진 경우 강한 baseline 대비 결론을 내리지 않는다. 이미 확인된 구현 결함의 복구와 과학적 불확정을 구분한다.
+
+모든 경로에서 이번 진단의 종료와 GOAL 달성을 구분한다. 원래 iter_041~043 판정은 보존한다.
+
+# Risks / Checks
+
+- MG-P/MG-MS와 C는 target 적응·사전학습 자료가 다르다. 이번은 운영상 비교이며 architecture·학습 효율의 인과 비교가 아니다.
+- V96는 반복 사용한 개발 집단이다. 독립 일반화·다른 seed·다른 기관의 우위를 주장하지 않는다.
+- 양성 문장만으로 non-groundable 처리나 clinical faithfulness를 평가했다고 말하지 않는다.
+- 공개 source의 주석·README·notebook 불일치는 D에서 실행 경로와 tensor로 해결하고 V96 점수로 선택하지 않는다.
+- CPU 자료 준비만으로 반복을 종료하는 실제 blocker는 외부 가중치 접근·호환성·입력 검증 실패다. 해소되면 같은 호출에서 GPU 비교까지 진행한다.
+- 공식 설치 실패 시 임의 모델 대체나 random checkpoint로 계속하지 않는다. 승인된 격리 구성은 재승인 대기로 돌리지 않는다.
+- 비용 CI는 고정 workload의 실행 변동성을 나타낸다. 전체 GPU 점유의 표본 관측을 순간 peak의 완전 계측으로 부르지 않는다.
+- 공개 산출물에 원본 보고서·환자 식별 metadata·제한 영상·가중치를 포함하지 않는다. Git 보존은 연구 코드와 재현 설정 범위다.
+
+## 대규모 GPU 필요 후보
+
+다기관 영상·문장·영역 자료로 VLM의 공동 grounding과 비groundable 거부를 대규모 multi-task post-training하는 방향은 후보로 보존한다. 현 두 GPU에서 전체 재학습을 실행하지 않으며, 이번 모듈형 비교로 해결되지 않는 중요한 잔여 가치가 확인되기 전에는 후속 투자 우선순위로 두지 않는다.
+
+# 계획의 근거 (GPT 조사 노트)
+
+## 새로 확인한 것
+
+- GOAL, GPT_USAGE_POLICY, REPORTING_STYLE, INDEX의 최근 기록, LIMITATIONS의 관련 항목, CODE_ASSETS와 iter_040~043 plan/review 원문 및 관련 review.json/code_assets를 확인했다. iter_039의 정상 입력 근거와 iter_037의 detector 비교도 연결했다.
+- iter_040: C의 V96 F1@0.3은 0.57795, 문장 대조 M은 0.57274다. baseline 수렴은 미확인이다. iter_041의 공동 정확도 손실은 유효하지만 정확도·비용 결합 투자 판정에는 blocker가 있다. iter_042의 presence gate와 iter_043의 영상 구별 진단은 원 기준상 투자 보류로 종료됐다.
+- iter_043 원시 report의 inconclusive_hold와 직전 리뷰가 일치한다. C−retrieval은 +0.1488이지만 강한 시각적 모듈형 대안과의 차이는 여전히 미측정이다.
+- iter_041의 worker timing, 요청 t_start/wall_s, GPU UUID, completion이 남아 있다. 그러나 조건당 비동기 단회 큐이므로 기존 요청을 독립 resampling한 CI를 반복 실행의 device 시간·처리량 CI로 바꿀 수 없다. 기존 report에는 request-wall CI를 device 경계에 사용한 양성 판정이 실제 남아 있다. 원 리뷰의 정정을 별도 artifact로 연결할 가치가 있으며 joint 재측정보다 이번 모듈형 비교의 정보 가치가 높다.
+- 공식 MedGrounder는 Chest ImaGenome, MS-CXR, PadChest, MS-CXR+PadChest checkpoint를 구분한다. 이번에는 앞의 두 모델만 비적응 비교 후보로 사용한다. [공식 저장소](https://github.com/aehrc/MedGrounder), [원논문](https://arxiv.org/html/2512.01085v1).
+- 공식 requirements는 Python 3.11 경로와 호환성을 확인할 수 있는 torch 2.5.1, torchvision 0.20.1, transformers 4.49.0, albumentations 2.0.4 등을 명시한다. 현재 환경을 변경할 이유가 없으며 별도 환경에서 검증할 수 있다. [requirements](https://raw.githubusercontent.com/aehrc/MedGrounder/main/requirements.txt).
+- 공식 evaluation.py는 checkpoint 부재 시 random initialization을 허용한다. 새 wrapper는 이를 fatal error로 바꿔야 한다. 기본 evaluator는 test loader를 만들므로 그대로 실행하면 보호 split을 읽을 수 있다. 모델·전후처리 함수만 사용하고 잠긴 D24/V96 manifest로 입력을 제한한다. [공식 평가 코드](https://raw.githubusercontent.com/aehrc/MedGrounder/main/evaluation.py).
+- 공식 notebook과 평가 dataset의 전처리가 다르다. 이번 기준은 evaluation.py가 사용하는 dataset의 validation transform이다. uint16→uint8, 640 resize/pad, normalization과 실제 padding affine을 확인해야 한다. 기존 iter_039의 v>>8 변환은 제공자 근거와 실제 120개 영상에서 검증됐다. 이를 다시 미확인으로 돌리지 않는다. [공식 dataset](https://raw.githubusercontent.com/aehrc/MedGrounder/main/dataloaders/dataset.py), [notebook](https://raw.githubusercontent.com/aehrc/MedGrounder/main/inference.ipynb).
+- postprocessor의 주석은 xyxy를 언급하지만 실제 tensor는 cxcywh이며 WBF가 이를 변환한다. 변환 순서를 실제 코드로 검사해야 한다. [모델 코드](https://raw.githubusercontent.com/aehrc/MedGrounder/main/model/medgrounder.py), [WBF 코드](https://raw.githubusercontent.com/aehrc/MedGrounder/main/utils/box_utils.py).
+
+## 의미와 선택
+
+공동 SFT를 시작하기 전에 강한 대안의 실제 비용·정확도를 아는 편이 투자 판단을 더 크게 바꾼다. 비적응 MedGrounder가 충분하면 track을 보류할 수 있다. C가 앞서더라도 target 적응 여부가 남으므로 곧바로 새 방법의 필요성을 승인하지 않는다.
+
+## 실행 단계에서 확정할 항목
+
+외부 Git full SHA, checkpoint 파일 ID·SHA256·출처와 이용 조건, text encoder revision, 실제 다운로드 및 GPU 호환성은 Claude가 설치 전후 기록한다. 이번 read-only 환경의 직접 네트워크 호출은 DNS 오류였고 GitHub API SHA 조회도 성공하지 못했다. 이를 Claude 환경의 설치 불가능으로 일반화하지 않는다. 웹에서는 공식 소스와 가중치 배포 링크를 확인했으며 가중치 바이너리 다운로드 성공은 아직 확인하지 않았다.
+
+
+
+## iter_044 CLAUDE REPORT — 2026-10-01 02:31:41
+
+# Work Performed
+
+**요약**
+
+- **핵심 결과:** MedGrounder 비교를 시작하지 못했다. 환경 구성에 필요한 외부 네트워크 접근이 권한 거부로 막혔다. 실험은 하나도 실행하지 않았다.
+- **근거:** 공식 저장소 SHA 조회(`git ls-remote`)와 `curl` 요청이 권한 거부됐다. 이를 우회하지 않았다. 반입 blob 확인용 `git hash-object`도 승인 대기로 실행되지 않았다.
+- **미검증·주의:** 코드·checkpoint·환경·평가·비용 측정은 모두 미실행이다. C와 MG 결과도 없다.
+- **다음:** 외부 다운로드 권한을 풀어 주거나 사람이 공식 코드와 두 checkpoint를 미리 내려받아 줘야 한다. 그러면 계획을 이어서 실행할 수 있다.
+
+**실제 수행한 것**
+
+- `plan.md`를 읽고 `git status --short`로 작업 트리를 확인했다. 미추적 파일은 반입된 `pg39_*`, `pg41_verify`, `pg43_*`, `rsna_diag/`뿐이다.
+- iter_044에서 이전에 끝낸 작업이 없음을 확인했다. `results/iter_044`와 `results/environments`가 없다.
+- 디스크 여유는 295GB로 설치에 충분하다.
+- GPU 0과 1은 각각 87 MiB와 15 MiB만 사용 중이라 여유가 크다.
+- `conda`는 `/home/milab/anaconda3/bin/conda`에 있다.
+
+# Files Changed
+
+없음. 코드 수정과 결과 파일 생성이 없다.
+
+# Commands / Experiments
+
+- `ls results/iter_044 results/environments`: 실패. 두 경로가 모두 없다.
+- `df -h`, `which`, `nvidia-smi`: 성공.
+- `git ls-remote https://github.com/aehrc/MedGrounder HEAD`: 권한 승인이 필요해 실행되지 않았다.
+- `curl .../requirements.txt`: 권한 거부.
+- `git hash-object <반입 14개 파일>`: 승인이 필요해 실행되지 않았다.
+
+GPU 실험과 학습은 실행하지 않았다.
+
+# Results
+
+수치 결과는 없다.
+
+# Goal Progress / Reused Assets
+
+- 목표 진전은 없다. "강한 모듈형 비교군 확보"는 여전히 미해결이다.
+- 반입 14개 파일의 required_checks는 모두 미수행이다. 구체적으로 다음이 남아 있다.
+  - blob 대조
+  - `pg43_eval.verify_import` 보완
+  - C의 F1@0.3=0.5779513889, F1@0.5=0.2911458333 재현
+  - 평가 소스 잠금
+  - 변조·재개 검사
+- iter_041 정정 artifact와 paired timing 블록도 미수행이다.
+
+# Problems
+
+- **현재 결론을 막는 문제:** 공식 MedGrounder 코드 revision과 `medgrounder_pretrain_imagenome.pth`, `medgrounder_finetune_ms.pth`를 확보할 수 없다. 이 환경의 Bash에서는 외부 호스트 접근이 권한 거부된다. 이는 정책상 승인된 격리 환경 설치 범위이지만, 이 실행에서는 네트워크 권한이 막혔다.
+- **남은 blocker와 해소 비용:** 권한을 풀어 주면 바로 해소된다. 사람이 저장소와 체크포인트를 `research/results/iter_044/external/`에 내려받아 줘도 된다. 그러면 그 이후는 오프라인 pip wheel 또는 기존 캐시 범위에서 진행해야 한다.
+- **재사용 전 수정:** 변경 없음. `pg43_eval.verify_import`의 protocol→completion 및 config 검사 보완이 아직 남아 있다.
+- **추후 개선:** 없음.
+
+# Recommendation to GPT
+
+- 계획을 바꾸지 말고 같은 계획으로 재개한다. 네트워크 권한이 풀리면 환경 구성, D8 동작 확인, D24 운영점 잠금, V96 비교, 6개 paired timing 블록 순서로 진행한다.
+- 이번 결과로 "MedGrounder 실행 불가"나 C의 방법 필요성을 결론내리면 안 된다. 이는 환경 권한 문제이며 연구 결과가 아니다.
+
+SELF_CHECK: FAIL
+SUMMARY: 네트워크 접근 권한 거부로 MedGrounder 코드·checkpoint 확보와 환경 구성이 막혀 iter_044의 모듈형 비교는 실행하지 못했다. 코드 수정과 실험이 없고 계획은 그대로 재개 가능하다.
+
+# [orchestrator] 권한 거부된 도구 호출
+- Bash: git ls-remote https://github.com/aehrc/MedGrounder HEAD
+- Bash: curl -sS -m 20 -o /dev/null -w "%{http_code}\n" https://raw.githubusercontent.com/aehrc/MedGrounder/main/requirements.txt
+- Bash: git hash-object pg43_run.py pg43_eval.py pg43_retrieval.py pg39_spec.py pg39_data.py pg41_verify.py rsna_diag/__init__.py rsna_diag/generate.py rsna_diag/geometry.py rsna_diag/metrics.py rsna_diag/parse.py rsna_diag/prompts.py rsna_diag/lora.py rsna_diag/queue_lock.py
+
+
+
+## iter_044 GPT REVIEW [CONTINUE] — 2026-10-01 02:35:10
+
+# 요약
+
+- **판정:** execution_failed. 실험 미실행이며 valid_experiment=false다.
+- **핵심 근거:** 원시 로그의 명령 권한 거부 3건과 결과·환경 디렉터리 부재를 확인했다.
+- **의미·한계:** 다운로드·호환성을 실제 시험하지 못했다. 모델의 성능이나 연구 가설에 대한 음성 결과가 아니다.
+- **다음:** 승인된 설치 정책과 실행 설정을 정합화하고 고정된 iter_044 계획을 이어간다.
+
+# Assessment
+
+plan.md·plan.json·claude_report.md·changes.patch·commit.json·reuse_manifest.json과 원시 도구 로그를 확인했다. execution_amendment는 없다. 현재 계획은 language-conditioned-grounding의 diagnostic이며 method_stage=none이다.
+
+환경 구성, MedGrounder 구현, D8 검사, D24 선택, V96 비교, 반복 timing 및 iter_041 정정은 모두 미실행이다. 따라서 통계적 불확정이나 가설 기각으로 분류하지 않는다. 새 원시 결과가 없어 독립 metric 재계산도 수행할 대상이 없다.
+
+# Key Findings
+
+1. **구체적인 차단 지점을 확인했다.** 로그에는 git ls-remote와 git hash-object의 'This command requires approval', curl의 명시적 permission denied가 있다. orchestrator.py는 acceptEdits와 agent/claude_settings.json을 전달한다. 이 설정에는 curl·wget deny가 있고 두 git 명령은 allow에 없다. 이는 승인된 설치 의도와 실행 설정의 불일치다. 실제 네트워크 연결 실패로 확대 해석할 수 없다.
+2. **보고서의 미실행 진술은 일치한다.** research/results/iter_044 및 research/results/environments는 없다. 로그의 자원 점검 당시 GPU 0/1 점유는 87/15 MiB, 디스크 여유는 295GB였다. 당시 GPU 메모리 부족이 중단 원인은 아니며 실행 재개 전에는 다시 확인해야 한다.
+3. **새 구현은 없지만 보존 diff는 있다.** 리뷰 SHA는 e908c7d9ccf65e8db0b499d74bbd7fa042f6fce9, before SHA는 68117cfd08429ffc3cb9b77e14fb1db3221d86ab이다. changes.patch는 두 SHA의 실제 diff와 일치한다. 추가된 14개 파일은 모두 출처 b50aa230a86c6d5b6c6b280fe718170ce4ecf220, manifest blob, 현재 작업 파일과 동일하다. 이는 orchestrator의 선별 반입이며 Claude 신규 개발이 아니다. unpreserved_paths는 비어 있고 현재 작업 트리 diff도 없다.
+4. **기존 모듈 가치와 새 실행 승인은 구분한다.** iter_043에서 승인된 동일 blob의 제한된 경로는 유지할 수 있다. 그러나 iter_044 required_checks는 수행되지 않았으며 기존 평가 경로의 결함도 수정되지 않았다.
+
+# Problems / Concerns
+
+현재 비교 결론을 막는 문제는 명령 권한 차단과 실험 결과 부재다. Claude가 차단을 우회하지 않고 미실행으로 보고한 것은 적절하다. 다만 '권한을 풀면 바로 해소' 또는 '사람이 파일을 내려받아야 한다'는 단정은 근거보다 넓다. 먼저 승인 범위의 실행 설정을 정식 보완해야 하며 이후 다운로드·의존성·checkpoint 검증은 여전히 필요하다.
+
+pg43_eval.verify_import의 protocol→completion 및 record config 연결과 평가 의존성 잠금은 기존 미해결 문제로 남는다. 이번에 수행한 blob 대조는 실제 입력 연결이나 수치 검증을 대신하지 않는다. 전체 스냅샷은 재사용 승인하지 않는다.
+
+GPU 병렬 구성·처리량·worker별 안전 여유는 아직 측정되지 않았다. 실행 전 자원 조회만으로 이 검사를 통과했다고 볼 수 없다. 반대로 GPU를 사용하지 못했다는 사실을 방법의 과학적 실패로 해석하지 않는다.
+
+# Interpretation
+
+새로운 정확도·FP·latency·device-seconds 결과는 없다. H_modular, H_residual 및 적응 예산의 경쟁 설명은 모두 미검증 상태다. 기존 한계 주장과 iter_040~043의 성과·보류·blocker를 변경하지 않는다.
+
+이 반복은 실행 복구가 필요한 사례이며 유효한 진단 횟수에 포함하지 않는다. 연구 목표의 성능·방법론 진전이나 마일스톤도 없다. 이번 비교 방향의 긍정적 실험 근거가 새로 확인되지 않아 논문 추천을 보류한다.
+
+# Strategy Check / 연구 방향 판단
+
+- **실행 유효성:** 실제 비교에 도달하지 못했다.
+- **성능 개선:** 새로운 측정이 없다.
+- **가설 지지:** 어느 경쟁 설명도 지지하거나 약화하지 못했다.
+- **신규 기여 가능성:** 강한 모듈형 대안 이후의 잔여 가치와 동일 적응 예산 비교가 여전히 빠져 있다.
+
+원 계획은 iter_040~043을 이어받아 ① joint 비용 정정·직접 SFT, ② 강한 모듈형 비교, ③ track 보류·전환을 이미 비교했다. 이번에는 그 판단을 뒤집는 과학적 근거가 없다. 구체적인 실행 설정 문제가 확인됐으므로 ②를 위한 한정 복구를 우선한다. 설정 오류 때문에 주변 진단이나 새 loss로 이동하지 않는다.
+
+해결된 과거 질문과 남은 핵심 질문은 원 계획대로 유지한다. 이번 반복은 진단 체류의 운영 비용에는 포함하되 유효 실험이나 GPU 연구 성과로 세지 않는다. 권한 보완 뒤에도 비교 준비만 반복하지 않고 고정 비교와 종료 판단까지 연결해야 한다.
+
+# Recommended Next Experiment
+
+새 실험 설계 없이 iter_044 원 계획을 유지한다. 먼저 관리 코드의 정식 변경 경로에서 승인된 설치와 필요한 읽기 명령의 실행 권한을 정합화하고 보호 규칙의 회귀 검사를 수행한다. 전역 권한 해제나 차단 명령 우회는 사용하지 않는다. 이번 read-only 리뷰에서는 설정을 수정하지 않았다.
+
+이후 기존 세션과 반입 코드를 이어서 공식 자산·격리 환경 검증, C provenance 보완, D8 검사, D24 운영점 잠금, V96 비교와 6개 paired timing block을 수행한다. C 기존 수치와 반복 출력 정합성 및 독립 metric 계산을 필수로 완료한다. iter_041 정정은 원 판정과 blocker를 보존한 별도 artifact로 남긴다.
+
+종료 기준은 바꾸지 않는다. C 잔여 이점 기준을 모두 충족할 때만 동일 T305 적응 비교를 검토한다. 모듈형 대안이 기준을 충족하거나 고정 비교 후 과학적 불확정이 남으면 track을 보류·전환한다. 새 환자·prompt·seed·timing block·reserve를 추가해 판단을 연장하지 않는다.

@@ -1230,3 +1230,31 @@ Claude 계정의 /usage 또는 Settings > Usage에서 제한을 확인한 뒤 �
   - 다음: 현재 영상 구별 방법 투자를 보류하고, 강한 모듈형 비교군을 확보하는 한정 보완을 우선한다. 다음 deep 계획에서는 iter_040~043의 원 계획·리뷰와 이번 결과를 이어받아 세 선택을 비교한다: ① iter_041 비용 판정의 최소 정정 및 공동 직접 SFT 검토, ② MedGrounder 공식 경로의 격리 환경 구축과 공정한 실제 비교, ③ track 보류·다른 질문 전환. 우선 권고는 ②다. 미설치를 제외 근거로 반복하지 말고 공식 dependency·checkpoint revision·이용 조건·학습 데이터 중복을 확인한 뒤 작은 실제 입력 검사와 사전 고정한 개발 비교를 같은 계획에 포함한다. PadChest 적응 checkpoint와 비적응 checkpoint를 구분하고, 비적응 모델과 C의 차이를 동일 annotation budget 비교로 포장하지 않는다. 개발 자료에서 설정을 잠그고 정확도·FP·latency·메모리의 목적상 최소 가치와 종료 조건을 결과 전에 정한다. 비교가 VLM의 유용한 잔여 이점을 보이면 그 범위의 최소 방법 시험을 검토하고, 모듈형 대안이 사용 목적을 충족하거나 판단 경계가 남으면 현 track을 보류한다. iter_041은 timing 원자료가 남아 있으므로 올바른 device/throughput 불확실성을 식별할 수 있는지 먼저 확인하되, 단회 비동기 실행으로 재계산이 부족하면 최소 재측정 비용을 비교한다. 기존 blocker와 원 판정은 보존하고 별도 정정 없이 joint pilot을 승인하지 않는다. 이번 21쌍의 추가 환자·prompt·seed, text-only SFT, 새 loss 및 reserve 개방은 자동 연장하지 않는다. RSNA 자산, VinDr 승인 대기와 H192/F120/test/MRI reserve 보존을 유지한다.
 - 📁 원본: `agent/runs/iter_043/`
 
+## iter_044 — 문장 grounding의 모듈형 대안 비교 (1번째 시도) · 2026-10-01 01:33
+
+- 🧭 **계획** (GPT deep): MedGrounder를 격리 환경에 구성해 기존 SFT와 정확도·비용을 비교한다. 명확한 잔여 이점이 있을 때만 동일 학습 예산 비교를 검토하고, 없거나 불확정이면 현재 grounding 투자를 보류한다.
+  - 대안: 1) 문장 grounding의 모듈형 대안 비교: 공식 비적응 MedGrounder와 C를 실제 실행해 track의 남은 정확도·비용 가치를 판단한다. · 2) 공동 grounding 비용 정정과 직접 joint SFT: 정확도 손실은 크지만 단회 timing의 불확실성과 형식 미학습이 남아 있다. 정정 기록만 이번에 남기고 학습 투자는 보류한다. · 3) track 보류·다른 질문 전환: 비교 후 잔여 이점이 없거나 불확정이면 선택한다. 현재는 승인된 환경 구성으로 해소할 수 있는 중요한 비교 공백의 정보 가치가 더 높다.
+  - 1순위 선택 근거: 공식 checkpoint·실행 경로가 있고 설치 권한도 승인됐다. 기존 출력과 고정 개발 자료를 활용하는 비교는 추가 권한 없이 가능하며, 새 loss나 주변 진단보다 다음 투자 결정을 직접 바꾼다.
+- ▶ **결정**: 자동 진행 (smart) — 1순위로 진행
+- ⏳ 사용 한도 도달 (Claude 구현/실험) → 대기
+- ↻ 끊겼던 Claude 세션을 이어서 진행
+- ▶ 사용 한도가 풀려 재개 (Claude 구현/실험, 57분 대기)
+- 💾 **개발 이력 체크포인트** `e908c7d9ccf65e8db0b499d74bbd7fa042f6fce9`: implementation_finished (검증 승인 아님)
+- 🔧 **Claude** (standard): 네트워크 접근 권한 거부로 MedGrounder 코드·checkpoint 확보와 환경 구성이 막혀 iter_044의 모듈형 비교는 실행하지 못했다. 코드 수정과 실험이 없고 계획은 그대로 재개 가능하다. [자체 검증 FAIL, 파일 0개 변경]
+  - 새 브랜치 `approach/modular-grounding-comparison` ← 68117cf (68117cf)
+  - ⚠ 권한 거부 3건
+- 🔍 **리뷰** (GPT normal): [CONTINUE / execution_failed] MedGrounder 비교는 명령 권한 거부 3건으로 미실행됐다. 승인된 설치 정책과 실행 설정의 불일치를 확인했으며, C 대비 정확도·비용 판단은 그대로 미확정이다.
+  - 접근법 판단: 명령 권한 차단으로 환경 구성과 비교 실험을 시작하지 못했다. 실행 설정을 승인 범위에 맞게 복구한 뒤 원 계획을 유지해 진행한다.
+  - 목표 진전: 실험 미실행으로 새로운 성능 개선·가설 지지·신규 기여 근거는 없다. 리뷰에서 승인된 설치 정책과 실제 Claude 명령 권한 설정의 불일치를 확인했고 반입 코드의 출처 일치만 검증했다. 강한 모듈형 비교군 대비 C의 실용적 가치와 target 적응 예산의 영향은 여전히 미검증이다.
+  - 판정 범위: iter_044의 MedGrounder 외부 자산 확보와 격리 환경 구성에 진입하기 전 발생한 도구 권한 실패다. D8·D24·V96 비교, 6개 paired timing block, iter_041 정정 artifact는 모두 미실행이다. MedGrounder의 기술적 실행 불가능성이나 C의 성능·비용 가설을 기각하지 않는다.
+  - 현재 결론 무효: orchestrator.py는 agent/claude_settings.json을 Claude 실행에 전달한다. 해당 설정은 curl·wget을 명시적으로 거부하고 git ls-remote·git hash-object를 허용 목록에 포함하지 않는다. 실제 로그에도 관련 명령 3건의 권한 거부가 기록됐다.
+  - 현재 결론 무효: research/results/iter_044와 research/results/environments가 없고 새 모델 출력·평가·timing 결과가 없다. 계획한 비교 가설을 판정할 자료가 없다.
+  - 재사용 전 수정: 승인된 격리 설치 범위와 연구 실행기의 명령 권한을 관리 코드의 정식 변경 절차로 정합화해야 한다. 차단 명령을 다른 실행기로 우회하거나 전역 권한 검사를 끄지 않는다.
+  - 재사용 전 수정: reuse_manifest의 blob 일치는 리뷰에서 확인했지만 import closure·현재 C 입력과 원본 protocol/config/adapter 연결·변조 및 재개 검사는 실행 단계에서 완료해야 한다.
+  - 재사용 전 수정: pg43_eval.verify_import의 provenance 연결, 평가 의존성 사전 잠금, report·per_item·timing·decision을 연결한 최종 completion을 구현해야 한다.
+  - 재사용 전 수정: 새 wrapper와 독립 검증기는 C의 기존 F1@0.3=0.5779513889 및 F1@0.5=0.2911458333을 재현하고 모든 시스템의 불일치를 실패로 처리해야 한다.
+  - 추후 개선: 보고서의 '권한을 풀어 주면 바로 해소된다'는 미검증이다. 명령 허용 후 실제 다운로드·checkpoint 출처·의존성·GPU 호환성이 추가로 확인돼야 한다.
+  - 추후 개선: 현재 실패는 네트워크 통신 자체의 실패로 확인되지 않았다. 명령 실행 전 권한 차단과 실제 DNS·HTTP·설치 오류를 구분해 기록해야 한다.
+  - 다음: 한정 실행 복구를 우선해 이미 승인된 모듈형 비교를 원 계획대로 수행한다. 기준은 agent/runs/iter_044/plan.md(SHA256 e59714854fbe60c50e2135181592ea8d0868fd8e3af54b278a68a06f779312af)이며 가설·D24/V96·두 checkpoint·metric·문턱·6개 timing block·종료 조건을 유지한다. 먼저 관리 코드 담당 실행에서 agent/claude_settings.json과 실제 적용 권한을 점검하고, 공식 자산 조회·격리 다운로드·설치 및 읽기 전용 blob 검사에 필요한 범위만 정식 보완한다. 기존 보호 경로·파괴적 명령 제한은 유지하고 허용/거부 회귀 검사를 완료한다. 동일 차단 상태로 Claude를 재호출하지 않는다. 권한 정합화 후 기존 세션·반입 SHA·원본 결과를 이어받아 환경 구성, required_checks, D8, D24 잠금, V96 비교와 6개 paired timing을 완료한다. iter_041 비용 정정은 별도 artifact로 남기며 원 blocker를 지우지 않는다. 원 C 잔여 이점 기준을 모두 충족할 때만 동일 T305 적응 baseline을 검토하고, 모듈형 대안 지지 또는 과학적 불확정이면 track을 보류·전환한다. 상위 강제 정책이 승인 범위의 정식 설정 변경도 막는다고 확인될 때만 구체적인 권한 조정을 사람에게 요청한다. VinDr 승인 대기와 RSNA 자산·보호 reserve를 유지한다.
+- 📁 원본: `agent/runs/iter_044/`
+
