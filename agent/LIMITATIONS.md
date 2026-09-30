@@ -180,3 +180,23 @@ RSNA seed17 grounding SFT의 nonempty 개발 출력 C201/E402에서 마지막 �
 - 미해결: 언어와 영상 근거를 연결해야 하는 실제 과제에서 직접 SFT와 detector+VLM의 차별적 가치가 있는가?
 - 미해결: 후처리 전 후보, annotation 경계 모호성, 사전학습 노출, SOP 수준 독립성 및 seed29 완전 수렴은 미확인이다.
 
+## padchest-sentence-grounding-and-joint-retention — observed
+
+MedGemma 1.5 revision 91850547d9f0b2fdd21aa7c5f4f3d1a8a52c243b의 고정 PadChest-GR 개발 E96에서 문장별 독립 grounding I-long의 환자 평균 F1@0.3은 0.2951이었다. 공동 요청 J-long은 0.2344로 독립 요청보다 0.0608 낮았지만, 개별 능력 기준 0.40을 충족하지 못했고 short 차이도 불확정이었다. 현재 문장·prompt·전처리 조건의 낮은 grounding 성능 관찰이며, 일반적인 공동 결합 능력 결함이나 내부 원인을 확정하지 않는다.
+
+- 적용 목표 시작: iter_003
+- 최신 리뷰: agent/runs/iter_039/review.json
+- 근거: research/results/iter_039/gen/E96/gen_worker*.jsonl: 96명×9조건 요청 864건, 고유 요청 집합 일치, worker 종료 코드 모두 0.
+- 근거: research/results/iter_039/eval/report_E96.json: I-long 0.295139, 95% CI [0.232639, 0.359418]; J-long 0.234375.
+- 근거: 리뷰의 별도 JSON 해석·최대 이분 matching·환자 bootstrap에서 모든 환자×조건 점수가 저장 결과와 일치했다. long I−J=0.060764, 97.5% CI [0.001736, 0.121528]; short I−J=0.011632, 97.5% CI [-0.032296, 0.052951].
+- 근거: 제공자 영상 변환 설명: https://github.com/auriml/Rx-thorax-automatic-captioning#dicom-to-png-preprocessing
+- 사용·평가 검증: D24·E96의 원본 영상 120개에서 PNG hash, uint16 pixel hash, uint16→uint8 변환, 저장 pixel hash, padded input hash, affine, 환자·split·문장·GT 연결을 대조해 불일치 0을 확인했다.
+- 사용·평가 검증: 리뷰 환경 Pillow 10.2.0은 16-bit PNG를 int32로 읽고 실행 환경 Pillow 12.3.0은 uint16로 읽었다. PNG bit depth와 값 범위를 확인한 뒤 uint16로 정규화하여 재검증했다.
+- 사용·평가 검증: 제공자 문서는 windowing된 값을 0–65535 PNG로 저장한다고 설명한다. 실제 120개 변환은 uint16에 대한 img_as_ubyte와 일치했다. 과거 검증된 값 보존 경로를 유지하며 추가 ×255는 적용하지 않았다.
+- 사용·평가 검증: sanity/sanity_pg39_v2.json의 세 조건에서 공식 pipeline과 wrapper의 tensor 및 생성 텍스트 일치를 확인했다.
+- 사용·평가 검증: D에서 허용된 label 형식 수정 1회 후 E96 prompt를 고정했다. 요청을 manifest에서 재구성해 일치함을 확인했다. 최종 비EOS 8건은 invalid로 포함했다.
+- 미해결: 낮은 개별 점수가 소견 종류·작은 영역·annotation 경계와 과제 적응 부족에 얼마나 의존하는가?
+- 미해결: 과제별 직접 SFT와 문장 조건부 모듈형 baseline을 넘는 정확도 또는 비용 개선 여지가 있는가?
+- 미해결: 공동 요청 손실이 개별 grounding을 충분히 확보한 조건에서도 남는가?
+- 미해결: E288·F120은 미실행이다. 독립 환자 재현, 외부 기관 일반화 및 사전학습 미노출은 확인하지 않았다.
+

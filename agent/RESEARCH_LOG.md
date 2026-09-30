@@ -14399,3 +14399,84 @@ EOF
 - Bash: until [ -f results/iter_039/gen/D48_tp4w/completion.json ] || [ -n "$(ls results/iter_039/gen/D48_tp4w/partial_* 2>/dev/null)" ]; do sleep 15; done; python -c "
 import json;c=json.load(open('results/iter_039/gen/D48_tp4w/completion.json'));print(c['wall_s'],c['exit_codes'],c['n_unique'])"
 
+
+
+## iter_039 GPT REVIEW [CONTINUE] — 2026-09-30 17:51:29
+
+# 요약
+
+- **판정:** CONTINUE / inconclusive. 실제 비교는 유효하지만 공동 결합 가설은 불확정이다.
+- **핵심 근거:** E96에서 I-long/J-long F1@0.3은 0.2951/0.2344다. 개별 능력 CI 상한 0.3594가 기준 0.40보다 낮아 확대 보류가 맞다.
+- **의미·한계:** 리뷰에서 영상 변환 근거와 실제 입력을 확인했다. 낮은 개별 grounding은 관찰됐으나 공동 처리의 일반적 결함·새 방법의 필요성은 입증하지 못했다.
+- **다음:** 공동 결합 loss 투자를 보류한다. 직접 SFT·문장별 독립 처리·모듈형 대안과 비교해 최소 방법 시험 또는 질문 전환을 선택한다.
+
+# Assessment
+
+검토 SHA는 `ca8be7658402eadbc0c501e877d76b1024ed2683`다. commit.json의 19개 대상 파일 모두 현재 내용과 일치했고 unpreserved_paths는 비어 있다. plan.md·plan.json·보고서·changes.patch·reuse_manifest와 관련 코드·원시 결과·검사 로그를 확인했다. execution_amendment.md는 없다.
+
+D v1과 형식 수정 후 D v2는 각각 216건, E96은 864건을 완료했다. E288·F120 추론은 미실행이다. D의 label 지시 수정 1회는 계획이 허용한 범위이며 수정 전 소스 사본의 hash도 원래 protocol과 일치한다. 현재 코드로 D v1 protocol 검사가 실패하는 것은 보존본을 잃었다는 뜻이 아니다.
+
+Claude가 입력 규약 미확인 상태에서 진행한 것은 사전 gate 준수 문제다. 다만 리뷰에서 제공자 근거와 실제 변환을 확인했으므로 현재 결과를 실행 무효로 판정하지 않는다. 이는 향후 gate를 생략해도 된다는 승인이 아니다.
+
+# Key Findings
+
+**독립 검증.** D v2·E96의 요청 집합, 중복·누락, worker file hash, record digest, protocol·config 연결, EOS 판별을 확인했다. manifest에서 prompt를 다시 구성해 일치함을 확인했다. 별도 JSON 해석과 최대 이분 matching으로 환자×조건 F1을 재계산했으며 저장 결과와 최대 차이는 0이었다. paired bootstrap 10,000회도 재현했다.
+
+| E96 비교 | 점추정 | 구간 |
+|---|---:|---|
+| I-long F1@0.3 | 0.295139 | 95% CI [0.232639, 0.359418] |
+| J-long F1@0.3 | 0.234375 | 저장 결과와 독립 재계산 일치 |
+| I-long−J-long | 0.060764 | 97.5% CI [0.001736, 0.121528] |
+| I-short−J-short | 0.011632 | 97.5% CI [-0.032296, 0.052951] |
+
+I에서 한 문장 이상 완전 성공한 환자는 47명이지만 평균 성능 gate는 미달이다. 따라서 `hold=true`, `expand_to_E288=false`가 맞다. 정밀도 보완 조건 b가 참이어도 hold가 우선한다. E96 최종 비EOS 8건은 invalid로 포함됐다.
+
+**입력·정답.** manifest의 432명은 환자 ID와 저장 원본 pixel hash가 각각 고유하며 manifest hash가 selection_lock과 일치했다. 실제 평가한 D24·E96의 120개 원본 PNG에서 raw hash, uint16 값, 8-bit 변환, padded pixel hash, affine 및 원본 문장·GT·환자·split 연결을 검증해 불일치 0을 확인했다. 저장 overlay도 확인했다. 이는 임상 재판독을 뜻하지 않는다.
+
+**전처리 쟁점 해결.** 제공자는 DICOM windowing 후 [0,1] 값을 0–65535 PNG로 저장한다고 설명한다. 현재 `v>>8`은 이 uint16 값의 8-bit 변환이며 실제 120개에서 `img_as_ubyte`와 같았다. [제공자 변환 설명](https://github.com/auriml/Rx-thorax-automatic-captioning#dicom-to-png-preprocessing). 리뷰 환경 Pillow 10.2.0과 실행 환경 12.3.0의 PNG decode dtype 차이는 bit depth·범위 확인 후 uint16로 맞춰 해소했다. 공식 보존 notebook의 첫 변환과 기존 값 보존 수정 경로를 확인했으며 잘못된 추가 ×255를 다시 적용하지 않았다. sanity 기록의 세 조건은 변환된 입력에 대한 공식 pipeline·wrapper tensor 및 생성 텍스트 일치를 뒷받침한다. 다른 windowing이 최적이라는 주장까지 검증한 것은 아니다.
+
+**자원.** D48에서 2 worker는 888.80초, 4 worker는 527.33초였고 48개 공통 출력 token은 모두 같았다. 처리량은 약 1.69배 높았다. E96은 두 GPU에 각 2 worker로 9,628.29초에 완료됐다. resource_log의 관측 peak는 GPU0/1 각각 18,512/17,757 MiB로 worker당 2 GiB 여유를 더해도 장치 용량 이내다. 5개 주요 생성 실행의 wall 합은 약 4.21시간이며 다운로드·fixture·sanity·준비 시간은 별도다.
+
+# Problems / Concerns
+
+현재 F1 비교를 무효화하는 결함은 발견하지 못했다. 전체 스냅샷 재사용은 다음 이유로 승인하지 않는다.
+
+- 평가기는 GT manifest와 평가 소스를 잠긴 provenance에 연결하지 않는다. 현재 연결은 리뷰의 독립 검증으로 보완했다.
+- runner가 단계별 결정 artifact를 강제하지 않고 F 요청도 미리 만들어졌다. F 출력은 생성하지 않았으므로 현재 성능 결과의 누수 근거는 아니지만 원 계획의 실행 보호는 미완성이다.
+- worker의 동시 JSONL 읽기·append와 부분 행 중단 복구, 완료 시 현재 입력 재검증은 저장된 SIGKILL·변조 검사만으로 충분히 보장되지 않는다.
+- 다운로드 ETag는 기록만 하며 재개 객체의 동일성 확인에 쓰지 않는다.
+- 보고서의 비용 해석은 정정해야 한다. I의 요청 wall 합 96.37초와 J 95.43초는 비슷하지만, I의 58.04초는 두 요청 시간의 max로 계산한 값이다. 실제 동시 dispatch 지연을 측정한 것이 아니므로 병렬 우위를 확정할 수 없다. 최종 token 416,995개와 재시도 포함 451,995개도 구분해야 한다.
+- 보고서의 '문장 순서 효과는 없다', '문맥은 손실을 만들지 않았다'는 표현은 과도하다. 각각의 구간은 양·음 효과를 포함하므로 뚜렷한 차이를 확인하지 못했다고 써야 한다.
+
+요청 생성 최적화와 검증기 matching 속도는 선택적 개선이며 현재 결론의 blocker가 아니다.
+
+# Interpretation
+
+long 공동 요청의 평균 손실은 관찰됐지만 사전 투자 기준 0.10보다 작고, 개별 능력 기준도 충족하지 못했다. short의 낮은 절대 성능과 불확정 차이 때문에 이를 강건한 공동 결합 한계로 승격하지 않는다.
+
+I−C=0.00087의 탐색적 95% CI는 [-0.04080, 0.04340], C−J=0.05990은 [0.01042, 0.11111]이다. 공동 출력에 손실이 집중될 가능성은 있으나 내부 원인의 증명은 아니다. long 그룹 교환 oracle 이득 0.014 역시 전체 배정 오류를 설명하는 해법으로 보기 어렵다. 개별 성공 문장 54개 중 18개 손실과 7개 회복을 함께 보존해야 한다.
+
+이번은 방법 성능 개선 실험이 아니다. 개별 grounding 자체가 낮아 독립 처리만으로 실용 문제가 해결됐다고도 말할 수 없다. 반대로 낮은 base 성능만으로 새로운 loss가 필요하다고 결론 내릴 수도 없다.
+
+# Strategy Check / 연구 방향 판단
+
+- **실행 유효성:** 정상 입력과 원시 비교를 리뷰에서 확인했다. valid_experiment=true다.
+- **성능 개선:** 새 방법에 의한 개선은 시험하지 않았다. 독립·공동 처리의 조건 차이를 측정했다.
+- **가설 지지:** 제한된 long 손실은 있으나 H_joint의 투자 기준과 개별 능력 gate를 충족하지 못했다. H_context·H_binding의 일반적 결론도 미확정이다.
+- **신규 기여 가능성:** 문장 분리와 공동 grounding 자체는 계획이 확인한 MedGrounder류 선행 방법과 구별되지 않는다. 강한 직접 SFT·모듈형 비교군 대비 잔여 문제와 비용 이득은 아직 없다.
+
+해결된 질문은 annotation 유일성만으로 grounding 성공을 판단할 수 없다는 점과 현재 M0 조건에서 개별 성능이 낮다는 점이다. 남은 핵심은 과제 적응과 강한 단순 대안 이후에도 중요한 정확도·비용 문제가 남는지다.
+
+iter_038은 metadata setup으로 유효 모델 실험이 아니며 이번은 이 접근법의 첫 유효 출력 비교다. iter_015 이후의 긴 진단 이력에는 실행 복구·준비·서로 다른 질문이 포함되므로 횟수만으로 포기하지 않는다. 그러나 이번 E96의 2.67시간과 관련 준비 비용을 고려하면 같은 질문의 자동 확대보다 다음 방법 투자 판단의 정보 가치가 높다. iter_037의 RSNA trade-off와 iter_038의 자료 판정도 유지한다.
+
+구형 계획에 research_track·related_iterations·decision_contract가 없는 것을 소급 결함으로 삼지 않는다. 다음 계획에는 안정된 연구 질문 id와 관련 원문을 연결해야 한다. 새 정책상 observed 근거로 제한된 method pilot은 가능하므로 validated 승격만을 위한 진단을 선행 강제하지 않는다. 다만 작은 개입, 공정한 baseline과 종료 결정을 구체화해야 한다.
+
+이번 방향은 불확정이며 방법의 긍정적 근거가 부족하므로 논문 추천은 보류한다.
+
+# Recommended Next Experiment
+
+공동 결합 loss와 E288·F120 확대 투자를 보류한다. 변환 근거 확인은 이번 리뷰에서 해결했으므로 동일 E96을 반복 생성하지 않는다.
+
+다음 deep 계획은 실제 사용 목적에서 문장별 grounding의 정확도 또는 비용을 개선할 최소 방법 시험이 성립하는지 판단한다. 직접 SFT·독립 처리·문장 조건부 모듈형 방법을 공정한 비교군으로 두고, 같은 비용의 정확도 또는 같은 정확도의 비용에서 최소 가치 있는 개선 폭을 정한다. 경쟁 설명을 구분할 개입이 성립하면 이번 observed 한계를 연결한 method pilot을 계획하고, 없으면 GOAL 안의 다른 질문으로 전환한다. 단순히 '추가 분석'이나 다른 loss 목록으로 결정을 미루지 않는다.
+
+현재 결과·분할·checkpoint는 보존한다. VinDr는 승인 통지 전 다운로드하지 않으며 continuation 투자 종료와 MRI·기존 reserve 보존도 유지한다. 후속 실행에 실제 필요한 코드만 수정·검증한다.
