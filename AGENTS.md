@@ -27,6 +27,9 @@
   - orchestrator를 `--gpus`로 실행하면 그 GPU만 보인다 (CUDA_VISIBLE_DEVICES). 명령 앞에 직접 붙이지 않는다.
 
 ## 연구 자원 활용
+- 구현·실험 담당은 `--engineer claude|codex`로 선택한다 (초기 기본 Claude, 명시한 선택은 서버에 저장).
+  Codex 구현은 `agent/CODEX_ENGINEER_POLICY.md`를 따른다. 계획·리뷰와 구현 세션은 별개다.
+  진행 중 구현의 담당 변경은 완료 후 또는 명시적 보존·재계획을 거친다.
 - GPT 계획·리뷰는 `agent/GPT_USAGE_POLICY.md`의 관련 문맥·1라운드 기본·변경점 중심 기준을 따른다.
   모델 설정과 필수 결과 검증은 유지하고, 원본 출처를 보존한다. 모델 교체는 추후 별도 판단한다.
 - `agent/CLAUDE_USAGE_POLICY.md`의 모델 선택·중복 작업 절감 기준을 따른다. 필수 검증·GPU 활용은 줄이지 않는다.
