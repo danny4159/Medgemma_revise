@@ -119,7 +119,7 @@ class ContextTests(unittest.TestCase):
             stack.enter_context(patch.object(loop, "code_assets_text", side_effect=AssertionError("전체 자산 주입")))
             stack.enter_context(patch.object(loop, "limitations_text", side_effect=AssertionError("전체 한계 주입")))
             stack.enter_context(patch.object(loop, "approach_ledger", return_value={}))
-            stack.enter_context(patch.object(loop, "plan_tier", return_value="deep"))
+            stack.enter_context(patch.object(loop, "record_event"))
             stack.enter_context(patch.object(loop, "review_tier", return_value="normal"))
             stack.enter_context(patch.object(loop, "set_stage"))
             stack.enter_context(patch.object(loop, "with_retries", side_effect=lambda name, call: call()))

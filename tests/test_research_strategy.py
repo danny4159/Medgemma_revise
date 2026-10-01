@@ -33,7 +33,7 @@ class ResearchStrategyTests(unittest.TestCase):
     def test_current_run_preserved_and_first_followup_reassesses(self):
         policy = (ROOT / "agent/RESEARCH_POLICY.md").read_text()
         section = policy.split("### 현재 실험과의 적용 경계", 1)[1].split("## 목표에 연결되는 실험", 1)[0]
-        for text in ("조건부 후속 비교", "새 요구를 소급해", "next_plan_tier=deep",
+        for text in ("조건부 후속 비교", "새 요구를 소급해", "deep_medium/deep_high",
                      "iter_014 이후 첫 새 계획", "GOAL과 과거 계획·리뷰를 덮어쓰지 않는다",
                      "superseded 처리하는 지시가 아니다"):
             self.assertIn(text, section)
@@ -49,7 +49,7 @@ class ResearchStrategyTests(unittest.TestCase):
             self.assertIn("# Strategy Check / 연구 방향 판단", prompt)
             self.assertIn("GOAL 범위 안", prompt)
         self.assertIn("iter_014 이후 첫 새 계획", plan)
-        self.assertIn("next_plan_tier=deep", review)
+        self.assertIn("deep_medium/deep_high", review)
         self.assertIn("next_task", review)
         self.assertIn("one_line_summary", review)
 
@@ -99,14 +99,14 @@ class ResearchStrategyTests(unittest.TestCase):
             stack.enter_context(patch.object(loop, "limitations_text", return_value=""))
             stack.enter_context(patch.object(loop, "intervention_context", return_value=""))
             stack.enter_context(patch.object(loop, "approach_ledger", return_value={}))
-            stack.enter_context(patch.object(loop, "plan_tier", return_value="deep"))
+            stack.enter_context(patch.object(loop, "record_event"))
             stack.enter_context(patch.object(loop, "review_tier", return_value="normal"))
             stack.enter_context(patch.object(loop, "set_stage"))
             stack.enter_context(patch.object(loop, "with_retries", side_effect=lambda name, call: call()))
             call = stack.enter_context(patch.object(loop, "run_codex", side_effect=Captured))
             args = argparse.Namespace(max_think_rounds=4)
             for stage, n, expected in ((loop.step_plan, 15, "iter_014 이후 첫 새 계획"),
-                                       (loop.step_review, 14, "next_plan_tier=deep")):
+                                       (loop.step_review, 14, "deep_medium/deep_high")):
                 with self.assertRaises(Captured):
                     stage(args, "기존 연구 목표", n)
                 prompt = call.call_args.args[1]
