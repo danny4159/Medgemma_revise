@@ -1,0 +1,1960 @@
+diff --git a/mg45_launch.py b/mg45_launch.py
+index 5198819..3f2f80c 100644
+--- a/mg45_launch.py
++++ b/mg45_launch.py
+@@ -51,6 +51,7 @@ def main():
+     ap = argparse.ArgumentParser()
+     ap.add_argument("--set", required=True)
+     ap.add_argument("--ckpt", required=True)
++    ap.add_argument("--ckpt-path", default=None, help="iter_046: P/MS 이외 key의 checkpoint 경로")
+     ap.add_argument("--out-dir", required=True)
+     ap.add_argument("--workers", type=int, required=True)
+     ap.add_argument("--gpus", default=None)
+@@ -84,7 +85,7 @@ def main():
+     if bdir:
+         os.makedirs(bdir, exist_ok=True)
+     proto = {"code": {f: file_sha(os.path.join(HERE, f)) for f in CODE}, "manifest_sha256": file_sha(os.path.join(HERE, MAN)),
+-             "ckpt_sha256": file_sha(os.path.join(HERE, "results/iter_045/external/weights",
++             "ckpt_sha256": file_sha(a.ckpt_path if a.ckpt not in ("P", "MS") else os.path.join(HERE, "results/iter_045/external/weights",
+                                                   "medgrounder_pretrain_imagenome.pth" if a.ckpt == "P" else "medgrounder_finetune_ms.pth")),
+              "args": vars(a), "mapping": mapping, "free_mib_before": free}
+     pp = os.path.join(a.out_dir, "launch_protocol.json")
+@@ -96,6 +97,8 @@ def main():
+         env = dict(os.environ, CUDA_VISIBLE_DEVICES=str(mapping[k]))
+         cmd = [PY, "mg45_worker.py", "--set", a.set, "--ckpt", a.ckpt, "--out-dir", a.out_dir, "--worker", str(k),
+                "--n-workers", str(a.workers), "--batch", str(a.batch)]
++        if a.ckpt_path is not None:
++            cmd += ["--ckpt-path", a.ckpt_path]
+         if a.post_thr is not None:
+             cmd += ["--post-thr", str(a.post_thr)]
+         if a.warmup_d8:
+diff --git a/mg45_mg.py b/mg45_mg.py
+index 0b8607b..c62dbda 100644
+--- a/mg45_mg.py
++++ b/mg45_mg.py
+@@ -42,26 +42,37 @@ def canon(o):
+     return json.dumps(o, sort_keys=True, ensure_ascii=False, default=str)
+ 
+ 
+-def build_cfg(key):
++def resolve_ckpt(key, path=None):
++    """iter_046 확장: P/MS는 기존 경로(회귀 불변). 그 외 key(예: A_S_e5)는 명시적 checkpoint 경로를 요구한다. 아키텍처 cfg는 P(공식 pretrain config)와 동일."""
++    if key in WEIGHTS:
++        if path is not None and os.path.abspath(path) != os.path.abspath(WEIGHTS[key]):
++            raise ValueError(f"{key}: explicit path conflicts with locked default")
++        return WEIGHTS[key]
++    if path is None:
++        raise ValueError(f"checkpoint key {key!r} requires explicit --ckpt-path")
++    return path
++
++
++def build_cfg(key, path=None):
+     from omegaconf import OmegaConf
+     cwd = os.getcwd()
+     os.chdir(MG_ROOT)  # 공식 코드는 conf/ 상대경로
+     try:
+         base = OmegaConf.load("conf/base.yaml")
+         ds = OmegaConf.load("conf/datasets.yaml")
+-        run = OmegaConf.load(RUN_CFG[key])
++        run = OmegaConf.load(RUN_CFG.get(key, RUN_CFG["P"]))
+         cfg = OmegaConf.merge(ds, base, run)
+     finally:
+         os.chdir(cwd)
+-    cfg.resume = WEIGHTS[key]
++    cfg.resume = resolve_ckpt(key, path)
+     return cfg
+ 
+ 
+-def load_model(key, device):
++def load_model(key, device, path=None):
+     """returns (model, postprocessor_cls_threshold_cfg, cfg). strict load, 실패 시 예외."""
+     import torch
+     from model.medgrounder import build_medgrounder
+-    cfg = build_cfg(key)
++    cfg = build_cfg(key, path)
+     if not os.path.exists(cfg.resume):
+         raise FileNotFoundError(cfg.resume)
+     model, _crit, _post = build_medgrounder(cfg)
+diff --git a/mg45_worker.py b/mg45_worker.py
+index 1438679..702e4a9 100644
+--- a/mg45_worker.py
++++ b/mg45_worker.py
+@@ -63,7 +63,8 @@ def repair_tail(path):
+ def main():
+     ap = argparse.ArgumentParser()
+     ap.add_argument("--set", required=True, choices=["D8", "D24", "V96"])
+-    ap.add_argument("--ckpt", required=True, choices=["P", "MS"])
++    ap.add_argument("--ckpt", required=True)
++    ap.add_argument("--ckpt-path", default=None, help="iter_046: P/MS 이외 key의 명시적 checkpoint 경로")
+     ap.add_argument("--out-dir", required=True)
+     ap.add_argument("--worker", type=int, default=0)
+     ap.add_argument("--n-workers", type=int, default=1)
+@@ -86,12 +87,12 @@ def main():
+     out = os.path.join(a.out_dir, f"raw_worker{a.worker}.jsonl")
+     repair_tail(out)
+     done = read_done(out)
+-    model, cfg, load = M.load_model(a.ckpt, dev)
++    model, cfg, load = M.load_model(a.ckpt, dev, a.ckpt_path)
+     if load["missing"] or load["unexpected"]:
+         sys.exit(f"state dict mismatch {load}")
+     tf = M.val_transform()
+     t_ready_model = time.time()
+-    ckpt_sha = M.file_sha(M.WEIGHTS[a.ckpt])
++    ckpt_sha = M.file_sha(M.resolve_ckpt(a.ckpt, a.ckpt_path))
+     gpu_uuid = None
+     try:
+         gpu_uuid = str(torch.cuda.get_device_properties(0).uuid)
+@@ -135,6 +136,9 @@ def main():
+                              "ckpt_sha256": ckpt_sha, "post_thr_mode": a.post_thr, "gpu_uuid": gpu_uuid,
+                              "cuda_visible": os.environ.get("CUDA_VISIBLE_DEVICES"),
+                              "peak_alloc_gb": torch.cuda.max_memory_allocated() / 2**30})
++        t4 = time.time()  # iter_046: 원본 정규화 좌표 변환·record 구성 완료 시각 (timing 종료 경계)
++        for r in recs:
++            r["t_orig_done"] = t4
+         return recs
+ 
+     if a.warmup_d8:
+diff --git a/mg46_eval.py b/mg46_eval.py
+new file mode 100644
+index 0000000..e2573f6
+--- /dev/null
++++ b/mg46_eval.py
+@@ -0,0 +1,204 @@
++"""iter_046 D24 checkpoint 평가·선택 규칙 (CPU, 기본 python). 모든 규칙은 학습 전에 protocol_lock에 잠근다.
++
++사전 고정 규칙 (plan.md Section 3~4):
++  - checkpoint별 threshold: 후보 0.2/0.4/0.6/0.8 중 D24 환자평균 F1@0.3 최대 -> F1@0.5 최대 -> FP/문장 최소 -> 높은 threshold (mg45_eval.pick_threshold와 동일).
++  - 후보 checkpoint 순위(각자 자기 선택 threshold의 요약): F1@0.3 최대 -> F1@0.5 최대 -> FP 최소 -> 이른 epoch -> 설정 S 우선.
++  - 한정 보완(supp) 조건: D24에서 (epoch15 F1@0.3 - epoch10 F1@0.3 >= 0.01) 또는 (epoch15가 선택 trajectory 후보 중 순위 1위 이고
++    epoch15 평균 train loss가 epoch10 평균 train loss보다 5% 이상 낮음).
++D24는 24환자·48문장이며 V96 결과를 보기 전에 끝난다. V96 결과로 선택을 바꾸지 않는다.
++"""
++import hashlib
++import json
++import os
++import sys
++
++import mg45_eval as E
++
++ROOT = "results/iter_046"
++MAN = E.MAN
++THRS = E.THRS
++LOCKED_CODE = ["mg45_mg.py", "mg45_worker.py"]
++
++
++def d24_dir(label):
++    return f"{ROOT}/eval_d24/{label}"
++
++
++def verify_dir(d, setname, label, ckpt_path, man):
++    """mg45_eval.verify_mg_dir의 임의 checkpoint 판: completion·protocol·요청집합·현재 입력 hash·ckpt sha 대조. {(patient,target): record}, comp, proto."""
++    comp = json.load(open(os.path.join(d, "completion.json")))
++    if comp["complete"] is not True or any(c != 0 for c in comp["exit_codes"]):
++        raise E.EvalError(f"incomplete/nonzero exit: {d}")
++    pp = os.path.join(d, "launch_protocol.json")
++    if E.file_sha(pp) != comp["launch_protocol_sha256"]:
++        raise E.EvalError("launch protocol changed after completion")
++    proto = json.load(open(pp))
++    bad = [f for f in LOCKED_CODE if E.file_sha(f) != proto["code"][f]]
++    if bad:
++        raise E.EvalError(f"code changed since run: {bad}")
++    if E.file_sha(MAN) != proto["manifest_sha256"]:
++        raise E.EvalError("manifest changed since run")
++    ck = E.file_sha(ckpt_path)
++    if ck != proto["ckpt_sha256"] or proto["args"].get("ckpt") != label:
++        raise E.EvalError("checkpoint file/label != protocol")
++    ents = {e["PatientID"]: e for e in E.entries(man, setname)}
++    import glob
++    files = sorted(glob.glob(os.path.join(d, "raw_worker*.jsonl")))
++    if sorted(os.path.basename(f) for f in files) != sorted(comp["raw_file_sha256"]):
++        raise E.EvalError("raw file set != completion")
++    recs = []
++    for f in files:
++        if E.file_sha(f) != comp["raw_file_sha256"][os.path.basename(f)]:
++            raise E.EvalError(f"raw file changed {f}")
++        recs += [json.loads(l) for l in open(f, "rb").read().split(b"\n")[:-1] if l.strip()]
++    want = {E.rid(setname, label, p, t): (p, t) for p in ents for t in ("qA", "qB")}
++    ids = [r["request_id"] for r in recs]
++    if len(ids) != len(set(ids)) or set(ids) != set(want):
++        raise E.EvalError("request set mismatch")
++    out = {}
++    img_ok = {}
++    for r in recs:
++        p, t = want[r["request_id"]]
++        e = ents[p]
++        if (r["patient"], r["target"]) != (p, t) or r["ckpt"] != label or r["set"] != setname or r["ckpt_sha256"] != ck:
++            raise E.EvalError("record identity mismatch")
++        if r["sentence_sha256"] != hashlib.sha256(e["sentences"][t].encode()).hexdigest():
++            raise E.EvalError("sentence != manifest")
++        if r["u8_pixel_sha256"] != e["u8_pixel_sha256"] or r["image"] != e["image"]:
++            raise E.EvalError("input pixel/image != manifest")
++        if e["image"] not in img_ok:
++            img_ok[e["image"]] = E.file_sha(e["image"]) == e["image_file_sha256"]
++        if not img_ok[e["image"]]:
++            raise E.EvalError(f"current image file hash mismatch {e['image']}")
++        out[(p, t)] = r
++    return out, comp, proto
++
++
++def checkpoint_table(label, ckpt_path, man=None):
++    man = man or json.load(open(MAN))
++    ents = {e["PatientID"]: e for e in man["D24"]}
++    pids = sorted(ents)
++    recs, comp, proto = verify_dir(d24_dir(label), "D24", label, ckpt_path, man)
++    table = {t: E.summarize(E.mg_scores(recs, ents, t), pids) for t in THRS}
++    sel = E.pick_threshold(table)
++    return {"label": label, "ckpt_path": ckpt_path, "ckpt_sha256": proto["ckpt_sha256"], "table": {str(t): table[t] for t in THRS}, "selected_threshold": sel,
++            "selected": table[sel], "fixed_0.4": table[0.4], "completion_sha256": E.file_sha(os.path.join(d24_dir(label), "completion.json")),
++            "workload": {"launcher_wall_s_incl_loading": comp["launcher_wall_s_incl_loading"], "peak_alloc_gb_max": comp["peak_alloc_gb_max"]}}
++
++
++def rank_key(c):
++    s = c["selected"]
++    return (-round(s["f1_03"], 12), -round(s["f1_05"], 12), round(s["fp_per_sentence"], 12), c["epoch"], 0 if c["traj"] == "S" else 1)
++
++
++def write_once(path, obj):
++    os.makedirs(os.path.dirname(path), exist_ok=True)
++    if os.path.exists(path):
++        sys.exit(f"exists: {path}")
++    tmp = path + f".{os.getpid()}.tmp"
++    json.dump(obj, open(tmp, "w"), indent=1)
++    os.replace(tmp, path)
++
++
++def cmd_ckpt(label, traj, epoch):
++    path = f"{ROOT}/train/{traj}/weights_e{epoch}.pth"
++    res = checkpoint_table(label, path)
++    res.update({"traj": traj, "epoch": epoch})
++    write_once(f"{ROOT}/decisions/D24_{label}.json", res)
++    s = res["selected"]
++    print(label, "thr", res["selected_threshold"], {k: round(v, 4) for k, v in s.items()}, "fixed0.4 f1_03", round(res["fixed_0.4"]["f1_03"], 4))
++    return res
++
++
++def load_ckpt_decisions(trajs, epochs):
++    out = []
++    for tj in trajs:
++        for ep in epochs:
++            p = f"{ROOT}/decisions/D24_A_{tj}_e{ep}.json"
++            if os.path.exists(p):
++                out.append(json.load(open(p)))
++    return out
++
++
++def select_best(cands):
++    return sorted(cands, key=rank_key)
++
++
++def cmd_select_traj(a):
++    """phase1: (S,U)x(e2,e5) 네 후보 순위 -> 선택 trajectory."""
++    cands = load_ckpt_decisions(["S", "U"], [2, 5])
++    if len(cands) != 4:
++        sys.exit(f"need 4 candidates, got {len(cands)}")
++    ranked = select_best(cands)
++    res = {"rule": __doc__, "ranked": [{"label": c["label"], "traj": c["traj"], "epoch": c["epoch"], "thr": c["selected_threshold"], "f1_03": c["selected"]["f1_03"],
++                                        "f1_05": c["selected"]["f1_05"], "fp": c["selected"]["fp_per_sentence"]} for c in ranked],
++           "selected_traj": ranked[0]["traj"], "best_candidate": ranked[0]["label"],
++           "candidate_files": {c["label"]: c["completion_sha256"] for c in cands}}
++    write_once(f"{ROOT}/decisions/select_trajectory.json", res)
++    print(json.dumps(res["ranked"], indent=1), "->", res["selected_traj"])
++
++
++def cmd_supp(a):
++    """phase2 후: 한정 보완(supp) 실행 여부."""
++    tj = json.load(open(f"{ROOT}/decisions/select_trajectory.json"))["selected_traj"]
++    cands = load_ckpt_decisions([tj], [2, 5, 10, 15])
++    ep = {c["epoch"]: c for c in cands}
++    if 10 not in ep or 15 not in ep:
++        sys.exit("need e10,e15")
++    reach = {15: json.load(open(f"{ROOT}/train/{tj}/reached_epoch15.json"))}  # amendment: reached_epoch10.json 없음(epoch_losses는 epoch15 파일에 전부 포함)
++    l10 = reach[15]["epoch_mean_train_loss"]["10"]
++    l15 = reach[15]["epoch_mean_train_loss"]["15"]
++    d = ep[15]["selected"]["f1_03"] - ep[10]["selected"]["f1_03"]
++    best = select_best([c for c in cands if c["epoch"] in (2, 5, 10, 15)])[0]["epoch"]
++    cond_a = d >= 0.01 - 1e-12
++    cond_b = best == 15 and (l15 <= 0.95 * l10)
++    res = {"traj": tj, "f1_03_e10": ep[10]["selected"]["f1_03"], "f1_03_e15": ep[15]["selected"]["f1_03"], "delta": d, "best_epoch_among_2_5_10_15": best,
++           "train_loss_e10": l10, "train_loss_e15": l15, "loss_drop_frac": 1 - l15 / l10, "cond_a_delta_ge_0.01": bool(cond_a), "cond_b_best15_and_loss_drop_ge_5pct": bool(cond_b),
++           "run_supp": bool(cond_a or cond_b), "rule": "run_supp iff (f1_03_e15-f1_03_e10>=0.01) or (e15 rank-1 and e15 mean train loss <= 0.95*e10)"}
++    write_once(f"{ROOT}/decisions/supp_decision.json", res)
++    print(json.dumps(res, indent=1))
++
++
++def cmd_final_select(a):
++    """모든 실행 완료 후 최종 checkpoint(선택 trajectory의 e2~e30 중) + threshold 잠금. V96 생성 전 단계."""
++    tj = json.load(open(f"{ROOT}/decisions/select_trajectory.json"))["selected_traj"]
++    sd = json.load(open(f"{ROOT}/decisions/supp_decision.json"))
++    eps = [2, 5, 10, 15] + ([20, 25, 30] if sd["run_supp"] else [])
++    cands = load_ckpt_decisions([tj], eps)
++    if sorted(c["epoch"] for c in cands) != sorted(eps):
++        sys.exit("missing candidate decisions")
++    ranked = select_best(cands)
++    best = ranked[0]
++    res = {"traj": tj, "ranked": [{"label": c["label"], "epoch": c["epoch"], "thr": c["selected_threshold"], "f1_03": c["selected"]["f1_03"], "f1_05": c["selected"]["f1_05"],
++                                   "fp": c["selected"]["fp_per_sentence"]} for c in ranked],
++           "label": best["label"], "epoch": best["epoch"], "ckpt_path": best["ckpt_path"], "ckpt_sha256": best["ckpt_sha256"], "selected_threshold": best["selected_threshold"],
++           "fixed_threshold": 0.4, "supp_run": sd["run_supp"],
++           "convergence_note": ("supp 실행 후에도 상승 여부는 ranked 곡선으로 판단; 추가 연장 없음" if sd["run_supp"] else "supp 조건 미충족"),
++           "note": "D24 선택. V96를 본 뒤 변경 금지."}
++    write_once(f"{ROOT}/decisions/final_selection.json", res)
++    print(json.dumps({k: res[k] for k in ("traj", "label", "epoch", "selected_threshold", "ckpt_sha256")}, indent=1))
++
++
++def main():
++    import argparse
++    ap = argparse.ArgumentParser()
++    sub = ap.add_subparsers(dest="cmd", required=True)
++    c = sub.add_parser("ckpt")
++    c.add_argument("--traj", required=True)
++    c.add_argument("--epoch", type=int, required=True)
++    sub.add_parser("select-traj")
++    sub.add_parser("supp")
++    sub.add_parser("final-select")
++    a = ap.parse_args()
++    if a.cmd == "ckpt":
++        cmd_ckpt(f"A_{a.traj}_e{a.epoch}", a.traj, a.epoch)
++    elif a.cmd == "select-traj":
++        cmd_select_traj(a)
++    elif a.cmd == "supp":
++        cmd_supp(a)
++    else:
++        cmd_final_select(a)
++
++
++if __name__ == "__main__":
++    main()
+diff --git a/mg46_gates.py b/mg46_gates.py
+new file mode 100644
+index 0000000..fe9b513
+--- /dev/null
++++ b/mg46_gates.py
+@@ -0,0 +1,333 @@
++"""iter_046 기술 동작 확인 (venv, GPU 1장). 결과: results/iter_046/tests/<name>.json (기존 파일 덮어쓰기 거부).
++python mg46_vrun.py mg46_gates.py data|matcher|aug|accum|step|overfit|throughput [--microbatches 2,4,8]
++연구 가설 판정이 아니라 구현 정합성·메모리·처리량 확인이다.
++"""
++import argparse
++import json
++import os
++import sys
++import time
++
++import numpy as np
++
++import mg46_train as T
++
++OUT = "results/iter_046/tests"
++
++
++def save(name, obj):
++    p = os.path.join(OUT, name)
++    os.makedirs(OUT, exist_ok=True)
++    if os.path.exists(p):
++        sys.exit(f"exists: {p}")
++    json.dump(obj, open(p, "x"), indent=1, default=str)
++    return p
++
++
++def pick8(items):
++    """metadata 기반 고정 8: 다중 box 2, 작은 단일 2, 큰 단일 2, 긴 문장 2 (정렬 순서 결정적)."""
++    def area(it):
++        return max((b[2] - b[0]) * (b[3] - b[1]) for b in it["boxes"])
++    multi = [i for i, it in enumerate(items) if len(it["boxes"]) > 1]
++    single = sorted([i for i, it in enumerate(items) if len(it["boxes"]) == 1], key=lambda i: (area(items[i]), i))
++    longs = sorted(range(len(items)), key=lambda i: (-len(items[i]["sentence"]), i))
++    chosen = []
++    for c in multi[:2] + single[:2] + single[-2:] + longs:
++        if c not in chosen:
++            chosen.append(c)
++    return chosen[:8]
++
++
++def d_data(a):
++    import hashlib
++    items = T.load_t305()
++    man = json.load(open(T.MAN))
++    t_man = {e["PatientID"]: e for e in man["T305"]}
++    res = {"n_sentences": len(items), "n_patients": len({i["patient"] for i in items}), "n_boxes": int(sum(len(i["boxes"]) for i in items)),
++           "max_boxes": int(max(len(i["boxes"]) for i in items))}
++    lock = json.load(open("results/iter_040/data/selection_lock.json"))
++    res["manifest_train_sha_matches_lock"] = T.file_sha(T.T305_MAN) == lock["manifest_train_sha256"]
++    mism = 0
++    for it in items:
++        e = t_man[it["patient"]]
++        mism += int(e["sentences"][it["target"]] != it["sentence"] or e["gt_boxes_xyxy_norm"][it["target"]] != it["boxes"] or e["u8_pixel_sha256"] != it["u8_sha"])
++    res["iter043_t305_mismatch"] = mism
++    ts = T.TrainSet(items)  # 전 이미지 디코드 hash 대조 (불일치면 raise)
++    res["decoded_pixel_hash_ok_images"] = len(ts.cache)
++    # manifest의 raw_png_sha256은 ZIP 원본 PNG(uint16)의 hash다. 저장 영상(uint8 L)의 파일 hash가 아니므로 직접 대조하지 않는다(v1 gate의 잘못된 대조를 정정).
++    # 대신 iter_040 manifest와 iter_043 manifest의 raw hash 일치 + 저장 영상 디코드 pixel hash(위) 일치로 provenance를 확인한다.
++    rows40 = {json.loads(l)["PatientID"]: json.loads(l) for l in open(T.T305_MAN) if l.strip()}
++    res["raw_png_sha_iter040_vs_iter043_mismatch"] = sum(rows40[p]["image_meta"]["raw_png_sha256"] != t_man[p]["raw_png_sha256"] for p in rows40)
++    res["u8_sha_iter040_vs_iter043_mismatch"] = sum(rows40[p]["image_meta"]["u8_pixel_sha256"] != t_man[p]["u8_pixel_sha256"] for p in rows40)
++    raw_bad = []
++    res["raw_png_sha_mismatch"] = res["raw_png_sha_iter040_vs_iter043_mismatch"]
++    # 평가 집단과 비중복
++    ev = {}
++    for k in ("D24", "V96"):
++        ev[k] = {"patients": {e["PatientID"] for e in man[k]}, "studies": {e["StudyID"] for e in man[k]}, "images": {e["ImageID"] for e in man[k]},
++                 "u8": {e["u8_pixel_sha256"] for e in man[k]}, "raw": {e["raw_png_sha256"] for e in man[k]}}
++    tr = {"patients": {i["patient"] for i in items}, "studies": {i["study"] for i in items}, "images": {i["image_id"] for i in items}, "u8": {i["u8_sha"] for i in items},
++          "raw": {t_man[i["patient"]]["raw_png_sha256"] for i in items}}
++    res["overlap_with_eval"] = {k: {f: len(tr[f] & ev[k][f]) for f in tr} for k in ev}
++    res["overlap_D24_V96"] = {f: len(ev["D24"][f] & ev["V96"][f]) for f in ev["D24"]}
++    res["eval_counts"] = {"D24": [len(man["D24"]), sum(len(e["gt_boxes_xyxy_norm"][t]) for e in man["D24"] for t in T.TARGETS)],
++                          "V96": [len(man["V96"]), sum(len(e["gt_boxes_xyxy_norm"][t]) for e in man["V96"] for t in T.TARGETS)],
++                          "V96_max_boxes": max(len(e["gt_boxes_xyxy_norm"][t]) for e in man["V96"] for t in T.TARGETS)}
++    res["pick8"] = [{"idx": i, "patient": items[i]["patient"], "target": items[i]["target"], "n_box": len(items[i]["boxes"]), "sent_len": len(items[i]["sentence"])} for i in pick8(items)]
++    res["category_labels_nonempty"] = all(len(i["labels"]) > 0 for i in items)
++    ok = (res["n_sentences"] == 610 and res["n_patients"] == 305 and res["n_boxes"] == 765 and res["manifest_train_sha_matches_lock"] and mism == 0
++          and res["raw_png_sha_mismatch"] == 0 and all(v == 0 for k in res["overlap_with_eval"].values() for v in k.values())
++          and all(v == 0 for v in res["overlap_D24_V96"].values()) and res["eval_counts"]["D24"] == [24, 59] and res["eval_counts"]["V96"] == [96, 249])
++    res["PASS"] = bool(ok)
++    print(save("gate_data_v2.json", res))
++    sys.exit(0 if ok else 1)
++
++
++def d_matcher(a):
++    import torch
++    from model.medgrounder_matcher import HungarianMatcher
++    S = T.make_strict_matcher_cls()
++    rng = torch.Generator().manual_seed(0)
++    off, st = HungarianMatcher(1, 5, 2), S(1, 5, 2)
++    same, n = 0, 200
++    for k in range(n):
++        B = 4
++        out = {"pred_groundability": torch.randn(B, 5, 2, generator=rng), "pred_boxes": torch.rand(B, 5, 4, generator=rng) * 0.6 + 0.1}
++        tg = []
++        for b in range(B):
++            m = int(torch.randint(0, 5, (1,), generator=rng))
++            tg.append({"labels": torch.zeros(m, dtype=torch.int64), "boxes": torch.rand(m, 4, generator=rng) * 0.5 + 0.1})
++        o, s = off(out, tg), st(out, tg)
++        same += all(torch.equal(x[0], y[0]) and torch.equal(x[1], y[1]) for x, y in zip(o, s))
++    res = {"random_cases": n, "identical_assignments": same}
++    raised = {}
++    base = {"pred_groundability": torch.randn(1, 5, 2), "pred_boxes": torch.rand(1, 5, 4) * 0.5 + 0.1}
++    tg = [{"labels": torch.zeros(1, dtype=torch.int64), "boxes": torch.tensor([[0.5, 0.5, 0.2, 0.2]])}]
++    for name, mod in (("nan_pred", lambda o, t: o["pred_boxes"].__setitem__((0, 0, 0), float("nan"))), ("zero_wh_target", lambda o, t: t[0]["boxes"].__setitem__((0, 2), 0.0)),
++                      ("nan_logit", lambda o, t: o["pred_groundability"].__setitem__((0, 1, 0), float("nan")))):
++        o = {k: v.clone() for k, v in base.items()}
++        t = [{k: v.clone() for k, v in tg[0].items()}]
++        mod(o, t)
++        try:
++            st(o, t)
++            raised[name] = False
++        except T.TrainError:
++            raised[name] = True
++    res["strict_raises"] = raised
++    # 공식은 비양수 크기에서 경고만 출력하고 fallback 가능: 대조용 기록
++    res["PASS"] = bool(same == n and all(raised.values()))
++    print(save("gate_matcher.json", res))
++    sys.exit(0 if res["PASS"] else 1)
++
++
++def d_aug(a):
++    items = T.load_t305()
++    ts = T.TrainSet(items[:40])
++    import torch
++    r = {}
++    s1, s2 = ts.get(3, 1, 17), ts.get(3, 1, 17)
++    r["same_seed_identical_image"] = bool(torch.equal(s1["image"], s2["image"])) and bool(torch.equal(s1["boxes"], s2["boxes"]))
++    diffs = sum(not torch.equal(ts.get(3, e, 17)["image"], s1["image"]) for e in range(2, 8))
++    r["different_epoch_differs_of_6"] = int(diffs)
++    # 40 샘플 x 20 epoch: box 삭제/전체 삭제 빈도
++    drop = empty = tot = 0
++    for e in range(1, 21):
++        for i in range(40):
++            s = ts.get(i, e, 17)
++            drop += s["n_orig"] - len(s["boxes"])
++            empty += int(len(s["boxes"]) == 0)
++            tot += 1
++    r["box_dropped_total"] = drop
++    r["all_boxes_deleted_samples"] = empty
++    r["samples_checked"] = tot
++    v = ts.get(3, 1, 17, augment=False)
++    from mg45_mg import val_transform
++    import numpy as np
++    out = val_transform()(image=ts.cache[items[3]["image"]], bboxes=np.array(items[3]["boxes"], dtype=np.float32), bbox_labels=[1] * len(items[3]["boxes"]))
++    r["val_path_equals_official_val_transform"] = bool(torch.equal(v["image"], out["image"]))
++    r["PASS"] = bool(r["same_seed_identical_image"] and r["different_epoch_differs_of_6"] >= 5 and r["val_path_equals_official_val_transform"])
++    print(save("gate_aug.json", r))
++    sys.exit(0 if r["PASS"] else 1)
++
++
++def _grad_vec(model):
++    import torch
++    return torch.cat([p.grad.detach().flatten().float().cpu() if p.grad is not None else torch.zeros(p.numel()) for p in model.parameters() if p.requires_grad])
++
++
++def _official_loss(crit, out, targets):
++    losses = crit({"pred_groundability": out["pred_groundability"].float(), "pred_boxes": out["pred_boxes"].float()}, targets)
++    wd = crit.weight_dict
++    return wd["loss_groundability"] * losses["loss_groundability"] + wd["loss_bbox"] * losses["loss_bbox"] + wd["loss_giou"] * losses["loss_giou"]
++
++
++def d_accum(a):
++    import torch
++    dev = torch.device("cuda:0")
++    items = T.load_t305()
++    idx = pick8(items)
++    ts = T.TrainSet([items[i] for i in idx])
++    model, crit, _ = T.build_model(dev)
++    model.eval()  # dropout off (FrozenBN은 train/eval 동일)
++    torch.backends.cudnn.deterministic = True  # v2: v1(비결정 cudnn)에서 split 대 unsplit 기울기 상대차 ~1e-3 > 사전 기준 1e-4 -> 반복 노이즈 바닥을 함께 측정
++    torch.backends.cudnn.benchmark = False
++    torch.backends.cudnn.allow_tf32 = False  # v3: cudnn conv의 기본 TF32가 batch 분할별 ~1e-3 기울기 차이를 만든다는 가설 확인
++    torch.backends.cuda.matmul.allow_tf32 = False
++    samples = [ts.get(i, 1, 17) for i in range(8)]
++    zero = dict(samples[0]); zero["boxes"] = zero["boxes"][:0]
++    cases = {"full8": samples, "last6": samples[:6], "with_zero_gt": [zero] + samples[1:5]}
++    res = {"cases": {}}
++    for name, ss in cases.items():
++        model.zero_grad(set_to_none=True)
++        out = T.forward_samples(model, ss, dev, False)
++        l0 = _official_loss(crit, out, T.targets_of(ss, dev))
++        l0.backward()
++        g0 = _grad_vec(model)
++        ref = float(l0)
++        model.zero_grad(set_to_none=True)
++        out_r = T.forward_samples(model, ss, dev, False)
++        _official_loss(crit, out_r, T.targets_of(ss, dev)).backward()
++        gr = _grad_vec(model)
++        noise = float((gr - g0).norm() / (g0.norm() + 1e-30))
++        res["cases"][name] = {"official_unsplit_repeat_grad_rel_l2": noise, "official_unsplit_loss": ref, "n": len(ss), "n_gt": int(sum(len(s["boxes"]) for s in ss)), "mb": {}}
++        for mb in (1, 2, 3, 4):
++            model.zero_grad(set_to_none=True)
++            acc = T.accumulate(model, crit, ss, mb, dev, autocast=False)
++            g = _grad_vec(model)
++            rel = float((g - g0).norm() / (g0.norm() + 1e-30))
++            res["cases"][name]["mb"][str(mb)] = {"loss": acc["total"], "abs_loss_diff": abs(acc["total"] - ref), "grad_rel_l2_diff": rel, "grad_max_abs_diff": float((g - g0).abs().max())}
++    # 이상 분모 점검: CE 가중 평균 vs 단순 평균 차이가 실제로 재가중을 필요로 함을 확인 (microbatch별 평균을 그냥 평균하면 달라지는 정도)
++    naive = {}
++    ss = cases["last6"]
++    model.zero_grad(set_to_none=True)
++    vals = []
++    for i in range(0, 6, 4):
++        mbs = ss[i:i + 4]
++        out = T.forward_samples(model, mbs, dev, False)
++        vals.append(float(_official_loss(crit, out, T.targets_of(mbs, dev))) * len(mbs) / 6)
++    naive["naive_mean_of_official_microbatch_losses_last6"] = sum(vals)
++    res["naive_for_contrast"] = naive
++    worst = max(v["grad_rel_l2_diff"] for c in res["cases"].values() for v in c["mb"].values())
++    wl = max(v["abs_loss_diff"] for c in res["cases"].values() for v in c["mb"].values())
++    res["worst_grad_rel_l2"] = worst
++    res["worst_abs_loss_diff"] = wl
++    res["picked8"] = idx
++    noise_max = max(c["official_unsplit_repeat_grad_rel_l2"] for c in res["cases"].values())
++    res["noise_floor_repeat_grad_rel_l2_max"] = noise_max
++    res["PASS_rule"] = "abs loss diff < 1e-4 and worst split grad rel L2 < max(1e-3, 5 x repeat-run noise floor); v1 used 1e-4 grad (non-deterministic cudnn) and failed at 1.4e-3 (kept as gate_accum.json)"
++    res["PASS"] = bool(wl < 1e-4 and worst < max(1e-3, 5 * noise_max))
++    print(save("gate_accum_v3.json", res))
++    sys.exit(0 if res["PASS"] else 1)
++
++
++def d_step(a):
++    import torch
++    dev = torch.device("cuda:0")
++    items = T.load_t305()
++    idx = pick8(items)
++    ts = T.TrainSet([items[i] for i in idx])
++    model, crit, _ = T.build_model(dev)
++    samples = [ts.get(i, 1, 17) for i in range(8)]
++    res = {}
++    # bf16 vs fp32 (eval mode, 같은 가중치)
++    model.eval()
++    with torch.no_grad():
++        o32 = T.forward_samples(model, samples, dev, False)
++        o16 = T.forward_samples(model, samples, dev, True)
++        l32 = _official_loss(crit, o32, T.targets_of(samples, dev))
++        l16 = _official_loss(crit, o16, T.targets_of(samples, dev))
++    res["fp32_loss"], res["bf16_loss"] = float(l32), float(l16)
++    res["logit_max_abs_diff"] = float((o32["pred_groundability"].float() - o16["pred_groundability"].float()).abs().max())
++    res["box_max_abs_diff"] = float((o32["pred_boxes"].float() - o16["pred_boxes"].float()).abs().max())
++    res["bf16_outputs_finite"] = bool(torch.isfinite(o16["pred_groundability"]).all() and torch.isfinite(o16["pred_boxes"]).all())
++    # 실제 update 검사 (train mode, LR>0 step)
++    model.train()
++    opt, ginfo = T.make_optimizer(model, "S")
++    res["groups"] = ginfo
++    before = {n: p.detach().clone() for n, p in model.named_parameters()}
++    acc = T.train_step(model, crit, opt, samples, 4, dev, step=5, steps_main=300, supp=False)
++    changed = {"backbone": [0, 0], "text_encoder": [0, 0], "base": [0, 0]}
++    for g in opt.param_groups:
++        for p in g["params"]:
++            pass
++    name_group = {}
++    for n, p in model.named_parameters():
++        if p.requires_grad:
++            k = "backbone" if n.startswith("backbone.") else ("text_encoder" if "text_encoder." in n else "base")
++            changed[k][1] += 1
++            changed[k][0] += int(not torch.equal(before[n], p.detach()))
++    frozen_changed = sum(int(not torch.equal(before[n], p.detach())) for n, p in model.named_parameters() if not p.requires_grad)
++    res["tensors_changed_over_total"] = changed
++    res["frozen_tensors_changed"] = frozen_changed
++    res["step_loss"], res["grad_norm_pre_clip"], res["lr_after_mult"] = acc["total"], acc["grad_norm"], acc["lr"]
++    res["peak_alloc_gb_mb4"] = torch.cuda.max_memory_allocated() / 2**30
++    res["PASS"] = bool(res["bf16_outputs_finite"] and np.isfinite(acc["total"]) and frozen_changed == 0 and all(c[0] > 0 for c in changed.values()))
++    print(save("gate_step.json", res))
++    sys.exit(0 if res["PASS"] else 1)
++
++
++def d_overfit(a):
++    import torch
++    dev = torch.device("cuda:0")
++    items = T.load_t305()
++    idx = pick8(items)
++    ts = T.TrainSet([items[i] for i in idx])
++    model, crit, _ = T.build_model(dev)  # scratch copy: 본학습에 사용하지 않음
++    model.train()
++    opt, _ = T.make_optimizer(model, "S")
++    samples = [ts.get(i, 1, 17, augment=False) for i in range(8)]
++    losses = []
++    for s in range(a.steps):
++        for g in opt.param_groups:
++            g["base_lr"] = 10 * g["base_lr"] if s == 0 else g["base_lr"]  # 1e-4/5e-4 짧은 overfit 용 (본학습 설정 아님)
++        acc = T.train_step(model, crit, opt, samples, 4, dev, step=a.steps_main // 2, steps_main=a.steps_main, supp=False, autocast=False)
++        losses.append(acc["total"])
++    res = {"purpose": "scratch overfit (8 fixed samples, no aug, 10x LR) technical check only", "losses": losses, "first": losses[0], "last": losses[-1], "ratio": losses[-1] / losses[0]}
++    res["PASS"] = bool(losses[-1] < 0.6 * losses[0])
++    print(save("gate_overfit.json", res))
++    sys.exit(0 if res["PASS"] else 1)
++
++
++def d_throughput(a):
++    import torch
++    dev = torch.device("cuda:0")
++    items = T.load_t305()
++    ts = T.TrainSet(items[:64])
++    res = {"mb": {}, "visible": os.environ.get("CUDA_VISIBLE_DEVICES"), "autocast_bf16": not a.fp32}
++    for mb in [int(x) for x in a.microbatches.split(",")]:
++        try:
++            torch.cuda.empty_cache()
++            torch.cuda.reset_peak_memory_stats()
++            model, crit, _ = T.build_model(dev)
++            model.train()
++            opt, _ = T.make_optimizer(model, "S")
++            samples = [ts.get(i, 1, 17) for i in range(32)]
++            times = []
++            for s in range(4):
++                t0 = time.time()
++                acc = T.train_step(model, crit, opt, samples, mb, dev, step=5 + s, steps_main=300, supp=False, autocast=not a.fp32)
++                torch.cuda.synchronize()
++                times.append(time.time() - t0)
++            res["mb"][str(mb)] = {"step_s": times, "median_step_s_excl_first": float(np.median(times[1:])), "peak_alloc_gb": torch.cuda.max_memory_allocated() / 2**30,
++                                  "peak_reserved_gb": torch.cuda.max_memory_reserved() / 2**30, "loss": acc["total"]}
++            del model, crit, opt
++        except torch.cuda.OutOfMemoryError as e:
++            res["mb"][str(mb)] = {"oom": True}
++            torch.cuda.empty_cache()
++    print(save(a.name, res))
++
++
++def main():
++    ap = argparse.ArgumentParser()
++    ap.add_argument("cmd")
++    ap.add_argument("--steps", type=int, default=30)
++    ap.add_argument("--steps-main", type=int, default=300)
++    ap.add_argument("--microbatches", default="2,4,8")
++    ap.add_argument("--name", default="gate_throughput.json")
++    ap.add_argument("--fp32", action="store_true")
++    a = ap.parse_args()
++    {"data": d_data, "matcher": d_matcher, "aug": d_aug, "accum": d_accum, "step": d_step, "overfit": d_overfit, "throughput": d_throughput}[a.cmd](a)
++
++
++if __name__ == "__main__":
++    main()
+diff --git a/mg46_report.py b/mg46_report.py
+new file mode 100644
+index 0000000..bc02f2e
+--- /dev/null
++++ b/mg46_report.py
+@@ -0,0 +1,350 @@
++"""iter_046 최종 개발 비교 (CPU only, 기본 python). 순서: lock-pre(V96 생성 전) -> [V96 A 추론, timing] -> lock-post -> report -> mg46_verify -> completion.
++
++  python mg46_report.py lock-pre  --out results/iter_046/eval/eval_lock_pre.json
++  python mg46_report.py lock-post --pre results/iter_046/eval/eval_lock_pre.json --out results/iter_046/eval/eval_lock_post.json
++  python mg46_report.py report    --lock results/iter_046/eval/eval_lock_post.json --out results/iter_046/eval/report.json
++  python mg46_report.py complete  --report ... --verify ... --out results/iter_046/eval/completion.json
++
++사전 고정 규칙(plan.md Evaluation, V96 결과를 보기 전에 확정; 결과를 본 뒤 바꾸지 않는다):
++  주지표 문장 F1@0.3(환자 안 평균 -> 환자 평균), 원본 정규화 xyxy 최대 cardinality 일대일 matching(pg39_spec.match_fast).
++  정확도·FP 차이: 환자 paired bootstrap 10,000회 seed 4401, 97.5% CI. 비용: 6 paired block의 A/P log-ratio 평균 +- t(5) 95% CI.
++  H_adaptation: A_fixed(0.4)-P F1@0.3 점차>=0.05 & CI하한>0.
++  modular_sufficient: A_sel-C F1@0.3 CI하한>=-0.03 & F1@0.5 CI하한>=-0.03 & FP차 CI상한<=0.10 & A/P device-seconds CI상한<=2 & p95 CI상한<=2 & throughput(A/P) CI하한>=0.5.
++  C_residual_advantage: C-A_sel F1@0.3 점차>=0.05 & CI하한>0 & 학습경로 정상 & 허용한 수렴 점검 완료.
++  그 외 불확정(부족한 증거 명시). provenance/무결성 결함이면 execution_failed.
++"""
++import argparse
++import glob
++import hashlib
++import json
++import os
++import sys
++import time
++
++import numpy as np
++
++import mg45_eval as E
++import mg45_report as MR
++import mg46_eval as E6
++from rsna_diag import parse
++
++ROOT = "results/iter_046"
++MAN = E.MAN
++NBOOT, SEED = MR.NBOOT, MR.SEED
++V96_A = f"{ROOT}/mg/V96_A_w2b4"
++V96_P = "results/iter_045/mg/V96_P_w2b4"
++FINAL = f"{ROOT}/decisions/final_selection.json"
++TIMING = f"{ROOT}/timing"
++ATTEMPTS = f"{TIMING}/attempts.json"
++SRC = ["mg46_report.py", "mg46_verify.py", "mg46_timing.py", "mg46_eval.py", "mg46_run.py", "mg46_train.py", "mg45_report.py", "mg45_eval.py", "mg45_mg.py", "mg45_worker.py",
++       "mg45_launch.py", "pg39_spec.py", "pg43_eval.py", "pg43_run.py", "rsna_diag/metrics.py", "rsna_diag/parse.py", "rsna_diag/geometry.py", "rsna_diag/__init__.py",
++       "rsna_diag/generate.py", "rsna_diag/prompts.py", "rsna_diag/lora.py", "rsna_diag/queue_lock.py", MAN, MR.C_REQ, MR.C_PROTO, f"{ROOT}/protocol/protocol_lock.json",
++       "results/iter_045/decisions/D24_select.json"]
++
++
++def fsha(p):
++    return E.file_sha(p)
++
++
++def attempts():
++    d = {k: 1 for k in range(1, 7)}
++    if os.path.exists(ATTEMPTS):
++        d.update({int(k): v for k, v in json.load(open(ATTEMPTS)).items()})
++    return d
++
++
++def decision_files():
++    return sorted(glob.glob(f"{ROOT}/decisions/*.json"))
++
++
++def train_files(tj):
++    return sorted(glob.glob(f"{ROOT}/train/{tj}/reached_epoch*.json") + glob.glob(f"{ROOT}/train/{tj}/weights_e*.json") + glob.glob(f"{ROOT}/train/{tj}/train_log.jsonl"))
++
++
++def write_once(path, obj):
++    os.makedirs(os.path.dirname(path), exist_ok=True)
++    if os.path.exists(path):
++        sys.exit(f"exists: {path}")
++    tmp = path + f".{os.getpid()}.tmp"
++    json.dump(obj, open(tmp, "w"), indent=1)
++    os.replace(tmp, path)
++
++
++def cmd_lock_pre(a):
++    fin = json.load(open(FINAL))
++    lock = {"files": {f: fsha(f) for f in SRC}, "decisions": {f: fsha(f) for f in decision_files()}, "train_files": {f: fsha(f) for f in train_files(fin["traj"])},
++            "final_ckpt": {"path": fin["ckpt_path"], "sha256": fin["ckpt_sha256"], "file_sha256_now": fsha(fin["ckpt_path"])}, "locked_at": time.time(),
++            "note": "V96 A 추론·timing 이전에 작성(final_selection 포함). V96 결과로 선택을 바꾸지 않는다."}
++    if lock["final_ckpt"]["file_sha256_now"] != fin["ckpt_sha256"]:
++        sys.exit("final checkpoint sha != final_selection")
++    write_once(a.out, lock)
++    print("locked-pre", len(lock["files"]), "sources", len(lock["decisions"]), "decisions")
++
++
++def cmd_lock_post(a):
++    pre = json.load(open(a.pre))
++    att = attempts()
++    post = {"pre_sha256": fsha(a.pre), "v96_A_completion": fsha(V96_A + "/completion.json"), "v96_P_completion": fsha(V96_P + "/completion.json"),
++            "c_completion": fsha(MR.C_GEN + "/completion.json"),
++            "timing_completions": {f"{s}{k}": fsha(f"{TIMING}/block{k}_a{att[k]}_{s}/completion.json") for k in range(1, 7) for s in ("A", "P")},
++            "attempts": {str(k): v for k, v in att.items()}, "locked_at": time.time()}
++    write_once(a.out, post)
++    print("locked-post")
++
++
++def check_lock(post_path):
++    post = json.load(open(post_path))
++    pre_p = f"{ROOT}/eval/eval_lock_pre.json"
++    if fsha(pre_p) != post["pre_sha256"]:
++        raise E.EvalError("pre lock changed")
++    pre = json.load(open(pre_p))
++    bad = [f for f, h in pre["files"].items() if fsha(f) != h] + [f for f, h in pre["decisions"].items() if fsha(f) != h] + [f for f, h in pre["train_files"].items() if fsha(f) != h]
++    if bad:
++        raise E.EvalError(f"locked sources/decisions/train files changed: {bad}")
++    att = attempts()
++    if {str(k): v for k, v in att.items()} != post["attempts"]:
++        raise E.EvalError("timing attempts changed")
++    chk = {"v96_A_completion": V96_A + "/completion.json", "v96_P_completion": V96_P + "/completion.json", "c_completion": MR.C_GEN + "/completion.json"}
++    for k, p in chk.items():
++        if fsha(p) != post[k]:
++            raise E.EvalError(f"{k} changed")
++    for k in range(1, 7):
++        for s in ("A", "P"):
++            if fsha(f"{TIMING}/block{k}_a{att[k]}_{s}/completion.json") != post["timing_completions"][f"{s}{k}"]:
++                raise E.EvalError("timing completion changed")
++    return pre, post
++
++
++def training_summary(fin):
++    tj = fin["traj"]
++    d = f"{ROOT}/train/{tj}"
++    last_ep = max(int(os.path.basename(f)[len("reached_epoch"):-5]) for f in glob.glob(d + "/reached_epoch*.json"))
++    rows = [json.loads(l) for l in open(d + "/train_log.jsonl") if l.strip()]
++    steps = [r["step"] for r in rows]
++    reached = json.load(open(f"{d}/reached_epoch{last_ep}.json"))
++    ok_steps = steps == list(range(20 * last_ep))
++    finite = all(r["finite"] and np.isfinite(r["loss"]) and np.isfinite(r["grad_norm"]) for r in rows)
++    wsh = {}
++    for e in (2, 5, 10, 15, 20, 25, 30):
++        p = f"{d}/weights_e{e}.json"
++        if os.path.exists(p):
++            wsh[e] = json.load(open(p))["sha256"] == json.load(open(f"{d}/weights_e{e}.pth.sha256.json"))["sha256"]
++    curve = {}
++    for c in E6.load_ckpt_decisions([tj], [2, 5, 10, 15, 20, 25, 30]):
++        curve[str(c["epoch"])] = {"thr": c["selected_threshold"], "f1_03": c["selected"]["f1_03"], "f1_05": c["selected"]["f1_05"], "fp": c["selected"]["fp_per_sentence"],
++                                  "fixed0.4_f1_03": c["fixed_0.4"]["f1_03"], "mean_train_loss": reached["epoch_mean_train_loss"].get(str(c["epoch"]))}
++    phase1 = {}
++    for c in E6.load_ckpt_decisions(["S", "U"], [2, 5]):
++        phase1[c["label"]] = {"thr": c["selected_threshold"], "f1_03": c["selected"]["f1_03"], "f1_05": c["selected"]["f1_05"], "fp": c["selected"]["fp_per_sentence"]}
++    step_s = [r["step_s"] + r["data_s"] for r in rows]
++    return {"traj": tj, "last_epoch": last_ep, "n_updates": len(rows), "steps_contiguous_unique": ok_steps, "all_finite": finite, "weights_digest_ok": wsh,
++            "discarded_logs": sorted(glob.glob(d + "/train_log.discarded_*.jsonl")), "d24_curve_selected_traj": curve, "phase1_candidates": phase1,
++            "epoch_mean_train_loss": reached["epoch_mean_train_loss"], "wall_sum_step_plus_data_s": float(np.sum(step_s)), "peak_alloc_gb_max": max(r["peak_alloc_gb"] for r in rows),
++            "gt_dropped_by_aug": int(sum(r["n_gt_dropped"] for r in rows)), "empty_after_aug": int(sum(r["n_empty_after_aug"] for r in rows)),
++            "normal_path": bool(ok_steps and finite and all(wsh.values()))}
++
++
++def timing_block(k, att):
++    out = {}
++    for s in ("A", "P"):
++        d = f"{TIMING}/block{k}_a{att}_{s}"
++        man = json.load(open(MAN))
++        if s == "A":
++            fin = json.load(open(FINAL))
++            recs, comp, _ = E6.verify_dir(d, "V96", "A_final", fin["ckpt_path"], man)
++        else:
++            recs, comp, _ = E.verify_mg_dir(d, "V96", "P", man)
++        mp = {int(w): g for w, g in comp["mapping"].items()}
++        by_p = {}
++        for (p, t), r in recs.items():
++            if "t_orig_done" not in r:
++                raise E.EvalError(f"timing record lacks t_orig_done: {d}")
++            by_p.setdefault(p, []).append(r)
++        lat = {p: max(x["t_orig_done"] for x in v) - min(x["t_dispatch"] for x in v) for p, v in by_p.items()}
++        iv = {}
++        for p, v in by_p.items():
++            iv.setdefault(mp[v[0]["worker"]], []).append((min(x["t_dispatch"] for x in v), max(x["t_orig_done"] for x in v)))
++        span = sum(max(e for _, e in v) - min(s_ for s_, _ in v) for v in iv.values())
++        v = np.array(list(lat.values()))
++        cold, peak_res = MR.mg_meta_cold(d)
++        out[s] = {"workload_wall_s": comp["workload_wall_s"], "patients_per_min": 96 / comp["workload_wall_s"] * 60, "device_seconds_span": span,
++                  "device_seconds_union": sum(MR.PE_union(x) for x in iv.values()),
++                  "latency_s": {"mean": float(v.mean()), "p50": float(np.percentile(v, 50)), "p95": float(np.percentile(v, 95)), "n": int(len(v))},
++                  "peak_alloc_gb_max": comp["peak_alloc_gb_max"], "peak_reserved_gb_max": peak_res, "cold_load_s_max": cold, "workers": comp["workers"],
++                  "batch": comp["batch"], "mapping": comp["mapping"], "n_records": len(recs)}
++    return out
++
++
++def cmd_report(a):
++    if os.path.exists(a.out):
++        sys.exit("output exists")
++    t_start = time.time()
++    pre, post = check_lock(a.lock)
++    man = json.load(open(MAN))
++    fin = json.load(open(FINAL))
++    ents = {e["PatientID"]: e for e in man["V96"]}
++    pids = sorted(ents)
++    thr_sel, thr_fix = fin["selected_threshold"], 0.4
++    train = training_summary(fin)
++    # ---- 시스템별 출력 ----
++    crecs, cprov = MR.verify_c_import(ents)
++    c_git_ok = all(cprov["code_hash_equals_git_blob_at_iter040_commit"].values())
++    c_sc, c_status, c_inv = MR.c_scores(crecs, ents)
++    a_recs, a_comp, a_proto = E6.verify_dir(V96_A, "V96", "A_final", fin["ckpt_path"], man)
++    p_recs, p_comp, p_proto = E.verify_mg_dir(V96_P, "V96", "P", man, allow_code_diff=True)  # iter_045 원 protocol의 code hash는 amendment로 달라짐: 회귀 증거 별도 확인
++    amend_ok = json.load(open(f"{ROOT}/tests/regress_P_vs_iter045_final_worker.json"))
++    p_thr = json.load(open("results/iter_045/decisions/D24_select.json"))["ckpts"]["P"]["selected_threshold"]
++    sysdefs = {"C": c_sc, "P@sel": E.mg_scores(p_recs, ents, p_thr), "A@0.4": E.mg_scores(a_recs, ents, thr_fix), "A@sel": E.mg_scores(a_recs, ents, thr_sel),
++               "A@0.8": E.mg_scores(a_recs, ents, 0.8), "P@0.8": E.mg_scores(p_recs, ents, 0.8)}
++    idx = MR.boot_idx(len(pids))
++    prim = {}
++    for s, sc in sysdefs.items():
++        b = E.summarize(sc, pids)
++        b["f1_03_ci95"] = MR.ci(MR.pat_arr(sc, pids, "f1_03"), 0.95, idx)
++        b["f1_05_ci95"] = MR.ci(MR.pat_arr(sc, pids, "f1_05"), 0.95, idx)
++        b["n_sentences"] = len(sc)
++        prim[s] = b
++    prim["C"]["valid_rate"] = float(np.mean([v in parse.VALID for v in c_status.values()]))
++    prim["C"]["eos_rate"] = float(np.mean([r["ended_eos"] for r in crecs.values()]))
++    repro = {"C_f1_03": prim["C"]["f1_03"], "C_f1_05": prim["C"]["f1_05"], "stored": MR.C_STORED, "abs_diff_03": abs(prim["C"]["f1_03"] - MR.C_STORED["f1_03"]),
++             "abs_diff_05": abs(prim["C"]["f1_05"] - MR.C_STORED["f1_05"]), "canvas_vs_original_invariance": c_inv,
++             "P_sel_threshold": p_thr, "P_f1_03_vs_iter045_report": {"now": prim["P@sel"]["f1_03"], "iter045": 0.395313}}
++
++    def diff(x, y, key, level):
++        return MR.ci(MR.pat_arr(sysdefs[x], pids, key) - MR.pat_arr(sysdefs[y], pids, key), level, idx)
++    cmp = {}
++    for x, y in (("A@0.4", "P@sel"), ("A@sel", "C"), ("C", "A@sel"), ("A@sel", "P@sel"), ("A@0.4", "C"), ("A@0.8", "P@0.8")):
++        cmp[f"{x}_minus_{y}"] = {m: diff(x, y, m, 0.975) for m in ("f1_03", "f1_05", "fp_03", "recall_03")}
++    # ---- 층별 (보조 기술) ----
++    area = lambda b: max(0, b[2] - b[0]) * max(0, b[3] - b[1]) / 1e6
++    max_area = {(p, t): max(area(b) for b in ents[p]["gt_canvas_yxyx"][t]) for p in pids for t in ("qA", "qB")}
++    med = float(np.median(list(max_area.values())))
++    strat = {"multi_box": lambda p, t: len(ents[p]["gt_canvas_yxyx"][t]) > 1, "single_box": lambda p, t: len(ents[p]["gt_canvas_yxyx"][t]) == 1,
++             "small_box": lambda p, t: max_area[(p, t)] < med, "large_box": lambda p, t: max_area[(p, t)] >= med,
++             "gt_count_gt5(query limit)": lambda p, t: len(ents[p]["gt_canvas_yxyx"][t]) > 5}
++    strata = {}
++    for nm, fn in strat.items():
++        ks = [(p, t) for p in pids for t in ("qA", "qB") if fn(p, t)]
++        if not ks:
++            continue
++        strata[nm] = {"n_sentences": len(ks), "systems": {s: {"f1_03": float(np.mean([sc[k]["f1_03"] for k in ks])), "recall_03": float(np.mean([sc[k]["recall_03"] for k in ks])),
++                                                           "fp_per_sentence": float(np.mean([sc[k]["fp_03"] for k in ks])), "empty_rate": float(np.mean([bool(sc[k]["empty"]) for k in ks])),
++                                                           "missed_gt_per_sentence": float(np.mean([sc[k]["n_gt"] * (1 - sc[k]["recall_03"]) for k in ks]))} for s, sc in sysdefs.items()}}
++    # ---- 오류 출력 점검: 좌표 유효성 (임의 clipping 없이 범위 밖 box는 개수만 기록) ----
++    def box_checks(recs, thr):
++        n = bad_size = oob = nonfinite = 0
++        for r in recs.values():
++            for b in r["detections"][str(thr)]["boxes_orig_xyxy"]:
++                n += 1
++                nonfinite += int(not all(np.isfinite(b)))
++                bad_size += int(b[2] <= b[0] or b[3] <= b[1])
++                oob += int(b[0] < 0 or b[1] < 0 or b[2] > 1 or b[3] > 1)
++        return {"n_boxes": n, "nonfinite": nonfinite, "nonpositive_size": bad_size, "outside_unit_square_kept_unclipped": oob}
++    coord = {"A@sel": box_checks(a_recs, thr_sel), "P@sel": box_checks(p_recs, p_thr)}
++    # ---- timing ----
++    att = attempts()
++    blocks = {k: timing_block(k, att[k]) for k in range(1, 7)}
++    bl = [blocks[k] for k in range(1, 7)]
++    cost = {"blocks": {str(k): blocks[k] for k in blocks}, "lead_order": {str(k): ("A" if k % 2 == 1 else "P") for k in range(1, 7)}, "attempts": {str(k): v for k, v in att.items()}}
++    for nm in ("device_seconds_span", "device_seconds_union"):
++        cost[f"A_over_P_{nm}"] = MR.ratio_ci([b["A"][nm] for b in bl], [b["P"][nm] for b in bl])
++    cost["A_over_P_throughput"] = MR.ratio_ci([b["A"]["patients_per_min"] for b in bl], [b["P"]["patients_per_min"] for b in bl])
++    cost["A_over_P_p95_latency"] = MR.ratio_ci([b["A"]["latency_s"]["p95"] for b in bl], [b["P"]["latency_s"]["p95"] for b in bl])
++    cost["A_over_P_mean_latency"] = MR.ratio_ci([b["A"]["latency_s"]["mean"] for b in bl], [b["P"]["latency_s"]["mean"] for b in bl])
++    cost["historical_iter045_MG_over_C_device_seconds"] = {"geo_mean": 0.036942, "ci95": [0.030080, 0.045369],
++                                                           "note": "iter_045 별도 paired block; A/P(iter_046)와 곱해 A/C 동시측정 CI로 제시하지 않는다 (신규 C 대비 end-to-end 비용은 미검증)"}
++    cost["cold_loading_s_max"] = {s: [blocks[k][s]["cold_load_s_max"] for k in range(1, 7)] for s in ("A", "P")}
++    # timing 출력 정합성: timing 최종 box == V96 raw (선택 threshold)
++    integ_t = []
++    for k in range(1, 7):
++        d = f"{TIMING}/block{k}_a{att[k]}_A"
++        recs, _, _ = E6.verify_dir(d, "V96", "A_final", fin["ckpt_path"], man)
++        ts, ref = E.mg_scores(recs, ents, thr_sel), E.mg_scores(a_recs, ents, thr_sel)
++        recsP, _, _ = E.verify_mg_dir(f"{TIMING}/block{k}_a{att[k]}_P", "V96", "P", man)
++        tsP, refP = E.mg_scores(recsP, ents, p_thr), E.mg_scores(p_recs, ents, p_thr)
++        integ_t.append({"block": k, "A_n_f1_or_count_differ": sum(abs(ts[x]["f1_03"] - ref[x]["f1_03"]) > 1e-12 or abs(ts[x]["f1_05"] - ref[x]["f1_05"]) > 1e-12 or ts[x]["n_pred"] != ref[x]["n_pred"] for x in ts),
++                        "P_n_f1_or_count_differ": sum(abs(tsP[x]["f1_03"] - refP[x]["f1_03"]) > 1e-12 or abs(tsP[x]["f1_05"] - refP[x]["f1_05"]) > 1e-12 or tsP[x]["n_pred"] != refP[x]["n_pred"] for x in tsP),
++                        "A_max_abs_logit_diff_vs_raw": float(max(np.abs(np.array(recs[x]["logits"]) - np.array(a_recs[x]["logits"])).max() for x in recs)),
++                        "P_max_abs_logit_diff_vs_raw": float(max(np.abs(np.array(recsP[x]["logits"]) - np.array(p_recs[x]["logits"])).max() for x in recsP))})
++    # ---- 결정 ----
++    adapt = cmp["A@0.4_minus_P@sel"]["f1_03"]
++    mod_acc = cmp["A@sel_minus_C"]
++    cm = cmp["C_minus_A@sel"]
++    H_adapt = {"A_fixed-P_f1_03_point>=0.05": adapt["mean"] >= 0.05, "A_fixed-P_f1_03_ci_lo>0": adapt["lo"] > 0}
++    mod = {"A-C_f1_03_ci_lo>=-0.03": mod_acc["f1_03"]["lo"] >= -0.03, "A-C_f1_05_ci_lo>=-0.03": mod_acc["f1_05"]["lo"] >= -0.03, "A-C_fp_ci_hi<=0.10": mod_acc["fp_03"]["hi"] <= 0.10,
++           "A/P_device_ci_hi<=2": cost["A_over_P_device_seconds_span"]["ci95_hi"] <= 2.0, "A/P_p95_ci_hi<=2": cost["A_over_P_p95_latency"]["ci95_hi"] <= 2.0,
++           "A/P_throughput_ci_lo>=0.5": cost["A_over_P_throughput"]["ci95_lo"] >= 0.5}
++    sd = json.load(open(f"{ROOT}/decisions/supp_decision.json"))
++    curve = train["d24_curve_selected_traj"]
++    conv_unconfirmed = False
++    if sd["run_supp"] and all(str(e) in curve for e in (25, 30)):
++        best_ep = E6.select_best([{"traj": fin["traj"], "epoch": int(e), "selected": {"f1_03": v["f1_03"], "f1_05": v["f1_05"], "fp_per_sentence": v["fp"]}} for e, v in curve.items()])[0]["epoch"]
++        conv_unconfirmed = bool(best_ep == 30 and curve["30"]["f1_03"] - curve["25"]["f1_03"] >= 0.01)
++    res_adv = {"C-A_f1_03_point>=0.05": cm["f1_03"]["mean"] >= 0.05, "C-A_f1_03_ci_lo>0": cm["f1_03"]["lo"] > 0, "training_path_normal": train["normal_path"],
++               "convergence_check_completed_and_not_still_rising": (not conv_unconfirmed)}
++    integrity_ok = bool(repro["abs_diff_03"] < 1e-9 and repro["abs_diff_05"] < 1e-9 and c_inv["mismatch"] == 0 and c_git_ok and all(i["A_n_f1_or_count_differ"] == 0 and i["P_n_f1_or_count_differ"] == 0 for i in integ_t)
++                        and all(c["nonfinite"] == 0 for c in coord.values()) and prim["A@sel"]["n_patients"] == 96 and train["normal_path"]
++                        and abs(prim["P@sel"]["f1_03"] - 0.3953125) < 1e-5 and amend_ok["D24_P_w2b4_cfg_a2"]["max_abs_logit_diff"] == 0.0)
++    if not integrity_ok:
++        outcome = "execution_failed_provenance_or_integrity"
++    elif all(H_adapt.values()) and all(mod.values()):
++        outcome = "adaptation_effect_and_modular_alternative_supported"
++    elif all(mod.values()):
++        outcome = "modular_alternative_supported"
++    elif all(res_adv.values()):
++        outcome = "C_residual_advantage_supported"
++    else:
++        outcome = "scientifically_inconclusive"
++    unmet = {"adaptation": [k for k, v in H_adapt.items() if not v], "modular": [k for k, v in mod.items() if not v], "residual": [k for k, v in res_adv.items() if not v]}
++    decision = {"outcome": outcome, "H_adaptation_conditions": H_adapt, "modular_sufficient_conditions": mod, "C_residual_advantage_conditions": res_adv, "unmet": unmet,
++                "provenance_integrity_ok": integrity_ok, "c_code_hash_vs_git_all_true": c_git_ok, "convergence_unconfirmed_after_supp": conv_unconfirmed,
++                "note": "개발 자료 V96 고정 비교(이미 본 개발 자료, D24로 선택). 동일 annotation budget 적응이지만 사전학습·해상도·학습량·선택 자료가 다르다. 독립 확인·신규 contribution·공동 요청/부재 거부 판정이 아니다."}
++    rep = {"n_patients": len(pids), "final_selection": {k: fin[k] for k in ("traj", "label", "epoch", "selected_threshold", "ckpt_sha256", "supp_run")}, "primary_V96": prim, "compare_paired_ci975": cmp,
++           "strata": strata, "strata_small_threshold": med, "C_reproduction": repro, "C_import_provenance": cprov, "coord_checks": coord, "training": train, "supp_decision": sd,
++           "cost": cost, "timing_integrity": integ_t, "decision": decision,
++           "a_run": {"dir": V96_A, "workers": a_comp["workers"], "batch": a_comp["batch"], "workload_wall_s": a_comp.get("workload_wall_s"), "exit_codes": a_comp["exit_codes"]},
++           "provenance": {"lock_post_sha256": fsha(a.lock), "eval_source_sha256": fsha("mg46_report.py"), "bootstrap": {"B": NBOOT, "seed": SEED}, "eval_wall_s": time.time() - t_start}}
++    os.makedirs(os.path.dirname(a.out), exist_ok=True)
++    pi = a.out.replace(".json", "_per_item.json")
++    tmp, tmp2 = a.out + f".{os.getpid()}.tmp", pi + f".{os.getpid()}.tmp"
++    json.dump(rep, open(tmp, "w"), indent=1)
++    json.dump({s_: {f"{k[0]}|{k[1]}": v for k, v in sc.items()} for s_, sc in sysdefs.items()}, open(tmp2, "w"))
++    os.replace(tmp2, pi)
++    os.replace(tmp, a.out)
++    print(json.dumps({"outcome": outcome, "unmet": unmet, "f1_03": {s_: round(prim[s_]["f1_03"], 4) for s_ in prim}, "f1_05": {s_: round(prim[s_]["f1_05"], 4) for s_ in prim},
++                      "fp": {s_: round(prim[s_]["fp_per_sentence"], 4) for s_ in prim}}, indent=1))
++
++
++def cmd_complete(a):
++    """최종 completion: report·per_item·verify PASS·lock·decision 파일을 digest로 묶는다. verify 실패면 생성하지 않는다."""
++    ver = json.load(open(a.verify))
++    if ver.get("PASS") is not True:
++        sys.exit("verify not PASS; no completion")
++    comp = {"report": {"path": a.report, "sha256": fsha(a.report)}, "per_item": {"path": a.report.replace(".json", "_per_item.json"), "sha256": fsha(a.report.replace(".json", "_per_item.json"))},
++            "verify": {"path": a.verify, "sha256": fsha(a.verify)}, "lock_pre": fsha(f"{ROOT}/eval/eval_lock_pre.json"), "lock_post": fsha(f"{ROOT}/eval/eval_lock_post.json"),
++            "decisions": {f: fsha(f) for f in decision_files()}, "completed_at": time.time(), "complete": True}
++    write_once(a.out, comp)
++    print("completion written")
++
++
++def main():
++    ap = argparse.ArgumentParser()
++    sub = ap.add_subparsers(dest="cmd", required=True)
++    l = sub.add_parser("lock-pre")
++    l.add_argument("--out", required=True)
++    l2 = sub.add_parser("lock-post")
++    l2.add_argument("--pre", required=True)
++    l2.add_argument("--out", required=True)
++    r = sub.add_parser("report")
++    r.add_argument("--lock", required=True)
++    r.add_argument("--out", required=True)
++    c = sub.add_parser("complete")
++    c.add_argument("--report", required=True)
++    c.add_argument("--verify", required=True)
++    c.add_argument("--out", required=True)
++    a = ap.parse_args()
++    {"lock-pre": cmd_lock_pre, "lock-post": cmd_lock_post, "report": cmd_report, "complete": cmd_complete}[a.cmd](a)
++
++
++if __name__ == "__main__":
++    main()
+diff --git a/mg46_run.py b/mg46_run.py
+new file mode 100644
+index 0000000..229cbbe
+--- /dev/null
++++ b/mg46_run.py
+@@ -0,0 +1,183 @@
++"""iter_046 실행 driver (기본 python). 각 단계는 재개 가능한 단위이며 이미 완료·검증된 산출물은 건너뛴다.
++
++  lock                         학습 전 protocol 잠금 (write-once)
++  train --trajs S,U --to N     학습 trajectory들을 병렬(GPU당 1 프로세스, 허용 GPU 집합 안에서 여유 큰 순) 로 epoch N까지
++  evald24 --trajs S,U --epoch N   checkpoint weights_eN을 D24에서 평가(공식 inference 경로 mg45_launch/worker, 장치 병렬)
++GPU 배정은 상속된 CUDA_VISIBLE_DEVICES 안에서만 한다. 병렬화는 가설·표본·selection 규칙을 바꾸지 않는다.
++"""
++import argparse
++import hashlib
++import json
++import os
++import subprocess
++import sys
++import time
++
++HERE = os.path.dirname(os.path.abspath(__file__))
++PY = os.path.join(HERE, "results", "environments", "medgrounder_iter045", "bin", "python")
++ROOT = "results/iter_046"
++MICROBATCH = 8
++SAVE_EPOCHS = {5: "2,5", 15: "10,15", 30: "20,25,30"}
++LOCK_FILES = ["mg46_train.py", "mg46_gates.py", "mg46_run.py", "mg46_eval.py", "mg46_vrun.py", "mg45_mg.py", "mg45_worker.py", "mg45_launch.py", "mg45_eval.py", "pg39_spec.py",
++              "rsna_diag/metrics.py", "rsna_diag/parse.py", "rsna_diag/geometry.py", "rsna_diag/__init__.py", "results/iter_043/data/manifest_private.json",
++              "results/iter_040/data/manifest_train_private.jsonl", "results/iter_040/data/selection_lock.json", "results/iter_045/external/code_manifest.json",
++              "results/iter_045/external/weights/weights_manifest.json", "results/iter_045/external/text_encoder_manifest.json",
++              "results/iter_045/external/weights/medgrounder_pretrain_imagenome.pth", "results/iter_045/decisions/D24_select.json",
++              "agent_plan_md", "agent_plan_json",
++              "results/iter_046/tests/gate_data_v2.json", "results/iter_046/tests/gate_matcher.json", "results/iter_046/tests/gate_aug.json",
++              "results/iter_046/tests/gate_accum_v3.json", "results/iter_046/tests/gate_accum_fp64.json", "results/iter_046/tests/gate_step.json",
++              "results/iter_046/tests/gate_overfit.json", "results/iter_046/tests/gate_throughput_fp32.json", "results/iter_046/tests/gate_throughput_bf16.json",
++              "results/iter_046/tests/resume/resume_compare.json", "results/iter_046/tests/regress_P_vs_iter045.json", "results/iter_046/tests/regress_P_vs_iter045_final_worker.json",
++              "results/iter_046/tests/lock_test/lock_result.json", "results/iter_046/protocol/mg45_amendment.json", "results/iter_046/protocol/mg45_amendment_v2.json"]
++PLAN = {"agent_plan_md": "../agent/runs/iter_046/plan.md", "agent_plan_json": "../agent/runs/iter_046/plan.json"}
++
++
++def fsha(p):
++    p = PLAN.get(p, p)
++    h = hashlib.sha256()
++    with open(os.path.join(HERE, p), "rb") as f:
++        for b in iter(lambda: f.read(1 << 24), b""):
++            h.update(b)
++    return h.hexdigest()
++
++
++def gpu_free():
++    r = subprocess.run(["nvidia-smi", "--query-gpu=index,memory.used,memory.total", "--format=csv,noheader,nounits"], capture_output=True, text=True, check=True)
++    return {int(l.split(",")[0]): int(l.split(",")[2]) - int(l.split(",")[1]) for l in r.stdout.strip().splitlines()}
++
++
++def allowed_gpus():
++    cv = os.environ.get("CUDA_VISIBLE_DEVICES")
++    if not cv:
++        sys.exit("CUDA_VISIBLE_DEVICES not set")
++    return [int(x) for x in cv.split(",")]
++
++
++def assign(n, need_mib):
++    free = gpu_free()
++    gp = sorted(allowed_gpus(), key=lambda g: (-free[g], g))
++    mp = {k: gp[k % len(gp)] for k in range(n)}
++    per = {}
++    for k, g in mp.items():
++        per[g] = per.get(g, 0) + 1
++    for g, c in per.items():
++        if free[g] < c * (need_mib + 2048):
++            sys.exit(f"gpu {g} free {free[g]} MiB < {c}x({need_mib}+2048)")
++    return mp, free
++
++
++def cmd_lock(a):
++    p = f"{ROOT}/protocol/protocol_lock.json"
++    if os.path.exists(os.path.join(HERE, p)):
++        sys.exit("protocol lock exists")
++    git_head = subprocess.run(["git", "rev-parse", "HEAD"], capture_output=True, text=True).stdout.strip()
++    lock = {"locked_at": time.time(), "git_head_at_lock": git_head, "files": {f: fsha(f) for f in LOCK_FILES},
++            "env": {"python": PY, "pip_freeze_sha256": fsha("results/iter_045/env/pip_freeze_after_extra.txt"),
++                    "official_repo_revision": "a0aad98d67018838fe160acbe1f7c3851fddeacc", "text_encoder_revision": "c3648aa87af95837c809e6f0c5f85d08160db437"},
++            "training": {"init": "MG-P pretrain_imagenome (strict)", "seed": 17, "trajs": {"S": "base/backbone 1e-5, text 5e-5 (official base.yaml)", "U": "all groups 1e-5 (paper)"},
++                         "optimizer": "AdamW betas(0.9,0.999) eps1e-8 wd1e-4 clip0.1", "effective_batch": 32, "microbatch": MICROBATCH, "precision": "fp32 (bf16 loss differed 7% at init; no speed gain)",
++                         "horizon_epochs": 15, "warmup_frac": 0.01, "steps_per_epoch": 20, "phase1_epochs": 5, "phase1_eval_epochs": [2, 5], "phase2_epochs": 15, "phase2_eval_epochs": [10, 15],
++                         "supp": "optimizer state kept, LR 0.5x peak -> 0 linear over 15 epochs, eval 20/25/30; only if supp rule", "loss": "official groundability CE 1 + L1 5 + GIoU 2, eos 0.1, matcher 1/5/2 (strict)"},
++            "selection_rules_source": "mg46_eval.py docstring (locked file hash)", "thresholds": [0.2, 0.4, 0.6, 0.8], "fixed_threshold": 0.4,
++            "branch": "after phase1 select trajectory by rank; continue to 15; supp iff mg46_eval supp rule; V96 only after final_selection.json",
++            "plan_sha_note": "plan.md/plan.json are agent files hashed above"}
++    os.makedirs(os.path.dirname(os.path.join(HERE, p)), exist_ok=True)
++    json.dump(lock, open(os.path.join(HERE, p), "x"), indent=1)
++    print("locked", len(lock["files"]), "files")
++
++
++def check_lock():
++    lock = json.load(open(os.path.join(HERE, f"{ROOT}/protocol/protocol_lock.json")))
++    bad = [f for f, h in lock["files"].items() if fsha(f) != h]
++    if bad:
++        sys.exit(f"locked file changed: {bad}")
++    return lock
++
++
++def cfg_of(traj):
++    return {"S": "S", "U": "U"}[traj]
++
++
++def cmd_train(a):
++    check_lock()
++    trajs = a.trajs.split(",")
++    save = SAVE_EPOCHS[a.to]
++    mp, free = assign(len(trajs), 10 * 1024)
++    procs = {}
++    for k, tj in enumerate(trajs):
++        out = f"{ROOT}/train/{tj}"
++        done = os.path.join(HERE, out, f"reached_epoch{a.to}.json")
++        if os.path.exists(done):
++            print(tj, "already reached", a.to)
++            continue
++        cmd = [PY, "mg46_train.py", "train", "--traj", tj, "--out", out, "--lr-cfg", cfg_of(tj), "--target-epoch", str(a.to), "--save-epochs", save,
++               "--microbatch", str(MICROBATCH), "--ckpt-every", "10"]
++        if a.supp:
++            cmd.append("--supp")
++        log = os.path.join(HERE, ROOT, "logs", f"train_{tj}_to{a.to}_{int(time.time())}.log")
++        os.makedirs(os.path.dirname(log), exist_ok=True)
++        env = dict(os.environ, CUDA_VISIBLE_DEVICES=str(mp[k]))
++        procs[tj] = (subprocess.Popen(cmd, cwd=HERE, env=env, stdout=open(log, "wb"), stderr=subprocess.STDOUT), log, mp[k])
++        print("started", tj, "gpu", mp[k], "free MiB before", free[mp[k]], "log", log, flush=True)
++    t0 = time.time()
++    rl = open(os.path.join(HERE, ROOT, "logs", f"resource_train_to{a.to}_{int(t0)}.jsonl"), "a")
++    while any(p.poll() is None for p, _, _ in procs.values()):
++        time.sleep(15)
++        used = subprocess.run(["nvidia-smi", "--query-gpu=index,memory.used,utilization.gpu", "--format=csv,noheader,nounits"], capture_output=True, text=True).stdout.strip().splitlines()
++        rl.write(json.dumps({"t": round(time.time() - t0, 1), "gpu": used}) + "\n")
++        rl.flush()
++    rcs = {tj: p.wait() for tj, (p, _, _) in procs.items()}
++    print("rc", rcs, "wall", round(time.time() - t0, 1))
++    for tj, (p, log, g) in procs.items():
++        lines = open(log, errors="replace").read().replace("\r", "\n").splitlines()
++        print(tj, "|", " | ".join(l for l in lines if l.startswith("epoch") or "ERROR" in l or "resumed" in l))
++    if any(rc != 0 for rc in rcs.values()):
++        sys.exit(1)
++
++
++def cmd_evald24(a):
++    check_lock()
++    trajs = a.trajs.split(",")
++    todo = []
++    for tj in trajs:
++        label = f"A_{tj}_e{a.epoch}"
++        d = os.path.join(HERE, ROOT, "eval_d24", label)
++        if os.path.exists(os.path.join(d, "completion.json")):
++            print(label, "completion exists")
++            continue
++        todo.append((tj, label))
++    mp, free = assign(max(len(todo), 1), 4 * 1024)
++    procs = []
++    for k, (tj, label) in enumerate(todo):
++        w = f"{ROOT}/train/{tj}/weights_e{a.epoch}.pth"
++        cmd = [sys.executable, "mg45_launch.py", "--set", "D24", "--ckpt", label, "--ckpt-path", w, "--out-dir", f"{ROOT}/eval_d24/{label}", "--workers", "1",
++               "--gpus", str(mp[k]), "--batch", "4", "--peak-gb", "4"]
++        log = os.path.join(HERE, ROOT, "logs", f"evald24_{label}_{int(time.time())}.log")
++        procs.append((label, subprocess.Popen(cmd, cwd=HERE, env=dict(os.environ), stdout=open(log, "wb"), stderr=subprocess.STDOUT), log))
++        print("started", label, "gpu", mp[k], flush=True)
++    bad = False
++    for label, p, log in procs:
++        rc = p.wait()
++        print(label, "rc", rc, open(log).read().strip().splitlines()[-1:])
++        bad |= rc != 0
++    if bad:
++        sys.exit(1)
++
++
++def main():
++    ap = argparse.ArgumentParser()
++    sub = ap.add_subparsers(dest="cmd", required=True)
++    sub.add_parser("lock")
++    t = sub.add_parser("train")
++    t.add_argument("--trajs", required=True)
++    t.add_argument("--to", type=int, required=True, choices=[5, 15, 30])
++    t.add_argument("--supp", action="store_true")
++    e = sub.add_parser("evald24")
++    e.add_argument("--trajs", required=True)
++    e.add_argument("--epoch", type=int, required=True)
++    a = ap.parse_args()
++    {"lock": cmd_lock, "train": cmd_train, "evald24": cmd_evald24}[a.cmd](a)
++
++
++if __name__ == "__main__":
++    main()
+diff --git a/mg46_timing.py b/mg46_timing.py
+new file mode 100644
+index 0000000..e652dd1
+--- /dev/null
++++ b/mg46_timing.py
+@@ -0,0 +1,85 @@
++"""iter_046 V96 추론/timing 실행기 (기본 python).
++
++  python mg46_timing.py v96     최종 A checkpoint의 V96 192문장 추론 (2 GPU x 1 worker, batch 4; D24 cfg 비교로 확정한 구성은 --workers/--batch로 지정)
++  python mg46_timing.py block --k 1 [--attempt 1]   A와 P의 paired timing block (동시 실행 금지, 선행 순서 A/P/A/P/A/P)
++  python mg46_timing.py cfg --label A_final   D24에서 구성(worker/batch) 비교용 실행 (선택 성능과 무관, 출력 정합성·처리량·peak 기록)
++기술 실패(비정상 종료·불완전)면 원본 dir을 보존하고 --attempt N+1 로 paired block 전체를 재측정한다. 느리다는 이유의 제외 금지.
++최종 checkpoint는 decisions/final_selection.json (V96 이전 D24 선택, 잠금됨).
++"""
++import argparse
++import json
++import os
++import subprocess
++import sys
++import time
++
++ROOT = "results/iter_046"
++FINAL = f"{ROOT}/decisions/final_selection.json"
++TIMING = f"{ROOT}/timing"
++
++
++def run(cmd, log):
++    t = time.time()
++    p = subprocess.run(cmd, capture_output=True, text=True)
++    with open(log, "a") as f:
++        f.write(f"$ {' '.join(cmd)}\nrc={p.returncode} dt={time.time() - t:.1f}\n{p.stdout[-3000:]}\n{p.stderr[-3000:]}\n")
++    return p.returncode
++
++
++def launch_cmd(sysname, d, fin, workers=2, batch=4, set_="V96", timing=True):
++    if sysname == "A":
++        cmd = [sys.executable, "mg45_launch.py", "--set", set_, "--ckpt", "A_final", "--ckpt-path", fin["ckpt_path"], "--out-dir", d]
++        thr = fin["selected_threshold"]
++    else:
++        cmd = [sys.executable, "mg45_launch.py", "--set", set_, "--ckpt", "P", "--out-dir", d]
++        thr = 0.4
++    cmd += ["--workers", str(workers), "--gpus", "0,1", "--batch", str(batch)]
++    if timing:
++        cmd += ["--post-thr", str(thr), "--warmup-d8", "--barrier"]
++    return cmd
++
++
++def main():
++    ap = argparse.ArgumentParser()
++    sub = ap.add_subparsers(dest="cmd", required=True)
++    v = sub.add_parser("v96")
++    v.add_argument("--workers", type=int, default=2)
++    v.add_argument("--batch", type=int, default=4)
++    b = sub.add_parser("block")
++    b.add_argument("--k", type=int, required=True)
++    b.add_argument("--attempt", type=int, default=1)
++    c = sub.add_parser("cfg")
++    c.add_argument("--workers", type=int, required=True)
++    c.add_argument("--batch", type=int, required=True)
++    c.add_argument("--tag", required=True)
++    a = ap.parse_args()
++    fin = json.load(open(FINAL))
++    if a.cmd == "v96":
++        d = f"{ROOT}/mg/V96_A_w2b4"
++        sys.exit(subprocess.call(launch_cmd("A", d, fin, a.workers, a.batch, "V96", timing=False)))
++    if a.cmd == "cfg":
++        d = f"{ROOT}/cfg/D24_A_{a.tag}"
++        sys.exit(subprocess.call(launch_cmd("A", d, fin, a.workers, a.batch, "D24", timing=False)))
++    # block
++    os.makedirs(TIMING, exist_ok=True)
++    ap_ = f"{TIMING}/attempts.json"
++    if a.attempt != 1:
++        cur = json.load(open(ap_)) if os.path.exists(ap_) else {}
++        cur[str(a.k)] = a.attempt
++        json.dump(cur, open(ap_, "w"))
++    lead = "A" if a.k % 2 == 1 else "P"
++    order = [lead, "P" if lead == "A" else "A"]
++    log = f"{TIMING}/block{a.k}_attempt{a.attempt}.driver.log"
++    for s in order:
++        d = f"{TIMING}/block{a.k}_a{a.attempt}_{s}"
++        if os.path.exists(d):
++            sys.exit(f"exists: {d}")
++        rc = run(launch_cmd(s, d, fin), log)
++        print(s, "rc", rc, d, flush=True)
++        if rc != 0:
++            sys.exit(f"technical failure in {s}: preserve {d}; rerun whole paired block with --attempt {a.attempt + 1}")
++        time.sleep(10)
++
++
++if __name__ == "__main__":
++    main()
+diff --git a/mg46_train.py b/mg46_train.py
+new file mode 100644
+index 0000000..7c84bcc
+--- /dev/null
++++ b/mg46_train.py
+@@ -0,0 +1,451 @@
++"""iter_046 MedGrounder-P 직접 적응 trainer (격리 venv 실행: python mg46_vrun.py mg46_train.py ...).
++
++공식 코드(a0aad98d, results/iter_045/external/MedGrounder)의 build_medgrounder / SetCriterion.loss_groundability·loss_boxes /
++build_transforms('train')를 그대로 호출한다. 공식 snapshot에는 학습 실행기가 없으므로 이 파일이 orchestration만 새로 만든다.
++의도된 차이(plan.md): matcher의 GIoU 예외 zero-cost fallback 금지(StrictMatcher), microbatch 누적 시 batch 전체 분모로 재가중,
++augmentation은 (seed, epoch, sample)에 연결해 재현, 원자적 checkpoint·단일 소유 lock·중간 step 재개.
++GT 좌표: manifest 원본 정규화 xyxy -> 공식 augmentation(albumentations format) -> 공식 box_xyxy_to_cxcywh target.
++
++CLI:
++  train --traj NAME --out DIR --lr-cfg S|U --target-epoch N [--save-epochs 2,5] [--microbatch 4] [--supp] [--gpu-check]
++"""
++import argparse
++import fcntl
++import hashlib
++import json
++import math
++import os
++import sys
++import time
++from concurrent.futures import ThreadPoolExecutor
++
++import numpy as np
++
++import mg45_mg as M  # 환경변수 설정 + 공식 repo sys.path 등록
++
++HERE = os.path.dirname(os.path.abspath(__file__))
++T305_MAN = "results/iter_040/data/manifest_train_private.jsonl"
++MAN = "results/iter_043/data/manifest_private.json"
++LR_CFG = {"S": {"base": 1e-5, "backbone": 1e-5, "text": 5e-5}, "U": {"base": 1e-5, "backbone": 1e-5, "text": 1e-5}}
++HP = {"batch": 32, "horizon_epochs": 15, "weight_decay": 1e-4, "betas": [0.9, 0.999], "eps": 1e-8, "clip": 0.1, "warmup_frac": 0.01,
++      "supp_start_mult": 0.5, "supp_epochs": 15, "imsize": 640, "seed": 17, "num_queries": 5,
++      "coef": {"groundability": 1.0, "bbox": 5.0, "giou": 2.0}, "eos_coef": 0.1}
++TARGETS = ("qA", "qB")
++
++
++class TrainError(RuntimeError):
++    pass
++
++
++def sha_bytes(b):
++    return hashlib.sha256(b).hexdigest()
++
++
++def file_sha(p):
++    return M.file_sha(p)
++
++
++# ---------------- 데이터 ----------------
++def load_t305():
++    """610 (환자,문장) 항목. 정렬: PatientID, target. 이미지는 iter_040 PNG(uint8 L)."""
++    rows = [json.loads(l) for l in open(T305_MAN) if l.strip()]
++    items = []
++    for r in sorted(rows, key=lambda r: r["PatientID"]):
++        for t in TARGETS:
++            items.append({"patient": r["PatientID"], "target": t, "sentence": r["sentences"][t], "image": r["image_meta"]["path"],
++                          "u8_sha": r["image_meta"]["u8_pixel_sha256"], "boxes": r["gt_boxes_xyxy_norm"][t], "study": r["StudyID"],
++                          "image_id": r["ImageID"], "labels": r["labels"][t], "stratum": r["stratum"]})
++    return items
++
++
++class TrainSet:
++    """디코드 캐시를 갖는 학습 자료. 항목 접근은 (seed, epoch, idx)로 augmentation seed가 결정된다. 로딩·변환 오류는 raise (조용한 skip 금지)."""
++
++    def __init__(self, items):
++        from PIL import Image
++        self.items = items
++        self.cache = {}
++        for it in items:
++            if it["image"] in self.cache:
++                continue
++            im = Image.open(it["image"])
++            if im.mode != "L":
++                raise TrainError(f"unexpected image mode {im.mode}: {it['image']}")
++            a = np.array(im)
++            if sha_bytes(a.tobytes()) != it["u8_sha"]:
++                raise TrainError(f"decoded pixel hash != manifest: {it['image']}")
++            self.cache[it["image"]] = np.stack([a, a, a], axis=-1)  # PIL L->RGB와 동일(채널 복제)
++
++    def __len__(self):
++        return len(self.items)
++
++    def get(self, idx, epoch, seed, augment=True):
++        import torch
++        from dataloaders.dataset import build_transforms
++        from utils.box_ops import box_xyxy_to_cxcywh
++        it = self.items[idx]
++        tf = build_transforms("train" if augment else "val", HP["imsize"])
++        if augment:
++            tf.set_random_seed(int(np.random.SeedSequence([seed, epoch, idx]).generate_state(1)[0]))
++        boxes = np.array(it["boxes"], dtype=np.float32).reshape(-1, 4)
++        out = tf(image=self.cache[it["image"]], bboxes=boxes, bbox_labels=[1] * len(boxes))
++        bt = torch.tensor(np.array(out["bboxes"], dtype=np.float32).reshape(-1, 4))
++        cx = box_xyxy_to_cxcywh(bt) if len(bt) else torch.empty((0, 4), dtype=torch.float32)
++        return {"image": out["image"], "boxes": cx, "n_orig": len(boxes), "phrase": it["sentence"], "idx": idx}
++
++
++def epoch_order(n, seed, epoch):
++    return np.random.default_rng([seed, epoch]).permutation(n).tolist()
++
++
++def batches(order, bs):
++    return [order[i:i + bs] for i in range(0, len(order), bs)]
++
++
++# ---------------- strict matcher ----------------
++def make_strict_matcher_cls():
++    import torch
++    from scipy.optimize import linear_sum_assignment
++    from model.medgrounder_matcher import HungarianMatcher
++    from utils.box_ops import box_cxcywh_to_xyxy, generalized_box_iou
++
++    class StrictMatcher(HungarianMatcher):
++        """공식 HungarianMatcher와 같은 cost(1/5/2)·linear_sum_assignment. 공식의 GIoU 예외 zero-cost fallback만 제거하고,
++        비유한 값·비양수 크기·비유한 cost는 예외로 중단한다."""
++
++        @torch.no_grad()
++        def forward(self, outputs, targets):
++            bs, nq = outputs["pred_groundability"].shape[:2]
++            out_prob = outputs["pred_groundability"].flatten(0, 1).softmax(-1)
++            out_bbox = outputs["pred_boxes"].flatten(0, 1)
++            tgt_ids = torch.cat([v["labels"] for v in targets])
++            tgt_bbox = torch.cat([v["boxes"] for v in targets])
++            if not (torch.isfinite(out_prob).all() and torch.isfinite(out_bbox).all() and torch.isfinite(tgt_bbox).all()):
++                raise TrainError("matcher: non-finite output/target")
++            if (out_bbox[:, 2:] <= 0).any() or (tgt_bbox[:, 2:] <= 0).any():
++                raise TrainError("matcher: non-positive width/height")
++            cost_class = -out_prob[:, tgt_ids]
++            cost_bbox = torch.cdist(out_bbox, tgt_bbox, p=1)
++            cost_giou = -generalized_box_iou(box_cxcywh_to_xyxy(out_bbox), box_cxcywh_to_xyxy(tgt_bbox))
++            C = self.cost_bbox * cost_bbox + self.cost_class * cost_class + self.cost_giou * cost_giou
++            if not torch.isfinite(C).all():
++                raise TrainError("matcher: non-finite cost")
++            C = C.view(bs, nq, -1).cpu()
++            sizes = [len(v["boxes"]) for v in targets]
++            idx = [linear_sum_assignment(c[i]) for i, c in enumerate(C.split(sizes, -1))]
++            return [(torch.as_tensor(i, dtype=torch.int64), torch.as_tensor(j, dtype=torch.int64)) for i, j in idx]
++    return StrictMatcher
++
++
++# ---------------- 모델/optimizer ----------------
++def build_model(device, seed=HP["seed"], init_path=None):
++    """공식 build_medgrounder + MG-P(pretrain_imagenome) strict load + StrictMatcher. returns (model, criterion, cfg)."""
++    import torch
++    from model.medgrounder import build_medgrounder
++    cfg = M.build_cfg("P")
++    torch.manual_seed(seed)
++    model, crit, _ = build_medgrounder(cfg)
++    path = init_path or M.WEIGHTS["P"]
++    ck = torch.load(path, map_location="cpu", weights_only=True)
++    sd = ck["model"] if "model" in ck else ck
++    model.load_state_dict(sd, strict=True)
++    m = crit.matcher
++    crit.matcher = make_strict_matcher_cls()(cost_class=m.cost_class, cost_bbox=m.cost_bbox, cost_giou=m.cost_giou)
++    return model.to(device), crit.to(device), cfg
++
++
++def param_groups(model, lr_cfg):
++    """backbone(requires_grad) / text_encoder / 나머지(transformer·heads·proj·query). 누락·중복 없음을 검사한다."""
++    c = LR_CFG[lr_cfg]
++    groups = {"backbone": [], "text_encoder": [], "base": []}
++    for n, p in model.named_parameters():
++        if not p.requires_grad:
++            continue
++        if n.startswith("backbone."):
++            groups["backbone"].append((n, p))
++        elif "text_encoder." in n:
++            groups["text_encoder"].append((n, p))
++        else:
++            groups["base"].append((n, p))
++    lrs = {"backbone": c["backbone"], "text_encoder": c["text"], "base": c["base"]}
++    allp = [id(p) for g in groups.values() for _, p in g]
++    trainable = [id(p) for p in model.parameters() if p.requires_grad]
++    if len(allp) != len(set(allp)) or set(allp) != set(trainable):
++        raise TrainError("param group duplicate/missing")
++    pg = [{"params": [p for _, p in groups[k]], "lr": lrs[k], "base_lr": lrs[k], "name": k, "weight_decay": HP["weight_decay"]} for k in ("backbone", "text_encoder", "base")]
++    info = {k: {"n_tensors": len(v), "n_params": int(sum(p.numel() for _, p in v)), "lr": lrs[k]} for k, v in groups.items()}
++    info["frozen_n_params"] = int(sum(p.numel() for p in model.parameters() if not p.requires_grad))
++    return pg, info
++
++
++def make_optimizer(model, lr_cfg):
++    import torch
++    pg, info = param_groups(model, lr_cfg)
++    opt = torch.optim.AdamW(pg, betas=tuple(HP["betas"]), eps=HP["eps"], weight_decay=HP["weight_decay"])
++    return opt, info
++
++
++def steps_per_epoch(n, bs=HP["batch"]):
++    return math.ceil(n / bs)
++
++
++def lr_mult(step, steps_main, supp):
++    """step: 지금까지 완료한 optimizer step 수(0부터). main: HF linear_with_warmup(총 steps_main, warmup 1%). supp: step>=steps_main에서 0.5 -> 0 선형(warmup 없음)."""
++    warm = max(1, int(round(HP["warmup_frac"] * steps_main)))
++    if step < steps_main:
++        return step / warm if step < warm else max(0.0, (steps_main - step) / (steps_main - warm))
++    if not supp:
++        raise TrainError("step beyond main horizon without --supp")
++    n_s = steps_main  # 15 epoch 보완 = main horizon과 같은 step 수
++    return HP["supp_start_mult"] * max(0.0, (steps_main + n_s - step) / n_s)
++
++
++# ---------------- loss (microbatch 누적, 공식 loss 함수 + batch 전체 분모) ----------------
++def targets_of(samples, device):
++    import torch
++    return [{"labels": torch.zeros((len(s["boxes"]),), dtype=torch.int64, device=device), "boxes": s["boxes"].to(device)} for s in samples]
++
++
++def batch_denoms(counts, nq, eos):
++    """전체 logical batch의 분모: num_boxes = max(sum n_gt,1) (공식 clamp), CE class-weight 합 W = n_matched*1 + (B*Q-n_matched)*eos, n_matched=sum min(Q,n_gt)."""
++    n_gt = int(sum(counts))
++    n_matched = int(sum(min(nq, c) for c in counts))
++    return {"num_boxes": float(max(n_gt, 1)), "W": n_matched * 1.0 + (len(counts) * nq - n_matched) * eos, "n_matched": n_matched, "n_gt": n_gt}
++
++
++def micro_loss(crit, out, targets, denom, w_total_den):
++    """한 microbatch의 (가중) 손실 항. 반환: dict(total, ce_part, bbox_part, giou_part, n_matched). total은 batch 전체 평균 손실에 대한 기여분."""
++    import torch
++    logits, boxes = out["pred_groundability"].float(), out["pred_boxes"].float()
++    outs = {"pred_groundability": logits, "pred_boxes": boxes}
++    indices = crit.matcher(outs, targets)
++    n_matched = int(sum(len(i) for i, _ in indices))
++    nq = logits.shape[1]
++    W_mb = n_matched * 1.0 + (logits.shape[0] * nq - n_matched) * crit.eos_coef
++    ce = crit.loss_groundability(outs, targets, indices, None, log=False)["loss_groundability"] * (W_mb / w_total_den)
++    bx = crit.loss_boxes(outs, targets, indices, denom["num_boxes"])  # sum / (batch 전체 num_boxes)
++    wd = crit.weight_dict
++    total = wd["loss_groundability"] * ce + wd["loss_bbox"] * bx["loss_bbox"] + wd["loss_giou"] * bx["loss_giou"]
++    return {"total": total, "ce": ce.detach(), "bbox": bx["loss_bbox"].detach(), "giou": bx["loss_giou"].detach(), "n_matched": n_matched}
++
++
++def forward_samples(model, samples, device, autocast):
++    import torch
++    from utils.misc import NestedTensor
++    x = torch.stack([s["image"] for s in samples]).to(device)
++    masks = torch.stack([torch.zeros_like(s["image"][0], dtype=torch.bool) for s in samples]).to(device)
++    with torch.autocast("cuda", dtype=torch.bfloat16, enabled=autocast):
++        out = model(NestedTensor(x, masks), [s["phrase"] for s in samples])
++    return out
++
++
++def accumulate(model, crit, samples, microbatch, device, autocast=True, backward=True):
++    """logical batch 전체의 손실/기울기를 microbatch 누적으로 계산(기울기는 .grad에 누적). returns 합계 dict."""
++    counts = [len(s["boxes"]) for s in samples]
++    den = batch_denoms(counts, HP["num_queries"], crit.eos_coef)
++    acc = {"total": 0.0, "ce": 0.0, "bbox": 0.0, "giou": 0.0, "n_matched": 0}
++    for i in range(0, len(samples), microbatch):
++        mb = samples[i:i + microbatch]
++        out = forward_samples(model, mb, device, autocast)
++        part = micro_loss(crit, out, targets_of(mb, device), den, den["W"])
++        if backward:
++            part["total"].backward()
++        for k in ("total", "ce", "bbox", "giou"):
++            acc[k] += float(part[k].detach())
++        acc["n_matched"] += part["n_matched"]
++    if acc["n_matched"] != den["n_matched"]:
++        raise TrainError(f"matched count {acc['n_matched']} != expected {den['n_matched']}")
++    acc.update({"n_gt": den["n_gt"], "denom": den})
++    return acc
++
++
++def train_step(model, crit, opt, samples, microbatch, device, step, steps_main, supp, autocast=True):
++    """1 optimizer step: LR 설정 -> 누적 backward -> clip 0.1 -> step. 비유한 값이면 TrainError."""
++    import torch
++    mult = lr_mult(step, steps_main, supp)
++    for g in opt.param_groups:
++        g["lr"] = g["base_lr"] * mult
++    opt.zero_grad(set_to_none=True)
++    acc = accumulate(model, crit, samples, microbatch, device, autocast)
++    params = [p for g in opt.param_groups for p in g["params"]]
++    gn = torch.nn.utils.clip_grad_norm_(params, HP["clip"])
++    if not (math.isfinite(acc["total"]) and torch.isfinite(gn)):
++        raise TrainError(f"non-finite loss/grad at step {step}: loss={acc['total']} gn={float(gn)}")
++    opt.step()
++    acc["grad_norm"] = float(gn)
++    acc["lr_mult"] = mult
++    acc["lr"] = {g["name"]: g["lr"] for g in opt.param_groups}
++    return acc
++
++
++# ---------------- checkpoint ----------------
++def rng_state():
++    import random
++    import torch
++    return {"torch": torch.get_rng_state(), "cuda": torch.cuda.get_rng_state_all(), "numpy": np.random.get_state(), "python": random.getstate()}
++
++
++def set_rng_state(s):
++    import random
++    import torch
++    torch.set_rng_state(s["torch"])
++    torch.cuda.set_rng_state_all(s["cuda"])
++    np.random.set_state(s["numpy"])
++    random.setstate(s["python"])
++
++
++def atomic_torch_save(obj, path):
++    import torch
++    tmp = f"{path}.{os.getpid()}.tmp"
++    torch.save(obj, tmp)
++    with open(tmp, "rb") as f:
++        os.fsync(f.fileno())
++    os.replace(tmp, path)
++    d = file_sha(path)
++    tj = f"{path}.sha256.{os.getpid()}.tmp"
++    json.dump({"sha256": d, "bytes": os.path.getsize(path)}, open(tj, "w"))
++    os.replace(tj, path + ".sha256.json")
++    return d
++
++
++def load_verified(path):
++    import torch
++    sj = path + ".sha256.json"
++    if not os.path.exists(sj):
++        raise TrainError(f"missing digest for {path}")
++    if file_sha(path) != json.load(open(sj))["sha256"]:
++        raise TrainError(f"checkpoint digest mismatch {path}")
++    return torch.load(path, map_location="cpu", weights_only=False)
++
++
++def acquire_lock(out):
++    f = open(os.path.join(out, "train.lock"), "w")
++    try:
++        fcntl.flock(f, fcntl.LOCK_EX | fcntl.LOCK_NB)
++    except OSError:
++        raise TrainError(f"another training process owns {out}")
++    f.write(json.dumps({"pid": os.getpid(), "t": time.time()}))
++    f.flush()
++    return f
++
++
++# ---------------- train CLI ----------------
++def cmd_train(a):
++    import torch
++    out = a.out
++    os.makedirs(out, exist_ok=True)
++    lock = acquire_lock(out)
++    if a.deterministic:
++        torch.backends.cudnn.deterministic = True
++        torch.backends.cudnn.benchmark = False
++    dev = torch.device("cuda:0")
++    items = load_t305()
++    if a.limit_train:
++        items = items[:a.limit_train]  # 재개/동작 검사 전용
++    n = len(items)
++    spe = steps_per_epoch(n)
++    steps_main = HP["horizon_epochs"] * spe if not a.limit_train else a.horizon_steps
++    ts = TrainSet(items)
++    model, crit, cfg = build_model(dev, HP["seed"])
++    opt, ginfo = make_optimizer(model, a.lr_cfg)
++    model.train()
++    state = {"step": 0, "epoch_done": 0, "epoch_losses": {}, "hist_digest": None}
++    rp = os.path.join(out, "resume.pt")
++    log_p = os.path.join(out, "train_log.jsonl")
++    if os.path.exists(rp):
++        ck = load_verified(rp)
++        if ck["config"]["lr_cfg"] != a.lr_cfg or ck["config"]["n_items"] != n or ck["config"]["steps_main"] != steps_main or ck["config"]["seed"] != HP["seed"]:
++            raise TrainError("resume checkpoint config != requested config")
++        model.load_state_dict(ck["model"], strict=True)
++        opt.load_state_dict(ck["optimizer"])
++        for g, gs in zip(opt.param_groups, ck["optimizer"]["param_groups"]):
++            g["base_lr"] = gs["base_lr"]
++        state = ck["state"]
++        set_rng_state(ck["rng"])
++        # 로그: 체크포인트 이후 step 행은 보존 파일로 이동
++        if os.path.exists(log_p):
++            rows = [json.loads(l) for l in open(log_p) if l.strip()]
++            keep = [r for r in rows if r["step"] < state["step"]]
++            drop = [r for r in rows if r["step"] >= state["step"]]
++            if drop:
++                open(os.path.join(out, f"train_log.discarded_{int(time.time())}.jsonl"), "x").write("\n".join(json.dumps(r) for r in drop) + "\n")
++            open(log_p, "w").write("".join(json.dumps(r) + "\n" for r in keep))
++        print(f"resumed at step {state['step']} epoch_done {state['epoch_done']}", flush=True)
++    cfgrec = {"lr_cfg": a.lr_cfg, "n_items": n, "steps_main": steps_main, "seed": HP["seed"], "hp": HP, "lr": LR_CFG[a.lr_cfg], "microbatch": a.microbatch,
++              "autocast_bf16": a.bf16, "deterministic": a.deterministic, "groups": ginfo, "init_ckpt_sha256": file_sha(M.WEIGHTS["P"]), "supp": a.supp}
++    json.dump(cfgrec, open(os.path.join(out, f"config_{int(time.time())}.json"), "w"), indent=1, default=str)
++    pool = ThreadPoolExecutor(max_workers=8)
++    save_epochs = [int(x) for x in a.save_epochs.split(",")] if a.save_epochs else []
++    log = open(log_p, "a")
++    start_epoch = state["epoch_done"]
++    while state["epoch_done"] < a.target_epoch:
++        ep = state["epoch_done"] + 1  # 1-based epoch (augmentation/order seed용)
++        bl = batches(epoch_order(n, HP["seed"], ep), HP["batch"])
++        first_b = state["step"] - (ep - 1) * spe
++        if not (0 <= first_b <= len(bl)):
++            raise TrainError(f"inconsistent step/epoch: step {state['step']} epoch {ep}")
++        for bi in range(first_b, len(bl)):
++            t0 = time.time()
++            samples = list(pool.map(lambda i: ts.get(i, ep, HP["seed"]), bl[bi]))
++            t1 = time.time()
++            acc = train_step(model, crit, opt, samples, a.microbatch, dev, state["step"], steps_main, a.supp, autocast=a.bf16)
++            torch.cuda.synchronize()
++            t2 = time.time()
++            row = {"step": state["step"], "epoch": ep, "batch_in_epoch": bi, "n_samples": len(samples), "loss": acc["total"], "ce": acc["ce"], "bbox": acc["bbox"],
++                   "giou": acc["giou"], "grad_norm": acc["grad_norm"], "lr": acc["lr"], "n_gt_after_aug": acc["n_gt"],
++                   "n_gt_dropped": int(sum(s["n_orig"] for s in samples) - acc["n_gt"]), "n_empty_after_aug": int(sum(len(s["boxes"]) == 0 for s in samples)),
++                   "data_s": t1 - t0, "step_s": t2 - t1, "peak_alloc_gb": torch.cuda.max_memory_allocated() / 2**30, "finite": True}
++            log.write(json.dumps(row) + "\n")
++            log.flush()
++            os.fsync(log.fileno())
++            state["epoch_losses"].setdefault(str(ep), []).append(acc["total"])
++            state["step"] += 1
++            end_of_epoch = bi == len(bl) - 1
++            if end_of_epoch:
++                state["epoch_done"] = ep
++            if end_of_epoch or (a.ckpt_every and state["step"] % a.ckpt_every == 0):
++                if end_of_epoch and ep in save_epochs:
++                    wp = os.path.join(out, f"weights_e{ep}.pth")
++                    d = atomic_torch_save({"model": model.state_dict()}, wp)
++                    json.dump({"epoch": ep, "step": state["step"], "sha256": d, "epoch_mean_train_loss": float(np.mean(state["epoch_losses"][str(ep)]))},
++                              open(os.path.join(out, f"weights_e{ep}.json"), "w"))
++                atomic_torch_save({"model": model.state_dict(), "optimizer": opt.state_dict(), "state": state, "rng": rng_state(),
++                                   "config": {k: cfgrec[k] for k in ("lr_cfg", "n_items", "steps_main", "seed")}}, rp)
++            if a.stop_after_steps is not None and state["step"] >= a.stop_after_steps and not end_of_epoch and a.ckpt_every and state["step"] % a.ckpt_every == 0:
++                print(f"test stop after step {state['step']}", flush=True)
++                os._exit(137)
++        mean_loss = float(np.mean(state["epoch_losses"][str(ep)]))
++        print(f"epoch {ep} done step {state['step']} mean_loss {mean_loss:.4f}", flush=True)
++    done = {"traj": a.traj, "lr_cfg": a.lr_cfg, "epoch_done": state["epoch_done"], "step": state["step"], "resume_sha256": json.load(open(rp + ".sha256.json"))["sha256"],
++            "epoch_mean_train_loss": {k: float(np.mean(v)) for k, v in state["epoch_losses"].items()}, "t": time.time()}
++    json.dump(done, open(os.path.join(out, f"reached_epoch{state['epoch_done']}.json"), "w"), indent=1)
++    lock.close()
++
++
++def main():
++    ap = argparse.ArgumentParser()
++    sub = ap.add_subparsers(dest="cmd", required=True)
++    t = sub.add_parser("train")
++    t.add_argument("--traj", required=True)
++    t.add_argument("--out", required=True)
++    t.add_argument("--lr-cfg", required=True, choices=["S", "U"])
++    t.add_argument("--target-epoch", type=int, required=True)
++    t.add_argument("--save-epochs", default="")
++    t.add_argument("--microbatch", type=int, default=4)
++    t.add_argument("--supp", action="store_true")
++    t.add_argument("--bf16", action="store_true", help="기본은 fp32 (gate_throughput: bf16 이득 없음, bf16 loss 차이 7%)")
++    t.add_argument("--deterministic", action="store_true")
++    t.add_argument("--ckpt-every", type=int, default=10)
++    t.add_argument("--limit-train", type=int, default=None, help="재개/동작 검사 전용")
++    t.add_argument("--horizon-steps", type=int, default=None)
++    t.add_argument("--stop-after-steps", type=int, default=None, help="재개 검사 전용: step N checkpoint 직후 os._exit")
++    a = ap.parse_args()
++    try:
++        cmd_train(a)
++    except TrainError as e:
++        print(f"TRAIN_ERROR: {e}", flush=True)
++        sys.exit(3)
++
++
++if __name__ == "__main__":
++    main()
+diff --git a/mg46_verify.py b/mg46_verify.py
+new file mode 100644
+index 0000000..49515bf
+--- /dev/null
++++ b/mg46_verify.py
+@@ -0,0 +1,171 @@
++"""iter_046 독립 검증기 (CPU only). mg46_report의 계산(pg39_spec.match_fast / parse_ids / mg45_eval.score)과 별도로 구현한다.
++  - C: 자체 JSON 해석(전체 문자열이 JSON list) + 자체 canvas->원본 정규화 변환.
++  - MG(P, A): raw logits에서 softmax/threshold 통과 수(pre_wbf_n) 재계산, 저장된 최종 box를 자체 완전탐색 matching으로 채점.
++  - 모든 판정 지표(F1@0.3, F1@0.5, FP/문장, recall@0.3)의 시스템 평균과 6개 paired 비교의 97.5% CI(자체 bootstrap)를 report와 대조.
++  - 모든 시스템의 요청 ID 집합(192), box 유한성·양의 크기, C 파싱 상태를 검사한다. 불일치 시스템/환자를 제외한 PASS 금지.
++python mg46_verify.py --report results/iter_046/eval/report.json --out results/iter_046/eval/verify.json
++"""
++import argparse
++import glob
++import json
++import os
++import sys
++
++import numpy as np
++
++import mg45_eval as E
++import mg46_eval as E6
++import mg45_verify as V
++
++MAN = E.MAN
++ROOT = "results/iter_046"
++METRICS = ("f1_03", "f1_05", "fp_03", "recall_03")
++
++
++def f1_all(pred, gt):
++    tp3 = V.best_matching(pred, gt, 0.3)
++    tp5 = V.best_matching(pred, gt, 0.5)
++
++    def f(tp):
++        p = tp / len(pred) if pred else 0.0
++        r = tp / len(gt) if gt else 0.0
++        return 2 * p * r / (p + r) if p + r > 0 else 0.0
++    return {"f1_03": f(tp3), "f1_05": f(tp5), "fp_03": len(pred) - tp3, "recall_03": tp3 / len(gt) if gt else 0.0, "empty": len(pred) == 0}
++
++
++def main():
++    ap = argparse.ArgumentParser()
++    ap.add_argument("--report", required=True)
++    ap.add_argument("--out", required=True)
++    a = ap.parse_args()
++    if os.path.exists(a.out):
++        sys.exit("output exists")
++    rep = json.load(open(a.report))
++    per = json.load(open(a.report.replace(".json", "_per_item.json")))
++    man = json.load(open(MAN))
++    fin = json.load(open(f"{ROOT}/decisions/final_selection.json"))
++    ents = {e["PatientID"]: e for e in man["V96"]}
++    pids = sorted(ents)
++    want_keys = {(p, t) for p in pids for t in ("qA", "qB")}
++    res = {"mismatches": [], "systems": {}, "checks": {}}
++    # ---- C ----
++    crecs = {}
++    for f in glob.glob("results/iter_040/gen/C/gen_worker*.jsonl"):
++        for l in open(f):
++            if l.strip():
++                r = json.loads(l)
++                if (r["patient"], r["targets"][0]) in crecs:
++                    res["mismatches"].append("C duplicate record")
++                crecs[(r["patient"], r["targets"][0])] = r
++    if set(crecs) != want_keys:
++        res["mismatches"].append("C key set != expected 192")
++    own_c, n_unparsed = {}, 0
++    for (p, t), r in crecs.items():
++        e = ents[p]
++        top, left, side = r["pad_affine_top_left_side"]
++        boxes = V.own_parse_list(r["suffix_text_raw"]) if r["ended_eos"] else None
++        if boxes is None:
++            n_unparsed += 1
++            boxes = []
++        orig = [[(x0 * side / 1000 - left) / e["w"], (y0 * side / 1000 - top) / e["h"], (x1 * side / 1000 - left) / e["w"], (y1 * side / 1000 - top) / e["h"]] for y0, x0, y1, x1 in boxes]
++        if not all(np.isfinite(x) for b in orig for x in b):
++            res["mismatches"].append("C nonfinite box")
++        own_c[(p, t)] = f1_all(orig, e["gt_boxes_xyxy_norm"][t])
++    res["checks"]["C_unparsed_or_noneos"] = n_unparsed
++    # ---- MG ----
++    a_recs, _, _ = E6.verify_dir(f"{ROOT}/mg/V96_A_w2b4", "V96", "A_final", fin["ckpt_path"], man)
++    p_recs, _, _ = E.verify_mg_dir("results/iter_045/mg/V96_P_w2b4", "V96", "P", man, allow_code_diff=True)
++    p_thr = json.load(open("results/iter_045/decisions/D24_select.json"))["ckpts"]["P"]["selected_threshold"]
++
++    def mg_own(recs, thr):
++        out, pass_bad, bad_box = {}, 0, 0
++        if set(recs) != want_keys:
++            res["mismatches"].append("MG key set != expected 192")
++        for (p, t), r in recs.items():
++            lg = np.array(r["logits"], dtype=np.float64)
++            ex = np.exp(lg - lg.max(axis=-1, keepdims=True))
++            n_pass = int(((ex / ex.sum(axis=-1, keepdims=True))[:, 0] > thr).sum())
++            pass_bad += int(n_pass != r["detections"][str(thr)]["pre_wbf_n"])
++            boxes = r["detections"][str(thr)]["boxes_orig_xyxy"]
++            bad_box += int(any((not all(np.isfinite(b))) or b[2] <= b[0] or b[3] <= b[1] for b in boxes))
++            out[(p, t)] = f1_all(boxes, ents[p]["gt_boxes_xyxy_norm"][t])
++        return out, pass_bad, bad_box
++    systems = {"C": (own_c, 0, 0), "P@sel": mg_own(p_recs, p_thr), "A@0.4": mg_own(a_recs, 0.4), "A@sel": mg_own(a_recs, fin["selected_threshold"]),
++               "A@0.8": mg_own(a_recs, 0.8), "P@0.8": mg_own(p_recs, 0.8)}
++    pat = {s: {m: np.array([np.mean([sc[(p, t)][m] for t in ("qA", "qB")]) for p in pids]) for m in METRICS} for s, (sc, _, _) in systems.items()}
++    for s, (sc, pass_bad, bad_box) in systems.items():
++        rp = per[s]
++        md = {m: max(abs(v[m] - rp[f"{p}|{t}"][m]) for (p, t), v in sc.items()) for m in METRICS}
++        prim = rep["primary_V96"][s]
++        means = {"f1_03": pat[s]["f1_03"].mean(), "f1_05": pat[s]["f1_05"].mean(), "fp_per_sentence": pat[s]["fp_03"].mean(), "recall_03": pat[s]["recall_03"].mean()}
++        ok = all(v < 1e-9 for v in md.values()) and pass_bad == 0 and bad_box == 0 and all(abs(means[k] - prim[k]) < 1e-9 for k in means)
++        res["systems"][s] = {"own": {k: float(v) for k, v in means.items()}, "max_abs_item_diff_vs_report": md, "threshold_pass_count_mismatch": pass_bad, "bad_boxes": bad_box, "ok": bool(ok)}
++        if not ok:
++            res["mismatches"].append(s)
++    res["C_matches_stored_iter040"] = bool(abs(res["systems"]["C"]["own"]["f1_03"] - 0.5779513888888889) < 1e-9 and abs(res["systems"]["C"]["own"]["f1_05"] - 0.2911458333333333) < 1e-9)
++    if not res["C_matches_stored_iter040"]:
++        res["mismatches"].append("C_stored")
++    # ---- 독립 bootstrap: 모든 판정 비교 x 모든 지표 ----
++    idx = np.random.default_rng(4401).integers(0, len(pids), size=(10000, len(pids)), dtype=np.int32)
++    res["bootstrap"] = {}
++    for x, y in (("A@0.4", "P@sel"), ("A@sel", "C"), ("C", "A@sel"), ("A@sel", "P@sel"), ("A@0.4", "C"), ("A@0.8", "P@0.8")):
++        name = f"{x}_minus_{y}"
++        res["bootstrap"][name] = {}
++        for m in METRICS:
++            d = pat[x][m] - pat[y][m]
++            mm = d[idx].mean(axis=1)
++            lo, hi = float(np.percentile(mm, 1.25)), float(np.percentile(mm, 98.75))
++            rc = rep["compare_paired_ci975"][name][m]
++            ok = abs(lo - rc["lo"]) < 1e-9 and abs(hi - rc["hi"]) < 1e-9 and abs(d.mean() - rc["mean"]) < 1e-9
++            res["bootstrap"][name][m] = {"own": [float(d.mean()), lo, hi], "report": [rc["mean"], rc["lo"], rc["hi"]], "ok": bool(ok)}
++            if not ok:
++                res["mismatches"].append(f"bootstrap {name} {m}")
++    # ---- 비용 비율 독립 재계산 ----
++    import math
++    att = {k: 1 for k in range(1, 7)}
++    ap_ = f"{ROOT}/timing/attempts.json"
++    if os.path.exists(ap_):
++        att.update({int(k): v for k, v in json.load(open(ap_)).items()})
++    t5 = 2.5705818366147395
++    ratios = {"device_seconds_span": [], "patients_per_min": [], "p95": []}
++    for k in range(1, 7):
++        row = {}
++        for s in ("A", "P"):
++            d = f"{ROOT}/timing/block{k}_a{att[k]}_{s}"
++            files = sorted(glob.glob(d + "/raw_worker*.jsonl"))
++            recs = [json.loads(l) for f in files for l in open(f, "rb").read().split(b"\n")[:-1] if l.strip()]
++            comp = json.load(open(d + "/completion.json"))
++            if len(recs) != 192 or len({r["request_id"] for r in recs}) != 192 or any(c != 0 for c in comp["exit_codes"]):
++                res["mismatches"].append(f"timing {s}{k} incomplete/duplicate")
++            mp = {int(w): g for w, g in comp["mapping"].items()}
++            bp = {}
++            for r in recs:
++                bp.setdefault(r["patient"], []).append(r)
++            lat = [max(x["t_orig_done"] for x in v) - min(x["t_dispatch"] for x in v) for v in bp.values()]
++            gi = {}
++            for v in bp.values():
++                gi.setdefault(mp[v[0]["worker"]], []).append((min(x["t_dispatch"] for x in v), max(x["t_orig_done"] for x in v)))
++            row[s] = {"span": sum(max(e for _, e in v) - min(s_ for s_, _ in v) for v in gi.values()), "ppm": 96 / comp["workload_wall_s"] * 60, "p95": float(np.percentile(lat, 95))}
++        ratios["device_seconds_span"].append(row["A"]["span"] / row["P"]["span"])
++        ratios["patients_per_min"].append(row["A"]["ppm"] / row["P"]["ppm"])
++        ratios["p95"].append(row["A"]["p95"] / row["P"]["p95"])
++    cost_own = {}
++    for k, v in ratios.items():
++        lr = np.log(v)
++        se = lr.std(ddof=1) / math.sqrt(6)
++        cost_own[k] = {"geo_mean": float(math.exp(lr.mean())), "lo": float(math.exp(lr.mean() - t5 * se)), "hi": float(math.exp(lr.mean() + t5 * se))}
++    rc = rep["cost"]
++    for k, rk in (("device_seconds_span", "A_over_P_device_seconds_span"), ("patients_per_min", "A_over_P_throughput"), ("p95", "A_over_P_p95_latency")):
++        ok = abs(cost_own[k]["geo_mean"] - rc[rk]["geo_mean"]) < 1e-9 and abs(cost_own[k]["lo"] - rc[rk]["ci95_lo"]) < 1e-9 and abs(cost_own[k]["hi"] - rc[rk]["ci95_hi"]) < 1e-9
++        cost_own[k]["ok"] = bool(ok)
++        if not ok:
++            res["mismatches"].append(f"cost {k}")
++    res["cost_own"] = cost_own
++    res["PASS"] = len(res["mismatches"]) == 0
++    json.dump(res, open(a.out, "x"), indent=1)
++    print(json.dumps({"PASS": res["PASS"], "mismatches": res["mismatches"], "systems": {k: v["ok"] for k, v in res["systems"].items()}, "C_unparsed": n_unparsed}))
++    sys.exit(0 if res["PASS"] else 1)
++
++
++if __name__ == "__main__":
++    main()
+diff --git a/mg46_vrun.py b/mg46_vrun.py
+new file mode 100644
+index 0000000..110d030
+--- /dev/null
++++ b/mg46_vrun.py
+@@ -0,0 +1,19 @@
++"""iter_046 격리 venv(medgrounder_iter045) 실행기: python mg46_vrun.py <script.py> [args...]. 로그는 results/iter_046/logs/ 에 보존, 마지막 40줄만 출력."""
++import os
++import subprocess
++import sys
++import time
++
++HERE = os.path.dirname(os.path.abspath(__file__))
++PY = os.path.join(HERE, "results", "environments", "medgrounder_iter045", "bin", "python")
++
++if __name__ == "__main__":
++    os.makedirs(os.path.join(HERE, "results", "iter_046", "logs"), exist_ok=True)
++    tag = "_".join(os.path.basename(x) for x in sys.argv[1:3]).replace("/", "_")[:60]
++    log = os.path.join(HERE, "results", "iter_046", "logs", f"{tag}_{int(time.time())}_{os.getpid()}.log")
++    with open(log, "wb") as f:
++        rc = subprocess.call([PY] + sys.argv[1:], cwd=HERE, env=dict(os.environ), stdout=f, stderr=subprocess.STDOUT)
++    lines = open(log, errors="replace").read().replace("\r", "\n").splitlines()
++    print("\n".join(lines[-40:]))
++    print(f"[vrun] rc={rc} log={log}")
++    sys.exit(rc)

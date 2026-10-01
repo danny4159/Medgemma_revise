@@ -17316,3 +17316,422 @@ MG 적응이 C의 정확도를 보존하면서 비용 이점을 유지하면 현
 기존 출력 재분석만으로 target 적응 효과를 구분할 수는 없다. 반면 현재 여섯 timing block을 더 늘리는 것은 이 결정을 바꿀 가능성이 작다. 실제 사용할 코드의 재사용 결함만 같은 계획에서 보완하고 별도 주변 정비 반복을 만들지 않는다. VinDr 승인 대기, RSNA 자산 및 보호 reserve를 유지한다.
 
 논문 추천은 보류한다. 이번 혼합 결과는 중요한 비교 근거지만 특정 새 방법 방향의 유망성을 확인한 결과는 아니다.
+
+
+## iter_046 GPT PLAN [문장 grounding의 모듈형 대안 비교 / proceed] — 2026-10-01 18:16:13
+
+# 요약
+
+- **이번에 할 일:** MedGrounder-P를 C와 같은 T305 annotation으로 직접 적응하고 기존 C·미적응 MG-P와 비교한다.
+- **필요한 이유:** 개발 V96에서 C의 F1@0.3은18.3 pp 높았지만 비용은약27배였다. target 적응 여부가 정확도 차이를 설명하는지는 아직 모른다.
+- **확인할 기준:** 충분한 직접 적응 이후의 paired F1·FP와 MG 비용 보존이다. 학습·설정 선택은 train/D24에서 끝낸다.
+- **주의·다음:** 기존 방법을 이용한 진단이다. 독립 확인·새 contribution을 주장하지 않으며 공동 요청 손실은 별도 관찰로 보존한다.
+
+# Current Understanding
+
+iter_045 원 판정은 `valid_experiment=true`, `inconclusive`다. C/MG-P F1@0.3은0.577951/0.395313이며 C−MG-P의97.5% CI는[0.080035,0.285245]다. MG/C device-seconds 비율은0.036942였다. C 잔여 이점 기준과 모듈형 대안 기준은 모두 미충족이었다.
+
+이번은 iter_045의 재판정이나 단순 실행 복구가 아니라 새로운 baseline 적응 개입이다. 원 기준을 소급 변경하지 않는다. 평가·출처 보완의 기준 문서는 `agent/runs/iter_044/plan.md`, SHA256 `e59714854fbe60c50e2135181592ea8d0868fd8e3af54b278a68a06f779312af`, 복구 기록은 `agent/runs/iter_045/plan.md`, SHA256 `a62bb72852b1c1600f6e94a82f5336c68d8a957eca9fcd647ec94de034a89528`다. 실행 범위와 새 판정은 이번 계획을 따른다.
+
+**유지:** GOAL, MedGemma1.5와 C adapter, T305/D24/V96, 원본 영상·문장·GT·matching, 기존 관찰·판정·checkpoint, RSNA 자산, VinDr 승인 대기, H192/F120/test/MRI reserve.
+
+**변경:** MG-P의 target 직접 적응을 추가한다. 새 결과는 `research/results/iter_046/`에 저장한다. 기존 환경·공식 snapshot·가중치·C 출력은 검증 후 재사용한다.
+
+**보류:** 새 loss, joint SFT, MG-MS 학습, 추가 seed·환자·데이터셋, C 재학습·새 C timing, 보호 집단 개방. 미사용 과거 runner 정비도 하지 않는다.
+
+# Strategy Check / 연구 방향 판단
+
+중요한 사용 과제는 영상과 지정한 양성 소견 문장을 받아 해당 영역을 반환하는 것이다. 내부 VLM이 이 과제에서 비용을 감수할 정확도 이점을 갖는지 알아야 후속 방법의 목표를 정할 수 있다.
+
+1. **현재 방법 개선:** C의 새 loss나 확대는 직접 CE 수렴과 모듈형 적응 차이가 남아 있어 우선순위가 낮다. iter_040 대조항의 추가 효과 불확정도 유지한다.
+2. **경쟁 설명 개입 — 선택:** MG-P에 동일 T305 annotation을 제공하면18.3 pp 격차에서 target 적응의 역할을 실제로 시험할 수 있다. 설치·추론 자산이 확보됐고 기존 출력 재분석만으로는 답할 수 없는 질문이다.
+3. **joint SFT 또는 다른 질문:** joint SFT는 iter_041의 공동 형식 미학습 설명을 구분하지만 별도의 효용·비용 판단이 필요하다. 다른 질문으로의 전환은 현재 비교의 정보 가치가 소진됐을 때 선택한다. 추측만으로 미검증 능력을 새 투자 이유로 삼지 않는다.
+
+같은 `language-conditioned-grounding` track을 유지한다. iter_038 준비, iter_039~043의 실제 비교, iter_044 실행 실패, iter_045의 유효한 모듈형 비교를 연결한다. 알려진 비용은 iter_040 학습약2.54 GPU-hours, iter_041 일부 큐약1.123 GPU-hours, iter_045 성공 timing launcher 합약2,453초 등이며 포함 범위가 달라 합산 총비용으로 제시하지 않는다.
+
+해결된 질문은 직접 SFT의 개선과 미적응 모듈형 모델의 정확도·비용 trade-off다. 남은 핵심은 동일 annotation 적응 이후의 격차다. 이번 종료 후에는 문장별 투자 보류 또는 구체적인 비용 개선 개입의 가치 재평가 중 하나를 선택한다. 새로운 주변 진단을 기본 다음 행동으로 두지 않는다.
+
+관찰별로 iter_040 직접 SFT 개선은 유지, iter_041 공동 요청 손실은 미검증 상태로 보존, iter_042 presence gate와 iter_043 영상 구별의 원 불확정도 유지한다. 이번 결과로 기존 blocker를 해제하지 않는다.
+
+# Hypothesis
+
+**H_adaptation:** 같은 T305 적응이 MG-P의 실제 grounding을 개선하고 C와의 격차를 상당 부분 줄인다.
+
+**H_sufficient:** 적응 MG가 C의 정확도를 허용 손실 내에서 보존하고 낮은 추론 비용을 유지한다.
+
+**H_residual:** 정상 학습과 한정 수렴 확인 후에도 C의 중요한 정확도 이점이 남는다. 이 경우에도 구조 자체의 인과 효과나 신규 방법 필요성을 확정하지 않는다.
+
+기존 MedGrounder 직접 학습을 경쟁 설명 대조군으로 사용하는 `diagnostic/none`이다. 새 기전·loss를 개발하는 method 실험을 diagnostic으로 바꿔 부르는 것이 아니다.
+
+# Limitation Evidence / Correct Usage Checks
+
+대상은 observed인 `padchest-sentence-grounding-and-joint-retention`이다. iter_045 원 review의 evidence·usage_checks·blocking_issues=[]를 연결한다. iter_041 정확도 관찰은 유효하지만 공동 비용 결합 판정의 blocker는 별도로 유지한다.
+
+공식 소스는 `results/iter_045/external/MedGrounder/`, revision `a0aad98d67018838fe160acbe1f7c3851fddeacc`다. [공식 저장소](https://github.com/aehrc/MedGrounder)와 [원논문 학습 설명](https://arxiv.org/html/2512.01085v1#S4)을 확인했다. 배포된 PadChest 적응 checkpoint는 사용하지 않는다.
+
+정상 사용 검사는 다음을 포함한다.
+
+- MG-P strict load, 공식 source·weight digest, text encoder revision `c3648aa87af95837c809e6f0c5f85d08160db437`, 현재 package/version을 연결한다. 디렉터리 존재만으로 검증을 대신하지 않는다.
+- T305의 raw image·uint16→uint8 변환·pixel hash를 iter_040 manifest 및 iter_043의 T305와 대조한다. 학습과 추론의 정상 transform을 분리한다.
+- GT는 original normalized xyxy에서 공식 augmentation을 거쳐 normalized cxcywh target으로 변환한다. 실제 모델 criterion은 box loss에서 xyxy L1을 사용하고 matcher는 cxcywh L1을 사용한다. 이를 임의로 통일하지 않는다.
+- 공식5-query 구조를 유지한다. T305의 최대 GT는4다. V96의6-box 문장1건도 전체 평가에 포함하고 query 한계의 적용 사례로 기술한다. 이 사례를 제거하거나 query 수를 바꾸지 않는다.
+- 공식 matcher의 GIoU 예외 fallback을 조용히 허용하지 않는다. strict adapter에서 유한 값·양의 크기·cost를 검사하고 예외는 실패로 처리한다. 정상 입력에서는 공식 matcher와 assignment·loss가 같아야 한다.
+- augmentation 후 box 삭제는 공식 min_visibility 규칙대로 기록하되 환자·문장 자체를 누락하지 않는다. 모든 box가 삭제된 입력과 unmatched query의 no-object label을 검사한다. category mapping이나 로딩 오류로 sample을 조용히 건너뛰지 않는다.
+
+# Contribution Path / Baselines / Reuse
+
+가장 가까운 방법은 MedGrounder의 직접 expert fine-tuning이다. 이번 적응 구현 자체는 contribution이 아니다. 후속 기여 후보는 동일 annotation의 강한 모듈형 대안 이후에도 남는 정확도를 더 낮은 비용으로 확보하는 원리이며, 현재는 미확정이다.
+
+비교 시스템은 다음과 같다.
+
+- **C:** iter_040 seed17 직접 추가 CE. 기존 V96 I-short192건을 사용한다.
+- **P:** iter_045의 미적응 MG-P와 D24 선택 threshold0.4.
+- **A_fixed:** 이번 D24 선택 checkpoint를 threshold0.4로 평가한다. P와의 적응 효과 비교다.
+- **A_selected:** 같은 checkpoint의 D24 선택 threshold를 사용한다. C와의 실용 주비교다.
+
+적응으로 score calibration이 달라질 수 있으므로 기존 후보0.2/0.4/0.6/0.8의 D24 재선택을 이번 계획에서 명시적으로 허용한다. 새로운 후보나 V96 기반 탐색은 추가하지 않는다. fixed와 selected가 다르면 둘 다 보고한다. 재선택은 저장 logits로 수행하며 GPU 요청을 늘리지 않는다.
+
+두 모델의 T305 환자·문장·box budget은 같지만 사전학습, 해상도, trainable parameter, epoch·step·GPU 비용은 다르다. C는 과거 V48/V96를 개발에 사용했고 MG는 D24에서 선택하므로 모델 선택 정보량까지 같다고 주장하지 않는다. oracle는 없다.
+
+현재 branch `approach/modular-grounding-comparison`, HEAD `2e431cdc7c7366960e12b7d055c7d3b70fec35c5`를 이어간다. 필요한 파일이 현재 기반에 있어 `reuse_assets=[]`다.
+
+- `mg45_mg.py`: 승인된 추론 wrapper. 학습용 checkpoint 경로를 명시적으로 받는 확장만 하고 원 P/MS 경로의 회귀 결과를 유지한다.
+- `mg45_eval.py`, `mg45_report.py`, `mg45_verify.py`, `pg43_eval.py`, `pg41_verify.py`: 필요한 순수 채점·import 검증을 재사용한다. 출처 불일치 강제 실패, 엄격한 parser, 모든 판정 지표 CI, 최종 completion을 먼저 보완한다.
+- `mg45_launch.py`, `mg45_worker.py`, `mg45_timing.py`, `mg45_ccheck.py`: 실제 사용하는 MG 경로만 protocol/config 재개 검사·동시 실행 배타성·barrier 실패 종료를 보완한다. 새 timing의 종료 경계를 원본 좌표 변환 완료 뒤로 맞춘다.
+- `pg39_data.py`, `pg39_spec.py`, `rsna_diag/geometry.py`, `rsna_diag/metrics.py`, `rsna_diag/parse.py`, `rsna_diag/queue_lock.py`: 현재 승인된 helper 범위와 import closure를 확인한다. 과거 전체 구축 CLI를 실행하지 않는다.
+- 공식 criterion·matcher·backbone·transformer는 기존 external snapshot에서 import한다. 새로 필요한 것은 이 모델의 학습 orchestration이며 기존 MedGemma trainer를 무단 재구현하거나 일반 승인으로 취급하지 않는다.
+
+`mg45_env/fetch/weights`는 재설치하지 않고 현재 환경·자산을 검증한다. 변경이 필요할 때만 별도 iter_046 환경을 만들고 정확한 버전을 잠근다. 미사용 C timing의 재개 결함은 deferred로 남긴다.
+
+# Proposed Experiment
+
+## 1. 입력과 실행 잠금
+
+T305는 `results/iter_040/data/manifest_train_private.jsonl`의305명·610문장·765개 box다. selection lock과 실제 파일 hash를 대조하고 `results/iter_043/data/manifest_private.json`의 T305와 일치시킨다. D24는24명·48문장, V96은96명·192문장이다. 기존 층·두 문장·복수 영역·희귀 사례를 유지한다.
+
+환자·study·영상·pixel hash 비중복, 문장·GT·학습 영상 provenance를 검증한다. 보호 집단은 기존 제외 목록으로만 확인하고 영상·GT를 열지 않는다. V96은 이미 본 개발 자료다.
+
+source·환경·가중치·데이터·LR 후보·seed·평가 일정·선택 규칙·분기 조건을 학습 전에 잠근다. 기술 동작 확인 후에는 microbatch·처리량·ETA만 추가 잠금하며 성능 결과로 조건을 바꾸지 않는다.
+
+## 2. 동작 확인
+
+T305에서 single/multiple box, 작은/큰 box, 긴 문장을 포함하는8명을 metadata 기반으로 고정한다. 데이터 검사는 전체 T305에 적용한다.
+
+독립 scratch checkpoint로 forward/backward, trainable parameter·optimizer group의 누락/중복, finite loss/gradient, 실제 parameter update, 작은 입력의 overfit 추세, 저장·재개를 확인한다. 동작 확인 가중치는 본학습에 사용하지 않는다. 작은 overfit 실패만으로 연구 가설을 기각하지 않으며 구현 문제와 관찰을 구분한다.
+
+공식 criterion의 weighted CE·box normalization은 accumulation 중 보존한다. 각 logical batch의 transformed GT를 먼저 확정하고, microbatch의 CE는 실제 class-weight 합, box loss는 실제 GT 수로 재가중해 전체 batch denominator와 맞춘다. class_error 같은 진단값은 최적화 loss에 넣지 않는다. dropout을 끈 fixture에서 split/unsplit loss·gradient를 비교하고, 마지막 불완전 batch도 검사한다.
+
+microbatch2와4를 우선 비교하며 안전하면8을 검토한다. effective batch는32문장으로 유지한다. 모델 forward는 bf16 autocast 후보, matching·loss 계산은 float32로 검증한다. fp32 대조에서 finite 값·loss·출력 오차를 확인하고 이상 시 fp32를 사용한다. 메모리만을 이유로 학습 모듈을 head-only로 바꾸지 않는다.
+
+중간 optimizer step와 validation 직전/직후 중단을 각각 검사한다. model·optimizer·scheduler·RNG·epoch·batch cursor·sample order·augmentation 상태를 복구해야 한다. augmentation은 seed/epoch/item에 연결해 재현하고 완료한 validation을 다른 checkpoint 결과로 잘못 건너뛰지 않게 한다.
+
+## 3. 가능성 탐색: 작은 자료 전체, 한 seed·두 LR
+
+610문장으로 이미 작고 동일 annotation 비교가 목적이므로 별도 작은 train subset 탐색은 생략한다. 대신 짧은 학습 단계로 투자량을 제한한다.
+
+MG-P에서 시작한 seed17 두 설정을 두 GPU에 독립 배정한다.
+
+- **설정 S:** 공식 config대로 일반/backbone LR1e-5, text encoder LR5e-5.
+- **설정 U:** 논문에 명시된 공통 LR1e-5를 모든 학습 가능 group에 적용.
+
+나머지는 동일하다. AdamW, betas(0.9,0.999), eps1e-8, weight_decay1e-4, gradient clip0.1, effective batch32, warmup1%, 총15 epoch horizon의 linear decay를 사용한다. backbone은 공식 코드의 layer2/3/4 학습 범위를 유지하고 text encoder·cross-modal transformer·heads를 학습한다. 공식 groundability CE1·box L1 5·GIoU2, eos_coef0.1, matcher cost1/5/2를 유지한다. aux·contrastive loss는 추가하지 않는다.
+
+공식 train augmentation을 적용하고 각 epoch에610문장을 한 번씩 사용한다. 샘플 누락·replacement oversampling은 없다. 마지막2문장 batch도 실제 denominator로 학습한다. epoch당20 updates다.
+
+두 설정을 각각5 epoch까지 실행하고 epoch2·5에서 D24 전체48문장을 평가한다. D24가 작으므로 더 작은 validation subset을 만들지 않는다. 매 epoch 전체 validation은 하지 않는다. 순서는 F1@0.3 최대, F1@0.5 최대, FP 최소, 이른 checkpoint, 마지막 동률은 공식 설정 S다. 각 checkpoint의 threshold는 기존 네 후보 중 같은 규칙과 높은 threshold 동률 규칙으로 선택한다.
+
+선택된 trajectory는 epoch5 상태에서 이어가며, 최종 모델 후보에는 그 trajectory의 이전 checkpoint도 포함한다. 낮은5-epoch 성능만으로 학습을 중단하거나 새 LR 후보를 추가하지 않는다.
+
+## 4. 규모 확대와 한정 수렴 확인
+
+선택된 trajectory만15 epoch까지 진행한다. epoch10·15에서 D24 전체 평가를 수행한다. 정상 수치와 학습 경로가 유지되면5 epoch 결과가 약해도15 epoch를 완료한다.
+
+D24에서 epoch15가 epoch10보다 F1@0.3을0.01 이상 개선하거나, epoch15가 사전 선택 순위상 최상이고10→15에서 epoch 평균 train loss가5% 이상 감소하면15 epoch 한정 보완을 실행한다. 이는 상승 추세를 너무 이르게 닫지 않기 위한 운영 규칙이며 통계적 수렴 증명이 아니다.
+
+보완은 optimizer state를 유지하고 기존 peak LR의0.5배에서 시작해15 epoch 동안0으로 linear decay한다. warmup은 반복하지 않는다. epoch20·25·30만 D24를 평가한다. 다른 LR·seed·추가 train data는 없다. 상승 조건을 충족하지 않으면 보완하지 않는다. 보완 후에도 상승하면 수렴 미확인이라고 보고하고 추가 연장을 중단한다.
+
+학습 loss·D24 곡선, 개선·과적합·기술 실패를 분리한다. 선택 checkpoint와 threshold를 잠근 뒤에만 V96 결과를 생성·분석한다. 수렴 미확인은 잔여 C 이점의 원인 해석을 제한하지만 완료된 출력 비교 자체를 삭제하지 않는다.
+
+## 5. 최종 개발 비교
+
+선택된 A checkpoint로 V96의192문장을 한 번 forward하고 raw logits·5개 query box를 저장한다. A_fixed와 A_selected는 같은 출력에서 계산한다. C와 P는 검증된 기존192건씩을 재사용한다.
+
+평가는 original normalized xyxy에서 기존 최대-cardinality 일대일 matching, 문장 평균→환자 평균을 유지한다. F1@0.3/0.5, FP/문장, recall@0.3, empty rate를 보고한다. 환자 paired bootstrap10,000회·seed4401·97.5% CI를 사용한다. 기존 층의 결과와6-GT 사례는 보조 기술로만 보고한다.
+
+새 점수가 낮거나 경계에 걸려도 V96를 본 뒤 학습·threshold·checkpoint를 바꾸지 않는다. 독립 확인은 이번 범위에 없다.
+
+## 6. GPU·비용·병렬 구성
+
+실제 실행 직전 `nvidia-smi`와 전용 Python에서 장치 가용성·상속된0,1의 물리/논리 대응을 확인한다. 계획 도구의 driver 통신 실패를 실제 학습 환경 검사로 대체하지 않는다. 실제 환경에서도 실패하면 다른 프로세스·driver를 변경하지 않고 오류와 blocker를 기록한다.
+
+두 LR 탐색은 각 GPU에 하나씩 배정한다. 한 설정 선택 뒤에는 학습 GPU와 완료 checkpoint 평가 GPU를 분리할 수 있다. 평가 병렬화로 training throughput이 나빠지면 실측을 남기고 순차화한다. 동시 worker peak와 타 사용자 점유에 worker당2GiB 여유를 더해 용량 안에 들어야 한다.
+
+추론은 기존2 GPU·각1 worker·batch4를 출발점으로 D24에서 batch8과 짧게 비교한다. batch 증가의 이득이 없고 독립 작업과 메모리가 충분하면 GPU당2 worker를 후보로 확인한다. 전체 처리량·GPU peak·오류·CPU/RAM/I/O·출력 집합 정합성으로 선택한다. D24의48문장 batch4/batch8 비교는96 forward이며 조건부 worker 비교는48건이다. 평가 성능으로 실행 구성을 고르지 않는다.
+
+새 비용 비교는 A_selected와 P의6 paired block으로 한정한다. 각 block은 V96의96환자·192문장, 선행 순서 A/P를3회씩 균형화하고 양쪽이 같은 장치·실행 구성을 사용한다. patient 두 문장은 같은 worker 작업으로 배치한다. 읽기·전처리부터 원본 좌표 후처리 완료까지 측정하고 decoded image cache 조건을 통일한다. prediction·feature cache는 쓰지 않는다.
+
+GPU별 작업 interval span 합인 device-seconds, 전체 workload throughput, 환자 p95 latency, cold loading, peak memory를 저장한다. 같은 GPU worker 시간은 중복 합산하지 않는다. block별 log-ratio 평균과 t(5)95% CI를 사용한다. technical failure만 실패 원본을 보존한 새 paired attempt로 전체 재측정한다. 느린 block은 제외하지 않는다.
+
+C의 기존6-block 비용은 역사적 참고로 재사용한다. 새로운 A/P 구간과 과거 P/C 구간을 곱해 동시 측정 A/C CI로 제시하지 않는다. 따라서 새 결과는 MG 비용 보존과 기존 큰 비용 차이의 연속성을 평가하며 엄밀한 신규 C 대비 end-to-end 우위는 별도 미검증으로 표시한다.
+
+## 7. 규모·예상 시간·재개
+
+기본 학습은 두 설정 각100 updates와 선택 설정의 추가200 updates, 총400 updates·12,200문장 노출이다. 조건부 보완은300 updates·9,150문장 노출이다. checkpoint D24 평가는 기본288 forward, 보완144건, V96는192건, paired timing은2,304건이다. warm-up·동작 확인·구성 비교·실패 재시도는 별도 집계한다.
+
+학습 wall은 실측 전 미정이다. GPU별100-step 탐색 시간의 최대값에 선택 설정200-step 시간, validation·저장·검사를 더해 기본 ETA를 산출한다. 보완 ETA는300-step 시간과144문장 평가 시간을 추가한다. 예를 들어 step이2–10초라면 순수 학습 wall은기본약10–50분, 보완약10–50분이지만 이는 실측치가 아닌 산식 예시다. 추론은 기존약944문장/분과 loading 비용을 출발 추정으로 사용하되 새 실행에서 갱신한다. 시간만으로 중단하는 임의 상한은 없다.
+
+optimizer-step checkpoint를 고정 간격과 epoch 끝에 남기고 atomic write·digest·exclusive lock을 사용한다. OOM은 microbatch·동시성을 낮추되 effective batch·objective·sample order를 유지한다. 비정상 수치·진행 정체는 실패 위치와 원인을 보존하고 안전한 checkpoint에서만 재개한다.
+
+# Implementation Tasks for Claude
+
+1. 현재 branch·source SHA·외부 자산·환경·입력 provenance를 검증하고 `results/iter_046/`의 protocol을 잠근다. 기존 결과·lock은 덮어쓰지 않는다.
+2. 사용 경로의 재사용 결함을 보완한다. iter_045 verifier bool 수정은 원 lock·전후 hash·diff를 이번 amendment에 연결한다. C import의 code_vs_git·adapter·protocol·record·input 불일치는 강제 실패시킨다.
+3. 공식 build_medgrounder·criterion을 호출하는 T305 training adapter와 trainer를 구현한다. strict matcher, accumulation normalization, augmentation·RNG·optimizer 재개를 검증한다.
+4. 동작 확인에서 메모리·step 처리량·batch 정합성을 측정하고 본학습 전에 ETA와 실행 구성을 기록한다.
+5. 두 설정5 epoch→한 설정15 epoch→조건부30 epoch를 지정된 분기로 실행하고 D24 선택을 잠근다.
+6. V96의 고정 비교와 MG paired timing을 완료한다. 독립 verifier로 모든 시스템의 ID·유한 좌표·box 크기·C label·matching 및 모든 판정 지표 CI를 대조한다. 공식 padding 때문에 원본 범위를 벗어난 유효 예측은 임의 clipping·삭제하지 않는다.
+7. 변조·중복·누락·wrong config·barrier 전 child 실패·중단 재개 fixture를 실제 사용 경로에 적용한다. launcher는 자기 child만 정리하고 실패를 보존한다.
+8. report·per_item·selection·training completion·timing·decision·verify를 최종 digest로 묶은 뒤 completion을 마지막에 생성한다. 실제 완료·전체 child exit 확인 전에 보고하지 않는다. source 변경은 orchestrator의 checkpoint 보존 대상으로 남긴다.
+
+# Evaluation (성공/실패 기준 포함)
+
+모든 기준은 V96를 보기 전에 잠근다. 이번 결과는 개발 진단이며 원 iter_045 판정을 바꾸지 않는다.
+
+**적응 설명의 직접 근거:** A_fixed−P의 F1@0.3 점차≥0.05이고97.5% CI 하한>0이면, target 적응이 중요한 차이를 만든다는 근거로 본다.0.05는 기존18.3 pp 격차의약27%에 해당하는 개선으로, 미세한 threshold 효과와 구분하려는 투자 기준이다. 미충족을 적응 가능성 전체의 실패로 부르지 않는다.
+
+**모듈형 대안 충분:** A_selected−C의 F1@0.3·F1@0.5 CI 하한이 각각−0.03 이상, FP 차이 CI 상한≤0.10이어야 한다. 기존 비교와 같은 정확도·FP 허용폭을 유지한다. 또한 A/P device-seconds와 p95 비율95% CI 상한≤2, throughput 비율 CI 하한≥0.5를 비용 보존 조건으로 둔다. 이는 기존약27배 비용 차이에 비해 큰 regression을 배제하는 기준이며 신규 동시 C 비용 검증은 아니다. 충족 시 현재 양성 문장별 내부 grounding 방법 투자를 보류·종료하고 다음 질문을 선택한다.
+
+**잔여 정확도 이점:** C−A_selected의 F1@0.3 점차≥0.05,97.5% CI 하한>0이며 학습 경로가 정상이고 허용한 수렴 점검이 완료됐으면 제한된 잔여 이점을 보존한다. F1@0.5·FP·recall의 방향과 CI를 함께 보고한다. 이것만으로 VLM 전반 우위나 새 방법 필요성을 승인하지 않는다. 다음 리뷰에서는 이 정확도를 더 낮은 비용으로 얻을 구체적 개입의 가치가 있는지만 판단한다.
+
+**불확정:** CI 경계, 수렴 미확인, metric 간 trade-off, 비용 regression이 남으면 각각의 부족한 증거를 명시한다. D24에 근거한 사전 보완 이후에는 이번 비교의 표본·학습·seed·threshold 후보·timing block을 추가하지 않는다. 문장별 동일-budget 비교 투자를 보류하며 공동 요청·부재 거부 전체를 기각하지 않는다.
+
+**실행 실패:** provenance, 데이터 누수, 잘못된 좌표·loss, 비정상 학습 또는 완료 무결성 실패로 해당 비교가 해석 불가하면 execution_failed다. 정상 실행된 낮은 점수와 구분한다. 준비·overfit·테스트 통과만으로 valid_experiment=true를 선언하지 않는다.
+
+# Risks / Checks
+
+- D24가 작고 V96는 반복 사용한 개발 자료다. checkpoint·threshold 선택 편향과 단일 seed를 유지해 보고하고 일반화·동등성의 확증으로 표현하지 않는다.
+- 같은 annotation budget은 같은 사전학습·연산·hyperparameter 탐색량이 아니다. 실제 학습 비용·노출·선택 경로를 비교표에 남긴다.
+- 공식 소스와 논문의 LR 차이를 숨기지 않는다. 두 설정은 이 불확실성을 다루는 한정 대조이며 광범위한 탐색이 아니다.
+- 양성 자료 적응의 부재 거부 영향은 이번에 검증하지 않는다. 평가 범위를 확장하거나 임상 정상 정답을 새로 만들지 않는다.
+- MG5-query 제한, 공식 augmentation의 GT drop, matcher fallback, 마지막 batch normalization, independent augmentation RNG를 필수 점검한다.
+- 현재 환경의 GPU 접근·학습 메모리는 아직 미확인이다. 실제 실행에서 확인하고 두 GPU의 가용 자원 안에서 구성한다. 기존 기본 환경·hf_cache·다른 사용자 프로세스는 변경하지 않는다.
+- 원 iter_041 blocker와 iter_045 판정·원본 lock·결과는 보존한다. 이번에 사용하지 않는 재사용 결함은 해결됐다고 표시하지 않는다.
+
+## 대규모 GPU 필요 후보
+
+다기관의 영상–문장–영역 자료로 VLM vision encoder와 언어 모듈을 함께 충분히 post-training하고 공동 요청·부재·근거 기반 답변을 통합 평가하는 방향은 장기 후보로 보존한다. 현 두 GPU보다 큰 activation·optimizer 메모리와 다중 seed 비용이 필요할 수 있다. 현재 동일-budget 비교와 구체적인 잔여 문제 확인 전에는 실행하거나 contribution으로 가정하지 않는다.
+
+# 계획의 근거 (GPT 조사 노트)
+
+### 새로 확인한 것
+
+- `agent/GOAL.md`, `agent/GPT_USAGE_POLICY.md`, `agent/INDEX.md`, 관련 `CODE_ASSETS.md`·`LIMITATIONS.md`, iter_040~045의 관련 계획·리뷰 원문과 iter_045 `review.json/code_assets`를 확인했다. iter_045는 valid_experiment=true, blocking_issues=[]이며 전체 코드 재사용은 미승인이다.
+- 원 결과는 C/MG-P F1@0.3=0.577951/0.395313, 차이0.182639, 97.5% CI [0.080035,0.285245]다. MG/C device-seconds 비율은0.036942 [0.030080,0.045369]다. 정확도 차이와 비용 차이는 모두 유효하며 양쪽 원 복합 기준은 미충족이다.
+- 현재 research HEAD는 `2e431cdc7c7366960e12b7d055c7d3b70fec35c5`이고 작업 트리는 깨끗하다. 재사용 후보17개 파일의 실제 바이트와 HEAD blob 일치를 확인했다. 현재 branch를 이어가므로 선별 반입은 필요 없다.
+- `results/iter_043/data/manifest_private.json`의 T305와 `results/iter_040/data/manifest_train_private.jsonl`은 환자·문장·GT가 일치한다. T305는610문장·765개 box, D24는48문장·59개 box, V96은192문장·249개 box다. train 최대 box 수는4, V96에는6개 box 문장이1건 있다. 공식5-query 구조의 제한을 숨기거나 해당 사례를 제외하지 않는다.
+- 확보된 공식 소스 revision은 `a0aad98d67018838fe160acbe1f7c3851fddeacc`, text encoder revision은 `c3648aa87af95837c809e6f0c5f85d08160db437`이다. `mg45_mg.py`는 고정 입력·추론 범위로 승인됐다. 공개 snapshot에는 모델·criterion·config가 있으나 완성된 학습 실행기는 없다.
+- 공식 `base.yaml`은 AdamW, batch32, 15epochs, 일반/backbone LR1e-5, text encoder LR5e-5, weight_decay1e-4, warmup1%, gradient clip0.1을 지정한다. 실제 criterion은 groundability CE와 xyxy L1·GIoU를 사용하며 matcher의 L1은 cxcywh다. matcher에는 GIoU 예외 시 zero-cost fallback이 있어 학습 전 strict 검증이 필요하다.
+- 원논문은 두 번째 단계15epochs·batch32·LR1e-5를 기술한다. 이 차이 때문에 공식 config와 uniform1e-5 두 설정만 개발 비교한다. 공식 학습 경로와 checkpoint 구분은 [MedGrounder 저장소](https://github.com/aehrc/MedGrounder), 학습 조건은 [원논문 IV-2](https://arxiv.org/html/2512.01085v1#S4)를 확인했다.
+- 기존 MG D24 구성 비교에서 전체 처리량은 batch1 약410→batch4 약944문장/분, 최대 allocated는약0.923→1.245GiB였다. 이는 추론 실측이며 학습 메모리로 사용할 수 없다.
+- 현재 계획 도구에서 `nvidia-smi`는 driver 통신 실패를 반환했다. 과거 실행 환경의 GPU2개 확인 기록과 구분한다. 실제 Claude 환경에서 실행 직전 재확인이 필요하며 가용 메모리를 확인했다고 보고하지 않는다.
+
+### 의미와 선택
+
+동일 annotation 적응은 기존 출력만으로 풀 수 없는 경쟁 설명을 직접 구분한다. joint SFT는 별도의 중요한 관찰을 다루지만 모듈형 대안 대비 필요성을 먼저 해결하지 못한다. 새로운 질문으로의 전환은 이번 한정 비교의 종료 후 선택할 수 있다. 이번 실험은 방법 개발이 아니라 기존 baseline의 적응 효과 진단이며 신규 기여·방법 gate 통과를 뜻하지 않는다.
+
+### 남은 실행 확인
+
+학습 peak·step 처리량, 공식 criterion의 accumulation 정합성, augmentation·RNG 재개, train 영상 provenance와 strict matcher 동작은 Claude의 동작 확인에서 측정한다. 결과를 보고 가설·평가 집단·성공 문턱을 바꾸는 권한은 부여하지 않는다.
+
+
+
+## iter_046 CLAUDE REPORT — 2026-10-01 19:20:29
+
+# 요약
+
+- **핵심 결과:** MedGrounder-P를 C와 같은 T305(305명·610문장·765 box)로 직접 적응시켰다. V96에서 F1@0.3은 0.395(미적응 P)에서 0.579(A@0.4)와 0.594(A@sel)로 올랐고, C는 0.578이다. 사전 기준은 모듈형 대안 충분도, C 잔여 이점도 충족하지 못해 `scientifically_inconclusive`다.
+- **근거:** A@0.4−P의 F1@0.3은 +0.183(97.5% CI [0.113, 0.255])로 H_adaptation 기준(≥0.05, 하한>0)을 충족했다. A@sel−C의 F1@0.3은 +0.017(CI [−0.072, 0.109])이다. 모듈형 대안 충분 기준에서는 F1@0.3 하한(−0.03)과 FP 상한(0.10)이 미달했다. 비용은 A/P device-seconds 1.009(95% CI [0.984, 1.035])로 거의 같다.
+- **미검증·주의:**
+  - 단일 seed, 반복 사용한 개발 자료 V96, D24 24명 기반 선택이다.
+  - 독립 확인이 아니다.
+  - 신규 C 대비 end-to-end 비용은 측정하지 않았다.
+  - 변조 거부·barrier 전 child 실패 fixture를 모두 수행하지 못했다. 그래서 SELF_CHECK는 FAIL이다.
+- **다음:** 정확도 격차는 적응 예산으로 대부분 설명된다. 잔여 문장별 비교 투자는 보류를 권고하고, 공동 요청·부재 거부는 별도 관찰로 남긴다.
+
+# Work Performed
+
+- 현재 branch·외부 자산·환경·입력 provenance를 검증했다. 환경은 torch 2.5.1+cu124이고 GPU 2장이 보인다.
+- 격리 환경의 공식 소스(rev a0aad98d)를 호출하는 T305 학습기 `mg46_train.py`를 구현했다.
+  - 공식 `build_medgrounder`, `loss_groundability`, `loss_boxes`, 공식 train augmentation을 그대로 쓴다.
+  - strict matcher는 GIoU 예외 fallback만 제거했다.
+  - microbatch 누적은 batch 전체 분모(num_boxes, CE class-weight 합)로 재가중한다.
+  - augmentation은 (seed, epoch, sample)에 연결해 재현한다.
+  - 원자적 checkpoint, digest, flock 단일 소유 lock, 중간 step 재개를 갖췄다.
+- 기술 gate를 수행했다.
+  - 데이터: 610문장, 765 box, 최대 4 box, 평가 집단과 환자·study·영상·pixel hash 교집합 0.
+  - matcher: 공식 matcher와 assignment 200/200 일치, 비유한 값·0 크기 입력은 예외 처리.
+  - 누적 정합성: fp64에서 loss 차이 0, grad 상대차 2.1e-8.
+  - 처리량: fp32 microbatch 8을 채택(bf16은 이득 없음).
+  - overfit 추세, 재개, lock 거부도 확인했다.
+- `mg45_*` 추론 wrapper에 `--ckpt-path`와 `t_orig_done` 필드를 추가했다. P 경로 회귀는 D24 logits 차이 0(w2b4)이다.
+- 두 LR 설정(S, U)을 병렬로 5 epoch 학습하고 D24로 trajectory를 선택했다. 선택된 U는 15 epoch까지 이어갔고, 사전 규칙상 보완이 필요 없었다.
+- 최종 checkpoint(A_U_e5, threshold 0.8)로 V96을 추론하고 6개 paired timing block을 측정했다.
+- 보고서, 독립 verifier, completion까지 마쳤다.
+
+# Files Changed
+
+- 신규: `mg46_train.py`, `mg46_gates.py`, `mg46_run.py`, `mg46_eval.py`, `mg46_report.py`, `mg46_verify.py`, `mg46_timing.py`, `mg46_vrun.py`
+- 수정: `mg45_mg.py`, `mg45_worker.py`, `mg45_launch.py`
+  - 변경은 `--ckpt-path`와 `t_orig_done` 추가뿐이다.
+  - 전후 hash와 diff는 `results/iter_046/protocol/mg45_amendment_v2.json`에 있다.
+- 결과: 전부 `results/iter_046/` 아래.
+
+# Commands / Experiments (실제 실행한 명령과 성공/실패)
+
+- gate:
+  - `data` v1은 실패했다. 업로드 PNG의 파일 hash와 ZIP 원본 raw hash를 잘못 대조한 것이 원인이다. v2에서 정정해 성공했다. v1 결과 파일은 보존했다.
+  - `accum` v1·v2는 기준(1e-4) 초과로 실패했다. 원인은 cuDNN 기본 TF32 conv로 확인했고, v3(TF32 끔)에서 통과했다. fp64 확인으로 누적 산식이 정확함을 별도로 확인했다.
+  - `matcher`, `aug`, `step`, `overfit`, `throughput`(bf16·fp32), 재개 3종(ref1/ref2/kill)은 성공했다.
+- 학습:
+  - `mg46_run.py train --trajs S,U --to 5`는 wall 558초에 rc 0이었다.
+  - `--trajs U --to 15`는 600초 timeout으로 백그라운드로 넘어갔지만 정상 완료했다.
+- D24 평가 6회(S/U e2·e5, U e10·e15)와 구성 비교 3회(w2b4/w2b8/w4b4)는 모두 성공했다. 구성은 w2b4를 채택했다.
+- V96 A 추론은 192건에 exit [0,0]이었다. timing block 6개는 모두 attempt 1로 완료했고 재측정은 없었다.
+- `mg46_report.py report`와 `mg46_verify.py`는 PASS했고, completion을 생성했다.
+- 결정 파일 오류 1건: `mg46_eval.py supp`가 존재하지 않는 `reached_epoch10.json`을 참조해 FileNotFoundError가 났다. 결정이 쓰이기 전이었고 규칙은 바꾸지 않았다. 수정 전후 hash를 `protocol/mg46_eval_amendment.json`에 남겼다. 이 수정으로 잠금 목록의 `mg46_eval.py` hash가 달라졌다.
+- OOM은 없었다. 학습 peak는 7.8GB/프로세스였다.
+
+# Results (수치와 결과 파일 경로)
+
+D24 선택 결과(`results/iter_046/decisions/`):
+
+| 후보 | threshold | F1@0.3 | F1@0.5 | FP/문장 |
+|---|---|---|---|---|
+| U e5 (최종 선택) | 0.8 | 0.7049 | 0.4063 | 0.375 |
+| U e2 | 0.6 | 0.6646 | 0.3889 | 0.458 |
+| S e5 | 0.6 | 0.6597 | 0.3785 | 0.479 |
+| S e2 | 0.2 | 0.5618 | 0.2736 | 1.0 |
+
+- U e10과 U e15는 둘 다 F1@0.3 0.684로 같았다. 보완(supp) 조건 두 가지가 모두 미충족이라 supp는 실행하지 않았다(`supp_decision.json`).
+- 선택 threshold 0.8은 후보 격자의 최댓값이다.
+
+V96 (`results/iter_046/eval/report.json`, `verify.json`: PASS):
+
+| 시스템 | F1@0.3 | F1@0.5 | FP/문장 |
+|---|---|---|---|
+| C | 0.5780 | 0.2911 | 0.552 |
+| P@sel | 0.3953 | 0.2335 | 0.604 |
+| A@0.4 | 0.5786 | 0.3472 | 0.703 |
+| A@sel | 0.5944 | 0.3941 | 0.5625 |
+
+paired 차이(97.5% CI):
+
+- A@0.4−P: F1@0.3 +0.183 [0.113, 0.255]
+- A@sel−C: F1@0.3 +0.017 [−0.072, 0.109], F1@0.5 +0.103 [0.027, 0.181], FP +0.010 [−0.109, 0.130]
+- C−A@sel: F1@0.3 −0.017 [−0.109, 0.072] → 잔여 이점 기준(≥0.05) 미충족
+
+비용(A/P, 6 paired block, t(5) 95% CI):
+
+- device-seconds 1.009 [0.984, 1.035]
+- throughput 0.992 [0.953, 1.033]
+- p95 latency 0.997 [0.963, 1.032]
+
+C 재현은 F1 0.5779514로 저장값과 일치했고, C 코드 hash는 git 보관본과 일치했다.
+
+학습: 300 updates가 모두 유한값이고 step이 연속이며 중복이 없었다. step당 약 2.1초(1.45 학습 + 0.65 데이터), 총 12,200문장 노출을 계획했고 실제 실행했다.
+
+# Goal Progress / Reused Assets (목표 진전·미검증 범위, 재사용 출처·검증)
+
+- 새로 알게 된 것: 같은 T305 annotation으로 MG-P를 적응시키면 C와의 F1@0.3 격차(0.183)는 사라진다. 이번 V96에서 A@0.4는 C와 같았고(0.5786 vs 0.5780), A@sel은 +0.017로 C보다 점추정이 높다. 단 CI가 넓어(하한 −0.072) 동등성이나 우위를 확정하지는 못한다.
+- 비용은 미적응 MG와 거의 같아 약 27배 비용 이점은 유지된다고 해석되지만, 신규 C 대비 end-to-end 비용은 측정하지 않았다.
+- F1@0.5는 A@sel이 C보다 높다(+0.103, CI 하한 > 0).
+- 판정 구분:
+  - 구현 정합성: gate와 독립 verifier 통과.
+  - 가설 지지: 적응 설명은 지지, 모듈형 대안 충분은 CI 폭 때문에 미충족.
+  - 신규 기여: 아님. 기존 방법의 직접 적응 진단이다.
+- 미검증:
+  - 독립 확인, 다른 seed·환자·기관 일반화.
+  - 부재 거부와 공동 요청 손실(iter_041 관찰은 유지, 해제하지 않음).
+  - 6-GT 문장 1건은 5-query 한계 사례로 평가에 포함했다(A는 최대 5개 예측).
+  - 선택된 U e5는 이후 epoch보다 D24 점수가 높지만 D24가 24명뿐이다.
+- 재사용: `mg45_mg/worker/launch`, `mg45_eval`, `mg45_report`(ratio_ci·bootstrap·C import), `pg39_spec`, `rsna_diag` helper는 모두 현재 branch에 있어 선별 반입 없이 썼다. P V96 출력은 iter_045 결과를 `allow_code_diff`로 검증해 재사용했다. 근거는 회귀 파일 `tests/regress_P_vs_iter045_final_worker.json`(logits 차이 0)이다.
+
+# Problems (현재 결론 무효 / 재사용 전 수정 / 추후 개선을 구분)
+
+- **현재 결론 무효: 없음.** provenance·무결성 검사와 독립 verifier는 모두 통과했다.
+- **계획 항목 중 미완료(그래서 SELF_CHECK FAIL):**
+  - 변조·중복·누락·wrong config 거부를 launcher·verify 경로에 직접 적용한 fixture를 수행하지 못했다. 현재는 재개·lock·변조 일부 검증만 있다.
+  - barrier 전 child 실패 처리와 동시 launcher 배타성은 수정하지 못했다.
+  - 학습 resume 검사는 validation 구간이 아닌 학습 step 중단만 확인했다. validation 경계는 driver가 completion 존재 기준으로 건너뛰는 방식이라 별도로 시험하지 않았다.
+- **재사용 전 수정:** 위 launcher 결함, `mg46_eval.py`의 amendment(잠금 hash 불일치가 남음).
+- **추후 개선:** 처리량 비교는 D24 48문장 규모라 모델 로딩이 지배한다. 학습 시 batch 증가 이득(microbatch 16)은 측정만 하고 채택하지 않았다.
+- 학습 중 box 삭제는 0건이었다(800개 샘플 audit). 그래서 전체 삭제 경로는 합성 사례로만 확인했다.
+
+# Recommendation to GPT
+
+- 이번 결과로 문장별 모듈형 비교는 "적응 예산이 정확도 격차 대부분을 설명하고 비용 이점은 유지된다"는 방향으로 정리할 수 있다. 다만 A−C CI가 넓어 동등성은 확정하지 않는다.
+- 이 문장별 양성 비교에는 추가 투자를 보류하고, 공동 요청·부재 거부 질문은 별도 계획으로 분리하길 권한다.
+- 보류 범위는 이번에 검증한 양성 문장별 grounding·T305 적응 조건으로 한정한다.
+- 리뷰에서는 SELF_CHECK FAIL의 원인인 변조·barrier fixture 미완료와 `mg46_eval.py` amendment를 확인하고, 필요하면 재사용 전 수정으로 분류해 달라.
+
+SELF_CHECK: FAIL
+SUMMARY: MG-P를 T305로 적응시켜 V96 F1@0.3이 0.395→0.579(A@0.4)·0.594(A@sel)로 올라 C(0.578)와 비슷해졌고(A@sel−C +0.017, CI [−0.072, 0.109]) 비용은 미적응 MG와 동일(device ratio 1.009)하나, 사전 기준상 불확정이며 변조·barrier fixture 일부는 미수행.
+
+# [orchestrator] 권한 거부된 도구 호출
+- Bash: results/environments/medgrounder_iter045/bin/python -c "
+import albumentations, torch, timm, transformers, scipy, numpy, cv2
+print(albumentations.__version__, torch.__version__, timm.__version__, transformers.__version__, scipy.__version__, numpy.__version__, cv2.__version__)
+import albumentations as A
+print(hasattr(A.Compose,'set_random_seed'))
+"
+- Bash: CUDA_VISIBLE_DEVICES=0 python mg46_vrun.py mg46_gates.py data
+- Bash: python mg46_vrun.py -c "
+import torch, json
+import mg46_train as T, mg46_gates as G
+dev=torch.device('cuda:0')
+torch.backends.cudnn.deterministic=True; torch.backends.cudnn.allow_tf32=False; torch.backends.cuda.matmul.allow_tf32=False
+items=T.load_t305(); idx=G.pick8(items)[:4]
+ts=T.TrainSet([items[i] for i in idx])
+model,crit,_=T.build_model(dev); model.eval()
+ss=[ts.get(i,1,17) for i in range(4)]
+def run(dtype, mb):
+    model.zero_grad(set_to_none=True)
+    m=model.to(dtype)
+    # inputs
+    sam=[dict(s, image=s['image'].to(dtype), boxes=s['boxes'].to(dtype)) for s in ss]
+    acc=T.accumulate(m, crit.to(dtype) if False else crit, sam, mb, dev, autocast=False)
+    g=torch.cat([p.grad.detach().flatten().double().cpu() for p in m.parameters() if p.requires_grad and p.grad is not None])
+    return acc['total'], g
+try:
+    l1,g1=run(torch.float64,1); l4,g4=run(torch.float64,4)
+    print('fp64 mb1 vs mb4 loss diff',abs(l1-l4),'grad rel',float((g1-g4).norm()/g4.norm()))
+    model.float()
+    lf,gf=run(torch.float32,1); lg,gg=run(torch.float32,4)
+    print('fp32 mb1 vs mb4', float((gf-gg).norm()/gg.norm()), 'fp32 mb4 vs fp64 mb4', float((gg-g4).norm()/g4.norm()), 'fp32 mb1 vs fp64 mb4', float((gf-g4).norm()/g4.norm()))
+except Exception as e:
+    import traceback; traceback.print_exc()
+" 2>&1 | tail -15
+- Bash: sed -i 's/step=a.steps_main \/\/ 2, steps_main=a.steps_main, supp=False)/step=a.steps_main \/\/ 2, steps_main=a.steps_main, supp=False, autocast=False)/' mg46_gates.py; grep -n "autocast=False)" mg46_gates.py | head; python mg46_vrun.py mg46_gates.py overfit --steps 30
+- Bash: python -c "
+import subprocess, hashlib, json
+fs=['mg45_mg.py','mg45_worker.py','mg45_launch.py']
+d=subprocess.run(['git','diff','--']+fs,capture_output=True,text=True).stdout
+res={'purpose':'iter_046 amendment: arbitrary checkpoint path (--ckpt-path) for the approved mg45 inference wrapper; P/MS default path unchanged (regression: tests/regress_P_vs_iter045.json)',
+ 'before_sha256':{f:hashlib.sha256(subprocess.run(['git','show','HEAD:'+f],capture_output=True).stdout).hexdigest() for f in fs},
+ 'after_sha256':{f:hashlib.sha256(open(f,'rb').read()).hexdigest() for f in fs},'diff':d,
+ 'iter045_verifier_bool_fix_lock_note':'mg45_verify.py is NOT used by iter_046 unchanged; see mg46 report for the verification path'}
+import os; os.makedirs('results/iter_046/protocol',exist_ok=True)
+json.dump(res,open('results/iter_046/protocol/mg45_amendment.json','x'),indent=1); print(len(d))"
+sed -i 's#"results/iter_046/tests/resume/resume_compare.json"\]#"results/iter_046/tests/resume/resume_compare.json", "results/iter_046/tests/regress_P_vs_iter045.json", "results/iter_046/tests/lock_test/lock_result.json", "results/iter_046/protocol/mg45_amendment.json"]#' mg46_run.py
+- Bash: python - <<'EOF'
+import hashlib,json
+p='mg46_eval.py'
+before=hashlib.sha256(open(p,'rb').read()).hexdigest()
+s=open(p).read()
+s=s.replace('reach = {n: json.load(open(f"{ROOT}/train/{tj}/reached_epoch{n}.json")) for n in (10, 15)}\n    l10 = reach[15]','reach = {15: json.load(open(f"{ROOT}/train/{tj}/reached_epoch15.json"))}  # amendment: reached_epoch10.json은 존재하지 않음(epoch_losses는 epoch15 파일에 모두 포함)\n    l10 = reach[15]')
+open(p,'w').write(s)
+after=hashlib.sha256(open(p,'rb').read()).hexdigest()
+json.dump({'file':p,'before_sha256':before,'after_sha256':after,'reason':'cmd_supp referenced nonexistent reached_epoch10.json (FileNotFoundError before any decision was written); rule unchanged','locked_hash_in_protocol':'before'},open('results/iter_046/protocol/mg46_eval_amendment.json','x'),indent=1)
+EOF
+python mg46_eval.py supp
+
