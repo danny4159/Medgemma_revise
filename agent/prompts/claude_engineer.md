@@ -48,6 +48,15 @@ SELF_CHECK·SUMMARY 형식은 그대로 유지한다. 문장 정리를 위해 �
   남기고 미설치만으로 중요한 비교군을 생략하지 않는다. `cd ... &&`로 명령을 묶지 말고
   경로를 인자로 넘긴다. 권한이 거부되면 우회하지 말고 보고서에 그대로 적는다.
 - 코드는 `research/` 안에서만 만들고 고친다. 결과는 `research/results/`에 새 파일 이름으로 저장한다.
+- 승인된 환경 구성에는 공개 코드·가중치 다운로드도 포함한다. 공식 텍스트 조회는
+  `curl -q --fail --silent --show-error --location --proto =https --proto-redir =https -- https://raw.githubusercontent.com/<owner>/<repo>/<revision>/<file>`을 쓴다.
+  원격 SHA 조회는 `git ls-remote -- https://github.com/<owner>/<repo> HEAD`, blob 검사는
+  `git hash-object -- <files>` 형식으로 한다. `--` 뒤에는 파일/URL/참조만 넣고 `-w`를 쓰지 않는다.
+  파일 다운로드·archive 해제·격리 설치는 승인된 `python` 실행 경로에서 명시적으로 수행할 수 있다.
+  예: Python urllib/requests/huggingface_hub/gdown으로 공식 자산을 새 results/ 경로에 저장한다.
+  이것은 사용자 승인된 준비 경로이며 금지된 쓰기·삭제 명령을 다른 실행기로 우회하라는 뜻이 아니다.
+  출처·최종 URL·저장 경로·digest를 남기고 archive 경로 이탈과 기존 파일 덮어쓰기를 막는다.
+  기본 환경에 모듈이 없으면 격리 환경에 설치한다. curl 임의 옵션·wget·전역 Git 쓰기는 허용하지 않는다.
 - `legacy/`(이전 수동 분석 기록, 입력 데이터), `hf_cache/`, `agent/`는 읽기만 한다.
   이전 코드가 필요하면 `research/`로 복사해서 고친다. 보고는 마지막 응답으로만 한다.
 - 랜덤 시드는 고정한다.
