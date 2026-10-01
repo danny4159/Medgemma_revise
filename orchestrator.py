@@ -1,7 +1,11 @@
-"""GPT(Codex) ↔ Claude Code 자동 연구 루프.
+"""GPT(Codex) 계획/리뷰 ↔ Claude 또는 Codex 구현 자동 연구 루프.
 
 반복(iteration) 한 번:
-    GPT 계획 (codex, read-only) → [사람 확인] → Claude 구현/실험 → GPT 리뷰 (codex, read-only, JSON)
+    GPT 계획 (codex, read-only) → [사람 확인] → 구현/실험 (--engineer) → GPT 리뷰 (codex, read-only, JSON)
+
+--engineer claude|codex: 구현 담당 선택을 서버에 저장한다. 초기값은 Claude다.
+Codex 구현은 별도로 선택한 권한으로 실행하며 계획/리뷰와 독립된 세션을 쓴다.
+아래 claude_* 필드·파일명은 기존 기록 호환을 위해 공통 구현 산출물 이름으로 유지한다.
 
 GPT 계획은 여러 사고 라운드로 이어질 수 있다. 방향이 아직 불분명하면 GPT가 조사·검색하고
 스스로 다음 질문을 남긴 뒤(think_more) 다시 사고하고, 무엇을 시도할지 판단이 서면(implement)
@@ -96,6 +100,7 @@ import time
 import traceback
 import urllib.request
 import uuid
+import codex_engineer
 
 from notifier import Human
 from claude_usage import summarize_stream, usage_report
@@ -438,7 +443,7 @@ def apply_pending_replan():
     tx["status"] = "applied"
     save_atomic(tx_file, json.dumps(tx, ensure_ascii=False, indent=2))
     rebuild_index()
-    print(f"보완 지시 적용: iter_{target:03d}에서 GPT 재계획 → 새 Claude 세션. 원본 기록·코드는 보존합니다.")
+    print(f"보완 지시 적용: iter_{target:03d}에서 GPT 재계획 → 새 구현 세션. 원본 기록·코드는 보존합니다.")
     return target
 
 
@@ -611,6 +616,67 @@ def tier_spec(agent, tier):
     return json.loads(read(TIERS_FILE))[agent][tier]
 
 
+def engineer_backend(args=None, n=None):
+    if n is not None:
+        saved = load_json(iter_dir(n) / "engineer_backend.json")
+        if saved:
+            backend = saved.get("backend")
+            if backend not in ("claude", "codex"):
+                raise AgentError("알 수 없는 구현 담당 기록: engineer_backend.json")
+            return backend
+    return getattr(args, "engineer", None) or "claude"
+
+
+def engineer_label(args=None, n=None):
+    return "Codex" if engineer_backend(args, n) == "codex" else "Claude"
+
+
+def started_engineer(n):
+    d = iter_dir(n)
+    if (d / "engineer_backend.json").exists():
+        return engineer_backend(n=n)
+    if any((d / name).exists() for name in (
+            "snapshot_before.json", "claude_session.txt", "claude_stream.jsonl",
+            "claude_result.raw.json", "claude_report.md")):
+        return "claude"  # 변경 전 기록의 기본값
+    return None
+
+
+def configure_engineer(args):
+    """lock 안에서 호출. 생략 시 서버의 선택을 유지하고, 중간 세션 교체는 거부한다."""
+    selection = AGENT_DIR / "engineer_selection.json"
+    requested = getattr(args, "engineer", None)
+    saved = load_json(selection) or {"backend": "claude"}
+    n = current_iteration()
+    active = started_engineer(n) if not is_done(n) else None
+    if requested and active and requested != active and not (iter_dir(n) / "claude_report.md").exists():
+        raise AgentError(f"iter_{n:03d} 구현은 {active} 세션으로 이미 시작했습니다. "
+                         "같은 담당으로 완료하거나 --replan에 인계 지시를 적어 새 반복에서 변경하세요.")
+    unfinished = active if not (iter_dir(n) / "claude_report.md").exists() else None
+    args.engineer = requested or unfinished or saved["backend"]
+    sandbox_request = getattr(args, "codex_engineer_sandbox", None)
+    args.codex_engineer_sandbox = sandbox_request or saved.get("codex_engineer_sandbox", "workspace-write")
+    if args.engineer not in ("claude", "codex"):
+        raise AgentError(f"알 수 없는 구현 담당 설정: {args.engineer}")
+    if args.codex_engineer_sandbox not in ("workspace-write", "danger-full-access"):
+        raise AgentError("지원하지 않는 Codex 구현 권한 설정입니다.")
+    if requested or sandbox_request:
+        save_atomic(selection, json.dumps({"backend": requested or saved["backend"],
+                    "codex_engineer_sandbox": args.codex_engineer_sandbox}, indent=2))
+
+
+def bind_engineer(args, n):
+    backend = engineer_backend(args)
+    active = started_engineer(n)
+    if active and active != backend:
+        raise AgentError(f"진행 중 구현 담당({active})을 {backend}로 교체할 수 없습니다. 보존 후 재계획하세요.")
+    path = iter_dir(n) / "engineer_backend.json"
+    if not path.exists():
+        save_atomic(path, json.dumps({"backend": backend, "time": now(),
+                    "initial_sandbox": getattr(args, "codex_engineer_sandbox", None)}, indent=2))
+    return backend
+
+
 def resource_context(args):
     """재시도·세션 재개를 포함한 모든 호출에 최신 사용자 자원 정책을 전달한다."""
     policy = read(RESOURCE_POLICY_FILE).strip()
@@ -622,15 +688,24 @@ def resource_context(args):
     usage_policy = read(CLAUDE_USAGE_POLICY_FILE).strip()
     if not usage_policy:
         raise AgentError(f"Claude 사용량 정책이 없거나 비어 있음: {CLAUDE_USAGE_POLICY_FILE}")
+    label = engineer_label(args)
+    if engineer_backend(args) == "codex":
+        usage_policy = read(AGENT_DIR / "CODEX_ENGINEER_POLICY.md").strip()
+        if not usage_policy:
+            raise AgentError("Codex 구현 운영 정책이 없거나 비어 있습니다.")
     visible = args.gpus if args.gpus is not None else os.environ.get("CUDA_VISIBLE_DEVICES", "미지정 (실행 전 확인)")
     timeout = f"{args.claude_timeout}초 (명시된 실행 제한)" if args.claude_timeout else "시간 제한 없음"
     return (
         f"=== 현재 사용자 자원 정책 (이전 계획의 임의 시간 상한보다 우선) ===\n{policy}\n\n"
         f"=== 현재 연구 운영 정책 (이전 자동 포기·코드 폐기 규칙보다 우선) ===\n{research_policy}\n\n"
-        f"=== 현재 Claude 사용량 정책 (필수 검증·GPU 활용 유지) ===\n{usage_policy}\n\n"
+        f"=== 현재 {label} 구현 사용량 정책 (필수 검증·GPU 활용 유지) ===\n{usage_policy}\n\n"
         f"=== 사람이 읽는 설명·보고서의 표현 기준 (실행·검증 기준은 유지) ===\n{read(REPORTING_STYLE_FILE)}\n\n"
         f"=== 현재 실행 설정 ===\nCUDA_VISIBLE_DEVICES: {visible}\n"
-        f"Claude 단계 timeout: {timeout}\n\n"
+        f"구현 담당: {label} / 구현 단계 timeout: {timeout}\n"
+        f"Codex 구현 권한: {getattr(args, 'codex_engineer_sandbox', None) or 'workspace-write'} "
+        "(Codex 담당일 때만 적용, GPT 계획/리뷰는 read-only 유지)\n"
+        "계획/리뷰의 claude_tier 및 claude_report.md 이름은 호환용 공통 구현 필드다. "
+        "구현 모델은 현재 담당의 tiers.json 설정을 따른다.\n\n"
     )
 
 
@@ -786,6 +861,57 @@ def run_claude(args, prompt, log_path, tier, session_file=None, resume_id=None):
         text = str(result.get("result", ""))
         raise failure_error(f"Claude가 오류로 종료: {text[:300]}", text, limit_info=latest_limit)
     return result
+
+
+def run_codex_engineer(args, prompt, log_path, tier, session_file=None, resume_id=None):
+    spec = tier_spec("codex_engineer", tier)
+    sandbox = getattr(args, "codex_engineer_sandbox", None) or "workspace-write"
+    print(f"Codex 구현 등급: {tier} ({spec['model']}, effort={spec['effort']})", flush=True)
+    stream = codex_engineer.Stream()
+
+    def on_line(line):
+        try:
+            event = json.loads(line)
+        except ValueError:
+            print(f"  [codex 구현] {line}", end="", flush=True)
+            return
+        if not isinstance(event, dict):
+            return
+        stream.feed(event)
+        if event.get("type") == "thread.started" and session_file and stream.session:
+            save_atomic(session_file, stream.session)
+        item = event.get("item") or {}
+        if event.get("type") in ("item.started", "item.completed"):
+            detail = item.get("command") or item.get("text") or item.get("type", "")
+            print(f"  [codex 구현] {str(detail).replace(chr(10), ' ')[:300]}", flush=True)
+
+    # 동일 연구 의무를 공유하되 Claude 전용 도구/모델 규칙은 Codex 계약으로 대체한다.
+    input_text = (resource_context(args) + read(PROMPT_DIR / "claude_engineer.md") + "\n\n"
+                  + read(PROMPT_DIR / "codex_engineer.md") + f"\n현재 Codex 구현 sandbox: {sandbox}\n\n" + prompt)
+    env = agent_env(args.gpus)
+    for key in ("OPENAI_API_KEY", "CODEX_API_KEY"):
+        env.pop(key, None)  # 저장된 CLI 로그인 사용. 자동 API 과금 전환 금지.
+    try:
+        run_streaming(codex_engineer.command(spec, resume_id, sandbox), log_path,
+                      args.claude_timeout, env, on_line, cwd=RESEARCH_DIR, stdin_text=input_text)
+    finally:
+        if log_path.exists():
+            try:
+                usage = codex_engineer.summarize_stream(log_path)
+                usage.update(model=spec["model"], effort=spec["effort"], updated_at=now())
+                save_atomic(log_path.with_name("codex_engineer_usage.json"),
+                            json.dumps(usage, ensure_ascii=False, indent=2))
+            except (OSError, ValueError) as e:
+                print(f"[WARN] Codex 구현 사용량 저장 실패 (원본 보존): {e}")
+    if not stream.completed:
+        if stream.error:
+            raise failure_error(f"Codex 구현 오류: {stream.error[:300]}", stream.error)
+        raise RetryableError(f"Codex 구현 turn.completed 없음. 로그: {log_path}")
+    if not stream.message.strip():
+        raise RetryableError(f"Codex 구현 최종 보고서 없음. 로그: {log_path}")
+    return {"result": stream.message, "session_id": stream.session or resume_id,
+            "is_error": False, "usage": stream.usage, "backend": "codex",
+            "permission_denials": stream.permission_denials, "sandbox": sandbox}
 
 
 # --------------------------------------------------
@@ -990,10 +1116,10 @@ def review_decision(args, n):
     if mode == "full":
         return True, "사람이 full 지정" if override else "계획에서 full 지정"
     if parse_trailer(read(d / "claude_report.md"), "SELF_CHECK").upper() != "PASS":
-        return True, "skip이었지만 Claude 자체 검증이 PASS가 아님"
+        return True, f"skip이었지만 {engineer_label(n=n)} 자체 검증이 PASS가 아님"
     if json.loads(read(d / "claude_meta.json", "{}")).get("permission_denials"):
         return True, "skip이었지만 권한 거부된 명령이 있음"
-    return False, ("사람이 skip 지정" if override else "계획에서 skip 지정") + ", Claude 자체 검증 PASS"
+    return False, ("사람이 skip 지정" if override else "계획에서 skip 지정") + f", {engineer_label(n=n)} 자체 검증 PASS"
 
 
 def load_plan(n):
@@ -1212,7 +1338,7 @@ def stage_of(n):
     if not (d / "plan.md").exists():
         return "계획"
     if not (d / "claude_report.md").exists():
-        return "Claude 구현" if (d / "git.json").exists() else "계획 확인"
+        return f"{engineer_label(n=n)} 구현" if (d / "git.json").exists() else "계획 확인"
     if not (d / "review.json").exists():
         return "리뷰"
     return "리뷰 후 처리"
@@ -1223,6 +1349,7 @@ def code_version():
     sha = git("rev-parse", "--short", "HEAD")[1].strip()
     dirty = git("status", "--porcelain", "--", "orchestrator.py", "notifier.py", "presentation.py", "claude_usage.py", "gpt_usage.py", "gpt_context.py", "research_history.py", "agent/prompts",
                 "agent/tiers.json", "agent/claude_settings.json", "agent/RESOURCE_POLICY.md",
+                "codex_engineer.py", "agent/CODEX_ENGINEER_POLICY.md",
                 "agent/RESEARCH_POLICY.md", "agent/CLAUDE_USAGE_POLICY.md", "agent/GPT_USAGE_POLICY.md", "agent/REPORTING_STYLE.md")[1].strip()
     return f"{sha}+수정" if dirty else sha
 
@@ -1364,7 +1491,7 @@ def iteration_block(n):
             lines.append(f"- ✏️ 사람이 {ev.get('what')}을 {ev.get('value')}(으)로 변경")
         elif stage == "claude":
             lines.append(
-                f"- 🔧 **Claude** ({ev.get('tier')}): {ev.get('summary') or '(요약 없음)'} "
+                f"- 🔧 **{ev.get('engineer', 'Claude')}** ({ev.get('tier')}): {ev.get('summary') or '(요약 없음)'} "
                 f"[자체 검증 {ev.get('self_check')}, 파일 {ev.get('changed_files')}개 변경]"
             )
             if git_info.get("created"):
@@ -1420,7 +1547,7 @@ def iteration_block(n):
         elif stage == "limit_resume":
             lines.append(f"- ▶ 사용 한도가 풀려 재개 ({ev.get('what')}, {ev.get('minutes')}분 대기)")
         elif stage == "claude_resume":
-            lines.append("- ↻ 끊겼던 Claude 세션을 이어서 진행")
+            lines.append(f"- ↻ 끊겼던 {ev.get('engineer', 'Claude')} 세션을 이어서 진행")
         elif stage == "stopped":
             lines.append(f"- ⏹ 중단: {ev.get('reason')} ({ev.get('during')} 중)")
         elif stage == "needs_human":
@@ -1462,7 +1589,7 @@ def step_plan(args, goal, n):
             f"직전 반복(iter_{n - 1:03d})은 GPT 리뷰를 생략했다 ({prev['reason']}).\n"
             f"먼저 agent/runs/iter_{n - 1:03d}/claude_report.md 와 changed_files.txt 를 직접 읽고\n"
             f"결과가 믿을 만한지 확인한 뒤 계획하라.\n"
-            f"Claude 요약: {prev['one_line_summary']}"
+            f"구현 요약: {prev['one_line_summary']}"
         )
     elif prev:
         prev_text = (
@@ -1587,7 +1714,7 @@ iter_{n:03d}
     for i, alt in enumerate(plan["alternatives"], 1):
         print(f"  {i}. {alt}")
     print(f"결정: {plan['decision']} — {plan['decision_reason']}")
-    print(f"\nClaude 등급 제안: {plan['claude_tier']} — {plan['tier_reason']}")
+    print(f"\n{engineer_label(args)} 구현 등급 제안: {plan['claude_tier']} — {plan['tier_reason']}")
     print(f"GPT 리뷰: {plan['review_mode']} — {plan['review_reason']}")
     record_event(n, "plan", tier=tier, think_rounds=len(done_rounds) + 1, **{k: plan.get(k) for k in (
         "plan_summary", "approach", "alternatives", "decision", "decision_reason",
@@ -1652,7 +1779,7 @@ def step_checkpoint(args, n):
                 + "\n".join(f"• {c}" for c in concerns)) if away else ""
         notify(notice(f"▶ iter_{n:03d} | 계획대로 자동 진행", [
             ("할 일", plan.get("plan_summary") or approach),
-            ("다음", "Claude 구현·실험 후 계획된 검증을 진행합니다."),
+            ("다음", f"{engineer_label(args)} 구현·실험 후 계획된 검증을 진행합니다."),
             ("주의", note),
         ], reference=f"agent/runs/iter_{n:03d}/plan.md"))
         record_event(n, "decision", by="auto", mode=mode, result="1순위로 진행",
@@ -1677,14 +1804,16 @@ def step_checkpoint(args, n):
             for c in concerns:
                 print(f"  - {c}")
         print(f"\n대안 순위 (1번이 현재 계획):\n{alt_text}\n")
-        print(f"Claude 등급: {tier} {tier_spec('claude', tier)}")
+        label = engineer_label(args)
+        spec_key = "codex_engineer" if engineer_backend(args) == "codex" else "claude"
+        print(f"{label} 구현 등급: {tier} {tier_spec(spec_key, tier)}")
         print(f"GPT 리뷰  : {review_mode}\n")
-        print("ENTER / ok / 1 : 현재 계획(1순위)대로 Claude에게 전달")
+        print(f"ENTER / ok / 1 : 현재 계획(1순위)대로 {label}에게 전달")
         print("2, 3, ...      : 해당 대안으로 계획 다시 세우기")
         print("f [지시]       : 추가 지시 후 전달")
         print("p [지시]       : 기존 반복 보존 후 새 반복에서 GPT 재계획")
-        print(f"t [등급]       : Claude 등급 바꾸기 ({' / '.join(CLAUDE_TIERS)})")
-        print("r full|skip    : Claude 작업 후 GPT 리뷰 여부 바꾸기")
+        print(f"t [등급]       : 구현 등급 바꾸기 ({' / '.join(CLAUDE_TIERS)})")
+        print("r full|skip    : 구현 후 GPT 리뷰 여부 바꾸기")
         print("a              : 이후 확인 없이 자동 진행")
         print("q              : 종료 (다시 실행하면 여기서 이어짐)")
 
@@ -1693,13 +1822,13 @@ def step_checkpoint(args, n):
             ("제안", plan.get("plan_summary") or approach),
             ("확인할 내용", reasons),
             ("대안 (1번이 현재 제안)", alt_text),
-            ("진행 설정", f"Claude {tier} · GPT 리뷰 {review_mode}"),
+            ("진행 설정", f"{label} 구현 {tier} · GPT 리뷰 {review_mode}"),
         ], reference=f"agent/runs/iter_{n:03d}/plan.md", actions=(
             "ok 또는 1 → 1순위로 진행\n"
             "2, 3… → 그 대안으로 계획 다시\n"
             "f 지시내용 → 추가 지시 후 진행\n"
             "p 지시내용 → 보존 후 GPT부터 재계획\n"
-            f"t {'|'.join(CLAUDE_TIERS)} → Claude 등급 변경\n"
+            f"t {'|'.join(CLAUDE_TIERS)} → 구현 등급 변경\n"
             "r full|skip → GPT 리뷰 여부 변경\n"
             "a → 이후 자동 진행\n"
             "q → 종료"
@@ -1736,7 +1865,7 @@ def step_checkpoint(args, n):
             picked = (rest or ask(f"등급 입력 ({' / '.join(CLAUDE_TIERS)}): ") or "").lower()
             if picked in CLAUDE_TIERS:
                 save(d / "claude_tier_override.txt", picked)
-                record_event(n, "override", by="human", what="Claude 등급", value=picked)
+                record_event(n, "override", by="human", what=f"{engineer_label(args)} 구현 등급", value=picked)
             else:
                 print("알 수 없는 등급입니다.")
             continue
@@ -1752,7 +1881,7 @@ def step_checkpoint(args, n):
             args.autonomy = "full"
             return decided("go", "1순위로 진행, 이후 자동 진행으로 전환", reply)
         if cmd == "f":
-            feedback = rest or ask("Claude에게 줄 추가 지시:\n> ") or ""
+            feedback = rest or ask(f"{engineer_label(args)} 구현 담당에게 줄 추가 지시:\n> ") or ""
             if feedback:
                 save(d / "human_to_claude.md", feedback)
                 log(f"iter_{n:03d} USER FEEDBACK", feedback)
@@ -1896,7 +2025,10 @@ CLAUDE_RESTART_NOTE = """
 
 def step_claude(args, goal, n):
     d = iter_dir(n)
-    banner(f"[iter_{n:03d} · 2/3] Claude가 구현/실험합니다.")
+    backend = bind_engineer(args, n)
+    label = engineer_label(args, n)
+    runner = run_codex_engineer if backend == "codex" else run_claude
+    banner(f"[iter_{n:03d} · 2/3] {label}가 구현/실험합니다.")
 
     branch = ensure_branch(n)["branch"]
     try:
@@ -1945,31 +2077,34 @@ JSON의 연구 질문·기여 경로·baseline·재사용 조건도 확인한다
 """
     tier = claude_tier(args, n)
     record_tier(n, "claude", tier)
-    session_file = d / "claude_session.txt"
-    stream_log = d / "claude_stream.jsonl"
+    prefix = "codex_engineer" if backend == "codex" else "claude"
+    session_file = d / f"{prefix}_session.txt"
+    stream_log = d / f"{prefix}_stream.jsonl"
 
     def attempt():
         session = read(session_file).strip()
         if session:
             # 이전 실행이 끊겼다: 같은 세션을 이어서 마무리하게 한다
-            print(f"이전 Claude 세션을 이어서 진행합니다 ({session[:8]}…)")
-            record_event(n, "claude_resume", session=session)
+            print(f"이전 {label} 구현 세션을 이어서 진행합니다 ({session[:8]}…)")
+            record_event(n, "claude_resume", session=session, engineer=label)
             try:
-                return run_claude(args, CLAUDE_RESUME_PROMPT + "\n\n" + prompt,
+                return runner(args, CLAUDE_RESUME_PROMPT + "\n\n" + prompt,
                                   stream_log, tier, session_file, resume_id=session)
             except RetryableError as e:
-                if "No conversation found" not in e.output:
+                missing = ("no conversation found", "no rollout found for thread id", "no saved session found")
+                if not any(message in e.output.lower() for message in missing):
                     raise
                 print("이전 세션을 찾을 수 없어 새로 시작합니다.")
+                record_event(n, "engineer_session_missing", engineer=label, session=session)
                 session_file.unlink(missing_ok=True)
         restarted = stream_log.exists() and stream_log.stat().st_size > 0
-        return run_claude(args, prompt + (CLAUDE_RESTART_NOTE if restarted else ""),
+        return runner(args, prompt + (CLAUDE_RESTART_NOTE.replace("Claude", label) if restarted else ""),
                           stream_log, tier, session_file)
 
     try:
         result = load_json(d / "claude_result.raw.json")
         if result is None:
-            result = with_retries("Claude 구현/실험", attempt)
+            result = with_retries(f"{label} 구현/실험", attempt)
             # 결과 응답 뒤 체크포인트/보고서 저장 중 끊겨도 모델·실험을 다시 호출하지 않는다.
             save_atomic(d / "claude_result.raw.json", json.dumps(result, ensure_ascii=False, indent=2))
     except BaseException:
@@ -1994,11 +2129,13 @@ JSON의 연구 질문·기여 경로·baseline·재사용 조건도 확인한다
     save(d / "claude_meta.json", json.dumps({
         key: result.get(key)
         for key in ("session_id", "is_error", "num_turns", "duration_ms", "total_cost_usd", "usage", "modelUsage")
-    } | {"permission_denials": len(denials)}, indent=2))
+    } | {"permission_denials": len(denials), "backend": backend,
+         "model_spec": tier_spec("codex_engineer" if backend == "codex" else "claude", tier),
+         "stream_log": stream_log.name, "sandbox": result.get("sandbox")}, indent=2))
     save(d / "claude_report.md", report)
-    log(f"iter_{n:03d} CLAUDE REPORT", report)
+    log(f"iter_{n:03d} {label.upper()} IMPLEMENTATION REPORT", report)
     print("\n" + report)
-    record_event(n, "claude", tier=tier, branch=branch,
+    record_event(n, "claude", tier=tier, branch=branch, engineer=label, sandbox=result.get("sandbox"),
                  summary=parse_trailer(report, "SUMMARY"),
                  self_check=parse_trailer(report, "SELF_CHECK") or "없음",
                  changed_files=len(changed.splitlines()), permission_denials=len(denials))
@@ -2008,6 +2145,8 @@ JSON의 연구 질문·기여 경로·baseline·재사용 조건도 확인한다
 
 def step_review(args, goal, n):
     d = iter_dir(n)
+    label = engineer_label(n=n)
+    stream_name = "codex_engineer_stream.jsonl" if engineer_backend(n=n) == "codex" else "claude_stream.jsonl"
     banner(f"[iter_{n:03d} · 3/3] GPT가 결과를 리뷰합니다.")
     context = gpt_record_context(n)
     commit = load_json(d / "commit.json") or {}
@@ -2057,8 +2196,9 @@ iter_{n:03d}
 === 검토 자료 (직접 열어 확인하라) ===
 - 계획: agent/runs/iter_{n:03d}/plan.md
 - 구조화된 계획: agent/runs/iter_{n:03d}/plan.json
-- Claude 보고서: agent/runs/iter_{n:03d}/claude_report.md
-- Claude 도구 호출 전체 기록: agent/runs/iter_{n:03d}/claude_stream.jsonl
+- {label} 구현 보고서 (호환용 파일명): agent/runs/iter_{n:03d}/claude_report.md
+- {label} 구현 도구 호출 전체 기록: agent/runs/iter_{n:03d}/{stream_name}
+- 구현 담당·모델 설정: agent/runs/iter_{n:03d}/claude_meta.json
 - 코드 버전·제외 파일: agent/runs/iter_{n:03d}/commit.json (체크포인트이지 검증 승인이 아님)
 - 코드 변경 diff (구현 전 SHA → 리뷰 대상 SHA): agent/runs/iter_{n:03d}/changes.patch
 - 선별 재사용 출처·필수 검증: agent/runs/iter_{n:03d}/reuse_manifest.json
@@ -2187,7 +2327,7 @@ def step_skip_review(n, reason):
     d = iter_dir(n)
     banner(f"[iter_{n:03d} · 3/3] GPT 리뷰 생략 — {reason}")
 
-    summary = parse_trailer(read(d / "claude_report.md"), "SUMMARY") or "Claude 작업 완료 (요약 없음)"
+    summary = parse_trailer(read(d / "claude_report.md"), "SUMMARY") or "구현 작업 완료 (요약 없음)"
     review = {
         "verdict": "CONTINUE",
         "one_line_summary": summary,
@@ -2196,7 +2336,7 @@ def step_skip_review(n, reason):
         "reason": reason,
         "review_markdown": (
             f"# GPT 리뷰 생략\n\n{reason}.\n"
-            "다음 반복의 계획 단계에서 GPT가 Claude 보고서를 직접 확인한다.\n"
+            "다음 반복의 계획 단계에서 GPT가 구현 보고서를 직접 확인한다.\n"
         ),
         "skipped": True,
     }
@@ -2340,7 +2480,11 @@ def nonnegative_iterations(value):
 
 
 def parse_args():
-    p = argparse.ArgumentParser(description="GPT(Codex) ↔ Claude Code 자동 연구 루프")
+    p = argparse.ArgumentParser(description="GPT 계획/리뷰 ↔ Claude 또는 Codex 구현 자동 연구 루프")
+    p.add_argument("--engineer", choices=["claude", "codex"],
+                   help="구현·실험 담당 선택. 선택은 저장되며 생략 시 유지 (초기값 claude)")
+    p.add_argument("--codex-engineer-sandbox", choices=["workspace-write", "danger-full-access"],
+                   help="Codex 구현 권한 (선택 저장). 초기 workspace-write. 이 서버 GPU 실행은 명시적 danger-full-access 필요")
     p.add_argument("--max-iters", type=nonnegative_iterations, default=0,
                    help="이번 실행의 최대 반복 수. 기본 0=횟수 제한 없음, 양수 지정 시에만 제한")
     p.add_argument("--autonomy", choices=["manual", "smart", "full"], default="smart",
@@ -2352,12 +2496,13 @@ def parse_args():
     p.add_argument("--max-think-rounds", type=int, default=4, help="반복당 GPT 사고 라운드 최대 횟수")
     p.add_argument("--goal", help="새 연구 목표. 이전 기록을 이어받아 새 목표로 다시 계획한다")
     p.add_argument("--reset", action="store_true", help="모든 기록을 archive로 옮기고 완전히 새로 시작")
-    p.add_argument("--gpus", help="Claude 실험에 보일 GPU (CUDA_VISIBLE_DEVICES), 예: 1 또는 0,1")
+    p.add_argument("--gpus", help="구현 담당 실험에 보일 GPU (CUDA_VISIBLE_DEVICES), 예: 1 또는 0,1")
     p.add_argument("--gpt-tier", choices=GPT_TIERS, help="GPT 계획/리뷰 등급 고정 (agent/tiers.json)")
-    p.add_argument("--claude-tier", choices=CLAUDE_TIERS, help="Claude 등급 고정 (agent/tiers.json)")
+    p.add_argument("--engineer-tier", "--claude-tier", dest="claude_tier", choices=CLAUDE_TIERS,
+                   help="구현 담당 등급 고정 (agent/tiers.json의 해당 backend)")
     p.add_argument("--gpt-timeout", type=int, default=30 * 60, help="GPT 단계 제한 시간(초)")
-    p.add_argument("--claude-timeout", type=nonnegative_seconds, default=0,
-                   help="Claude 단계 제한 시간(초), 0=시간 제한 없음(기본). 양수 지정 시에만 강제 종료")
+    p.add_argument("--engineer-timeout", "--claude-timeout", dest="claude_timeout", type=nonnegative_seconds, default=0,
+                   help="구현 단계 제한 시간(초), 0=시간 제한 없음(기본). 양수 지정 시에만 강제 종료")
     p.add_argument("--always-review", action="store_true", help="계획과 상관없이 매 반복 GPT 리뷰")
     p.add_argument("--limit-poll-minutes", type=int, default=30, help="사용 한도 대기 중 다시 시도하는 간격(분)")
     p.add_argument("--limit-max-hours", type=float, default=8, help="사용 한도가 풀리길 최대 몇 시간 기다릴지")
@@ -2508,10 +2653,14 @@ def main():
     if args.usage:
         print(usage_report(RUNS_DIR))
         print("\n" + gpt_usage.usage_report(RUNS_DIR))
+        print("\n" + codex_engineer.usage_report(RUNS_DIR))
         return
     if args.status:
         n = current_iteration()
         print(f"현재: iter_{n:03d} / {stage_of(n)}")
+        selection = load_json(AGENT_DIR / "engineer_selection.json") or {"backend": "claude"}
+        print(f"구현 담당: {started_engineer(n) or selection['backend']} / 다음 선택: {selection['backend']}")
+        print(f"Codex 구현 권한: {selection.get('codex_engineer_sandbox', 'workspace-write')}")
         print(f"보완 지시 대기: {'있음' if RESUME_FILE.exists() or pending_interventions() else '없음'}")
         print(f"지시 파일: {RESUME_FILE}")
         info = load_json(iter_dir(n) / "intervention.json")
@@ -2525,6 +2674,8 @@ def main():
             queue_replan(args.replan)
         target = apply_pending_replan()
         if args.prepare_only:
+            if args.engineer or args.codex_engineer_sandbox:
+                configure_engineer(args)
             print(f"준비 완료: iter_{current_iteration():03d}, 실험·에이전트·알림 미실행. "
                   + ("새 보완 지시를 적용했습니다." if target else "새 보완 지시가 없습니다."))
             return
@@ -2533,6 +2684,9 @@ def main():
 
 def run_loop(args):
     global HUMAN, MAX_ATTEMPTS
+    configure_engineer(args)
+    if engineer_backend(args) == "codex":
+        print(f"Codex 구현 sandbox: {args.codex_engineer_sandbox} (자동 권한 확대 없음)")
     MAX_ATTEMPTS = args.max_attempts
     LIMIT.update(poll=args.limit_poll_minutes * 60, max=int(args.limit_max_hours * 3600))
     HUMAN = Human(None if args.no_telegram else NOTIFY_ENV_FILE)
@@ -2567,7 +2721,8 @@ def run_loop(args):
     away_text = (f"\n{args.no_ask_until:%m-%d %H:%M}까지는 묻지 않고 진행합니다 (그 후 원래 규칙)."
                  if args.no_ask_until else "")
     notify(notice(f"▶ iter_{current_iteration():03d} | 연구 루프 시작", [
-        ("현재", f"{stage_of(n)} 단계부터 이어갑니다."),
+        ("현재", f"{stage_of(n)} 단계부터 이어갑니다. 구현 담당: {engineer_label(args)}."),
+        ("구현 권한", args.codex_engineer_sandbox if engineer_backend(args) == "codex" else ""),
         ("진행 범위", f"최대 {args.max_iters}회 반복" if args.max_iters
          else "반복 횟수 제한 없이 자동 진행 · 사용자 결정이 필요하면 질문합니다."),
         ("사용자 확인", away_text),
@@ -2612,7 +2767,7 @@ def run_loop(args):
             if RESUME_FILE.exists() or pending_interventions():
                 continue
             check_stop()
-            set_stage(n, "Claude 구현/실험")
+            set_stage(n, f"{engineer_label(args)} 구현/실험")
             step_claude(args, goal_for(n), n)
         if RESUME_FILE.exists() or pending_interventions():
             continue

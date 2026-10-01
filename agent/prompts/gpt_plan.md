@@ -118,7 +118,11 @@ decision (사람에게 물을지) 선택 기준 — 사용자는 진행이 느�
 - 현재 GPU 두 장 안에서의 실험은 1시간을 넘는다는 이유만으로 ask_human으로 보내지 않는다.
 - GOAL 범위 안의 근거 있는 연구 질문 변경·전략 재검토 자체는 ask_human 사유가 아니다.
 
-claude_tier (Claude에게 쓸 모델 등급) 선택 기준:
+claude_tier (구현 담당 작업 등급, 호환용 필드명) 선택 기준:
+- 현재 실행 설정의 구현 담당이 Codex이면 아래 Sonnet/Opus 배정 대신
+  agent/CODEX_ENGINEER_POLICY.md와 agent/tiers.json의 codex_engineer를 적용한다.
+  standard를 기본으로 하며 작업 난이도에 따른 등급 선택·검증 의무는 유지한다.
+  이 문서의 Claude/Claude Code는 선택된 구현 담당 역할을 뜻한다.
 - agent/CLAUDE_USAGE_POLICY.md를 따른다. 기본은 standard (Sonnet/medium)다.
 - standard: 구체적으로 정한 계획의 일반 구현. 데이터 처리, 공식 예제에 따른 추론 코드,
   기존 패턴의 테스트, 알려진 오류 수정, 정해진 통계·평가 계산. 새 파일·여러 파일·GPU 사용 자체는 상향 근거가 아니다.

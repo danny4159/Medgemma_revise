@@ -28,6 +28,51 @@ python legacy/run_medgemma.py
 - 모델 크기: 약 4B 파라미터, bf16 기준 GPU 메모리 약 8~10GB 필요
 - 서버 GPU: RTX 3090 24GB x2 (인덱스 0, 1) — 충분히 여유 있음
 
+## 구현 담당 선택: Claude / Codex
+
+GPT 계획·리뷰는 유지하고, 구현·GPU 실험·자체 검증 담당 전체를 선택할 수 있다.
+
+```bash
+python orchestrator.py --engineer codex --codex-engineer-sandbox danger-full-access --gpus 0,1
+python orchestrator.py --engineer claude --gpus 0,1
+```
+
+첫 기본값은 Claude다. 명시한 선택은 서버의 `agent/engineer_selection.json`에 저장되어,
+이후 `python orchestrator.py --gpus 0,1`로 재개해도 유지된다. 이 서버별 설정은 Git에 올리지 않는다.
+`--status`는 실제/선택 담당을 보여주며 설정을 변경하지 않는다. 동시 실행은 기존 lock으로 막는다.
+현재 실행 중인 프로세스는 설정 추가로 바뀌지 않는다. 정상 중단·종료 확인 후 다음 실행에 적용한다.
+실행 없이 선택만 저장하려면 종료 상태에서 `--prepare-only --engineer codex`를 쓴다.
+단, 대기 중인 RESUME.md가 있으면 기존 prepare-only 동작대로 그 보완 전환도 적용한다.
+
+이미 구현을 시작한 반복에서는 담당을 조용히 교체하지 않는다. 기존 담당으로 완료하거나,
+정상 중단 후 `--engineer codex --replan "기존 코드·결과를 보존하고 남은 작업을 인계해 재계획"`처럼
+명시적으로 새 반복으로 넘긴다. 목표·원본 기록·checkpoint는 보존한다.
+
+`--engineer-tier standard`와 `--engineer-timeout 0`으로 등급·timeout을 설정할 수 있다.
+기존 `--claude-tier`, `--claude-timeout`도 같은 옵션의 호환 별칭이다. 모델 설정은
+`agent/tiers.json`의 `claude` / `codex_engineer`로 분리된다. 계획/리뷰의 `gpt` 설정은 바꾸지 않는다.
+Codex 구현 기본은 현재 `gpt-6-astra`/medium이며 creative·heavy는 high, light는 low다.
+
+Codex의 초기 권한은 research/ 기준 workspace-write다. 이 서버에서는 해당 sandbox가 NVIDIA
+접근을 막고, 장치 파일만 허용하면 CLI 초기화가 실패하는 문제가 확인됐다. 위 GPU 실행 예시는
+사용자가 명시적으로 `danger-full-access`를 선택하는 것이다. 이 선택도 서버에 저장된다.
+이 모드는 OS 파일쓰기 제한 없이 현재 계정의 호스트 권한으로 실행하므로, 연구 폴더 밖 쓰기
+금지는 작업 정책으로 지키며 OS 강제 보호라고 주장하지 않는다. 계획/리뷰는 read-only를 유지한다.
+작업 폴더 쓰기만 필요하면 `--codex-engineer-sandbox workspace-write`로 선택할 수 있다.
+
+Codex는 저장된 CLI 인증을 사용하되 사용자 config는 무시하고 모델·권한을 이 호출에서 고정한다.
+로그인 셸은 끄며 medgemma 환경과 CUDA_VISIBLE_DEVICES를 상속한다.
+Claude의 도구 allowlist를 흉내 내지 않으며 완전히 같은 보안 구현은 아니다. 연구 코드·결과 쓰기,
+공개 자산 조회와 격리 환경 구성은 허용하되 상위 관리 파일·모델 캐시·기존 데이터는 보존한다.
+자동 API 과금 전환이나 실패 시 권한 승격은 하지 않는다. Codex CLI가 PATH에 있어야 한다.
+비대화형 실행·JSONL·세션 재개는 [공식 Codex 실행 문서](https://developers.openai.com/codex/noninteractive)를 따른다.
+
+반복별 `engineer_backend.json`에 실제 담당을 기록한다. Codex 구현의 세션·도구 로그·사용량은
+`codex_engineer_session.txt`, `codex_engineer_stream.jsonl`, `codex_engineer_usage.json`으로 분리한다.
+계획/리뷰와 세션을 공유하지 않는다. 기존 기록 호환을 위해 구현 보고서·메타·완료 응답은
+`claude_report.md`, `claude_meta.json`, `claude_result.raw.json` 이름을 유지한다.
+`--usage`에서 Codex 구현 사용량도 따로 확인한다. 토큰은 구독 잔여량을 의미하지 않는다.
+
 ## 연구 루프의 GPU 활용
 
 연구 자원 기준은 `agent/RESOURCE_POLICY.md`에 있다. 현재 두 GPU의 실제 여유 메모리 안에서
