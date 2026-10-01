@@ -17,7 +17,7 @@ Claude로 넘어간다. 라운드별 노트는 runs/iter_NNN/think/, 최대 --ma
     NEEDS_HUMAN → 사람 입력을 받고 다음 반복 (또는 종료)
 
 단계별 모델/사고 수준은 agent/tiers.json의 등급으로 정한다.
-    GPT 계획  : 직전 리뷰의 next_plan_tier (deep / normal / light), 첫 반복은 deep
+    GPT 계획  : deep_medium / deep_high / normal / light, 기본 medium; high는 전략 판단 근거 필요
     Claude    : 계획의 claude_tier (기본 standard, creative / heavy / standard / light)
     GPT 리뷰  : creative→deep, heavy/standard→normal, light→light
 
@@ -65,7 +65,7 @@ orchestrator.py를 고친 뒤 다시 실행해도 완료되지 않은 단계부�
       월간 지출 한도는 예외로 즉시 중단한다. 계정 상태 확인 후 수동 재개한다.
     - 예전 반복 파일에 없는 필드는 기본값으로 채워 읽는다.
 연구 목표 변경: --goal "새 목표"는 기록을 지우지 않고 새 챕터를 연다. 반복 번호는 이어지고,
-새 목표의 첫 계획(deep)은 이전 기록에서 가져올 것을 정리한 뒤 새 목표 기준으로 다시 사고한다.
+새 목표의 첫 계획은 이전 기록에서 가져올 것을 정리한 뒤 새 목표 기준으로 다시 사고한다.
 접근법 시도 횟수는 목표별로 센다. 목표 이력은 agent/GOALS.json. --reset은 완전히 새로 시작할 때만.
 
 정지: 터미널 Ctrl+C, `touch agent/STOP`(현재 단계 후), Telegram `stop` / `stop now` / `status`.
@@ -107,6 +107,7 @@ from claude_usage import summarize_stream, usage_report
 import research_history as history
 import gpt_usage
 import gpt_context
+import planning_effort
 from presentation import notice, iteration_result
 
 PROJECT_DIR = Path(__file__).resolve().parent
@@ -1042,10 +1043,12 @@ PLAN_DEFAULTS = {
     "limitation_ids": [], "reuse_assets": [],
     # legacy는 저장된 옛 계획에만 사용. 새 계획은 스키마의 none/pilot/full을 명시한다.
     "method_stage": "legacy", "research_track": "", "related_iterations": [], "decision_contract": {},
+    "next_think_tier": "deep_medium", "next_think_reason": {},
 }
 REVIEW_DEFAULTS = {
     "verdict": "CONTINUE", "approach_status": "", "approach_note": "", "commit_worthy": False,
-    "commit_message": "", "one_line_summary": "", "next_task": "", "next_plan_tier": "normal",
+    "commit_message": "", "one_line_summary": "", "next_task": "", "next_plan_tier": "deep_medium",
+    "next_plan_reason": {},
     "reason": "", "review_markdown": "", "paper_recommendation": {}, "milestone": {},
     "valid_experiment": None, "reusable_code": None, "failure_scope": "", "goal_progress": "",
     "blocking_issues": [], "reuse_issues": [], "deferred_issues": [],
@@ -1069,14 +1072,30 @@ def record_tier(n, step, tier):
 
 
 def plan_tier(args, n):
-    if args.gpt_tier:
-        return args.gpt_tier
+    return plan_tier_choice(args, n)["tier"]
+
+
+def plan_tier_choice(args, n):
+    override = getattr(args, "plan_tier", None) or getattr(args, "gpt_tier", None)
+    if override:
+        return planning_effort.choose(override, explicit=True, source="CLI")
     if (iter_dir(n) / "intervention.json").exists():
-        return "deep"
+        return planning_effort.choose(source="사용자 보완: 내용 확인부터, 자동 high 아님")
     if goal_start(n) == n:
-        return "deep"  # 새 목표의 첫 계획은 이전 기록을 다시 읽고 깊게 사고한다
+        return planning_effort.choose(source="새 목표: medium에서 관련 이력 확인")
     prev = load_review(n - 1) if n > 1 else None
-    return prev.get("next_plan_tier", "deep") if prev else "deep"
+    return planning_effort.choose((prev or {}).get("next_plan_tier"),
+                                  (prev or {}).get("next_plan_reason"), source="직전 리뷰")
+
+
+def planning_round_choice(args, n, done_rounds):
+    """중단한 호출의 선택은 보존하고, 완료된 라운드가 제안한 다음 선택은 재평가한다."""
+    choice = plan_tier_choice(args, n)
+    if choice["explicit"] or not done_rounds:
+        return choice
+    previous = load_json(done_rounds[-1]) or {}
+    return planning_effort.choose(previous.get("next_think_tier"),
+                                  previous.get("next_think_reason"), source=str(done_rounds[-1]))
 
 
 def claude_tier(args, n):
@@ -1659,7 +1678,6 @@ iter_{n:03d}
 === 규칙 ===
 같은 접근법의 유효한 실험 {MAX_ATTEMPTS}회부터 방향 재평가 (자동 포기 아님).
 """
-    tier = plan_tier(args, n)
     think_dir = d / "think"
     think_dir.mkdir(exist_ok=True)
     while True:
@@ -1667,8 +1685,23 @@ iter_{n:03d}
         done_rounds = sorted(think_dir.glob("round_[0-9][0-9].json"))
         r = len(done_rounds) + 1
         final = r >= args.max_think_rounds
-        set_stage(n, f"GPT 사고 라운드 {r}")
-        round_prompt = prompt + think_section(done_rounds, r, args.max_think_rounds, final)
+        choice_file = think_dir / f"round_{r:02d}.tier.json"
+        choice = planning_round_choice(args, n, done_rounds)
+        # 같은 미완료 호출을 재개할 때 자동으로 다른 effort로 바꾸지 않는다. 명시적 CLI는 우선한다.
+        saved_choice = load_json(choice_file)
+        if saved_choice and not choice["explicit"] and saved_choice.get("tier") in planning_effort.TIERS:
+            choice = saved_choice
+        tier = choice["tier"]
+        choice.update(model=tier_spec("gpt", tier)["model"], effort=tier_spec("gpt", tier)["effort"])
+        if not saved_choice:
+            save_atomic(choice_file, json.dumps(choice, ensure_ascii=False, indent=2))
+        elif choice != saved_choice:
+            # 명시적 override 이력도 원본을 지우지 않고 events.jsonl에 남긴다.
+            record_event(n, "plan_effort_override", round=r, previous=saved_choice, selected=choice)
+        set_stage(n, f"GPT 사고 라운드 {r} ({tier})")
+        record_event(n, "plan_effort", round=r, **choice)
+        round_prompt = (prompt + f"\n=== 현재 계획 사고 등급 ===\n{json.dumps(choice, ensure_ascii=False)}\n"
+                        + think_section(done_rounds, r, args.max_think_rounds, final))
         raw = with_retries(f"GPT 사고 라운드 {r}", lambda: run_codex(
             args, round_prompt, think_dir / f"round_{r:02d}.raw.json", d / "plan_codex.log", tier,
             schema=PROMPT_DIR / "plan_schema.json",
@@ -2498,6 +2531,8 @@ def parse_args():
     p.add_argument("--reset", action="store_true", help="모든 기록을 archive로 옮기고 완전히 새로 시작")
     p.add_argument("--gpus", help="구현 담당 실험에 보일 GPU (CUDA_VISIBLE_DEVICES), 예: 1 또는 0,1")
     p.add_argument("--gpt-tier", choices=GPT_TIERS, help="GPT 계획/리뷰 등급 고정 (agent/tiers.json)")
+    p.add_argument("--plan-tier", choices=planning_effort.TIERS,
+                   help="GPT 계획만 등급 고정. --gpt-tier보다 계획에서 우선, 리뷰·구현은 변경하지 않음")
     p.add_argument("--engineer-tier", "--claude-tier", dest="claude_tier", choices=CLAUDE_TIERS,
                    help="구현 담당 등급 고정 (agent/tiers.json의 해당 backend)")
     p.add_argument("--gpt-timeout", type=int, default=30 * 60, help="GPT 단계 제한 시간(초)")

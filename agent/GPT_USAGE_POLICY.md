@@ -3,17 +3,44 @@
 사용자 승인: 2026-09-29. 문맥·사고 라운드·보완 작업의 중복을 줄인다.
 모델 변경은 추후 판단한다. GPT 모델은 gpt-6-astra로 유지한다.
 
-## 사고 등급 (2026-10-01 사용자 조정)
+## 계획 사고 등급 (2026-10-01 사용자 승인: deep 분리)
 
-- 계획·리뷰: deep=high, normal=low, light=low. normal의 effort만 medium에서 low로 낮춘다.
-  normal과 light는 실제 effort가 같아도 작업 분류·기존 기록의 등급명은 유지한다.
+- 계획은 deep_medium=Astra/medium, deep_high=Astra/high, normal/light=Astra/low다.
+  모델은 모두 gpt-6-astra다. normal과 light는 effort가 같아도 기존 작업 분류는 유지한다.
+- deep_medium은 깊은 검토의 기본이다. 현재 연구 안의 경쟁 가설·진단 실험·문헌 검토·한정된
+  결과 해석을 담당한다. normal/light는 승인된 방향의 명확한 보완·재실행·일반 후속 계획이다.
+- deep_high는 연구 방향의 유지·중단·전환, 핵심 contribution 선정, 기존 핵심 해석을 뒤집는
+  복잡한 판단에 쓴다. 작은 후속 질문의 선택을 연구 방향 전환으로 부풀리지 않는다.
+  문헌 검색·새 실험·막연한 불확실성·사용자 보완/재계획 자체는 high 사유가 아니다.
+- high 자동 선택에는 scope(research_direction/core_contribution/foundational_interpretation),
+  decision(결정할 선택), difficulty(충돌 근거·어려운 해석), impact(오판의 연구·투자 영향)를
+  모두 기록한다. 빈 근거·비전략 범위면 medium에서 확인하며 실험 실패로 처리하지 않는다.
+  세 근거의 존재 검사는 최소 요건이고, 내용의 타당성은 리뷰에서 판단한다.
+- 직전 리뷰의 next_plan_tier/next_plan_reason으로 바로 적절한 등급을 고른다. 명백한 전략
+  판단을 medium으로 한 번 더 돌린 뒤 high로 반복하지 않는다. 추가 분류 전용 모델 호출은 없다.
+- think_more의 next_think_tier/next_think_reason으로 다음 라운드 등급을 정한다. medium에서
+  중요한 해석 충돌이 발견되면 남은 판단만 high로 넘긴다. high에서 방향이 정해졌으면 세부
+  설계는 medium으로 낮춘다. 기존 조사·출처·노트를 버리거나 동일 문헌을 다시 전수 조사하지 않는다.
+- 매 라운드 선택·근거·모델·effort는 think/round_NN.tier.json과 events.jsonl에 남긴다.
+  tiers_used.json의 plan은 마지막 라운드 등급이며 혼합 사용은 라운드 기록·원본 로그로 확인한다.
+  중단된 같은 라운드의 선택은 보존한다. 선택 변경을 위한 재실행·추가 라운드는 만들지 않는다.
+- 첫 목표·사용자 보완·옛 deep 추천·추천 누락은 기본 medium에서 관련 맥락을 확인한다.
+  중요한 전략 결정이면 다음 라운드 high를 요청할 수 있다. 옛 기록·계획을 다시 쓰지 않는다.
+- --plan-tier는 계획만 명시적으로 고정한다. 기존 --gpt-tier는 계획/리뷰 모두 고정하며
+  계획에서는 --plan-tier가 우선이다. 명시적 --gpt-tier deep는 high를 유지한다.
+
+## 리뷰·구현·적용 경계
+
 - 구현 standard/heavy의 GPT 리뷰는 normal/low, creative는 deep/high, light는 light/low다.
   Claude/Codex 중 누가 구현해도 동일하며, 명시한 --gpt-tier는 기존처럼 우선한다.
-- 등급 선택 기준·필수 full 리뷰·독립 수치 검증·사고 라운드 상한은 변경하지 않는다.
+- deep는 기존 리뷰와 CLI·과거 기록 호환용 high 설정으로 보존한다. 새 자동 계획은 분리 등급을 쓴다.
+- 구현 등급·필수 full 리뷰·독립 수치 검증·사고 라운드 상한은 변경하지 않는다.
   low는 필수 조사나 검증을 생략해도 된다는 뜻이 아니다.
-- 실제 effort는 agent/tiers.json에서 매 호출 읽는다. 이미 실행 중인 호출은 유지하고 다음
-  호출(같은 세션 재시도 포함)부터 적용한다. 저장된 계획의 등급명과 과거 로그는 고치지 않는다.
-  이 설정 변경만으로 재시작·재계획할 필요는 없다.
+- effort 값은 agent/tiers.json에서 매 호출 읽지만 이번 선택 로직 변경은 새 프로세스에서 적용된다.
+  실행 중인 호출·GPU 실험은 유지하고 안전한 단계 경계에서 관리 프로세스를 재개한다.
+  기존 계획·세션·결과·판정 기준을 보존하며 GOAL 변경·reset/replan은 필요하지 않다.
+- high 비율에 강제 상한을 두지 않는다. 이후 5~10회 반복의 선택 근거·라운드 수·계획 수정/
+  재작업·표시 토큰을 관찰한다. 절감률이나 품질 동등성을 미리 보장하지 않는다.
 
 ## 문맥과 출처
 

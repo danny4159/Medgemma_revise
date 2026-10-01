@@ -34,7 +34,7 @@ class ControlTests(unittest.TestCase):
         self.assertFalse((loop.iter_dir(2) / "claude_session.txt").exists())
         self.assertTrue((self.repo / "partial.py").exists())
         self.assertIn("정상 사용 한계", loop.intervention_context(2))
-        self.assertEqual(loop.plan_tier(argparse.Namespace(gpt_tier=None), 2), "deep")
+        self.assertEqual(loop.plan_tier(argparse.Namespace(gpt_tier=None), 2), "deep_medium")
         self.assertTrue(loop.review_decision(argparse.Namespace(), 2)[0])
         self.assertIsNone(loop.apply_pending_replan())
         self.assertFalse(loop.RESUME_FILE.exists())
