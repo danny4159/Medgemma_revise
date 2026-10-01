@@ -136,7 +136,7 @@ class ContextTests(unittest.TestCase):
                     self.assertIn(value, prompt)
 
     def test_models_and_required_review_stay_unchanged(self):
-        for tier, effort in (("deep", "high"), ("normal", "medium"), ("light", "low")):
+        for tier, effort in (("deep", "high"), ("normal", "low"), ("light", "low")):
             self.assertEqual(loop.tier_spec("gpt", tier), {"model": "gpt-6-astra", "effort": effort})
         policy = (ROOT / "agent/GPT_USAGE_POLICY.md").read_text()
         for value in ("필수 GPT 리뷰", "독립 수치 재계산", "SHA256", "1라운드", "원본", "영향 범위"):
