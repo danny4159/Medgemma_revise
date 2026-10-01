@@ -1,0 +1,2516 @@
+diff --git a/mg45_ccheck.py b/mg45_ccheck.py
+new file mode 100644
+index 0000000..14eb24b
+--- /dev/null
++++ b/mg45_ccheck.py
+@@ -0,0 +1,53 @@
++"""iter_045: C timing block 출력의 token 정합성(기존 iter_040 C 192 출력 대비)·EOS·입력 hash·자원 요약.
++
++python mg45_ccheck.py DIR [DIR ...]   (결과는 stdout JSON; 저장은 호출자가 필요 시 리다이렉트하지 않고 timing 리포트가 읽는다)
++"""
++import glob
++import json
++import sys
++
++import numpy as np
++
++OLD = "results/iter_040/gen/C"
++
++
++def old_records():
++    old = {}
++    for f in glob.glob(OLD + "/gen_worker*.jsonl"):
++        for l in open(f):
++            r = json.loads(l)
++            old[r["request_id"]] = r
++    return old
++
++
++def check(d, old=None):
++    old = old or old_records()
++    recs = []
++    for f in sorted(glob.glob(d + "/ctime_worker*.jsonl")):
++        recs += [json.loads(l) for l in open(f)]
++    mm = [r["request_id"] for r in recs if r["suffix_ids"] != old[r["request_id"]]["suffix_ids"]]
++    c = json.load(open(d + "/completion.json"))
++    lat = {}
++    for r in recs:
++        lat[r["patient"]] = r["t_patient_done"] - r["t_patient_dispatch"]
++    lv = np.array(list(lat.values()))
++    rl = [json.loads(x) for x in open(d + "/resource_log.jsonl")]
++    gmax = {}
++    for r in rl:
++        for g in r["gpu"]:
++            i, used, _ = [int(x) for x in g.split(",")]
++            gmax[i] = max(gmax.get(i, 0), used)
++    return {"dir": d, "n": len(recs), "token_mismatch": len(mm), "mismatch_ids": mm[:5], "all_eos": all(r["ended_eos"] for r in recs),
++            "input_pixel_equal": all(r["input_pixel_sha256"] == old[r["request_id"]]["input_pixel_sha256"] for r in recs),
++            "n_retry": sum(len(r["attempts"]) > 1 for r in recs),
++            "workload_wall_s": c.get("workload_wall_s"), "device_seconds_union": c.get("device_seconds_union"),
++            "patients_per_min": 96 / c["workload_wall_s"] * 60 if c.get("workload_wall_s") else None,
++            "latency_s": {"mean": float(lv.mean()), "p50": float(np.percentile(lv, 50)), "p95": float(np.percentile(lv, 95))},
++            "peak_alloc_gb_max": c.get("peak_alloc_gb_max"), "peak_reserved_gb_max": c.get("peak_reserved_gb_max"),
++            "gpu_used_mib_max_sampled": gmax, "cold_load_s": c.get("cold_load_s"), "mapping": c["mapping"]}
++
++
++if __name__ == "__main__":
++    old = old_records()
++    for d in sys.argv[1:]:
++        print(json.dumps(check(d, old), indent=1))
+diff --git a/mg45_ctime.py b/mg45_ctime.py
+new file mode 100644
+index 0000000..9bb6a95
+--- /dev/null
++++ b/mg45_ctime.py
+@@ -0,0 +1,281 @@
++"""iter_045 C(MedGemma+LoRA seed17 epoch03) timing worker/launcher. 기본(medgemma) python 실행.
++
++환자 단위 작업: worker가 환자 claim(flock)을 얻은 시점이 dispatch이고, 그 환자의 두 문장 요청을 순차 생성·후처리(JSON parse + canvas->원본 좌표 변환)한 뒤의
++시각이 done이다. 요청 입력은 기존 C V96 요청(results/iter_040/requests/requests_V96.jsonl, prompt/cap/adapter 불변)이며 greedy 출력은
++기존 192개 token과 대조한다 (불일치는 조사 대상; 기존 정확도 출력은 대체하지 않는다).
++timing worker는 pg43_run과 달리 claim마다 전체 record를 재검증하지 않는다(검증은 block 종료 후 launcher가 수행): 비용 측정에 장부 검증 시간을 넣지 않기 위함.
++
++사용:
++  python mg45_ctime.py launch --out-dir DIR --workers 4 --gpus 0,1 [--barrier] [--warmup-n 8] [--peak-gb 9] [--set V96|D24]
++  (worker는 launcher가 호출: python mg45_ctime.py worker ...)
++"""
++import argparse
++import glob
++import hashlib
++import json
++import os
++import subprocess
++import sys
++import time
++
++REQ = {"V96": "results/iter_040/requests/requests_V96.jsonl"}
++PROTO = "results/iter_040/protocol/protocol_C.json"
++MAN = "results/iter_043/data/manifest_private.json"
++
++
++def sha_b(b):
++    return hashlib.sha256(b).hexdigest()
++
++
++def file_sha(p):
++    h = hashlib.sha256()
++    with open(p, "rb") as f:
++        for b in iter(lambda: f.read(1 << 22), b""):
++            h.update(b)
++    return h.hexdigest()
++
++
++def try_flock(path):
++    import fcntl
++    fd = os.open(path, os.O_CREAT | os.O_RDWR)
++    try:
++        fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
++    except BlockingIOError:
++        os.close(fd)
++        return None
++    return fd
++
++
++def load_rows(setname):
++    rows = [json.loads(l) for l in open(REQ[setname]) if l.strip()]
++    by_p = {}
++    for r in rows:
++        by_p.setdefault(r["patient"], []).append(r)
++    return rows, by_p
++
++
++def worker(a):
++    from rsna_diag import generate as G
++    import pg39_spec as S39
++    import pg43_eval as E
++    from rsna_diag import parse
++    t_proc = time.time()
++    proto = json.load(open(PROTO))
++    rows, by_p = load_rows(a.set)
++    torch, proc, model = G.load_model()
++    adig = G.load_adapter(torch, model, proto["adapter"]["path"])
++    if adig != proto["adapter"]["digest"]:
++        sys.exit("adapter digest != protocol")
++    env = G.env_info(torch, proc, model)
++    for k, v in proto["generation_config"].items():
++        if k in env and k not in ("runner", "image_size") and env[k] != v:
++            sys.exit(f"runtime env {k}={env[k]!r} != protocol {v!r}")  # 생성 설정 불일치는 fatal (chat template/model revision/dtype 등)
++    eos = env["eos_token_id"]
++    eos_ids = set(eos if isinstance(eos, list) else [eos])
++    t_ready = time.time()
++    man = json.load(open(MAN))
++    ents = {e["PatientID"]: e for e in man["V96"] + man["D24"]}  # warm-up(D8)와 본 작업(V96) 환자 모두 포함
++
++    def do_request(row, record_dir=None):
++        image, aff, pxs = G.load_image(row["image"])
++        inp = G.build_inputs(proc, image, row["prompt"])
++        ids_in = inp["input_ids"][0].tolist()
++        attempts = []
++        for cap in row["caps"]:
++            at = G.generate(torch, proc, model, inp, cap, eos_ids)
++            attempts.append(at)
++            if at["ended_eos"]:
++                break
++        fin = attempts[-1]
++        txt = proc.tokenizer.decode(fin["suffix_ids"], skip_special_tokens=False)
++        # 후처리: 공통 parser로 box 추출 후 canvas->원본 정규화 xyxy (평가와 같은 함수)
++        t = row["targets"][0]
++        pr = S39.parse_ids(txt, fin["ended_eos"], {t})
++        boxes = [E.canvas_to_norm_xyxy(b, aff, ents[row["patient"]]["h"], ents[row["patient"]]["w"]) for b in pr["groups"][t]] if pr["status"] in parse.VALID else []
++        return {"suffix_ids": fin["suffix_ids"], "suffix_text_raw": txt, "ended_eos": fin["ended_eos"], "n_output_tokens": fin["n_new"],
++                "final_cap": fin["cap"], "status": pr["status"], "boxes_orig_xyxy": boxes, "input_pixel_sha256": pxs,
++                "n_input_tokens": len(ids_in), "input_ids_sha256": sha_b(json.dumps(ids_in).encode()),
++                "attempts": [{k: v for k, v in at.items() if k != "suffix_ids"} for at in attempts],
++                "peak_mem_alloc_gb_max": max(at["peak_mem_alloc_gb"] for at in attempts),
++                "peak_mem_reserved_gb_max": max(at["peak_mem_reserved_gb"] for at in attempts)}
++
++    if a.warmup_n:
++        d8 = sorted(man["D8"])[: max(1, a.warmup_n // 2)]
++        d24 = {e["PatientID"]: e for e in man["D24"]}
++        for p in d8:
++            for t in ("qA", "qB"):
++                row = {"patient": p, "image": d24[p]["image"], "prompt": S39.prompt_I_short(d24[p]["sentences"][t], t),
++                       "caps": [1000, 2000, 4000], "targets": [t]}
++                do_request(row)
++        torch.cuda.synchronize()
++    torch.cuda.reset_peak_memory_stats()
++    t_warm = time.time()
++    if a.barrier:
++        open(os.path.join(a.barrier, f"ready.{a.worker}"), "w").write(json.dumps({"t": time.time(), "pid": os.getpid()}))
++        gof = os.path.join(a.barrier, "go")
++        while not os.path.exists(gof):
++            time.sleep(0.005)
++        t_go = json.load(open(gof))["t"]
++    else:
++        t_go = None
++    out = os.path.join(a.out_dir, f"ctime_worker{a.worker}.jsonl")
++    cdir = os.path.join(a.out_dir, "claims")
++    os.makedirs(cdir, exist_ok=True)
++    n_new = 0
++    with open(out, "a") as f:
++        for p in sorted(by_p):
++            try:  # 영구 claim (O_EXCL): flock은 claim 보유 worker가 종료하면 풀려 꼬리 구간에서 같은 환자를 다른 worker가 다시 처리하는 중복이 실제 발생했다 (block1_a1_C)
++                fd = os.open(os.path.join(cdir, p + ".claim"), os.O_CREAT | os.O_EXCL | os.O_WRONLY)
++                os.write(fd, json.dumps({"worker": a.worker, "t": time.time()}).encode())
++                os.close(fd)
++            except FileExistsError:
++                continue
++            t_disp = time.time()
++            res = {}
++            for row in sorted(by_p[p], key=lambda r: r["targets"][0]):
++                t_req = time.time()
++                r = do_request(row)
++                r.update({"request_id": row["request_id"], "patient": p, "target": row["targets"][0], "t_req_start": t_req, "t_req_done": time.time()})
++                res[row["targets"][0]] = r
++            t_done = time.time()
++            for t, r in res.items():
++                r.update({"t_patient_dispatch": t_disp, "t_patient_done": t_done, "worker": a.worker, "gpu_uuid": env.get("gpu_uuid"),
++                          "cuda_visible": os.environ.get("CUDA_VISIBLE_DEVICES")})
++                f.write(json.dumps(r) + "\n")
++                n_new += 1
++            f.flush()
++            os.fsync(f.fileno())
++    t_end = time.time()
++    if a.barrier:
++        open(os.path.join(a.barrier, f"done.{a.worker}"), "w").write(json.dumps({"t": t_end, "n_new": n_new}))
++    json.dump({"worker": a.worker, "t_proc_start": t_proc, "t_model_ready": t_ready, "t_warm_done": t_warm, "t_go": t_go, "t_end": t_end, "load_s": t_ready - t_proc,
++               "n_new": n_new, "peak_alloc_gb": torch.cuda.max_memory_allocated() / 2**30, "peak_reserved_gb": torch.cuda.max_memory_reserved() / 2**30,
++               "cuda_visible": os.environ.get("CUDA_VISIBLE_DEVICES"), "adapter_digest": adig},
++              open(os.path.join(a.out_dir, f"worker{a.worker}.meta.{int(t_proc)}.json"), "x"), indent=1)
++    print(f"worker {a.worker}: {n_new} requests", flush=True)
++
++
++def gpu_free_mib():
++    r = subprocess.run(["nvidia-smi", "--query-gpu=index,memory.used,memory.total", "--format=csv,noheader,nounits"], capture_output=True, text=True, check=True)
++    return {int(l.split(",")[0]): (int(l.split(",")[2]) - int(l.split(",")[1])) for l in r.stdout.strip().splitlines()}
++
++
++def union(ivs):
++    tot, cs, ce = 0.0, None, None
++    for s_, e_ in sorted(ivs):
++        if ce is None or s_ > ce:
++            if ce is not None:
++                tot += ce - cs
++            cs, ce = s_, e_
++        else:
++            ce = max(ce, e_)
++    return tot + ((ce - cs) if ce is not None else 0.0)
++
++
++def launch(a):
++    os.makedirs(a.out_dir, exist_ok=True)
++    if os.path.exists(os.path.join(a.out_dir, "completion.json")):
++        sys.exit("completion exists")
++    allowed = [int(x) for x in os.environ["CUDA_VISIBLE_DEVICES"].split(",")] if os.environ.get("CUDA_VISIBLE_DEVICES") else None
++    if allowed is None:
++        sys.exit("CUDA_VISIBLE_DEVICES not set")
++    gpus = [int(x) for x in a.gpus.split(",")] if a.gpus else allowed
++    if not set(gpus) <= set(allowed):
++        sys.exit("--gpus not within allowed")
++    free = gpu_free_mib()
++    gpus = sorted(gpus, key=lambda g: (-free[g], g))
++    mapping = {k: gpus[k % len(gpus)] for k in range(a.workers)}
++    per = {}
++    for k, g in mapping.items():
++        per.setdefault(g, []).append(k)
++    for g, ws in per.items():
++        need = len(ws) * (a.peak_gb + 2.0) * 1024
++        if free[g] < need:
++            sys.exit(f"gpu {g}: free {free[g]}MiB < need {need:.0f}MiB for workers {ws}")
++    bdir = os.path.join(a.out_dir, "barrier") if a.barrier else None
++    if bdir:
++        os.makedirs(bdir, exist_ok=True)
++    json.dump({"mapping": mapping, "free_mib_before": free, "args": vars(a), "code_sha256": file_sha("mg45_ctime.py"),
++               "protocol_sha256": file_sha(PROTO), "requests_sha256": file_sha(REQ[a.set])}, open(os.path.join(a.out_dir, "launch_protocol.json"), "x"), indent=1)
++    t0 = time.time()
++    procs = {}
++    for k in range(a.workers):
++        env = dict(os.environ, CUDA_VISIBLE_DEVICES=str(mapping[k]))
++        cmd = [sys.executable, "mg45_ctime.py", "worker", "--set", a.set, "--out-dir", a.out_dir, "--worker", str(k), "--warmup-n", str(a.warmup_n)]
++        if bdir:
++            cmd += ["--barrier", bdir]
++        procs[k] = subprocess.Popen(cmd, env=env, stdout=open(os.path.join(a.out_dir, f"worker{k}.stdout"), "a"), stderr=open(os.path.join(a.out_dir, f"worker{k}.stderr"), "a"))
++    rl = open(os.path.join(a.out_dir, "resource_log.jsonl"), "a")
++    t_go, last = None, 0
++    while any(p.poll() is None for p in procs.values()):
++        if bdir and t_go is None:
++            if all(os.path.exists(os.path.join(bdir, f"ready.{k}")) for k in range(a.workers)):
++                t_go = time.time()
++                tmpg = os.path.join(bdir, f"go.{os.getpid()}.tmp")
++                json.dump({"t": t_go}, open(tmpg, "w"))
++                os.replace(tmpg, os.path.join(bdir, "go"))
++            elif any(p.poll() is not None for p in procs.values()):
++                break
++        time.sleep(0.02 if (bdir and t_go is None) else 0.5)
++        if time.time() - last > 5:
++            last = time.time()
++            used = subprocess.run(["nvidia-smi", "--query-gpu=index,memory.used,utilization.gpu", "--format=csv,noheader,nounits"], capture_output=True, text=True).stdout.strip().splitlines()
++            rl.write(json.dumps({"t": round(time.time() - t0, 1), "gpu": used}) + "\n")
++            rl.flush()
++    codes = [procs[k].wait() for k in range(a.workers)]
++    wall = time.time() - t0
++    recs = []
++    for fn in sorted(glob.glob(os.path.join(a.out_dir, "ctime_worker*.jsonl"))):
++        recs += [json.loads(l) for l in open(fn, "rb").read().split(b"\n")[:-1] if l.strip()]
++    rows, by_p = load_rows(a.set)
++    ids = [r["request_id"] for r in recs]
++    want = {r["request_id"] for r in rows}
++    complete = len(ids) == len(set(ids)) and set(ids) == want
++    iv = {}
++    for r in recs:
++        iv.setdefault(mapping[r["worker"]], set()).add((r["t_patient_dispatch"], r["t_patient_done"]))
++    res = {"exit_codes": codes, "launcher_wall_s_incl_loading": wall, "n_records": len(recs), "n_unique": len(set(ids)), "n_expected": len(want), "complete": complete,
++           "workers": a.workers, "mapping": mapping, "t_go": t_go,
++           "device_seconds_union": sum(union(v) for v in iv.values()) if iv else None,
++           "peak_alloc_gb_max": None}
++    metas = [json.load(open(p)) for p in glob.glob(os.path.join(a.out_dir, "worker*.meta.*.json"))]
++    if metas:
++        res["peak_alloc_gb_max"] = max(m["peak_alloc_gb"] for m in metas)
++        res["peak_reserved_gb_max"] = max(m["peak_reserved_gb"] for m in metas)
++        res["cold_load_s"] = {m["worker"]: m["load_s"] for m in metas}
++    if bdir:
++        dn = [json.load(open(p))["t"] for p in glob.glob(os.path.join(bdir, "done.*"))]
++        res["workload_wall_s"] = (max(dn) - t_go) if (dn and t_go) else None
++    if complete and all(c == 0 for c in codes):
++        res["worker_file_sha256"] = {os.path.basename(f): file_sha(f) for f in sorted(glob.glob(os.path.join(a.out_dir, "ctime_worker*.jsonl")))}
++        tmp = os.path.join(a.out_dir, f"completion.{os.getpid()}.tmp")
++        json.dump(res, open(tmp, "w"), indent=1)
++        os.replace(tmp, os.path.join(a.out_dir, "completion.json"))
++        print("completion", json.dumps({k: res[k] for k in ("exit_codes", "n_unique", "launcher_wall_s_incl_loading", "workload_wall_s") if k in res}))
++    else:
++        json.dump(res, open(os.path.join(a.out_dir, f"partial_{int(time.time())}.json"), "w"), indent=1)
++        print("NOT complete", json.dumps({k: res[k] for k in ("exit_codes", "n_unique", "n_expected")}))
++        sys.exit(1)
++
++
++def main():
++    ap = argparse.ArgumentParser()
++    sub = ap.add_subparsers(dest="cmd", required=True)
++    w = sub.add_parser("worker")
++    l = sub.add_parser("launch")
++    for s in (w, l):
++        s.add_argument("--out-dir", required=True)
++        s.add_argument("--set", default="V96")
++        s.add_argument("--warmup-n", type=int, default=8)
++    w.add_argument("--worker", type=int, required=True)
++    w.add_argument("--barrier", default=None)
++    l.add_argument("--workers", type=int, required=True)
++    l.add_argument("--gpus", default=None)
++    l.add_argument("--barrier", action="store_true")
++    l.add_argument("--peak-gb", type=float, default=9.0)
++    a = ap.parse_args()
++    {"worker": worker, "launch": launch}[a.cmd](a)
++
++
++if __name__ == "__main__":
++    main()
+diff --git a/mg45_d8.py b/mg45_d8.py
+new file mode 100644
+index 0000000..921bead
+--- /dev/null
++++ b/mg45_d8.py
+@@ -0,0 +1,144 @@
++"""iter_045 D8 동작 확인 (venv 실행): checkpoint strict load, 공식 dataset 경로와 wrapper 입력 tensor 일치, 좌표 왕복,
++confidence·threshold·WBF 순서, batch 1 vs N 정합성, empty/복수 box fixture.  GT는 좌표 역변환 검사에만 쓰고 운영점 선택에 쓰지 않는다.
++
++python mg45_vrun.py mg45_d8.py --out results/iter_045/d8/d8_check.json   (CUDA_VISIBLE_DEVICES로 장치 지정)
++"""
++import argparse
++import ast
++import json
++import os
++import sys
++import time
++
++import mg45_mg as M
++
++MAN = "results/iter_043/data/manifest_private.json"
++
++
++def main():
++    ap = argparse.ArgumentParser()
++    ap.add_argument("--out", required=True)
++    a = ap.parse_args()
++    if os.path.exists(a.out):
++        sys.exit("output exists")
++    import numpy as np
++    import pandas as pd
++    import torch
++    dev = torch.device("cuda:0")
++    man = json.load(open(MAN))
++    d24 = {e["PatientID"]: e for e in man["D24"]}
++    d8 = [d24[p] for p in man["D8"]]
++    tf = M.val_transform()
++    res = {"manifest_sha256": M.file_sha(MAN), "n_d8": len(d8), "checks": {}}
++
++    # --- 공식 dataset 경로와 wrapper 입력 일치 ---
++    os.makedirs(os.path.dirname(a.out), exist_ok=True)
++    csv = os.path.join(os.path.dirname(a.out), "official_dataset_input.csv")
++    rows = []
++    for e in d8:
++        for t in ("qA", "qB"):
++            rows.append({"image_id": e["ImageID"], "split": "test", "sentence_en": e["sentences"][t],
++                         "labels": str(["cardiomegaly"]),  # 범주는 공식 dataset의 lookup 통과용 더미 (모델 입력 아님)
++                         "boxes": str([list(map(float, b)) for b in e["gt_boxes_xyxy_norm"][t]])})
++    pd.DataFrame(rows).to_csv(csv, index=False)
++    from dataloaders.dataset import GMPGPadChestDataset
++    ds = GMPGPadChestDataset(csv, csv, "results/iter_039/data/images", split="test", transform=tf)
++    items, affs, tens, phrases, gts_c = [], [], [], [], []
++    tdiff, bdiff, aff_ok = [], [], []
++    for i, r in enumerate(rows):
++        e = d24[man["D8"][i // 2]]
++        t = "qA" if i % 2 == 0 else "qB"
++        ten, aff, u8 = M.prepare(e["image"], tf)
++        assert u8 == e["u8_pixel_sha256"], "decoded u8 pixel hash != manifest"
++        o = ds[i]
++        tdiff.append(float((o["image"] - ten).abs().max()))
++        # GT를 공식 transform이 변환한 canvas cxcywh vs 우리 affine으로 변환한 값
++        W, H = aff["r"] - aff["l"], aff["b"] - aff["t"]
++        mine = []
++        for x0, y0, x1, y1 in e["gt_boxes_xyxy_norm"][t]:
++            cx0, cy0, cx1, cy1 = aff["l"] + x0 * W, aff["t"] + y0 * H, aff["l"] + x1 * W, aff["t"] + y1 * H
++            mine.append([(cx0 + cx1) / 2, (cy0 + cy1) / 2, cx1 - cx0, cy1 - cy0])
++        off = o["bboxes"].numpy()
++        bdiff.append(float(np.abs(np.array(mine) - off).max()) if len(mine) == len(off) and len(off) else (0.0 if len(mine) == len(off) else 9.0))
++        aff_ok.append(aff)
++        tens.append(ten)
++        phrases.append(e["sentences"][t])
++        gts_c.append(e["gt_boxes_xyxy_norm"][t])
++        items.append((e["PatientID"], t))
++    res["checks"]["official_dataset_tensor_max_abs_diff"] = max(tdiff)
++    res["checks"]["official_dataset_gt_box_vs_affine_max_abs_diff"] = max(bdiff)
++    res["checks"]["n_items"] = len(items)
++    res["affines"] = {f"{p}|{t}": {k: aff_ok[i][k] for k in aff_ok[i]} for i, (p, t) in enumerate(items)}
++    # affine이 정수 resize/padding과 일치하는지 (shape 기준 독립 계산)
++    ind = []
++    for i, e_ in enumerate(aff_ok):
++        sc = 640.0 / max(e_["h"], e_["w"])
++        nh, nw = round(e_["h"] * sc), round(e_["w"] * sc)
++        ind.append(abs((e_["r"] - e_["l"]) * 640 - nw) < 1e-3 and abs((e_["b"] - e_["t"]) * 640 - nh) < 1e-3 and
++                   abs(e_["l"] * 640 - (640 - nw) // 2) < 1.0 and abs(e_["t"] * 640 - (640 - nh) // 2) < 1.0)
++    res["checks"]["affine_matches_integer_resize_pad"] = all(ind)
++
++    res["models"] = {}
++    for key in ("P", "MS"):
++        t0 = time.time()
++        model, cfg, load = M.load_model(key, dev)
++        assert not load["missing"] and not load["unexpected"], load
++        r = {"load_s": time.time() - t0, "state_keys": load["n_state_keys"], "ckpt_sha256": M.file_sha(M.WEIGHTS[key]),
++             "text_encoder_type": cfg.text_encoder_type, "grounding_threshold_cfg": cfg.grounding_threshold,
++             "num_queries": cfg.num_queries}
++        lg1, bx1 = [], []
++        for i in range(len(items)):
++            l, b = M.forward(model, [tens[i]], [phrases[i]], dev)
++            lg1.append(l[0])
++            bx1.append(b[0])
++        lg1, bx1 = torch.stack(lg1), torch.stack(bx1)
++        r["batch_compare"] = {}
++        for bs in (4, 8, 16):
++            lgs, bxs = [], []
++            for s in range(0, len(items), bs):
++                l, b = M.forward(model, tens[s:s + bs], phrases[s:s + bs], dev)
++                lgs.append(l)
++                bxs.append(b)
++            lgb, bxb = torch.cat(lgs), torch.cat(bxs)
++            r["batch_compare"][bs] = {"max_abs_logit_diff": float((lgb - lg1).abs().max()), "max_abs_box_diff": float((bxb - bx1).abs().max())}
++        # confidence/threshold/WBF 순서 검사
++        probs = torch.softmax(lg1, dim=-1)[..., 0]
++        order = {}
++        for thr in M.THRESHOLDS + [1.0]:
++            det = M.postprocess(lg1, bx1, thr)
++            exp_n = (probs > thr).sum(1).tolist()
++            order[str(thr)] = {"pre_wbf_n_equals_softmax0_gt_thr": [d["pre_wbf_n"] for d in det] == exp_n,
++                               "n_after_wbf_mean": float(np.mean([len(d["boxes"]) for d in det])),
++                               "n_empty": sum(len(d["boxes"]) == 0 for d in det),
++                               "max_after_wbf_leq_pre": all(len(d["boxes"]) <= d["pre_wbf_n"] for d in det)}
++        r["threshold_wbf"] = order
++        # cxcywh 해석 검사: query box를 cxcywh로 보았을 때 [0,1] 범위 안(sigmoid)이며 w,h>0, 원본 좌표 변환 후 영상 안쪽 비율
++        cx = bx1.reshape(-1, 4).numpy()
++        r["raw_box_range"] = {"min": float(cx.min()), "max": float(cx.max())}
++        # 복수 box fixture: 공식 WBF에 겹치지 않는 두 box + 하나의 empty
++        fx = [{"boxes": torch.tensor([[0.3, 0.3, 0.2, 0.2], [0.7, 0.7, 0.2, 0.2]]), "scores": torch.tensor([0.9, 0.8])},
++              {"boxes": torch.zeros((0, 4)), "scores": torch.zeros((0,))}]
++        from utils.box_utils import run_wbf
++        o = run_wbf(fx, iou_threshold=0.1, skip_box_threshold=0.0)
++        r["wbf_fixture"] = {"two_disjoint_boxes_kept": len(o[0]["boxes"]) == 2, "empty_ok": len(o[1]["boxes"]) == 0,
++                            "roundtrip_cxcywh_maxdiff": float((o[0]["boxes"][np.argsort([-s for s in o[0]["scores"].tolist()])] - fx[0]["boxes"]).abs().max())}
++        # GT 대비 좌표 sanity (원본 정규화 변환; 운영점 선택 아님): 5 query 중 최대 IoU의 평균
++        from rsna_diag import metrics
++        best = []
++        for i, (p, t) in enumerate(items):
++            ob = M.canvas_cxcywh_to_orig_xyxy(bx1[i].tolist(), aff_ok[i])
++            ious = [metrics.iou(q, g) for q in ob for g in gts_c[i]] or [0.0]
++            best.append(max(ious))
++        r["gt_sanity_mean_best_query_iou_orig_coords"] = float(np.mean(best))
++        res["models"][key] = r
++        del model
++        torch.cuda.empty_cache()
++    res["torch"] = torch.__version__
++    res["cuda_visible"] = os.environ.get("CUDA_VISIBLE_DEVICES")
++    res["peak_mem_alloc_gb"] = torch.cuda.max_memory_allocated() / 2**30
++    json.dump(res, open(a.out, "w"), indent=1)
++    print(json.dumps({"checks": res["checks"], "models": {k: {kk: vv for kk, vv in v.items() if kk in ("batch_compare", "gt_sanity_mean_best_query_iou_orig_coords", "raw_box_range")} for k, v in res["models"].items()}}, indent=1))
++
++
++if __name__ == "__main__":
++    main()
+diff --git a/mg45_env.py b/mg45_env.py
+new file mode 100644
+index 0000000..3cf8cb5
+--- /dev/null
++++ b/mg45_env.py
+@@ -0,0 +1,58 @@
++"""iter_045: 격리 venv(results/environments/medgrounder_iter045)에 MedGrounder 의존성을 설치하고 기록한다.
++
++기존 medgemma 환경은 변경하지 않는다. 설치 명령·freeze를 results/iter_045/env/ 에 남긴다.
++사용: python mg45_env.py install | check
++"""
++import json
++import os
++import subprocess
++import sys
++
++HERE = os.path.dirname(os.path.abspath(__file__))
++ENV = os.path.join(HERE, "results", "environments", "medgrounder_iter045")
++PY = os.path.join(ENV, "bin", "python")
++OUT = os.path.join(HERE, "results", "iter_045", "env")
++
++# 공식 requirements.txt(SHA a0aad98d) 그대로 + gdown(가중치 다운로드용 보조)
++REQ = os.path.join(HERE, "results", "iter_045", "external", "MedGrounder", "requirements.txt")
++
++
++def run(args, log):
++    os.makedirs(OUT, exist_ok=True)
++    p = subprocess.run(args, capture_output=True, text=True)
++    with open(os.path.join(OUT, log), "a") as f:
++        f.write("$ " + " ".join(args) + f"\nrc={p.returncode}\n{p.stdout[-20000:]}\n{p.stderr[-20000:]}\n")
++    print(" ".join(args[:6]), "rc=", p.returncode)
++    return p
++
++
++def install():
++    run([PY, "-m", "pip", "install", "--upgrade", "pip"], "install.log")
++    p = run([PY, "-m", "pip", "install", "-r", REQ, "gdown"], "install.log")
++    if p.returncode != 0:
++        sys.exit(p.returncode)
++    fr = run([PY, "-m", "pip", "freeze"], "freeze_cmd.log")
++    with open(os.path.join(OUT, "pip_freeze.txt"), "w") as f:
++        f.write(fr.stdout)
++
++
++def extra():
++    """공식 requirements.txt에 빠져 있지만 model/backbone.py가 import하는 패키지(timm). 사유: ModuleNotFoundError 대응."""
++    p = run([PY, "-m", "pip", "install", "timm"], "install_extra.log")
++    fr = run([PY, "-m", "pip", "freeze"], "freeze_cmd.log")
++    with open(os.path.join(OUT, "pip_freeze_after_extra.txt"), "w") as f:
++        f.write(fr.stdout)
++    sys.exit(p.returncode)
++
++
++def check():
++    code = ("import torch,torchvision,transformers,json;"
++            "print(json.dumps({'torch':torch.__version__,'tv':torchvision.__version__,"
++            "'tf':transformers.__version__,'cuda':torch.cuda.is_available(),"
++            "'n':torch.cuda.device_count(),'cap':torch.cuda.get_device_capability(0) if torch.cuda.is_available() else None}))")
++    p = run([PY, "-c", code], "check.log")
++    print(p.stdout, p.stderr[-2000:])
++
++
++if __name__ == "__main__":
++    {"install": install, "check": check, "extra": extra}[sys.argv[1]]()
+diff --git a/mg45_eval.py b/mg45_eval.py
+new file mode 100644
+index 0000000..376761d
+--- /dev/null
++++ b/mg45_eval.py
+@@ -0,0 +1,221 @@
++"""iter_045 평가 라이브러리/CLI (기본 python, CPU only). MG 출력은 원본 정규화 xyxy에서, C 출력은 canvas->원본 정규화 역변환으로 채점한다.
++
++사전 고정 규칙 (plan.md Evaluation; 결과를 본 뒤 바꾸지 않는다):
++  - 주지표 문장 F1@IoU0.3 (최대 cardinality 일대일 matching, 동률은 총 IoU 최대: pg39_spec.match_fast)를 환자 안 평균 -> 환자 평균.
++  - D24 운영점 선택: checkpoint별 환자평균 F1@0.3 최대 threshold. 동률은 F1@0.5, 낮은 FP/문장, 높은 threshold 순.
++    두 checkpoint 대표 선택도 같은 순서. 완전 동률이면 MS. 공식 threshold 0.8은 보조 보고.
++  - 낮은 성능을 이유로 정상 동작한 모델을 제외하지 않는다.
++CLI:
++  python mg45_eval.py select --out results/iter_045/decisions/D24_select.json
++"""
++import argparse
++import glob
++import hashlib
++import json
++import os
++import sys
++
++import numpy as np
++
++import pg39_spec as S39
++from rsna_diag import parse
++
++MAN = "results/iter_043/data/manifest_private.json"
++THRS = [0.2, 0.4, 0.6, 0.8]
++OFFICIAL_THR = 0.8
++LOCKED_CODE = ["mg45_mg.py", "mg45_worker.py"]
++
++
++class EvalError(RuntimeError):
++    pass
++
++
++def file_sha(p):
++    h = hashlib.sha256()
++    with open(p, "rb") as f:
++        for b in iter(lambda: f.read(1 << 22), b""):
++            h.update(b)
++    return h.hexdigest()
++
++
++def rid(setname, ckpt, patient, t):
++    return hashlib.sha256(f"{setname}|{ckpt}|{patient}|{t}".encode()).hexdigest()[:32]
++
++
++def entries(man, setname):
++    if setname in ("D24", "D8"):
++        ents = man["D24"]
++        if setname == "D8":
++            keep = set(man["D8"])
++            ents = [e for e in ents if e["PatientID"] in keep]
++        return ents
++    return man[setname]
++
++
++def verify_mg_dir(d, setname, ckpt, man, allow_code_diff=False):
++    """completion·protocol·요청 집합·현재 입력 hash·code/ckpt/manifest 잠금을 검증하고 {(patient,target): record}를 반환한다."""
++    comp_p = os.path.join(d, "completion.json")
++    if not os.path.exists(comp_p):
++        raise EvalError(f"no completion: {d}")
++    comp = json.load(open(comp_p))
++    if comp["complete"] is not True or any(c != 0 for c in comp["exit_codes"]):
++        raise EvalError(f"completion not complete/exit codes nonzero: {d}")
++    pp = os.path.join(d, "launch_protocol.json")
++    if file_sha(pp) != comp["launch_protocol_sha256"]:
++        raise EvalError("launch protocol changed after completion")
++    proto = json.load(open(pp))
++    bad = [f for f in LOCKED_CODE if file_sha(f) != proto["code"][f]]
++    if bad and not allow_code_diff:
++        raise EvalError(f"code changed since run: {bad}")
++    if file_sha(MAN) != proto["manifest_sha256"]:
++        raise EvalError("manifest changed since run")
++    wf = {"P": "medgrounder_pretrain_imagenome.pth", "MS": "medgrounder_finetune_ms.pth"}[ckpt]
++    ck = file_sha(os.path.join("results/iter_045/external/weights", wf))
++    if ck != proto["ckpt_sha256"]:
++        raise EvalError("checkpoint file changed")
++    ents = {e["PatientID"]: e for e in entries(man, setname)}
++    files = sorted(glob.glob(os.path.join(d, "raw_worker*.jsonl")))
++    if sorted(os.path.basename(f) for f in files) != sorted(comp["raw_file_sha256"]):
++        raise EvalError("raw file set != completion")
++    recs = []
++    for f in files:
++        if file_sha(f) != comp["raw_file_sha256"][os.path.basename(f)]:
++            raise EvalError(f"raw file changed after completion {f}")
++        recs += [json.loads(l) for l in open(f, "rb").read().split(b"\n")[:-1] if l.strip()]
++    want = {rid(setname, ckpt, p, t): (p, t) for p in ents for t in ("qA", "qB")}
++    ids = [r["request_id"] for r in recs]
++    if len(ids) != len(set(ids)) or set(ids) != set(want):
++        raise EvalError("request set mismatch (missing/duplicate/extra)")
++    out = {}
++    img_ok = {}
++    for r in recs:
++        p, t = want[r["request_id"]]
++        e = ents[p]
++        if (r["patient"], r["target"]) != (p, t) or r["ckpt"] != ckpt or r["set"] != setname or r["ckpt_sha256"] != ck:
++            raise EvalError("record identity mismatch")
++        if r["sentence_sha256"] != hashlib.sha256(e["sentences"][t].encode()).hexdigest():
++            raise EvalError("sentence != manifest")
++        if r["u8_pixel_sha256"] != e["u8_pixel_sha256"] or r["image"] != e["image"]:
++            raise EvalError("input pixel/image != manifest")
++        if e["image"] not in img_ok:
++            img_ok[e["image"]] = file_sha(e["image"]) == e["image_file_sha256"]
++        if not img_ok[e["image"]]:
++            raise EvalError(f"current image file hash mismatch {e['image']}")
++        out[(p, t)] = r
++    return out, comp, proto
++
++
++def score(pred_boxes, gt_boxes):
++    m3 = S39.sent_metrics(pred_boxes, gt_boxes, 0.3)
++    m5 = S39.sent_metrics(pred_boxes, gt_boxes, 0.5)
++    return {"f1_03": m3["f1"], "f1_05": m5["f1"], "recall_03": m3["recall"], "fp_03": m3["fp"], "n_pred": len(pred_boxes),
++            "n_gt": len(gt_boxes), "empty": len(pred_boxes) == 0}
++
++
++def mg_scores(recs, ents, thr):
++    """{(patient,target): score dict} at threshold thr. 예측 box는 원본 정규화 xyxy(추가 clipping 없음)."""
++    out = {}
++    for (p, t), r in recs.items():
++        d = r["detections"][str(thr)]
++        out[(p, t)] = score(d["boxes_orig_xyxy"], ents[p]["gt_boxes_xyxy_norm"][t])
++    return out
++
++
++def summarize(sc, pids):
++    f3 = [np.mean([sc[(p, t)]["f1_03"] for t in ("qA", "qB")]) for p in pids]
++    f5 = [np.mean([sc[(p, t)]["f1_05"] for t in ("qA", "qB")]) for p in pids]
++    rec = [np.mean([sc[(p, t)]["recall_03"] for t in ("qA", "qB")]) for p in pids]
++    fp = [np.mean([sc[(p, t)]["fp_03"] for t in ("qA", "qB")]) for p in pids]
++    emp = [np.mean([sc[(p, t)]["empty"] for t in ("qA", "qB")]) for p in pids]
++    return {"n_patients": len(pids), "f1_03": float(np.mean(f3)), "f1_05": float(np.mean(f5)), "recall_03": float(np.mean(rec)),
++            "fp_per_sentence": float(np.mean(fp)), "empty_rate": float(np.mean(emp))}
++
++
++def pick_threshold(table):
++    """table: {thr: summary}. 규칙: F1@0.3 최대 -> F1@0.5 최대 -> FP 최소 -> threshold 최대."""
++    return sorted(table, key=lambda t: (-round(table[t]["f1_03"], 12), -round(table[t]["f1_05"], 12),
++                                        round(table[t]["fp_per_sentence"], 12), -t))[0]
++
++
++def cmd_select(a):
++    if os.path.exists(a.out):
++        sys.exit("output exists")
++    man = json.load(open(MAN))
++    ents = {e["PatientID"]: e for e in man["D24"]}
++    pids = sorted(ents)
++    res = {"manifest_sha256": file_sha(MAN), "n_patients": len(pids), "rule": pick_threshold.__doc__, "ckpts": {}, "dirs": {}}
++    for ck, d in (("P", a.p_dir), ("MS", a.ms_dir)):
++        recs, comp, proto = verify_mg_dir(d, "D24", ck, man)
++        res["dirs"][ck] = {"dir": d, "completion_sha256": file_sha(os.path.join(d, "completion.json")),
++                           "launch_protocol_sha256": comp["launch_protocol_sha256"]}
++        table = {t: summarize(mg_scores(recs, ents, t), pids) for t in THRS}
++        sel = pick_threshold(table)
++        res["ckpts"][ck] = {"table": {str(t): table[t] for t in THRS}, "selected_threshold": sel, "official_0.8": table[OFFICIAL_THR]}
++    cand = {ck: res["ckpts"][ck]["table"][str(res["ckpts"][ck]["selected_threshold"])] for ck in ("P", "MS")}
++    key = lambda ck: (-round(cand[ck]["f1_03"], 12), -round(cand[ck]["f1_05"], 12), round(cand[ck]["fp_per_sentence"], 12))
++    best = sorted(["MS", "P"], key=key)  # 완전 동률이면 MS 우선(정렬 안정성: 리스트 순서)
++    res["selected"] = {"ckpt": best[0], "threshold": res["ckpts"][best[0]]["selected_threshold"], "summary": cand[best[0]],
++                       "tie_rule_ms_preferred": key("P") == key("MS")}
++    res["note"] = "D24는 양성 문장 집단이다. 이 선택으로 부재 거부 성능을 주장할 수 없다. V96를 보고 checkpoint/threshold를 바꾸지 않는다."
++    os.makedirs(os.path.dirname(a.out), exist_ok=True)
++    tmp = a.out + f".{os.getpid()}.tmp"
++    json.dump(res, open(tmp, "w"), indent=1)
++    os.replace(tmp, a.out)
++    print(json.dumps({"selected": res["selected"], "P": res["ckpts"]["P"]["selected_threshold"], "MS": res["ckpts"]["MS"]["selected_threshold"]}, indent=1))
++    for ck in ("P", "MS"):
++        for t in THRS:
++            print(ck, t, {k: round(v, 4) for k, v in res["ckpts"][ck]["table"][str(t)].items()})
++
++
++def cmd_cfg(a):
++    """실행 구성(worker/batch) 비교: 기준 dir 대비 logit/box 차이, threshold 통과 집합, 최종 box 집합·matching F1 일치. 처리량은 completion 기록."""
++    if os.path.exists(a.out):
++        sys.exit("output exists")
++    man = json.load(open(MAN))
++    ents = {e["PatientID"]: e for e in man["D24"]}
++    pids = sorted(ents)
++    base, bcomp, _ = verify_mg_dir(a.base, "D24", a.ckpt, man)
++    res = {"base": a.base, "ckpt": a.ckpt, "configs": {}}
++    for d in a.dirs:
++        recs, comp, proto = verify_mg_dir(d, "D24", a.ckpt, man)
++        ml = mb = 0.0
++        pass_same = True
++        boxes_same = True
++        f1_same = True
++        for k, r in recs.items():
++            b = base[k]
++            ml = max(ml, float(np.abs(np.array(r["logits"]) - np.array(b["logits"])).max()))
++            mb = max(mb, float(np.abs(np.array(r["pred_boxes_cxcywh"]) - np.array(b["pred_boxes_cxcywh"])).max()))
++            for t in THRS:
++                x, y = r["detections"][str(t)], b["detections"][str(t)]
++                pass_same &= x["pre_wbf_n"] == y["pre_wbf_n"]
++                boxes_same &= len(x["boxes_orig_xyxy"]) == len(y["boxes_orig_xyxy"])
++        for t in THRS:
++            sa, sb = mg_scores(recs, ents, t), mg_scores(base, ents, t)
++            f1_same &= all(sa[k]["f1_03"] == sb[k]["f1_03"] and sa[k]["f1_05"] == sb[k]["f1_05"] for k in sa)
++        res["configs"][d] = {"workers": comp["workers"], "batch": comp["batch"], "workload_wall_s": comp.get("workload_wall_s"),
++                             "launcher_wall_incl_loading_s": comp["launcher_wall_s_incl_loading"], "items_per_min_workload": (48 / comp["workload_wall_s"] * 60) if comp.get("workload_wall_s") else None,
++                             "peak_alloc_gb_max": comp["peak_alloc_gb_max"], "max_abs_logit_diff": ml, "max_abs_box_diff": mb,
++                             "threshold_pass_counts_equal": bool(pass_same), "n_final_boxes_equal": bool(boxes_same), "per_sentence_f1_equal_all_thr": bool(f1_same)}
++    json.dump(res, open(a.out, "x"), indent=1)
++    print(json.dumps(res, indent=1))
++
++
++def main():
++    ap = argparse.ArgumentParser()
++    sub = ap.add_subparsers(dest="cmd", required=True)
++    c = sub.add_parser("cfg")
++    c.add_argument("--out", required=True)
++    c.add_argument("--ckpt", required=True)
++    c.add_argument("--base", required=True)
++    c.add_argument("--dirs", nargs="+", required=True)
++    s = sub.add_parser("select")
++    s.add_argument("--out", required=True)
++    s.add_argument("--p-dir", default="results/iter_045/mg/D24_P_w1b1")
++    s.add_argument("--ms-dir", default="results/iter_045/mg/D24_MS_w1b1")
++    a = ap.parse_args()
++    {"select": cmd_select, "cfg": cmd_cfg}[a.cmd](a)
++
++
++if __name__ == "__main__":
++    main()
+diff --git a/mg45_fetch.py b/mg45_fetch.py
+new file mode 100644
+index 0000000..a759b86
+--- /dev/null
++++ b/mg45_fetch.py
+@@ -0,0 +1,56 @@
++"""iter_045: MedGrounder 공식 코드(고정 SHA)를 results/iter_045/external/ 에 받아 digest를 기록한다.
++
++기존 파일은 덮어쓰지 않는다. 가중치(Google Drive)는 mg45_weights.py 에서 따로 받는다.
++"""
++import hashlib
++import io
++import json
++import os
++import sys
++import time
++import urllib.request
++import zipfile
++
++SHA = "a0aad98d67018838fe160acbe1f7c3851fddeacc"
++REPO = "aehrc/MedGrounder"
++OUT = os.path.join(os.path.dirname(os.path.abspath(__file__)), "results", "iter_045", "external")
++CODE = os.path.join(OUT, "MedGrounder")
++
++
++def main():
++    if os.path.exists(CODE):
++        print("exists, not overwriting:", CODE)
++        return
++    os.makedirs(OUT, exist_ok=True)
++    url = f"https://codeload.github.com/{REPO}/zip/{SHA}"
++    t = time.time()
++    data = urllib.request.urlopen(url, timeout=300).read()
++    digest = hashlib.sha256(data).hexdigest()
++    zf = zipfile.ZipFile(io.BytesIO(data))
++    root = os.path.realpath(OUT)
++    tmp = os.path.join(OUT, "_extract_tmp")
++    os.makedirs(tmp)
++    files = {}
++    for info in zf.infolist():
++        dest = os.path.realpath(os.path.join(tmp, info.filename))
++        if not dest.startswith(os.path.realpath(tmp) + os.sep) and dest != os.path.realpath(tmp):
++            raise RuntimeError("path escape: " + info.filename)
++        if info.is_dir():
++            os.makedirs(dest, exist_ok=True)
++            continue
++        os.makedirs(os.path.dirname(dest), exist_ok=True)
++        b = zf.read(info)
++        with open(dest, "wb") as f:
++            f.write(b)
++        files[info.filename.split("/", 1)[1]] = hashlib.sha256(b).hexdigest()
++    os.rename(os.path.join(tmp, f"MedGrounder-{SHA}"), CODE)
++    os.rmdir(tmp)
++    man = {"repo": f"https://github.com/{REPO}", "sha": SHA, "archive_url": url, "archive_sha256": digest,
++           "n_files": len(files), "files_sha256": files, "elapsed_s": round(time.time() - t, 2)}
++    with open(os.path.join(OUT, "code_manifest.json"), "w") as f:
++        json.dump(man, f, indent=1)
++    print("ok", len(files), "files", digest)
++
++
++if __name__ == "__main__":
++    sys.exit(main())
+diff --git a/mg45_launch.py b/mg45_launch.py
+new file mode 100644
+index 0000000..5198819
+--- /dev/null
++++ b/mg45_launch.py
+@@ -0,0 +1,175 @@
++"""iter_045 MedGrounder worker launcher (기본 python에서 실행; worker는 격리 venv python subprocess).
++
++python mg45_launch.py --set D24 --ckpt P --out-dir results/iter_045/mg/D24_P_w2b1 --workers 2 --gpus 0,1 --batch 1 [--post-thr T] [--barrier] [--warmup-d8]
++
++- worker k는 허용 GPU 집합(CUDA_VISIBLE_DEVICES 상속) 안의 gpus[k % len(gpus)]에 매핑한다. 실제 여유 메모리 큰 장치부터 배정하고
++  GPU별 (worker 수 x (peak-gb + 2GiB))가 현재 free 안에 들어와야 시작한다 (다른 프로세스 점유 포함).
++- completion.json은 모든 worker 정상 종료 + 예상 (환자x문장) 집합과 정확히 일치(누락/중복/잉여 0)일 때만 원자적으로 작성한다. 이미 있으면 거부.
++- --barrier: worker가 모델 로딩+warm-up 후 ready를 쓰면 launcher가 go 시각을 기록하고 workload wall = max(worker done) - go 로 측정한다.
++"""
++import argparse
++import glob
++import hashlib
++import json
++import os
++import subprocess
++import sys
++import time
++
++HERE = os.path.dirname(os.path.abspath(__file__))
++PY = os.path.join(HERE, "results", "environments", "medgrounder_iter045", "bin", "python")
++MAN = "results/iter_043/data/manifest_private.json"
++CODE = ["mg45_mg.py", "mg45_worker.py", "mg45_launch.py"]
++
++
++def file_sha(p):
++    h = hashlib.sha256()
++    with open(p, "rb") as f:
++        for b in iter(lambda: f.read(1 << 22), b""):
++            h.update(b)
++    return h.hexdigest()
++
++
++def gpu_free_mib():
++    r = subprocess.run(["nvidia-smi", "--query-gpu=index,memory.used,memory.total", "--format=csv,noheader,nounits"],
++                       capture_output=True, text=True, check=True)
++    return {int(l.split(",")[0]): (int(l.split(",")[2]) - int(l.split(",")[1])) for l in r.stdout.strip().splitlines()}
++
++
++def expected_ids(setname, ckpt):
++    man = json.load(open(MAN))
++    ents = man["D24"] if setname in ("D8", "D24") else man[setname]
++    if setname == "D8":
++        keep = set(man["D8"])
++        ents = [e for e in ents if e["PatientID"] in keep]
++    sys.path.insert(0, HERE)
++    import hashlib as h
++    return {h.sha256(f"{setname}|{ckpt}|{e['PatientID']}|{t}".encode()).hexdigest()[:32] for e in ents for t in ("qA", "qB")}
++
++
++def main():
++    ap = argparse.ArgumentParser()
++    ap.add_argument("--set", required=True)
++    ap.add_argument("--ckpt", required=True)
++    ap.add_argument("--out-dir", required=True)
++    ap.add_argument("--workers", type=int, required=True)
++    ap.add_argument("--gpus", default=None)
++    ap.add_argument("--batch", type=int, default=1)
++    ap.add_argument("--post-thr", type=float, default=None)
++    ap.add_argument("--warmup-d8", action="store_true")
++    ap.add_argument("--barrier", action="store_true")
++    ap.add_argument("--peak-gb", type=float, default=4.0)
++    ap.add_argument("--max-items", type=int, default=None)
++    a = ap.parse_args()
++    os.makedirs(a.out_dir, exist_ok=True)
++    if os.path.exists(os.path.join(a.out_dir, "completion.json")):
++        sys.exit("completion.json exists: use a new out-dir")
++    allowed = [int(x) for x in os.environ["CUDA_VISIBLE_DEVICES"].split(",")] if os.environ.get("CUDA_VISIBLE_DEVICES") else None
++    if allowed is None:
++        sys.exit("CUDA_VISIBLE_DEVICES not set; refusing to pick devices")
++    gpus = [int(x) for x in a.gpus.split(",")] if a.gpus else allowed
++    if not set(gpus) <= set(allowed):
++        sys.exit(f"--gpus {gpus} not within allowed {allowed}")
++    free = gpu_free_mib()
++    gpus = sorted(gpus, key=lambda g: (-free[g], g))
++    mapping = {k: gpus[k % len(gpus)] for k in range(a.workers)}
++    per = {}
++    for k, g in mapping.items():
++        per.setdefault(g, []).append(k)
++    for g, ws in per.items():
++        need = len(ws) * (a.peak_gb + 2.0) * 1024
++        if free[g] < need:
++            sys.exit(f"gpu {g}: free {free[g]}MiB < need {need:.0f}MiB for workers {ws}")
++    bdir = os.path.join(a.out_dir, "barrier") if a.barrier else None
++    if bdir:
++        os.makedirs(bdir, exist_ok=True)
++    proto = {"code": {f: file_sha(os.path.join(HERE, f)) for f in CODE}, "manifest_sha256": file_sha(os.path.join(HERE, MAN)),
++             "ckpt_sha256": file_sha(os.path.join(HERE, "results/iter_045/external/weights",
++                                                  "medgrounder_pretrain_imagenome.pth" if a.ckpt == "P" else "medgrounder_finetune_ms.pth")),
++             "args": vars(a), "mapping": mapping, "free_mib_before": free}
++    pp = os.path.join(a.out_dir, "launch_protocol.json")
++    if not os.path.exists(pp):
++        json.dump(proto, open(pp, "x"), indent=1)
++    t0 = time.time()
++    procs = {}
++    for k in range(a.workers):
++        env = dict(os.environ, CUDA_VISIBLE_DEVICES=str(mapping[k]))
++        cmd = [PY, "mg45_worker.py", "--set", a.set, "--ckpt", a.ckpt, "--out-dir", a.out_dir, "--worker", str(k),
++               "--n-workers", str(a.workers), "--batch", str(a.batch)]
++        if a.post_thr is not None:
++            cmd += ["--post-thr", str(a.post_thr)]
++        if a.warmup_d8:
++            cmd += ["--warmup-d8"]
++        if bdir:
++            cmd += ["--barrier", bdir]
++        if a.max_items is not None:
++            cmd += ["--max-items", str(a.max_items)]
++        procs[k] = subprocess.Popen(cmd, cwd=HERE, env=env, stdout=open(os.path.join(a.out_dir, f"worker{k}.stdout"), "a"),
++                                    stderr=open(os.path.join(a.out_dir, f"worker{k}.stderr"), "a"))
++    rl = open(os.path.join(a.out_dir, "resource_log.jsonl"), "a")
++    t_go = None
++    last_sample = 0
++    while any(p.poll() is None for p in procs.values()):
++        if bdir and t_go is None:
++            if all(os.path.exists(os.path.join(bdir, f"ready.{k}")) for k in range(a.workers)):
++                t_go = time.time()
++                tmpg = os.path.join(bdir, f"go.{os.getpid()}.tmp")  # 원자적 작성 (worker가 쓰는 도중의 빈 파일을 읽는 경쟁 방지; 1차 시도에서 실제 발생)
++                json.dump({"t": t_go}, open(tmpg, "w"))
++                os.replace(tmpg, os.path.join(bdir, "go"))
++            elif any(p.poll() is not None for p in procs.values()):
++                break
++        time.sleep(0.02 if (bdir and t_go is None) else 0.5)
++        if time.time() - last_sample > 5:
++            last_sample = time.time()
++            used = subprocess.run(["nvidia-smi", "--query-gpu=index,memory.used,utilization.gpu", "--format=csv,noheader,nounits"],
++                                  capture_output=True, text=True).stdout.strip().splitlines()
++            rl.write(json.dumps({"t": round(time.time() - t0, 1), "gpu": used}) + "\n")
++            rl.flush()
++    codes = [procs[k].wait() for k in range(a.workers)]
++    wall = time.time() - t0
++    recs = []
++    for fn in sorted(glob.glob(os.path.join(a.out_dir, "raw_worker*.jsonl"))):
++        for ln in open(fn, "rb").read().split(b"\n")[:-1]:
++            if ln.strip():
++                recs.append(json.loads(ln))
++    ids = [r["request_id"] for r in recs]
++    want = expected_ids(a.set, a.ckpt)
++    complete = a.max_items is None and len(ids) == len(set(ids)) and set(ids) == want
++    # GPU별 점유 구간 (worker 요청 구간 합집합) -- timing용
++    iv = {}
++    for r in recs:
++        iv.setdefault(mapping[r["worker"]], []).append((r["t_dispatch"], r["t_done"]))
++
++    def union(ivs):
++        tot, cs, ce = 0.0, None, None
++        for s_, e_ in sorted(ivs):
++            if ce is None or s_ > ce:
++                if ce is not None:
++                    tot += ce - cs
++                cs, ce = s_, e_
++            else:
++                ce = max(ce, e_)
++        return tot + ((ce - cs) if ce is not None else 0.0)
++
++    res = {"exit_codes": codes, "launcher_wall_s_incl_loading": wall, "n_records": len(recs), "n_unique": len(set(ids)), "n_expected": len(want),
++           "complete": complete, "workers": a.workers, "mapping": mapping, "batch": a.batch,
++           "device_seconds_request_union": sum(union(v) for v in iv.values()) if iv else None,
++           "t_go": t_go, "peak_alloc_gb_max": max((r["peak_alloc_gb"] for r in recs), default=None)}
++    if bdir:
++        dn = [json.load(open(p))["t"] for p in glob.glob(os.path.join(bdir, "done.*"))]
++        res["workload_wall_s"] = (max(dn) - t_go) if (dn and t_go) else None
++    if complete and all(c == 0 for c in codes):
++        res["raw_file_sha256"] = {os.path.basename(f): file_sha(f) for f in sorted(glob.glob(os.path.join(a.out_dir, "raw_worker*.jsonl")))}
++        res["launch_protocol_sha256"] = file_sha(pp)
++        tmp = os.path.join(a.out_dir, f"completion.{os.getpid()}.tmp")
++        json.dump(res, open(tmp, "w"), indent=1)
++        os.replace(tmp, os.path.join(a.out_dir, "completion.json"))
++        print("completion", json.dumps({k: res[k] for k in ("exit_codes", "n_unique", "launcher_wall_s_incl_loading", "workload_wall_s") if k in res}))
++    else:
++        json.dump(res, open(os.path.join(a.out_dir, f"partial_{int(time.time())}.json"), "w"), indent=1)
++        print("NOT complete", json.dumps({k: res[k] for k in ("exit_codes", "n_unique", "n_expected")}))
++        sys.exit(1)
++
++
++if __name__ == "__main__":
++    main()
+diff --git a/mg45_legacy041.py b/mg45_legacy041.py
+new file mode 100644
+index 0000000..8289a5d
+--- /dev/null
++++ b/mg45_legacy041.py
+@@ -0,0 +1,107 @@
++"""iter_045: iter_041 비용 결합 판정 한정 정정 artifact (원본 plan/review/report는 수정하지 않는다).
++
++원 blocker(iter_041 review.json): pg41_eval이 요청 wall 합 기반 환자 bootstrap CI(request_wall_ratio_bootstrap_ci95)를 device-seconds 경계 검사에 쓰고,
++처리량 비율의 CI 없이 cost_boundary=false를 만들었다. 이 스크립트는
++  1) 원 plan/review/report/timing 파일의 hash를 연결하고,
++  2) 정확도 수치와 비용 점추정치를 원시 record에서 다시 계산해 저장값과 일치함을 확인하며(불변성 회귀),
++  3) device-seconds·처리량의 '유효한 반복 구간'은 unavailable(조건당 비동기 단회 큐: 요청 resampling은 반복 실행 변동성이 아님)로, 결합 투자 판정은 unresolved로 기록한다.
++원 기준(device 비율 1.25, p95 1.20, throughput 0.80)은 바꾸지 않는다. 이번 MG 비용 문턱으로 옛 joint 판정을 대체하지 않는다.
++python mg45_legacy041.py --out results/iter_045/legacy041_correction/correction.json
++"""
++import argparse
++import glob
++import hashlib
++import json
++import os
++import sys
++
++AG = "/SSD1_1TB/home/milab/daniel/08_medgemma/agent/runs/iter_041"
++PLAN_SHA = "e9786ff168532ae432a03be8aa9d64e84308bc69ff08d8cd03e3002fd28eb87f"
++REPORT = "results/iter_041/eval/report_V96.json"
++QUEUES = {"Icost": "results/iter_041/gen/V96_C_Icost", "JAB": "results/iter_041/gen/V96_C_JAB", "JBA": "results/iter_041/gen/V96_C_JBA"}
++
++
++def fsha(p):
++    h = hashlib.sha256()
++    with open(p, "rb") as f:
++        for b in iter(lambda: f.read(1 << 22), b""):
++            h.update(b)
++    return h.hexdigest()
++
++
++def union(iv):
++    tot, cs, ce = 0.0, None, None
++    for s_, e_ in sorted(iv):
++        if ce is None or s_ > ce:
++            if ce is not None:
++                tot += ce - cs
++            cs, ce = s_, e_
++        else:
++            ce = max(ce, e_)
++    return tot + ((ce - cs) if ce is not None else 0.0)
++
++
++def combined_decision(accuracy_class, cost_point_burden, repeated_cost_ci_available):
++    """정확도·비용 결합 판정. 유효한 반복 비용 구간이 없으면 양성 결합 판정을 내리지 않는다."""
++    if not repeated_cost_ci_available:
++        return "unresolved"
++    return "positive_method_pilot_candidate" if (accuracy_class == "positive" and cost_point_burden) else "not_positive"
++
++
++def main():
++    ap = argparse.ArgumentParser()
++    ap.add_argument("--out", required=True)
++    a = ap.parse_args()
++    if os.path.exists(a.out):
++        sys.exit("output exists")
++    plan_sha = fsha(AG + "/plan.md")
++    if plan_sha != PLAN_SHA:
++        sys.exit("iter_041 plan sha changed")
++    rv = json.load(open(AG + "/review.json"))
++    rep = json.load(open(REPORT))
++    out = {"original": {"plan_md": AG + "/plan.md", "plan_sha256": plan_sha, "review_json": AG + "/review.json", "review_json_sha256": fsha(AG + "/review.json"),
++                        "blocking_issues_verbatim": rv["blocking_issues"], "report": REPORT, "report_sha256": fsha(REPORT)},
++           "queues": {}, "recomputed_vs_stored": {}}
++    for q, d in QUEUES.items():
++        comp = json.load(open(d + "/completion.json"))
++        mapping = {int(k): v for k, v in comp["mapping"].items()}
++        recs = []
++        files = sorted(glob.glob(d + "/gen_worker*.jsonl"))
++        for f in files:
++            recs += [json.loads(l) for l in open(f, "rb").read().split(b"\n")[:-1] if l.strip()]
++        iv = {}
++        for r in recs:
++            iv.setdefault(mapping[r["worker"]], []).append((r["t_start"], r["ts"]))
++        out["queues"][q] = {"dir": d, "completion_sha256": fsha(d + "/completion.json"), "worker_files": {os.path.basename(f): fsha(f) for f in files},
++                            "timing_files": {os.path.basename(f): fsha(f) for f in sorted(glob.glob(d + "/worker*.timing.*.json"))},
++                            "n_records": len(recs), "sum_request_wall_s": sum(r["wall_s"] for r in recs),
++                            "device_seconds_generate_union_recomputed": sum(union(v) for v in iv.values()),
++                            "device_seconds_generate_union_stored": comp["cost"]["device_seconds_generate_union"],
++                            "request_wall_sum_differs_from_device_union": abs(sum(r["wall_s"] for r in recs) - sum(union(v) for v in iv.values())) > 1.0}
++    st = rep["cost"]
++    out["recomputed_vs_stored"] = {
++        "Icost_device_union_abs_diff": abs(out["queues"]["Icost"]["device_seconds_generate_union_recomputed"] - st["I_over_JAB"]["device_seconds_generate_union"][0]),
++        "JAB_device_union_abs_diff": abs(out["queues"]["JAB"]["device_seconds_generate_union_recomputed"] - st["I_over_JAB"]["device_seconds_generate_union"][1]),
++        "JBA_device_union_abs_diff": abs(out["queues"]["JBA"]["device_seconds_generate_union_recomputed"] - st["I_over_JBA"]["device_seconds_generate_union"][1]),
++        "devsec_ratio_I_over_JAB_stored": st["I_over_JAB"]["devsec_ratio_I_over_J"], "devsec_ratio_I_over_JBA_stored": st["I_over_JBA"]["devsec_ratio_I_over_J"],
++        "p95_latency_ratio_stored": [st["I_over_JAB"]["p95_latency_ratio_I_over_J"], st["I_over_JBA"]["p95_latency_ratio_I_over_J"]],
++        "throughput_ratio_stored": [st["I_over_JAB"]["throughput_ratio_I_over_J"], st["I_over_JBA"]["throughput_ratio_I_over_J"]],
++        "accuracy_stored": {"C_I_f1_03": rep["models"]["C"]["mean_f1_03"]["I"][0], "C_JAB_f1_03": rep["models"]["C"]["mean_f1_03"]["AB"][0],
++                            "C_JBA_f1_03": rep["models"]["C"]["mean_f1_03"]["BA"][0]}}
++    out["recomputed_vs_stored"]["point_estimates_unchanged"] = all(v < 1e-6 for k, v in out["recomputed_vs_stored"].items() if k.endswith("abs_diff"))
++    out["original_thresholds_unchanged"] = {"device_seconds_ratio_ge": 1.25, "p95_latency_ratio_ge": 1.20, "throughput_ratio_le": 0.80,
++                                            "note": "원 기준 유지. 이번 MG 비용 문턱(0.50/2.0/1.20)으로 대체하지 않는다."}
++    out["valid_repeated_run_ci_device_seconds_throughput"] = "unavailable"
++    out["valid_repeated_run_ci_reason"] = "조건당 비동기 단회 큐. 요청/환자 resampling CI는 반복 실행의 device 시간·처리량 변동성이 아니다. 단회 timing 복제로 해결된 것으로 만들지 않는다."
++    out["combined_investment_decision"] = combined_decision(rep["decision"]["accuracy"]["class"], rep["decision"]["cost"]["cost_burden"], False)
++    out["original_overall_preserved_as_recorded"] = rep["decision"]["overall"]
++    out["note"] = "원본 report/review/blocking_issues는 수정하지 않았다. 정확도 관찰(C I 0.578 vs J 0.381/0.354)과 비용 점추정은 유지되며, 비용 CI를 요구하는 결합 판정만 unresolved다."
++    os.makedirs(os.path.dirname(a.out), exist_ok=True)
++    json.dump(out, open(a.out, "x"), indent=1)
++    print(json.dumps({"point_estimates_unchanged": out["recomputed_vs_stored"]["point_estimates_unchanged"], "combined": out["combined_investment_decision"],
++                      "diffs": {k: v for k, v in out["recomputed_vs_stored"].items() if k.endswith("abs_diff")},
++                      "wall_sum_vs_union": {q: [v["sum_request_wall_s"], v["device_seconds_generate_union_recomputed"]] for q, v in out["queues"].items()}}, indent=1))
++
++
++if __name__ == "__main__":
++    main()
+diff --git a/mg45_mg.py b/mg45_mg.py
+new file mode 100644
+index 0000000..0b8607b
+--- /dev/null
++++ b/mg45_mg.py
+@@ -0,0 +1,129 @@
++"""iter_045 MedGrounder wrapper (격리 venv `results/environments/medgrounder_iter045`에서 실행).
++
++공식 코드(a0aad98d, results/iter_045/external/MedGrounder)의 build_medgrounder / InferencePostProcessor / run_wbf /
++dataloaders.dataset.build_transforms('val')를 그대로 호출한다. 공식 evaluation.py와 다른 점(의도된 차이):
++  - checkpoint 부재·키 불일치는 fatal (random initialization fallback 금지, strict=True).
++  - 공식 test loader를 만들지 않는다. 입력은 잠긴 D24/V96 manifest의 영상·문장뿐이다.
++  - GT는 이 모듈에 들어오지 않는다 (평가는 mg45_eval.py).
++좌표: 공식 val transform(LongestMaxSize(640)->PadIfNeeded(640,640,center)->Normalize)에 전체 영상 box [0,0,1,1]을 같이 통과시켜
++실제 resize/padding affine(canvas 내 영상 영역 l,t,r,b)을 얻고, 모델 출력(canvas 정규화 cxcywh)을 원본 정규화 xyxy로 역변환한다 (추가 clipping 없음).
++"""
++import hashlib
++import json
++import os
++import sys
++import time
++
++HERE = os.path.dirname(os.path.abspath(__file__))
++EXT = os.path.join(HERE, "results", "iter_045", "external")
++MG_ROOT = os.path.join(EXT, "MedGrounder")
++WEIGHTS = {"P": os.path.join(EXT, "weights", "medgrounder_pretrain_imagenome.pth"),
++           "MS": os.path.join(EXT, "weights", "medgrounder_finetune_ms.pth")}
++RUN_CFG = {"P": "conf/conf_pretrain_imagenome.yaml", "MS": "conf/conf_finetune_ms.yaml"}
++THRESHOLDS = [0.2, 0.4, 0.6, 0.8]
++WBF = {"run_wbf": True, "wbf_iou_threshold": 0.1, "skip_box_thr": 0.0, "run_nms": False}
++
++os.environ.setdefault("HF_HUB_CACHE", os.path.join(EXT, "hf_cache"))
++os.environ.setdefault("NO_ALBUMENTATIONS_UPDATE", "1")
++os.environ.setdefault("HF_HUB_OFFLINE", "1")
++os.environ.setdefault("TORCH_HOME", os.path.join(EXT, "torch_home"))
++sys.path.insert(0, MG_ROOT)
++
++
++def file_sha(p):
++    h = hashlib.sha256()
++    with open(p, "rb") as f:
++        for b in iter(lambda: f.read(1 << 24), b""):
++            h.update(b)
++    return h.hexdigest()
++
++
++def canon(o):
++    return json.dumps(o, sort_keys=True, ensure_ascii=False, default=str)
++
++
++def build_cfg(key):
++    from omegaconf import OmegaConf
++    cwd = os.getcwd()
++    os.chdir(MG_ROOT)  # 공식 코드는 conf/ 상대경로
++    try:
++        base = OmegaConf.load("conf/base.yaml")
++        ds = OmegaConf.load("conf/datasets.yaml")
++        run = OmegaConf.load(RUN_CFG[key])
++        cfg = OmegaConf.merge(ds, base, run)
++    finally:
++        os.chdir(cwd)
++    cfg.resume = WEIGHTS[key]
++    return cfg
++
++
++def load_model(key, device):
++    """returns (model, postprocessor_cls_threshold_cfg, cfg). strict load, 실패 시 예외."""
++    import torch
++    from model.medgrounder import build_medgrounder
++    cfg = build_cfg(key)
++    if not os.path.exists(cfg.resume):
++        raise FileNotFoundError(cfg.resume)
++    model, _crit, _post = build_medgrounder(cfg)
++    ck = torch.load(cfg.resume, map_location="cpu", weights_only=True)
++    sd = ck["model"] if isinstance(ck, dict) and "model" in ck else ck
++    res = model.load_state_dict(sd, strict=True)  # 불일치면 RuntimeError
++    model.to(device).eval()
++    return model, cfg, {"missing": list(res.missing_keys), "unexpected": list(res.unexpected_keys),
++                         "n_state_keys": len(sd), "ckpt_top_keys": list(ck.keys())[:5] if isinstance(ck, dict) else None}
++
++
++def val_transform(imsize=640):
++    from dataloaders.dataset import build_transforms
++    return build_transforms("val", imsize)
++
++
++def prepare(image_path, tf):
++    """공식 dataset(GMPGPadChestDataset)과 같은 경로: PIL L -> RGB -> np -> val transform. returns (tensor[3,640,640], aff, u8_sha)."""
++    import numpy as np
++    from PIL import Image
++    img = Image.open(image_path)
++    if img.mode == "I;16":
++        raise ValueError("uint16 입력은 이 wrapper 경로에서 지원하지 않는다 (manifest는 검증된 uint8 L PNG)")
++    arr_l = np.array(img)
++    u8_sha = hashlib.sha256(arr_l.tobytes()).hexdigest()
++    img_np = np.array(img.convert("RGB"))
++    out = tf(image=img_np, bboxes=np.array([[0.0, 0.0, 1.0, 1.0]], dtype=np.float32), bbox_labels=[1])
++    if len(out["bboxes"]) != 1:
++        raise RuntimeError("full-image box dropped by transform")
++    l, t, r, b = [float(v) for v in out["bboxes"][0]]
++    return out["image"], {"l": l, "t": t, "r": r, "b": b, "h": int(arr_l.shape[0]), "w": int(arr_l.shape[1])}, u8_sha
++
++
++def canvas_cxcywh_to_orig_xyxy(boxes, aff):
++    """canvas 정규화 cxcywh [N,4] -> 원본 정규화 xyxy list (clipping 없음)."""
++    out = []
++    W, H = aff["r"] - aff["l"], aff["b"] - aff["t"]
++    for cx, cy, w, h in boxes:
++        x0, y0, x1, y1 = cx - w / 2, cy - h / 2, cx + w / 2, cy + h / 2
++        out.append([(x0 - aff["l"]) / W, (y0 - aff["t"]) / H, (x1 - aff["l"]) / W, (y1 - aff["t"]) / H])
++    return out
++
++
++def postprocess(logits, boxes, thr):
++    """공식 InferencePostProcessor(threshold) -> 공식 run_wbf. logits [B,5,2], boxes [B,5,4] (torch, cpu/gpu).
++    returns list of {'boxes': cxcywh list, 'scores': list, 'pre_wbf_n': int}."""
++    from model.medgrounder import InferencePostProcessor
++    from utils.box_utils import run_wbf
++    pp = InferencePostProcessor(threshold=thr)
++    outs = pp({"pred_boxes": boxes, "pred_groundability": logits})
++    det = outs["detections"]
++    pre = [int(d["scores"].numel()) for d in det]
++    det = run_wbf(det, iou_threshold=WBF["wbf_iou_threshold"], skip_box_threshold=WBF["skip_box_thr"])
++    return [{"boxes": d["boxes"].cpu().tolist(), "scores": d["scores"].cpu().tolist(), "pre_wbf_n": n} for d, n in zip(det, pre)]
++
++
++def forward(model, imgs, phrases, device):
++    import torch
++    from utils.misc import NestedTensor
++    with torch.no_grad():
++        x = torch.stack(imgs)
++        # 공식 gmpg_collate_fn과 동일: mask는 전부 False (모델 내부 NestedTensor.from_tensor_list는 공식 코드에 없어 tensor를 직접 넘기면 실패)
++        masks = torch.stack([torch.zeros_like(im[0], dtype=torch.bool) for im in imgs], dim=0)
++        out = model(NestedTensor(x, masks).to(device), list(phrases))
++    return out["pred_groundability"].float().cpu(), out["pred_boxes"].float().cpu()
+diff --git a/mg45_report.py b/mg45_report.py
+new file mode 100644
+index 0000000..60c4e5b
+--- /dev/null
++++ b/mg45_report.py
+@@ -0,0 +1,421 @@
++"""iter_045 비교 평가 (CPU only, 기본 python). 순서: lock -> report.
++
++  python mg45_report.py lock   --out results/iter_045/eval/eval_lock.json      (출력 평가 전에 평가 소스·입력·decision을 digest로 잠금)
++  python mg45_report.py report --lock results/iter_045/eval/eval_lock.json --out results/iter_045/eval/report.json
++
++사전 고정 규칙(plan.md Evaluation; 결과를 본 뒤 변경하지 않는다):
++  주지표 문장 F1@0.3 (환자 안 평균 -> 환자 평균), 원본 정규화 xyxy에서 최대 cardinality 일대일 matching.
++  정확도·FP 차이: 환자 paired bootstrap 10,000회 seed 4401, 97.5% CI.
++  비용: 6 paired block, block별 MG/C 비율의 log 평균 +- t(5) 95% CI.
++  모듈형 대안 지지: MG-C F1@0.3 CI하한>=-0.03 & F1@0.5 CI하한>=-0.03 & FP차 CI상한<=0.10 & device ratio(MG/C) CI상한<=0.50
++                    & throughput ratio(MG/C) CI하한>=2.0 & p95 latency ratio(MG/C) CI상한<=1.20.
++  C 잔여 이점 지지: C-MG F1@0.3 점차>=0.05 & CI하한>0 & F1@0.5 CI하한>=-0.03 & FP차(C-MG) CI상한<=0.10 &
++                    C/MG device ratio CI상한<=2.0 & C/MG p95 latency ratio CI상한<=2.0 (+ 두 checkpoint 정상 실행).
++  그 외 과학적 불확정 -> track 보류. 실행/provenance 결함이 있으면 execution_failed.
++"""
++import argparse
++import glob
++import hashlib
++import json
++import math
++import os
++import subprocess
++import sys
++import time
++
++import numpy as np
++
++import mg45_eval as E
++import pg39_spec as S39
++import pg43_eval as PE
++import pg43_run as R
++from rsna_diag import geometry, parse
++
++NBOOT = 10000
++SEED = 4401
++MAN = E.MAN
++SEL = "results/iter_045/decisions/D24_select.json"
++V96_DIRS = {"P": "results/iter_045/mg/V96_P_w2b4", "MS": "results/iter_045/mg/V96_MS_w2b4"}
++C_GEN = "results/iter_040/gen/C"
++C_REQ = "results/iter_040/requests/requests_V96.jsonl"
++C_PROTO = "results/iter_040/protocol/protocol_C.json"
++C_ADAPTER_DIGEST = "419ae81f5ef455d39742b158537373da6e26061b362d13205ab28b4a50905ba8"
++C_COMMIT = "18fdae2eec4f4ab3605845fdaeafd1959d9d725f"  # iter_040 코드 보관 commit
++C_STORED = {"f1_03": 0.5779513888888889, "f1_05": 0.2911458333333333}
++TIMING = "results/iter_045/timing/main"
++BLOCK_ATTEMPT = {1: 2, 2: 1, 3: 1, 4: 1, 5: 1, 6: 1}  # block1 attempt1은 C 중복 claim 결함으로 보존만 한다
++LOCK_FILES = ["mg45_report.py", "mg45_eval.py", "mg45_verify.py", "mg45_ccheck.py", "mg45_mg.py", "mg45_worker.py", "mg45_launch.py", "mg45_ctime.py",
++              "mg45_timing.py", "pg39_spec.py", "pg43_eval.py", "pg43_run.py", "pg43_retrieval.py", "rsna_diag/metrics.py", "rsna_diag/parse.py",
++              "rsna_diag/geometry.py", "rsna_diag/__init__.py", "rsna_diag/generate.py", "rsna_diag/prompts.py", "rsna_diag/lora.py", "rsna_diag/queue_lock.py",
++              MAN, SEL, C_REQ, C_PROTO, "results/iter_045/decisions/D24_P_cfg_compare.json", "results/iter_045/d8/d8_check.json",
++              "results/iter_045/external/code_manifest.json", "results/iter_045/external/weights/weights_manifest.json",
++              "results/iter_045/external/text_encoder_manifest.json"]
++
++
++def fsha(p):
++    return E.file_sha(p)
++
++
++# ---------------- lock ----------------
++def cmd_lock(a):
++    if os.path.exists(a.out):
++        sys.exit("lock exists")
++    lock = {"files": {f: fsha(f) for f in LOCK_FILES},
++            "mg_v96_completions": {k: fsha(d + "/completion.json") for k, d in V96_DIRS.items()},
++            "c_completion": fsha(C_GEN + "/completion.json"),
++            "timing_completions": {f"{s}{k}": fsha(f"{TIMING}/block{k}_a{BLOCK_ATTEMPT[k]}_{s}/completion.json") for k in range(1, 7) for s in ("C", "MG")},
++            "locked_at": time.time(), "bootstrap": {"B": NBOOT, "seed": SEED},
++            "note": "V96 출력 채점 전에 작성. 이후 평가 소스/입력이 달라지면 report가 중단한다."}
++    os.makedirs(os.path.dirname(a.out), exist_ok=True)
++    json.dump(lock, open(a.out, "x"), indent=1)
++    print("locked", len(lock["files"]), "files")
++
++
++def check_lock(path):
++    lock = json.load(open(path))
++    bad = [f for f, h in lock["files"].items() if fsha(f) != h]
++    if bad:
++        raise E.EvalError(f"locked eval source/input changed: {bad}")
++    for k, d in V96_DIRS.items():
++        if fsha(d + "/completion.json") != lock["mg_v96_completions"][k]:
++            raise E.EvalError("mg completion changed")
++    if fsha(C_GEN + "/completion.json") != lock["c_completion"]:
++        raise E.EvalError("C completion changed")
++    for k in range(1, 7):
++        for s in ("C", "MG"):
++            if fsha(f"{TIMING}/block{k}_a{BLOCK_ATTEMPT[k]}_{s}/completion.json") != lock["timing_completions"][f"{s}{k}"]:
++                raise E.EvalError("timing completion changed")
++    return lock
++
++
++# ---------------- C import 검증 (pg43_eval.verify_import 보완판: protocol -> completion -> record config -> adapter -> 현재 영상/요청/GT manifest) ----------------
++def git_show_sha(commit, path):
++    p = subprocess.run(["git", "show", f"{commit}:{path}"], capture_output=True)
++    return hashlib.sha256(p.stdout).hexdigest() if p.returncode == 0 else None
++
++
++def verify_c_import(man_v96):
++    d = C_GEN
++    comp = json.load(open(d + "/completion.json"))
++    if any(c != 0 for c in comp["exit_codes"]):
++        raise R.RunError("C: nonzero exit codes")
++    proto = json.load(open(C_PROTO))
++    pdig = R.sha_bytes(R.canon(proto).encode())
++    if comp["protocol_digest"] != pdig:
++        raise R.RunError("C: completion protocol_digest != digest(원본 protocol 파일)")
++    if R.file_sha(C_REQ) != proto["requests_sha256"]:
++        raise R.RunError("C: requests != protocol lock")
++    ad = proto["adapter"]
++    if ad["digest"] != C_ADAPTER_DIGEST or R.file_sha(os.path.join(ad["path"], "adapter.pt")) != ad["file_sha256"]:
++        raise R.RunError("C: adapter digest/file mismatch")
++    # 원본 protocol의 코드 hash는 보관 commit의 실제 파일과 대조 (이전 protocol의 source 검사)
++    code_vs_git = {f: (git_show_sha(C_COMMIT, f) == h) for f, h in proto["code"].items()}
++    rows = {}
++    for l in open(C_REQ):
++        if l.strip():
++            r = json.loads(l)
++            rows[r["request_id"]] = r
++    files = sorted(glob.glob(d + "/gen_worker*.jsonl"))
++    if sorted(os.path.basename(f) for f in files) != sorted(comp["worker_file_sha256"]):
++        raise R.RunError("C: worker file set != completion")
++    recs = []
++    for f in files:
++        if R.file_sha(f) != comp["worker_file_sha256"][os.path.basename(f)]:
++            raise R.RunError("C: worker file changed after completion")
++        recs += R.read_records(f)
++    ids = [r["request_id"] for r in recs]
++    if len(ids) != len(set(ids)) or set(ids) != set(rows) or len(ids) != comp["n_requests"]:
++        raise R.RunError("C: request set mismatch")
++    out = {}
++    for r in recs:
++        row = rows[r["request_id"]]
++        if r["record_digest"] != R.record_digest(r) or r["row_digest"] != R.row_digest(row):
++            raise R.RunError("C: record/row digest mismatch")
++        if r["protocol_digest"] != pdig or r["config_digest"] != proto["generation_config_digest"] or r["adapter_digest"] != C_ADAPTER_DIGEST:
++            raise R.RunError("C: record protocol/config/adapter digest mismatch")
++        e = man_v96[r["patient"]]
++        t = r["targets"][0]
++        if row["prompt_sha256"] != R.sha_bytes(S39.prompt_I_short(e["sentences"][t], t).encode()) or r["prompt_sha256"] != row["prompt_sha256"] \
++                or R.sha_bytes(row["prompt"].encode()) != row["prompt_sha256"]:
++            raise R.RunError("C: prompt != manifest sentence")
++        if r["input_pixel_sha256"] != e["input_pixel_sha256"] or row["image"] != e["image"] or R.file_sha(e["image"]) != e["image_file_sha256"]:
++            raise R.RunError("C: input image != manifest/current file")
++        if R.G.load_image(e["image"])[2] != e["input_pixel_sha256"]:
++            raise R.RunError("C: current pixel hash mismatch")
++        if tuple(r["pad_affine_top_left_side"]) != tuple(geometry.pad_offsets(e["h"], e["w"])):
++            raise R.RunError("C: pad affine mismatch")
++        out[(r["patient"], t)] = r
++    if len(out) != 192:
++        raise R.RunError(f"C: expected 192, got {len(out)}")
++    return out, {"protocol_digest": pdig, "code_hash_equals_git_blob_at_iter040_commit": code_vs_git, "adapter_digest": ad["digest"]}
++
++
++def c_scores(recs, ents):
++    """C: canvas -> 원본 정규화 xyxy 변환 후 채점. canvas F1과의 불변성도 검사한다."""
++    out, st, inv = {}, {}, {"checked": 0, "mismatch": 0}
++    for (p, t), r in recs.items():
++        e = ents[p]
++        pr = S39.parse_ids(r["suffix_text_raw"], r["ended_eos"], {t})
++        valid = pr["status"] in parse.VALID
++        boxes = [PE.canvas_to_norm_xyxy(b, r["pad_affine_top_left_side"], e["h"], e["w"]) for b in pr["groups"][t]] if valid else []
++        sc = E.score(boxes, e["gt_boxes_xyxy_norm"][t])
++        cc = S39.score_request(pr["status"], {t: pr["groups"][t]}, [t], {t: e["gt_canvas_yxyx"][t]})[t]
++        inv["checked"] += 1
++        inv["mismatch"] += int(abs(cc["f1_03"] - sc["f1_03"]) > 1e-9 or abs(cc["f1_05"] - sc["f1_05"]) > 1e-9)
++        sc["valid"] = valid
++        out[(p, t)] = sc
++        st[(p, t)] = pr["status"]
++    return out, st, inv
++
++
++# ---------------- 통계 ----------------
++def boot_idx(n, seed=SEED, B=NBOOT):
++    return np.random.default_rng(seed).integers(0, n, size=(B, n), dtype=np.int32)
++
++
++def pat_arr(sc, pids, key):
++    return np.array([np.mean([sc[(p, t)][key] for t in ("qA", "qB")]) for p in pids])
++
++
++def ci(v, level, idx):
++    v = np.asarray(v, float)
++    m = v[idx].mean(axis=1)
++    al = (1 - level) / 2 * 100
++    return {"mean": float(v.mean()), "lo": float(np.percentile(m, al)), "hi": float(np.percentile(m, 100 - al)), "level": level}
++
++
++T5_975 = 2.5705818366147395  # scipy.stats.t.ppf(0.975, 5)
++
++
++def ratio_ci(x, y):
++    """block별 비율 x/y의 log 평균 +- t(5) 95% CI (원시 비율도 반환). x,y: 길이 6."""
++    r = np.asarray(x, float) / np.asarray(y, float)
++    lr = np.log(r)
++    n = len(lr)
++    se = lr.std(ddof=1) / math.sqrt(n)
++    m = lr.mean()
++    t = T5_975 if n == 6 else None
++    if t is None:
++        raise ValueError("t critical value fixed for n=6")
++    return {"raw_ratios": r.tolist(), "geo_mean": float(math.exp(m)), "ci95_lo": float(math.exp(m - t * se)), "ci95_hi": float(math.exp(m + t * se)),
++            "raw_min": float(r.min()), "raw_max": float(r.max()), "n_blocks": n}
++
++
++# ---------------- timing 분석 ----------------
++def timing_block(k):
++    att = BLOCK_ATTEMPT[k]
++    c_dir, m_dir = f"{TIMING}/block{k}_a{att}_C", f"{TIMING}/block{k}_a{att}_MG"
++    cc = json.load(open(c_dir + "/completion.json"))
++    mc = json.load(open(m_dir + "/completion.json"))
++    # C: 환자 단위 record
++    crecs = []
++    for f in sorted(glob.glob(c_dir + "/ctime_worker*.jsonl")):
++        if cc["worker_file_sha256"][os.path.basename(f)] != fsha(f):
++            raise E.EvalError("C timing worker file changed")
++        crecs += [json.loads(l) for l in open(f, "rb").read().split(b"\n")[:-1] if l.strip()]
++    cmap = {int(w): g for w, g in cc["mapping"].items()}
++    c_by_p = {}
++    for r in crecs:
++        c_by_p.setdefault(r["patient"], []).append(r)
++    c_lat = {p: v[0]["t_patient_done"] - v[0]["t_patient_dispatch"] for p, v in c_by_p.items()}
++    c_iv = {}
++    for p, v in c_by_p.items():
++        c_iv.setdefault(cmap[v[0]["worker"]], []).append((v[0]["t_patient_dispatch"], v[0]["t_patient_done"]))
++    # MG: 환자 latency = 두 문장 중 최대 t_done - 최소 t_dispatch
++    man = json.load(open(MAN))
++    mrecs, mcomp, _ = E.verify_mg_dir(m_dir, "V96", json.load(open(SEL))["selected"]["ckpt"], man)
++    mmap = {int(w): g for w, g in mc["mapping"].items()}
++    m_by_p = {}
++    for (p, t), r in mrecs.items():
++        m_by_p.setdefault(p, []).append(r)
++    m_lat = {p: max(x["t_done"] for x in v) - min(x["t_dispatch"] for x in v) for p, v in m_by_p.items()}
++    m_iv = {}
++    for p, v in m_by_p.items():
++        m_iv.setdefault(mmap[v[0]["worker"]], []).append((min(x["t_dispatch"] for x in v), max(x["t_done"] for x in v)))
++
++    def span(iv):
++        return sum(max(e for _, e in v) - min(s for s, _ in v) for v in iv.values())
++
++    def union(iv):
++        return sum(PE_union(v) for v in iv.values())
++
++    def lat_stats(d):
++        v = np.array(list(d.values()))
++        return {"mean": float(v.mean()), "p50": float(np.percentile(v, 50)), "p95": float(np.percentile(v, 95)), "n": int(len(v))}
++    out = {}
++    for name, comp, iv, lat in (("C", cc, c_iv, c_lat), ("MG", mc, m_iv, m_lat)):
++        out[name] = {"workload_wall_s": comp["workload_wall_s"], "patients_per_min": 96 / comp["workload_wall_s"] * 60,
++                     "device_seconds_span": span(iv), "device_seconds_union": union(iv), "latency_s": lat_stats(lat),
++                     "peak_alloc_gb_max": comp["peak_alloc_gb_max"], "workers": comp["workers"],
++                     "launcher_wall_s_incl_loading": comp["launcher_wall_s_incl_loading"], "mapping": comp["mapping"]}
++    out["C"]["cold_load_s_max"] = max(cc["cold_load_s"].values())
++    out["MG_n_records"] = len(mrecs)
++    return out, c_dir, m_dir
++
++
++def PE_union(iv):
++    tot, cs, ce = 0.0, None, None
++    for s_, e_ in sorted(iv):
++        if ce is None or s_ > ce:
++            if ce is not None:
++                tot += ce - cs
++            cs, ce = s_, e_
++        else:
++            ce = max(ce, e_)
++    return tot + ((ce - cs) if ce is not None else 0.0)
++
++
++def mg_meta_cold(dirpath):
++    ms = [json.load(open(p)) for p in glob.glob(dirpath + "/worker*.meta.*.json")]
++    return max(m["load_s"] for m in ms), max(m["peak_reserved_gb"] for m in ms)
++
++
++def cmd_report(a):
++    if os.path.exists(a.out):
++        sys.exit("output exists")
++    t_start = time.time()
++    lock = check_lock(a.lock)
++    man = json.load(open(MAN))
++    sel = json.load(open(SEL))
++    ents = {e["PatientID"]: e for e in man["V96"]}
++    pids = sorted(ents)
++    # ---- C ----
++    crecs, cprov = verify_c_import(ents)
++    c_sc, c_status, c_inv = c_scores(crecs, ents)
++    # ---- MG ----
++    mg = {}
++    for ck, d in V96_DIRS.items():
++        recs, comp, proto = E.verify_mg_dir(d, "V96", ck, man)
++        mg[ck] = {"recs": recs, "comp": comp}
++    P_thr, MS_thr = sel["ckpts"]["P"]["selected_threshold"], sel["ckpts"]["MS"]["selected_threshold"]
++    sysdefs = {"C": c_sc,
++               "MG-P@sel": E.mg_scores(mg["P"]["recs"], ents, P_thr), "MG-MS@sel": E.mg_scores(mg["MS"]["recs"], ents, MS_thr),
++               "MG-P@0.8": E.mg_scores(mg["P"]["recs"], ents, 0.8), "MG-MS@0.8": E.mg_scores(mg["MS"]["recs"], ents, 0.8)}
++    selname = f"MG-{sel['selected']['ckpt']}@sel"
++    idx = boot_idx(len(pids))
++    prim = {}
++    for s, sc in sysdefs.items():
++        base = E.summarize(sc, pids)
++        base["f1_03_ci95"] = ci(pat_arr(sc, pids, "f1_03"), 0.95, idx)
++        base["f1_05_ci95"] = ci(pat_arr(sc, pids, "f1_05"), 0.95, idx)
++        base["n_sentences"] = len(sc)
++        prim[s] = base
++    prim["C"]["valid_rate"] = float(np.mean([v in parse.VALID for v in c_status.values()]))
++    prim["C"]["eos_rate"] = float(np.mean([r["ended_eos"] for r in crecs.values()]))
++    prim["C"]["status_counts"] = {k: sum(v == k for v in c_status.values()) for k in sorted(set(c_status.values()))}
++    # C 재현
++    repro = {"C_f1_03": prim["C"]["f1_03"], "C_f1_05": prim["C"]["f1_05"], "stored": C_STORED,
++             "abs_diff_03": abs(prim["C"]["f1_03"] - C_STORED["f1_03"]), "abs_diff_05": abs(prim["C"]["f1_05"] - C_STORED["f1_05"]),
++             "canvas_vs_original_invariance": c_inv}
++    # ---- 차이 (paired) ----
++    def diff(x, y, key, level):
++        return ci(pat_arr(sysdefs[x], pids, key) - pat_arr(sysdefs[y], pids, key), level, idx)
++    cmp = {}
++    for x, y in ((selname, "C"), ("C", selname), ("MG-P@sel", "C"), ("MG-MS@sel", "C"), ("MG-P@0.8", "C"), ("MG-MS@0.8", "C"), ("MG-P@sel", "MG-MS@sel")):
++        k = f"{x}_minus_{y}"
++        if k in cmp:
++            continue
++        cmp[k] = {"f1_03": diff(x, y, "f1_03", 0.975), "f1_05": diff(x, y, "f1_05", 0.975), "fp_03": diff(x, y, "fp_03", 0.975), "recall_03": diff(x, y, "recall_03", 0.975)}
++    # ---- 층별 ----
++    def area_frac(b):
++        return max(0, (b[2] - b[0])) * max(0, (b[3] - b[1])) / 1e6
++    max_area = {(p, t): max(area_frac(b) for b in ents[p]["gt_canvas_yxyx"][t]) for p in pids for t in ("qA", "qB")}
++    med = float(np.median(list(max_area.values())))
++    strat = {"multi_box": lambda p, t: len(ents[p]["gt_canvas_yxyx"][t]) > 1, "single_box": lambda p, t: len(ents[p]["gt_canvas_yxyx"][t]) == 1,
++             "small_box(max GT area<median)": lambda p, t: max_area[(p, t)] < med, "large_box": lambda p, t: max_area[(p, t)] >= med,
++             "share_group_patient": lambda p, t: ents[p]["stratum"].startswith("share1"), "non_share_patient": lambda p, t: ents[p]["stratum"].startswith("share0")}
++    strata = {}
++    for nm, fn in strat.items():
++        ks = [(p, t) for p in pids for t in ("qA", "qB") if fn(p, t)]
++        strata[nm] = {"n_sentences": len(ks), "systems": {s: {"f1_03": float(np.mean([sc[k]["f1_03"] for k in ks])), "recall_03": float(np.mean([sc[k]["recall_03"] for k in ks])),
++                                                          "fp_per_sentence": float(np.mean([sc[k]["fp_03"] for k in ks])), "empty_rate": float(np.mean([bool(sc[k]["empty"]) for k in ks])),
++                                                          "missed_gt_per_sentence": float(np.mean([sc[k]["n_gt"] * (1 - sc[k]["recall_03"]) for k in ks]))}
++                                                      for s, sc in sysdefs.items()}}
++    # ---- timing ----
++    blocks = {}
++    for k in range(1, 7):
++        blocks[k], c_dir, m_dir = timing_block(k)
++    bl = [blocks[k] for k in range(1, 7)]
++    cost = {"blocks": {str(k): blocks[k] for k in blocks}, "lead_order": {str(k): ("C" if k % 2 == 1 else "MG") for k in range(1, 7)},
++            "attempts": BLOCK_ATTEMPT, "excluded_attempts": {"block1_a1": "C 환자 claim 중복(flock 해제 경쟁)으로 기술 실패; 원본 보존, paired block 전체 재측정"}}
++    for nm in ("device_seconds_span", "device_seconds_union"):
++        cost[f"MG_over_C_{nm}"] = ratio_ci([b["MG"][nm] for b in bl], [b["C"][nm] for b in bl])
++    cost["MG_over_C_throughput"] = ratio_ci([b["MG"]["patients_per_min"] for b in bl], [b["C"]["patients_per_min"] for b in bl])
++    cost["MG_over_C_p95_latency"] = ratio_ci([b["MG"]["latency_s"]["p95"] for b in bl], [b["C"]["latency_s"]["p95"] for b in bl])
++    cost["MG_over_C_mean_latency"] = ratio_ci([b["MG"]["latency_s"]["mean"] for b in bl], [b["C"]["latency_s"]["mean"] for b in bl])
++    cost["MG_over_C_workload_wall"] = ratio_ci([b["MG"]["workload_wall_s"] for b in bl], [b["C"]["workload_wall_s"] for b in bl])
++    inv_c_over_mg = lambda r: {"geo_mean": 1 / r["geo_mean"], "ci95_lo": 1 / r["ci95_hi"], "ci95_hi": 1 / r["ci95_lo"]}
++    cost["C_over_MG_device_seconds_span"] = inv_c_over_mg(cost["MG_over_C_device_seconds_span"])
++    cost["C_over_MG_p95_latency"] = inv_c_over_mg(cost["MG_over_C_p95_latency"])
++    cold = {}
++    for k in range(1, 7):
++        mdir = f"{TIMING}/block{k}_a{BLOCK_ATTEMPT[k]}_MG"
++        cold[str(k)] = {"MG_cold_load_s_max": mg_meta_cold(mdir)[0], "MG_peak_reserved_gb": mg_meta_cold(mdir)[1], "C_cold_load_s_max": blocks[k]["C"]["cold_load_s_max"]}
++    cost["cold_loading"] = cold
++    # timing 출력 정합성: C token == iter_040 / MG timing 최종 box == V96 raw(selected thr) box
++    import mg45_ccheck as CC
++    old = CC.old_records()
++    cchk = [CC.check(f"{TIMING}/block{k}_a{BLOCK_ATTEMPT[k]}_C", old) for k in range(1, 7)]
++    mg_raw = mg[sel["selected"]["ckpt"]]["recs"]
++    mchk = []
++    for k in range(1, 7):
++        recs, _, _ = E.verify_mg_dir(f"{TIMING}/block{k}_a{BLOCK_ATTEMPT[k]}_MG", "V96", sel["selected"]["ckpt"], man)
++        ts = E.mg_scores(recs, ents, sel["selected"]["threshold"])
++        ref = E.mg_scores(mg_raw, ents, sel["selected"]["threshold"])
++        mchk.append({"block": k, "n": len(recs), "n_f1_differ": sum(abs(ts[x]["f1_03"] - ref[x]["f1_03"]) > 1e-12 or abs(ts[x]["f1_05"] - ref[x]["f1_05"]) > 1e-12 or ts[x]["n_pred"] != ref[x]["n_pred"] for x in ts),
++                     "max_abs_logit_diff_vs_raw": float(max(np.abs(np.array(recs[x]["logits"]) - np.array(mg_raw[x]["logits"])).max() for x in recs))})
++    integrity = {"C_timing_token_mismatch_total": int(sum(c["token_mismatch"] for c in cchk)), "C_timing_all_eos": all(c["all_eos"] for c in cchk),
++                 "C_timing_n": [c["n"] for c in cchk], "MG_timing_f1_or_count_differ_total": int(sum(m["n_f1_differ"] for m in mchk)),
++                 "MG_timing": mchk, "C_peak_gpu_used_mib_sampled": [c["gpu_used_mib_max_sampled"] for c in cchk]}
++    # ---- 결정 ----
++    s = f"{selname}_minus_C"
++    cm = f"C_minus_{selname}"
++    mod = {"MG-C_f1_03_ci_lo>=-0.03": cmp[s]["f1_03"]["lo"] >= -0.03, "MG-C_f1_05_ci_lo>=-0.03": cmp[s]["f1_05"]["lo"] >= -0.03,
++           "MG-C_fp_ci_hi<=0.10": cmp[s]["fp_03"]["hi"] <= 0.10, "device_ratio_ci_hi<=0.50": cost["MG_over_C_device_seconds_span"]["ci95_hi"] <= 0.50,
++           "throughput_ratio_ci_lo>=2.0": cost["MG_over_C_throughput"]["ci95_lo"] >= 2.0, "p95_latency_ratio_ci_hi<=1.20": cost["MG_over_C_p95_latency"]["ci95_hi"] <= 1.20}
++    both_ok = all(prim[x]["n_patients"] == 96 for x in ("MG-P@sel", "MG-MS@sel"))
++    res_adv = {"C-MG_f1_03_point>=0.05": cmp[cm]["f1_03"]["mean"] >= 0.05, "C-MG_f1_03_ci_lo>0": cmp[cm]["f1_03"]["lo"] > 0,
++               "C-MG_f1_05_ci_lo>=-0.03": cmp[cm]["f1_05"]["lo"] >= -0.03, "C-MG_fp_ci_hi<=0.10": cmp[cm]["fp_03"]["hi"] <= 0.10,
++               "C/MG_device_ratio_ci_hi<=2.0": cost["C_over_MG_device_seconds_span"]["ci95_hi"] <= 2.0,
++               "C/MG_p95_latency_ratio_ci_hi<=2.0": cost["C_over_MG_p95_latency"]["ci95_hi"] <= 2.0, "both_checkpoints_ran": both_ok}
++    prov_ok = (repro["abs_diff_03"] < 1e-9 and repro["abs_diff_05"] < 1e-9 and c_inv["mismatch"] == 0 and integrity["C_timing_token_mismatch_total"] == 0
++               and integrity["MG_timing_f1_or_count_differ_total"] == 0 and all(n == 192 for n in integrity["C_timing_n"]))
++    if not prov_ok:
++        outcome = "execution_failed_provenance_or_integrity"
++    elif all(mod.values()):
++        outcome = "modular_alternative_supported"
++    elif all(res_adv.values()):
++        outcome = "C_residual_advantage_supported"
++    else:
++        outcome = "scientifically_inconclusive_hold_track"
++    decision = {"outcome": outcome, "modular_alternative_conditions": mod, "C_residual_advantage_conditions": res_adv, "provenance_integrity_ok": prov_ok,
++                "note": "개발 자료 V96 고정 비교. 비적응(MG) 대 T305 적응(C) 차이는 적응 예산 설명을 제거하지 않는다. 임상적 충분성·신규 contribution·외부 일반화 주장이 아니다."}
++    rep = {"n_patients": len(pids), "selected": sel["selected"], "primary_V96": prim, "compare_paired_ci975": cmp, "strata": strata, "strata_small_threshold": med,
++           "C_reproduction": repro, "C_import_provenance": cprov, "cost": cost, "integrity": integrity, "decision": decision,
++           "mg_runs": {k: {"dir": V96_DIRS[k], "workload_wall_s": mg[k]["comp"].get("workload_wall_s"), "exit_codes": mg[k]["comp"]["exit_codes"]} for k in mg},
++           "provenance": {"lock_sha256": fsha(a.lock), "eval_source_sha256": fsha("mg45_report.py"), "bootstrap": {"B": NBOOT, "seed": SEED}, "eval_wall_s": time.time() - t_start}}
++    os.makedirs(os.path.dirname(a.out), exist_ok=True)
++    tmp = a.out + f".{os.getpid()}.tmp"
++    json.dump(rep, open(tmp, "w"), indent=1)
++    tmp2 = a.out.replace(".json", "_per_item.json") + f".{os.getpid()}.tmp"
++    json.dump({s_: {f"{k[0]}|{k[1]}": v for k, v in sc.items()} for s_, sc in sysdefs.items()}, open(tmp2, "w"))
++    os.replace(tmp2, a.out.replace(".json", "_per_item.json"))
++    os.replace(tmp, a.out)
++    print(json.dumps({"outcome": outcome, "F1_03": {s_: round(prim[s_]["f1_03"], 4) for s_ in prim}, "F1_05": {s_: round(prim[s_]["f1_05"], 4) for s_ in prim},
++                      "mod": mod, "res_adv": res_adv, "prov_ok": prov_ok}, indent=1))
++
++
++def main():
++    ap = argparse.ArgumentParser()
++    sub = ap.add_subparsers(dest="cmd", required=True)
++    l = sub.add_parser("lock")
++    l.add_argument("--out", required=True)
++    r = sub.add_parser("report")
++    r.add_argument("--lock", required=True)
++    r.add_argument("--out", required=True)
++    a = ap.parse_args()
++    {"lock": cmd_lock, "report": cmd_report}[a.cmd](a)
++
++
++if __name__ == "__main__":
++    main()
+diff --git a/mg45_timing.py b/mg45_timing.py
+new file mode 100644
+index 0000000..884b33e
+--- /dev/null
++++ b/mg45_timing.py
+@@ -0,0 +1,53 @@
++"""iter_045 paired timing block 실행기. block k(1..6)는 C와 MG-selected를 순차 실행한다 (동시 실행 금지).
++선행 시스템: C/MG/C/MG/C/MG (k 홀수=C 먼저). 구성은 D24/pilot에서 잠근 값:
++  C : 4 worker (GPU당 2), 환자 단위 claim, warm-up D8 4환자(8요청) 후 barrier.
++  MG: decisions/D24_select.json의 ckpt·threshold, 2 worker(GPU당 1), batch 4, inline 후처리, warm-up D8 16문장 후 barrier.
++python mg45_timing.py --k 1 [--attempt 1]
++기술 실패(비정상 종료·불완전)면 원본 dir을 보존하고 --attempt N+1 로 paired block 전체(두 시스템)를 새 dir에 재측정한다. 느리다는 이유의 제외 금지.
++"""
++import argparse
++import json
++import os
++import subprocess
++import sys
++import time
++
++SEL = "results/iter_045/decisions/D24_select.json"
++ROOT = "results/iter_045/timing/main"
++
++
++def run(cmd, log):
++    t = time.time()
++    p = subprocess.run(cmd, capture_output=True, text=True)
++    open(log, "a").write(f"$ {' '.join(cmd)}\nrc={p.returncode} dt={time.time()-t:.1f}\n{p.stdout[-3000:]}\n{p.stderr[-3000:]}\n")
++    return p.returncode
++
++
++def main():
++    ap = argparse.ArgumentParser()
++    ap.add_argument("--k", type=int, required=True)
++    ap.add_argument("--attempt", type=int, default=1)
++    a = ap.parse_args()
++    sel = json.load(open(SEL))["selected"]
++    lead = "C" if a.k % 2 == 1 else "MG"
++    order = [lead, "MG" if lead == "C" else "C"]
++    os.makedirs(ROOT, exist_ok=True)
++    log = os.path.join(ROOT, f"block{a.k}_attempt{a.attempt}.driver.log")
++    for sysname in order:
++        d = os.path.join(ROOT, f"block{a.k}_a{a.attempt}_{sysname}")
++        if os.path.exists(d):
++            sys.exit(f"exists: {d}")
++        if sysname == "C":
++            cmd = [sys.executable, "mg45_ctime.py", "launch", "--out-dir", d, "--workers", "4", "--gpus", "0,1", "--barrier", "--warmup-n", "8"]
++        else:
++            cmd = [sys.executable, "mg45_launch.py", "--set", "V96", "--ckpt", sel["ckpt"], "--out-dir", d, "--workers", "2", "--gpus", "0,1",
++                   "--batch", "4", "--post-thr", str(sel["threshold"]), "--warmup-d8", "--barrier"]
++        rc = run(cmd, log)
++        print(sysname, "rc", rc, d)
++        if rc != 0:
++            sys.exit(f"technical failure in {sysname}: preserve {d}; rerun whole paired block with --attempt {a.attempt + 1}")
++        time.sleep(10)  # GPU 메모리 반환·clock 안정화
++
++
++if __name__ == "__main__":
++    main()
+diff --git a/mg45_verify.py b/mg45_verify.py
+new file mode 100644
+index 0000000..55c9d29
+--- /dev/null
++++ b/mg45_verify.py
+@@ -0,0 +1,183 @@
++"""iter_045 독립 검증기 (CPU only). report 계산(pg39_spec.match_fast / parse_ids)과 별도로 구현한다:
++  - C 출력: 자체 JSON 해석(전체 문자열이 JSON list) + 자체 canvas->원본 정규화 변환 + 완전탐색 최대 cardinality matching(동률 총 IoU 최대).
++  - MG 출력: raw logits에서 softmax/threshold 통과 수 재계산(pre_wbf_n), 저장된 최종 box를 같은 완전탐색 matching으로 채점.
++  - report 의 시스템별 환자 F1@0.3/0.5, FP/문장, 평균과 paired bootstrap CI(C - MG-selected)를 독립 계산해 대조한다.
++불일치가 하나라도 있으면 종료 코드 1 (불일치 시스템/환자를 제외한 PASS 금지).
++python mg45_verify.py --report results/iter_045/eval/report.json --out results/iter_045/eval/verify.json
++"""
++import argparse
++import itertools
++import json
++import math
++import os
++import sys
++
++import numpy as np
++
++import mg45_eval as E
++
++MAN = E.MAN
++
++
++def iou(a, b):
++    ix = max(0.0, min(a[2], b[2]) - max(a[0], b[0]))
++    iy = max(0.0, min(a[3], b[3]) - max(a[1], b[1]))
++    inter = ix * iy
++    ua = (a[2] - a[0]) * (a[3] - a[1]) + (b[2] - b[0]) * (b[3] - b[1]) - inter
++    return inter / ua if ua > 0 else 0.0
++
++
++def best_matching(pred, gt, thr):
++    """완전탐색: (일치 수, 총 IoU) 사전식 최대. 작은 쪽을 순회하며 큰 쪽의 서로 다른 원소 또는 미할당에 배정."""
++    if not pred or not gt:
++        return 0
++    small, big, flip = (pred, gt, False) if len(pred) <= len(gt) else (gt, pred, True)
++    w = [[(iou(s, b)) for b in big] for s in small]
++    best = [(0, 0.0)]
++
++    def rec(i, used, cnt, tot):
++        if i == len(small):
++            if (cnt, tot) > best[0]:
++                best[0] = (cnt, tot)
++            return
++        rec(i + 1, used, cnt, tot)  # 미할당
++        for j in range(len(big)):
++            if j not in used and w[i][j] >= thr:
++                rec(i + 1, used | {j}, cnt + 1, tot + w[i][j])
++    rec(0, frozenset(), 0, 0.0)
++    return best[0][0]
++
++
++def f1(pred, gt, thr):
++    tp = best_matching(pred, gt, thr)
++    p = tp / len(pred) if pred else 0.0
++    r = tp / len(gt) if gt else 0.0
++    return 2 * p * r / (p + r) if p + r > 0 else 0.0, len(pred) - tp, r
++
++
++def own_parse_list(text):
++    """전체 문자열(<end_of_turn> 제거 후)이 JSON list이고 각 원소가 box_2d(4개 수)를 갖는 경우만 인정. 그 외 None."""
++    t = text.strip()
++    if t.endswith("<end_of_turn>"):
++        t = t[: -len("<end_of_turn>")].strip()
++    try:
++        v = json.loads(t)
++    except Exception:
++        return None
++    if not isinstance(v, list):
++        return None
++    out = []
++    for it in v:
++        if not isinstance(it, dict) or "box_2d" not in it:
++            return None
++        b = it["box_2d"]
++        if not (isinstance(b, list) and len(b) == 4 and all(isinstance(x, (int, float)) for x in b)):
++            return None
++        out.append([float(x) for x in b])
++    return out
++
++
++def main():
++    ap = argparse.ArgumentParser()
++    ap.add_argument("--report", required=True)
++    ap.add_argument("--out", required=True)
++    a = ap.parse_args()
++    if os.path.exists(a.out):
++        sys.exit("output exists")
++    rep = json.load(open(a.report))
++    per = json.load(open(a.report.replace(".json", "_per_item.json")))
++    man = json.load(open(MAN))
++    ents = {e["PatientID"]: e for e in man["V96"]}
++    pids = sorted(ents)
++    sel = json.load(open("results/iter_045/decisions/D24_select.json"))
++    res = {"mismatches": [], "systems": {}}
++
++    # ---- C ----
++    import glob
++    crecs = {}
++    for f in glob.glob("results/iter_040/gen/C/gen_worker*.jsonl"):
++        for l in open(f):
++            r = json.loads(l)
++            crecs[(r["patient"], r["targets"][0])] = r
++    own = {}
++    n_unparsed = 0
++    for (p, t), r in crecs.items():
++        e = ents[p]
++        top, left, side = (r["pad_affine_top_left_side"][0], r["pad_affine_top_left_side"][1], r["pad_affine_top_left_side"][2])
++        boxes = own_parse_list(r["suffix_text_raw"]) if r["ended_eos"] else None
++        if boxes is None:
++            n_unparsed += 1
++            boxes = []
++        orig = []
++        for y0, x0, y1, x1 in boxes:
++            X0, Y0, X1, Y1 = x0 * side / 1000 - left, y0 * side / 1000 - top, x1 * side / 1000 - left, y1 * side / 1000 - top
++            orig.append([X0 / e["w"], Y0 / e["h"], X1 / e["w"], Y1 / e["h"]])
++        gt = e["gt_boxes_xyxy_norm"][t]
++        a3, fp3, rec3 = f1(orig, gt, 0.3)
++        a5, _, _ = f1(orig, gt, 0.5)
++        own[(p, t)] = {"f1_03": a3, "f1_05": a5, "fp_03": fp3, "empty": len(orig) == 0}
++    res["C_own_unparsed_or_noneos"] = n_unparsed
++    # ---- MG ----
++    def mg_own(ck, thr):
++        recs, _, _ = E.verify_mg_dir({"P": "results/iter_045/mg/V96_P_w2b4", "MS": "results/iter_045/mg/V96_MS_w2b4"}[ck], "V96", ck, man)
++        out, pass_bad = {}, 0
++        for (p, t), r in recs.items():
++            lg = np.array(r["logits"], dtype=np.float64)
++            ex = np.exp(lg - lg.max(axis=-1, keepdims=True))
++            prob0 = (ex / ex.sum(axis=-1, keepdims=True))[:, 0]
++            n_pass = int((prob0 > thr).sum())
++            pass_bad += int(n_pass != r["detections"][str(thr)]["pre_wbf_n"])
++            boxes = r["detections"][str(thr)]["boxes_orig_xyxy"]
++            gt = ents[p]["gt_boxes_xyxy_norm"][t]
++            a3, fp3, _ = f1(boxes, gt, 0.3)
++            a5, _, _ = f1(boxes, gt, 0.5)
++            out[(p, t)] = {"f1_03": a3, "f1_05": a5, "fp_03": fp3, "empty": len(boxes) == 0}
++        return out, pass_bad
++    P_thr, MS_thr = sel["ckpts"]["P"]["selected_threshold"], sel["ckpts"]["MS"]["selected_threshold"]
++    systems = {"C": (own, 0)}
++    systems["MG-P@sel"] = mg_own("P", P_thr)
++    systems["MG-MS@sel"] = mg_own("MS", MS_thr)
++    systems["MG-P@0.8"] = mg_own("P", 0.8)
++    systems["MG-MS@0.8"] = mg_own("MS", 0.8)
++    for name, (sc, pass_bad) in systems.items():
++        rp = per[name]
++        md = {"f1_03": 0.0, "f1_05": 0.0, "fp_03": 0.0}
++        for (p, t), v in sc.items():
++            q = rp[f"{p}|{t}"]
++            for k in md:
++                md[k] = max(md[k], abs(v[k] - q[k]))
++        mean03 = float(np.mean([np.mean([sc[(p, t)]["f1_03"] for t in ("qA", "qB")]) for p in pids]))
++        mean05 = float(np.mean([np.mean([sc[(p, t)]["f1_05"] for t in ("qA", "qB")]) for p in pids]))
++        fpm = float(np.mean([np.mean([sc[(p, t)]["fp_03"] for t in ("qA", "qB")]) for p in pids]))
++        ok = md["f1_03"] < 1e-9 and md["f1_05"] < 1e-9 and md["fp_03"] < 1e-9 and pass_bad == 0 \
++            and abs(mean03 - rep["primary_V96"][name]["f1_03"]) < 1e-9 and abs(mean05 - rep["primary_V96"][name]["f1_05"]) < 1e-9 \
++            and abs(fpm - rep["primary_V96"][name]["fp_per_sentence"]) < 1e-9
++        ok = bool(ok)
++        res["systems"][name] = {"own_f1_03": mean03, "own_f1_05": mean05, "own_fp_per_sentence": fpm, "max_abs_item_diff_vs_report": md,
++                                "threshold_pass_count_mismatch": pass_bad, "ok": bool(ok)}
++        if not ok:
++            res["mismatches"].append(name)
++    # C 저장값 재현
++    res["C_matches_stored_iter040"] = bool(abs(res["systems"]["C"]["own_f1_03"] - 0.5779513888888889) < 1e-9 and abs(res["systems"]["C"]["own_f1_05"] - 0.2911458333333333) < 1e-9)
++    if not res["C_matches_stored_iter040"]:
++        res["mismatches"].append("C_stored")
++    # 독립 paired bootstrap (C - MG-selected)
++    sn = f"MG-{sel['selected']['ckpt']}@sel"
++    d = np.array([np.mean([own[(p, t)]["f1_03"] - systems[sn][0][(p, t)]["f1_03"] for t in ("qA", "qB")]) for p in pids])
++    idx = np.random.default_rng(4401).integers(0, len(pids), size=(10000, len(pids)), dtype=np.int32)
++    m = d[idx].mean(axis=1)
++    lo, hi = float(np.percentile(m, 1.25)), float(np.percentile(m, 98.75))
++    rc = rep["compare_paired_ci975"][f"C_minus_{sn}"]["f1_03"]
++    res["bootstrap_C_minus_sel_f1_03"] = {"own": [float(d.mean()), lo, hi], "report": [rc["mean"], rc["lo"], rc["hi"]],
++                                          "ok": bool(abs(lo - rc["lo"]) < 1e-9 and abs(hi - rc["hi"]) < 1e-9 and abs(d.mean() - rc["mean"]) < 1e-9)}
++    if not res["bootstrap_C_minus_sel_f1_03"]["ok"]:
++        res["mismatches"].append("bootstrap")
++    res["PASS"] = len(res["mismatches"]) == 0
++    json.dump(res, open(a.out, "x"), indent=1)
++    print(json.dumps({"PASS": res["PASS"], "mismatches": res["mismatches"], "systems": {k: v["ok"] for k, v in res["systems"].items()},
++                      "C_unparsed": n_unparsed, "bootstrap_ok": res["bootstrap_C_minus_sel_f1_03"]["ok"]}))
++    sys.exit(0 if res["PASS"] else 1)
++
++
++if __name__ == "__main__":
++    main()
+diff --git a/mg45_vrun.py b/mg45_vrun.py
+new file mode 100644
+index 0000000..29a48e4
+--- /dev/null
++++ b/mg45_vrun.py
+@@ -0,0 +1,23 @@
++"""격리 venv(medgrounder_iter045)의 python으로 스크립트를 실행하는 얇은 실행기.
++
++사용: python mg45_vrun.py <script.py> [args...]
++CUDA_VISIBLE_DEVICES 등 환경은 상속한다. 전체 출력은 results/iter_045/logs/<script>_<ts>.log 에 보존하고 마지막 40줄만 보여 준다.
++(긴 진행 막대·경고를 반복 출력하지 않기 위함.)
++"""
++import os
++import subprocess
++import sys
++import time
++
++HERE = os.path.dirname(os.path.abspath(__file__))
++PY = os.path.join(HERE, "results", "environments", "medgrounder_iter045", "bin", "python")
++
++if __name__ == "__main__":
++    os.makedirs(os.path.join(HERE, "results", "iter_045", "logs"), exist_ok=True)
++    log = os.path.join(HERE, "results", "iter_045", "logs", f"{os.path.basename(sys.argv[1])}_{int(time.time())}.log")
++    with open(log, "wb") as f:
++        rc = subprocess.call([PY] + sys.argv[1:], cwd=HERE, env=dict(os.environ), stdout=f, stderr=subprocess.STDOUT)
++    lines = open(log, errors="replace").read().replace("\r", "\n").splitlines()
++    print("\n".join(lines[-40:]))
++    print(f"[vrun] rc={rc} log={log}")
++    sys.exit(rc)
+diff --git a/mg45_weights.py b/mg45_weights.py
+new file mode 100644
+index 0000000..f01beb6
+--- /dev/null
++++ b/mg45_weights.py
+@@ -0,0 +1,127 @@
++"""iter_045: MedGrounder 공개 가중치(Google Drive 폴더)에서 비적응 후보 두 개만 받는다.
++
++사용: python mg45_weights.py list | get
++venv python(medgrounder_iter045)에서 gdown을 실행한다. PadChest 적응(pc, mspc) 가중치는 받지 않는다.
++"""
++import hashlib
++import json
++import os
++import subprocess
++import sys
++
++HERE = os.path.dirname(os.path.abspath(__file__))
++PY = os.path.join(HERE, "results", "environments", "medgrounder_iter045", "bin", "python")
++OUT = os.path.join(HERE, "results", "iter_045", "external", "weights")
++FOLDER = "https://drive.google.com/drive/folders/1fwr-Bi2ICb26-MIJVKPxwhHVWGJaaBvz"
++WANT = ["medgrounder_pretrain_imagenome.pth", "medgrounder_finetune_ms.pth"]
++
++LIST_CODE = """
++import gdown, json, sys
++fs = gdown.download_folder(url=sys.argv[1], skip_download=True, quiet=True, use_cookies=False)
++print(json.dumps([{'id': f.id, 'path': f.path} for f in fs]))
++"""
++
++
++def listing():
++    p = subprocess.run([PY, "-c", LIST_CODE, FOLDER], capture_output=True, text=True)
++    if p.returncode != 0:
++        print(p.stderr[-3000:])
++        sys.exit(1)
++    items = json.loads(p.stdout.strip().splitlines()[-1])
++    os.makedirs(OUT, exist_ok=True)
++    with open(os.path.join(OUT, "drive_listing.json"), "w") as f:
++        json.dump({"folder": FOLDER, "items": items}, f, indent=1)
++    print(json.dumps(items, indent=1))
++    return items
++
++
++def sha256(path):
++    h = hashlib.sha256()
++    with open(path, "rb") as f:
++        for b in iter(lambda: f.read(1 << 24), b""):
++            h.update(b)
++    return h.hexdigest()
++
++
++def get():
++    items = listing()
++    manifest = {}
++    for name in WANT:
++        hit = [i for i in items if os.path.basename(i["path"]) == name]
++        if len(hit) != 1:
++            raise SystemExit(f"{name}: {len(hit)} matches in listing")
++        dest = os.path.join(OUT, name)
++        if os.path.exists(dest):
++            print("exists, not overwriting", dest)
++        else:
++            tmp = dest + ".part"
++            code = "import gdown,sys;gdown.download(id=sys.argv[1],output=sys.argv[2],quiet=False,use_cookies=False)"
++            p = subprocess.run([PY, "-c", code, hit[0]["id"], tmp], capture_output=True, text=True)
++            with open(os.path.join(OUT, "download.log"), "a") as f:
++                f.write(f"{name} rc={p.returncode}\n{p.stderr[-3000:]}\n")
++            if p.returncode != 0 or not os.path.exists(tmp):
++                raise SystemExit(f"download failed {name}: {p.stderr[-1500:]}")
++            os.rename(tmp, dest)
++        manifest[name] = {"drive_id": hit[0]["id"], "bytes": os.path.getsize(dest), "sha256": sha256(dest)}
++    with open(os.path.join(OUT, "weights_manifest.json"), "w") as f:
++        json.dump(manifest, f, indent=1)
++    print(json.dumps(manifest, indent=1))
++
++
++TEXT_ENC = "thomas-sounack/BioClinical-ModernBERT-base"
++TE_CODE = """
++import sys, json
++from huggingface_hub import HfApi, snapshot_download
++repo, dest = sys.argv[1], sys.argv[2]
++info = HfApi().model_info(repo)
++p = snapshot_download(repo_id=repo, revision=info.sha, local_dir=dest)
++print(json.dumps({'repo': repo, 'revision': info.sha, 'path': p, 'license': getattr(info, 'card_data', None) and info.card_data.to_dict().get('license')}))
++"""
++
++
++def textenc():
++    dest = os.path.join(HERE, "results", "iter_045", "external", "text_encoder")
++    if os.path.exists(dest):
++        print("exists, not overwriting", dest)
++        return
++    p = subprocess.run([PY, "-c", TE_CODE, TEXT_ENC, dest], capture_output=True, text=True)
++    if p.returncode != 0:
++        print(p.stderr[-3000:])
++        sys.exit(1)
++    info = json.loads(p.stdout.strip().splitlines()[-1])
++    files = {}
++    for r, _, fs in os.walk(dest):
++        for fn in fs:
++            fp = os.path.join(r, fn)
++            if ".cache" in fp:
++                continue
++            files[os.path.relpath(fp, dest)] = sha256(fp)
++    info["files_sha256"] = files
++    with open(os.path.join(os.path.dirname(dest), "text_encoder_manifest.json"), "w") as f:
++        json.dump(info, f, indent=1)
++    print(json.dumps({k: v for k, v in info.items() if k != "files_sha256"}, indent=1), len(files), "files")
++
++
++CACHE_CODE = """
++import sys
++from huggingface_hub import snapshot_download
++print(snapshot_download(repo_id=sys.argv[1], revision=sys.argv[2], cache_dir=sys.argv[3]))
++"""
++
++
++def textenc_cache():
++    """공식 코드가 hub 이름('thomas-sounack/BioClinical-ModernBERT-base')으로 from_pretrained 하므로 고정 revision의 오프라인 cache를 만든다."""
++    man = json.load(open(os.path.join(HERE, "results", "iter_045", "external", "text_encoder_manifest.json")))
++    cache = os.path.join(HERE, "results", "iter_045", "external", "hf_cache")
++    p = subprocess.run([PY, "-c", CACHE_CODE, TEXT_ENC, man["revision"], cache], capture_output=True, text=True)
++    print(p.stdout, p.stderr[-1500:])
++    if p.returncode != 0:
++        sys.exit(1)
++    refs = os.path.join(cache, "models--thomas-sounack--BioClinical-ModernBERT-base", "refs")
++    os.makedirs(refs, exist_ok=True)
++    with open(os.path.join(refs, "main"), "w") as f:
++        f.write(man["revision"])
++
++
++if __name__ == "__main__":
++    {"list": listing, "get": get, "textenc": textenc, "textenc_cache": textenc_cache}[sys.argv[1]]()
+diff --git a/mg45_worker.py b/mg45_worker.py
+new file mode 100644
+index 0000000..1438679
+--- /dev/null
++++ b/mg45_worker.py
+@@ -0,0 +1,189 @@
++"""iter_045 MedGrounder worker (venv 실행). 한 프로세스 = 모델 1개 = GPU 1장(CUDA_VISIBLE_DEVICES로 지정됨).
++
++python mg45_vrun.py mg45_worker.py --set D24 --ckpt P --out-dir DIR --worker K --n-workers N --batch B
++        [--post-thr 0.4]  (지정하면 해당 threshold만 inline 후처리: timing 용 / 미지정이면 THRESHOLDS 전부 후처리해 저장)
++        [--warmup-d8] [--barrier DIR]  (barrier: ready.K 작성 후 go 파일 대기. timing block 용)
++
++작업 할당: 환자를 PatientID 순으로 정렬해 i % n_workers == worker 인 환자를 담당(정적 분할, 겹침/누락 없음).
++출력: DIR/raw_worker{K}.jsonl (환자×문장 1행; 완결 행만 인정, 재개 시 이미 있는 행은 건너뜀), DIR/worker{K}.meta.json.
++GT는 읽지 않는다 (manifest의 sentences/image/hash만 사용).
++"""
++import argparse
++import json
++import os
++import sys
++import time
++
++import mg45_mg as M
++
++MAN = "results/iter_043/data/manifest_private.json"
++
++
++def sha_s(s):
++    import hashlib
++    return hashlib.sha256(s.encode()).hexdigest()
++
++
++def load_set(name):
++    man = json.load(open(MAN))
++    ents = sorted(man[name], key=lambda e: e["PatientID"])
++    return man, ents
++
++
++def rid(setname, ckpt, patient, t):
++    return sha_s(f"{setname}|{ckpt}|{patient}|{t}")[:32]
++
++
++def read_done(path):
++    out = {}
++    if os.path.exists(path):
++        data = open(path, "rb").read()
++        for ln in data.split(b"\n")[:-1]:
++            if ln.strip():
++                r = json.loads(ln)
++                out[r["request_id"]] = r
++    return out
++
++
++def repair_tail(path):
++    if not os.path.exists(path):
++        return 0
++    data = open(path, "rb").read()
++    if data and not data.endswith(b"\n"):
++        tail = data.rsplit(b"\n", 1)[-1]
++        keep = f"{path}.partial.{int(time.time())}.{os.getpid()}.bin"
++        with open(keep, "xb") as f:
++            f.write(tail)
++        with open(path, "r+b") as f:
++            f.truncate(len(data) - len(tail))
++        return len(tail)
++    return 0
++
++
++def main():
++    ap = argparse.ArgumentParser()
++    ap.add_argument("--set", required=True, choices=["D8", "D24", "V96"])
++    ap.add_argument("--ckpt", required=True, choices=["P", "MS"])
++    ap.add_argument("--out-dir", required=True)
++    ap.add_argument("--worker", type=int, default=0)
++    ap.add_argument("--n-workers", type=int, default=1)
++    ap.add_argument("--batch", type=int, default=1, help="forward 1회당 (영상,문장) 항목 수")
++    ap.add_argument("--post-thr", type=float, default=None)
++    ap.add_argument("--warmup-d8", action="store_true")
++    ap.add_argument("--barrier", default=None)
++    ap.add_argument("--max-items", type=int, default=None, help="재개 시험용: 새 항목 N개 후 정상 종료")
++    ap.add_argument("--stop-after-items", type=int, default=None, help="재개 시험용: N개 기록 직후 SIGKILL 유사 중단(os._exit)")
++    a = ap.parse_args()
++    import torch
++    t_proc = time.time()
++    dev = torch.device("cuda:0")
++    man, ents = load_set("D24" if a.set == "D8" else a.set)
++    if a.set == "D8":
++        keep = set(man["D8"])
++        ents = [e for e in ents if e["PatientID"] in keep]
++    mine = [e for i, e in enumerate(ents) if i % a.n_workers == a.worker]
++    os.makedirs(a.out_dir, exist_ok=True)
++    out = os.path.join(a.out_dir, f"raw_worker{a.worker}.jsonl")
++    repair_tail(out)
++    done = read_done(out)
++    model, cfg, load = M.load_model(a.ckpt, dev)
++    if load["missing"] or load["unexpected"]:
++        sys.exit(f"state dict mismatch {load}")
++    tf = M.val_transform()
++    t_ready_model = time.time()
++    ckpt_sha = M.file_sha(M.WEIGHTS[a.ckpt])
++    gpu_uuid = None
++    try:
++        gpu_uuid = str(torch.cuda.get_device_properties(0).uuid)
++    except Exception:
++        pass
++    thrs = [a.post_thr] if a.post_thr is not None else M.THRESHOLDS
++
++    def run_group(group, record):
++        """group: list of (entry, target). returns list of records."""
++        t0 = time.time()
++        imgs, affs, shas, cache = [], [], [], {}
++        for e, t in group:
++            if e["PatientID"] not in cache:
++                ten, aff, u8 = M.prepare(e["image"], tf)
++                if u8 != e["u8_pixel_sha256"]:
++                    raise RuntimeError(f"decoded pixel hash != manifest {e['PatientID']}")
++                cache[e["PatientID"]] = (ten, aff, u8)
++            ten, aff, u8 = cache[e["PatientID"]]
++            imgs.append(ten)
++            affs.append(aff)
++            shas.append(u8)
++        t1 = time.time()
++        lg, bx = M.forward(model, imgs, [e["sentences"][t] for e, t in group], dev)
++        t2 = time.time()
++        dets = {thr: M.postprocess(lg, bx, thr) for thr in thrs}
++        t3 = time.time()
++        recs = []
++        if record:
++            for i, (e, t) in enumerate(group):
++                det = {}
++                for thr in thrs:
++                    d = dets[thr][i]
++                    det[f"{thr}"] = {"boxes_orig_xyxy": M.canvas_cxcywh_to_orig_xyxy(d["boxes"], affs[i]), "scores": d["scores"],
++                                     "pre_wbf_n": d["pre_wbf_n"]}
++                recs.append({"request_id": rid(a.set, a.ckpt, e["PatientID"], t), "set": a.set, "ckpt": a.ckpt, "patient": e["PatientID"],
++                             "target": t, "sentence_sha256": sha_s(e["sentences"][t]), "image": e["image"],
++                             "u8_pixel_sha256": shas[i], "aff": affs[i], "logits": lg[i].tolist(), "pred_boxes_cxcywh": bx[i].tolist(),
++                             "detections": det, "batch": a.batch, "group_n": len(group), "worker": a.worker, "n_workers": a.n_workers,
++                             "t_dispatch": t0, "t_loaded": t1, "t_forward_done": t2, "t_done": t3,
++                             "load_s": t1 - t0, "forward_s": t2 - t1, "post_s": t3 - t2,
++                             "ckpt_sha256": ckpt_sha, "post_thr_mode": a.post_thr, "gpu_uuid": gpu_uuid,
++                             "cuda_visible": os.environ.get("CUDA_VISIBLE_DEVICES"),
++                             "peak_alloc_gb": torch.cuda.max_memory_allocated() / 2**30})
++        return recs
++
++    if a.warmup_d8:
++        man8 = set(man["D8"])
++        d24 = {e["PatientID"]: e for e in man["D24"]}
++        wu = [(d24[p], t) for p in sorted(man8) for t in ("qA", "qB")]
++        for s in range(0, len(wu), a.batch):
++            run_group(wu[s:s + a.batch], record=False)
++        torch.cuda.synchronize()
++    torch.cuda.reset_peak_memory_stats()
++    t_warm = time.time()
++    if a.barrier:
++        open(os.path.join(a.barrier, f"ready.{a.worker}"), "w").write(json.dumps({"t": time.time(), "pid": os.getpid()}))
++        gof = os.path.join(a.barrier, "go")
++        while not os.path.exists(gof):
++            time.sleep(0.005)
++        t_go = json.load(open(gof))["t"]
++    else:
++        t_go = None
++    # 작업 목록: 환자 순서 유지, 환자의 두 문장을 연속 배치
++    items = [(e, t) for e in mine for t in ("qA", "qB") if rid(a.set, a.ckpt, e["PatientID"], t) not in done]
++    n_new = 0
++    t_first = None
++    with open(out, "a") as f:
++        for s in range(0, len(items), a.batch):
++            if a.max_items is not None and n_new >= a.max_items:
++                break
++            group = items[s:s + a.batch]
++            recs = run_group(group, record=True)
++            if t_first is None:
++                t_first = recs[0]["t_dispatch"]
++            for r in recs:
++                f.write(json.dumps(r) + "\n")
++                f.flush()
++                os.fsync(f.fileno())
++                n_new += 1
++                if a.stop_after_items is not None and n_new >= a.stop_after_items:
++                    os._exit(137)
++    t_end = time.time()
++    if a.barrier:
++        open(os.path.join(a.barrier, f"done.{a.worker}"), "w").write(json.dumps({"t": t_end, "n_new": n_new}))
++    json.dump({"worker": a.worker, "n_workers": a.n_workers, "set": a.set, "ckpt": a.ckpt, "batch": a.batch, "post_thr": a.post_thr,
++               "n_assigned": len(mine) * 2, "n_new": n_new, "t_proc_start": t_proc, "t_model_ready": t_ready_model, "t_warm_done": t_warm,
++               "t_go": t_go, "t_first_dispatch": t_first, "t_end": t_end, "load_s": t_ready_model - t_proc,
++               "peak_alloc_gb": torch.cuda.max_memory_allocated() / 2**30, "peak_reserved_gb": torch.cuda.max_memory_reserved() / 2**30,
++               "cuda_visible": os.environ.get("CUDA_VISIBLE_DEVICES"), "gpu_uuid": gpu_uuid, "ckpt_sha256": ckpt_sha},
++              open(os.path.join(a.out_dir, f"worker{a.worker}.meta.{int(t_proc)}.json"), "x"), indent=1)
++    print(f"worker {a.worker}: done, {n_new} new items", flush=True)
++
++
++if __name__ == "__main__":
++    main()
+diff --git a/test_mg45.py b/test_mg45.py
+new file mode 100644
+index 0000000..d957447
+--- /dev/null
++++ b/test_mg45.py
+@@ -0,0 +1,200 @@
++"""iter_045 CPU fixture/regression 검사. 결과: results/iter_045/tests/fixtures_mg45.json (기존 파일은 덮어쓰지 않는다).
++
++python test_mg45.py
++"""
++import glob
++import hashlib
++import json
++import os
++import random
++import shutil
++import subprocess
++import sys
++import time
++
++import numpy as np
++
++import mg45_eval as E
++import mg45_report as RP
++import mg45_verify as V
++import pg39_spec as S39
++import pg43_run as R
++
++OUT = sys.argv[1] if len(sys.argv) > 1 else "results/iter_045/tests/fixtures_mg45.json"
++RES = []
++
++
++def check(name, ok, detail=None):
++    RES.append({"name": name, "pass": bool(ok), "detail": detail})
++    print(("PASS " if ok else "FAIL ") + name, detail if not ok else "")
++
++
++def raises(fn, exc):
++    try:
++        fn()
++    except exc as e:
++        return True, str(e)[:120]
++    except Exception as e:
++        return False, f"wrong exception {type(e).__name__}: {e}"
++    return False, "no exception"
++
++
++def copy_dir(src, tag):
++    dst = f"results/iter_045/tests/tmp_{tag}_{int(time.time()*1000)%10**9}"
++    shutil.copytree(src, dst)
++    return dst
++
++
++def main():
++    if os.path.exists(OUT):
++        sys.exit("fixture output exists")
++    man = json.load(open(E.MAN))
++    # ---- A. 반입 blob 일치 ----
++    files = ["pg43_run.py", "pg43_eval.py", "pg43_retrieval.py", "pg39_spec.py", "pg39_data.py", "pg41_verify.py", "rsna_diag/__init__.py", "rsna_diag/generate.py",
++             "rsna_diag/geometry.py", "rsna_diag/metrics.py", "rsna_diag/parse.py", "rsna_diag/prompts.py", "rsna_diag/lora.py", "rsna_diag/queue_lock.py"]
++    src = "b50aa230a86c6d5b6c6b280fe718170ce4ecf220"
++    bad = []
++    for f in files:
++        h = subprocess.run(["git", "hash-object", "--", f], capture_output=True, text=True).stdout.strip()
++        b = subprocess.run(["git", "rev-parse", f"{src}:{f}"], capture_output=True, text=True).stdout.strip()
++        if h != b:
++            bad.append(f)
++    check("A1 reused 14 files == source blobs", not bad, bad)
++    # ---- B. MG dir 변조 거부 ----
++    base = "results/iter_045/mg/D24_P_w1b1"
++    ok_recs, _, _ = E.verify_mg_dir(base, "D24", "P", man)
++    check("B0 clean D24_P verifies (48 records)", len(ok_recs) == 48)
++    d = copy_dir(base, "edit_logit")
++    f = d + "/raw_worker0.jsonl"
++    rows = [json.loads(l) for l in open(f)]
++    rows[0]["logits"][0][0] += 0.5
++    open(f, "w").write("".join(json.dumps(r) + "\n" for r in rows))
++    ok, msg = raises(lambda: E.verify_mg_dir(d, "D24", "P", man), E.EvalError)
++    check("B1 edited raw row rejected (file hash)", ok, msg)
++    d = copy_dir(base, "drop_row")
++    f = d + "/raw_worker0.jsonl"
++    lines = open(f).read().splitlines(True)
++    open(f, "w").write("".join(lines[:-1]))
++    ok, msg = raises(lambda: E.verify_mg_dir(d, "D24", "P", man), E.EvalError)
++    check("B2 dropped row rejected", ok, msg)
++    d = copy_dir(base, "dup_row")
++    f = d + "/raw_worker0.jsonl"
++    lines = open(f).read().splitlines(True)
++    open(f, "w").write("".join(lines + lines[:1]))
++    ok, msg = raises(lambda: E.verify_mg_dir(d, "D24", "P", man), E.EvalError)
++    check("B3 duplicated row rejected", ok, msg)
++    d = copy_dir(base, "proto")
++    p = json.load(open(d + "/launch_protocol.json"))
++    p["code"]["mg45_mg.py"] = "0" * 64
++    json.dump(p, open(d + "/launch_protocol.json", "w"))
++    ok, msg = raises(lambda: E.verify_mg_dir(d, "D24", "P", man), E.EvalError)
++    check("B4 edited launch protocol rejected", ok, msg)
++    d = copy_dir(base, "comp")
++    c = json.load(open(d + "/completion.json"))
++    c["exit_codes"] = [1]
++    json.dump(c, open(d + "/completion.json", "w"))
++    ok, msg = raises(lambda: E.verify_mg_dir(d, "D24", "P", man), E.EvalError)
++    check("B5 nonzero exit code in completion rejected", ok, msg)
++    ok, msg = raises(lambda: E.verify_mg_dir(base, "D24", "MS", man), E.EvalError)
++    check("B6 wrong ckpt label rejected (ckpt sha/identity)", ok, msg)
++    # ---- C. 재개/torn row ----
++    rd = "results/iter_045/tests/resume_D24_P"
++    rr, rc, _ = E.verify_mg_dir(rd, "D24", "P", man)
++    same = all(rr[k]["logits"] == ok_recs[k]["logits"] and rr[k]["detections"] == ok_recs[k]["detections"] for k in ok_recs)
++    parts = glob.glob(rd + "/raw_worker0.jsonl.partial.*.bin")
++    check("C1 kill(137)+torn-row resume: 48 unique, outputs identical to uninterrupted run", len(rr) == 48 and same, {"n": len(rr)})
++    check("C2 torn bytes preserved in .partial file", len(parts) == 1 and open(parts[0], "rb").read().startswith(b'{"request_id": "torn'), parts)
++    # ---- D. matching 독립 구현 대조 ----
++    rng = random.Random(7)
++
++    def rb():
++        x0, y0 = rng.random() * 0.6, rng.random() * 0.6
++        return [x0, y0, x0 + 0.05 + rng.random() * 0.35, y0 + 0.05 + rng.random() * 0.35]
++    mism = 0
++    for _ in range(400):
++        pred = [rb() for _ in range(rng.randint(0, 5))]
++        gt = [rb() for _ in range(rng.randint(0, 5))]
++        if rng.random() < 0.3 and pred and gt:
++            gt[0] = list(pred[0])  # 동일 box (동점/완전일치)
++        for thr in (0.3, 0.5):
++            a = S39.sent_metrics(pred, gt, thr)
++            f1b, fpb, _ = V.f1(pred, gt, thr)
++            mism += int(abs(a["f1"] - f1b) > 1e-12 or a["fp"] != fpb)
++    check("D1 match_fast == independent exhaustive matching (400 random x2 thr)", mism == 0, mism)
++    tie_pred = [[0.0, 0.0, 0.5, 0.5], [0.0, 0.0, 0.5, 0.5]]
++    tie_gt = [[0.0, 0.0, 0.5, 0.5]]
++    check("D2 duplicate-box tie: one TP one FP", S39.sent_metrics(tie_pred, tie_gt, 0.3)["fp"] == 1 and V.f1(tie_pred, tie_gt, 0.3)[1] == 1)
++    # ---- E. 선택 규칙 ----
++    tb = {0.2: {"f1_03": .5, "f1_05": .2, "fp_per_sentence": .3}, 0.4: {"f1_03": .5, "f1_05": .2, "fp_per_sentence": .3},
++          0.6: {"f1_03": .4, "f1_05": .3, "fp_per_sentence": .1}, 0.8: {"f1_03": .5, "f1_05": .25, "fp_per_sentence": .4}}
++    check("E1 threshold pick: F1@0.3 tie -> F1@0.5 higher (0.8)", E.pick_threshold(tb) == 0.8)
++    tb[0.8]["f1_05"] = 0.2
++    tb[0.8]["fp_per_sentence"] = 0.2
++    check("E2 tie F1@0.3,F1@0.5 -> lower FP (0.8)", E.pick_threshold(tb) == 0.8)
++    tb[0.8]["fp_per_sentence"] = 0.3
++    check("E3 full tie -> higher threshold (0.8)", E.pick_threshold(tb) == 0.8)
++    sel = json.load(open("results/iter_045/decisions/D24_select.json"))
++    cand = {ck: sel["ckpts"][ck]["table"][str(sel["ckpts"][ck]["selected_threshold"])] for ck in ("P", "MS")}
++    check("E4 stored selection reproduces from stored tables", sel["selected"]["ckpt"] == sorted(["MS", "P"], key=lambda ck: (-round(cand[ck]["f1_03"], 12), -round(cand[ck]["f1_05"], 12), round(cand[ck]["fp_per_sentence"], 12)))[0])
++    # ---- F. 비용 통계 helper ----
++    iv = [(0, 4), (2, 6), (10, 12)]
++    check("F1 interval union != request wall sum (gap and overlap handled)", abs(RP.PE_union(iv) - 8.0) < 1e-12 and sum(e - s for s, e in iv) == 10)
++    r = RP.ratio_ci([2, 2, 2, 2, 2, 2], [1, 1, 1, 1, 1, 1])
++    check("F2 constant ratio CI collapses", abs(r["geo_mean"] - 2) < 1e-12 and abs(r["ci95_hi"] - 2) < 1e-9)
++    ok, msg = raises(lambda: RP.ratio_ci([1, 2, 3], [1, 1, 1]), ValueError)
++    check("F3 ratio CI refuses n != 6 (t(5) fixed)", ok, msg)
++    r = RP.ratio_ci([1, 2, 3, 4, 5, 6], [1, 1, 1, 1, 1, 1])
++    x = np.log(np.arange(1, 7, dtype=float))
++    chk = float(np.exp(x.mean() + 2.5705818366147395 * x.std(ddof=1) / np.sqrt(6)))
++    check("F4 ratio CI equals independent log-t formula", abs(r["ci95_hi"] - chk) < 1e-9)
++    # ---- G. C import 변조 거부 (복사본 + 모듈 상수 교체) ----
++    ents = {e["PatientID"]: e for e in man["V96"]}
++    base_c = RP.C_GEN
++    try:
++        RP.verify_c_import(ents)
++        check("G0 clean C import verifies (192)", True)
++    except Exception as e:
++        check("G0 clean C import verifies (192)", False, str(e))
++    d = copy_dir(base_c, "c_clean")
++    # records 편집: suffix_ids 변경 -> record digest 불일치
++    fw = sorted(glob.glob(d + "/gen_worker*.jsonl"))[0]
++    rows = [json.loads(l) for l in open(fw)]
++    rows[0]["suffix_ids"] = rows[0]["suffix_ids"][:-1] + [1]
++    open(fw, "w").write("".join(json.dumps(r) + "\n" for r in rows))
++    RP.C_GEN = d
++    ok, msg = raises(lambda: RP.verify_c_import(ents), R.RunError)
++    check("G1 edited C record rejected (worker file hash/record digest)", ok, msg)
++    d2 = copy_dir(base_c, "c_comp")
++    c = json.load(open(d2 + "/completion.json"))
++    c["protocol_digest"] = "0" * 64
++    json.dump(c, open(d2 + "/completion.json", "w"))
++    RP.C_GEN = d2
++    ok, msg = raises(lambda: RP.verify_c_import(ents), R.RunError)
++    check("G2 completion protocol digest != original protocol rejected", ok, msg)
++    d3 = copy_dir(base_c, "c_drop")
++    fw = sorted(glob.glob(d3 + "/gen_worker*.jsonl"))[0]
++    lines = open(fw).read().splitlines(True)
++    open(fw, "w").write("".join(lines[:-1]))
++    RP.C_GEN = d3
++    ok, msg = raises(lambda: RP.verify_c_import(ents), R.RunError)
++    check("G3 dropped C record rejected", ok, msg)
++    RP.C_GEN = base_c
++    # ---- H. lock 변조 거부 ----
++    if os.path.exists("results/iter_045/eval/eval_lock.json"):
++        lk = json.load(open("results/iter_045/eval/eval_lock.json"))
++        lk["files"]["mg45_eval.py"] = "0" * 64
++        tmp = "results/iter_045/tests/tmp_lock_%d.json" % (int(time.time() * 1000) % 10**9)
++        json.dump(lk, open(tmp, "w"))
++        ok, msg = raises(lambda: RP.check_lock(tmp), E.EvalError)
++        check("H1 changed eval source vs lock rejected", ok, msg)
++    # ---- I. verifier가 불일치를 PASS로 만들지 않는다 (독립 parser 단위) ----
++    check("I1 own parser rejects trailing prose / non-list", V.own_parse_list('[{"box_2d":[1,2,3,4],"label":"qA"}] extra') is None and V.own_parse_list('{"a":1}') is None)
++    check("I2 own parser accepts clean EOS list", V.own_parse_list('[{"box_2d": [10, 20, 30, 40], "label": "qA"}]<end_of_turn>') == [[10.0, 20.0, 30.0, 40.0]])
++    n_pass = sum(r["pass"] for r in RES)
++    json.dump({"n": len(RES), "n_pass": n_pass, "results": RES}, open(OUT, "x"), indent=1)
++    print(f"{n_pass}/{len(RES)} pass")
++    sys.exit(0 if n_pass == len(RES) else 1)
++
++
++if __name__ == "__main__":
++    main()

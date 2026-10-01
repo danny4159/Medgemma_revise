@@ -1264,5 +1264,29 @@ Claude 계정의 /usage 또는 Settings > Usage에서 제한을 확인한 뒤 �
   - 대안: 1) 문장 grounding의 모듈형 대안 비교: 관리 권한을 정합화한 뒤 이미 고정한 정확도·비용 비교를 완료한다. · 2) joint 비용 정정·직접 SFT 검토: 정정 artifact는 유지하되 강한 모듈형 비교 이전의 신규 joint 학습은 보류한다. · 3) track 보류·다른 질문 전환: 고정 비교가 모듈형 대안을 지지하거나 과학적으로 불확정이면 선택한다.
   - 사람에게 묻기로 함: 관리 권한이 있는 별도 세션에서 agent/claude_settings.json의 승인된 공식 자산 조회·격리 설치·읽기 전용 Git 검사 범위만 정합화하고, 회귀 검사 후 재개해 주세요. 설치·GPU 사용의 재승인을 묻는 것은 아닙니다. 현재 설정의 agent/ Edit·Write 거부와 claude_engineer.md의 research/ 한정 수정 규칙 때문에 연구 Claude는 이 선행 변경을 적용할 수 없고, 이번 GPT 단계도 read-only입니다. 단순 진행 승인만으로 같은 차단 상태의 Claude를 재호출하면 안 됩니다.
 - ⏹ 중단: Ctrl+C (계획 확인 중)
+- ↻ 재실행: '계획 확인' 단계부터 이어서 (orchestrator e91b4ca)
+- 🙋 **결정 (사람)**: "f 사용자가 권한 보완 후 iter_045 원 계획 진행을 승인했습니다. 관리 commit 507b3c6 적용 완료, 전체 168 tests 및 실제 Claude 권한 회귀 6건 성공/거부 0. agent/runs/iter_045/management_recovery.md를 먼저 읽고 설정 digest를 확인하세요. 원 iter_044/045 계획과 판정 기준을 유지하여 진행하세요. 현재 Claude 프롬프트의 승인된 curl/Git 형식과 Python 자산 다운로드/격리 설치 경로를 사용하며 추가 관리 권한 변경은 필요하지 않습니다." → 추가 지시 후 진행: 사용자가 권한 보완 후 iter_045 원 계획 진행을 승인했습니다. 관리 commit 507b3c6 적용 완료, 전체 168 tests 및 실제 Claude 권한 회귀 6건 성공/거부 0. agent/runs/iter_045/management_recovery.md를 먼저 읽고 설정 digest를 확인하세요. 원 iter_044/045 계획과 판정 기준을 유지하여 진행하세요. 현재 Claude 프롬프트의 승인된 curl/Git 형식과 Python 자산 다운로드/격리 설치 경로를 사용하며 추가 관리 권한 변경은 필요하지 않습니다.
+- 💾 **개발 이력 체크포인트** `2e431cdc7c7366960e12b7d055c7d3b70fec35c5`: implementation_finished (검증 승인 아님)
+- 🔧 **Claude** (standard): MedGrounder 두 checkpoint를 격리 환경에서 구성해 V96에서 C와 비교했다(C F1@0.3 0.578 대 MG-P 0.395, MG 비용 약 27배 낮음). 사전 규칙상 판정은 track 보류이며 독립 검증은 PASS지만, C timing worker의 중단·재개 시험은 미실행이다. [자체 검증 FAIL, 파일 28899개 변경]
+  - 브랜치 `approach/modular-grounding-comparison`에서 계속
+  - ⚠ 권한 거부 8건
+- 🔍 **리뷰** (GPT normal): [CONTINUE / inconclusive] PadChest 개발96명에서 C의 F1@0.3은 0.578, MedGrounder는 0.395였지만 C 비용은 약 27배였다. 복합 기준은 미달이며, 문장별 방법 확대는 보류하고 적응 예산 차이를 구분하는 한정 비교를 권고한다.
+  - 접근법 판단: C의 정확도 우위와 MG의 비용 우위는 확인됐지만 양쪽 사전 복합 기준은 미충족이다. 다음 투자는 근소한 CI 경계가 아니라 적응 예산 차이를 구분할 가치로 판단한다.
+  - 목표 진전: 실행은 유효하며 부족했던 강한 모듈형 비교군을 확보했다. 직접 SFT C의 F1@0.3 우위와 MG의 큰 추론 비용 이점을 독립 재현했다. 이번에는 새로운 개선 방법을 시험하지 않았다. 정확도 보존과 비용 절감을 함께 달성한다는 모듈형 가설, 제한된 비용으로 C의 잔여 이점을 확보한다는 가설 모두 사전 복합 기준을 충족하지 못했다. 적응 예산 차이라는 경쟁 설명, 공동 요청 손실의 해법, 독립 일반화와 신규 contribution은 남아 있다.
+  - 판정 범위: 불확정 판정은 PadChest-GR의 두 양성 문장을 가진 개발 V96 96명, seed17 직접 SFT C, D24에서 선택한 비적응 MG-P 및 보조 MG-MS, 현재 두 GPU의 고정 실행 구성에 대한 정확도·비용 복합 기준에 한정한다. 공동 요청, 부재 거부, 근거 기반 답변, 의료 VLM 전체의 가치나 경량 적응 가능성을 기각하지 않는다.
+  - 재사용 전 수정: 원 eval_lock은 보존하고 bool 직렬화 수정의 전후 hash·diff를 별도 amendment로 연결해야 한다. report·per_item·timing·decision·verify를 묶은 최종 digest와 completion을 마지막에 확정해야 한다.
+  - 재사용 전 수정: mg45_report.verify_c_import의 code_vs_git 불일치, C timing의 exit code·요청 집합·EOS·input_pixel_equal 불일치를 판정에 강제 반영해야 한다. 현재는 일부 결과가 기록만 되거나 prov_ok에서 빠진다.
+  - 재사용 전 수정: MG launcher는 기존 launch_protocol과 재개 인자를 대조하지 않으며 worker는 저장 행의 config를 확인하지 않고 건너뛴다. 동일 출력 경로의 동시 실행 배타성도 보완해야 한다.
+  - 재사용 전 수정: 양 launcher는 barrier 준비 전 child가 실패하면 나머지 worker가 go를 기다리는 상태에서 wait가 정체될 수 있다. 자기 child만 정리하고 실패를 보존하는 검사가 필요하다.
+  - 재사용 전 수정: C timing은 중단·복구 검사가 미실행이다. timing block은 새 attempt 전체 재측정 정책을 유지하되, 실제 중단 후 안전한 종료·재측정 검사를 완료해야 한다.
+  - 재사용 전 수정: 독립 verifier의 parser는 label·유한 좌표·box 유효성 검사가 부족하고 CI 대조는 F1@0.3에 한정된다. 현재 리뷰에서 보완한 F1@0.5·FP·recall·비용 검증을 실제 사용 경로에 반영해야 한다.
+  - 재사용 전 수정: 환경 및 자산 생성 스크립트는 기록된 package/version·text encoder revision을 재실행 입력으로 고정하고 기존 자산 검증과 부분 실패 보존을 갖춰야 한다.
+  - 추후 개선: MG latency의 t_done은 WBF 직후이며 원본 좌표 변환은 뒤에 수행된다. 다음 비용 측정에서는 양쪽의 후처리 종료 경계를 맞추고 현재 값을 엄밀한 전체 end-to-end latency로 확대 해석하지 않는다.
+  - 추후 개선: CPU/RAM/I/O 경합과 전체 요청량·warm-up·실패 재시도의 통합 비용 장부가 부족하다. GPU 표본 최대 점유를 순간 peak의 완전한 계측으로 부르지 않는다.
+  - 추후 개선: C 구성 선택은 기존 iter_041 D24 실측을 재사용했다. 현재 timing 구현과 다르므로 4 worker를 전역 최적 구성이라고 주장할 수 없다.
+  - 추후 개선: 작은/큰 box 층별 차이는 기술적 관찰이다. 효과 차이의 불확실성과 적응 예산을 통제하지 않아 C의 이점 원인으로 확정할 수 없다.
+  - 추후 개선: V96 개발 선택 편향, 단일 seed, 양성 문장 모집단 및 사전학습 자료 중복의 불확실성은 독립 확인 단계에서 다뤄야 한다.
+  - 다음: 문장별 새 방법 확대는 보류하고, 정확도 격차가 target 적응 차이로 줄어드는지 확인하는 동일 T305 모듈형 적응 비교를 별도 한정 계획으로 우선한다. 이번 원 판정과 문턱은 유지하며 사용자 보완에 따라 후속 투자만 새로 판단한다. 같은 language-conditioned-grounding track에 iter_040~045를 연결하고, MG-P 한 checkpoint·우선 1개 seed·동일 T305 annotation을 사용하는 강한 직접 적응 baseline을 검토한다. 기존 환경·wrapper·C 출력·비용 결과를 재사용하고 실제 사용할 평가·완료 보호만 먼저 보완한다. 새 학습의 메모리와 step 처리량을 작은 동작 확인으로 측정해 수렴 확인에 필요한 학습량·평가 횟수·wall-clock을 실행 전에 고정한다. V96은 이미 본 개발 자료로 표시하고 설정 선택은 train/D24에서만 하며, reserve·새 환자·추가 C timing·threshold 탐색을 자동 추가하지 않는다. MG 적응으로 정확도 격차와 FP 조건이 해소되면 현재 문장별 내부 grounding 방법 투자를 종료·보류한다. 충분한 직접 적응 뒤에도 의미 있는 격차가 남으면 그 정확도 이점을 비용 개선 목표와 연결할 구체적 방법 가치만 재평가하며 새 loss를 자동 시작하지 않는다. 불확정이면 사전 허용한 수렴 확인을 넘겨 연장하지 않고 해당 비교 투자를 보류한다. 공동 요청 손실은 별도 유효 관찰로 보존하되 iter_041 비용 blocker를 이번 문장별 결과로 해제하지 않는다. 이 후속의 가치는 18.3 pp 격차의 적응 예산 설명을 실제 개입으로 구분하는 데 있으며, 근소한 CI 문턱을 넘기 위한 확대가 아니다. 설치·추론 자산은 이미 확보됐지만 학습 비용은 아직 미측정이므로 deep 계획에서 직접 joint SFT 및 다른 질문 전환과 비용·정보 이득을 최종 비교하고 실행 범위를 확정한다. VinDr 승인 대기와 RSNA 자산·보호 reserve는 유지한다.
+- 🏁 **마일스톤**: 문장 grounding에서 직접 SFT의 정확도와 모듈형 모델의 비용 이점이 엇갈렸다 — JOURNEY.md
 - 📁 원본: `agent/runs/iter_045/`
 

@@ -237,3 +237,20 @@ PadChest-GR 개발96명에서 직접 SFT의 큰 개선을 확인해, 낮은 기�
 - 접근법: 문장 대조 grounding pilot (`approach/query-contrast-grounding`), 시도: iter_040
 - 커밋: 18fdae2eec4f4ab3605845fdaeafd1959d9d725f
 - 자세히: DECISIONS.md의 iter_040, `agent/runs/iter_040/review.md`
+
+## 🏁 문장 grounding에서 직접 SFT의 정확도와 모듈형 모델의 비용 이점이 엇갈렸다
+
+*iter_045 · 2026-10-01 18:08 · 판정: CONTINUE / inconclusive*
+
+강한 모듈형 비교군을 실제로 확보해, 직접 SFT의 점수 개선과 실용적 투자 가치를 구분했다.
+**고민:** 직접 SFT는 grounding을 개선했지만 기존 retrieval 비교만으로 VLM 내부 학습의 필요성을 판단하기 어려웠다.
+**시도:** 공동 요청·부재 거부·영상 구별 진단 이후 MedGrounder 비교를 택했고, iter_044의 권한 차단을 복구했다.
+**개발:** 두 checkpoint의 공식 추론 경로와 공통 좌표 평가, D24 선택 및 6개 paired timing을 구성했다.
+**결과:** 개발 V96 96명에서 C/MG-P F1@0.3은 0.578/0.395, 차이는 +0.183 [0.080, 0.285]였다.
+**비용:** MG의 측정 device-seconds는 C의 0.0369배였으며 양쪽 모두 원 정확도·비용 복합 기준은 충족하지 못했다.
+**의미:** 현재 C의 단순 확대도, MG가 충분하다는 단정도 지지되지 않는다. 공동 요청 손실 관찰은 별도로 남는다.
+**다음:** 문장별 새 방법 확대는 보류하고, 적응 예산 차이를 구분할 동일 T305 비교를 한정 계획으로 검토한다. 독립 일반화와 신규 contribution은 미확인이다.
+
+- 접근법: 문장 grounding의 모듈형 대안 비교 (`approach/modular-grounding-comparison`), 시도: iter_044, iter_045
+- 커밋: e908c7d9ccf65e8db0b499d74bbd7fa042f6fce9, 2e431cdc7c7366960e12b7d055c7d3b70fec35c5
+- 자세히: DECISIONS.md의 iter_045, `agent/runs/iter_045/review.md`
