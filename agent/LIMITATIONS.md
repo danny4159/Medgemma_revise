@@ -182,23 +182,24 @@ RSNA seed17 grounding SFT의 nonempty 개발 출력 C201/E402에서 마지막 �
 
 ## padchest-sentence-grounding-and-joint-retention — observed
 
-PadChest-GR 개발 V96에서 직접 SFT C의 문장별 grounding은 학습하지 않은 공동 요청에서 낮아진다는 iter_041 관찰을 유지한다(F1@0.3 독립 0.57795, 공동 AB/BA 0.38108/0.35417). iter_045의 별도 문장별 비교에서 C는 D24로 선택한 비적응 MedGrounder-P보다 F1@0.3이 0.18264 높았지만, 측정한 device-seconds는 약 27배 컸다. 양쪽 모두 원 정확도·비용 복합 기준을 충족하지 못했다. 이 비교는 공동 요청 손실을 설명하거나 반박하지 않으며, 동일 annotation 적응 후의 차이·일반적인 결합 능력 결함·신규 방법의 필요성을 확정하지 않는다.
+PadChest-GR 개발 V96에서 직접 SFT C의 공동 요청 grounding 저하 관찰은 유지된다(독립 F1@0.3 0.57795, 공동 AB/BA 0.38108/0.35417). 그러나 문장별 비교에서 비적응 MedGrounder-P 대비 나타났던 C의 정확도 이점은 동일 T305 annotation으로 MedGrounder를 적응시킨 뒤 점추정치에서 남지 않았다. 고정 threshold 0.4의 적응 효과는 F1@0.3 +0.18333이고, D24 선택 적응 모델 A−C는 +0.01649였다. 적응 효과는 지지되지만 A−C의 F1@0.3 및 FP 신뢰구간은 사전 허용폭을 충족하지 못해 모듈형 대안의 충분성은 불확정이다. 공동 요청 손실의 원인·해법과 VLM 내부 방법의 필요성은 이번 비교로 판정하지 않는다.
 
 - 적용 목표 시작: iter_003
-- 최신 리뷰: agent/runs/iter_045/review.json
-- 근거: agent/runs/iter_041/review.json 및 research/results/iter_041/eval/report_V96.json: 공동 요청의 정확도 손실 관찰과 기존 비용 결합 판정 blocker를 유지한다.
-- 근거: research/results/iter_045/eval/report.json 및 원시 출력: V96 96명·192문장에서 C/MG-P F1@0.3=0.577951/0.395313, C−MG-P=0.182639, 97.5% CI [0.080035, 0.285245].
-- 근거: research/results/iter_045/timing/main/: 6개 paired block의 MG/C device-seconds 비율 0.036942, 95% CI [0.030080, 0.045369]; throughput 비율 26.237, CI [21.052, 32.699].
-- 근거: research/results/iter_045/legacy041_correction/correction.json: iter_041의 반복 비용 CI는 unavailable, 결합 판정은 unresolved로 보존했다.
-- 사용·평가 검증: 리뷰에서 C JSON·좌표 변환과 별도 최대 cardinality matching으로 5개 시스템의 960개 문장 점수를 재계산했다. 저장된 F1@0.3/0.5·FP·recall과 최대 차이 0이었다.
-- 사용·평가 검증: C−MG-P의 네 지표 bootstrap과 6개 block의 device span·throughput·p95 비율 및 t(5) CI를 독립 재계산했다.
-- 사용·평가 검증: T305/D24/V96 간 환자·영상 ID·pixel hash 교집합은 모두 0이었다. D24/V96 영상 120개의 현재 파일 hash가 일치했다.
-- 사용·평가 검증: D8 실제 검사에서 공식 dataset과 wrapper 입력 tensor 차이 0, GT affine 차이 최대 6.09e-8, 두 checkpoint strict load 851 keys를 확인했다.
-- 사용·평가 검증: 리뷰에서 공식 소스 44개 및 두 checkpoint digest, C 원 protocol의 소스 9개와 보관 SHA, adapter 파일 hash를 확인했다. C timing 1,152건은 기존 출력과 token 불일치 0이었다.
-- 미해결: C는 T305 적응 모델이고 MG-P/MS는 배포 문서상 PadChest 비적응 모델이다. 동일 annotation budget의 적응 비교는 미실행이다.
-- 미해결: 공동 형식 직접 SFT가 iter_041 손실을 해소하는지, 그 이후 중요한 정확도·비용 문제가 남는지는 미검증이다. 기존 blocker는 해제하지 않는다.
-- 미해결: V96은 반복 사용한 개발 자료다. 독립 환자·seed·기관 일반화, 부재 거부와 근거 기반 답변은 이번 비교 대상이 아니다.
-- 미해결: 사전학습 자료의 실제 환자 중복은 배포 문서만으로 완전히 배제할 수 없다. 새로운 방법의 기여도 아직 확인되지 않았다.
+- 최신 리뷰: agent/runs/iter_046/review.json
+- 근거: research/results/iter_046/eval/report.json 및 원시 출력: V96 96명·192문장, P/A@0.4/A@sel/C F1@0.3=0.395313/0.578646/0.594444/0.577951.
+- 근거: A@0.4−P F1@0.3=0.183333, 97.5% CI [0.113366, 0.254863]; A@sel−C=0.016493, CI [-0.071704, 0.109377].
+- 근거: A@sel−C F1@0.5=0.102951, 97.5% CI [0.027424, 0.181081]; FP/문장 차이=0.010417, CI [-0.109375, 0.130208].
+- 근거: research/results/iter_046/timing/: 6 paired block의 A/P device-seconds 비율 1.009338, 95% CI [0.984285, 1.035029]. 신규 A/C 동시 비용 비교는 미실행이다.
+- 근거: agent/runs/iter_041/review.json의 공동 요청 관찰 및 비용 결합 판정 blocker는 그대로 유지한다.
+- 사용·평가 검증: 리뷰에서 별도 JSON parser·좌표 변환·최대 cardinality matching으로 C/P/A@0.4/A@sel의 768개 문장 점수를 재계산했고 네 지표의 저장값 차이는 0이었다.
+- 사용·평가 검증: 주요 두 paired 비교의 네 지표 bootstrap과 원시 timing의 device span·throughput·p95 및 t(5) CI를 독립 재계산했다.
+- 사용·평가 검증: T305/D24/V96 환자·study·영상 ID 교집합 0, D24/V96 현재 영상 파일 hash 120/120 일치를 확인했다. 전체 train pixel 검사와 pixel 비중복은 gate_data_v2.json에 보존돼 있다.
+- 사용·평가 검증: 공식 소스 44개 hash, 리뷰 대상 소스 11개와 commit SHA 일치, 6개 학습 checkpoint digest, 최종 checkpoint 선택 및 V96 이전 평가 잠금을 확인했다.
+- 사용·평가 검증: S 100 updates·3,050문장 노출과 U 300 updates·9,150문장 노출, 연속 step 및 유한 loss/gradient를 원시 학습 로그에서 확인했다.
+- 미해결: 동일 annotation은 동일 사전학습·학습 연산·설정 탐색량을 뜻하지 않는다. 적응이 중요한 경쟁 설명이라는 근거이며 원인의 완전한 분해는 아니다.
+- 미해결: 단일 seed와 반복 사용한 개발 V96의 결과다. 독립 환자·기관 일반화와 비열등성은 미확인이다.
+- 미해결: 공동 형식 직접 SFT, 부재 거부, 근거 기반 답변은 이번 비교 대상이 아니다. 기존 관찰의 보존이 자동 후속 투자를 뜻하지 않는다.
+- 미해결: iter_041 비용 blocker와 이번 실행기의 재사용 결함은 별도 보완 없이 해제하지 않는다.
 
 ## padchest-presence-grounding-interface — observed
 

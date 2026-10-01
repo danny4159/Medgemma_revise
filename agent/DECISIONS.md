@@ -1301,5 +1301,24 @@ Claude 계정의 /usage 또는 Settings > Usage에서 제한을 확인한 뒤 �
   - 브랜치 `approach/modular-grounding-comparison`에서 계속
   - ⚠ 권한 거부 6건
 - ⏹ 중단: 정지 요청 (Claude 구현/실험 중)
+- ↻ 재실행: '리뷰' 단계부터 이어서 (orchestrator eb75c82)
+- 🔍 **리뷰** (GPT normal): [CONTINUE / inconclusive] PadChest 개발96명에서 MedGrounder 적응으로 F1@0.3이 0.395→0.579로 올라 C(0.578)와 비슷해졌다. 적응 효과는 확인됐지만 대안 충분성은 불확정이며, 문장별 추가 투자는 보류하고 공동 요청 관찰은 유지한다.
+  - 접근법 판단: 적응 효과는 사전 기준을 충족했지만 모듈형 대안 충분성의 F1@0.3·FP 구간 조건과 C 잔여 이점 기준은 충족하지 못했다.
+  - 목표 진전: 실제 학습·평가가 완료됐고 주요 수치를 독립 재현했다. 고정 threshold에서 MedGrounder 적응은 F1@0.3을 0.18333 개선해 기존 C 우위의 중요한 경쟁 설명을 확인했다. 선택된 A는 C보다 F1@0.5가 높지만 F1@0.3 비열등성과 FP 허용폭은 입증하지 못했다. 기존 방법의 강한 비교군 확보와 연구 투자 판단에는 의미 있는 진전이며, 새로운 방법론·독립 일반화·top-tier contribution의 증명은 아니다.
+  - 판정 범위: 불확정은 PadChest-GR T305의 동일 annotation으로 적응한 seed17 MedGrounder-P와 기존 C를 반복 사용한 개발 V96 96명·192개 양성 문장에서 비교한 정확도·FP·비용 복합 기준에 한정한다. 적응 효과 자체는 지지된다. 공동 요청, 부재 거부, 임상 reasoning, 의료 VLM 전체 또는 경량 적응 전체의 실패로 확대하지 않는다.
+  - 재사용 전 수정: MG launcher의 protocol/config 재개 대조, 동시 실행 배타성, barrier 전 child 실패 시 자기 child 정리 및 원본 보존을 구현하고 실제 실패 fixture로 검증해야 한다.
+  - 재사용 전 수정: mg46_eval.py 수정은 protocol_lock의 기존 hash와 불일치한다. 원 lock을 보존하면서 수정 전후 내용·hash·검증을 연결하고 정상 재개가 가능한 amendment 검사 경로를 마련해야 한다.
+  - 재사용 전 수정: mg46_verify.py는 mg45_verify.py를 import하지만 해당 파일이 eval_lock_pre의 source 목록에서 빠져 있다. 의존성을 잠그고 C label·유한 좌표·양의 box 크기를 실제 parser에서 강제해야 한다.
+  - 재사용 전 수정: completion 생성은 verify PASS 값만으로 승인하지 말고 동일 report/raw/selection/training/timing/source에 대한 검증임을 연결해야 한다. 실제 변조·중복·누락·wrong config 거부 검사가 미완료다.
+  - 재사용 전 수정: training/validation 재개는 completion 존재만으로 건너뛰지 말고 checkpoint·입력·설정 연결을 검증해야 한다. 현재 training resume config는 precision·microbatch·입력/source digest 등을 충분히 묶지 않는다.
+  - 재사용 전 수정: 누적 기울기 검사 설명을 정정해야 한다. v3는 TF32 설정뿐 아니라 허용 오차도 1e-4에서 1e-3으로 완화했으며 최대 상대차는 2.97e-4다. fp64 보조 검사는 일부 출력·target을 float32로 변환하므로 완전한 fp64 경로로 표현하지 않는다.
+  - 추후 개선: D24 48문장의 구성 비교는 loading 영향이 크다. w2b8 wall은 18.78초로 w2b4 19.27초보다 소폭 짧으므로 '이득 없음'보다 '반복 측정 없는 작은 차이로 기존 구성을 유지'가 정확하다. 전역 최적 구성 주장은 피한다.
+  - 추후 개선: 보고서의 300 updates는 선택된 U만의 수치다. 전체 학습은 S 100+U 300=400 updates이며 총 노출은 12,200문장이다.
+  - 추후 개선: 학습 로그의 step+data 시간 합은 약 835.4초이며 checkpoint I/O·loading·검사·실패 시도까지 포함한 전체 GPU 비용은 아니다. 통합 비용 장부와 CPU/RAM/I/O 계측은 후속 실제 사용 시 보완한다.
+  - 추후 개선: 작은 D24 선택, threshold 격자 최댓값 0.8 선택, 단일 seed, 양성 문장 모집단, 사전학습 중복 불확실성은 독립 확인 단계에서 다룬다.
+  - 추후 개선: A/P 비용 보존과 과거 P/C 비용 차이를 곱해 신규 A/C 동시 측정 CI 또는 정확한 end-to-end 배수로 제시하지 않는다.
+  - 다음: 현재 T305 양성 문장별 grounding 비교의 추가 투자를 보류하고, 중요한 다른 질문으로의 전환을 우선한다. 적응 개입으로 기존 정확도 격차의 점추정치가 해소됐고, 현재 복합 기준을 넘기기 위한 표본·seed·threshold 확대의 정보 가치가 낮다. 다음 deep 계획 한 번에서 같은 language-conditioned-grounding track의 iter_040~046 결과와 비용을 이어받아, iter_041 공동 요청 손실에 대한 직접 joint SFT 한정 대조와 GOAL 안의 다른 중요한 질문을 비교해 하나를 선택한다. joint 대조는 형식 미학습이라는 경쟁 설명, 사용 목적상 필요한 정확도·비용 이득, 적응 MedGrounder를 포함한 공정한 단순 대안, 결과별 투자 결정과 종료점이 구체적일 때만 별도 계획한다. 기존 iter_041 비용 blocker를 해제하거나 방법 pilot 진입을 가정하지 않는다. 이 조건을 충족하지 못하면 공동 요청도 투자 보류로 남기고 새 질문을 선택하며, 주변 진단을 추가하지 않는다. 현재 결과의 CI 경계를 넘기려는 재실행·재선택·새 loss는 하지 않는다. 실제 선택한 경로의 reuse_issues만 해결하고 미사용 파이프라인 정비로 반복을 소비하지 않는다. RSNA 자산, VinDr 승인 대기, H192/F120/test/MRI reserve와 모든 원 판정을 보존한다.
+- 📚 논문 추천: Generalised Medical Phrase Grounding — PAPERS.md
+- 🏁 **마일스톤**: 같은 annotation으로 적응하자 MedGrounder의 문장 grounding 점수가 C에 근접했다 — JOURNEY.md
 - 📁 원본: `agent/runs/iter_046/`
 

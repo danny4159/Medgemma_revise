@@ -254,3 +254,19 @@ PadChest-GR 개발96명에서 직접 SFT의 큰 개선을 확인해, 낮은 기�
 - 접근법: 문장 grounding의 모듈형 대안 비교 (`approach/modular-grounding-comparison`), 시도: iter_044, iter_045
 - 커밋: e908c7d9ccf65e8db0b499d74bbd7fa042f6fce9, 2e431cdc7c7366960e12b7d055c7d3b70fec35c5
 - 자세히: DECISIONS.md의 iter_045, `agent/runs/iter_045/review.md`
+
+## 🏁 같은 annotation으로 적응하자 MedGrounder의 문장 grounding 점수가 C에 근접했다
+
+*iter_046 · 2026-10-01 19:27 · 판정: CONTINUE / inconclusive*
+
+문장별 grounding에서 관찰한 C의 정확도 이점을 해석하려면 비교군의 적응 차이를 먼저 통제해야 했다.
+**고민:** iter_045에서 C는 비적응 MedGrounder보다 F1@0.3이 18.3 pp 높았지만 측정 추론 비용도 약 27배였다.
+**시도:** 새 loss 대신 기존 MedGrounder-P에 C와 같은 T305 annotation을 제공하는 직접 적응을 선택했다.
+**개발:** 공식 구조·loss를 유지하고 두 LR 설정의 짧은 비교 후 한 설정을 15 epoch까지 학습했다. 전체 400 updates를 수행했다.
+**결과:** 개발96명에서 고정 threshold F1@0.3은 0.395→0.579로 올라 C의 0.578에 근접했다. 적응 효과의 97.5% CI는 [0.113, 0.255]였다.
+**한계:** 선택된 A−C의 F1@0.3은 +0.0165 [-0.0717, 0.1094]로 대안 충분성은 불확정이다. A/P 비용 보존은 확인했지만 신규 A/C 동시 비용 비교는 하지 않았다.
+**의미:** 적응 차이가 기존 정확도 격차의 중요한 설명임을 확인했다. 현재 양성 문장별 추가 투자는 보류하고, 공동 요청 관찰을 보존하면서 다음 중요한 질문을 선택한다.
+
+- 접근법: 문장 grounding의 모듈형 대안 비교 (`approach/modular-grounding-comparison`), 시도: iter_044, iter_045, iter_046
+- 커밋: e908c7d9ccf65e8db0b499d74bbd7fa042f6fce9, 2e431cdc7c7366960e12b7d055c7d3b70fec35c5, bab147379dde1bcd68550e298cc596ee15091e99
+- 자세히: DECISIONS.md의 iter_046, `agent/runs/iter_046/review.md`
