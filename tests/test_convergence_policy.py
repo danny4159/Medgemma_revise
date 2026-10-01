@@ -13,6 +13,25 @@ ROOT = Path(__file__).resolve().parents[1]
 
 
 class ConvergencePolicyTests(unittest.TestCase):
+    def test_scoped_followup_keeps_current_experiment_fixed(self):
+        policy = (ROOT / "agent/RESEARCH_POLICY.md").read_text().split(
+            "## 판정 범위와 조건부 후속 투자", 1)[1].split("## 사용자 논문 추천", 1)[0]
+        for text in ("현재 iter_045는 중단·재계획하지 않는다", "원 계획의 판정은 유지",
+                     "후속 투자 자동 결정은 이 사용자 보완으로 대체", "실제 검증한 과제·조건",
+                     "설명/반박/미검증", "기준 미달", "검증 부족", "연구 가치 부족",
+                     "결과별로 달라지는 투자 결정", "예상 비용 대비 정보 가치", "종료 조건",
+                     "이후 별도 계획의 decision_contract", "method 진입 gate", "사후 가설은 탐색"):
+            self.assertIn(text, policy)
+
+    def test_scoped_followup_is_delivered_to_next_calls_and_reports(self):
+        context = loop.resource_context(argparse.Namespace(gpus="0,1", claude_timeout=0))
+        self.assertIn("판정 범위와 조건부 후속 투자", context)
+        self.assertIn("현재 iter_045는 중단·재계획하지 않는다", context)
+        for name in ("gpt_plan", "gpt_review"):
+            self.assertIn("판정 범위와 조건부 후속 투자",
+                          (ROOT / f"agent/prompts/{name}.md").read_text())
+        self.assertIn("검증 부족과 가치 부족", (ROOT / "agent/REPORTING_STYLE.md").read_text())
+
     def test_official_asset_commands_have_explicit_permissions(self):
         permissions = json.loads((ROOT / "agent/claude_settings.json").read_text())["permissions"]
         self.assertNotIn("Bash(curl *)", permissions["deny"])
