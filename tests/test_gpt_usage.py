@@ -67,8 +67,8 @@ class GPTUsageTests(unittest.TestCase):
             loop.run_codex(argparse.Namespace(gpt_timeout=0, gpus=None), "계획", self.root / "raw.json", self.log, "deep")
         self.assertEqual(json.loads((self.root / "plan_usage.json").read_text())["error_sessions"], 1)
 
-    def test_model_efforts_and_round_budget_are_unchanged(self):
-        for tier, effort in (("deep", "high"), ("normal", "medium"), ("light", "low")):
+    def test_requested_efforts_and_unchanged_round_budget(self):
+        for tier, effort in (("deep", "high"), ("normal", "low"), ("light", "low")):
             self.assertEqual(loop.tier_spec("gpt", tier), {"model": "gpt-6-astra", "effort": effort})
         with patch("sys.argv", ["orchestrator.py"]):
             self.assertEqual(loop.parse_args().max_think_rounds, 4)

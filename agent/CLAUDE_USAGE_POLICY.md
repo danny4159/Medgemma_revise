@@ -7,12 +7,12 @@ API 환산 비용은 구독 청구액이나 구독 한도 소진율이 아니다
 
 - 기본 `standard`: Sonnet / medium. GPT가 구체화한 계획의 일반 구현, 데이터 처리,
   공식 추론 예제 적용, 알려진 오류 수정, 기존 패턴의 테스트·평가 계산.
-- `heavy`: Opus / medium. 원인 불명의 어려운 버그, 구성요소 간 고위험 변경,
+- `heavy`: Opus / low. 원인 불명의 어려운 버그, 구성요소 간 고위험 변경,
   구현 중 중요한 방법론 판단이 남아 있는 작업. `tier_reason`에 구체적 난점을 적는다.
 - `creative`: Opus / high. 새로운 방법의 설계·구현에 창의적 판단이 필요한 작업.
   처음 만드는 파이프라인·파일 수·GPU 사용만으로 상향하지 않는다.
 - `light`: Sonnet / medium. 재실행·작은 수정·단순 집계. 기존 등급과 기록의 호환성을 유지한다.
-- `standard`의 GPT 리뷰는 `normal`로 유지한다 (`heavy`와 동일).
+- `standard`의 GPT 리뷰는 `normal`/low로 유지한다 (`heavy`와 동일).
   diagnostic/method/confirmatory는 구현 등급과 무관하게 full 리뷰를 한다.
 - 중요한 난점이 명확하면 처음부터 Opus를 쓴다. 일반 구현에서 막히면 실패 근거와 GPT 리뷰를
   토대로 다음 계획의 등급을 정한다. 횟수만으로 자동 상향하거나 환경 문제에 Opus를 투입하지 않는다.
@@ -44,5 +44,8 @@ API 환산 비용은 구독 청구액이나 구독 한도 소진율이 아니다
   지출 한도를 자동 인상하거나 유료 overage로 전환하지 않는다.
 - 기존 저장 계획·등급을 소급해서 바꾸지 않는다. 다음 새 계획부터 standard를 기본으로 선택한다.
   CLI `--claude-tier`와 사람이 저장한 override는 계속 우선한다.
+- 2026-10-01 사용자 조정: heavy의 effort만 medium→low, standard/light의 Sonnet/medium과
+  creative의 Opus/high는 유지한다. 등급명 override에도 현재 tiers.json의 effort를 적용한다.
+  실행 중인 호출은 중단하지 않으며, 다음 호출(같은 세션 재시도 포함)부터 새 매핑을 사용한다.
 
 권한 문법 참고: https://code.claude.com/docs/en/permissions

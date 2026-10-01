@@ -10,8 +10,9 @@
 - 저장된 CLI 인증은 사용하되 사용자 config는 무시하고 이 호출의 모델·권한을 명시한다.
   shell login은 꺼서 medgemma Python PATH가 기본 Anaconda로 바뀌지 않게 한다.
 - 작업 등급은 호환성을 위해 plan.json의 claude_tier를 그대로 사용한다.
-  실제 모델은 agent/tiers.json의 codex_engineer 항목이다. 기본 standard는 medium,
-  creative/heavy는 high, light는 low reasoning effort다. 모델은 기존 GPT 설정과 같은 계열을 쓴다.
+  실제 모델은 agent/tiers.json의 codex_engineer 항목이다. 2026-10-01 사용자 조정으로
+  standard/light는 low, heavy는 medium, creative는 high reasoning effort다.
+  모델은 gpt-6-astra를 유지한다. 실행 중인 호출은 유지하고 다음 호출부터 적용한다.
 - 관련 파일·변경점부터 확인하고 전체 기록 재독해와 중복 구현을 줄인다. 필요한 원문·검증은
   생략하지 않는다. GPU 활용·표본·seed·검증 기준은 기존 연구/자원 정책 그대로다.
 - 구현용 세션 ID와 JSONL은 계획/리뷰와 분리한다. 한도·일시 오류는 같은 구현 세션으로

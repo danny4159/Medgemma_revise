@@ -51,7 +51,7 @@ python orchestrator.py --engineer claude --gpus 0,1
 `--engineer-tier standard`와 `--engineer-timeout 0`으로 등급·timeout을 설정할 수 있다.
 기존 `--claude-tier`, `--claude-timeout`도 같은 옵션의 호환 별칭이다. 모델 설정은
 `agent/tiers.json`의 `claude` / `codex_engineer`로 분리된다. 계획/리뷰의 `gpt` 설정은 바꾸지 않는다.
-Codex 구현 기본은 현재 `gpt-6-astra`/medium이며 creative·heavy는 high, light는 low다.
+Codex 구현은 `gpt-6-astra`이며 standard·light는 low, heavy는 medium, creative는 high다.
 
 Codex의 초기 권한은 research/ 기준 workspace-write다. 이 서버에서는 해당 sandbox가 NVIDIA
 접근을 막고, 장치 파일만 허용하면 CLI 초기화가 실패하는 문제가 확인됐다. 위 GPU 실행 예시는
@@ -250,8 +250,8 @@ Telegram은 짧은 문단으로 보내며 원문 위치와 필요한 답장 명�
 ## GPT·Claude 사용량 절감과 조회
 
 새 계획은 일반 구현에 `standard`(Sonnet/medium)를 기본으로 선택한다. 어려운 디버깅·중요한
-구현 판단은 `heavy`(Opus/medium), 실제 새로운 방법의 설계·구현은 `creative`(Opus/high)로 구분한다.
-`standard`의 GPT 리뷰는 기존 `heavy`와 같은 `normal`이다. 필수 검증·독립 리뷰·GPU 실험 규모는 줄이지 않는다.
+구현 판단은 `heavy`(Opus/low), 실제 새로운 방법의 설계·구현은 `creative`(Opus/high)로 구분한다.
+`standard`의 GPT 리뷰는 기존 `heavy`와 같은 `normal`/low다. 필수 검증·독립 리뷰·GPU 실험 규모는 줄이지 않는다.
 구체적인 기준과 재사용·로그 읽기 원칙은 [CLAUDE_USAGE_POLICY.md](agent/CLAUDE_USAGE_POLICY.md)에 있다.
 
 ```bash
@@ -272,7 +272,9 @@ result 없이 끊긴 호출에는 미집계 사용량이 있을 수 있다. Clau
 기존 계획·CLI 등급 지정·일반 재개 동작은 보존한다. 새 기준은 다음 새 계획부터 적용된다.
 준비된 iter_009는 계획 전이므로 별도 reset/replan 없이 평소 명령으로 실행하면 새 기준을 사용한다.
 
-GPT는 `gpt-6-astra`와 기존 high/medium/low 선택 기준, 최대 사고 라운드 4회, 독립 리뷰를 유지한다.
+GPT는 `gpt-6-astra`를 유지하며 deep는 high, normal·light는 low다 (2026-10-01 사용자 조정).
+작업 등급 선택 기준, 최대 사고 라운드 4회, 독립 리뷰는 유지한다. effort는 매 호출 tiers.json에서
+읽으므로 진행 중인 호출은 바뀌지 않고 다음 호출부터 반영된다. 기존 계획·등급명·원본 로그는 보존한다.
 조사 중인 `think_more`에서는 긴 임시 구현 계획 대신 조사 근거·대안 비교·남은 질문을 남기고,
 최종 `implement`에서 전체 계획을 작성한다. 이전 조사 노트는 잘라내지 않는다.
 이미 확인한 자료는 활용하되 모순·미확인 세부·최신성 검증이 필요하면 다시 확인한다.
