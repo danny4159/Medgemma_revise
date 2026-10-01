@@ -51,6 +51,7 @@ def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--set", required=True)
     ap.add_argument("--ckpt", required=True)
+    ap.add_argument("--ckpt-path", default=None, help="iter_046: P/MS 이외 key의 checkpoint 경로")
     ap.add_argument("--out-dir", required=True)
     ap.add_argument("--workers", type=int, required=True)
     ap.add_argument("--gpus", default=None)
@@ -84,7 +85,7 @@ def main():
     if bdir:
         os.makedirs(bdir, exist_ok=True)
     proto = {"code": {f: file_sha(os.path.join(HERE, f)) for f in CODE}, "manifest_sha256": file_sha(os.path.join(HERE, MAN)),
-             "ckpt_sha256": file_sha(os.path.join(HERE, "results/iter_045/external/weights",
+             "ckpt_sha256": file_sha(a.ckpt_path if a.ckpt not in ("P", "MS") else os.path.join(HERE, "results/iter_045/external/weights",
                                                   "medgrounder_pretrain_imagenome.pth" if a.ckpt == "P" else "medgrounder_finetune_ms.pth")),
              "args": vars(a), "mapping": mapping, "free_mib_before": free}
     pp = os.path.join(a.out_dir, "launch_protocol.json")
@@ -96,6 +97,8 @@ def main():
         env = dict(os.environ, CUDA_VISIBLE_DEVICES=str(mapping[k]))
         cmd = [PY, "mg45_worker.py", "--set", a.set, "--ckpt", a.ckpt, "--out-dir", a.out_dir, "--worker", str(k),
                "--n-workers", str(a.workers), "--batch", str(a.batch)]
+        if a.ckpt_path is not None:
+            cmd += ["--ckpt-path", a.ckpt_path]
         if a.post_thr is not None:
             cmd += ["--post-thr", str(a.post_thr)]
         if a.warmup_d8:

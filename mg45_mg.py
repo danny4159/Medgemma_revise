@@ -42,26 +42,37 @@ def canon(o):
     return json.dumps(o, sort_keys=True, ensure_ascii=False, default=str)
 
 
-def build_cfg(key):
+def resolve_ckpt(key, path=None):
+    """iter_046 확장: P/MS는 기존 경로(회귀 불변). 그 외 key(예: A_S_e5)는 명시적 checkpoint 경로를 요구한다. 아키텍처 cfg는 P(공식 pretrain config)와 동일."""
+    if key in WEIGHTS:
+        if path is not None and os.path.abspath(path) != os.path.abspath(WEIGHTS[key]):
+            raise ValueError(f"{key}: explicit path conflicts with locked default")
+        return WEIGHTS[key]
+    if path is None:
+        raise ValueError(f"checkpoint key {key!r} requires explicit --ckpt-path")
+    return path
+
+
+def build_cfg(key, path=None):
     from omegaconf import OmegaConf
     cwd = os.getcwd()
     os.chdir(MG_ROOT)  # 공식 코드는 conf/ 상대경로
     try:
         base = OmegaConf.load("conf/base.yaml")
         ds = OmegaConf.load("conf/datasets.yaml")
-        run = OmegaConf.load(RUN_CFG[key])
+        run = OmegaConf.load(RUN_CFG.get(key, RUN_CFG["P"]))
         cfg = OmegaConf.merge(ds, base, run)
     finally:
         os.chdir(cwd)
-    cfg.resume = WEIGHTS[key]
+    cfg.resume = resolve_ckpt(key, path)
     return cfg
 
 
-def load_model(key, device):
+def load_model(key, device, path=None):
     """returns (model, postprocessor_cls_threshold_cfg, cfg). strict load, 실패 시 예외."""
     import torch
     from model.medgrounder import build_medgrounder
-    cfg = build_cfg(key)
+    cfg = build_cfg(key, path)
     if not os.path.exists(cfg.resume):
         raise FileNotFoundError(cfg.resume)
     model, _crit, _post = build_medgrounder(cfg)

@@ -63,7 +63,8 @@ def repair_tail(path):
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--set", required=True, choices=["D8", "D24", "V96"])
-    ap.add_argument("--ckpt", required=True, choices=["P", "MS"])
+    ap.add_argument("--ckpt", required=True)
+    ap.add_argument("--ckpt-path", default=None, help="iter_046: P/MS 이외 key의 명시적 checkpoint 경로")
     ap.add_argument("--out-dir", required=True)
     ap.add_argument("--worker", type=int, default=0)
     ap.add_argument("--n-workers", type=int, default=1)
@@ -86,12 +87,12 @@ def main():
     out = os.path.join(a.out_dir, f"raw_worker{a.worker}.jsonl")
     repair_tail(out)
     done = read_done(out)
-    model, cfg, load = M.load_model(a.ckpt, dev)
+    model, cfg, load = M.load_model(a.ckpt, dev, a.ckpt_path)
     if load["missing"] or load["unexpected"]:
         sys.exit(f"state dict mismatch {load}")
     tf = M.val_transform()
     t_ready_model = time.time()
-    ckpt_sha = M.file_sha(M.WEIGHTS[a.ckpt])
+    ckpt_sha = M.file_sha(M.resolve_ckpt(a.ckpt, a.ckpt_path))
     gpu_uuid = None
     try:
         gpu_uuid = str(torch.cuda.get_device_properties(0).uuid)
@@ -135,6 +136,9 @@ def main():
                              "ckpt_sha256": ckpt_sha, "post_thr_mode": a.post_thr, "gpu_uuid": gpu_uuid,
                              "cuda_visible": os.environ.get("CUDA_VISIBLE_DEVICES"),
                              "peak_alloc_gb": torch.cuda.max_memory_allocated() / 2**30})
+        t4 = time.time()  # iter_046: 원본 정규화 좌표 변환·record 구성 완료 시각 (timing 종료 경계)
+        for r in recs:
+            r["t_orig_done"] = t4
         return recs
 
     if a.warmup_d8:
