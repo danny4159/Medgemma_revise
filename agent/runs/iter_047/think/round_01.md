@@ -1,0 +1,67 @@
+# 사고 라운드 1
+
+## 핵심 판단
+
+현재 T305 양성 문장별 grounding의 추가 투자는 보류한다. 공동 요청 손실은 보존하지만 직접 joint SFT를 이번 우선 실험으로 선택하지 않는다. 다른 질문으로의 전환을 우선하되, 이번에 확인한 가까운 선행 때문에 보고서 교정 후보도 아직 구현 계획으로 확정하지 않는다.
+
+## 원문과 실제 저장 결과에서 확인한 것
+
+`agent/GOAL.md`, `agent/GPT_USAGE_POLICY.md`, `agent/REPORTING_STYLE.md`, 관련 `LIMITATIONS.md` 항목, iter_040·041·043·046 리뷰 원문과 관련 plan/review.json을 확인했다. 전환 후보와 겹치는 iter_017·018 리뷰 및 legacy 문서의 중대 정정도 읽었다. 색인의 판정을 새로운 실험 결과로 취급하지 않았다.
+
+- iter_046의 `research/results/iter_046/eval/report.json`에서 C/P/A@0.4/A@sel의 F1@0.3은 각각 0.577951/0.395313/0.578646/0.594444다. A@0.4−P는 +0.183333, 97.5% CI [0.113366, 0.254863]이다. 원 리뷰의 적응 설명을 뒷받침한다. 이번 계획 단계에서 원시 출력 전체를 다시 채점한 것은 아니다.
+- A@sel−C의 F1@0.3 CI는 [-0.071704, 0.109377], FP 차이 CI는 [-0.109375, 0.130208]이다. 원 복합 기준 미달은 유지한다. 이것은 대안 충분성의 정밀도 부족이며, 의료 VLM의 연구 가치 부족을 입증한 결과가 아니다.
+- iter_041에서 C의 독립/공동 AB/BA F1@0.3은 0.577951/0.381076/0.354167이다. 원 리뷰는 정확도 관찰을 유효하게 인정했지만 request latency bootstrap을 device 시간 불확실성과 연결한 blocker를 남겼다. 이번 결과로 해제하지 않는다.
+- iter_040의 M−C는 −0.005208, 97.5% CI [-0.038194, 0.026910]이고 baseline 수렴도 미확정이다. 새 loss의 자동 연장은 근거가 약하다.
+- iter_043의 C−retrieval은 +0.148785지만 동일 문장 영상 구별은 불확정이었다. 적응 MedGrounder 확보가 이 원인을 규명한 것은 아니다.
+- iter_042의 presence gate 이후 잔여 문제는 미확정이다. 보고서 교정이라는 이름으로 동일한 부재 거부 진단을 반복해서는 안 된다.
+
+참조 plan SHA256: iter_041 `e9786ff168532ae432a03be8aa9d64e84308bc69ff08d8cd03e3002fd28eb87f`, iter_046 `0cbe18162cc5c1b81a75601ba4ac5d01cda0bb8050f14f77a50f841cead3baf6`. 이번은 두 계획의 실행 복구 amendment가 아니다.
+
+## Strategy Check / 연구 방향 판단
+
+1. **현재 방법 개선:** 문장별 정확도 격차의 적응 설명을 확인했다. CI 문턱 통과를 위한 표본·seed·threshold 확대나 새 loss의 기대 정보 가치는 낮다.
+2. **직접 joint SFT 한정 대조:** 공동 형식 미학습이라는 설명을 구분할 수 있다는 장점은 있다. 그러나 정확도 회복만으로는 이미 확보한 빠른 모듈형 대안 대비 새로운 효용이 생기지 않는다. 이전 C/P 비용 차이와 A/P 비용 보존을 신규 A/C 동시 측정 비율로 합성하지 않는다. 공동 요청이 필요한 별도 기능이나 충분한 정확도·비용 이득을 아직 구체화하지 못해 이번 투자는 보류한다.
+3. **다른 중요한 질문:** 영상에 근거한 보고서 검토·교정은 위치 출력과 다른 사용 목적이다. 다만 그 과제 자체와 일반적인 시각 사실성 개선은 이미 연구됐다. 기존 방법의 구체적 부족함과 올바른 내용 보존을 평가할 수 있는 자료를 먼저 확인해야 한다. 현재 우선 조사 후보이며 유망성이 입증된 방향은 아니다.
+
+같은 `language-conditioned-grounding` track의 투자 판단으로 기록한다. 새 과제가 확정되기 전에 새 track으로 체류 이력을 초기화하지 않는다. iter_038 이후 준비·실행 복구·진단·방법 pilot·모듈형 비교를 함께 고려했다. 기록된 iter_040 학습 약2.54 GPU-hours, iter_041 일부 실행 약1.123 GPU-hours, iter_043 launcher wall 약68.82분, iter_046 학습 step+data 약835.4초는 포함 범위가 달라 총비용으로 합산하지 않는다.
+
+## 새로 확인한 선행과 선택에 미친 영향
+
+**일반적인 외부 문맥 편향은 우선 후보에서 내린다.** MedGemma 1.5를 포함해 영상–텍스트 충돌, 무관한 과거 보고서, prompt 민감성을 이미 다룬 연구가 있다. 이 현상을 RSNA에서 다시 확인하는 것만으로는 차별성이 부족하다. [Medical Context Distorts Decisions in Clinical Vision Language Models](https://arxiv.org/html/2605.17436v1)
+
+의료 VLM의 grounding과 sycophancy 관계, 추론 내용의 반사실적 수정과 출처·삽입 위치의 영향도 가까운 선행에 포함된다. 따라서 단순한 잘못된 문장 삽입이나 reasoning 수정만으로 새 기여를 주장할 수 없다. [Grounding–Sycophancy Tradeoff](https://arxiv.org/html/2603.22623v1), [Position, Not Provenance](https://arxiv.org/html/2607.27304v1)
+
+**보고서 교정도 빈 연구 영역은 아니다.** CorBenchX는 오류 탐지·교정과 MSRL을 제안한다. 공식 저장소는 MIMIC-CXR에서 파생한 자료이며 credentialed license를 명시한다. 공개 코드가 있다는 사실만으로 영상 접근 권한이나 현재 실행 가능성을 가정하지 않는다. [CorBenchX 논문](https://arxiv.org/html/2505.12057v1), [공식 저장소](https://github.com/Liqq1/CorBenchX)
+
+Phrase-grounded fact-checking은 finding과 위치의 진위를 다루므로 강한 모듈형 비교군 후보다. 단순히 MedGrounder box를 붙이는 구성을 새로운 교정 원리로 부를 수 없다. [Phrase-grounded Fact-checking](https://arxiv.org/html/2509.21356v1)
+
+CVPR 2026의 Phrase-grounded APO는 fact-checking과 교정을 이용한 정렬을 이미 제안한다. 공식 검색 결과의 초록은 확인했으나 PDF 직접 조회는 403으로 실패했다. 세부 loss·실행 비용·올바른 내용 보존 평가·공개 checkpoint를 읽은 것으로 간주하지 않는다. 이 확인은 후속 후보와의 차이를 실제로 바꿀 수 있다. [공식 논문](https://openaccess.thecvf.com/content/CVPR2026/papers/Mahmood_Phrase-grounded_APO_for_Improving_Chest_X-ray_Report_Generation_CVPR_2026_paper.pdf)
+
+RadQC-Bench의 공식 소개는 MIMIC-CXR와 IU X-Ray의 탐지·교정 과제를 제시한다. 소개 페이지에서 데이터 배포·checkpoint 경로는 확인하지 못했고 PDF 조회도 실패했다. 공개 사용 가능한 완성 benchmark라고 가정하지 않는다. [공식 소개](https://papers.miccai.org/miccai-2026-sat/CREATE_019.html)
+
+이 문헌들은 조사 출처다. 현재 실험의 긍정적 근거에 연결한 사용자 논문 추천으로 등록하지 않는다.
+
+## 자산과 실행 가능성
+
+현재 research HEAD는 `bab147379dde1bcd68550e298cc596ee15091e99`이며 `git status --short`와 `git diff --stat` 출력은 비어 있었다. `CODE_ASSETS.md`와 iter_046 code_assets를 확인했다. `mg45_mg.py`의 제한된 승인과 launcher·verifier·training resume의 needs_fix 범위를 구분한다.
+
+현재 파일에서 `pg39_data.py`의 metadata 연결·선택 경로와 `pg43_run.py`의 입력·protocol 구조를 확인했다. 기존 PadChest 자료와 생성 helper는 후보 자산이지만 보고서 교정 입력의 재사용 승인을 뜻하지 않는다. 실행 경로가 정해지지 않아 선별 반입을 요청하지 않는다. 미사용 MG 학습기·과거 runner를 정비하는 반복도 만들지 않는다.
+
+보고서 정답은 특히 주의가 필요하다. bbox가 없다는 이유로 소견 부재를 만들 수 없고, 원 보고서와 다른 문장이라는 이유만으로 영상상 거짓이라고 확정할 수 없다. 기존 양성 grounding manifest만으로 전체 보고서의 오류·수정 정답을 보장할 수 없다. 이 문제가 해결되지 않으면 새 GPU 진단을 시작하지 않는다.
+
+## 추가 라운드가 필요한 이유와 종료점
+
+이번 조사로 기존 문장별 확대와 일반적 문맥 편향 반복의 우선순위를 낮췄다. 동시에 보고서 교정의 가까운 방법과 데이터 접근 제약을 새로 확인했다. 남은 것은 문서 정리가 아니라, 실제 비교할 실패 조건과 정답 자료가 성립하는지의 판단이다. 지금 임의 표본과 성공 문턱을 정하면 평가하기 쉬운 합성 오류에 맞춘 실험이 될 위험이 있다.
+
+다음 라운드는 아래 질문에 집중한다. 동일 원문을 다시 읽는 경우에도 미확인된 평가·배포·비교군 세부만 확인한다. 후보가 성립하면 실제 출력 diagnostic 계획을 완성하고, 성립하지 않으면 이 후보를 보류한다. 공동 요청 관찰을 자동 폐기하지도, 대안이 막혔다는 이유로 joint SFT를 자동 재개하지도 않는다.
+
+## 대규모 GPU 필요 후보
+
+다기관 영상–보고서와 전문가 수정 이력으로 verifier와 generator를 공동 학습하는 방향은 장기 후보로 남긴다. 자료 구축과 대규모 multimodal post-training 부담이 있으며 현재 두 GPU에서의 최소 진단과 구분한다. 해당 방법의 효과·신규성은 아직 미확인이다.
+
+GOAL, RSNA 자산, VinDr 승인 대기, H192/F120/test/MRI reserve와 원 판정은 유지한다. 파일 생성·수정·실험 실행은 하지 않았다.
+
+## 다음에 파고들 질문
+- Phrase-grounded fact-checking·APO와 CorBenchX MSRL은 오류가 없는 보고서의 불필요한 수정과 시각적으로 필요한 수정의 trade-off를 어떻게 평가하는가? 공식 본문·부록·코드에서 이 항목을 확인해 구별 가능한 실패 조건이 없으면 보고서 교정 후보를 보류한다.
+- 현재 승인된 PadChest-GR train 자료 또는 공식 공개 자료에서 영상으로 판정 가능한 오류와 보존해야 할 올바른 내용을 함께 정의할 수 있는가? 원 annotation 규약과 접근 조건을 확인하고, 보고서 불일치·bbox 부재를 거짓 소견으로 바꾸지 않는 평가 단위를 선택한다.
+- 원문 보존, text-only 교정, 직접 VLM 교정, 문장별 시각 검증 후 수정 중 어떤 강한 대안을 같은 정확도·비용 조건으로 실행할 수 있는가? 그 대안 이후에도 중요한 잔여 문제를 식별할 수 있을 때만 표본·요청량·최소 가치 기준을 갖춘 diagnostic 계획을 확정한다.

@@ -17842,3 +17842,553 @@ iter_038 이후 준비·진단, iter_044 실행 실패, iter_045~046 모듈형 �
 - 추천 이유: 복합 비교는 불확정이지만 모듈형 baseline의 직접 적응 효과는 사전 양성 기준을 충족했다. 논문은 이 긍정적 결과를 해석하고 다음 VLM 비교에서 적응·후처리·모듈형 대안을 공정하게 다루는 데 직접 도움이 된다. 현재 결과는 독립 일반화, C 대비 비열등성, 공동 요청·보고서 과제의 이점을 증명하지 않는다.
 - 읽어볼 부분: V-C1과 Table VII에서 사전학습과 target 적응을 구분한 대조를 먼저 보고, V-C2와 Table VIII에서 threshold·WBF의 효과를 확인한다. III-B의 집합 예측 구조를 함께 읽되 논문 지표와 현재 F1@0.3/0.5를 직접 동일시하지 않는다.
 
+
+
+## iter_047 GPT PLAN [소견 교정과 보존의 대조 진단 / proceed] — 2026-10-01 21:35:05
+
+# 요약
+
+- **이번에 할 일:** 두 소견 초안의 상태를 네 조합으로 바꾸고, 오류 수정과 올바른 상태 보존을 실제 MedGemma 출력으로 비교한다.
+- **필요한 이유:** 기존 grounding 점수 개선은 보고서 검토 능력의 증거가 아니다. 초안을 보지 않는 소견 판단과 결정론적 편집으로 충분한지도 함께 확인한다.
+- **확인할 기준:** 영상 정보의 기여, 수정률·훼손률, 중요한 교정–보존 trade-off, 단순 대안의 충분성을 사전 규칙으로 판단한다.
+- **주의·다음:** 완전한 보고서 교정이나 새 기여를 입증하는 실험은 아니다. D8/E96 한정 진단 이후 최소 방법 시험 검토 또는 투자 보류로 종료한다.
+
+# Current Understanding
+
+iter_046은 같은 annotation으로 MedGrounder를 적응시키면 기존 문장별 C 정확도 격차의 점추정치가 해소됨을 보였다. 비열등성은 불확정이지만 CI 문턱만 넘기기 위한 추가 투자는 보류한다. iter_041의 공동 요청 저하와 비용 blocker, iter_042의 presence gate 이후 잔여 문제 미확정, iter_043의 영상 구별 불확정은 그대로 유지한다.
+
+이번은 기존 plan의 실행 복구 amendment가 아니다. round_01의 조사와 이번 metadata·선행 확인을 근거로 새 제한 과제를 선택한다. GOAL, RSNA checkpoint, VinDr 승인 대기, H192/F120/test/MRI reserve는 유지한다.
+
+두 소견의 존재/부재 상태를 검토하는 과제다. 자유형 문장의 모든 내용, 누락된 새 질환의 발견, 위치·중증도·시간 변화, 임상 reasoning은 평가하지 않는다. 최종 출력은 실제 생성된 상태 JSON과 그 상태를 반영한 결정론적 두 문장이다.
+
+# Strategy Check / 연구 방향 판단
+
+**재검토 이유:** 강한 적응 모듈형 baseline을 확보했고 기존 문장별 비교의 다음 정보 가치가 낮아졌다. round_01에서 보고서 교정의 선행 중복과 정답 문제를 확인했으므로 이번에는 실행 가능한 실패 조건을 좁혀야 한다.
+
+**선택 비교:** 문장별 loss 개선은 우선하지 않는다. joint SFT는 형식 미학습을 시험할 수 있지만 독립 처리·적응 MedGrounder보다 필요한 효용이 구체적이지 않다. 선택한 진단은 초안 검토라는 사용 목적에서 수정과 보존을 분리하며, 기존 생성기를 사용해 학습 없이 경쟁 설명을 구분할 수 있다. 자유형 보고서 benchmark 구축보다 작은 범위로 판단 가능하다.
+
+**기여에 대한 제한:** CorBenchX MSRL과 phrase-grounded fact-checking/APO는 이미 교정을 다룬다. APO에는 올바른 내용을 유지하는 규칙도 있다. 이번 과제나 polarity perturbation을 새 기여로 부르지 않는다. 선행을 넘어설 주장은 아직 없다.
+
+**track 연속성:** 같은 language-conditioned-grounding track에 기록한다. bbox 출력에서 임상 소견의 검토로 평가 단위를 바꾸지만 영상 근거와 언어 출력의 연결이라는 큰 질문과 iter_015~046의 교훈을 이어받는다. 진단·setup 연속 기록을 초기화하지 않는다. 과거 비용은 집계 범위가 달라 임의로 합산하지 않는다.
+
+**끝난 뒤 결정:** 단순 대안이 충분하면 이 과제의 방법 투자를 보류한다. 중요한 잔여 trade-off가 엄격한 기준으로 관찰되면 직접 SFT를 포함하는 최소 방법 pilot의 가치만 다음 리뷰에서 검토한다. 정밀도·자료·구현 때문에 불확정이면 E96를 늘리거나 주변 과제를 붙이지 않는다.
+
+# Hypothesis
+
+동일한 영상을 이해할 수 있어도 초안을 수정하라는 조건에서 잘못된 상태를 유지하거나 올바른 상태를 바꿀 수 있다. 보존 지시만으로 해결되는지, 초안 없는 공동·독립 판단으로 해결되는지 확인한다.
+
+대안 설명은 다음과 같다.
+
+- 초안 없는 판단부터 틀리면 시각 판별 또는 annotation 문제다.
+- R1만 나쁘고 R2가 충분하면 합리적인 prompt 수정으로 해결되는 문제다.
+- BJ/BI와 결정론적 편집이 충분하면 별도 편집 학습의 필요성이 약하다.
+- text-only가 비슷하면 질환 조합·언어 prior나 자료 구성의 영향을 먼저 의심한다.
+- oracle에서도 실패하면 schema·지시·평가기 문제를 우선한다.
+
+# Limitation Evidence / Correct Usage Checks
+
+연결하는 기존 observed id는 padchest-sentence-grounding-and-joint-retention과 padchest-presence-grounding-interface다. 전자는 새 사용 과제를 선택한 배경이고 후자는 초안 없는 presence 판단을 강한 대안으로 넣는 근거다. 둘 다 이번 교정 실패의 실증 근거는 아니다.
+
+따라서 experiment_role=diagnostic, method_stage=none이다. 학습·새 방법·pilot gate 우회를 하지 않는다. iter_041 blocker와 기존 limitation 상태를 변경하지 않는다.
+
+MedGemma 1.5 revision 91850547d9f0b2fdd21aa7c5f4f3d1a8a52c243b의 M0만 사용한다. adapter는 로드하지 않는다. 공식 chat template과 기존 값 보존 전처리를 유지하고 D8에서 processor tensor, 영상 token, image/text modality, 출력 cap·EOS를 확인한다. text-only에는 영상 tensor/token이 없어야 한다.
+
+# Contribution Path / Baselines / Reuse
+
+## 가까운 방법과 주장 범위
+
+[CorBenchX](https://arxiv.org/html/2505.12057v1)는 단계적 오류 교정을, [phrase-grounded fact-checking](https://arxiv.org/html/2509.21356v1)은 진위와 위치 검증을 다룬다. [APO](https://openaccess.thecvf.com/content/CVPR2026/papers/Mahmood_Phrase-grounded_APO_for_Improving_Chest_X-ray_Report_Generation_CVPR_2026_paper.pdf)는 검증에 따른 선택적 교정과 정렬을 다룬다. 이번은 이들보다 우수한 방법의 평가가 아니다. 공개 checkpoint·전체 실행 경로를 확보하지 않은 방법을 재현했다고 표현하지 않는다.
+
+최소 방법 시험을 후속으로 선택하려면 현재 진단의 유효한 실제 출력 근거와 함께 같은 annotation의 강한 직접 교정 SFT를 대조해야 한다. 단순 판단 후 편집을 이기지 못하는 새 loss는 자동 확대하지 않는다.
+
+## 비교 조건
+
+모든 조건에서 finding 이름과 qA/qB를 동일하게 유지한다. 출력은 두 ID 각각 present/absent/uncertain 중 하나다. unknown·uncertain을 정답으로 인정하지 않는다.
+
+- **K:** 초안 그대로 반환. 수정률 0인 보존 기준점이다.
+- **R1:** 영상과 두 문장 초안을 주고 최종 상태를 판단한다. 오류 존재를 단정하지 않는다.
+- **R2:** 같은 입력에 '초안은 모두 맞을 수도 있으며, 영상이 수정을 지지하지 않으면 올바른 내용을 유지하라'는 보존 지시를 추가한다. 주 직접 교정 조건이다.
+- **T:** R2와 같은 소견·초안·출력 지시를 제공하되 영상은 제공하지 않는다. 상태의 불확실성을 허용한다.
+- **BJ:** 영상과 두 finding 이름만 제공한다. 초안 없이 두 상태를 한 번에 판단하고 규칙으로 문장을 생성한다.
+- **BI:** 같은 영상에서 finding 하나씩 독립 판단한다. 두 호출을 결합한다.
+- **O:** D8에서만 정답 상태를 명시적으로 제공하여 같은 출력 schema와 편집 연결을 검사한다. 실용 baseline에서 제외한다.
+
+기존 C/MedGrounder는 위치 출력에 적응된 모델이다. box의 유무를 소견 진위로 해석해 이번 비교군을 만들지 않는다. 과거 빠른 모듈형 대안의 존재는 보존하지만 이번 과제의 충분성을 대신 판정하지 않는다.
+
+## 재사용
+
+새 branch는 재사용 호환 승인 iter_006의 68117cfd08429ffc3cb9b77e14fb1db3221d86ab를 기반으로 한다. 이 선택은 오래된 NIH 코드의 새 승인이나 사용을 뜻하지 않는다. 필요한 pg43_run·pg39_data와 9개 의존 파일은 reuse_assets의 iter_043 전체 SHA에서 반입한다. 기준점에 경로가 없음을 확인했다.
+
+현재 HEAD와 반입 원본의 11개 blob은 같다. pg43_run은 실행기로 재사용하고 기존 CLI 전체를 새 schema 평가기로 간주하지 않는다. 새 parser·평가·자료 구성만 추가한다. 사용하지 않는 MG 학습기·launcher·과거 bbox 평가기의 needs_fix는 이번 범위에서 고치지 않는다.
+
+# Proposed Experiment
+
+## 1. 자료와 평가 단위 고정
+
+기존 PadChest-GR raw의 grounded_reports_20240819.json과 master_table.csv.zip을 사용하고 pg39_data의 pinned hash·연결 검사를 유지한다. 공식 train만 사용한다. H192는 기존 manifest의 E192 환자 ID로 제외하고 F120·공식 validation/test 및 MRI reserve는 열지 않는다.
+
+고정 finding 사전은 cardiomegaly, pleural effusion, consolidation, pneumothorax, pulmonary nodule, atelectasis, scoliosis, aortic elongation, pacemaker다. 양성은 명시적 label과 양언어 문장의 일치로, 음성은 해당 finding의 명시적 부정으로 정의한다. normal heart size 또는 normal cardiothoracic index처럼 cardiomegaly 부재를 직접 표현하는 문구는 의미 검토 후 허용한다. 일반적인 정상·무소견, clear costophrenic angle, bbox 부재, 다른 질환의 부재에서 target 음성을 추론하지 않는다. alveolar pattern을 consolidation으로 자동 치환하지 않는다.
+
+시간 비교, uncertain/possible/cannot exclude, significant처럼 부정 범위를 제한하는 표현, 부분 위치의 부재를 전체 부재로 바꿔야 하는 문장, 양언어 불일치, 같은 finding의 상충 annotation은 제외한다. 양성에 box가 없다는 이유만으로 음성 처리하지 않는다.
+
+모델 출력을 보기 전에 후보별 sentence_en/sentence_es, label, finding 이름, 최종 상태, 제외 이유를 private 의미 검토표에 보존한다. 이것은 문장의 의미 연결 검사이며 전문가의 새 영상 판독이 아니다. 현재 metadata에는 전체 원 보고서가 없다는 한계를 기록한다.
+
+한 환자에서 한 영상·서로 다른 두 finding만 선택한다. 후보 pair와 환자 선택은 seed4701의 hash 순서와 희소 층 우선 배정으로 고정한다. D8은 상태00/01/10/11 각2명, E96은 각24명이다. 같은 환자·study·영상·pixel이 D/E에 중복되지 않게 한다. 혼합 상태의 qA/qB 배치는 균형화하고 ID·파일명·prompt에 정답이나 corruption 여부를 넣지 않는다.
+
+기존 개발 집단과의 중복은 표시하되 독립 확인이라고 부르지 않는다. M0만 사용하므로 T305 적응 checkpoint의 학습 누수와는 구분한다. 사전학습 노출은 미확정이다. 최종 의미 검토 후 요구 층을 채울 수 없으면 broad negative를 추가하거나 reserve를 열지 않고 자료 gate 미달로 종료한다.
+
+각 영상에서 두 canonical finding의 상태를 present/absent 네 조합으로 만들어 초안00/01/10/11을 모두 평가한다. 이에 따라 환자마다 무오류 초안1개, 단일 오류2개, 이중 오류1개가 생긴다. 생성 문구는 소견별 고정 canonical 문장으로 하여 수식어·중증도·위치 의미를 추가하지 않는다. 합성 오류의 실제 임상 빈도는 주장하지 않는다.
+
+## 2. 동작 확인: D8
+
+D8에서 본실험의 15요청/환자와 O 4요청/환자를 실행한다. 기본152요청이다. parser는 두 ID·허용 상태·중복·누락·상충 출력·비EOS를 강제 검사한다. 코드펜스 같은 허용 wrapper는 D 단계에서 규칙을 고정한다. 상충하는 여러 답 중 하나를 고르는 parser는 금지한다.
+
+O 32요청의 상태·ID와 결정론적 문장 생성은 모두 맞아야 한다. 영상/텍스트 조건의 입력 정합성과 재개·완료 검증도 통과해야 한다. D에서만 필요한 형식 수정 한 번을 허용하며 이전 prompt·출력은 보존한다. 수정할 경우 D 전체 관련 조건을 새 attempt로 다시 확인한다. 두 번째에도 기술 gate가 실패하면 E를 실행하지 않는다. D 임상 정확도로 prompt를 선택하지 않는다.
+
+## 3. 가능성 탐색: E96
+
+기술·자료 gate와 평가 lock이 확정되면 E96을 한 번 실행한다. 학습 seed·checkpoint·threshold 탐색은 없다. R1/R2/T 각각384요청, BJ96요청, BI192요청으로 총1,440요청이다. K는 생성하지 않는다. BJ/BI 결과는 동일 환자의 네 초안에 공통 적용한다.
+
+E96은 큰 교정 손실을 판별하기 위한 개발 진단이다. paired binary 차이의 불일치 비율을0.25로 가정하면 95% 구간 반폭의 근사값은 약0.10이다. 이는 실측 분산이 아니며 작은 차이나5% 수준 비열등성을 확정하기에는 부족할 수 있다. 따라서 작은 E 일부에서 결과를 보고 표본을 정하지 않고 고정96명을 완료한다.
+
+## 4. 규모 확대와 독립 확인
+
+이번 E96이 가능성 탐색의 종료점이다. method pilot·다중 seed·다기관·자유형 보고서로 자동 확대하지 않는다. 양성 기준을 충족한 경우에만 다음 full 리뷰에서 강한 직접 SFT를 포함한 최소 방법 시험을 별도 계획한다. 독립 확인 집단은 이번에 사용하지 않는다.
+
+## 자원·시간·재개
+
+실행 직전 nvidia-smi와 상속된 CUDA_VISIBLE_DEVICES의 논리/물리 대응을 확인한다. 두 GPU 중 여유가 큰 장치부터 배정한다. D에서 GPU당1 worker와2 worker 구성을 같은 요청으로 비교한다. 추가 비교는 독립 요청이 충분하고 예상 절약이 측정 비용보다 클 때만 한다. 각 worker의 실제 peak와 다른 점유에 최소2GiB 여유를 더해 GPU 용량을 넘지 않아야 한다.
+
+처리량·긴 출력 latency·OOM·CPU/RAM/I/O 경합과 출력 정합성을 기준으로 구성을 선택한다. 기존 약8.35GiB/worker는 참고값이며 새 작업의 메모리 보장을 대신하지 않는다. GPU당1 worker를 유지하면 구체적인 실측 이유를 기록한다.
+
+greedy, bf16과 충분한 cap ladder 1000→2000→4000을 사용한다. 비EOS 재시도는 모두 보존하고 마지막에도 비EOS이면 invalid로 점수에 포함한다. 의미가 틀렸다는 이유로 재생성하지 않는다.
+
+본생성 참고 wall 범위는 과거 작업 처리량 환산으로 약1.6–4.8시간이다. D 실측 후 실제 E 요청량·loading·재시도를 반영한 ETA를 기록한다. 임의 시간 상한으로 중단하지 않는다. 요청 단위 claim, worker별 파일, 원본 partial 보존, 동일 config 재개를 유지한다. 기존 실행 중인 큐와 다른 사용자 프로세스는 건드리지 않는다.
+
+# Implementation Tasks for Claude
+
+1. 기준 원문은 이번 plan과 iter_043 review.json의 해당 code_assets다. 반입 SHA·import 의존성과 기존 결과 위치를 확인한다. 새 결과는 research/results/iter_047/ 아래에만 저장한다.
+2. rr47_spec.py에 finding 사전, 문장 mapping, prompt R1/R2/T/BJ/BI/O, 상태 parser, 요청량과 판정 규칙을 구현한다. 사전 의미 검토를 keyword 결과와 분리한다.
+3. rr47_data.py에서 pinned metadata 연결, 보호 ID 제외, 양언어 검토표, 환자 단위 층화 선택, 이미지 변환·hash, 네 초안 생성을 구현한다. build 중단 시 원본을 덮어쓰지 않는다.
+4. rr47_run.py는 pg43_run의 실행·검증 API를 사용한다. protocol과 호출 인자 대조, 전 의존성 잠금, D gate의 실제 E 진입 강제, 완료 결과 재검증을 구현한다. 연구 가설과 무관한 runner 재작성은 하지 않는다.
+5. rr47_eval.py와 별도 rr47_verify.py에서 아래 지표·환자 bootstrap·판정을 각각 구현한다. verifier는 production 점수 함수를 그대로 호출하지 않는다. 모든 조건을 검증하고 불일치 조건을 제외한 채 PASS를 만들지 않는다.
+6. 손계산 fixture로 K, 완전 정답, 항상 present, 항상 flip, 한쪽 누락, uncertain, 상충 JSON의 수정률·훼손률·paired 분모를 검사한다. D에서 중단·재개와 실제 변조·중복·누락·wrong config 거부를 확인한다.
+7. 최종 report/raw/manifest/protocol/source/verifier 결과의 digest를 연결한 뒤 completion을 마지막에 확정한다. 종료 코드와1,440개 E 요청의 완결성을 확인하고 실제 비용·미완료·보류 이유를 보고한다. 완료 전 보고서를 최종 결과로 내지 않는다.
+
+# Evaluation (성공/실패 기준 포함)
+
+## 점수
+
+각 환자는 두 finding×네 초안으로8개 상태 평가를 가진다. 그중4개는 원래 맞는 상태,4개는 틀린 상태다.
+
+- **수정률 r:** 원래 틀린4개 상태 중 최종 정답 상태로 바꾼 비율.
+- **훼손률 h:** 원래 맞는4개 상태를 반대 상태로 바꾼 비율.
+- **보존 실패율 h_fail:** 원래 맞는 상태를 반대 상태·uncertain·invalid로 만든 비율. 투자 기준에는 보수적인 h_fail을 쓴다.
+- **최종 상태 정확도:**8개 상태의 정답률. uncertain/invalid는0점이다.
+- **clean exact:** 무오류 초안에서 두 상태를 모두 보존한 환자 비율.
+- **robust exact:** 네 초안 모두에서 두 상태가 맞은 환자 비율.
+- **초안 민감도:** 같은 영상·finding에서 초안에 따라 최종 상태가 달라지는 비율. 변화만으로 결함을 판정하지 않는다.
+
+K는 r=0, h_fail=0이다. BJ/BI는 실제 상태 예측을 네 초안에 적용한다. 반복 초안을 독립 환자로 세지 않는다. 병원 배포의 오류 prevalence를 가정한 단일 utility 점수는 만들지 않는다.
+
+환자 단위 층화 paired bootstrap10,000회, seed4702를 사용한다. 환자 내 네 초안·두 finding은 함께 resample한다. 주비교 R2 대 BJ의 r 차이와 h_fail 차이는 각각97.5% CI로 제시한다. 나머지는95% CI와 탐색 표기로 보고한다. finding별·원 상태별 표는 기술적 분석이며 유리한 층으로 주판정을 교체하지 않는다.
+
+## 사전 투자 판단
+
+사용 목적상 탐색 목표는 잘못된 상태의80% 이상 수정과 올바른 상태의5% 이하 보존 실패다. 이는 임상 배포 안전 기준이 아니라 후속 연구 후보를 거르는 기준이다. 성공을 주장하려면 r의 CI 하한≥0.80, h_fail의 CI 상한≤0.05를 함께 요구한다.
+
+**단순 대안 충분:** R1/R2/BJ/BI 중 하나라도 위 두 조건을 충족하면 이 제한 과제에서 새 방법 투자를 보류한다. 다른 조건의 손실 관찰은 보존하되 자동 학습으로 연결하지 않는다.
+
+**최소 방법 시험을 검토할 양성 근거:** 다음을 모두 요구한다.
+
+1. 자료·정상 사용·실행·독립 재계산이 유효하다.
+2. BJ의 최종 상태 정확도가 T보다0.10 이상 높고 paired95% CI 하한이0보다 크다. 영상 정보가 실제 판단에 기여해야 한다.
+3. 주비교에서 BJ−R2 수정률 차이가0.15 이상이고97.5% CI 하한>0이며, 동시에 BJ−R2 보존 실패율 차이가0.05 이상이고97.5% CI 하한>0이다. 즉 초안 없는 재판단은 더 고치지만 더 훼손하는 trade-off가 있어야 한다.
+4. R1/R2/BJ/BI 각각에서 r의95% CI 상한<0.80 또는 h_fail의95% CI 하한>0.05 중 적어도 하나가 성립한다. 단순히 복합 성공 기준을 통과하지 못했다는 이유만으로 baseline 부족을 확정하지 않는다.
+
+이 기준을 충족해도 새로운 방법이나 선행 대비 차별성은 미확정이다. 다음 리뷰는 직접 교정 SFT를 먼저 포함하는 최소 개입의 가치를 판단한다. 강한 baseline이 해결할 가능성을 남기며 full 확대는 별도 결정한다.
+
+**음성 또는 투자 가치 부족:** 단순 대안 충분, R2로 손실 해소, text-only와 유사한 성능, 초안 없는 시각 판단부터 낮은 경우를 구분한다. 각각 이번 교정 후보의 투자 보류 근거이며 의료 VLM 전체의 기각은 아니다.
+
+**불확정:** CI가 목표·trade-off 경계를 가로지르거나 annotation·유효 출력 부족이 남으면 그 항목을 명시한다. 추가 표본·질환·prompt·seed로 경계를 넘기려 하지 않는다. 이미 저장된 출력의 한정 재분석 이외의 자동 보완은 없다.
+
+## 비용
+
+요청별 전처리 시작부터 상태 파싱·문장 렌더링 종료까지 latency를 기록하고 loading 포함 wall, GPU별 점유 구간, peak VRAM, tokens, 실패·재시도를 별도로 보고한다. BJ/BI의 반복 초안 공통 출력을 재사용한 실험 비용과 실제 한 검토당 필요한 호출 비용을 구분한다. request latency bootstrap을 device 시간 CI로 사용하지 않는다. 이번에는 단회 실행 비용의 점추정치를 보고하며 비용 우위나 비열등성의 확증을 주장하지 않는다.
+
+# Risks / Checks
+
+- PadChest 음성 문장의 검증 수준은 양성 box annotation과 같지 않다. 명시적 의미만 사용하고 진단 정답을 annotation 상대의 상태로 한정한다.
+- rough 후보65/74/159는 겹침·qualified negation을 제거하기 전 값이다. 표본 부족 시 규칙을 완화하지 않는다.
+- canonical 두 문장은 자유형 보고서의 대용물이 아니다. 원본 문장에 없는 위치·중증도·진단을 생성하거나 그 정확도를 주장하지 않는다.
+- 네 초안의 균등 구성은 오류 밀도 효과를 분리하기 위한 설계다. 자연 발생 보고서의 유병률·오류율 추정에 사용하지 않는다.
+- finding 조합 prior가 남을 수 있다. T와 영상 조건의 차이를 양성 판단의 필수 조건으로 사용한다.
+- E96은 개발 자료이며 선행 평가 자료와의 중복·MedGemma 사전학습 노출을 모두 독립성으로 포장하지 않는다.
+- 새 schema에 bbox parser를 적용하지 않는다. invalid·uncertain을 보존 성공으로 계산하지 않는다.
+- 기존 iter_041 비용 blocker, iter_046 실행기 reuse_issues와 원 판정은 변경하지 않는다.
+
+## 대규모 GPU 필요 후보
+
+다기관 영상과 전문가 수정 이력을 사용하여 verifier·editor를 공동 학습하고 실제 오류 밀도에서 수정–보존 trade-off를 최적화하는 방향은 장기 후보로 남긴다. 현재 자료와 두 GPU의 한정 진단에서 그 필요성·효과·신규성이 확인된 것은 아니다.
+
+# 계획의 근거 (GPT 조사 노트)
+
+## 이번 라운드의 결론
+
+완전한 자유형 보고서 교정은 이번 범위에서 제외한다. 명시적 annotation이 있는 두 소견의 상태를 수정·보존하는 제한된 실제 출력 diagnostic을 선택한다. 이는 새 기여가 확인된 방향이 아니라, 단순 대안 이후에도 방법 투자 가치가 남는지 판단하는 실험이다.
+
+## 직전 질문에 대한 답
+
+1. **가까운 방법은 보존을 고려하는가?** 고려한다. CorBenchX 본문은 오류가 주입된 보고서의 탐지·교정과 MSRL을 평가한다. 확인한 평가 설명에서는 별도 무오류 입력의 불필요한 수정률이 주지표로 제시되지 않았다. 그러나 이를 선행 전체의 부재로 일반화하지 않는다. [CorBenchX 본문](https://arxiv.org/html/2505.12057v1)
+
+APO의 공식 PDF 검색 색인에서 Table 1의 올바른 finding/location에 대한 유지 규칙, Table 3의 1,000문장 교정 검사, Table 4의 집계 보고서 품질 비교를 확인했다. 따라서 ‘올바른 내용을 보존하는 교정’ 자체는 차별점이 아니다. PDF 직접 열기는 계속 실패했으며 부록 전체를 읽었다고 주장하지 않는다. [APO 공식 논문](https://openaccess.thecvf.com/content/CVPR2026/papers/Mahmood_Phrase-grounded_APO_for_Improving_Chest_X-ray_Report_Generation_CVPR_2026_paper.pdf)
+
+Phrase-grounded fact-checking은 finding 진위와 위치를 함께 예측하며 polarity 반전 등의 합성 perturbation을 이미 사용한다. 단순 polarity 반전 과제를 새 benchmark 기여로 주장할 수 없다. [공식 본문](https://arxiv.org/html/2509.21356v1)
+
+2. **접근 가능한 자료로 정답을 정의할 수 있는가?** 두 소견의 명시적 상태로 범위를 제한하면 가능성이 있다. PadChest-GR의 양성 소견은 영상과 함께 검토됐지만 음성 문장은 추출 과정과 검증 수준이 다르다. bbox 부재는 음성 근거가 아니며, broad normal 문구에서 개별 질환 부재를 만들지 않는다. 논문의 annotation 설명과 로컬 schema를 대조했다. [PadChest-GR annotation](https://arxiv.org/html/2411.05085v2)
+
+로컬 pinned metadata의 train 3,185영상만 대상으로 읽기 전용 집계를 했다. H192를 환자 ID로 제외하고, 고정 아홉 소견의 명시적 양성 label 및 음성 문구를 거칠게 검색했을 때 두 상태 조합의 환자 후보는 모두 음성65명, 혼합74명, 모두 양성159명이었다. 이 집단들은 서로 겹칠 수 있으며 최종 적격 표본 수가 아니다. keyword 결과에는 qualified negation·문장 범위 오류가 들어갈 수 있으므로 출력 눈가림 의미 검토가 필요하다. D8/E96은 이 후보 용량과 큰 차이를 구분하는 진단 정밀도를 근거로 정한다. 보호 집단 영상이나 모델 출력은 열지 않았다.
+
+전체 원 보고서 문자열은 현재 master_table에 없고 sentence_en/sentence_es가 있다. 따라서 원 전체 보고서를 독립 감사했다고 표현하지 않는다. 최종 판단은 양언어 소견 annotation과 label이 명확히 지지하는 존재/부재에 한정한다.
+
+3. **어떤 단순 대안이 실제 실행 가능한가?** 같은 M0를 사용한 직접 교정, 보존 지시 교정, text-only, 초안 없는 공동·독립 소견 판단과 결정론적 편집을 실행할 수 있다. 이는 모델 계열·학습량 차이 없이 편집 조건을 구분한다. CorBenchX 공식 저장소는 MIMIC-CXR credentialed license를 명시하며, 확인한 README에는 MSRL checkpoint 실행 경로가 없었다. 접근 권한을 가정하거나 완전 재현을 했다고 하지 않는다. [공식 저장소](https://github.com/Liqq1/CorBenchX)
+
+## 기존 결과와 선택의 연결
+
+round_01 원문, GOAL, GPT_USAGE_POLICY, REPORTING_STYLE, iter_046 리뷰와 관련 code_assets, iter_042 리뷰, LIMITATIONS의 관련 항목을 확인했다. 문장별 적응 비교의 보류와 iter_041 공동 요청 관찰·비용 blocker는 유지한다. 이번은 그 blocker의 복구나 method gate 우회가 아니다. iter_042의 높은 presence 성능은 초안 없는 판단을 강한 대안으로 반드시 넣어야 하는 이유다.
+
+기존 접근법 개선은 적응 MedGrounder 확보 이후 추가 정보 가치가 낮다. joint SFT는 형식 미학습을 시험할 수 있지만 빠른 모듈형 대안 대비 필요한 실용 이득이 아직 불명확하다. 이번 후보는 bbox 점수를 더 올리는 대신 검토 과정에서 올바른 임상 내용을 보존하는 능력을 다룬다. 다만 완전한 보고서, omission 발견, 임상 reasoning을 평가하지 않는다.
+
+## 코드·비용 근거
+
+현재 HEAD는 bab147379dde1bcd68550e298cc596ee15091e99이며 작업 트리는 깨끗했다. pg43_run.py와 명시한 10개 의존 파일은 iter_043 SHA의 blob과 모두 같았다. iter_043 code_assets의 제한적 승인 범위를 확인했다. 새 branch의 자동 기준점은 과거 호환 승인 iter_006이며, 실제 SHA 68117cfd08429ffc3cb9b77e14fb1db3221d86ab와 해당 리뷰를 확인했다. 이 기준점에는 필요한 경로가 없어 선별 반입을 명시한다.
+
+iter_042의 E 414요청 launcher wall 합은 약1,702.9초이고, iter_043 MAIN_M0는 234요청에 약2,787.8초다. 서로 다른 출력 과제의 값이므로 참고 범위로만 사용한다. iter_043의 worker당 peak reserved는 약8.35GiB였다. 새 입력에서 D8 처리량과 실제 peak를 측정해 운영 구성을 확정한다.
+
+## 대규모 GPU 필요 후보
+
+전문가 수정 이력과 다양한 오류 밀도를 가진 다기관 자료로 시각 verifier와 편집기를 공동 학습하는 방향은 장기 후보로 보존한다. annotation·학습 비용이 크며 현재 두 소견 진단의 성공으로 필요성이나 신규성이 입증되는 것은 아니다.
+
+파일 생성·수정·실험 실행은 하지 않았다.
+
+이전 사고 라운드 노트: agent/runs/iter_047/think/
+
+
+
+## iter_047 CLAUDE REPORT — 2026-10-01 22:16:08
+
+# 요약
+
+- **핵심 결과:** E96 본실험은 실행하지 못했다. 계획한 층(상태 00/01/10/11 각 24명)을 채울 수 없어서 계획대로 자료 gate에서 종료했다. 정답이 "한 소견은 있고 다른 소견은 없음"인 환자(혼합 층)가 최대 34명뿐이다. 필요한 수는 D8 4명과 E96 48명을 합쳐 52명이다.
+- **D8 기술 gate도 미통과:** 정답 상태를 프롬프트에 주는 oracle(O) 조건이 32건 중 29건만 맞았다. 계획은 32/32를 요구한다. 사전 규칙상 E는 이중으로 차단된다.
+- **근거:** 최종 D8은 실제 MedGemma 출력 152건이고, 형식 유효율은 모든 조건 100%이다. 2/4 worker 출력은 token 단위로 일치하고, 실제 SIGKILL 후 재개도 일치했다. 변조 거부 검사는 16개 중 전부 통과했다. fixture는 57/57 통과, 독립 verifier는 62개 검사에서 불일치 0이다.
+- **미검증·주의:** 교정–보존 가설, 단순 대안의 충분성, 후속 투자 판단에 대해서는 아무것도 말할 수 없다. D8의 8명 수치는 기술 검사용 기술통계다. 이 수치로 prompt를 고르지 않았다.
+- **다음:** GPT가 데이터 부족에 맞춘 사전 규모 축소(예: E를 neg2 24 / 혼합 약 29 / pos2 24 명 수준)를 새 계획으로 승인할지, O 실패를 이유로 보류할지 판단한다. 구현은 끝나 있어 승인되면 바로 실행할 수 있다.
+
+# Work Performed
+
+- 반입된 11개 파일의 `git hash-object` 결과가 reuse_manifest의 blob과 모두 일치함을 확인했다. 새 코드는 `pg43_run`의 실행·검증 API를 그대로 쓴다.
+- **자료 규칙** (`rr47_data.py`, `rr47_spec.py`)
+  - pinned PadChest-GR metadata의 train에서 아홉 소견의 명시적 존재/부재 문장만 규칙으로 분류했다.
+  - 시간 비교, hedge, 한정된 부정, side 한정 부정, 다중 소견 양성 문장, 영문·스페인어 불일치, 같은 영상 내 상충 annotation은 제외했다.
+  - 검토자는 임상의가 아닌 자동화 에이전트다. 모델 출력을 보기 전에 허용 문장을 직접 읽고 문장 2개를 veto했다. 해당 목록은 `review_private.json`에 있다.
+  - H192 환자 192명과 F120 환자 120명은 제외했고, 이 영상은 열지 않았다.
+- **빌드** (`rr47_build.py`)
+  - 희소 층을 먼저, finding 쌍을 번갈아 뽑는 선택 규칙을 적용했다.
+  - 영상은 uint16>>8 규약으로 추출하고 file/pixel hash를 기록했다.
+  - 기존 개발 집단과의 중복은 표시만 했다. 8명 중 4명은 이전 개발 집단과 겹친다.
+- **요청·실행**
+  - D8 요청 152건: 8명 × (R1 4, R2 4, T 4, BJ 1, BI 2, O 4).
+  - `rr47_run.py`는 protocol에 코드·자료·평가 소스를 잠그고, adapter 미사용, 모델 revision, 요청 파일, 단계 이름, 요청 수를 completion 검증 때 대조한다.
+  - E protocol은 E 자료 gate와 D8 gate를 모두 요구하며, 둘 중 하나라도 실패하면 생성을 거부한다.
+- **평가·검증**
+  - `rr47_eval.py`: r, h, h_fail, accuracy, clean/robust exact, sensitivity와 환자 단위 층화 paired bootstrap.
+  - `rr47_decide.py`: 사전 투자 판단 규칙.
+  - `rr47_verify.py`: production parser·점수 함수를 호출하지 않는 독립 재계산.
+  - `rr47_gate.py`: D8 기술 gate.
+  - `test_rr47.py`, `rr47_gen_test.py`: fixture, 실행 검사.
+
+# Files Changed
+
+- 반입(수정 없음): `pg43_run.py`, `pg39_data.py`, `pg39_spec.py`, `rsna_diag/{__init__,generate,geometry,metrics,parse,prompts,lora,queue_lock}.py`
+- 신규:
+  - `rr47_spec.py`, `rr47_data.py`, `rr47_build.py`, `rr47_run.py`
+  - `rr47_eval.py`, `rr47_verify.py`, `rr47_decide.py`, `rr47_gate.py`
+  - `test_rr47.py`, `rr47_gen_test.py`
+- 결과: `results/iter_047/{data,requests,protocol,gen,eval,tests}/` (기존 결과는 수정하지 않았고, 이번 반복 경로에만 저장했다)
+
+# Commands / Experiments (실제 실행한 명령과 성공/실패)
+
+- `python rr47_build.py feasibility`: 성공.
+- `python rr47_build.py build D8`: 처음에 images 디렉터리가 없어 실패했다. 디렉터리 생성을 추가해 성공.
+- `python rr47_build.py build E`: exit 3. 자료 gate 미충족을 기록했다.
+- D8 attempt 1 (`gen/D8_2w`, protocol v1, GPU당 worker 1개): 성공, 512초.
+  - text-only 조건 T가 32건 모두 완결된 thinking block을 출력했다. 이 출력은 v1 parser에서 invalid가 된다.
+- 형식 수정 1회: 완결된 thinking block 하나를 허용하고 답은 닫힘 뒤에서만 읽는다. protocol v2로 새 attempt를 만들었다. v1 결과는 보존했다.
+- D8 v2 2 worker: 성공, 497초. D8 v2 4 worker (GPU당 2개): 성공, 256초.
+- 중단·재개, 변조·거부 검사: 성공. fixture: `test_rr47.py` 57/57. 첫 시도 파일은 `fixtures_rr47_try1~4.json`로 남겼다.
+  - try1은 내 fixture의 sens 기대값 오류와 R2 프롬프트의 "correct" 문구 때문에 2건 실패했다.
+  - try2는 55/55에서 thinking parser 규칙을 추가했고, try3은 구 fixture 1건이 새 규칙과 충돌해 실패했다.
+- 평가·검증: `rr47_eval.py`는 처음에 출력 디렉터리 부재로 실패했고, 잠긴 파일을 건드리지 않으려고 디렉터리를 만든 뒤 재실행했다. `rr47_verify.py`는 PASS(62검사)였고, `rr47_gate.py`는 `run=false`였다.
+- `rr47_run.py protocol --stage E`: 의도대로 거부됐다.
+
+# Results (수치와 결과 파일 경로)
+
+**자료 가용량** (`data/feasibility.json`, `data/E_data_gate.json`)
+
+| 항목 | 값 |
+|---|---|
+| 후보 환자 수 | 173명 |
+| 층별 가용 환자 (정답 유형) | neg2 45, 혼합 34, pos2 102 |
+| 계획이 필요한 환자 | neg2 26, 혼합 52, pos2 26 |
+
+- 혼합 층이 18명 부족하다. 규칙을 느슨하게 해도 해결되지 않는다. 명시적 음성 문장이 있는 영상 중 아홉 소견의 양성 label을 가진 영상이 최대 51개이고, 이 상한이 52에 못 미친다.
+- E gate의 상세 부족분은 `E_data_gate.json`에 있다 (선택 가능 24/5/24/24).
+
+**D8 실행** (`gen/D8_v2_2w`, `gen/D8_v2_4w`, `gen/D8_v2_resume`)
+
+| 구성 | wall | GPU당 peak 점유 | worker 간 token 일치 |
+|---|---|---|---|
+| 2 worker | 497초 | 약 8.8GiB | — |
+| 4 worker | 256초 (1.94배) | 약 17.7GiB | 152/152 일치 |
+
+- 4 worker 선택 근거: 처리량이 약 2배이고, GPU 24GiB에서 worker당 여유가 3GiB 이상이다. E를 다시 돌린다면 이 구성을 쓴다.
+- worker당 peak reserved는 8.27GiB로 측정됐다.
+- 재개 검사: 4 worker로 40건 기록 후 실제 SIGKILL, 같은 디렉터리에서 재실행해 152건 완료. 기준 대비 token 불일치 0 (`tests/resume_result.json`). torn-row 복구 경로는 이번에 발생하지 않아 검사하지 못했다.
+- 변조·거부: 16개 전부 거부됐다 (`tests/tamper_result_v2.json`).
+  - 파일 hash 검사에 걸린 8건, record 내부 검사에 걸린 7건이 따로 확인됐다. record 내부 검사는 digest, 요청 집합, adapter, prompt hash, text에 image token이 있는 경우를 모두 포함한다.
+  - 동시 launcher와 완료된 디렉터리 재실행도 거부됐다.
+  - 변조 전 정상 복사본은 통과해야 하는 대조군이고 합격 판정에서는 제외했다.
+
+**D8 gate** (`eval/D8_gate.json`): 7개 검사 중 oracle만 실패했다.
+
+| 항목 | 결과 |
+|---|---|
+| oracle(O) 정답 | 32건 중 29건 (3건 실패) |
+| 최종 EOS 종료 | 전부 EOS |
+| 조건별 형식 유효율 | 모두 100% |
+| 독립 verifier | PASS |
+| worker 간 일치 | token 불일치 0 |
+| 재개 | token 불일치 0 |
+| 변조 거부 | 전부 거부 |
+
+- oracle 실패 3건은 모두 정답 상태가 `cardiomegaly=present`인 환자다. 모델이 프롬프트의 "Verified final status"를 따르지 않고 `absent`를 답했다. 파서·형식 오류가 아니라 지시 이행 실패다.
+- 예기치 않은 관찰: text-only T는 32건 모두 thinking block(약 330 token)을 먼저 출력했다. 이것이 T의 비용을 키우고, 질문 없이 `uncertain`이 56/64로 나왔다.
+
+**D8 기술통계** (8명, 탐색용·결정에 사용하지 않음; `eval/D8_report.json`)
+
+| 조건 | 수정률 r | 보존 실패율 h_fail |
+|---|---|---|
+| R1 | 0.625 | 0.188 |
+| R2 | 0.625 | 0.188 |
+| BJ | 0.750 | 0.250 |
+| BI | 0.812 | 0.188 |
+| T | 0.0 | 0.844 |
+
+# Goal Progress / Reused Assets (목표 진전·미검증 범위, 재사용 출처·검증)
+
+- **목표 진전:** 교정·보존 진단을 실행할 도구는 갖췄고 작동을 확인했다. 그러나 이 진단의 연구 질문에는 새로 답한 것이 없다.
+- **자료 범위의 새 사실:** PadChest-GR train에서 명시적 부정 문장과 명시적 양성이 같은 영상에 있는 혼합 환자는 많아야 약 34명이다. 현재 metadata(영상별 문장 단위)로는 계획한 균형 설계가 불가능하다.
+- **재사용 검증 상태:**
+  - 11개 blob이 출처와 일치한다.
+  - import 완결성과 protocol CODE_FILES 의존성을 실제로 확인했다.
+  - 생성·검증 경로는 D8 152건에서 실제 입력으로 검증했다.
+  - 변조·wrong config·요청 중복/누락·동시 실행 거부를 확인했다.
+  - 최종 verifier의 digest를 report와 연결했다 (`eval/D8_verify.json`).
+- **required_checks 중 미완료**
+  - 공식 notebook 대비 processor tensor의 새 입력 직접 대조는 하지 못했다. chat template은 `generate.py`의 공식 `apply_chat_template` 경로를 그대로 썼고, 모델 revision·chat template hash는 config digest로 잠겨 있다.
+  - E 요청 전체(1,440건)와 E 완료 검증은 실행하지 못했다.
+  - 파일 hash 검사에 걸린 변조 중 일부는 내부 검사 변형으로 보완했지만, 이미지 파일 자체를 바꾸는 변조는 실행하지 못했다.
+
+# Problems (현재 결론 무효 / 재사용 전 수정 / 추후 개선을 구분)
+
+- **현재 결론을 막는 것**
+  - 자료 gate 미충족: 혼합 층 34 < 52.
+  - D8 oracle 3/32 실패. 계획상 형식 수정 1회는 thinking parser에 이미 사용했다.
+- **재사용 전 수정**
+  - `rr47_eval.py` main은 출력 디렉터리를 만들지 않는다. protocol에 이 파일이 잠겨 있어 수정하지 않고 디렉터리를 먼저 만들었다. 다음 protocol에서 고친다.
+  - `rr47_build.py`의 요청 ID는 `rr47_spec.VERSION`을 포함한다. 요청 파일은 v1 시기에 만들었고, 이후 VERSION이 `rr47_v2`가 됐다. 재생성하면 ID가 달라진다.
+  - torn-row 복구는 이번에 발생하지 않아 새 검사가 없다.
+  - 독립 verifier는 같은 bootstrap 규약(seed, 층 순서)을 공유한다. 두 구현이 같은 오류를 가질 가능성은 남는다.
+- **추후 개선**
+  - T가 thinking으로 길어진다. 계획의 비용 보고에 영향이 있다.
+  - 혼합 층 부족 시 사전 정할 대체 규모(D8 4명 제외 후 E는 혼합 약 29~30명 이하).
+
+# Recommendation to GPT
+
+- E 진행 여부는 새 계획이 정하는 것이 맞다. 규모 변경은 이번 모델 출력을 본 뒤가 아니라 사전 기준으로 정해야 한다.
+- 선택지는 두 가지다.
+  - **(a) 보류:** 이 과제의 자료 한계(혼합 약 34명)와 oracle 지시 이행 실패(3/32)를 근거로 보류하고 다른 질문으로 전환한다.
+  - **(b) 한정 보완:** 사전 규모를 줄여 새 계획을 세운다. 예: E = neg2 24 / 혼합 약 29 / pos2 24. 다만 이 경우 oracle 실패 원인, 곧 모델이 검증된 상태를 무시한 이유를 먼저 분리해야 한다.
+- (b)를 택하면 구현은 준비되어 있다. 4 worker 구성에서 E 추정 시간은 다음과 같다.
+  - T 요청이 thinking으로 약 21초씩 걸린다. D8의 T 32건 합계는 약 686초였다.
+  - 이를 환산하면 E96 규모에서 4 worker로 약 1.5~2.5시간 (추정치이며 실측 아님).
+- 이 결과는 교정–보존 trade-off, 단순 대안의 충분성, 후속 투자 판단 중 어느 것에도 증거가 되지 않는다.
+
+SELF_CHECK: FAIL
+SUMMARY: 반입 코드·parser·평가·독립 verifier·D8 실행 검증(2/4 worker 일치, SIGKILL 재개, 변조 거부 16/16)은 완료했으나, 혼합 층이 34/52로 부족해 E96 자료 gate가 미통과이고 D8 oracle이 29/32로 기술 gate도 실패해 E는 실행하지 못했다.
+
+# [orchestrator] 권한 거부된 도구 호출
+- Bash: ls results/datasets/padchest_gr results/datasets/padchest_gr/raw results/iter_043 results/iter_042 results/iter_042/data; ls results/datasets/padchest_gr/images | head -3; nvidia-smi --query-gpu=index,memory.used,memory.total --format=csv; echo $CUDA_VISIBLE_DEVICES
+- Bash: git show b50aa230a86c6d5b6c6b280fe718170ce4ecf220 --stat --format=%H -- . | head -5; git ls-tree -r --name-only b50aa230a86c6d5b6c6b280fe718170ce4ecf220 | grep -E "pg4[23]|pg39"
+- Bash: git ls-tree -r --name-only b50aa230a86c6d5b6c6b280fe718170ce4ecf220
+- Bash: git ls-tree --name-only b50aa230a86c6d5b6c6b280fe718170ce4ecf220
+- Bash: python - <<'EOF'
+import pg39_data as D, json, collections, re
+rep,m,l=D.load_inputs()
+ev=[json.loads(x) for x in open('results/iter_040/data/manifest_eval_private.jsonl')]
+print(collections.Counter(x['eval_set'] for x in ev))
+tr=m[m.split=='train']
+trimg=set(tr.ImageID)
+neg=collections.Counter()
+KW={'cardiomegaly':r'cardiomegal|cardiac (size|silhouette)|heart size|cardiothoracic|cardiac index|\bheart\b',
+'pleural effusion':r'effusion','consolidation':r'consolidat','pneumothorax':r'pneumothorax','pulmonary nodule':r'nodul','atelectasis':r'atelecta','scoliosis':r'scolio','aortic elongation':r'aort','pacemaker':r'pacemaker'}
+ex={k:collections.Counter() for k in KW}
+for r in rep:
+    if r['ImageID'] not in trimg: continue
+    for f in r['findings']:
+        if f.get('abnormal') is False:
+            s=f['sentence_en']
+            for k,p in KW.items():
+                if re.search(p,s,re.I): ex[k][s]+=1
+for k in ex: print(k, sum(ex[k].values()), ex[k].most_common(12))
+EOF
+- Bash: cat >> rr47_eval.py <<'EOF'
+
+
+def main():
+    import argparse
+    import hashlib
+    import os
+    import sys
+    import rr47_run
+    ap = argparse.ArgumentParser()
+    ap.add_argument("--stage", required=True)
+    ap.add_argument("--out-dir", required=True)
+    ap.add_argument("--protocol", required=True)
+    ap.add_argument("--out", required=True)
+    a = ap.parse_args()
+    if os.path.exists(a.out):
+        sys.exit(f"refuse to overwrite {a.out}")
+    recs = rr47_run.verify(a.out_dir, a.stage, a.protocol)  # completion·요청 집합·hash 재검증 후에만 점수 계산
+    req_path = f"results/iter_047/requests/requests_{a.stage}.jsonl"
+    rows = [json.loads(l) for l in open(req_path)]
+    manifest = json.load(open(f"results/iter_047/data/manifest_{a.stage}.json"))
+    table, parsed = build_table(manifest, rows, recs)
+    rep = summarize(table)
+    rep["stage"] = a.stage
+    rep["format_status_counts"] = format_counts(parsed)
+    rep["answer_counts_ok_only"] = uncertain_counts(parsed)
+    rep["n_valid_requests_nonoracle"] = sum(p["status"] == "ok" for pid, byc in parsed.items() for c, p in byc.items() if not c.startswith("O_"))
+    rep["n_requests_nonoracle"] = sum(1 for pid, byc in parsed.items() for c in byc if not c.startswith("O_"))
+    rep["n_non_eos_final"] = sum(1 for pid, byc in parsed.items() for c, p in byc.items() if not p["ended_eos"])
+    rep["oracle"] = oracle_check(manifest, parsed)
+    rep["per_patient_metrics"] = {pid: dict(stratum=t["stratum"], truth=t["truth"], metrics=t["metrics"]) for pid, t in table.items()}
+    rep["by_truth_stratum"] = {k: {c: {m: float(np.mean([table[p]["metrics"][c][m] for p in v])) for m in METRICS} for c in CONDS}
+                               for k, v in strata(table).items()}
+    h = hashlib.sha256()
+    for f in sorted(os.listdir(a.out_dir)):
+        if f.startswith("gen_worker") and f.endswith(".jsonl"):
+            h.update(open(os.path.join(a.out_dir, f), "rb").read())
+    rep["source"] = dict(protocol=a.protocol, out_dir=a.out_dir, worker_files_digest=h.hexdigest(), spec=S.VERSION, boot_seed=S.BOOT_SEED, boot_b=S.BOOT_B)
+    tmp = a.out + ".tmp"
+    json.dump(rep, open(tmp, "w"), indent=1, default=str)
+    os.replace(tmp, a.out)
+    print("report written", a.out)
+
+
+if __name__ == "__main__":
+    main()
+EOF
+python -c "import rr47_eval, rr47_verify"
+- Bash: CUDA_VISIBLE_DEVICES=0,1 python pg43_run.py launch --requests results/iter_047/requests/requests_D8.jsonl --protocol results/iter_047/protocol/protocol_D8_v1.json --out-dir results/iter_047/gen/D8_2w --workers 2 --peak-gb 10
+- Bash: python - <<'EOF'
+import json,glob,collections
+recs=[]
+for f in glob.glob('results/iter_047/gen/D8_2w/gen_worker*.jsonl'):
+    recs+=[json.loads(l) for l in open(f)]
+rq={json.loads(l)['request_id']:json.loads(l) for l in open('results/iter_047/requests/requests_D8.jsonl')}
+c=collections.Counter()
+for r in recs:
+    c[(rq[r['request_id']]['cond'].split('_d')[0], r['ended_eos'], r['final_cap'])]+=1
+print(c)
+for cond in ['R1_d01','R2_d00','T_d10','BJ','BI_qA','O_d11']:
+    for r in recs:
+        if rq[r['request_id']]['cond']==cond:
+            print(cond, repr(r['suffix_text_raw'][:200]), r['n_output_tokens'], round(r['wall_s'],2)); break
+c=json.load(open('results/iter_047/gen/D8_2w/completion.json'))['cost']; print(c)
+import statistics
+print(statistics.mean(r['wall_s'] for r in recs), max(r['peak_mem_reserved_gb_max'] for r in recs))
+EOF
+- Bash: python - <<'EOF'
+import json
+d=json.load(open('results/iter_047/eval/D8_report.json'))
+print(d['format_status_counts']); print(d['answer_counts_ok_only']); print(d['oracle']['n'], d['oracle']['ok'], d['n_non_eos_final'], d['n_valid_requests_nonoracle'], d['n_requests_nonoracle'])
+for c,m in d['conds'].items(): print(c, {k:round(v['mean'],3) for k,v in m.items()})
+print(d['strata_sizes'] if 'strata_sizes' in d else d['strata_sizes'])
+EOF
+
+
+
+## iter_047 GPT REVIEW [CONTINUE] — 2026-10-01 22:20:33
+
+# 요약
+
+- **판정:** execution_failed, valid_experiment=false. E96 본실험은 미실행이다.
+- **핵심 근거:** 혼합 환자 34명으로 필요한 52명을 채우지 못했고, D8 oracle도 29/32로 필수 기준에 미달했다.
+- **의미·한계:** 생성·평가 도구의 일부는 검증됐지만 교정–보존 가설과 단순 대안의 충분성은 미검증이다.
+- **다음:** 현재 제한 과제의 추가 투자를 보류하고 다음 deep 계획에서 자료와 공정한 대조가 확보되는 질문을 선택한다.
+
+# Assessment
+
+원 계획은 자료 gate 실패 또는 한 차례 형식 보완 후 D8 기술 gate 실패 시 E를 실행하지 않도록 정했다. 실제로 E를 시작하지 않은 종료는 이 규칙에 부합한다. 다만 기술 검사 완료를 유효한 과학적 실험으로 계산할 수 없다.
+
+engineer_backend.json은 없었다. claude_meta.json과 실제 stream의 model 기록은 Claude Sonnet 5.5 구현을 가리킨다. 리뷰 대상은 commit.json의 5d34c5cd69de08603b7ad02fbb43a78691c6e7c7이며, 대상 소스 21개가 현재 파일과 일치했다. unpreserved_paths는 비어 있다. changes.patch는 기준점에 없던 반입 파일과 신규 rr47 구현을 포함한다.
+
+# Key Findings
+
+1. **자료 부족을 재현했다.** pinned metadata와 구현된 적격성 규칙으로 후보 173명, neg2 45명·mixed 34명·pos2 102명을 다시 계산했다. 집단은 서로 겹칠 수 있다. E_data_gate.json은 00/01/10/11에 24/24/5/24명을 선택하고 종료했다. 이는 현재 규칙의 가용량이며 모든 가능한 annotation 해석의 절대 상한은 아니다.
+2. **oracle 실패는 실제 내용 불일치다.** 원시 출력 152건을 독립 파싱해 oracle 3건의 잘못된 상태를 확인했다. 두 환자의 cardiomegaly=present를 absent로 반환했다. 형식 오류를 정답 실패로 오인한 경우가 아니다.
+3. **D8 점수는 재현됐다.** R1/R2의 r=0.625, h_fail=0.1875, BJ의 0.750/0.250, BI의 0.8125/0.1875, T의 0/0.84375를 확인했다. 별도 계산으로 모든 조건의 지표와 bootstrap CI가 저장값과 일치했다. 이 값은 8명의 기술통계이며 투자 판정에 사용하지 않는다.
+4. **병렬·재개 검사는 유용하다.** 2 worker와 4 worker, 중단 후 재개 결과의 152개 요청 token이 모두 일치했다. 정상 attempt wall은 497.4초에서 256.2초로 줄었다. worker peak reserved는 약 8.27GiB다. fixture 57/57, 저장된 변조 거부·재개 기록도 확인했다.
+5. **출처 연결의 일부를 확인했다.** D8 영상 8개 파일 hash와 manifest, verifier의 report digest가 일치했다. E 생성 결과는 없었다. 공식 processor tensor의 새 입력 직접 대조는 구현 보고서도 미완료로 명시한다.
+
+# Problems / Concerns
+
+현재 과학적 결론을 막는 핵심은 E 미실행과 oracle gate 실패다. 원 계획의 성공 문턱을 낮춰 완료로 바꿀 수 없다.
+
+재사용 전에는 다음을 보완해야 한다.
+
+- T는 R2와 동일 지시문을 유지하지 않는다. 영상 부재 안내와 uncertain 유도 문구가 추가되어 영상 유무와 지시문 효과가 섞인다. BJ−T 역시 초안·질의 형식이 달라 순수한 영상 기여의 대조가 아니다.
+- rr47_run.verify는 D8에만 요청 수·modality 검사를 적용한다. E의 계획된 요청 구성은 자동 강제되지 않는다.
+- gate는 verifier PASS가 정확히 해당 report와 원시 출력에 대한 것인지 digest를 대조하지 않는다. 최종 평가·검증까지 묶은 완료 봉인이 필요하다.
+- D/E study·pixel 교집합 검사와 기존 이미지 파일의 원본 변환 일치 강제가 부족하다.
+- v1 요청 ID, v2 spec 및 v1 protocol extra의 관계를 명시해야 한다.
+- 재개 비용은 서로 다른 범위를 혼합한다. loading 포함 device 시간이 generation union보다 작은 현재 값을 전체 실행 비용으로 사용할 수 없다.
+
+이 결함들은 현재 D8에서 독립 재계산한 기술통계를 지우는 이유는 아니다. 그러나 전체 스냅샷 재사용 승인은 막는다. 미사용 경로의 보완만으로 다음 반복을 소비하지 않는다.
+
+# Interpretation
+
+이번에는 성능 문제의 유효한 재현보다 실행 가능성의 한계를 확인했다. 특히 정해진 명시적 음성 규칙으로 균형 E96을 만들 수 없었다. oracle 실패도 제한된 지시 이행 관찰일 뿐, 일반적인 보고서 교정 한계로 등록할 근거는 아니다. 따라서 limitation_updates는 비워 둔다.
+
+두 GPU를 사용했고 4 worker의 출력 정합성과 처리량 이득은 확인됐다. 다만 자료 부족이 알려진 상황에서 수행한 여러 D attempt의 가치는 실행 자산 검증에 한정된다. GPU 사용량이나 fixture 수를 연구 진전으로 세지 않는다.
+
+# Strategy Check / 연구 방향 판단
+
+- **실행 유효성:** D8 기술 검사만 완료했으며 E96 가설 검증은 미완료다.
+- **성능 개선:** 학습·방법 개입이 없고, D8 차이를 일반화 개선으로 해석할 수 없다.
+- **가설 지지:** 교정 고유 trade-off와 단순 대안의 부족함 모두 미확인이다.
+- **신규 기여 가능성:** 현재 결과로 새 방법 진입을 정당화하지 못한다.
+
+같은 track의 iter_040~046은 문장별 직접 적응과 모듈형 적응 효과를 확인했지만 새 내부 방법의 필요성은 남겨 두었다. 이번 실행 실패는 그 관찰을 설명하거나 반박하지 않는다. iter_041 공동 grounding 저하와 비용 blocker는 유지하고, iter_042 부재 거부와 gate의 제한된 관찰도 이번 결과로 변경하지 않는다. 각 관찰의 보존은 자동 후속 투자와 다르다.
+
+현재 교정 후보에는 유효한 E 관찰이 없고 자료 축소·oracle 보완·지시문 대조 수정이 함께 필요하다. 축소만으로 실행을 이어갈 정보 가치가 충분하다고 보기 어렵다. 따라서 검증 부족을 이유로 이 제한 설계의 투자를 보류한다. 대안이 충분하거나 보고서 교정 연구의 가치가 작다는 결론은 아니다. 진단 연속 횟수 자체를 포기 근거로 쓰지도 않는다.
+
+논문 추천은 보류한다. 이번에는 후속 탐구를 지지하는 유효한 가설 검증 결과가 없다.
+
+# Recommended Next Experiment
+
+현재 E를 축소해 즉시 실행하지 않는다. 다음 deep 계획에서 기존 공동 요청 손실의 직접 joint SFT 대조와 다른 중요한 질문을 정보 가치·자료 가용성·강한 baseline·비용으로 비교하고 하나를 선택한다. 공동 대조는 형식 미학습을 구분하고 적응 MedGrounder 대비 실용적 투자 결정을 바꿀 수 있을 때만 선택한다.
+
+교정 후보를 재개하려면 현재 출력의 한정 재분석으로 해결 가능한 oracle 근거, 적격 자료와 필요한 정밀도, 지시문을 통제한 대조, 결과별 종료 행동을 별도 계획에 고정해야 한다. 이 조건이 없으면 보류를 유지한다. VinDr 승인 대기와 보호 reserve는 유지하며 새 권한이나 사용자 가치 선택이 필요하지 않은 범위에서 다음 계획으로 진행한다.
