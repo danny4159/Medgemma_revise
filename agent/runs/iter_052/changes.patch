@@ -1,0 +1,1508 @@
+diff --git a/mt52_audit.py b/mt52_audit.py
+new file mode 100644
+index 0000000..6fe1810
+--- /dev/null
++++ b/mt52_audit.py
+@@ -0,0 +1,79 @@
++"""CT 의미 감사 순서·명시적 판정·고정 D/E 집합. 미확인은 자동 유지하지 않는다."""
++import argparse
++import json
++from mt52_prepare import ROOT, OUT, save, safe, sha256_file
++from mt52_cluster import rank
++
++def load():
++    order=json.loads((OUT/'audit/representative_order.json').read_text())
++    raw={r['title']:r for r in json.loads((OUT/'audit/candidates_private.json').read_text())}
++    decisions={}
++    for p in sorted((OUT/'audit/decisions').glob('*.json')):
++        for r in json.loads(p.read_text()):
++            if r['case_key'] in decisions: raise ValueError('duplicate decision')
++            decisions[r['case_key']]=r
++    return order,raw,decisions
++
++def choose(order,dec):
++    def good(r):
++        d=dec.get(r['case_key'],{})
++        return d.get('visual')=='keep' and d.get('history')=='keep'
++    def pending(r): return r['case_key'] not in dec
++    selected=[]
++    # 최장 적격을 먼저 확정하며 동률은 고정 hash 순서다.
++    longest=sorted(order,key=lambda r:(-r['n_images'],r['rank']))
++    for r in longest:
++        if pending(r): return selected,[r],'D_longest'
++        if good(r): selected.append(r);break
++    strata={ (r['subtype'],0 if r['n_images']<=3 else 1 if r['n_images']<=7 else 2) for r in order}
++    for st in sorted(strata):
++        pool=[r for r in order if (r['subtype'],0 if r['n_images']<=3 else 1 if r['n_images']<=7 else 2)==st]
++        if any(r in selected for r in pool):continue
++        for r in pool:
++            if pending(r): return selected,[r],'D_stratum'
++            if good(r): selected.append(r);break
++    for r in order:
++        if len(selected)>=24:break
++        if r in selected:continue
++        if pending(r):return selected,[r],'D_fill'
++        if good(r):selected.append(r)
++    if len(selected)<24:return selected,[],'D_insufficient'
++    e=[]
++    for r in order:
++        if r in selected:continue
++        if len(e)==280:break
++        if pending(r):return selected+e,[r],'E'
++        if good(r):e.append(r)
++    return selected+e,[],'ready' if len(e)==280 else 'E_insufficient'
++
++def next_batch(n):
++    order,raw,dec=load(); selected,_,stage=choose(order,dec)
++    batch=[]
++    # pending 예측을 keep으로 두어 조회 후보만 선택한다. 실제 판정/선택에는 저장하지 않는다.
++    temporary=dict(dec)
++    for _ in range(n):
++        _,pending,s=choose(order,temporary)
++        if not pending:break
++        r=pending[0];batch.append(r)
++        temporary[r['case_key']]={'visual':'keep','history':'keep'}
++    for r in batch:
++        c=raw[r['case_key']]
++        print(json.dumps({**r,'history':c['CLINICAL_HISTORY'],'answer':c['correct_answer_text'],
++                          'options':c['options']},ensure_ascii=False))
++    print('STATUS',stage,'audited',len(dec),'selected',len(selected))
++
++def record(name,entries,call_id):
++    order,raw,dec=load(); by={r['case_key']:r for r in order}
++    result=[]
++    for cid,visual,history,note in entries:
++        key='Case number '+cid.removeprefix('c')
++        assert key not in dec and visual in ('keep','exclude','pending') and history in ('keep','exclude','pending')
++        r=by[key];assert sha256_file(safe(ROOT/r['sheet']))==r['sheet_sha256']
++        result.append({'case_key':key,'visual':visual,'history':history,'note':note,
++                       'image_return_call_id':call_id,'sheet':r['sheet'],'sheet_sha256':r['sheet_sha256'],
++                       'raw_source_sha256':sha256_file(OUT/'audit/candidates_private.json')})
++    save(OUT/'audit/decisions'/f'{name}.json',result)
++    print('recorded',len(result))
++
++if __name__=='__main__':
++    p=argparse.ArgumentParser();p.add_argument('--next',type=int,default=6);a=p.parse_args();next_batch(a.next)
+diff --git a/mt52_audit_finish.py b/mt52_audit_finish.py
+new file mode 100644
+index 0000000..5e72324
+--- /dev/null
++++ b/mt52_audit_finish.py
+@@ -0,0 +1,84 @@
++"""전체 대표 감사와 실제 이미지 반환을 연결하고 자료 gate를 봉인한다."""
++import base64
++import hashlib
++import io
++import json
++import re
++from pathlib import Path
++from collections import Counter
++import numpy as np
++from PIL import Image
++from mt52_prepare import ROOT, OUT, save, sha256_file
++from mt52_audit import load, choose
++from mt52_provenance import pixels
++
++ROLLOUT=Path('/home/test/.codex/sessions/2026/10/03/rollout-2026-10-03T03-55-07-01a0fdf8-5e99-7c83-a778-8e11764ea36f.jsonl')
++
++def bind(snapshot, order):
++    by={r['case_key']:r for r in order}; expected={}; found={}; calls={}
++    for r in order:
++        assert sha256_file(ROOT/r['sheet'])==r['sheet_sha256']
++        with Image.open(ROOT/r['sheet']) as im:expected[pixels(im)]=r['case_key']
++    for ln,line in enumerate(snapshot.open()):
++        p=json.loads(line).get('payload',{})
++        if p.get('type')=='custom_tool_call':calls[p['call_id']]=p.get('input','')
++        if p.get('type')!='custom_tool_call_output':continue
++        for i,item in enumerate(p.get('output',[])):
++            if item.get('type')!='input_image':continue
++            data=base64.b64decode(item['image_url'].split(',',1)[1]); call=calls.get(p['call_id'],'')
++            with Image.open(io.BytesIO(data)) as im:
++                ph=pixels(im); key=expected.get(ph); mode='exact_rgb'; error=0.
++                if key is None:
++                    for cid in re.findall(r'/sheets/c(\d+)\.png',call):
++                        ck='Case number '+cid
++                        if ck not in by:continue
++                        with Image.open(ROOT/by[ck]['sheet']) as src:
++                            if src.size==im.size:continue
++                            if abs(src.width/src.height-im.width/im.height)>.002:continue
++                            error=float(np.abs(np.asarray(src.convert('RGB').resize(im.size,Image.Resampling.BILINEAR)).astype(float)-np.asarray(im.convert('RGB'))).mean())
++                        if error<.1:key=ck;mode='tool_resize_bilinear_mae_lt_0.1';break
++                if key is None:continue
++                # Match both the actual returned pixels and the requested path.
++                assert call,('missing call',key,p['call_id'])
++                found.setdefault(key,[]).append({'call_id':p['call_id'],'line':ln+1,'output_index':i,
++                    'returned_sha256':hashlib.sha256(data).hexdigest(),'pixels_sha256':ph,
++                    'mode':mode,'rgb_mae':error,'literal_path_in_call':by[key]['sheet'] in call,'call_input':call})
++    return found
++
++def validate(order,dec,found):
++    keys={r['case_key'] for r in order}
++    assert keys==set(dec),'missing/extra audit decision'
++    assert keys<=set(found),'missing actual image return'
++    for r in order:
++        d=dec[r['case_key']]
++        assert d['sheet_sha256']==r['sheet_sha256'],'audit sheet mismatch'
++        assert d['raw_source_sha256']==sha256_file(OUT/'audit/candidates_private.json'),'audit source mismatch'
++
++def main():
++    order,raw,dec=load();snap=OUT/'provenance/iter052_complete_audit_rollout_v2.jsonl'
++    if not snap.exists():
++        data=ROLLOUT.read_bytes();data=data[:data.rfind(b'\n')+1]
++        with snap.open('xb') as f:f.write(data)
++    found=bind(snap,order)
++    save(OUT/'provenance/all_image_returns_v2.json',{'snapshot':str(snap.relative_to(ROOT)),
++        'snapshot_sha256':sha256_file(snap),'returns':found,'missing':sorted(set(dec)-set(found))})
++    validate(order,dec,found)
++    selected,pending,stage=choose(order,dec);assert not pending
++    d=json.loads((OUT/'data/D_inference.json').read_text())
++    assert [r['case_key'] for r in selected[:24]]==[r['case_key'] for r in d]
++    e=selected[24:];assert not ({r['case_key'] for r in e}&{r['case_key'] for r in d})
++    sources=['mt52_audit_finish.py','mt52_audit.py','mt52_cluster.py','mt52_prepare.py']
++    inputs=['audit/representative_order.json','audit/candidates_private.json','data/clusters.json',
++        'data/image_manifest.json','data/D_selection.json','provenance/all_image_returns_v2.json']
++    files=[ROOT/p for p in sources]+[OUT/p for p in inputs]+sorted((OUT/'audit/decisions').glob('*.json'))
++    result={'status':stage,'run_E':stage=='ready','candidates':607,'representatives':len(order),
++        'audited':len(dec),'eligible':len(selected),'D':24,'E_available':len(e),'E_required':280,
++        'shortfall':max(0,280-len(e)),'eligible_images':sum(r['n_images'] for r in selected),
++        'E_images':sum(r['n_images'] for r in e),'visual':dict(Counter(r['visual'] for r in dec.values())),
++        'history':dict(Counter(r['history'] for r in dec.values())),
++        'selected':selected,'source_digests':{str(p.relative_to(ROOT)):sha256_file(p) for p in files},
++        'scope':'CT-only fixed representative primary audit. No model hypothesis judgment; E not shortened.'}
++    save(OUT/'audit/data_gate.json',result)
++    print({k:v for k,v in result.items() if k not in ('selected','source_digests')})
++
++if __name__=='__main__':main()
+diff --git a/mt52_cluster.py b/mt52_cluster.py
+new file mode 100644
+index 0000000..d0707d2
+--- /dev/null
++++ b/mt52_cluster.py
+@@ -0,0 +1,85 @@
++"""모델 실행 및 의미 감사 전 중복 후보와 대표 순서를 고정한다."""
++import collections
++import hashlib
++import json
++import numpy as np
++from PIL import Image, ImageDraw, ImageOps
++from mt52_prepare import ROOT, OUT, safe, save, candidates, norm_text, sha256_file
++
++def rank(key): return hashlib.sha256(('5201|'+key).encode()).hexdigest()
++
++def dctn(a, norm='ortho'):
++    """32x32 orthonormal DCT-II. scipy 없는 기본 환경에서 NumPy 수식을 사용한다."""
++    n=a.shape[0]
++    basis=np.cos(np.pi*np.arange(n)[:,None]*(np.arange(n)[None,:]+0.5)/n)*np.sqrt(2/n)
++    basis[0]/=np.sqrt(2)
++    return basis@a@basis.T
++
++def main():
++    cs=candidates(); by={r['title']:r for r in cs}
++    manifest=json.loads((OUT/'data/image_manifest.json').read_text())
++    assert len(manifest)==607 and sum(len(c['images']) for c in manifest)==2909
++    parent={k:k for k in by}; edges=[]
++    def find(x):
++        while parent[x]!=x:
++            parent[x]=parent[parent[x]]; x=parent[x]
++        return x
++    def join(a,b,reason,detail):
++        if a==b:return
++        parent[find(a)]=find(b)
++        edges.append({'a':a,'b':b,'reason':reason,'detail':detail})
++    seen={}; allims=[]
++    for r in manifest:
++        key=r['case_key']; ims=[]
++        c=by[key]
++        sig=norm_text(c['CLINICAL_HISTORY'])+'|'+str(sorted(norm_text(x) for x in c['options'].values()))
++        if sig in seen: join(key,seen[sig],'same_normalized_history_options',sig)
++        seen[sig]=key
++        for rec in r['images']:
++            p=safe(ROOT/rec['path']); assert sha256_file(p)==rec['sha256']
++            with Image.open(p) as im:
++                rgb=im.convert('RGB'); ims.append(rgb.copy())
++                assert hashlib.sha256(str(rgb.size).encode()+rgb.tobytes()).hexdigest()==rec['rgb_sha256']
++                freq=dctn(np.asarray(rgb.convert('L').resize((32,32)),dtype=float),norm='ortho')[:8,:8]
++                ph=int(''.join('1' if x>np.median(freq.flatten()[1:]) else '0' for x in freq.flat),2)
++            for kind in ['sha256','rgb_sha256','id']:
++                sig=kind+'|'+rec[kind]
++                if sig in seen: join(key,seen[sig],'exact_'+kind,rec['path'])
++                seen[sig]=key
++            allims.append((key,rec['path'],ph,int(rec['dhash'],16)))
++        # aspect ratio를 유지하며 감사용 사본에만 index를 표시한다.
++        cols=min(4,len(ims)); tile=384
++        sheet=Image.new('RGB',(cols*tile,((len(ims)+cols-1)//cols)*tile),(35,35,35))
++        draw=ImageDraw.Draw(sheet)
++        for i,im in enumerate(ims):
++            thumb=ImageOps.contain(im,(tile,tile-22))
++            x=(i%cols)*tile; y=(i//cols)*tile
++            sheet.paste(thumb,(x+(tile-thumb.width)//2,y+22))
++            draw.text((x+4,y+3),f'{key} / {i+1}',fill='yellow')
++        dest=safe(OUT/'audit/sheets'/(key.replace('Case number ','c')+'.png'),True)
++        dest.parent.mkdir(parents=True,exist_ok=True)
++        if dest.exists(): raise ValueError('sheet exists')
++        with dest.open('xb') as f: sheet.save(f,format='PNG')
++    near=[]
++    for i,(a,pa,ha,da) in enumerate(allims):
++        for b,pb,hb,db in allims[i+1:]:
++            if a!=b and (ha^hb).bit_count()<=4 and (da^db).bit_count()<=4:
++                detail={'paths':[pa,pb],'phash_distance':(ha^hb).bit_count(),'dhash_distance':(da^db).bit_count()}
++                near.append(detail)
++                join(a,b,'unresolved_near_duplicate_conservative_cluster',detail)
++    groups=collections.defaultdict(list)
++    for k in by:groups[find(k)].append(k)
++    clusters=[{'representative':min(v,key=rank),'members':sorted(v)} for v in groups.values()]
++    clusters.sort(key=lambda r:rank(r['representative']))
++    save(OUT/'data/clusters.json',{'clusters':clusters,'edges':edges,'near_pairs':near,
++        'manifest_sha256':sha256_file(OUT/'data/image_manifest.json'),
++        'rule':'exact bytes/RGB/id or history+options; unresolved pHash<=4 AND dHash<=4 conservatively merged; not patient identity',
++        'code_sha256':sha256_file(__file__)})
++    reps=[by[r['representative']] for r in clusters]
++    save(OUT/'audit/representative_order.json',[{'case_key':r['title'],'rank':rank(r['title']),
++        'n_images':r['image_count'],'subtype':r['image_01_sub_modality'],
++        'sheet':str((OUT/'audit/sheets'/(r['title'].replace('Case number ','c')+'.png')).relative_to(ROOT)),
++        'sheet_sha256':sha256_file(OUT/'audit/sheets'/(r['title'].replace('Case number ','c')+'.png'))} for r in reps])
++    print('clusters',len(clusters),'near pairs',len(near),'edges',len(edges))
++
++if __name__=='__main__':main()
+diff --git a/mt52_d_report.py b/mt52_d_report.py
+new file mode 100644
+index 0000000..ef3002f
+--- /dev/null
++++ b/mt52_d_report.py
+@@ -0,0 +1,68 @@
++"""D24 탐색 점수·비용 장부. E 본 가설 판정을 생성하지 않는다."""
++import json
++from collections import defaultdict
++import numpy as np
++from mt52_prepare import ROOT,OUT,save,sha256_file
++from mt52_spec import parse
++from mt52_verify import verify
++
++def union(intervals):
++    total=0.;end=None
++    for a,b in sorted(intervals):
++        assert b>=a
++        total+=b-max(a,end) if end is not None and b>end else b-a if end is None else 0
++        end=max(end,b) if end is not None else b
++    return total
++
++def report():
++    job=OUT/'pilot/D24_caps2';audit=verify(job)
++    cs=json.loads((OUT/'data/D_inference.json').read_text());truth={r['title']:r['correct_answer'] for r in json.loads((OUT/'audit/D_private.json').read_text())}
++    allr=[json.loads(p.read_text()) for p in sorted((job/'records').glob('*/*.json'))]
++    by={(r['spec']['case'],r['spec']['stage']):r for r in allr};vectors={s:[] for s in ['T','D','C','R','X']};costs=defaultdict(list);rows=[]
++    for c in cs:
++        key=c['case_key'];n=len(c['images']);row={'case':key,'truth':truth[key],'n_images':n,'outputs':{}}
++        for s in vectors:
++            r=by[key,s];ans=parse(r['text']);correct=int(ans==truth[key]);vectors[s].append(correct)
++            row['outputs'][s]={'answer':ans,'correct':correct,'eos':r['eos'],'input_tokens':len(r['input_tokens']),'output_tokens':len(r['tokens'])}
++            stages=[s] if s in ('T','D') else [f'F{i:02d}' for i in range(n)]+['U',s] if s in ('C','R') else ['H','X']
++            rs=[by[key,x] for x in stages]
++            costs[s].append({'case':key,'requests':len(rs),'generation_seconds':sum(x['runtime'] for x in rs),
++                'elapsed_span_seconds':max(x['t_end'] for x in rs)-min(x['t_start'] for x in rs),
++                'input_tokens':sum(len(x['input_tokens']) for x in rs),'output_tokens':sum(len(x['tokens']) for x in rs),
++                'peak_reserved_GiB':max(x['peak_reserved_GiB'] for x in rs)})
++        rows.append(row)
++    comparisons={}
++    inds=np.random.default_rng(5202).integers(0,len(cs),(20000,len(cs)))
++    for a,b in [('D','C'),('R','C'),('D','R'),('D','X'),('D','T')]:
++        delta=np.array(vectors[a])-np.array(vectors[b]);q=[2.5,97.5] if b=='T' else [.625,99.375]
++        comparisons[a+'-'+b]={'difference':float(delta.mean()),'CI':np.percentile(delta[inds].mean(1),q).tolist(),
++            'CI_level':.95 if b=='T' else .9875,'discordant':int(np.count_nonzero(delta)),
++            'a_only':int((delta==1).sum()),'b_only':int((delta==-1).sum()),'scope':'D24 exploratory only'}
++    intervals=defaultdict(list)
++    for r in allr:intervals[r['gpu']].append((r['t_start'],r['t_end']))
++    attempts=[]
++    for ad in sorted((job/'attempts').iterdir()):
++        resources=[json.loads(x) for x in (ad/'resources.jsonl').read_text().splitlines()] if (ad/'resources.jsonl').exists() else []
++        completed=[r for r in allr if r['attempt']==ad.name];done={r['request_id'] for r in completed}
++        starts=[json.loads(p.read_text()) for p in ad.glob('*_start.json')];unfinished=[x for x in starts if x['request_id'] not in done]
++        last=max((r['time'] for r in resources),default=0)
++        attempts.append({'attempt':ad.name,'committed':len(completed),'started':len(starts),'unfinished':len(unfinished),
++            'unfinished_observed_seconds_lower_bound':sum(max(0,last-x['time']) for x in unfinished),
++            'last_resource_time':last,'first_resource_time':min((r['time'] for r in resources),default=0),
++            'load_seconds':sum(json.loads(p.read_text())['load_seconds'] for p in ad.glob('worker*_env.json')),
++            'completion':json.loads((ad/'completion.json').read_text()) if (ad/'completion.json').exists() else None})
++    costs_summary={s:{'generation_seconds':sum(x['generation_seconds'] for x in rs),'input_tokens':sum(x['input_tokens'] for x in rs),
++        'output_tokens':sum(x['output_tokens'] for x in rs),'elapsed_span_p50':float(np.median([x['elapsed_span_seconds'] for x in rs])),
++        'elapsed_span_p95':float(np.percentile([x['elapsed_span_seconds'] for x in rs],95))} for s,rs in costs.items()}
++    result={'scope':'D24 development exploration; E data gate failed, hypothesis untested','integrity':audit,
++        'accuracy':{s:{'correct':sum(v),'n':len(v),'accuracy':sum(v)/len(v)} for s,v in vectors.items()},
++        'comparisons':comparisons,'vectors':vectors,'per_case':rows,'deployment_costs':dict(costs),'cost_summary':costs_summary,
++        'actual_shared_execution':{'requests':len(allr),'runtime_sum':sum(r['runtime'] for r in allr),
++            'gpu_interval_union':{g:union(v) for g,v in intervals.items()},'attempts':attempts,
++            'note':'F/U actually counted once. Deployment C and R each include F/U. Elapsed spans include interruptions and intervening shared DAG stages; not isolated deployment latency. Unfinished work is a lower bound, not exact device time.'},
++        'technical_gate_pass':not audit['non_eos'],'E_run':False,
++        'sources':{str(p.relative_to(ROOT)):sha256_file(p) for p in [ROOT/'mt52_d_report.py',ROOT/'mt52_verify.py',ROOT/'mt52_spec.py',OUT/'audit/D_private.json',OUT/'audit/data_gate.json']}}
++    save(OUT/'eval/D24_report.json',result)
++    print(result['accuracy']);print('nonEOS',len(audit['non_eos']),'invalid',len(audit['invalid_final']))
++
++if __name__=='__main__':report()
+diff --git a/mt52_d_verify.py b/mt52_d_verify.py
+new file mode 100644
+index 0000000..c2f26cc
+--- /dev/null
++++ b/mt52_d_verify.py
+@@ -0,0 +1,66 @@
++"""Production parser/집계 없이 원시 D 답변·paired CI·비용을 재계산한다."""
++import json
++import re
++from collections import defaultdict
++import numpy as np
++from mt52_prepare import ROOT,OUT,save,sha256_file
++
++def swept(intervals):
++    events=defaultdict(int)
++    for a,b in intervals:events[a]+=1;events[b]-=1
++    active=0;last=0.;value=0.
++    for t,change in sorted(events.items()):
++        if active:value+=t-last
++        active+=change;last=t
++    assert active==0
++    return value
++
++def main():
++    path=OUT/'eval/D24_report.json';r=json.loads(path.read_text())
++    cs=json.loads((OUT/'data/D_inference.json').read_text());truth={x['title']:x['correct_answer'] for x in json.loads((OUT/'audit/D_private.json').read_text())}
++    raw={};digests={}
++    for p in sorted((OUT/'pilot/D24_caps2/records').glob('*/*.json')):
++        x=json.loads(p.read_text());key=(x['spec']['case'],x['spec']['stage']);assert key not in raw;raw[key]=x
++        digests[str(p.relative_to(ROOT))]=sha256_file(p)
++    expected={(c['case_key'],s) for c in cs for s in ['T','D','U','C','R','H','X']+[f'F{i:02d}' for i in range(len(c['images']))]}
++    assert set(raw)==expected and digests==r['integrity']['raw_digests']
++    vectors={s:[] for s in 'TDCRX'};invalid=[];non_eos=[]
++    for (case,s),x in raw.items():
++        assert x['eos']==bool(x['tokens'] and x['tokens'][-1] in [1,106])
++        if not x['eos']:non_eos.append((case,s))
++    for c in cs:
++        for s in vectors:
++            text=raw[c['case_key'],s]['text'];lines=[l.strip() for l in text.splitlines() if l.strip()]
++            ans=None
++            if lines and lines[-1] in ['Answer: '+a for a in 'ABCDE'] and sum(bool(re.match(r'(?i)^Answer\s*:',l)) for l in lines)==1:ans=lines[-1][-1]
++            if ans is None:invalid.append((c['case_key'],s))
++            vectors[s].append(int(ans==truth[c['case_key']]))
++    assert vectors==r['vectors'] and len(non_eos)==len(r['integrity']['non_eos']) and len(invalid)==len(r['integrity']['invalid_final'])
++    rng=np.random.default_rng(5202);boot={k:[] for k in r['comparisons']}
++    for _ in range(20000):
++        ids=rng.integers(0,24,24)
++        for key in boot:
++            a,b=key.split('-');boot[key].append(sum(vectors[a][i]-vectors[b][i] for i in ids)/24)
++    for key,vals in boot.items():
++        q=[2.5,97.5] if key=='D-T' else [.625,99.375]
++        assert np.allclose(np.percentile(vals,q),r['comparisons'][key]['CI'],atol=1e-12,rtol=0)
++    ints=defaultdict(list)
++    for x in raw.values():ints[x['gpu']].append((x['t_start'],x['t_end']))
++    total=sum(x['t_end']-x['t_start'] for x in raw.values())
++    assert abs(total-r['actual_shared_execution']['runtime_sum'])<1e-6
++    for g,v in ints.items():assert abs(swept(v)-r['actual_shared_execution']['gpu_interval_union'][g])<1e-6
++    for s in vectors:
++        cost=0.;it=ot=0
++        for c in cs:
++            stages=[s] if s in 'TD' else ['H','X'] if s=='X' else [f'F{i:02d}' for i in range(len(c['images']))]+['U',s]
++            for stage in stages:
++                x=raw[c['case_key'],stage];cost+=x['t_end']-x['t_start'];it+=len(x['input_tokens']);ot+=len(x['tokens'])
++        assert abs(cost-r['cost_summary'][s]['generation_seconds'])<1e-6
++        assert (it,ot)==(r['cost_summary'][s]['input_tokens'],r['cost_summary'][s]['output_tokens'])
++    assert swept([(0,2),(1,3),(5,6)])==4 # overlapping workers counted once
++    save(OUT/'eval/D24_independent_verify.json',{'status':'PASS','requests':len(raw),'cases':24,'paired_CIs':len(boot),
++        'raw_digests':digests,'report_sha256':sha256_file(path),'verifier_sha256':sha256_file(__file__),
++        'scope':'D exploration only; no E hypothesis validation','costs_verified':['shared once','C/R each include F/U','GPU interval sweep','input/output token sums']})
++    print('PASS',len(raw),'5 paired CI and cost totals')
++
++if __name__=='__main__':main()
+diff --git a/mt52_data_verify.py b/mt52_data_verify.py
+new file mode 100644
+index 0000000..cb21cf7
+--- /dev/null
++++ b/mt52_data_verify.py
+@@ -0,0 +1,47 @@
++"""원본·공식 객체·전체 영상·고정 대표 및 감사 gate의 별도 재집계."""
++import hashlib
++import json
++from collections import Counter
++from PIL import Image
++from mt52_prepare import ROOT,OUT,save,sha256_file,verify_object,safe
++
++def main():
++    rawpath=ROOT/'results/iter_049/raw/train.jsonl'
++    assert sha256_file(rawpath)=='7b38ceddc9cb1cf3a8dc0f9179c694caf826cd5716bb1b326e71d36e9e7d9b3a'
++    raw=[json.loads(s) for s in rawpath.read_text().splitlines()]
++    selected={r['title']:r for r in raw if r['image_count']>=2 and r['timepoint_count']==1 and r['is_longitudinal'] is False
++        and all(r[f'image_{i:02d}_modality']=='CT' for i in range(1,r['image_count']+1))}
++    assert len(selected)==607
++    manifest=json.loads((OUT/'data/image_manifest.json').read_text());assert {r['case_key'] for r in manifest}==set(selected)
++    n=0;alpha=[]
++    for case in manifest:
++        key=case['case_key'];r=selected[key];cid=key.replace('Case number ','c')
++        listing=json.loads((OUT/'acq'/f'{cid}.json').read_text());entries={e['path']:e for e in listing['entries'] if e['type']=='file'}
++        assert len(case['images'])==r['image_count']
++        for i,x in enumerate(case['images'],1):
++            assert x['id']==r[f'image_{i:02d}_id'] and x['original_path']==r[f'image_{i:02d}_path']
++            p=safe(ROOT/x['path']);verify_object(p,entries[x['original_path']]);assert sha256_file(p)==x['sha256']
++            with Image.open(p) as im:
++                if 'A' in im.getbands() and im.getchannel('A').getextrema()!=(255,255):alpha.append(x['path'])
++                rgb=im.convert('RGB');assert hashlib.sha256(str(rgb.size).encode()+rgb.tobytes()).hexdigest()==x['rgb_sha256']
++            n+=1
++    groups=json.loads((OUT/'data/clusters.json').read_text())['clusters'];reps=[];members=[]
++    for g in groups:
++        members.extend(g['members']);rep=min(g['members'],key=lambda k:hashlib.sha256(('5201|'+k).encode()).hexdigest())
++        assert rep==g['representative'];reps.append(rep)
++    assert len(members)==len(set(members))==607 and set(members)==set(selected)
++    ds=[]
++    for p in sorted((OUT/'audit/decisions').glob('*.json')):ds.extend(json.loads(p.read_text()))
++    assert len(ds)==len({d['case_key'] for d in ds})==606 and {d['case_key'] for d in ds}==set(reps)
++    good={d['case_key'] for d in ds if d['visual']=='keep' and d['history']=='keep'}
++    d={c['case_key'] for c in json.loads((OUT/'data/D_inference.json').read_text())};assert len(d)==24 and d<=good
++    e=good-d;gate=json.loads((OUT/'audit/data_gate.json').read_text())
++    assert gate['eligible']==len(good)==287 and gate['E_available']==len(e)==263 and gate['run_E'] is False
++    ret=json.loads((OUT/'provenance/all_image_returns_v2.json').read_text());assert set(reps)<=set(ret['returns']) and not ret['missing']
++    assert sha256_file(ROOT/ret['snapshot'])==ret['snapshot_sha256']
++    save(OUT/'tests/data_verify_final.json',{'status':'PASS','cases':607,'images':n,'representatives':606,'eligible':len(good),
++        'D':len(d),'E':len(e),'E_gate':False,'nonopaque_alpha':alpha,'source_sha256':sha256_file(__file__),
++        'gate_sha256':sha256_file(OUT/'audit/data_gate.json'),'returns_sha256':sha256_file(OUT/'provenance/all_image_returns_v2.json')})
++    print('PASS',607,n,606,len(good),len(e))
++
++if __name__=='__main__':main()
+diff --git a/mt52_finish.py b/mt52_finish.py
+new file mode 100644
+index 0000000..440b38c
+--- /dev/null
++++ b/mt52_finish.py
+@@ -0,0 +1,41 @@
++"""자료 gate 실패 종료를 원시 실행·검증 근거와 연결한다. 연구 성공 판정 아님."""
++import json
++from mt52_prepare import ROOT,OUT,save,sha256_file
++
++def main():
++    paths=['audit/data_gate.json','provenance/all_image_returns_v2.json','provenance/iter051_return_links_v2.json',
++        'tests/data_verify_final.json','tests/input_tensor_final.json','tests/final_fixtures.json',
++        'tests/resume_current_result.json','tests/revalidation/tests/data_fixtures.json',
++        'eval/source_lock.json','eval/D24_report.json','eval/D24_independent_verify.json','pilot/throughput.json',
++        'tests/protocol_final.json','usage_ledger.json','provenance/old_pilot_source_verify.json']
++    objs={p:json.loads((OUT/p).read_text()) for p in paths}
++    gate=objs['audit/data_gate.json'];assert gate['run_E'] is False and gate['E_available']==263
++    prior=objs['provenance/iter051_return_links_v2.json']
++    assert prior['status']=='PASS' and len(prior['cases'])==254 and not prior['missing']
++    assert len(prior['other_image_returns'])==13 and sha256_file(ROOT/prior['rollout'])==prior['rollout_sha256']
++    for p,h in gate['source_digests'].items():assert sha256_file(ROOT/p)==h
++    for p in ['tests/data_verify_final.json','tests/input_tensor_final.json','tests/final_fixtures.json',
++              'tests/resume_current_result.json','tests/revalidation/tests/data_fixtures.json','eval/D24_independent_verify.json','tests/protocol_final.json']:
++        assert objs[p]['status']=='PASS'
++    for p,h in objs['eval/source_lock.json']['files'].items():assert sha256_file(ROOT/p)==h
++    report=objs['eval/D24_report.json'];verifier=objs['eval/D24_independent_verify.json']
++    assert verifier['report_sha256']==sha256_file(OUT/'eval/D24_report.json')
++    assert verifier['verifier_sha256']==sha256_file(ROOT/'mt52_d_verify.py')
++    assert verifier['raw_digests']==report['integrity']['raw_digests']
++    for p,h in verifier['raw_digests'].items():assert sha256_file(ROOT/p)==h
++    job=OUT/'pilot/D24_caps2';completions=list(job.glob('attempts/*/completion.json'));assert len(completions)==1
++    complete=json.loads(completions[0].read_text());assert complete['exit_codes']==[0,0] and complete['n']==296
++    assert complete['records']==verifier['raw_digests']
++    sources=sorted(ROOT.glob('mt52*.py'))+sorted(ROOT.glob('test_mt52*.py'))
++    files=[OUT/p for p in paths]+sources+completions+[job/'protocol.json']
++    save(OUT/'completion.json',{'artifact_bundle_sealed':True,'iteration_outcome':'data_gate_failed',
++        'valid_experiment':False,'self_check':'FAIL','E_run':False,'D_requests':296,
++        'D_non_EOS':len(report['integrity']['non_eos']),'E_available':263,'E_required':280,
++        'files':{str(p.relative_to(ROOT)):sha256_file(p) for p in files},
++        'raw_digests':verifier['raw_digests'],
++        'limitations':['No E hypothesis test','D non-EOS remains after F/U cap doubling',
++            'Final-stage doubling not pursued after definitive data gate failure; no E technical gate approval',
++            'Agent audit is not clinical gold adjudication','Interrupted generation costs only bounded from below']})
++    print('SEALED gate failure, SELF_CHECK FAIL')
++
++if __name__=='__main__':main()
+diff --git a/mt52_freeze_d.py b/mt52_freeze_d.py
+new file mode 100644
+index 0000000..7005f51
+--- /dev/null
++++ b/mt52_freeze_d.py
+@@ -0,0 +1,62 @@
++"""현재 D24와 실제 감사 이미지 반환의 불변 snapshot을 연결한다."""
++import base64
++import hashlib
++import io
++import json
++import numpy as np
++from pathlib import Path
++from PIL import Image
++from mt52_prepare import ROOT,OUT,save,sha256_file
++from mt52_audit import load,choose
++from mt52_provenance import pixels
++
++def main():
++    order,raw,dec=load()
++    selected,_,stage=choose(order,dec)
++    assert stage=='E' and len(selected)>=24
++    selected=selected[:24]
++    src=Path('/home/test/.codex/sessions/2026/10/03/rollout-2026-10-03T03-55-07-01a0fdf8-5e99-7c83-a778-8e11764ea36f.jsonl')
++    dst=OUT/'provenance/iter052_D_audit_rollout.jsonl'
++    if not dst.exists():
++        data=src.read_bytes();data=data[:data.rfind(b'\n')+1]
++        with dst.open('xb') as f:f.write(data)
++    expected={}
++    for r in selected:
++        with Image.open(ROOT/r['sheet']) as im:expected[pixels(im)]=r['case_key']
++    found={};calls={}
++    for n,line in enumerate(dst.open()):
++        p=json.loads(line).get('payload',{})
++        if p.get('type')=='custom_tool_call':calls[p['call_id']]=p
++        if p.get('type')!='custom_tool_call_output':continue
++        for i,item in enumerate(p.get('output',[])):
++            if item.get('type')!='input_image':continue
++            data=base64.b64decode(item['image_url'].split(',',1)[1])
++            with Image.open(io.BytesIO(data)) as im:
++                key=pixels(im)
++                # 도구가 2048px로 축소한 최장 sheet. 호출 경로와 실제 픽셀을 함께 검사한다.
++                if key not in expected and im.size==(1170,2048):
++                    call=calls.get(p['call_id'],{}).get('input','')
++                    if 'c11994' in call:
++                        with Image.open(ROOT/'results/iter_052/audit/sheets/c11994.png') as source:
++                            err=float(np.abs(np.asarray(source.convert('RGB').resize(im.size,Image.Resampling.BILINEAR)).astype(float)-np.asarray(im.convert('RGB'))).mean())
++                        if err<0.1:expected[key]='Case number 11994'
++            if key in expected:
++                found.setdefault(expected[key],[]).append({'call_id':p['call_id'],'line':n+1,'output_index':i,
++                    'returned_sha256':hashlib.sha256(data).hexdigest(),'pixels_sha256':key,
++                    'call_input':calls.get(p['call_id'],{}).get('input')})
++    missing=[r['case_key'] for r in selected if r['case_key'] not in found]
++    save(OUT/'provenance/D_image_returns_v2.json',{'snapshot_sha256':sha256_file(dst),'returns':found,'missing':missing,
++        'longest_resize':'c11994: 1536x2688→1170x2048; call path + bilinear RGB MAE<0.1/255. Other sheets exact pixels.'})
++    assert not missing,missing
++    inf={c['case_key']:c for c in json.loads((OUT/'data/inference_candidates.json').read_text())}
++    ims={c['case_key']:c for c in json.loads((OUT/'data/image_manifest.json').read_text())}
++    save(OUT/'data/D_inference.json',[inf[r['case_key']] for r in selected])
++    save(OUT/'data/D_images.json',[ims[r['case_key']] for r in selected])
++    save(OUT/'audit/D_private.json',[raw[r['case_key']] for r in selected])
++    save(OUT/'data/D_selection.json',{'cases':selected,'decisions':[dec[r['case_key']] for r in selected],
++        'returns_sha256':sha256_file(OUT/'provenance/D_image_returns_v2.json'),
++        'code_sha256':{p:sha256_file(ROOT/p) for p in ['mt52_audit.py','mt52_cluster.py','mt52_freeze_d.py']},
++        'input_sha256':{p:sha256_file(OUT/p) for p in ['data/clusters.json','data/D_inference.json','data/D_images.json','audit/D_private.json']}})
++    print('D24 frozen; images',sum(r['n_images'] for r in selected))
++
++if __name__=='__main__':main()
+diff --git a/mt52_prepare.py b/mt52_prepare.py
+new file mode 100644
+index 0000000..c37528d
+--- /dev/null
++++ b/mt52_prepare.py
+@@ -0,0 +1,162 @@
++"""CT 후보 확보. 과거 자산 읽기 전용, 새 결과만 배타적으로 기록한다."""
++import concurrent.futures as cf
++import hashlib
++import json
++import os
++from pathlib import Path
++import sys
++import time
++import urllib.request
++import urllib.parse
++import fcntl
++import PIL
++from PIL import Image, ImageOps, ImageDraw
++from mt49_audit import modalities, schema_problems, answer_problems, infer_view, norm_text
++from mt49_fetch import HF, HF_REV, get_json, sha256_file
++from mt49_images import git_blob_sha1, safe_rel
++
++ROOT = Path(__file__).resolve().parent
++OUT = ROOT/'results/iter_052'
++TRAIN_SHA = '7b38ceddc9cb1cf3a8dc0f9179c694caf826cd5716bb1b326e71d36e9e7d9b3a'
++
++def safe(path, write=False):
++    p = Path(path).absolute()
++    if '..' in p.parts or any(q.is_symlink() for q in [p, *p.parents]):
++        raise ValueError('path traversal or symlink')
++    if not p.is_relative_to(OUT if write else ROOT):
++        raise ValueError('output outside iteration' if write else 'input outside research')
++    return p
++
++def save(path, obj):
++    p = safe(path, True)
++    p.parent.mkdir(parents=True, exist_ok=True)
++    text = json.dumps(obj, ensure_ascii=False, indent=2)
++    if p.exists():
++        if p.read_text() != text:
++            raise ValueError('existing content mismatch: '+str(p))
++        return
++    with p.open('x') as f:
++        f.write(text)
++        f.flush()
++        os.fsync(f.fileno())
++
++def candidates():
++    p = safe(ROOT/'results/iter_049/raw/train.jsonl')
++    assert sha256_file(p) == TRAIN_SHA
++    rows = [json.loads(x) for x in p.read_text().splitlines()]
++    assert len(rows) == 7347 and len({r['title'] for r in rows}) == 7347
++    cs = [r for r in rows if set(modalities(r)) == {'CT'} and r['is_longitudinal'] is False
++          and r['timepoint_count'] == 1 and r['image_count'] >= 2]
++    assert (len(cs),sum(r['image_count'] for r in cs)) == (607,2909)
++    for r in cs:
++        assert not schema_problems(r) and not answer_problems(r), r['title']
++        v = infer_view(r)
++        assert all(set(i)=={'id','path'} for i in v['images'])
++        for i in v['images']:
++            safe_rel(i['path'])
++    return sorted(cs,key=lambda r:hashlib.sha256(('5201|'+r['title']).encode()).hexdigest())
++
++def verify_object(p, ent):
++    safe(p)
++    if p.stat().st_size != ent['size']:
++        raise ValueError('object size mismatch')
++    expected = ent.get('lfs',{}).get('oid')
++    actual = sha256_file(p) if expected else git_blob_sha1(p)
++    if actual != (expected or ent['oid']):
++        raise ValueError('official object digest mismatch')
++
++def case_download(r):
++    cid = r['title'].replace('Case number ','c')
++    images = infer_view(r)['images']
++    listing_path = OUT/'acq'/f'{cid}.json'
++    directory = str(Path(images[0]['path']).parent)
++    url = f'https://huggingface.co/api/datasets/{HF}/tree/{HF_REV}/'+directory
++    if listing_path.exists():
++        listing = json.loads(safe(listing_path).read_text())
++        assert listing['url'] == url
++    else:
++        listing = {'url':url,'entries':get_json(url)}
++        save(listing_path,listing)
++    ents = {e['path']:e for e in listing['entries'] if e['type']=='file'}
++    records=[]
++    for im in images:
++        ent = ents[im['path']]
++        p = safe(OUT/im['path'],True)
++        p.parent.mkdir(parents=True,exist_ok=True)
++        u = f'https://huggingface.co/datasets/{HF}/resolve/{HF_REV}/'+urllib.parse.quote(im['path'])
++        provenance = p.with_suffix('.acquisition.json')
++        if p.exists():
++            verify_object(p,ent)
++            if not provenance.exists():
++                raise ValueError('missing acquisition provenance')
++            prior=json.loads(provenance.read_text())
++            assert prior['url']==u and prior['sha256']==sha256_file(p)
++        else:
++            last=None
++            for attempt in range(3):
++                part=p.with_suffix(f'.part.{os.getpid()}.{attempt}')
++                try:
++                    with urllib.request.urlopen(u,timeout=60) as res, part.open('xb') as f:
++                        final=res.geturl()
++                        while b:=res.read(1<<20):
++                            f.write(b)
++                        f.flush(); os.fsync(f.fileno())
++                    verify_object(part,ent)
++                    os.link(part,p)
++                    save(provenance,{'url':u,'final_url':final,'sha256':sha256_file(p),
++                                     'size':p.stat().st_size,'revision':HF_REV})
++                    last=None
++                    break
++                except Exception as e:
++                    last=repr(e)
++                    time.sleep(1)
++            if last:
++                raise RuntimeError(last)
++        with Image.open(p) as img:
++            img.load()
++            alpha=img.getchannel('A').getextrema() if 'A' in img.getbands() else None
++            rgb=img.convert('RGB')
++            alpha_identical=True
++            if alpha and alpha!=(255,255):
++                # 검정 투명 경계는 검정 배경 합성과 RGB 변환이 정확히 같다.
++                black=Image.new('RGBA',img.size,(0,0,0,255))
++                composed=Image.alpha_composite(black,img.convert('RGBA')).convert('RGB')
++                alpha_identical=composed.tobytes()==rgb.tobytes()
++            # dHash 후보만 생성한다. 동일 환자 판정으로 사용하지 않는다.
++            small=list(rgb.convert('L').resize((9,8)).getdata())
++            bits=''.join('1' if small[y*9+x]>small[y*9+x+1] else '0' for y in range(8) for x in range(8))
++            records.append({'path':str(p.relative_to(ROOT)),'original_path':im['path'],'id':im['id'],
++                'sha256':sha256_file(p),'size':p.stat().st_size,'mode':img.mode,'wh':list(img.size),
++                'rgb_sha256':hashlib.sha256(str(rgb.size).encode()+rgb.tobytes()).hexdigest(),
++                'dhash':format(int(bits,2),'016x'),'alpha':alpha,
++                'alpha_black_composite_identical':alpha_identical})
++    rec={'case_key':r['title'],'images':records,'decoder':PIL.__version__,
++         'listing_sha256':sha256_file(listing_path)}
++    save(OUT/'acq'/f'{cid}_verified.json',rec)
++    return rec
++
++def main():
++    OUT.mkdir(parents=True,exist_ok=True)
++    with (OUT/'prepare.lock').open('a') as lock:
++        fcntl.flock(lock,fcntl.LOCK_EX|fcntl.LOCK_NB)
++        cs=candidates()
++        save(OUT/'data/inference_candidates.json',[infer_view(r) for r in cs])
++        save(OUT/'audit/candidates_private.json',cs)
++        save(OUT/'data/source_lock.json',{'train_sha256':TRAIN_SHA,'revision':HF_REV,
++             'code_sha256':{p:sha256_file(ROOT/p) for p in ['mt52_prepare.py','mt49_audit.py','mt49_fetch.py','mt49_images.py']},
++             'plan_sha256':sha256_file(ROOT.parent/'agent/runs/iter_052/plan.json'),
++             'python':sys.executable,'decoder':PIL.__version__,'cases':607,'images':2909})
++        t=time.time(); recs=[]; errors=[]
++        with cf.ThreadPoolExecutor(8) as ex:
++            futures={ex.submit(case_download,r):r['title'] for r in cs}
++            for n,f in enumerate(cf.as_completed(futures),1):
++                try: recs.append(f.result())
++                except Exception as e: errors.append({'case_key':futures[f],'error':repr(e)})
++                if n%25==0: print(n,len(errors),round(time.time()-t),flush=True)
++        save(OUT/'acq/summary.json',{'seconds':time.time()-t,'cases':len(recs),
++             'images':sum(len(r['images']) for r in recs),'errors':errors})
++        if errors: raise RuntimeError('acquisition incomplete')
++        save(OUT/'data/image_manifest.json',sorted(recs,key=lambda r:r['case_key']))
++        print('acquisition complete',len(recs),flush=True)
++
++if __name__=='__main__': main()
+diff --git a/mt52_provenance.py b/mt52_provenance.py
+new file mode 100644
+index 0000000..ea9236f
+--- /dev/null
++++ b/mt52_provenance.py
+@@ -0,0 +1,69 @@
++"""iter_051 실제 이미지 반환 원본을 보존하고 case별 call_id에 연결한다."""
++import base64
++import hashlib
++import io
++import json
++import re
++import shutil
++from pathlib import Path
++from PIL import Image
++from mt52_prepare import ROOT, OUT, save, safe, sha256_file
++
++SOURCE=Path('/home/test/.codex/sessions/2026/10/03/rollout-2026-10-03T02-56-55-01a0fdc3-130f-7b50-ad7d-d61d231a1e7f.jsonl')
++
++def pixels(im):
++    im.load()
++    return hashlib.sha256(im.mode.encode()+str(im.size).encode()+im.tobytes()).hexdigest()
++
++def main():
++    dest=safe(OUT/'provenance/iter051_rollout.jsonl',True)
++    dest.parent.mkdir(parents=True,exist_ok=True)
++    if not dest.exists():
++        with SOURCE.open('rb') as s, dest.open('xb') as d: shutil.copyfileobj(s,d)
++    digest=sha256_file(SOURCE)
++    assert sha256_file(dest)==digest
++    rows=[json.loads(x) for x in dest.read_text().splitlines()]
++    calls={x['payload']['call_id']:x['payload'] for x in rows
++           if x.get('payload',{}).get('type')=='custom_tool_call'}
++    source=ROOT/'results/iter_051/audit/source_check.json'
++    cases=json.loads(source.read_text())['cases']
++    expected={}; originals={}
++    for c in cases:
++        p=safe(ROOT/c['sheet'])
++        assert sha256_file(p)==c['sheet_sha256']
++        with Image.open(p) as im: expected[pixels(im)]=c
++        for imrec in c['ordered_images']:
++            original=safe(ROOT/'results/iter_049'/imrec['path'])
++            assert sha256_file(original)==imrec['file_sha256']
++            with Image.open(original) as im:
++                for rendered in (im,im.convert('RGB')):
++                    originals[pixels(rendered)]={'case_id':c['case_id'],'original_path':imrec['path'],
++                                                'file_sha256':imrec['file_sha256']}
++    matches={}; extra=[]
++    for n,row in enumerate(rows):
++        p=row.get('payload',{})
++        if p.get('type')!='custom_tool_call_output': continue
++        call=calls.get(p['call_id'],{})
++        for k,item in enumerate(p.get('output',[])):
++            if item.get('type')!='input_image': continue
++            raw=base64.b64decode(item['image_url'].split(',',1)[1])
++            with Image.open(io.BytesIO(raw)) as im: pix=pixels(im)
++            ev={'call_id':p['call_id'],'rollout_line':n+1,'output_index':k,
++                'returned_image_sha256':hashlib.sha256(raw).hexdigest(),
++                'returned_pixel_sha256':pix,'call_input_sha256':hashlib.sha256(call.get('input','').encode()).hexdigest()}
++            if pix in expected:
++                c=expected[pix]
++                matches.setdefault(c['case_id'],[]).append(ev)
++            else: extra.append({**ev,'original':originals.get(pix)})
++    missing=[c['case_id'] for c in cases if c['case_id'] not in matches]
++    result={'status':'PASS' if not missing else 'FAIL','rollout':str(dest.relative_to(ROOT)),
++        'rollout_sha256':digest,'source_rollout':str(SOURCE),'source_check_sha256':sha256_file(source),
++        'cases':[{'case_id':c['case_id'],'sheet_sha256':c['sheet_sha256'],
++                  'ordered_images':c['ordered_images'],'returns':matches.get(c['case_id'],[])} for c in cases],
++        'missing':missing,'other_image_returns':extra,
++        'scope':'실제 반환 sheet 픽셀과 원본 sheet 동일성 연결. 재판독·판정 변경 없음.'}
++    save(OUT/'provenance/iter051_return_links_v2.json',result)
++    print('linked',len(matches),'missing',len(missing),'other image returns',len(extra))
++    if missing or any(e['original'] is None for e in extra): raise RuntimeError('unlinked images')
++
++if __name__=='__main__': main()
+diff --git a/mt52_run.py b/mt52_run.py
+new file mode 100644
+index 0000000..b31362f
+--- /dev/null
++++ b/mt52_run.py
+@@ -0,0 +1,143 @@
++"""고정 case 그래프 실행. case flock·원자적 request JSON·attempt별 비용 보존."""
++import argparse
++import json
++import os
++import signal
++import subprocess
++import sys
++import time
++import uuid
++from pathlib import Path
++from mt52_prepare import ROOT,OUT,safe,save,sha256_file
++from mt52_spec import prompt,digest,MODEL_REVISION,check_case
++from mt52_sanity import images,build
++from rsna_diag.queue_lock import try_lock,my_info
++
++CODE=['mt52_run.py','mt52_sanity.py','mt52_spec.py','mt52_prepare.py','rsna_diag/generate.py','rsna_diag/queue_lock.py']
++
++def atomic(path,value):
++    path=safe(path,True);path.parent.mkdir(parents=True,exist_ok=True)
++    temp=path.with_name(path.name+'.partial.'+uuid.uuid4().hex)
++    with temp.open('x') as f:
++        json.dump(value,f,ensure_ascii=False);f.flush();os.fsync(f.fileno())
++    os.link(temp,path) # 기존 정식 결과를 덮어쓰지 않는다.
++
++def verify_protocol(path):
++    p=json.loads(safe(path).read_text())
++    for f,h in p['files'].items():
++        if sha256_file(safe(ROOT/f))!=h:raise ValueError('protocol file changed: '+f)
++    assert p['revision']==MODEL_REVISION
++    return p,sha256_file(path)
++
++def stages(c,only):
++    if only:return [(s,None) for s in only]
++    return [('T',None),('D',None)]+[('F',i) for i in range(len(c['images']))]+[(s,None) for s in ['U','C','R','H','X']]
++
++def worker(a):
++    job=safe(ROOT/a.job);p,pdig=verify_protocol(job/'protocol.json')
++    cs=json.loads((ROOT/p['inference']).read_text());assert len({c['case_key'] for c in cs})==len(cs)
++    manifest={r['case_key']:r for r in json.loads((ROOT/p['images']).read_text())}
++    for c in cs:check_case(c)
++    allowed=os.environ['CUDA_VISIBLE_DEVICES'].split(',');assert a.gpu in allowed
++    os.environ['CUDA_VISIBLE_DEVICES']=a.gpu
++    from rsna_diag.generate import load_model,env_info
++    start=time.time();torch,proc,model=load_model();torch.manual_seed(5201)
++    env=env_info(torch,proc,model);eos=env['eos_token_id'];eos=eos if isinstance(eos,list) else [eos]
++    atomic(job/'attempts'/a.attempt/f'worker{a.worker}_env.json',{'env':env,'load_seconds':time.time()-start,'gpu':a.gpu})
++    for c in cs:
++        cid=c['case_key'].replace('Case number ','c');(job/'claims').mkdir(exist_ok=True)
++        lk,_,_=try_lock(job/'claims'/cid,my_info(worker=a.worker))
++        if lk is None:continue
++        try:
++            ims=images(c,manifest);parents={}
++            for stage,index in stages(c,p['only']):
++                name=stage if index is None else f'F{index:02d}'
++                needed=[parents[f'F{i:02d}'] for i in range(len(ims))] if stage=='U' else [parents['U']] if stage in ('C','R') else [parents['H']] if stage=='X' else []
++                text=prompt(c,stage,[r['text'] for r in needed],index)
++                idx=[index] if stage=='F' else list(range(len(ims))) if stage in ('D','R','H','X') else []
++                cap=p['caps'].get(stage,1024)
++                if stage=='H':cap=len(ims)*p['caps']['F']+p['caps']['U']
++                spec={'case':c['case_key'],'stage':name,'prompt':text,'images':[manifest[c['case_key']]['images'][i] for i in idx],
++                    'parents':[r['record_digest'] for r in needed],'cap':cap,'protocol':pdig}
++                rid=digest(spec);path=job/'records'/cid/f'{name}.json'
++                if path.exists():
++                    rec=json.loads(safe(path).read_text());rd=rec.pop('record_digest')
++                    assert rd==digest(rec) and rec['request_id']==rid and rec['spec']==spec,'stale or damaged result'
++                    rec['record_digest']=rd;parents[name]=rec;continue
++                inp=build(proc,[ims[i] for i in idx],text,idx)
++                x={k:v.to('cuda',dtype=torch.bfloat16) if v.is_floating_point() else v.to('cuda') for k,v in inp.items()}
++                torch.cuda.synchronize();torch.cuda.reset_peak_memory_stats();t=time.time()
++                atomic(job/'attempts'/a.attempt/f'{cid}_{name}_start.json',{'time':t,'request_id':rid,'worker':a.worker,'gpu':a.gpu})
++                with torch.inference_mode():y=model.generate(**x,max_new_tokens=cap,do_sample=False)
++                torch.cuda.synchronize();end=time.time();ids=y[0,inp['input_ids'].shape[1]:].tolist()
++                rec={'spec':spec,'request_id':rid,'text':proc.decode(ids,skip_special_tokens=True),'tokens':ids,
++                    'input_tokens':inp['input_ids'][0].tolist(),'eos':bool(ids and ids[-1] in eos),
++                    't_start':t,'t_end':end,'runtime':end-t,'worker':a.worker,'gpu':a.gpu,'attempt':a.attempt,
++                    'peak_alloc_GiB':torch.cuda.max_memory_allocated()/2**30,'peak_reserved_GiB':torch.cuda.max_memory_reserved()/2**30}
++                rec['record_digest']=digest(rec);atomic(path,rec);parents[name]=rec
++                print(cid,name,len(ids),rec['eos'],round(end-t,2),flush=True);del x,y,inp
++        finally:lk.release()
++
++def launch(a):
++    job=safe(ROOT/a.job,True);job.mkdir(parents=True,exist_ok=True)
++    lk,_,_=try_lock(job/'launch.lock',my_info())
++    if lk is None:raise RuntimeError('launcher already running')
++    children=[];logs=[]
++    try:
++        files=CODE+[a.inference,a.images,'results/iter_052/data/D_selection.json','results/iter_052/provenance/D_image_returns_v2.json']
++        protocol={'files':{f:sha256_file(safe(ROOT/f)) for f in files},'inference':a.inference,'images':a.images,
++                  'revision':MODEL_REVISION,'only':a.only.split(',') if a.only else [],'caps':{'F':512,'U':1024,'T':1024,'D':1024,'C':1024,'R':1024,'X':1024}}
++        if a.double_caps:
++            for s in a.double_caps.split(','):
++                assert s in protocol['caps']
++                protocol['caps'][s]*=2
++        if (job/'protocol.json').exists():
++            old,_=verify_protocol(job/'protocol.json');assert old==protocol,'requested configuration mismatch'
++        else:save(job/'protocol.json',protocol)
++        allowed=os.environ['CUDA_VISIBLE_DEVICES'].split(',');assert all(x.isdigit() for x in allowed)
++        out=subprocess.check_output(['nvidia-smi','--query-gpu=index,memory.free,memory.total','--format=csv,noheader,nounits'],text=True)
++        gpu={x.split(',')[0].strip():[int(v.strip()) for v in x.split(',')[1:]] for x in out.strip().splitlines()}
++        order=sorted(allowed,key=lambda g:-gpu[g][0]);mapping=[order[i%len(order)] for i in range(a.workers)]
++        for g in order:
++            if mapping.count(g)*(a.peak_gib+2)*1024>gpu[g][0]:raise RuntimeError('insufficient memory margin '+g)
++        attempt=time.strftime('%Y%m%dT%H%M%S')+'_'+uuid.uuid4().hex[:8];ad=job/'attempts'/attempt;ad.mkdir(parents=True)
++        save(ad/'launch.json',{'allowed':allowed,'mapping':mapping,'free_MiB':gpu,'peak_estimate_GiB':a.peak_gib,'per_worker_margin_GiB':2})
++        def stop(sig,frame):
++            for c in children:
++                if c.poll() is None:c.terminate()
++            raise KeyboardInterrupt('signal '+str(sig))
++        signal.signal(signal.SIGTERM,stop);signal.signal(signal.SIGINT,stop)
++        start=time.time()
++        for i,g in enumerate(mapping):
++            f=(ad/f'worker{i}.log').open('x');logs.append(f)
++            cmd=[sys.executable,str(ROOT/'mt52_run.py'),'--job',a.job,'--worker',str(i),'--gpu',g,'--attempt',attempt]
++            children.append(subprocess.Popen(cmd,stdout=f,stderr=f))
++        with (ad/'resources.jsonl').open('x') as f:
++            while any(c.poll() is None for c in children):
++                if any(c.poll() not in (None,0) for c in children):raise RuntimeError('worker failure')
++                stat=subprocess.check_output(['nvidia-smi','--query-gpu=index,memory.used,utilization.gpu','--format=csv,noheader,nounits'],text=True)
++                f.write(json.dumps({'time':time.time(),'gpu':stat})+'\n');f.flush();time.sleep(5)
++        if any(c.returncode!=0 for c in children):raise RuntimeError('worker failure')
++        _,pdig=verify_protocol(job/'protocol.json');cs=json.loads((ROOT/a.inference).read_text())
++        expected={(c['case_key'].replace('Case number ','c'),s if i is None else f'F{i:02d}') for c in cs for s,i in stages(c,protocol['only'])}
++        paths=list((job/'records').glob('*/*.json'));actual={(p.parent.name,p.stem) for p in paths}
++        assert actual==expected
++        save(ad/'completion.json',{'status':'PASS','exit_codes':[c.returncode for c in children],'wall':time.time()-start,
++            'protocol':pdig,'n':len(paths),'records':{str(p.relative_to(ROOT)):sha256_file(p) for p in paths}})
++        print('complete',len(paths),time.time()-start)
++    finally:
++        for c in children:
++            if c.poll() is None:c.terminate()
++        for c in children:
++            try:c.wait(timeout=30)
++            except subprocess.TimeoutExpired:c.kill();c.wait()
++        for f in logs:f.close()
++        lk.release()
++
++if __name__=='__main__':
++    p=argparse.ArgumentParser();p.add_argument('--job',required=True);p.add_argument('--worker',type=int)
++    p.add_argument('--gpu');p.add_argument('--attempt');p.add_argument('--workers',type=int,default=2)
++    p.add_argument('--peak-gib',type=float,default=12.0);p.add_argument('--only',default='')
++    p.add_argument('--double-caps',default='')
++    p.add_argument('--inference',default='results/iter_052/data/D_inference.json');p.add_argument('--images',default='results/iter_052/data/D_images.json')
++    a=p.parse_args();worker(a) if a.worker is not None else launch(a)
+diff --git a/mt52_sanity.py b/mt52_sanity.py
+new file mode 100644
+index 0000000..0f8a619
+--- /dev/null
++++ b/mt52_sanity.py
+@@ -0,0 +1,73 @@
++"""D 입력의 공식 processor tensor 대조와 실제 긴 다중 영상 생성 실측."""
++import json
++import os
++import time
++import traceback
++from PIL import Image
++from mt52_prepare import ROOT,OUT,save,safe,sha256_file
++from mt52_spec import prompt,MODEL_REVISION
++
++def images(c,manifest):
++    rows=manifest[c['case_key']]['images'];out=[]
++    assert [r['id'] for r in rows]==[r['id'] for r in c['images']]
++    for r in rows:
++        p=safe(ROOT/r['path']);assert sha256_file(p)==r['sha256']
++        with Image.open(p) as im:
++            if im.mode=='RGBA':assert im.getchannel('A').getextrema()==(255,255)
++            im=im.convert('RGB')
++            import hashlib
++            assert hashlib.sha256(str(im.size).encode()+im.tobytes()).hexdigest()==r['rgb_sha256']
++            out.append(im.copy())
++    return out
++
++def build(proc,ims,text,indices=None):
++    indices=list(range(len(ims))) if indices is None else indices
++    assert len(indices)==len(ims)
++    content=[{'type':'text','text':text}]
++    for i,im in zip(indices,ims):
++        content.extend([{'type':'text','text':f'Image {i+1}:'},{'type':'image','image':im}])
++    return proc.apply_chat_template([{'role':'user','content':content}],tokenize=True,
++        add_generation_prompt=True,return_dict=True,return_tensors='pt')
++
++def main():
++    allowed=os.environ.get('CUDA_VISIBLE_DEVICES','').split(',')
++    assert '1' in allowed
++    os.environ['CUDA_VISIBLE_DEVICES']='1'
++    from rsna_diag.generate import load_model,env_info
++    torch,proc,model=load_model();torch.manual_seed(5201)
++    cs=json.loads((OUT/'data/D_inference.json').read_text())
++    manifest={r['case_key']:r for r in json.loads((OUT/'data/D_images.json').read_text())}
++    save(OUT/'sanity/environment.json',env_info(torch,proc,model))
++    checks=[]
++    short=min(cs,key=lambda c:len(c['images']));long=max(cs,key=lambda c:len(c['images']))
++    for name,c,n in [('text',short,0),('single',short,1),('two',short,2),('longest',long,len(long['images']))]:
++        ims=images(c,manifest)[:n];text=prompt(c,'D')
++        a=build(proc,ims,text)
++        # 공식 two-step 경로: template 문자열을 먼저 만든 뒤 processor 호출.
++        content=[{'type':'text','text':text}]
++        for i in range(n):content.extend([{'type':'text','text':f'Image {i+1}:'},{'type':'image'}])
++        rendered=proc.apply_chat_template([{'role':'user','content':content}],tokenize=False,add_generation_prompt=True)
++        b=proc(text=rendered,images=ims if ims else None,return_tensors='pt',add_special_tokens=False)
++        ok=set(a)==set(b) and all(a[k].shape==b[k].shape and a[k].dtype==b[k].dtype and torch.equal(a[k],b[k]) for k in a)
++        checks.append({'name':name,'n_images':n,'equal':ok,'keys':{k:{'shape':list(v.shape),'dtype':str(v.dtype)} for k,v in a.items()},'input_tokens':a['input_ids'].shape[1]})
++        save(OUT/'sanity'/f'tensors_v2_{name}.json',checks[-1]);assert ok
++        if name not in ('two','longest'):continue
++        cap=1024;torch.cuda.empty_cache();torch.cuda.reset_peak_memory_stats();start=time.time()
++        try:
++            x={k:v.to('cuda',dtype=torch.bfloat16) if v.is_floating_point() else v.to('cuda') for k,v in a.items()}
++            torch.cuda.synchronize();t=time.time()
++            with torch.inference_mode():y=model.generate(**x,max_new_tokens=cap,do_sample=False)
++            torch.cuda.synchronize();end=time.time();ids=y[0,a['input_ids'].shape[1]:].tolist()
++            eos=model.generation_config.eos_token_id;eos=eos if isinstance(eos,list) else [eos]
++            result={'status':'PASS','case_key':c['case_key'],'stage':'D','cap':cap,'tokens':ids,'text':proc.decode(ids,skip_special_tokens=True),
++                'eos':bool(ids and ids[-1] in eos),'runtime':end-t,'total':end-start,
++                'peak_alloc_GiB':torch.cuda.max_memory_allocated()/2**30,'peak_reserved_GiB':torch.cuda.max_memory_reserved()/2**30}
++            del x,y
++        except Exception as e:
++            result={'status':'FAIL','error':repr(e),'traceback':traceback.format_exc(),'total':time.time()-start,
++                'peak_alloc_GiB':torch.cuda.max_memory_allocated()/2**30,'peak_reserved_GiB':torch.cuda.max_memory_reserved()/2**30}
++        save(OUT/'sanity'/f'generate_{name}.json',result)
++        print(name,result['status'],result.get('runtime'),flush=True)
++        if result['status']=='FAIL':raise RuntimeError(result['error'])
++
++if __name__=='__main__':main()
+diff --git a/mt52_spec.py b/mt52_spec.py
+new file mode 100644
+index 0000000..5591102
+--- /dev/null
++++ b/mt52_spec.py
+@@ -0,0 +1,46 @@
++"""고정 CT workflow prompt, 엄격 MCQ parser, 추론 필드 경계."""
++import hashlib
++import json
++import re
++
++MODEL_REVISION='91850547d9f0b2fdd21aa7c5f4f3d1a8a52c243b'
++FINAL='Give a brief rationale, then write exactly one answer on the last line as Answer: <A-E>.'
++F='Describe the observations and uncertainties visible in this image. Do not choose a diagnosis option. Preserve the image index when describing findings.'
++U='Integrate the following image-indexed observations into a concise imaging summary. Preserve relevant findings, uncertainty, and image indices. Do not choose a diagnosis option.'
++H='Describe the observations and uncertainties across all provided images together. Preserve image indices. Do not choose a diagnosis option.'
++
++def digest(obj):
++    return hashlib.sha256(json.dumps(obj,sort_keys=True,separators=(',',':'),ensure_ascii=False).encode()).hexdigest()
++
++def check_case(c):
++    if set(c)!={'case_key','CLINICAL_HISTORY','options','images'}:
++        raise ValueError('inference fields')
++    if set(c['options'])!=set('ABCDE'):
++        raise ValueError('option keys')
++    for im in c['images']:
++        if set(im)!={'id','path'}:raise ValueError('image fields')
++
++def context(c):
++    check_case(c)
++    return 'Clinical history:\n'+c['CLINICAL_HISTORY']+'\nOptions:\n'+'\n'.join(f'{k}. {c["options"][k]}' for k in 'ABCDE')
++
++def prompt(c,stage,parents=(),index=None):
++    base=context(c)
++    if stage=='F':return base+f'\nImage index: {index+1}\n'+F
++    if stage=='U':
++        if len(parents)!=len(c['images']):raise ValueError('missing F outputs')
++        return base+'\n'+U+'\n'+'\n'.join(f'Image {i+1}:\n{s}' for i,s in enumerate(parents))
++    if stage=='H':return base+'\n'+H
++    if stage in ('T','D'):
++        if parents:raise ValueError('unexpected parent')
++        return base+'\n'+FINAL
++    if stage in ('C','R','X'):
++        if len(parents)!=1:raise ValueError('exactly one summary required')
++        return base+'\nImaging summary:\n'+parents[0]+'\n'+FINAL
++    raise ValueError('unknown stage')
++
++def parse(text):
++    lines=[s.strip() for s in text.splitlines() if s.strip()]
++    if not lines or not re.fullmatch(r'Answer: [A-E]',lines[-1]):return None
++    if len(re.findall(r'(?im)^\s*Answer\s*:',text))!=1:return None
++    return lines[-1][-1]
+diff --git a/mt52_usage.py b/mt52_usage.py
+new file mode 100644
+index 0000000..1be7104
+--- /dev/null
++++ b/mt52_usage.py
+@@ -0,0 +1,40 @@
++"""실험 job만 집계한다. 변조 fixture의 복사본은 실행량으로 세지 않는다."""
++import json
++from collections import defaultdict
++from mt52_prepare import ROOT,OUT,save,sha256_file
++from mt52_d_report import union
++
++def main():
++    jobs=['pilot/P4_2w','pilot/P4_4w','pilot/D8_graph','pilot/D8_graph_v2','pilot/D24_caps2','tests/resume_current']
++    rows=[];intervals=defaultdict(list);total=0;seconds=0.;unknown=0.
++    for name in jobs:
++        job=OUT/name;records=[json.loads(p.read_text()) for p in job.glob('records/*/*.json')]
++        assert len({r['request_id'] for r in records})==len(records)
++        n=len(records);runtime=sum(r['runtime'] for r in records);total+=n;seconds+=runtime
++        attempt_rows=[];peak=defaultdict(float)
++        for r in records:intervals[r['gpu']].append((r['t_start'],r['t_end']))
++        for ad in sorted(job.glob('attempts/*')):
++            completed={r['request_id'] for r in records if r['attempt']==ad.name}
++            starts=[json.loads(p.read_text()) for p in ad.glob('*_start.json')]
++            samples=[json.loads(s) for s in (ad/'resources.jsonl').read_text().splitlines()] if (ad/'resources.jsonl').exists() else []
++            last=max((s['time'] for s in samples),default=0.)
++            for s in samples:
++                for line in s['gpu'].strip().splitlines():
++                    g,mem,util=[x.strip() for x in line.split(',')];peak[g]=max(peak[g],float(mem))
++            undone=[s for s in starts if s['request_id'] not in completed]
++            low=sum(max(0,last-s['time']) for s in undone);unknown+=low
++            attempt_rows.append({'attempt':ad.name,'committed':len(completed),'unfinished':len(undone),'unfinished_seconds_lower_bound':low,
++                'observed_wall_span':last-min((s['time'] for s in samples),default=last),
++                'load_seconds':sum(json.loads(p.read_text())['load_seconds'] for p in ad.glob('worker*_env.json'))})
++        rows.append({'job':name,'committed_generations':n,'generation_runtime_sum':runtime,'sampled_GPU_peak_MiB':dict(peak),
++            'max_record_reserved_GiB':max((r['peak_reserved_GiB'] for r in records),default=0),'attempts':attempt_rows})
++    standalone=[json.loads((OUT/'sanity'/f'generate_{s}.json').read_text()) for s in ['two','longest']]
++    save(OUT/'usage_ledger.json',{'jobs':rows,'job_generations':total,'standalone_sanity_generations':2,
++        'completed_generation_seconds':seconds+sum(r['runtime'] for r in standalone),
++        'job_GPU_union_seconds':{g:union(v) for g,v in intervals.items()},
++        'unfinished_observed_seconds_lower_bound':unknown,
++        'note':'Includes invalid initial F-index pilot and cap/restart overhead. No test-fixture copies. Interrupted request exact exit timestamps unavailable; lower bounds reported separately. Standalone sanity has duration but no absolute interval so excluded from union.',
++        'source_sha256':sha256_file(__file__)})
++    print('generations',total+2,'completed seconds',seconds+sum(r['runtime'] for r in standalone),'unfinished lower bound',unknown)
++
++if __name__=='__main__':main()
+diff --git a/mt52_verify.py b/mt52_verify.py
+new file mode 100644
+index 0000000..2de025d
+--- /dev/null
++++ b/mt52_verify.py
+@@ -0,0 +1,40 @@
++"""실행과 독립적으로 전체 요청 그래프·원시 기록·입력/상위 소견을 재구성한다."""
++import argparse
++import json
++from mt52_prepare import ROOT,OUT,save,safe,sha256_file
++from mt52_spec import digest,prompt,parse
++from mt52_run import verify_protocol,stages
++from mt52_sanity import images
++
++def verify(job):
++    p,pdig=verify_protocol(job/'protocol.json')
++    cs=json.loads((ROOT/p['inference']).read_text())
++    manifest={r['case_key']:r for r in json.loads((ROOT/p['images']).read_text())}
++    expected={};non_eos=[];invalid=[];records=[]
++    for c in cs:
++        ims=images(c,manifest);cid=c['case_key'].replace('Case number ','c');parent={}
++        for stage,index in stages(c,p['only']):
++            name=stage if index is None else f'F{index:02d}'
++            needed=[parent[f'F{i:02d}'] for i in range(len(ims))] if stage=='U' else [parent['U']] if stage in ('C','R') else [parent['H']] if stage=='X' else []
++            text=prompt(c,stage,[r['text'] for r in needed],index)
++            indices=[index] if stage=='F' else list(range(len(ims))) if stage in ('D','R','H','X') else []
++            cap=len(ims)*p['caps']['F']+p['caps']['U'] if stage=='H' else p['caps'][stage]
++            spec={'case':c['case_key'],'stage':name,'prompt':text,'images':[manifest[c['case_key']]['images'][i] for i in indices],
++                  'parents':[r['record_digest'] for r in needed],'cap':cap,'protocol':pdig}
++            path=job/'records'/cid/f'{name}.json';r=json.loads(safe(path).read_text())
++            rd=r.pop('record_digest');assert digest(r)==rd,'record modified';r['record_digest']=rd
++            assert r['spec']==spec and r['request_id']==digest(spec),'request mismatch'
++            assert r['t_end']>=r['t_start'] and abs(r['runtime']-(r['t_end']-r['t_start']))<1e-6
++            assert len(r['tokens'])<=cap
++            if not r['eos']:non_eos.append((cid,name))
++            if stage in ['T','D','C','R','X'] and parse(r['text']) is None:invalid.append((cid,name))
++            expected[str(path.relative_to(ROOT))]=sha256_file(path);parent[name]=r;records.append(r)
++    actual={str(f.relative_to(ROOT)) for f in (job/'records').glob('*/*.json')}
++    assert actual==set(expected),'missing/extra record'
++    return {'integrity':'PASS','requests':len(records),'non_eos':non_eos,'invalid_final':invalid,'raw_digests':expected,
++            'protocol_sha256':pdig,'generation_runtime_sum':sum(r['runtime'] for r in records),
++            'max_reserved_GiB':max(r['peak_reserved_GiB'] for r in records)}
++
++if __name__=='__main__':
++    p=argparse.ArgumentParser();p.add_argument('--job',required=True);p.add_argument('--out',required=True);a=p.parse_args()
++    r=verify(safe(ROOT/a.job));save(safe(ROOT/a.out,True),r);print({k:v for k,v in r.items() if k!='raw_digests'})
+diff --git a/test_mt52_data.py b/test_mt52_data.py
+new file mode 100644
+index 0000000..065d906
+--- /dev/null
++++ b/test_mt52_data.py
+@@ -0,0 +1,48 @@
++"""자료 재사용 경계·공식 객체 검증 및 추론 manifest 분리 회귀 검사."""
++import copy
++import hashlib
++import json
++import os
++from pathlib import Path
++from mt52_prepare import ROOT, OUT, safe, save, candidates, verify_object, sha256_file
++from mt49_audit import infer_view, schema_problems, answer_problems
++
++def main():
++    t=OUT/'tests/data';t.mkdir(parents=True,exist_ok=True)
++    results=[]
++    def check(name,condition):
++        assert condition,name
++        results.append({'name':name,'pass':True})
++    def reject(name,fn):
++        try:fn()
++        except (ValueError,AssertionError):results.append({'name':name,'pass':True});return
++        raise AssertionError(name)
++    reject('old output forbidden',lambda:safe(ROOT/'results/iter_051/new.json',True))
++    reject('path traversal',lambda:safe(OUT/'x/../z',True))
++    sy=t/'symlink';sy.symlink_to(t,target_is_directory=True)
++    reject('ancestor symlink',lambda:safe(sy/'child',True))
++    p=t/'object.bin';p.write_bytes(b'abc')
++    sha=hashlib.sha256(b'abc').hexdigest()
++    ent={'size':3,'lfs':{'oid':sha}}
++    verify_object(p,ent);check('official LFS object',True)
++    reject('existing size mismatch',lambda:verify_object(p,{**ent,'size':4}))
++    reject('existing hash mismatch',lambda:verify_object(p,{'size':3,'lfs':{'oid':'0'*64}}))
++    blob=hashlib.sha1(b'blob 3\0abc').hexdigest()
++    verify_object(p,{'size':3,'oid':blob});check('git blob object',True)
++    q=t/'exclusive.json';save(q,{'a':1});save(q,{'a':1})
++    reject('changed result cannot overwrite',lambda:save(q,{'a':2}))
++    cs=candidates();check('607 cases 2909 images',len(cs)==607 and sum(r['image_count'] for r in cs)==2909)
++    for r in cs:
++        v=infer_view(r)
++        assert set(v)=={'case_key','CLINICAL_HISTORY','options','images'}
++        assert all(set(im)=={'id','path'} for im in v['images'])
++    check('nested inference allowlist all candidates',True)
++    c=copy.deepcopy(cs[0]);c['image_01_path']='../x.jpg'
++    check('bad image path refused',bool(schema_problems(c)))
++    c=copy.deepcopy(cs[0]);c['correct_answer_text']='wrong'
++    check('answer mismatch refused',bool(answer_problems(c)))
++    save(OUT/'tests/data_fixtures.json',{'status':'PASS','checks':results,
++        'sources':{p:sha256_file(ROOT/p) for p in ['mt52_prepare.py','test_mt52_data.py','mt49_audit.py']}})
++    print('PASS',len(results))
++
++if __name__=='__main__':main()
+diff --git a/test_mt52_final.py b/test_mt52_final.py
+new file mode 100644
+index 0000000..7b689aa
+--- /dev/null
++++ b/test_mt52_final.py
+@@ -0,0 +1,64 @@
++"""현재 실행 소스의 실패 분기와 자료 gate 근거를 재검증한다."""
++import copy
++import json
++import shutil
++import subprocess
++import sys
++from mt52_prepare import ROOT,OUT,save,sha256_file
++from mt52_verify import verify
++from mt52_run import atomic
++from mt52_spec import digest,check_case,parse
++from mt52_audit import load,choose
++from mt52_audit_finish import validate
++from rsna_diag.queue_lock import try_lock,my_info
++
++def main():
++    dest=OUT/'tests/final_fixtures';dest.mkdir(parents=True,exist_ok=False);checks=[]
++    def reject(name,fn,needle):
++        try:fn()
++        except Exception as e:
++            assert needle in str(e),(name,str(e));checks.append({'name':name,'pass':True,'branch':str(e)})
++        else:raise AssertionError('accepted '+name)
++    base=OUT/'pilot/D8_graph_v2';verify(base);checks.append({'name':'current_complete_D8_graph','pass':True})
++    for name,change,needle in [
++        ('wrong_prompt',lambda x:x['spec'].__setitem__('prompt','changed'),'request mismatch'),
++        ('wrong_parent',lambda x:x['spec'].__setitem__('parents',['wrong']),'request mismatch'),
++        ('image_order',lambda x:x['spec'].__setitem__('images',list(reversed(x['spec']['images']))),'request mismatch')]:
++        job=dest/name;shutil.copytree(base,job)
++        p=job/'records/c2924/D.json';r=json.loads(p.read_text());r.pop('record_digest');change(r);r['record_digest']=digest(r);p.write_text(json.dumps(r))
++        reject(name,lambda:verify(job),needle)
++    job=dest/'missing';job.mkdir();shutil.copyfile(base/'protocol.json',job/'protocol.json')
++    reject('missing_record',lambda:verify(job),'No such file')
++    job=dest/'extra';shutil.copytree(base,job);shutil.copyfile(job/'records/c2924/D.json',job/'records/c2924/extra.json')
++    reject('extra_record',lambda:verify(job),'missing/extra')
++    reject('immutable_result',lambda:atomic(job/'protocol.json',{}),'File exists')
++    bad=copy.deepcopy(json.loads((OUT/'data/D_inference.json').read_text())[0]);bad['images'][0]['caption']='answer'
++    reject('nested_answer_leak',lambda:check_case(bad),'image fields')
++    assert parse('Answer: A\nAnswer: B') is None and parse('Answer: A or B') is None and parse('Answer: C')=='C'
++    checks.append({'name':'ambiguous_parser','pass':True})
++    lk,_,_=try_lock(job/'launch.lock',my_info());assert lk
++    try:
++        r=subprocess.run([sys.executable,'mt52_run.py','--job',str(job.relative_to(ROOT))],capture_output=True,text=True)
++        assert r.returncode!=0 and 'launcher already running' in r.stderr
++        checks.append({'name':'live_launcher_rejected','pass':True})
++    finally:lk.release()
++    order,raw,dec=load();found=json.loads((OUT/'provenance/all_image_returns_v2.json').read_text())['returns'];validate(order,dec,found)
++    missing=dict(found);missing.pop(order[0]['case_key'])
++    reject('unreturned_image_rejected',lambda:validate(order,dec,missing),'missing actual image return')
++    missing=dict(dec);missing.pop(order[0]['case_key'])
++    reject('implicit_keep_rejected',lambda:validate(order,missing,found),'missing/extra audit decision')
++    bad=copy.deepcopy(dec);bad[order[0]['case_key']]['sheet_sha256']='bad'
++    reject('audit_tamper_rejected',lambda:validate(order,bad,found),'audit sheet mismatch')
++    bad=copy.deepcopy(dec);bad[order[0]['case_key']]['raw_source_sha256']='bad'
++    reject('audit_source_tamper',lambda:validate(order,bad,found),'audit source mismatch')
++    gate=json.loads((OUT/'audit/data_gate.json').read_text())
++    for p,h in gate['source_digests'].items():assert sha256_file(ROOT/p)==h
++    selected,pending,stage=choose(order,dec);assert stage=='E_insufficient' and not pending and len(selected)==287
++    clusters=json.loads((OUT/'data/clusters.json').read_text())['clusters']
++    members=[k for c in clusters for k in c['members']];assert len(members)==len(set(members))==607
++    assert len({r['case_key'] for r in selected})==len(selected)
++    checks.append({'name':'all_source_cluster_split_gate','pass':True})
++    save(OUT/'tests/final_fixtures.json',{'status':'PASS','checks':checks,'n':len(checks),'source':sha256_file(__file__)})
++    print('PASS',len(checks))
++
++if __name__=='__main__':main()
+diff --git a/test_mt52_inputs.py b/test_mt52_inputs.py
+new file mode 100644
+index 0000000..0e9616a
+--- /dev/null
++++ b/test_mt52_inputs.py
+@@ -0,0 +1,36 @@
++"""D24 전체의 공식 tensor 및 영상 순서·단일 F index 대조."""
++import json
++import torch
++from transformers import AutoProcessor
++from mt52_prepare import OUT,save,sha256_file
++from mt52_sanity import images,build
++from mt52_spec import prompt,MODEL_REVISION
++
++def main():
++    torch.set_num_threads(2)
++    proc=AutoProcessor.from_pretrained('google/medgemma-1.5-4b-it',revision=MODEL_REVISION,local_files_only=True)
++    cs=json.loads((OUT/'data/D_inference.json').read_text())
++    manifest={r['case_key']:r for r in json.loads((OUT/'data/D_images.json').read_text())};checks=[]
++    for c in cs:
++        ims=images(c,manifest)
++        for stage,idx in [('T',[]),('D',list(range(len(ims)))),('F',[len(ims)-1])]:
++            text=prompt(c,stage,index=idx[0] if stage=='F' else None)
++            selected=[ims[i] for i in idx];a=build(proc,selected,text,idx)
++            content=[{'type':'text','text':text}]
++            for i in idx:content.extend([{'type':'text','text':f'Image {i+1}:'},{'type':'image'}])
++            rendered=proc.apply_chat_template([{'role':'user','content':content}],tokenize=False,add_generation_prompt=True)
++            b=proc(text=rendered,images=selected or None,return_tensors='pt',add_special_tokens=False)
++            assert set(a)==set(b)
++            assert all(a[k].shape==b[k].shape and a[k].dtype==b[k].dtype and torch.equal(a[k],b[k]) for k in a)
++            if stage=='F':assert f'Image index: {idx[0]+1}' in rendered and f'Image {idx[0]+1}:' in rendered
++            checks.append({'case':c['case_key'],'stage':stage,'indices':idx,'all_tensors_equal':True,
++                'input_tokens':a['input_ids'].shape[1],'keys':{k:{'shape':list(v.shape),'dtype':str(v.dtype)} for k,v in a.items()}})
++        a=build(proc,ims[:2],prompt(c,'D'));b=build(proc,list(reversed(ims[:2])),prompt(c,'D'))
++        assert torch.equal(a['input_ids'],b['input_ids'])
++        assert torch.equal(a['pixel_values'][0],b['pixel_values'][1]) and torch.equal(a['pixel_values'][1],b['pixel_values'][0])
++        checks.append({'case':c['case_key'],'stage':'swap_two','ordered_pixels_equal':True})
++    save(OUT/'tests/input_tensor_final.json',{'status':'PASS','cases':len(cs),'checks':checks,
++        'source':sha256_file(__file__),'inference_sha256':sha256_file(OUT/'data/D_inference.json')})
++    print('PASS',len(cs),len(checks))
++
++if __name__=='__main__':main()
+diff --git a/test_mt52_protocol.py b/test_mt52_protocol.py
+new file mode 100644
+index 0000000..b151ec6
+--- /dev/null
++++ b/test_mt52_protocol.py
+@@ -0,0 +1,32 @@
++"""잠금 source 변조·손상 record 및 동일 출력 경합의 실제 거부 검사."""
++import json
++import multiprocessing as mp
++from mt52_prepare import ROOT,OUT,save,sha256_file
++from mt52_run import verify_protocol,atomic
++from mt52_d_report import union
++
++def contend(path,barrier,q,value):
++    barrier.wait()
++    try:atomic(path,{'value':value});q.put('written')
++    except FileExistsError:q.put('refused')
++
++def main():
++    dest=OUT/'tests/protocol_final';dest.mkdir(parents=True,exist_ok=False)
++    p=json.loads((OUT/'pilot/D8_graph_v2/protocol.json').read_text());p['files']['mt52_run.py']='0'*64
++    bad=dest/'wrong_source_protocol.json';save(bad,p)
++    try:verify_protocol(bad)
++    except ValueError as e:assert 'protocol file changed: mt52_run.py' in str(e)
++    else:raise AssertionError('source mutation accepted')
++    ctx=mp.get_context('spawn');q=ctx.Queue();bar=ctx.Barrier(2);path=dest/'contended.json'
++    ps=[ctx.Process(target=contend,args=(path,bar,q,i)) for i in range(2)]
++    for child in ps:child.start()
++    for child in ps:child.join(30)
++    assert all(child.exitcode==0 for child in ps)
++    assert sorted([q.get(timeout=2),q.get(timeout=2)])==['refused','written']
++    assert json.loads(path.read_text())['value'] in [0,1]
++    assert union([(1,4),(2,3),(3,6),(9,10)])==6
++    save(OUT/'tests/protocol_final.json',{'status':'PASS','checks':['changed locked source rejected at intended branch',
++        'two concurrent atomic writers: one success, one refusal','overlap union not runtime sum'],'source':sha256_file(__file__)})
++    print('PASS 3')
++
++if __name__=='__main__':main()
+diff --git a/test_mt52_resume.py b/test_mt52_resume.py
+new file mode 100644
+index 0000000..514d1b2
+--- /dev/null
++++ b/test_mt52_resume.py
+@@ -0,0 +1,53 @@
++"""실제 중단·worker 수 변경·부분 파일 보존 및 greedy token 회귀."""
++import json
++import os
++import subprocess
++import sys
++import time
++from mt52_prepare import ROOT,OUT,save,sha256_file
++from mt52_verify import verify
++
++def main():
++    job=OUT/'tests/resume_current';job.mkdir(parents=True,exist_ok=False)
++    prefix=[sys.executable,str(ROOT/'mt52_run.py'),'--job',str(job.relative_to(ROOT)),
++        '--inference','results/iter_052/data/P4_inference.json','--images','results/iter_052/data/D_images.json',
++        '--only','T,D','--peak-gib','9']
++    children=[]
++    try:
++        with (job/'initial.log').open('x') as log:
++            proc=subprocess.Popen(prefix+['--workers','1'],stdout=log,stderr=log);children.append(proc)
++            while len(list((job/'records').glob('*/*.json')))<3:
++                assert proc.poll() is None,'initial process ended early'
++                time.sleep(1)
++            proc.terminate();rc=proc.wait(timeout=60);assert rc!=0
++        before={str(p.relative_to(job)):sha256_file(p) for p in (job/'records').glob('*/*.json')}
++        assert 0<len(before)<8
++        partial=job/'records/c445/D.json.partial.interrupted_fixture'
++        partial.parent.mkdir(parents=True,exist_ok=True);partial.write_bytes(b'{"interrupted":')
++        partial_hash=sha256_file(partial)
++        with (job/'resume.log').open('x') as log:
++            proc=subprocess.Popen(prefix+['--workers','2'],stdout=log,stderr=log);children.append(proc)
++            assert proc.wait()==0
++        result=verify(job);assert result['requests']==8
++        assert all(sha256_file(job/p)==h for p,h in before.items()) and sha256_file(partial)==partial_hash
++        base=OUT/'pilot/P4_2w';compared=[]
++        for p in sorted((job/'records').glob('*/*.json')):
++            q=base/'records'/p.parent.name/p.name;a=json.loads(p.read_text());b=json.loads(q.read_text())
++            assert a['tokens']==b['tokens'] and a['input_tokens']==b['input_tokens']
++            for field in ['case','stage','prompt','images','parents','cap']:assert a['spec'][field]==b['spec'][field]
++            compared.append({'new':str(p.relative_to(ROOT)),'base':str(q.relative_to(ROOT)),
++                'new_sha256':sha256_file(p),'base_sha256':sha256_file(q)})
++        cfg=subprocess.run(prefix+['--workers','1','--double-caps','D'],capture_output=True,text=True)
++        assert cfg.returncode!=0 and 'requested configuration mismatch' in cfg.stderr
++        save(OUT/'tests/resume_current_result.json',{'status':'PASS','interrupted_exit':rc,'committed_before':len(before),
++            'worker_change':[1,2],'requests':8,'tokens_equal':8,'partial_preserved':True,'wrong_config_rejected':True,
++            'integrity':result,'comparisons':compared,'source_sha256':sha256_file(__file__)})
++        print('PASS interrupted',len(before),'resumed 8 tokens equal')
++    finally:
++        for proc in children:
++            if proc.poll() is None:proc.terminate()
++        for proc in children:
++            try:proc.wait(timeout=60)
++            except subprocess.TimeoutExpired:proc.kill();proc.wait()
++
++if __name__=='__main__':main()
+diff --git a/test_mt52_run.py b/test_mt52_run.py
+new file mode 100644
+index 0000000..ee21671
+--- /dev/null
++++ b/test_mt52_run.py
+@@ -0,0 +1,44 @@
++"""실제 완료 pilot의 provenance/누락/중복/동시 실행 거부 회귀 검사."""
++import copy
++import json
++import shutil
++import subprocess
++import sys
++from mt52_prepare import ROOT,OUT,save
++from mt52_verify import verify
++from mt52_run import atomic
++from mt52_spec import digest,check_case,parse
++
++def main():
++    base=OUT/'pilot/P4_2w';dest=OUT/'tests/run_fixtures';dest.mkdir(parents=True,exist_ok=False)
++    checks=[]
++    def check(name,fn,needle):
++        try:fn()
++        except Exception as e:
++            assert needle in str(e),(name,str(e));checks.append({'name':name,'pass':True,'error':str(e)})
++        else:raise AssertionError('accepted '+name)
++    verify(base);checks.append({'name':'complete_real_pilot','pass':True})
++    for name,change,needle in [
++        ('wrong_prompt',lambda x:x['spec'].__setitem__('prompt','changed'),'request mismatch'),
++        ('wrong_parent',lambda x:x['spec'].__setitem__('parents',['wrong']),'request mismatch'),
++        ('image_order',lambda x:x['spec'].__setitem__('images',list(reversed(x['spec']['images']))),'request mismatch')]:
++        job=dest/name;shutil.copytree(base,job)
++        p=job/'records/c2924/D.json';r=json.loads(p.read_text());r.pop('record_digest');change(r);r['record_digest']=digest(r);p.write_text(json.dumps(r))
++        check(name,lambda:verify(job),needle)
++    job=dest/'missing';job.mkdir();shutil.copyfile(base/'protocol.json',job/'protocol.json')
++    check('missing_records',lambda:verify(job),'No such file')
++    job=dest/'extra';shutil.copytree(base,job);shutil.copyfile(job/'records/c2924/D.json',job/'records/c2924/extra.json')
++    check('extra_record',lambda:verify(job),'missing/extra')
++    check('overwrite',lambda:atomic(dest/'extra/protocol.json',{}),'File exists')
++    cs=json.loads((OUT/'data/P4_inference.json').read_text());bad=copy.deepcopy(cs[0]);bad['images'][0]['caption']='answer'
++    check('nested_answer_leak',lambda:check_case(bad),'image fields')
++    assert parse('Answer: A\nAnswer: B') is None and parse('Answer: A or B') is None and parse('Answer: C')=='C'
++    checks.append({'name':'ambiguous_parser','pass':True})
++    cmd=[sys.executable,'mt52_run.py','--job','results/iter_052/pilot/D8_graph','--inference','results/iter_052/data/D8_inference.json']
++    r=subprocess.run(cmd,capture_output=True,text=True)
++    assert r.returncode!=0 and 'launcher already running' in r.stderr
++    checks.append({'name':'live_launcher_refused','pass':True,'returncode':r.returncode,'stderr':r.stderr})
++    save(OUT/'tests/run_fixtures_result.json',{'checks':checks,'n':len(checks),'status':'PASS'})
++    print('PASS',len(checks))
++
++if __name__=='__main__':main()
