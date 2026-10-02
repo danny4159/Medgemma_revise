@@ -1,0 +1,839 @@
+diff --git a/mt49_audit.py b/mt49_audit.py
+new file mode 100644
+index 0000000..c334159
+--- /dev/null
++++ b/mt49_audit.py
+@@ -0,0 +1,323 @@
++"""iter_049: MedThinkVQA train metadata 전수 감사 (CPU-only).
++
++검사 함수는 순수 함수(row -> 문제 목록)로 두고 test_mt49.py 에서 회귀 검사한다.
++적격 규칙(고정 순서): R1 schema/slot 정합, R2 정답-선택지 정합, R3 모든 영상 modality=X-ray,
++R4 is_longitudinal=false & timepoint_count=1, R5 고유 영상(id/path) >= 2.
++누락·상충 값은 보정하지 않고 reason 으로 집계한다. 모델 출력/정오답은 사용하지 않는다.
++"""
++import collections
++import hashlib
++import json
++import os
++import re
++import sys
++
++OUT = os.path.join(os.path.dirname(os.path.abspath(__file__)), "results", "iter_049")
++MAXSLOT = 49
++LETTERS = "ABCDE"
++# 추론 입력 허용 필드 / 평가·감사 전용 필드
++INFER_FIELDS = ("case_key", "CLINICAL_HISTORY", "options", "images")
++EVAL_ONLY = ("IMAGING_FINDINGS", "discussion", "correct_answer", "correct_answer_text",
++             "ICD Chapter", "ICD Block", "ICD Category", "caption")
++FORBIDDEN_IN_INFER = set(EVAL_ONLY) | {"image_%02d_caption" % i for i in range(1, MAXSLOT + 1)}
++
++
++def slots(row):
++    out = []
++    for i in range(1, MAXSLOT + 1):
++        k = "image_%02d_" % i
++        vals = {s: row.get(k + s) for s in ("id", "path", "caption", "modality", "sub_modality")}
++        out.append((i, vals))
++    return out
++
++
++def schema_problems(row):
++    """R1: 필수 필드, image_count 와 nonempty slot, slot 내부 일관성, 중복 영상."""
++    p = []
++    for k in ("title", "CLINICAL_HISTORY", "options", "correct_answer", "correct_answer_text",
++              "is_longitudinal", "timepoint_count", "image_count"):
++        if k not in row or row[k] is None:
++            p.append("missing_field:" + k)
++    if p:
++        return p
++    ne = []
++    for i, v in slots(row):
++        filled = [bool(v[s]) for s in ("id", "path", "modality")]
++        if any(filled) and not all(filled):
++            p.append("partial_slot:%d" % i)
++        if all(filled):
++            ne.append((i, v))
++    if not isinstance(row["image_count"], int) or row["image_count"] != len(ne):
++        p.append("slot_count_mismatch")
++    # nonempty slot 이 앞에서부터 연속인지
++    if ne and [i for i, _ in ne] != list(range(1, len(ne) + 1)):
++        p.append("slot_gap")
++    ids = [v["id"] for _, v in ne]
++    paths = [v["path"] for _, v in ne]
++    if len(set(ids)) != len(ids):
++        p.append("dup_image_id_in_case")
++    if len(set(paths)) != len(paths):
++        p.append("dup_image_path_in_case")
++    m = re.fullmatch(r"Case number (\d+)", row["title"] or "")
++    for _, v in ne:
++        pm = re.fullmatch(r"images/case(\d+)/([^/\\]+)\.jpg", v["path"])
++        if not pm:
++            p.append("bad_path_form")
++            break
++        if m and int(pm.group(1)) != int(m.group(1)):  # title 과 경로는 zero-padding 만 다를 수 있다
++            p.append("path_case_mismatch")
++            break
++        if pm.group(2) != v["id"]:
++            p.append("path_id_mismatch")
++            break
++    return p
++
++
++def answer_problems(row):
++    """R2: options A-E 와 정답 letter/text 대응."""
++    p = []
++    o = row.get("options")
++    if not isinstance(o, dict) or sorted(o.keys()) != list(LETTERS):
++        return ["options_not_A_E"]
++    if any(not isinstance(o[k], str) or not o[k].strip() for k in LETTERS):
++        p.append("empty_option")
++    if len({o[k].strip().lower() for k in LETTERS}) != 5:
++        p.append("duplicate_option_text")
++    ca = row.get("correct_answer")
++    if ca not in LETTERS:
++        p.append("bad_answer_letter")
++    elif o[ca] != row.get("correct_answer_text"):
++        p.append("answer_text_mismatch")
++    return p
++
++
++def modalities(row):
++    return [v["modality"] for _, v in slots(row) if v["id"] and v["path"]]
++
++
++def classify(row):
++    """고정 순서 적용 -> (eligible, first_reason, all_reasons)."""
++    reasons = []
++    sp = schema_problems(row)
++    if sp:
++        return False, "R1_schema", sp
++    ap = answer_problems(row)
++    if ap:
++        return False, "R2_answer", ap
++    mods = modalities(row)
++    if any(m != "X-ray" for m in mods):
++        return False, "R3_not_all_xray", sorted(set(mods))
++    lg = row["is_longitudinal"]
++    tc = row["timepoint_count"]
++    if lg is not False or tc != 1:
++        return False, "R4_longitudinal", ["is_longitudinal=%r timepoint_count=%r" % (lg, tc)]
++    if row["image_count"] < 2:
++        return False, "R5_single_image", []
++    return True, "eligible", []
++
++
++def case_key(row):
++    return row["title"]
++
++
++def infer_view(row):
++    """추론 입력: 임상 이력, options, 영상(id/path)만. caption/정답/발견은 포함하지 않는다."""
++    imgs = [{"id": v["id"], "path": v["path"]} for _, v in slots(row) if v["id"] and v["path"]]
++    return {"case_key": case_key(row), "CLINICAL_HISTORY": row["CLINICAL_HISTORY"],
++            "options": dict(row["options"]), "images": imgs}
++
++
++def assert_no_leak(view):
++    bad = [k for k in view if k in FORBIDDEN_IN_INFER]
++    for im in view.get("images", []):
++        bad += [k for k in im if k in FORBIDDEN_IN_INFER]
++    if bad:
++        raise ValueError("leak fields in inference view: %s" % bad)
++    if set(view) != set(INFER_FIELDS):
++        raise ValueError("unexpected fields: %s" % sorted(set(view) ^ set(INFER_FIELDS)))
++    return True
++
++
++def norm_text(s):
++    return re.sub(r"\s+", " ", re.sub(r"[^a-z0-9 ]", " ", (s or "").lower())).strip()
++
++
++def history_leak_flags(row):
++    """임상 이력에 정답 선택지 텍스트(정규화) 또는 그 핵심 토큰이 포함되는지 표시(확정 아님)."""
++    h = norm_text(row["CLINICAL_HISTORY"])
++    ans = norm_text(row["correct_answer_text"])
++    flags = []
++    if ans and ans in h:
++        flags.append("answer_text_in_history")
++    # 오답 선택지 포함은 대조(정답만 있는 것이 아니라 어느 선택지든 언급되는지)
++    others = [norm_text(row["options"][k]) for k in LETTERS if k != row["correct_answer"]]
++    if any(o and o in h for o in others):
++        flags.append("distractor_text_in_history")
++    toks = [t for t in ans.split() if len(t) >= 5]
++    if toks and all(t in h.split() for t in toks) and "answer_text_in_history" not in flags:
++        flags.append("answer_tokens_in_history")
++    return flags
++
++
++def read_rows(path):
++    rows = []
++    with open(path, encoding="utf-8") as f:
++        for ln, l in enumerate(f, 1):
++            try:
++                rows.append(json.loads(l))
++            except json.JSONDecodeError:
++                rows.append({"__malformed__": ln})
++    return rows
++
++
++def file_sha(path):
++    h = hashlib.sha256()
++    with open(path, "rb") as f:
++        for b in iter(lambda: f.read(1 << 20), b""):
++            h.update(b)
++    return h.hexdigest()
++
++
++def audit(train_path, out_dir, expect_sha=None, expect_rows=7347):
++    sha = file_sha(train_path)
++    if expect_sha and sha != expect_sha:
++        raise RuntimeError("train.jsonl sha256 mismatch")
++    done = os.path.join(out_dir, "audit_done.json")
++    if os.path.exists(done):
++        d = json.load(open(done))
++        if d.get("train_sha256") == sha:
++            return d  # 같은 원본이면 재사용
++        raise RuntimeError("raw hash changed; 기존 감사 결과를 재사용하지 않는다. 새 out_dir 사용")
++    rows = read_rows(train_path)
++    n = len(rows)
++    malformed = [r["__malformed__"] for r in rows if "__malformed__" in r]
++    good = [r for r in rows if "__malformed__" not in r]
++    keys = collections.Counter(case_key(r) for r in good if "title" in r)
++    dup_keys = {k: c for k, c in keys.items() if c > 1}
++    first = collections.Counter()
++    all_reason = collections.Counter()
++    elig = []
++    excl = []
++    cascade = collections.Counter()
++    for r in good:
++        ok, fr, rs = classify(r)
++        first[fr] += 1
++        for x in rs:
++            all_reason[fr + ":" + x] += 1
++        (elig if ok else excl).append((r, fr, rs))
++    # modality 집합 단독 X-ray (다중 영상 여부 무관) 집계 = 논문 M.6 대응 후보
++    xray_only_any = 0
++    xray_only_ge2 = 0
++    xray_only_nonlong = 0
++    mod_sets = collections.Counter()
++    for r in good:
++        if schema_problems(r):
++            continue
++        ms = frozenset(modalities(r))
++        mod_sets["+".join(sorted(ms))] += 1
++        if ms == {"X-ray"}:
++            xray_only_any += 1
++            if r["image_count"] >= 2:
++                xray_only_ge2 += 1
++            if r["is_longitudinal"] is False and r["timepoint_count"] == 1:
++                xray_only_nonlong += 1
++    # 적격 사례 요약
++    cnt_dist = collections.Counter(r["image_count"] for r, _, _ in elig)
++    subs = collections.Counter()
++    case_subs = collections.Counter()
++    icd = collections.Counter()
++    for r, _, _ in elig:
++        ss = sorted({v["sub_modality"] for _, v in slots(r) if v["id"]})
++        case_subs["|".join(ss)] += 1
++        for _, v in slots(r):
++            if v["id"]:
++                subs[v["sub_modality"]] += 1
++        icd[r["ICD Chapter"]] += 1
++    S = sum(r["image_count"] for r, _, _ in elig)
++    # 적격 사례 간 중복(영상 id, 문맥+선택지)
++    id_owner = collections.defaultdict(set)
++    for r, _, _ in elig:
++        for _, v in slots(r):
++            if v["id"]:
++                id_owner[v["id"]].add(case_key(r))
++    shared_ids = {k: sorted(v) for k, v in id_owner.items() if len(v) > 1}
++    ctx_owner = collections.defaultdict(list)
++    for r, _, _ in elig:
++        sig = hashlib.sha256((norm_text(r["CLINICAL_HISTORY"]) + "|" +
++                              "|".join(sorted(norm_text(r["options"][k]) for k in LETTERS))).encode()).hexdigest()
++        ctx_owner[sig].append(case_key(r))
++    dup_ctx = [v for v in ctx_owner.values() if len(v) > 1]
++    opt_owner = collections.defaultdict(list)
++    for r, _, _ in elig:
++        sig = "|".join(sorted(norm_text(r["options"][k]) for k in LETTERS))
++        opt_owner[sig].append(case_key(r))
++    dup_opts = [v for v in opt_owner.values() if len(v) > 1]
++    # 전체 train 에서 영상 id 가 다른 case 와 공유되는지 (적격 사례가 비적격과 공유하는 경우 포함)
++    all_owner = collections.defaultdict(set)
++    for r in good:
++        if schema_problems(r):
++            continue
++        for _, v in slots(r):
++            if v["id"]:
++                all_owner[v["id"]].add(case_key(r))
++    elig_keys = {case_key(r) for r, _, _ in elig}
++    shared_with_noneligible = sorted({k for k, v in all_owner.items() if len(v) > 1 and (v & elig_keys)})
++    # 누출 표시
++    lk = collections.Counter()
++    leak_cases = collections.defaultdict(list)
++    for r, _, _ in elig:
++        fl = history_leak_flags(r)
++        for f in fl:
++            lk[f] += 1
++            leak_cases[f].append(case_key(r))
++        assert_no_leak(infer_view(r))
++    ans_dist = collections.Counter(r["correct_answer"] for r, _, _ in elig)
++    summary = {
++        "train_sha256": sha, "rows_read": n, "rows_expected": expect_rows,
++        "malformed_lines": malformed, "unique_case_keys": len(keys), "dup_case_keys": dup_keys,
++        "first_failure_counts": dict(first), "all_reason_counts": dict(all_reason),
++        "xray_only_modality_set_cases": xray_only_any,
++        "xray_only_ge2_images": xray_only_ge2, "xray_only_nonlongitudinal": xray_only_nonlong,
++        "modality_set_top": mod_sets.most_common(25),
++        "eligible_N": len(elig), "eligible_S_images": S,
++        "image_count_dist": dict(sorted(cnt_dist.items())),
++        "sub_modality_image_counts": dict(subs.most_common()),
++        "case_sub_modality_sets_top": case_subs.most_common(25),
++        "icd_chapter_dist": dict(icd.most_common()),
++        "answer_letter_dist": dict(ans_dist),
++        "shared_image_ids_among_eligible": len(shared_ids),
++        "shared_image_ids_with_any_other_case": len(shared_with_noneligible),
++        "duplicate_context_options_clusters": dup_ctx,
++        "duplicate_options_set_clusters_n": len(dup_opts),
++        "history_leak_flags": dict(lk),
++        "case_unit_note": "case(title)를 분석 단위로 쓴다. case=환자 동일성은 보장되지 않는다.",
++    }
++    os.makedirs(out_dir, exist_ok=True)
++    with open(os.path.join(out_dir, "eligible_cases.jsonl"), "x") as f:
++        for r, _, _ in elig:
++            v = infer_view(r)
++            v["_eval"] = {"correct_answer": r["correct_answer"], "correct_answer_text": r["correct_answer_text"]}
++            v["_audit"] = {"history_leak_flags": history_leak_flags(r),
++                           "sub_modalities": sorted({s["sub_modality"] for _, s in slots(r) if s["id"]}),
++                           "icd_chapter": r["ICD Chapter"], "image_count": r["image_count"]}
++            f.write(json.dumps(v, ensure_ascii=False) + "\n")
++    with open(os.path.join(out_dir, "excluded_cases.jsonl"), "x") as f:
++        for r, fr, rs in excl:
++            f.write(json.dumps({"case_key": case_key(r), "first_reason": fr, "detail": rs}, ensure_ascii=False) + "\n")
++    with open(os.path.join(out_dir, "leak_flag_cases.json"), "x") as f:
++        json.dump(leak_cases, f, indent=1)
++    with open(os.path.join(out_dir, "audit_summary.json"), "x") as f:
++        json.dump(summary, f, indent=1, ensure_ascii=False)
++    with open(done, "x") as f:
++        json.dump({"train_sha256": sha, "eligible_N": len(elig), "S": S}, f)
++    return summary
++
++
++if __name__ == "__main__":
++    tp = os.path.join(OUT, "raw", "train.jsonl")
++    # audit/ (v0)는 path_case_mismatch 문자열 비교 오류(zero-padding)로 무효. 오류 기록으로 보존하고 audit_v2 사용
++    s = audit(tp, os.path.join(OUT, "audit_v2"),
++              "7b38ceddc9cb1cf3a8dc0f9179c694caf826cd5716bb1b326e71d36e9e7d9b3a")
++    print(json.dumps({k: v for k, v in s.items() if k not in ("modality_set_top", "case_sub_modality_sets_top",
++                                                              "duplicate_context_options_clusters")},
++                     indent=1, ensure_ascii=False)[:6000])
+diff --git a/mt49_fetch.py b/mt49_fetch.py
+new file mode 100644
+index 0000000..7e71f38
+--- /dev/null
++++ b/mt49_fetch.py
+@@ -0,0 +1,110 @@
++"""iter_049: MedThinkVQA 공식 자료 확보 (revision 고정, sha256 검증, 원자적 저장).
++
++- HF dataset revision, GitHub commit을 고정하고 파일 목록·LFS oid를 results/iter_049/acq/ 에 보존한다.
++- train.jsonl 만 받는다 (test.jsonl/test.parquet 은 열지 않는다).
++- 파일은 .part 에 받은 뒤 sha256(LFS oid가 있으면 oid, 없으면 기록만) 검증 후 rename. 기존 파일은 덮어쓰지 않는다.
++"""
++import hashlib
++import json
++import os
++import sys
++import time
++import urllib.request
++
++HF = "bio-nlp-umass/MedThinkVQA"
++HF_REV = "5555b80e167c4796efab92fe709fb05914077dc0"
++GH = "benluwang/MedThinkVQA"
++GH_REV = "efa12d09024dbe458782059bc7a2d9fa41d28821"
++OUT = os.path.join(os.path.dirname(os.path.abspath(__file__)), "results", "iter_049")
++UA = {"User-Agent": "mt49-fetch/1.0"}
++
++
++def get_json(url):
++    with urllib.request.urlopen(urllib.request.Request(url, headers=UA), timeout=120) as r:
++        return json.load(r)
++
++
++def sha256_file(p):
++    h = hashlib.sha256()
++    with open(p, "rb") as f:
++        for b in iter(lambda: f.read(1 << 20), b""):
++            h.update(b)
++    return h.hexdigest()
++
++
++def fetch(url, dest, expect_sha=None, expect_size=None, retries=4):
++    """공식 URL -> dest. dest가 이미 있으면 검증만 하고 재사용(덮어쓰지 않음)."""
++    if os.path.exists(dest):
++        s = sha256_file(dest)
++        if expect_sha and s != expect_sha:
++            raise RuntimeError(f"existing file hash mismatch {dest}")
++        return {"path": dest, "sha256": s, "size": os.path.getsize(dest), "reused": True}
++    os.makedirs(os.path.dirname(dest), exist_ok=True)
++    part = dest + f".part.{os.getpid()}"
++    last = None
++    for k in range(retries):
++        try:
++            h = hashlib.sha256()
++            n = 0
++            t0 = time.time()
++            req = urllib.request.Request(url, headers=UA)
++            with urllib.request.urlopen(req, timeout=120) as r, open(part, "wb") as f:
++                final_url = r.geturl()
++                etag = r.headers.get("ETag")
++                while True:
++                    b = r.read(1 << 20)
++                    if not b:
++                        break
++                    f.write(b)
++                    h.update(b)
++                    n += len(b)
++            if expect_size is not None and n != expect_size:
++                raise RuntimeError(f"size {n} != {expect_size}")
++            if expect_sha and h.hexdigest() != expect_sha:
++                raise RuntimeError("sha256 mismatch")
++            os.link(part, dest)  # 이미 존재하면 FileExistsError -> 덮어쓰기 방지
++            os.unlink(part)
++            return {"path": dest, "sha256": h.hexdigest(), "size": n, "url": url, "final_url": final_url,
++                    "etag": etag, "seconds": time.time() - t0, "reused": False}
++        except FileExistsError:
++            os.unlink(part)
++            return {"path": dest, "sha256": sha256_file(dest), "reused": True}
++        except Exception as e:  # noqa
++            last = repr(e)
++            time.sleep(2 * (k + 1))
++    raise RuntimeError(f"fetch failed {url}: {last}")
++
++
++def main():
++    acq = os.path.join(OUT, "acq")
++    os.makedirs(acq, exist_ok=True)
++    log = {"hf_repo": HF, "hf_revision": HF_REV, "gh_repo": GH, "gh_revision": GH_REV, "files": []}
++    info = get_json(f"https://huggingface.co/api/datasets/{HF}/revision/{HF_REV}")
++    log["hf_card_license"] = (info.get("cardData") or {}).get("license")
++    log["hf_lastModified"] = info.get("lastModified")
++    top = get_json(f"https://huggingface.co/api/datasets/{HF}/tree/{HF_REV}")
++    json.dump(top, open(os.path.join(acq, "hf_top_tree.json"), "w"), indent=1)
++    meta = {x["path"]: x for x in top if x["type"] == "file"}
++    tr = meta["train.jsonl"]
++    assert tr["lfs"]["oid"] == "7b38ceddc9cb1cf3a8dc0f9179c694caf826cd5716bb1b326e71d36e9e7d9b3a"
++    for name in ["README.md", ".gitattributes"]:
++        log["files"].append(fetch(f"https://huggingface.co/datasets/{HF}/resolve/{HF_REV}/{name}",
++                                  os.path.join(acq, "hf_" + name.lstrip(".")), None, meta[name]["size"]))
++    log["files"].append(fetch(f"https://huggingface.co/datasets/{HF}/resolve/{HF_REV}/train.jsonl",
++                              os.path.join(OUT, "raw", "train.jsonl"), tr["lfs"]["oid"], tr["size"]))
++    gh_tree = get_json(f"https://api.github.com/repos/{GH}/git/trees/{GH_REV}?recursive=1")
++    json.dump(gh_tree, open(os.path.join(acq, "gh_tree.json"), "w"), indent=1)
++    for x in gh_tree["tree"]:
++        p = x["path"]
++        if x["type"] == "blob" and (p in ("LICENSE", "README.md") or p.startswith("model/")
++                                    or p.startswith("data_processing/") or p.startswith("tools/")):
++            r = fetch(f"https://raw.githubusercontent.com/{GH}/{GH_REV}/{p}",
++                      os.path.join(OUT, "code_gh", p), None, x["size"])
++            r["git_blob_sha"] = x["sha"]
++            log["files"].append(r)
++    json.dump(log, open(os.path.join(acq, "acquisition_log.json"), "w"), indent=1)
++    print("ok", len(log["files"]))
++
++
++if __name__ == "__main__":
++    sys.exit(main())
+diff --git a/mt49_images.py b/mt49_images.py
+new file mode 100644
+index 0000000..3726eef
+--- /dev/null
++++ b/mt49_images.py
+@@ -0,0 +1,99 @@
++"""iter_049: 적격 train case의 전체 영상만 공식 HF revision에서 선택 다운로드하고 검증한다.
++
++- 입력: audit_v2/eligible_cases.jsonl (train 적격 case만; test 경로는 열거하지 않는다)
++- case 디렉터리 listing(공식 tree API)으로 객체 oid 확보 -> 받은 bytes 의 git blob sha1(비LFS) 또는 sha256(LFS) 검증
++- 각 영상: 파일 sha256, 크기, PIL decode 성공 여부, mode/size, decode pixel sha256 기록. 경로 이탈 거부.
++- 결과: images/ (git 제외 대형 자산), image_manifest.json. 기존 파일은 덮어쓰지 않는다.
++"""
++import concurrent.futures as cf
++import hashlib
++import json
++import os
++import sys
++import time
++import urllib.parse
++import urllib.request
++
++from PIL import Image
++
++from mt49_fetch import HF, HF_REV, OUT, UA, fetch, get_json
++
++AUD = os.path.join(OUT, "audit_v2")
++IMG = os.path.join(OUT, "images")
++
++
++def safe_rel(p):
++    if p.startswith("/") or ".." in p.split("/") or "\\" in p or not p.startswith("images/case"):
++        raise ValueError("unsafe path " + p)
++    return p
++
++
++def git_blob_sha1(path):
++    n = os.path.getsize(path)
++    h = hashlib.sha1(b"blob %d\0" % n)
++    with open(path, "rb") as f:
++        for b in iter(lambda: f.read(1 << 20), b""):
++            h.update(b)
++    return h.hexdigest()
++
++
++def list_case(case_dir):
++    u = f"https://huggingface.co/api/datasets/{HF}/tree/{HF_REV}/" + urllib.parse.quote(case_dir)
++    for k in range(4):
++        try:
++            return {x["path"]: x for x in get_json(u) if x["type"] == "file"}
++        except Exception:
++            time.sleep(2 * (k + 1))
++    raise RuntimeError("list failed " + case_dir)
++
++
++def do_case(c):
++    out = []
++    paths = [safe_rel(i["path"]) for i in c["images"]]
++    cdir = os.path.dirname(paths[0])
++    assert all(os.path.dirname(p) == cdir for p in paths)
++    lst = list_case(cdir)
++    for p in paths:
++        if p not in lst:
++            out.append({"case_key": c["case_key"], "path": p, "error": "not_in_official_listing"})
++            continue
++        ent = lst[p]
++        dest = os.path.join(OUT, p)
++        exp_sha = (ent.get("lfs") or {}).get("oid")
++        url = f"https://huggingface.co/datasets/{HF}/resolve/{HF_REV}/" + urllib.parse.quote(p)
++        rec = {"case_key": c["case_key"], "path": p, "listing_size": ent.get("size"), "lfs": bool(exp_sha)}
++        try:
++            r = fetch(url, dest, exp_sha, ent.get("size"))
++            rec.update({"file_sha256": r["sha256"], "size": r["size"]})
++            if not exp_sha:
++                rec["git_blob_sha1"] = git_blob_sha1(dest)
++                rec["git_blob_ok"] = rec["git_blob_sha1"] == ent.get("oid")
++            im = Image.open(dest)
++            im.load()
++            rec.update({"decode_ok": True, "mode": im.mode, "wh": list(im.size),
++                        "pixel_sha256": hashlib.sha256(im.mode.encode() + str(im.size).encode() + im.tobytes()).hexdigest()})
++        except Exception as e:  # noqa
++            rec.update({"decode_ok": False, "error": repr(e)})
++        out.append(rec)
++    return out
++
++
++def main():
++    cases = [json.loads(l) for l in open(os.path.join(AUD, "eligible_cases.jsonl"))]
++    t0 = time.time()
++    recs = []
++    with cf.ThreadPoolExecutor(8) as ex:
++        for k, r in enumerate(ex.map(do_case, cases), 1):
++            recs += r
++            if k % 25 == 0:
++                print(k, len(recs), round(time.time() - t0), "s", flush=True)
++    bad = [r for r in recs if not r.get("decode_ok") or r.get("git_blob_ok") is False or "error" in r]
++    man = {"hf_revision": HF_REV, "n_cases": len(cases), "n_images": len(recs), "n_bad": len(bad),
++           "seconds": time.time() - t0, "bytes": sum(r.get("size", 0) for r in recs), "records": recs}
++    with open(os.path.join(OUT, "image_manifest.json"), "x") as f:
++        json.dump(man, f, indent=1)
++    print("images", len(recs), "bad", len(bad), "seconds", round(time.time() - t0), "bytes", man["bytes"])
++
++
++if __name__ == "__main__":
++    sys.exit(main())
+diff --git a/mt49_report.py b/mt49_report.py
+new file mode 100644
+index 0000000..00bb12f
+--- /dev/null
++++ b/mt49_report.py
+@@ -0,0 +1,112 @@
++"""iter_049: 적격 manifest 기반 후속 비용 산식·정밀도 표·영상 중복/입력 규모 (CPU-only).
++모델 출력은 사용하지 않는다. 결과: results/iter_049/report/feasibility.json
++"""
++import collections
++import json
++import math
++import os
++import sys
++
++from mt49_fetch import OUT, sha256_file
++
++AUD = os.path.join(OUT, "audit_v2")
++REP = os.path.join(OUT, "report")
++MODEL_SNAP = "/SSD1_1TB/home/milab/daniel/08_medgemma/hf_cache/models--google--medgemma-1.5-4b-it/snapshots/91850547d9f0b2fdd21aa7c5f4f3d1a8a52c243b"
++TOK_PER_IMAGE = 256  # Gemma3 SigLIP 896x896 -> 256 soft tokens (모델 config로 확인, 아래 mm_tokens_per_image)
++
++
++def mde(N, q, z_a=1.96, z_b=0.8416):
++    """paired accuracy 차이의 최소 검출 효과(독립 case 근사): delta s.t. delta = (z_a+z_b)*sqrt((q-delta^2)/N)."""
++    d = 0.0
++    for _ in range(200):
++        d = (z_a + z_b) * math.sqrt(max(q - d * d, 0) / N)
++    return d
++
++
++def main():
++    os.makedirs(REP, exist_ok=True)
++    cases = [json.loads(l) for l in open(os.path.join(AUD, "eligible_cases.jsonl"))]
++    man = json.load(open(os.path.join(OUT, "image_manifest.json")))
++    recs = man["records"]
++    # 영상 연결: 모든 case 의 모든 영상이 manifest 에 있고 decode 성공
++    by_path = {r["path"]: r for r in recs}
++    miss = [i["path"] for c in cases for i in c["images"] if i["path"] not in by_path]
++    undec = [r["path"] for r in recs if not r.get("decode_ok")]
++    # pixel hash 중복 (case 간)
++    owner = collections.defaultdict(set)
++    for r in recs:
++        owner[r["pixel_sha256"]].add(r["case_key"])
++    dup_pix = {h: sorted(v) for h, v in owner.items() if len(v) > 1}
++    same_case_dup = collections.Counter(r["pixel_sha256"] for r in recs)
++    within_dup = sum(1 for h, n in same_case_dup.items() if n > 1 and len(owner[h]) == 1)
++    wh = collections.Counter(tuple(r["wh"]) for r in recs)
++    mx = [max(r["wh"]) for r in recs]
++    mn = [min(r["wh"]) for r in recs]
++    modes = collections.Counter(r["mode"] for r in recs)
++    N = len(cases)
++    S = sum(c["_audit"]["image_count"] for c in cases)
++    # 토큰 수 (텍스트: CLINICAL_HISTORY + options; prompt 템플릿은 후속 계획에서 고정)
++    tok_info = {}
++    try:
++        from transformers import AutoTokenizer
++        tk = AutoTokenizer.from_pretrained(MODEL_SNAP, local_files_only=True)
++        cfg = json.load(open(os.path.join(MODEL_SNAP, "config.json")))
++        tok_info["mm_tokens_per_image_config"] = cfg.get("mm_tokens_per_image")
++        tl = []
++        for c in cases:
++            txt = c["CLINICAL_HISTORY"] + "\n" + "\n".join("%s. %s" % (k, v) for k, v in c["options"].items())
++            tl.append(len(tk(txt)["input_ids"]))
++        tl.sort()
++        tok_info.update({"text_tokens_mean": sum(tl) / N, "text_tokens_max": tl[-1], "text_tokens_p95": tl[int(.95 * N) - 1]})
++        per_img = tok_info["mm_tokens_per_image_config"] or TOK_PER_IMAGE
++        mx_img = max(c["_audit"]["image_count"] for c in cases)
++        tok_info["max_images_in_case"] = mx_img
++        tok_info["max_input_tokens_est"] = max(len(tk(c["CLINICAL_HISTORY"])["input_ids"]) +
++                                               per_img * c["_audit"]["image_count"] for c in cases)
++        tok_info["note"] = "텍스트(이력+선택지)와 영상 soft token 합. chat template·지시문 토큰은 미포함(후속 prompt 고정 시 추가)."
++    except Exception as e:  # noqa
++        tok_info["error"] = repr(e)
++    # 후속 후보 요청량 산식 (실행 허가량 아님)
++    req = {
++        "N_cases": N, "S_images": S,
++        "direct_full_images": N, "per_image_findings": S, "integrate": N, "stepwise_final": N,
++        "findings_plus_original_images_final": N, "extra_budget_direct_control": N, "text_only": N,
++        "stepwise_total_calls": S + N + N, "stepwise_vs_direct_call_ratio": (S + 2 * N) / N,
++        "note": "shared findings 를 조건 2/3 이 공유하면 per_image_findings+integrate 는 한 번만 센다. 비용은 device-seconds 로 실측해야 한다.",
++    }
++    # 정밀도 표
++    prec = []
++    for n_eff, label in [(N, "N=%d (cluster 없음 가정)" % N), (round(N * 0.8), "유효 N 80%"), (round(N * 0.5), "유효 N 50%"),
++                         (100, "N=100 부분표본")]:
++        for q in (0.10, 0.20, 0.30, 0.40):
++            for delta in (0.0, 0.05, 0.10):
++                se = math.sqrt(max(q - delta ** 2, 0) / n_eff)
++                prec.append({"n_eff": n_eff, "label": label, "q_discordant": q, "delta": delta,
++                             "SE": round(se, 4), "ci95_half": round(1.96 * se, 4), "ci975_half": round(2.241 * se, 4)})
++    mdes = [{"n_eff": n, "q": q, "mde_80power_a05": round(mde(n, q), 4), "mde_80power_a025": round(mde(n, q, 2.241), 4)}
++            for n in (N, round(N * 0.8), round(N * 0.5), 100) for q in (0.10, 0.20, 0.30, 0.40)]
++    # 하위 군(분석 단위) 크기
++    sub = collections.Counter("|".join(c["_audit"]["sub_modalities"]) for c in cases)
++    out = {
++        "eligible_N": N, "S": S, "unit": "case(title); 환자 동일성 미보장",
++        "links": {"cases_without_all_images": miss, "undecodable": undec, "n_bad_in_manifest": man["n_bad"]},
++        "image_pixel_dup_across_cases": len(dup_pix), "image_pixel_dup_clusters": dup_pix,
++        "within_case_pixel_dup_hashes": within_dup,
++        "image_wh_top": [(list(k), v) for k, v in wh.most_common(8)],
++        "longest_side_min_max_mean": [min(mx), max(mx), sum(mx) / len(mx)], "shortest_side_min": min(mn),
++        "image_modes": dict(modes), "tokens": tok_info, "requests": req,
++        "precision_table": prec, "mde_table": mdes, "sub_modality_set_counts": sub.most_common(),
++        "acquisition_cost": {"image_download_seconds": man["seconds"], "image_bytes": man["bytes"],
++                             "n_images": man["n_images"], "train_jsonl_bytes": os.path.getsize(os.path.join(OUT, "raw", "train.jsonl"))},
++        "manifest_digests": {"eligible_cases": sha256_file(os.path.join(AUD, "eligible_cases.jsonl")),
++                             "image_manifest": sha256_file(os.path.join(OUT, "image_manifest.json")),
++                             "train_jsonl": sha256_file(os.path.join(OUT, "raw", "train.jsonl"))},
++    }
++    with open(os.path.join(REP, "feasibility.json"), "x") as f:
++        json.dump(out, f, indent=1, ensure_ascii=False)
++    print(json.dumps({k: v for k, v in out.items() if k not in ("precision_table", "image_pixel_dup_clusters")},
++                     indent=1, ensure_ascii=False)[:5000])
++
++
++if __name__ == "__main__":
++    sys.exit(main())
+diff --git a/test_mt49.py b/test_mt49.py
+new file mode 100644
+index 0000000..f7c4d35
+--- /dev/null
++++ b/test_mt49.py
+@@ -0,0 +1,165 @@
++"""iter_049 회귀 검사: 합성 결함 행 거부 + 실제 산출물 독립 재계산. 결과 -> results/iter_049/tests/fixtures_mt49.json"""
++import copy
++import json
++import os
++import re
++import shutil
++import sys
++import tempfile
++
++import mt49_audit as A
++from mt49_fetch import OUT
++from mt49_images import safe_rel
++
++CHECKS = []
++
++
++def chk(name, cond, detail=""):
++    CHECKS.append({"name": name, "pass": bool(cond), "detail": str(detail)})
++
++
++def base(n=3, mod="X-ray"):
++    r = {"title": "Case number 77", "CLINICAL_HISTORY": "A patient with pain.",
++         "IMAGING_FINDINGS": "secret findings", "discussion": "d",
++         "options": {k: "Dx " + k for k in "ABCDE"}, "correct_answer": "B", "correct_answer_text": "Dx B",
++         "ICD Chapter": "c", "ICD Block": "b", "ICD Category": "k",
++         "is_longitudinal": False, "timepoint_count": 1, "interval_text": "", "image_count": n}
++    for i in range(1, 50):
++        k = "image_%02d_" % i
++        if i <= n:
++            r.update({k + "id": "id%d" % i, k + "path": "images/case00077/id%d.jpg" % i, k + "caption": "cap",
++                      k + "modality": mod, k + "sub_modality": "Plain radiograph"})
++        else:
++            r.update({k + s: "" for s in ("id", "path", "caption", "modality", "sub_modality")})
++    return r
++
++
++def main():
++    ok, fr, _ = A.classify(base())
++    chk("baseline_eligible (title/path zero-padding 허용)", ok and fr == "eligible")
++    r = base(); r["image_count"] = 4
++    chk("slot_count_mismatch 거부", A.classify(r)[1] == "R1_schema" and "slot_count_mismatch" in A.classify(r)[2])
++    r = base(); r["image_02_path"] = ""
++    chk("partial_slot 거부", "partial_slot:2" in A.classify(r)[2])
++    r = base(); r["image_03_id"] = r["image_02_id"]; r["image_03_path"] = r["image_02_path"]
++    chk("중복 영상 id/path 거부", {"dup_image_id_in_case", "dup_image_path_in_case"} <= set(A.classify(r)[2]) or
++        "path_id_mismatch" in A.classify(r)[2])
++    r = base(); r["image_02_path"] = "images/case00078/id2.jpg"
++    chk("다른 case 경로 거부", "path_case_mismatch" in A.classify(r)[2])
++    r = base(); r["options"]["D"] = r["options"]["A"]
++    chk("중복 선택지 거부", A.classify(r)[1] == "R2_answer")
++    r = base(); r["correct_answer_text"] = "Dx C"
++    chk("정답 text/letter 불일치 거부", A.classify(r)[2] == ["answer_text_mismatch"])
++    r = base(); r["correct_answer"] = "F"
++    chk("정답 letter 범위 밖 거부", A.classify(r)[1] == "R2_answer")
++    r = base(); r["options"].pop("E")
++    chk("options 5개 아님 거부", A.classify(r)[2] == ["options_not_A_E"])
++    r = base(); r["image_02_modality"] = "CT"
++    chk("혼합 modality 거부 (삭제로 구제하지 않음)", A.classify(r)[1] == "R3_not_all_xray")
++    r = base(); r["is_longitudinal"] = True; r["timepoint_count"] = 2
++    chk("longitudinal 거부", A.classify(r)[1] == "R4_longitudinal")
++    r = base(); r["is_longitudinal"] = False; r["timepoint_count"] = 2
++    chk("longitudinal 상충(false & tc=2) 거부, 보정 안 함", A.classify(r)[1] == "R4_longitudinal")
++    r = base(); r["is_longitudinal"] = None
++    chk("is_longitudinal 누락(None) 거부", A.classify(r)[1] in ("R1_schema", "R4_longitudinal") and not A.classify(r)[0])
++    r = base(1)
++    chk("단일 영상 거부", A.classify(r)[1] == "R5_single_image")
++    r = base(); del r["correct_answer"]
++    chk("필수 필드 누락 거부", "missing_field:correct_answer" in A.classify(r)[2])
++    # 누출 필드 혼입 거부
++    v = A.infer_view(base())
++    chk("정상 추론 view 통과", A.assert_no_leak(v))
++    for f in ("correct_answer", "IMAGING_FINDINGS", "discussion", "ICD Chapter", "image_01_caption"):
++        w = copy.deepcopy(v); w[f] = "x"
++        try:
++            A.assert_no_leak(w); res = False
++        except ValueError:
++            res = True
++        chk("추론 view 에 %s 혼입 거부" % f, res)
++    w = copy.deepcopy(v); w["images"][0]["caption"] = "x"
++    try:
++        A.assert_no_leak(w); res = False
++    except ValueError:
++        res = True
++    chk("영상 항목에 caption 혼입 거부", res)
++    chk("추론 view 에 정답/발견 문자열 없음", "secret" not in json.dumps(v) and "Dx B" not in json.dumps(v["CLINICAL_HISTORY"]))
++    # 이력 누출 표시
++    r = base(); r["CLINICAL_HISTORY"] = "Findings of dx b were described."
++    chk("이력 내 정답 텍스트 표시", "answer_text_in_history" in A.history_leak_flags(r))
++    # path traversal
++    for bad in ("../x.jpg", "/etc/passwd", "images/case1/../../x", "other/case1/a.jpg"):
++        try:
++            safe_rel(bad); res = False
++        except ValueError:
++            res = True
++        chk("경로 이탈 거부 %s" % bad, res)
++    # malformed jsonl 줄 및 원본 hash 변경 시 감사 재사용 금지
++    d = tempfile.mkdtemp()
++    p = os.path.join(d, "t.jsonl")
++    with open(p, "w") as f:
++        f.write(json.dumps(base()) + "\n{broken\n")
++    rows = A.read_rows(p)
++    chk("malformed JSON 줄 탐지", "__malformed__" in rows[1])
++    out = os.path.join(d, "audit")
++    s = A.audit(p, out, None, expect_rows=2)
++    chk("합성 audit: malformed 기록·적격 1", s["malformed_lines"] == [2] and s["eligible_N"] == 1)
++    with open(p, "a") as f:
++        f.write(json.dumps(dict(base(), title="Case number 78")) + "\n")
++    try:
++        A.audit(p, out, None); res = False
++    except RuntimeError:
++        res = True
++    chk("원본 hash 변경 시 기존 감사 완료 재사용 거부", res)
++    try:
++        A.audit(p, os.path.join(d, "a2"), "0" * 64); res = False
++    except RuntimeError:
++        res = True
++    chk("기대 sha256 불일치 거부", res)
++    shutil.rmtree(d, ignore_errors=True)
++
++    # ---- 실제 산출물 독립 재계산 (audit 코드 미사용, 최소 로직) ----
++    raw = [json.loads(l) for l in open(os.path.join(OUT, "raw", "train.jsonl"))]
++    n_x = 0; n_el = 0; S = 0
++    ids = {}
++    for r in raw:
++        ms = [r["image_%02d_modality" % i] for i in range(1, 50) if r["image_%02d_id" % i]]
++        if ms and set(ms) == {"X-ray"}:
++            n_x += 1
++            n_img = len(ms)
++            opts = [r["options"][k].strip().lower() for k in "ABCDE"]
++            if (n_img >= 2 and r["is_longitudinal"] is False and r["timepoint_count"] == 1 and
++                    len(set(opts)) == 5 and r["options"][r["correct_answer"]] == r["correct_answer_text"] and
++                    n_img == r["image_count"]):
++                n_el += 1; S += n_img
++                ids[r["title"]] = [r["image_%02d_path" % i] for i in range(1, n_img + 1)]
++    summ = json.load(open(os.path.join(OUT, "audit_v2", "audit_summary.json")))
++    chk("독립 재계산: X-ray-only 433 (논문 M.6과 일치)", n_x == 433 == summ["xray_only_modality_set_cases"], n_x)
++    chk("독립 재계산: 적격 N/S 일치", (n_el, S) == (summ["eligible_N"], summ["eligible_S_images"]), (n_el, S))
++    chk("실패 사유 합 = 7347", sum(summ["first_failure_counts"].values()) == 7347)
++    el = [json.loads(l) for l in open(os.path.join(OUT, "audit_v2", "eligible_cases.jsonl"))]
++    chk("적격 manifest 의 영상 경로가 독립 재계산과 일치",
++        {c["case_key"]: [i["path"] for i in c["images"]] for c in el} == ids)
++    chk("적격 manifest 추론 필드에 누출 필드 없음", all(A.assert_no_leak({k: c[k] for k in A.INFER_FIELDS}) for c in el))
++    chk("적격 manifest 추론 필드가 INFER_FIELDS 와 정확히 일치",
++        all(set(c) - {"_eval", "_audit"} == set(A.INFER_FIELDS) for c in el))
++    im = json.load(open(os.path.join(OUT, "image_manifest.json")))
++    chk("영상 manifest: 896개 전부 decode 성공, 실패 0", im["n_images"] == 896 and im["n_bad"] == 0)
++    chk("영상 파일 경로가 images/ 아래에만 존재", all(os.path.realpath(os.path.join(OUT, r["path"])).startswith(
++        os.path.realpath(os.path.join(OUT, "images")) + os.sep) for r in im["records"]))
++    chk("train 이외 split 영상 미포함 (case 번호가 train title 집합)", all(
++        any(k == "Case number %d" % int(re.search(r"case(\d+)/", r["path"]).group(1)) for k in [r["case_key"]])
++        for r in im["records"]))
++    chk("test.jsonl 미다운로드", not os.path.exists(os.path.join(OUT, "raw", "test.jsonl")))
++    os.makedirs(os.path.join(OUT, "tests"), exist_ok=True)
++    npass = sum(c["pass"] for c in CHECKS)
++    with open(os.path.join(OUT, "tests", "fixtures_mt49.json"), "x") as f:
++        json.dump({"n": len(CHECKS), "n_pass": npass, "checks": CHECKS}, f, indent=1, ensure_ascii=False)
++    for c in CHECKS:
++        if not c["pass"]:
++            print("FAIL", c["name"], c["detail"])
++    print("%d/%d PASS" % (npass, len(CHECKS)))
++    return 0 if npass == len(CHECKS) else 1
++
++
++if __name__ == "__main__":
++    sys.exit(main())
