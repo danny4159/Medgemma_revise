@@ -4046,6 +4046,82 @@ index 0000000..997ecd2
 +
 +if __name__ == "__main__":
 +    main()
+diff --git a/pg48_final.py b/pg48_final.py
+new file mode 100644
+index 0000000..e95c29f
+--- /dev/null
++++ b/pg48_final.py
+@@ -0,0 +1,70 @@
++"""iter_048 최종 봉인: 동작 확인·재개·변조·launcher·lock 검사와 모든 단계 산출물의 상태를 다시 확인하고, 하나라도 실패하면 completion을 쓰지 않는다.
++최종 raw/report/selection/training/timing/source/verifier digest를 묶어 results/iter_048/completion.json을 마지막에 원자적으로 만든다 (기존 파일 덮어쓰기 거부).
++"""
++import glob
++import hashlib
++import json
++import os
++import sys
++
++import pg43_run as R
++
++ROOT = "results/iter_048"
++
++
++def sha(p):
++    return R.file_sha(p)
++
++
++def jl(p):
++    return json.load(open(p))
++
++
++def main():
++    out = f"{ROOT}/completion.json"
++    if os.path.exists(out):
++        sys.exit("exists")
++    c = {}
++    d = jl(f"{ROOT}/tests/gate_data_final.json")
++    c["gate_data"] = d["n_pass"] == d["n"] == 20
++    d = jl(f"{ROOT}/tests/gate_inputs_v2_final.json") if os.path.exists(f"{ROOT}/tests/gate_inputs_v2_final.json") else jl(f"{ROOT}/tests/gate_inputs_final.json")
++    c["gate_inputs"] = d["n_pass"] == d["n"]
++    d = jl(f"{ROOT}/tests/gate_gpu_det_0_final.json") if os.path.exists(f"{ROOT}/tests/gate_gpu_det_0_final.json") else jl(f"{ROOT}/tests/gate_gpu_det_01_final.json")
++    c["gate_gpu_det"] = d["n_pass"] == d["n"] == 8
++    c["resume_compare"] = jl(f"{ROOT}/tests/resume/resume_compare.json")["all_ok"]
++    g = jl(f"{ROOT}/tests/gen_tests.json")
++    c["gen_tests_all_rejected_and_tokens_equal"] = bool(g["all_rejected"] and g["tokens_all_equal"])
++    c["launch_tests"] = jl(f"{ROOT}/tests/launch_tests.json")["all_ok"]
++    c["trainer_lock_test"] = jl(f"{ROOT}/tests/lock_test.json")["ok"]
++    gate = jl(f"{ROOT}/decisions/v96_gate.json")
++    for n in ("E", "J"):
++        info = gate["v96_runs"][n]
++        recs = R.verify_completion(info["gen_dir"], info["requests"], info["protocol"])
++        c[f"v96_{n}_verify_completion_{len(recs)}"] = len(recs) == 384
++    c["eval_verify_all_ok"] = jl(f"{ROOT}/eval/verify.json")["all_ok"]
++    c["timing_verify_ok"] = jl(f"{ROOT}/timing/timing_verify.json")["ok"]
++    t = jl(f"{ROOT}/timing/timing_report.json")
++    c["timing_integrity_zero_mismatch"] = t["integrity"]["E_token_mismatch_total"] == t["integrity"]["J_token_mismatch_total"] == t["integrity"]["A_box_mismatch_total"] == 0
++    rep = jl(f"{ROOT}/eval/report.json")
++    c["report_provenance_hashes_current"] = all(rep["provenance"][k] == sha(p) for k, p in (("eval_source_sha256", "pg48_eval.py"), ("manifest_sha256", "results/iter_043/data/manifest_private.json"),
++                                                                                           ("select_sha256", f"{ROOT}/decisions/v96_gate.json")))
++    ok = all(c.values())
++    files = {}
++    for pat in ("eval/report.json", "eval/report_per_patient.json", "eval/verify.json", "timing/timing_report.json", "timing/timing_verify.json", "decisions/*.json", "protocol/*.json",
++                "requests/*.jsonl", "gen/V96_*/completion.json", "gen/D24_*/completion.json", "train/*/train_config.json", "train/*/epoch_0[258]/adapter.pt"):
++        for p in sorted(glob.glob(f"{ROOT}/{pat}")):
++            files[os.path.relpath(p, ROOT)] = sha(p)
++    src = {f: sha(f) for f in sorted(glob.glob("pg48_*.py")) + ["pg43_run.py", "pg39_spec.py", "mg45_launch.py", "mg45_mg.py", "mg45_worker.py", "rsna_diag/generate.py", "rsna_diag/lora.py"]}
++    res = {"all_checks_ok": ok, "checks": c, "file_digests": files, "source_digests": src,
++           "known_caveat": "gen_tests: all_branch_match=false is a label-needle mismatch of my test (wrong_prompt_hash rejected at 'prompt hash mismatch' instead of 'row digest'); rejection itself held."}
++    if not ok:
++        print(json.dumps(c, indent=1))
++        sys.exit("checks failed; completion NOT written")
++    tmp = out + f".{os.getpid()}.tmp"
++    json.dump(res, open(tmp, "w"), indent=1)
++    os.replace(tmp, out)
++    print("completion written", json.dumps(c))
++
++
++if __name__ == "__main__":
++    main()
 diff --git a/pg48_gates.py b/pg48_gates.py
 new file mode 100644
 index 0000000..60dc315
@@ -4815,6 +4891,144 @@ index 0000000..a10b6bc
 +
 +if __name__ == "__main__":
 +    main()
+diff --git a/pg48_launchtests.py b/pg48_launchtests.py
+new file mode 100644
+index 0000000..da12f3d
+--- /dev/null
++++ b/pg48_launchtests.py
+@@ -0,0 +1,90 @@
++"""iter_048 mg45_launch.py 보완 검사 (실제 프로세스 fixture): (c) barrier 전 child 사망 -> launcher가 자기 child만 종료하고 실패로 끝남,
++(a) 기존 launch_protocol과 다른 config로 같은 out-dir 재호출 -> 거부(기존 파일 불변), (b) 같은 out-dir 동시 launcher -> 거부.
++GPU 1장(물리 --gpu 인자)을 사용한다. 결과: results/iter_048/tests/launch_tests.json (덮어쓰기 거부).
++python pg48_launchtests.py --gpu 1 --out results/iter_048/tests/launch_tests.json
++"""
++import argparse
++import hashlib
++import json
++import os
++import signal
++import subprocess
++import sys
++import time
++
++CKPT = "results/iter_046/train/U/weights_e5.pth"
++BASE = ["python", "mg45_launch.py", "--set", "D24", "--ckpt", "A_final", "--ckpt-path", CKPT, "--workers", "2", "--batch", "4", "--post-thr", "0.8", "--warmup-d8", "--barrier"]
++
++
++def children(pid):
++    out = subprocess.run(["pgrep", "-P", str(pid)], capture_output=True, text=True).stdout.split()
++    return [int(x) for x in out]
++
++
++def alive(pid):
++    try:
++        os.kill(pid, 0)
++        return True
++    except OSError:
++        return False
++
++
++def main():
++    ap = argparse.ArgumentParser()
++    ap.add_argument("--gpu", default="1")
++    ap.add_argument("--out", required=True)
++    a = ap.parse_args()
++    if os.path.exists(a.out):
++        sys.exit("exists")
++    env = dict(os.environ, CUDA_VISIBLE_DEVICES=a.gpu)
++    root = "results/iter_048/tests/launch"
++    res = {}
++    # (c) barrier 전 child 사망
++    dc = f"{root}/c_child_death"
++    p = subprocess.Popen(BASE + ["--gpus", a.gpu, "--out-dir", dc, "--peak-gb", "4"], env=env, stdout=open(f"{root}_c.stdout", "w"), stderr=subprocess.STDOUT)
++    victim = None
++    t0 = time.time()
++    while time.time() - t0 < 60 and victim is None:
++        ch = children(p.pid)
++        if len(ch) >= 2:
++            victim = ch[1]
++        time.sleep(0.5)
++    all_children = children(p.pid)
++    os.kill(victim, signal.SIGKILL)
++    t_kill = time.time()
++    try:
++        rc = p.wait(timeout=180)
++        hung = False
++    except subprocess.TimeoutExpired:
++        rc, hung = None, True
++        p.kill()
++    left = [c for c in all_children if alive(c)]
++    partial = [f for f in os.listdir(dc) if f.startswith("partial_")]
++    pj = json.load(open(os.path.join(dc, partial[0]))) if partial else {}
++    res["c_child_death_before_barrier"] = {"launcher_rc": rc, "hung": hung, "seconds_to_exit_after_kill": time.time() - t_kill, "leftover_child_pids": left,
++                                           "partial_json_aborted_field": pj.get("aborted"), "no_completion": not os.path.exists(os.path.join(dc, "completion.json")),
++                                           "ok": rc not in (0, None) and not hung and not left and bool(pj.get("aborted")) and not os.path.exists(os.path.join(dc, "completion.json"))}
++    # (a) config mismatch on same out-dir (batch 4 -> 2)
++    lp = os.path.join(dc, "launch_protocol.json")
++    before = hashlib.sha256(open(lp, "rb").read()).hexdigest()
++    cmd = [x if x != "4" else "2" for x in BASE]
++    r = subprocess.run(cmd + ["--gpus", a.gpu, "--out-dir", dc, "--peak-gb", "4"], env=env, capture_output=True, text=True, timeout=120)
++    res["a_config_mismatch_rejected"] = {"rc": r.returncode, "message": (r.stderr + r.stdout)[-200:], "launch_protocol_unchanged": hashlib.sha256(open(lp, "rb").read()).hexdigest() == before,
++                                         "ok": r.returncode != 0 and "config mismatch" in (r.stderr + r.stdout) and hashlib.sha256(open(lp, "rb").read()).hexdigest() == before}
++    # (b) 동시 launcher
++    db = f"{root}/b_concurrent"
++    p1 = subprocess.Popen(BASE + ["--gpus", a.gpu, "--out-dir", db, "--peak-gb", "4"], env=env, stdout=open(f"{root}_b.stdout", "w"), stderr=subprocess.STDOUT)
++    time.sleep(8)
++    r2 = subprocess.run(BASE + ["--gpus", a.gpu, "--out-dir", db, "--peak-gb", "4"], env=env, capture_output=True, text=True, timeout=120)
++    rc1 = p1.wait(timeout=600)
++    comp = os.path.exists(os.path.join(db, "completion.json"))
++    res["b_concurrent_launcher_rejected"] = {"second_rc": r2.returncode, "message": (r2.stderr + r2.stdout)[-200:], "first_launcher_rc": rc1, "first_completed": comp,
++                                             "ok": r2.returncode != 0 and "another launcher" in (r2.stderr + r2.stdout) and rc1 == 0 and comp}
++    res["all_ok"] = all(v["ok"] for v in res.values() if isinstance(v, dict))
++    res["mg45_launch_sha256"] = hashlib.sha256(open("mg45_launch.py", "rb").read()).hexdigest()
++    json.dump(res, open(a.out, "w"), indent=1)
++    print(json.dumps(res, indent=1))
++
++
++if __name__ == "__main__":
++    main()
+diff --git a/pg48_locktest.py b/pg48_locktest.py
+new file mode 100644
+index 0000000..337d023
+--- /dev/null
++++ b/pg48_locktest.py
+@@ -0,0 +1,36 @@
++"""iter_048 학습 run-dir 배타 lock 검사: 다른 live 프로세스가 같은 run-dir lock을 잡고 있을 때 pg48_train.py train이 모델 로딩 전에 거부하는지 확인한다 (GPU 불필요).
++python pg48_locktest.py --out results/iter_048/tests/lock_test.json
++"""
++import argparse
++import json
++import os
++import subprocess
++import sys
++import time
++
++from rsna_diag import queue_lock
++
++
++def main():
++    ap = argparse.ArgumentParser()
++    ap.add_argument("--out", required=True)
++    a = ap.parse_args()
++    if os.path.exists(a.out):
++        sys.exit("exists")
++    d = "results/iter_048/tests/lock_run"
++    os.makedirs(d, exist_ok=True)
++    lk, own, rec = queue_lock.try_lock(os.path.join(os.path.realpath(d), "train.lock"), queue_lock.my_info(role="locktest_holder"))
++    assert lk is not None
++    t0 = time.time()
++    r = subprocess.run([sys.executable, "pg48_train.py", "train", "--run-dir", d, "--protocol", "results/iter_048/protocol/train_protocol_v1.json", "--mode", "joint",
++                        "--init-adapter", "results/iter_040/train2/C_s17/epoch_03", "--epochs", "1", "--max-patients", "8"], capture_output=True, text=True, timeout=300)
++    dt = time.time() - t0
++    lk.release()
++    out = {"second_trainer_rc": r.returncode, "seconds": dt, "message": (r.stderr + r.stdout)[-250:],
++           "ok": r.returncode != 0 and "owned by another live process" in (r.stderr + r.stdout) and dt < 60 and not os.path.exists(os.path.join(d, "train_config.json"))}
++    json.dump(out, open(a.out, "w"), indent=1)
++    print(json.dumps(out, indent=1))
++
++
++if __name__ == "__main__":
++    main()
 diff --git a/pg48_requests.py b/pg48_requests.py
 new file mode 100644
 index 0000000..37b172a
@@ -5245,6 +5459,113 @@ index 0000000..44e37eb
 +    json.dump(rep, open(a.out, "w"), indent=1)
 +    print(json.dumps({k: {m: (round(v["ratio"], 4), round(v["lo95"], 4), round(v["hi95"], 4)) for m, v in r.items()} for k, r in rep["ratios"].items()}, indent=1))
 +    print(rep["integrity"])
++
++
++if __name__ == "__main__":
++    main()
+diff --git a/pg48_timing_verify.py b/pg48_timing_verify.py
+new file mode 100644
+index 0000000..abf25cd
+--- /dev/null
++++ b/pg48_timing_verify.py
+@@ -0,0 +1,101 @@
++"""iter_048 timing 독립 재계산 (pg48_time_report를 호출하지 않는 별도 구현; 원시 timing 파일에서 device-seconds union, throughput, p95, 비율의 t(5) 95% CI를 다시 계산).
++python pg48_timing_verify.py --report results/iter_048/timing/timing_report.json --out results/iter_048/timing/timing_verify.json
++"""
++import argparse
++import glob
++import json
++import os
++import sys
++
++import numpy as np
++
++ROOT = "results/iter_048/timing"
++
++
++def union(iv):
++    iv = sorted(iv)
++    tot, cs, ce = 0.0, None, None
++    for s, e in iv:
++        if ce is None or s > ce:
++            if ce is not None:
++                tot += ce - cs
++            cs, ce = s, e
++        else:
++            ce = max(ce, e)
++    return tot + (ce - cs if ce is not None else 0.0)
++
++
++def rows(p):
++    return [json.loads(l) for l in open(p, "rb").read().split(b"\n")[:-1] if l.strip()]
++
++
++def block(k, att, s):
++    d = f"{ROOT}/block{k}_a{att}_{s}"
++    comp = json.load(open(f"{d}/completion.json"))
++    t_go = comp["t_go"]
++    dn = [json.load(open(p))["t"] for p in glob.glob(f"{d}/barrier/done.*")]
++    wall = max(dn) - t_go
++    mapping = {int(k_): v for k_, v in comp["mapping"].items()}
++    if s in ("E", "J"):
++        recs = [r for f in sorted(glob.glob(f"{d}/ctime_worker*.jsonl")) for r in rows(f)]
++        per = {}
++        for r in recs:
++            per[r["patient"]] = (r["worker"], r["t_patient_dispatch"], r["t_patient_done"])
++        iv = {}
++        for w, a, b in per.values():
++            iv.setdefault(mapping[w], set()).add((a, b))
++        dev = sum(union(v) for v in iv.values())
++        lat = [b - a for _, a, b in per.values()]
++    else:
++        recs = [r for f in sorted(glob.glob(f"{d}/raw_worker*.jsonl")) for r in rows(f)]
++        iv = {}
++        for r in recs:
++            iv.setdefault(mapping[r["worker"]], []).append((r["t_dispatch"], r["t_done"]))
++        dev = sum(union(v) for v in iv.values())
++        pp = {}
++        for r in recs:
++            a, b = pp.get(r["patient"], (1e30, 0.0))
++            pp[r["patient"]] = (min(a, r["t_dispatch"]), max(b, r["t_orig_done"]))
++        lat = [b - a for a, b in pp.values()]
++        assert len(pp) == 96
++    return {"dev": dev, "thr": 96 / wall * 60, "p95": float(np.percentile(lat, 95)), "wall": wall}
++
++
++def ratio(num, den, key):
++    lr = np.log([num[k][key] / den[k][key] for k in range(1, 7)])
++    m, se = lr.mean(), lr.std(ddof=1) / np.sqrt(6)
++    t = 2.5705818366147395  # t(0.975, df=5) (scipy 미설치; 표준값)
++    return [float(np.exp(m)), float(np.exp(m - t * se)), float(np.exp(m + t * se))]
++
++
++def main():
++    ap = argparse.ArgumentParser()
++    ap.add_argument("--report", required=True)
++    ap.add_argument("--out", required=True)
++    a = ap.parse_args()
++    if os.path.exists(a.out):
++        sys.exit("exists")
++    rep = json.load(open(a.report))
++    att = rep["attempts_used"]
++    B = {s: {k: block(k, att[k - 1], s) for k in range(1, 7)} for s in ("E", "J", "A")}
++    res, ok, mx = {}, True, 0.0
++    for num, den in (("J", "E"), ("A", "E"), ("J", "A")):
++        for key, rk in (("dev", "device_seconds"), ("thr", "throughput"), ("p95", "p95_latency")):
++            mine = ratio(B[num], B[den], key)
++            th = rep["ratios"][f"{num}/{den}"][rk]
++            d = max(abs(mine[0] - th["ratio"]), abs(mine[1] - th["lo95"]), abs(mine[2] - th["hi95"]))
++            res[f"{num}/{den}:{rk}"] = {"mine": mine, "max_abs_diff_vs_report": d}
++            mx = max(mx, d)
++    # 블록별 개별 값 대조
++    bd = 0.0
++    for s in B:
++        for k in range(1, 7):
++            r = rep["blocks"][s][str(k)]
++            bd = max(bd, abs(B[s][k]["dev"] - r["device_seconds"]), abs(B[s][k]["thr"] - r["throughput_patients_per_min"]), abs(B[s][k]["p95"] - r["p95_latency_s"]))
++    out = {"ratios": res, "max_ratio_diff": mx, "max_block_value_diff": bd, "ok": bool(mx < 1e-9 and bd < 1e-9), "blocks": {s: {str(k): v for k, v in B[s].items()} for s in B}}
++    json.dump(out, open(a.out, "w"), indent=1)
++    print(json.dumps({k: out[k] for k in ("max_ratio_diff", "max_block_value_diff", "ok")}))
 +
 +
 +if __name__ == "__main__":
@@ -5939,6 +6260,45 @@ index 0000000..cc5b0ac
 +    json.dump(res, open(a.out, "w"), indent=1)
 +    print(json.dumps({k: res[k] for k in ("all_ok", "vector_check_all_ok", "ci_check", "invalid_counts_match", "coord_checks_ok")}, indent=1))
 +    sys.exit(0 if res["all_ok"] else 1)
++
++
++if __name__ == "__main__":
++    main()
+diff --git a/pg48_waitgpu.py b/pg48_waitgpu.py
+new file mode 100644
+index 0000000..a00b8bd
+--- /dev/null
++++ b/pg48_waitgpu.py
+@@ -0,0 +1,33 @@
++"""허용 GPU의 사용 메모리가 모두 --max-used-mib 아래로 내려갈 때까지 기다린다 (다른 사용자의 프로세스는 건드리지 않는다). timing처럼 외부 부하가 결과를 오염시키는 측정 전용.
++python pg48_waitgpu.py [--max-used-mib 1500] [--poll 30] [--timeout-s 570]  (rc 0=비었음, 1=timeout)
++"""
++import argparse
++import subprocess
++import sys
++import time
++
++
++def used():
++    r = subprocess.run(["nvidia-smi", "--query-gpu=index,memory.used", "--format=csv,noheader,nounits"], capture_output=True, text=True, check=True)
++    return {int(l.split(",")[0]): int(l.split(",")[1]) for l in r.stdout.strip().splitlines()}
++
++
++def main():
++    ap = argparse.ArgumentParser()
++    ap.add_argument("--max-used-mib", type=int, default=1500)
++    ap.add_argument("--poll", type=int, default=30)
++    ap.add_argument("--timeout-s", type=int, default=570)
++    a = ap.parse_args()
++    t0 = time.time()
++    while time.time() - t0 < a.timeout_s:
++        u = used()
++        if max(u.values()) < a.max_used_mib:
++            print("free", u)
++            return
++        time.sleep(a.poll)
++    print("timeout", used())
++    sys.exit(1)
 +
 +
 +if __name__ == "__main__":

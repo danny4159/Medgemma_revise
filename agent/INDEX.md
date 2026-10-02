@@ -82,7 +82,7 @@
 - 영상 기여와 문장 위치 prior 분리 [approach/grounding-image-specificity]: 1회 (iter_043), 유효한 실험 1회, 미분류 0회, 최근 판정: inconclusive, 커밋: b50aa230a86c6d5b6c6b280fe718170ce4ecf220
 - 문장 grounding의 모듈형 대안 비교 [approach/modular-grounding-comparison]: 3회 (iter_044, iter_045, iter_046), 유효한 실험 2회, 미분류 0회, 최근 판정: inconclusive, 커밋: e908c7d9ccf65e8db0b499d74bbd7fa042f6fce9, 2e431cdc7c7366960e12b7d055c7d3b70fec35c5, bab147379dde1bcd68550e298cc596ee15091e99
 - 소견 교정과 보존의 대조 진단 [approach/controlled-report-revision]: 1회 (iter_047), 유효한 실험 0회, 미분류 0회, 최근 판정: execution_failed, 커밋: 5d34c5cd69de08603b7ad02fbb43a78691c6e7c7
-- 공동 형식 직접 학습 대조 [approach/joint-format-control]: 1회 (iter_048), 유효한 실험 0회, 미분류 0회, 최근 판정: 진행 중, 커밋: 없음
+- 공동 형식 직접 학습 대조 [approach/joint-format-control]: 1회 (iter_048), 유효한 실험 0회, 미분류 0회, 최근 판정: 진행 중, 커밋: 54607a22c7046d0ab75fde09b2a5616edf0e2344
 
 현재 연구 브랜치: approach/joint-format-control (코드 위치: /SSD1_1TB/home/milab/daniel/08_medgemma/research)
 

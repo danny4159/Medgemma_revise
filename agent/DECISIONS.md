@@ -1364,5 +1364,13 @@ Claude 계정의 /usage 또는 Settings > Usage에서 제한을 확인한 뒤 �
 - ⏳ 사용 한도 도달 (Claude 구현/실험) → 대기
 - 💾 **개발 이력 체크포인트** `675e25966ea7a6405d0cc8eeac857f8f61b80f99`: interrupted (검증 승인 아님)
 - ⏹ 중단: 정지 요청 (Claude 구현/실험 중)
+- ↻ 재실행: 'Claude 구현' 단계부터 이어서 (orchestrator 4cda774)
+- ▶ **결정**: 자동 진행 (smart) — 1순위로 진행
+- ↻ 끊겼던 Claude 세션을 이어서 진행
+- 💾 **개발 이력 체크포인트** `54607a22c7046d0ab75fde09b2a5616edf0e2344`: implementation_finished (검증 승인 아님)
+- 🔧 **Claude** (standard): 같은 C checkpoint에서 직접 공동 SFT(J)와 추가 독립 SFT(E)를 비교해, J가 공동 F1@0.3을 0.333→0.523으로 회복(M1 +0.190 [0.138,0.244])하나 독립 보존 충분성·MedGrounder 대비 이점(J_J−A −0.071)·비용 이점(J/E 0.96)이 모두 미달해 사전 규칙상 공동 grounding 방법 투자 보류(단일 seed·개발 V96·두 양성 문장 한정). [자체 검증 PASS, 파일 5364개 변경]
+  - 새 브랜치 `approach/joint-format-control` ← 68117cf (68117cf)
+  - ⚠ 권한 거부 2건
+- ⏹ 중단: 오류: codex 실행 준비 실패 (errno=2): No such file or directory. 로그: /SSD1_1TB/home/milab/daniel/08_medgemma/agent/runs/iter_048/review_codex.log (GPT 리뷰 중)
 - 📁 원본: `agent/runs/iter_048/`
 
