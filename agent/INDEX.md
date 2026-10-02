@@ -55,7 +55,8 @@
 - iter_047 [CONTINUE] (deep/standard/normal) <소견 교정과 보존의 대조 진단: execution_failed> 💾5d34c5cd69de08603b7ad02fbb43a78691c6e7c7 혼합 환자 34/52명과 D8 oracle 29/32로 E96은 미실행이다. 현재 교정 진단의 추가 투자는 보류하되, 교정 능력과 기존 공동 grounding 관찰은 기각하지 않는다. → 다음: 현재 PadChest 두 소견 교정 진단은 투자 보류하고, 자료·대조군이 확보된 다른 중요한 질문으로 전환하는 deep 계획을 권고한다. 표본 축소만으로 oracle 실패와 text-only 지시문 confound가 해결되지 않으며, 이번 D8은 방법 투자를 정당화할 유효 관찰이 아니다. 같은 language-conditioned-grounding track의 iter_040~047 이력과 비용을 이어받고, 기존 공동 grounding 손실의 직접 joint SFT 대조와 GOAL 내 다른 후보를 비교해 하나만 선택한다. 공동 대조도 적응 MedGrounder 대비 필요한 실용 이득과 형식 미학습이라는 경쟁 설명, 결과별 종료 행동이 구체적일 때만 선택한다. 교정 후보는 기존 출력의 한정 재분석만으로 oracle 문제를 해소할 근거와 충분한 적격 자료·정밀도·동일 지시문 대조가 확보될 때 별도 계획으로 재개하며, 이번 문턱을 소급 변경하지 않는다. 미사용 rr47 코드 정비나 축소 E 실행을 자동 추가하지 않는다. VinDr 승인 대기와 보호 reserve, RSNA 자산, 기존 blocker는 유지한다.
 - iter_048 [CONTINUE] (deep/standard/normal) <공동 형식 직접 학습 대조: inconclusive> 💾54607a22c7046d0ab75fde09b2a5616edf0e2344 개발 V96에서 공동 SFT는 공동 F1을 0.333→0.523으로 회복했지만 MedGrounder(0.594) 대비 이점과 비용 절감 기준은 미달했다. 현재 공동 grounding 투자는 보류하며 일반적 VLM 능력은 기각하지 않는다. → 다음: 현재 두 양성 문장 공동 grounding의 추가 방법 투자를 보류하고, GOAL 안의 다른 중요한 질문을 선택하는 전략 계획으로 전환한다. iter_040~048의 같은 research_track 이력과 비용을 이어받아 강한 단순 대안 이후에도 남는 중요한 실제 사용 문제를 우선순위화한다. 직접 공동 SFT의 회복과 잔여 손실은 보존하되 추가 epoch·seed·표본·prompt·timing·새 loss를 자동 추가하지 않는다. 재개는 독립 VLM의 필요한 정확도 이점과 공동 처리의 비용 기회를 바꿀 구체적 새 근거가 생길 때만 검토한다. 다음 계획은 후보 하나, 단순 대조군, 실제 출력의 진입 근거, 결과별 투자 결정과 종료점을 정하고 주변 진단 목록으로 끝내지 않는다. 미사용 pg48 파이프라인 정비를 별도 반복으로 만들지 않는다. 기존 blocker·RSNA 자산·보호 reserve·VinDr 승인 대기를 유지한다.
 - iter_049 [CONTINUE] (deep_medium/standard/normal) <다중 영상 근거 종합 대조: inconclusive> 💾05bd6b0b543ae786a7e250f7502b70db7a6dc7f8 MedThinkVQA train에서 254 case·896장 확보를 독립 확인했다. 실제 모델 실험은 미실행이며, 누출·영상 주석 통제 후에만 다중 영상 진단에 진입할 수 있다. → 다음: 확보한 자료를 재사용하는 한정 보완을 다음 실제 출력 진단의 진입 gate로 묶고, 누출 통제가 불가능하면 현재 후보를 보류한다. 다운로드·전수 집계를 반복하는 별도 setup은 만들지 않는다. 원 plan의 전체 X-ray·비longitudinal·전체 영상 보존 조건을 유지하며 이력의 정답성 정보, 영상 주석과 figure 구성, subtype·해부 부위, 중복을 모델 출력 확인 전에 감사한다. 그 결과로 개발/평가 집단과 가능한 정밀도를 고정한다. 직접 전체 영상, 동일 지시문의 text-only, 생성 소견 압축, 같은 소견+원본 재접근, 추가 계산량 직접 대조 중 경쟁 설명을 구분할 최소 비교와 실제 비용·종료 기준을 정한다. 누출 통과 자료와 공식 processor 입력 검증이 확보되면 두 GPU의 메모리·처리량을 실측한 뒤 사전 고정 diagnostic을 실행한다. 효과가 단순 대조로 설명되거나 판단 가치가 부족하면 보류하고, 중요한 잔여 출력 문제가 관찰될 때만 method pilot을 검토한다. 기존 공동 grounding 투자는 보류하며 VinDr 승인 대기·보호 reserve·과거 blocker를 유지한다.
-- iter_050 [진행 중]
+- iter_050 [사용자 보완으로 전환 → iter_051] 기존 기록 보존, 성공·실패 판정 아님 (Claude 구현)
+- iter_051 [CONTINUE] (deep_medium/standard/normal) <다중 영상 근거 종합 대조: execution_failed> 💾d298808193836dee0c5269aef418f0ae6b1b70bd 감사 통과 169개 사례에서 E cluster는 최대 145개로 기준 156개에 미달해 모델 비교를 실행하지 않았다. 현재 자료 투자는 보류하되 다중 영상 가설은 미판정이다. → 다음: 현재 자료 범위의 투자를 보류하고, 같은 질문을 다른 자료로 검증할 가치와 다른 연구 질문으로 전환할 가치를 비교해 다음 방향을 정한다. iter_049~051을 유효 모델 실험으로 세지 말고 자료 확보·감사 비용으로 연결한다. 기존 출력·자료로 답할 수 있는 후보를 먼저 검토하고, 다른 자료를 택한다면 접근 가능성·누출 통제·필요 정밀도·준비 비용과 실제 출력 실험까지의 종료점을 먼저 제시한다. 새 근거 없이 같은 254개를 재감사하거나 문턱을 낮추지 않는다. 한정된 출처 보존 작업은 후속 계획에 포함하되 별도 과학적 반복으로 만들지 않는다.
 
 ## 이전 목표들의 접근법 (참고용, 현재 목표의 재평가 횟수에는 안 들어감)
 
@@ -85,12 +86,12 @@
 - 문장 grounding의 모듈형 대안 비교 [approach/modular-grounding-comparison]: 3회 (iter_044, iter_045, iter_046), 유효한 실험 2회, 미분류 0회, 최근 판정: inconclusive, 커밋: e908c7d9ccf65e8db0b499d74bbd7fa042f6fce9, 2e431cdc7c7366960e12b7d055c7d3b70fec35c5, bab147379dde1bcd68550e298cc596ee15091e99
 - 소견 교정과 보존의 대조 진단 [approach/controlled-report-revision]: 1회 (iter_047), 유효한 실험 0회, 미분류 0회, 최근 판정: execution_failed, 커밋: 5d34c5cd69de08603b7ad02fbb43a78691c6e7c7
 - 공동 형식 직접 학습 대조 [approach/joint-format-control]: 1회 (iter_048), 유효한 실험 1회, 미분류 0회, 최근 판정: inconclusive, 커밋: 54607a22c7046d0ab75fde09b2a5616edf0e2344
-- 다중 영상 근거 종합 대조 [approach/multi-image-evidence-control]: 2회 (iter_049, iter_050), 유효한 실험 0회, 미분류 0회, 최근 판정: inconclusive, 커밋: 05bd6b0b543ae786a7e250f7502b70db7a6dc7f8
+- 다중 영상 근거 종합 대조 [approach/multi-image-evidence-control]: 3회 (iter_049, iter_050, iter_051), 유효한 실험 0회, 미분류 0회, 최근 판정: execution_failed, 커밋: 05bd6b0b543ae786a7e250f7502b70db7a6dc7f8, d298808193836dee0c5269aef418f0ae6b1b70bd
 
 현재 연구 브랜치: approach/multi-image-evidence-control (코드 위치: /SSD1_1TB/home/milab/daniel/08_medgemma/research)
 
 ### 최근 계획의 대안 순위
 
-1. 다중 영상 근거 종합 대조: 기존 자료 감사를 진입 gate에 묶고 압축·재접근·추가 계산의 효과를 한 번 비교한다.
-2. 현재 후보 보류·다른 질문 전환: 누출 통제 또는 필요한 정밀도를 확보하지 못하거나 단순 대안으로 충분할 때 선택한다.
-3. 공동 grounding 추가 개선: iter_048의 보류 판단을 바꿀 새 근거가 없어 현재는 재개하지 않는다.
+1. 다중 영상 근거 종합 대조: 유효 자산을 보존하고 감사 정정과 미완료 진단만 이어간다.
+2. 현재 자료 범위 보류: 실제 이미지 확인이나 원래 표본·입력 gate를 충족하지 못하면 종료한다.
+3. 새 연구 질문 전환: 이번 인계에서는 탐색하지 않으며 원 진단의 종료 판정 이후 검토한다.

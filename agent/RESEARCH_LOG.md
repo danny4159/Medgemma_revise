@@ -19341,3 +19341,285 @@ iter_021 원본 code_assets와 mi19_gen을 확인했다. MRI 전용 request/prot
 
 현재 공동 grounding 보류는 유지한다. 확보한 자료의 한정 진단은 새 학습보다 정보 가치가 높지만, 단순 대안이 충분하거나 남은 표본으로 정밀도가 부족하면 종료한다. 새로운 limitation은 실제 출력과 사용 검증을 리뷰한 뒤에만 등록할 수 있다.
 
+
+
+## iter_051 GPT PLAN [다중 영상 근거 종합 대조 / proceed] — 2026-10-03 02:56:50
+
+# 요약
+
+- **이번에 할 일:** iter_050을 Codex로 인계해 무효·미확인 영상 감사를 보완하고 남은 진단을 수행한다.
+- **필요한 이유:** 이전 감사 일부는 이미지가 보이지 않은 상태에서 작성됐다. 모델 비교 완료 근거는 없다.
+- **확인할 기준:** 실제 이미지 확인 근거와 원래 자료·입력·정밀도 gate, 동일 정확도·비용 기준을 적용한다.
+- **주의·다음:** 유효 중간물은 재사용한다. gate 실패 시 현재 자료 범위를 보류하며 새 방법의 효과를 미리 주장하지 않는다.
+
+# Current Understanding
+
+이번은 사용자 보완 `20261003_025112_c5bc1c2e`에 따른 인계다. iter_050의 실패 판정이나 새로운 과학적 설계가 아니다.
+
+기준 문서는 `agent/runs/iter_050/plan.md`이며 SHA256은 `6e9a5010785840182c20e13456bc0051d73b1a827ee4e19eebba229bc7ffc041`이다. 함께 읽을 plan.json의 SHA256은 `32e82ceac78888799067eae50d6e36a87e0286dcb33a20c58f658e7afd478813`이다. 구현 시작 시 일치를 확인한다. 본 amendment는 담당·감사 근거 승계·새 결과 경로만 보완하며 나머지는 기준 계획 전체를 따른다.
+
+- **유지:** 연구 질문, 전체 X-ray·비longitudinal·고유 영상 둘 이상 조건, 모든 원본 영상, 이력·A–E options, T/D/C/R/X, split seed, metric, 문턱과 종료 조건.
+- **변경:** 구현 담당은 Codex, 새 산출물은 `research/results/iter_051/`. iter_049/050은 읽기용 출처로 보존한다. 무효 감사의 자동 승계를 차단한다.
+- **미완료:** 시각적 감사의 유효 근거 연결, 의미상 이력 감사 정합성, 중복 cluster와 split, processor 검증, 생성 실행기·평가 및 실제 비교.
+- **회귀 검증:** 원본·코드·규칙·산출물 digest, 정정문 적용, 입력 allowlist, 정상 입력, 재개와 최종 완료 판정.
+
+현재 브랜치와 HEAD `fbaea4c557e151fa39d5cdf0e9da1c4f8de7c106`을 이어간다. checkpoint는 interrupted/unreviewed이며 승인본이 아니다. 04:30 KST 복귀 예약은 orchestrator가 관리한다. 이미 시작한 iter_051 담당을 시각 때문에 바꾸거나 종료하지 않는다.
+
+# Strategy Check / 연구 방향 판단
+
+iter_050의 Strategy Check를 유지한다. 새로운 모델 결과나 방향 전환 요청이 없어 전략·문헌조사를 다시 시작하지 않는다. 현재 방법 개선보다 원래 한정 진단을 마치는 것이 우선이며 자료 gate 실패 때는 이 후보를 보류한다.
+
+기존 공동 grounding 투자의 보류와 관찰은 유지한다. 이번 감사 문제는 모델 가설을 설명하거나 반박하지 않는다. 같은 research_track에 iter_050을 연결하며 진단 체류를 초기화하지 않는다. 해결된 것은 자료 확보와 코드 보존이고, 남은 것은 유효 감사 및 실제 출력 비교다.
+
+# Hypothesis
+
+기준 계획의 H1/H2를 그대로 유지한다. D−C는 생성 소견 대체 경로의 손실, R−C는 동일 요약에 원본을 추가한 효과를 평가한다. D−R 및 D−X는 원본이 있어도 남는 중간 생성물 경로의 문제를 비교한다. T는 영상 관련 해석의 대조군이다. 순수 내부 원인이나 모든 영상의 필요성을 확정하지 않는다.
+
+# Limitation Evidence / Correct Usage Checks
+
+새 모집단의 실제 출력 한계는 아직 없으므로 `limitation_ids=[]`, diagnostic/none을 유지한다. iter_049의 누출 감사 blocker는 해소 증거가 검증되기 전까지 유지한다.
+
+먼저 `research/results/iter_050/audit/decisions/RETRACTION_image_part1_to_14.md`와 `RETRACTION_image_redo_01_to_25.md`를 읽는다. 후자가 이전의 redo 유효 주장을 정정한다.
+
+- `image_part*.json` 전체, `image_redo_01.json`부터 `image_redo_25.json` 전체, redo26의 c620/c621은 제외·유지 판정 모두 무효다. 암묵적 기본 keep에도 사용하지 않는다.
+- redo26의 c623/c625/c627/c6369/c6378/c6456, redo27–30과 valid31은 유효 후보다. 원 세션의 해당 이미지 도구 응답과 실제 렌더링, sheet와 원본 영상의 연결을 확인한 항목만 승계한다. 확인 불가 항목은 미확인으로 두고 실제 이미지를 본다.
+- 파일 glob이나 viewed_from/through 범위만으로 case 전체를 승인하지 않는다. case별 ordered image 목록과 각 영상의 확인 근거를 명시한다. 최신 정정문이 앞선 판정보다 우선한다.
+- 무효·미확인 사례는 실제 렌더링된 contact sheet를 확인한다. 흐리거나 주석 여부가 모호하면 원본 크기로 확인한다. 도구가 이미지를 반환하지 않으면 pending으로 기록하며 소견을 만들지 않는다. 정상 렌더링 경로를 확보하지 못하면 gate 실패로 종료한다.
+- 기존 sheet의 생성 index 표시는 원본 annotation과 구분한다. sheet hash·원본 hash·순서·생성 코드의 연결을 검사한다. 검증된 sheet를 일괄 재생성하지 않는다.
+
+254개 이력·선택지와 896장 전체에 원 계획의 감사 범위를 유지한다. history_part1–4의 출처와 case coverage를 연결하고 원 규칙과 충돌하거나 누락된 항목만 재검토한다. 강한 검사 결과·증상만으로 정답 직접 공개와 동일시하지 않는다. 실제 정답 진단의 명시·동의어, 모호한 공개, 교육용 화살표·outline·진단 설명 및 원 계획의 중복·불일치 제외 조건을 적용한다. 무효 영상 판정을 참조한 파생 집계·split·완료 표시는 모두 재사용하지 않는다.
+
+# Contribution Path / Baselines / Reuse
+
+새 기여는 미확정이다. 가장 가까운 선행과 직접·단계별 대안에 대한 판단은 기준 계획을 계승한다. 이번 수정은 평가의 타당성을 복구하는 작업이다.
+
+현재 기반에 `mt50_common.py`, `mt50_prep.py`와 `rsna_diag/__init__.py`, `generate.py`, `geometry.py`, `prompts.py`, `queue_lock.py`가 있다. helper 다섯 파일은 iter_043 SHA `b50aa230a86c6d5b6c6b280fe718170ce4ecf220`의 blob과 일치한다. 추가 반입 없이 기존 파일을 재사용하며 iter_050/reuse_manifest.json의 required_checks를 완료한다. 과거 단일 영상 padding·CLI·cap ladder를 새 과제에 사용하지 않는다.
+
+필수 수정은 다음으로 한정한다.
+
+- OUT을 새 결과 경로로 명시적으로 지정하고 이전 경로 쓰기·덮어쓰기를 거부한다.
+- 원본 hash/size/pixel 불일치가 있으면 bad를 기록하는 데 그치지 않고 이후 gate를 차단한다.
+- 허용 입력 경로의 모든 관련 symlink·경로 이탈과 기존 sheet의 불일치를 거부한다.
+- 재사용 완료 판정에 원본·규칙·코드·출력 digest와 decoder 버전을 연결한다. 기존 v2 검사는 시각적 감사 완료로 취급하지 않는다.
+- 현재 입력 검증 경로로 iter_049의 재사용 결함을 해결하되 사용하지 않는 download CLI나 주변 코드를 정비하지 않는다.
+
+원본 파일·검증된 중간물은 재다운로드·중복 생성하지 않는다. `research/results/iter_051/`에 인계 manifest로 출처 SHA, 파일 hash, 승계 여부, 정정 사유와 남은 검사를 연결한다.
+
+# Proposed Experiment
+
+## 자료와 단계
+
+원 계획대로 감사 통과 cluster를 subtype와 영상 수 2–3/4장 이상으로 층화한다. seed5001로 D24를 고정하고 가장 긴 입력 및 연결 cluster를 포함하며 실제 D 증가를 기록한다. 나머지 전체 E의 중복 cluster가 최소156개일 때만 실행한다. q=0.10/0.25/0.40과 unequal cluster size의 예상 정밀도를 보고한다. gate를 맞추기 위해 제외 규칙·모집단을 바꾸지 않는다.
+
+동작 확인은 D 중 최소8 case, 가능성 탐색은 D24 전체의 기술적 검증과 처리량 측정이다. D 정확도로 조건을 고르지 않는다. 자료·정밀도·입력·출력·재개 gate 통과 후 E 전체를 한 번 실행한다. 학습·다중 seed·독립 확인은 이번 범위가 아니다.
+
+## 요청과 입력
+
+T는 이력·선택지, D는 여기에 전체 원본 영상을 제공한다. 영상별 F를 U로 통합한 뒤 C가 답하며, R은 동일 U bytes와 전체 영상을 사용한다. H는 전체 영상 공동 소견, X는 H와 전체 영상으로 답한다. 최종 지시는 동일하며 각 단계는 새 single-turn 요청이다.
+
+F cap512, U 및 최종 T/D/C/R/X cap1024, H cap은 영상 수×512+1024를 유지한다. 개발 집단에서 비EOS·잘림이 있으면 원 계획대로 해당 단계 cap을 한 번 두 배로 조정하고 고정한다. 이후에도 정상 출력이 확보되지 않으면 E를 보류한다. E 결과로 cap을 수정하지 않는다.
+
+MedGemma 1.5 revision `91850547d9f0b2fdd21aa7c5f4f3d1a8a52c243b`, bf16, eval, adapter 없음, greedy를 유지한다. 공식 processor 경로와 wrapper를 text-only·1장·2장·최대 영상 입력에서 tensor 단위로 비교한다. RGB·alpha·Pillow12.3.0 및 실제 환경, 영상 순서와 options 포함 token 수를 기록한다. 추가 crop·padding·영상 선택을 하지 않는다.
+
+추론 manifest는 이력·A–E options·ordered image path/hash만 허용한다. 추적 ID는 prompt에서 제외한다. 평가 정답·caption·audit·findings·discussion 등은 별도 파일에 두고 worker 입력의 하위 key까지 allowlist를 검사한다.
+
+## 자원·비용·재개
+
+요청 수는 S+7N으로 전체 후보 기준 최대2674건이다. 감사 후 실제 규모를 고정하고 기술 검사·재시도 비용은 별도 집계한다. 시작 직전 nvidia-smi와 논리/물리 GPU 대응을 확인한다.
+
+D에서 두 GPU의 1 worker/GPU와 안전할 때 2 worker/GPU를 비교한다. 복수 worker가 불가능하면 작은 batch 확대를 검토한다. 최대 영상 입력·긴 H 출력을 포함한 peak 합계와 외부 점유에 worker당2GB 여유를 확보한다. 처리량·긴 요청 지연·OOM·정합성·CPU/RAM/I/O 경합으로 배치를 정한다. 1 worker를 유지하면 실측 이유를 남긴다.
+
+wall-clock은 단계별 실측 처리량과 의존 경로로 계산해 E 실행 전에 기록한다. 임의 시간 상한은 두지 않는다. 원자적 claim, worker별 결과, attempt 비용, 원본·config·상위 생성물 digest 및 완료 seal을 적용한다. U/F, C/R/U, X/H 연결을 검증한다. OOM은 동시성·batch를 줄여 동일 요청을 복구하며 영상·표본·출력 기준을 줄이지 않는다.
+
+# Implementation Tasks for Claude
+
+호환용 제목이며 실제 담당은 Codex다.
+
+1. 기준 계획 hash, intervention, checkpoint, 정정문과 원본 helper 승인 범위를 확인한다. 기존 실행·claim의 상태를 확인하고 중복 작업을 시작하지 않는다.
+2. 새 결과 경로와 인계 manifest를 만들고 감사 파일을 valid-candidate/invalid/unverified로 명시적으로 구분한다. 유효 출처가 확인된 작업만 승계한다.
+3. 무효·미확인 시각적 감사와 필요한 이력 판정 보완을 수행한다. 전체 coverage·중복 cluster·정밀도 gate를 독립 점검한다. 실패하면 범위와 이유를 보고하고 종료한다.
+4. 입력·평가 manifest 분리, 필요한 경로·digest 보완, 공식 processor 및 요청 그래프를 구현한다. 원 계획의 D 기술 gate와 E protocol 잠금을 완료한다.
+5. gate 통과 시 두 GPU로 실제 비교를 실행한다. 기준 계획의 평가·비용·독립 verifier를 완결한다.
+6. 새 보고서에 유지/변경/승계/무효/미완료를 구분한다. 과거 원본은 보존하며 소스 checkpoint는 orchestrator 절차에 맡긴다.
+
+# Evaluation (성공/실패 기준 포함)
+
+원 metric·문턱을 유지한다. case MCQ accuracy를 사용하며 마지막 비어 있지 않은 줄의 `Answer: A`–`Answer: E`를 엄격하게 파싱한다. 여러 답·불명확한 최종 답은 invalid 및 오답으로 분모에 유지한다. 비EOS·기술 실패를 별도 보고한다.
+
+D−C, R−C, D−R, D−X 각각에 98.75% two-sided cluster bootstrap CI, seed5002, 20000회를 적용한다. case 평균 estimand를 유지하고 cluster를 함께 resample한다. 원 계획의 discordance·exact 보조 분석도 유지한다.
+
+- 압축 손실: D−C≥0.10이며 CI 하한>0.
+- 재접근 회복: R−C≥0.10이며 CI 하한>0.
+- 원본 이후 중간물 문제: D−R과 D−X 각각≥0.10이며 CI 하한>0.
+- 영상 관련 해석: D−T의95% CI 하한>0이 아니면 영상 한계 해석과 method 진입 근거를 제한한다.
+- 비용·비열등성: 정확도 paired CI 하한≥−0.03과 device-seconds 최소20% 감소를 함께 요구한다. 단회 timing으로 모집단 비용 CI를 만들지 않는다.
+
+C/R 각 배포 경로에 F/U 비용을 포함하되 실제 공유 실행 장부에는 한 번만 센다. loading·실패·재시도를 따로 기록하고 동시 worker 시간 합을 GPU busy union 또는 latency로 표현하지 않는다.
+
+양성이라도 D/R 등 단순 대안으로 충분하면 새 방법은 보류한다. 중요한 잔여 문제와 영상 기여가 함께 남을 때만 full review에서 method pilot을 검토한다. 관련 차이의 CI 상한이0.10 미만이면 현재 큰 효과 가설의 투자를 보류한다. 무효과와 중요한 효과를 함께 포함하면 정밀도 부족으로 현재 자료 범위를 보류한다. gate 실패는 모델 가설 기각이 아니다. 결과에 따라 추가 sample·prompt·seed·loss를 붙이지 않는다.
+
+# Risks / Checks
+
+필수 회귀 검사는 무효 감사 자동 유입, 누락 case의 암묵적 keep, 정정 전 파생물 승계, sheet/원본 불일치, 이전 결과 경로 쓰기, 평가 필드·unknown 하위 key 혼입, symlink, 원본·산출물 변조, 영상 누락·순서 교환, 단계 digest 오류, 중복 요청·torn output·worker 수 변경 재개, 정답 letter 오류와 비용 이중 집계다. 최종 verifier가 실제 보고 대상 raw/source/config digest를 검사했는지 확인한다.
+
+기존 감사 유효 후보도 파일명만으로 승인하지 않는다. 이번 계획은 영상 내용을 확인한 임상 판정이 아니다. 에이전트 감사는 전문가 gold 검증이 아니며 공개 train의 E는 탐색용 개발 평가다. 환자 독립성·사전학습 오염 부재·순수 다중 영상 결합 결함을 주장하지 않는다.
+
+공식 test, MRI F139와 기존 reserve를 열지 않는다. VinDr 승인 대기를 유지한다. 새로운 limitation 승격이나 과거 blocker 삭제는 full review의 근거 없이 하지 않는다.
+
+**대규모 GPU 필요 후보:** 다중 영상 encoder와 언어 decoder의 공동 적응을 통한 근거 보존 학습 후보는 기준 계획대로 보존한다. 현재 필요성·차별성은 미확정이며 이번에는 실행하지 않는다.
+
+# 계획의 근거 (GPT 조사 노트)
+
+이번 라운드는 같은 실험의 인계이므로 문헌·전략을 다시 탐색하지 않았다.
+
+- 기준 plan.md 전체와 plan.json을 확인했다. SHA256은 각각 `6e9a5010785840182c20e13456bc0051d73b1a827ee4e19eebba229bc7ffc041`, `32e82ceac78888799067eae50d6e36a87e0286dcb33a20c58f658e7afd478813`이다.
+- 현재 research HEAD는 `fbaea4c557e151fa39d5cdf0e9da1c4f8de7c106`이고 작업 트리는 깨끗하다. checkpoint.json은 interrupted/unreviewed이며 unpreserved_paths는 없다. 이는 재사용 승인이 아니다.
+- 두 최종 정정문을 읽었다. image_part 전체, redo01–25와 redo26의 c620/c621은 무효다. redo26의 명시된 여섯 사례 및 redo27–30·valid31은 출처 확인 후 재사용할 후보다. 이번 계획 단계에서 해당 이미지의 관찰 내용을 검증했다고 주장하지 않는다.
+- regression_source_check_v2.json은 254 case·896장, bad=[], RGBA364/RGB532, alpha_min=255를 기록한다. 이는 파일·decoder 검사 기록이며 시각적 주석 감사의 완료 근거가 아니다.
+- mt50_common.py와 mt50_prep.py를 확인했다. OUT이 iter_050으로 고정되어 있고 prep은 bad를 모아 기록하지만 실패 종료를 강제하지 않는다. 기존 sheet 존재 시 내용 일치를 검증하지 않는다. 경로 검사는 모든 조상 symlink를 검사하지 않는다. 현재 실행 경로에서 보완해야 한다.
+- history_part1–4는 보존돼 있으나 범위 요약을 case별 근거로 연결해야 한다. 일부 제외 설명은 진단을 직접 명시한 경우와 강한 검사·증상 단서를 혼동할 여지가 있으므로 원 규칙과 충돌하는 항목만 원문으로 재검토한다.
+- iter_043 원본 review.json/code_assets와 iter_049의 needs_fix 항목, CODE_ASSETS 및 LIMITATIONS 관련 항목을 확인했다. 현재 rsna_diag helper 다섯 파일은 iter_043 원본 blob과 모두 같다. 이미 현재 기반에 있으므로 추가 반입은 불필요하다. 모델 로더·잠금의 제한적 재사용과 새 입력 검증 의무를 유지한다.
+- 소스 수정·파일 생성·실험 실행은 하지 않았다. 다음 구현에서 출처 확인, 필요한 감사 보완, 원 gate에 따른 실행 또는 보류를 수행한다.
+
+
+
+## iter_051 CODEX IMPLEMENTATION REPORT — 2026-10-03 03:31:31
+
+# 요약
+
+- **핵심 결과:** 자료 gate가 실패해 계획대로 GPU 비교에 진입하지 않았습니다.
+- **근거:** 감사 통과 169개 사례·559장입니다. D24 제외 후 E는 최대 145개 cluster로, 최소 기준 156개보다 작습니다.
+- **미검증·주의:** 모델 가설을 검증하거나 기각한 결과가 아닙니다. 실제 중복 cluster 확정·모델 비교는 미실행입니다.
+- **다음:** GPT 리뷰에서 현재 자료 범위의 보류와 후속 투자 방향을 판단해야 합니다.
+
+# Work Performed
+
+- 기존 254개 사례·896장의 파일/pixel hash와 contact sheet 연결을 검증했습니다.
+- 실제 렌더링된 영상을 확인해 사례별 감사를 새로 기록했습니다. 무효 영상 판정은 승계하지 않았습니다.
+- 기존 이력 감사 254건을 원 세션의 실제 텍스트 반환과 연결했습니다. 검사 결과·과거력·의심을 확정 정답 공개와 혼동한 11건을 정정했습니다.
+- 입력/평가 정보를 분리하고, 자료 gate·회귀 검사·독립 재집계와 digest 봉인을 구현했습니다.
+- 이전 결과는 덮어쓰지 않았으며 다운로드·Git 변경 명령·GPU 생성은 수행하지 않았습니다.
+
+# Files Changed
+
+신규 소스 4개입니다. 기존 tracked 소스 변경은 없습니다.
+
+- `mt51_audit.py`: 원본 검증과 실제 영상 감사 기록
+- `mt51_finish.py`: 이력 출처 연결·중복 후보 탐색·자료 gate
+- `test_mt51.py`: 자료 검증 실패 분기 회귀 검사
+- `mt51_verify.py`: 독립 재집계와 봉인 검증
+
+새 산출물은 `results/iter_051/`에 저장했습니다.
+
+# Commands / Experiments (실제 실행한 명령과 성공/실패)
+
+| 명령·작업 | 결과 |
+|---|---|
+| `python mt51_audit.py prepare` | 원본 254개 사례·896장 연결 검사 통과 |
+| `view_image` 및 사례별 감사 기록 | 254개 사례 확인, 모호한 5개 원본 추가 확인 |
+| `python mt51_finish.py history` | 반환 형식 처리 수정 후 통과 |
+| `python mt51_finish.py duplicates` | 중복 후보 탐색 완료 |
+| `python mt51_finish.py gate` | 정상 종료, `DATA_GATE_FAIL` |
+| `python test_mt51.py` | 30/30 통과 |
+| `python mt51_verify.py verify` | 독립 재집계 통과 |
+| `python mt51_verify.py check` | 봉인 파일·출처 hash 일치 |
+| helper 5개 import 검사 | 모두 통과 |
+| `git diff --exit-code` | 기존 tracked 소스 변경 없음 |
+
+초기 `scipy` import 실패는 NumPy의 명시적 DCT 계산으로 해결했습니다. 모델 실행 실패는 아닙니다.
+
+# Results (수치와 결과 파일 경로)
+
+| 항목 | 결과 |
+|---|---:|
+| 영상 감사 유지 / 제외 | 187 / 67 사례 |
+| 이력 감사 유지 / 제외 | 233 / 21 사례 |
+| 두 감사 통과 | **169 사례·559장** |
+| D24 이후 E cluster 상한 | **145 < 156** |
+| 모호한 제외 5건을 모두 유지하는 보조 상한 | **150 < 156** |
+| 신규 모델 요청 / GPU 사용 | **0건 / 0초** |
+
+주요 결과:
+
+- [자료 gate](results/iter_051/audit/gate.json)
+- [사례별 판정](results/iter_051/audit/case_decisions.json)
+- [회귀 검사](results/iter_051/tests/fixtures.json)
+- [독립 검증](results/iter_051/verification/independent.json)
+- [완료 봉인](results/iter_051/completion.json)
+- [인계 기록](results/iter_051/handoff.json)
+
+**145는 실제 E cluster 수가 아니라 낙관적 상한입니다.** 중복 후보 97쌍 중 사례 간 후보는 56쌍이며, 수동 확정과 split은 하지 않았습니다. 이 작업으로도 표본 상한 부족을 해소할 수 없습니다.
+
+# Goal Progress / Reused Assets
+
+iter_049의 확보 자료와 iter_050의 sheet·이력 감사 원본을 검증해 재사용했습니다. 영상 판정은 전부 새 확인 근거로 대체했습니다. 인계 checkpoint는 검증 승인으로 취급하지 않았습니다.
+
+이번 진전은 자료 감사의 신뢰성을 복구하고 현재 자료의 진입 불가를 확인한 것입니다. MedGemma 성능, 압축 손실, 원본 재접근 효과와 새로운 방법의 필요성은 미검증입니다.
+
+# Problems
+
+- **현재 결론을 막는 조건:** 사전 표본 기준 미달로 모델 가설 검증에 진입하지 못했습니다.
+- **재사용 전 필요한 검사:** 실제 중복 cluster 확정, 공식 processor tensor 대조, 모델 설정·메모리·처리량·실제 중단/재개 검증이 남아 있습니다.
+- **해석 한계:** 에이전트의 주석 감사는 임상 전문가의 gold 재판정이 아닙니다. 회귀 검사 통과도 전체 GPU 실행기 승인을 뜻하지 않습니다.
+
+# Recommendation to GPT
+
+원 기준을 유지해 **현재 자료 범위의 진단 투자를 보류**하는 판정을 검토하십시오. 표본 문턱을 낮추거나 모델 가설 실패로 확대하지 마십시오. 보존된 감사·입력 자산과 남은 검증 비용을 근거로 다음 투자 방향을 판단할 수 있습니다.
+
+SELF_CHECK: FAIL
+SUMMARY: 254개 사례·896장 감사를 보완했으나 적격 169개 사례에서 E cluster 상한이 145로 기준 156에 미달해 GPU 비교를 보류했다.
+
+
+## iter_051 GPT REVIEW [CONTINUE] — 2026-10-03 03:36:14
+
+# 요약
+
+- **판정:** `execution_failed`, `valid_experiment=false`. 모델 비교는 실험 미실행이며 자료 gate에서 종료했다.
+- **핵심 근거:** 감사 통과 169개 사례·559장이다. D24를 제외하면 E cluster는 최대 145개로 사전 기준 156개에 못 미친다.
+- **의미·한계:** 중단 판단과 저장 집계는 재현됐다. MedGemma 성능이나 다중 영상 가설을 검증한 결과는 아니다.
+- **다음:** 현재 자료 투자를 보류하고 다음 연구 방향을 선택한다. 감사 원본의 재사용 출처 연결은 보완한다.
+
+# Assessment
+
+iter_051은 iter_050의 조건을 유지한 담당 변경 후속 작업이다. engineer_backend.json과 claude_meta.json에서 실제 담당이 Codex, 모델이 gpt-6-astra/low임을 확인했다. 원래 자료·정밀도 기준을 낮추지 않았고, 자료 gate 실패 후 조건부 GPU 작업을 실행하지 않은 것은 계획에 부합한다.
+
+원 계획이 요구한 T/D/C/R/X 비교가 없으므로 가설 검증 완료로 판정할 수 없다. `execution_failed`는 현재 자료의 진입 실패를 뜻하며, 구현 전체 실패나 모델 가설 기각을 뜻하지 않는다. 현재의 제한된 자료 gate 결론을 무효화할 blocker는 발견하지 않았다.
+
+# Key Findings
+
+1. **집계 재현:** 생산 gate를 호출하지 않고 visual b01–b39와 resolutions, history_linked를 직접 집계했다. 영상 유지/제외 187/67, 이력 유지/제외 233/21, 교집합 169개·559장을 재현했다. 따라서 모든 사례가 독립이라는 낙관적 가정에서도 E≤169−24=145다. 실제 중복 cluster를 확정하지 않아도 기준 미달을 판단할 수 있다.
+2. **코드·결과 일치:** 리뷰 대상 SHA는 `d298808193836dee0c5269aef418f0ae6b1b70bd`다. changes.patch와 신규 소스 네 파일을 검토했고 작업 파일이 해당 SHA의 blob과 같음을 확인했다. completion의 verified_files/source_files 합계 1,264개 항목에서 digest 불일치는 없었다. unpreserved_paths는 없다.
+3. **영상 근거:** 두 RETRACTION 문서를 확인했다. 신규 감사는 이전 무효 판정을 자동 승계하지 않는다. 제공된 engineer stream에는 영상 응답이 없어서 원본 `/home/test/.codex/sessions/2026/10/03/rollout-2026-10-03T02-56-55-01a0fdc3-130f-7b50-ad7d-d61d231a1e7f.jsonl`까지 확인했다. case label과 연결된 253개 sheet 및 별도 c10054 호출의 input_image 반환을 확인했고, 모호한 사례의 원본 13장 반환도 확인했다. c11452 sheet를 직접 열어 기록된 흰 화살표가 있음을 대조했다. 이는 전체 임상 판정의 독립 재판독은 아니다.
+4. **검증 범위:** fixtures.json의 30개 검사, 구현 로그의 검사 완료, helper import 결과를 확인했다. 리뷰에서는 파일 생성형 test/verify 명령을 재실행하지 않고 원시 집계와 digest를 별도로 재계산했다.
+5. **미실행:** 실제 중복 cluster 확정, D/E split, 공식 processor 비교, GPU 처리량·재개 검사, 모델 생성과 성능 비교는 없다. 보고서는 이를 명시한다. 표본 gate 실패 이후 이 작업들을 생략한 것은 자원 정책 위반이 아니다.
+
+# Problems / Concerns
+
+현재 자료 gate 산술에는 문제가 없다. 다만 재사용 provenance가 완결되지 않았다. `mt51_finish.visual()`은 evidence 문자열 접두사를 검사하며 실제 도구 응답을 검증하지 않는다. `mt51_verify.py`의 봉인도 신규 시각적 판단의 근거인 Codex rollout을 포함하지 않는다. 이번 리뷰에서는 해당 원본을 찾아 반환을 확인했지만, 다음 재사용은 그 기록이 사라져도 검사를 통과할 수 있다. case별 도구 응답 연결과 원본 digest 보존이 필요하다.
+
+코드는 현재 실패 경로에 맞춰 고정돼 있다. GPU 실행기 또는 다른 모집단의 범용 감사기로 승인하지 않는다. 기존 helper의 import 성공도 미완료 required_checks를 대신하지 않는다.
+
+이력의 11건 정정은 확정 진단 공개와 검사·과거력·의심을 구분하는 원 계획에 부합하는 방향이다. 다만 감사 전체를 전문가 정답으로 간주하지 않으며, 보고서의 모호한 다섯 사례 민감도 상한 150 역시 모든 판정 불확실성을 포괄하는 수치는 아니다.
+
+# Interpretation
+
+이번 결과가 지지하는 것은 현재 고정 자료와 감사 규칙으로는 사전 규모에 도달하지 못한다는 운영 판단이다. 자료가 적다는 이유로 다중 영상 압축 손실이 없거나 직접 답변이 충분하다고 말할 수 없다. 반대로 아직 비교하지 않은 능력에 이점이 있을 것이라는 기대만으로 같은 자료 준비를 반복할 근거도 없다.
+
+새 실제 모델 출력이 없으므로 limitation 상태를 변경하지 않는다. iter_049의 감사 미완료 기록은 당시 판정으로 보존하며, 이번 자료 감사 결과를 모델 한계의 검증으로 승격하지 않는다.
+
+# Strategy Check / 연구 방향 판단
+
+- **실행 유효성:** 파일 연결·감사 집계·자료 중단 판단은 검증됐다. 모델 가설 실험은 미실행이다.
+- **성능 개선:** 비교 출력이 없어 판단할 수 없다.
+- **가설 지지:** 생성 소견의 정보 손실과 원본 재접근 이후 간섭은 모두 미판정이다.
+- **신규 기여 가능성:** 실제 한계와 단순 대안 이후의 잔여 문제가 없어 method pilot 진입 근거가 없다.
+
+iter_049~051의 자료 확보·감사는 같은 연구 묶음의 비용으로 유지한다. 세 반복을 세 번의 유효 가설 검증으로 세지 않는다. 해결된 질문은 현재 자료의 파일 연결과 감사 결과에 따른 규모 부족이다. 남은 핵심 질문은 이 다중 영상 과제가 다른 자료 확보 비용을 감수할 만큼 중요한 방법 개발 기회를 제공하는가이다.
+
+현재 설계를 더 다듬어도 표본 상한은 회복되지 않는다. 따라서 같은 자료의 추가 준비는 보류한다. 다른 자료에서 같은 질문을 검증하는 선택과 다른 중요한 연구 질문으로 전환하는 선택을 다음 계획에서 비교한다. 과거 grounding의 유효 관찰과 보류 판정은 이번 자료 실패로 설명되거나 반박되지 않는다. 기존 관찰을 유지하는 것과 그 방향에 다시 투자하는 것은 별개다.
+
+# Recommended Next Experiment
+
+현재 반복에 추가 실험을 붙이지 않는다. 다음 계획은 재개 가능한 구체적 자료·평가 근거가 있는 동일 질문과 다른 연구 질문을 비교해 하나를 선택해야 한다. 동일 질문을 유지하려면 누출 통제 가능한 자료, 필요한 표본·정밀도, 준비 비용, 단순 baseline과 실제 GPU 비교까지의 종료 조건을 먼저 제시한다. 그 근거가 없다면 GOAL 범위 안에서 전환한다. 문턱 완화나 같은 감사 반복을 기본 후속으로 삼지 않는다.
+
+논문 추천은 보류한다. 이번에는 실제 모델 실험에서 유망성을 확인하지 못했다.

@@ -1,0 +1,586 @@
+diff --git a/mt51_audit.py b/mt51_audit.py
+new file mode 100644
+index 0000000..820a47d
+--- /dev/null
++++ b/mt51_audit.py
+@@ -0,0 +1,123 @@
++"""iter_051 인계 자료 검증 및 명시적 영상 감사 기록. 과거 결과는 읽기 전용."""
++import argparse
++import hashlib
++import json
++import os
++from pathlib import Path
++import subprocess
++import sys
++import PIL
++from PIL import Image, ImageDraw
++import mt50_common as C
++
++ROOT = Path(__file__).resolve().parent
++OUT = ROOT / 'results/iter_051'
++OLD = ROOT / 'results/iter_050/audit'
++
++def sha(p):
++    return C.file_sha(p)
++
++def safe(p):
++    p = Path(p).absolute()
++    if '..' in p.parts:
++        raise ValueError('path traversal')
++    if any(q.is_symlink() for q in [p, *p.parents]):
++        raise ValueError('symlink: ' + str(p))
++    if not p.is_relative_to(ROOT):
++        raise ValueError('path escape')
++    return p
++
++def write(p, obj):
++    p = safe(p)
++    if not p.is_relative_to(OUT):
++        raise ValueError('old output path forbidden')
++    p.parent.mkdir(parents=True, exist_ok=True)
++    with p.open('x') as f:
++        json.dump(obj, f, ensure_ascii=False, indent=2)
++
++def cases():
++    return C.read_jsonl(ROOT / 'results/iter_049/audit_v2/eligible_cases.jsonl')
++
++def prepare():
++    assert PIL.__version__ == '12.3.0', PIL.__version__
++    plans = {'plan.md': '6e9a5010785840182c20e13456bc0051d73b1a827ee4e19eebba229bc7ffc041',
++             'plan.json': '32e82ceac78888799067eae50d6e36a87e0286dcb33a20c58f658e7afd478813'}
++    for name, digest in plans.items():
++        assert sha(ROOT.parent / 'agent/runs/iter_050' / name) == digest
++    assert sha(safe(Path(C.R49) / 'raw/train.jsonl')) == C.TRAIN_SHA
++    manifest_path = safe(Path(C.R49) / 'image_manifest.json')
++    man = json.loads(manifest_path.read_text())
++    by_path = {r['path']: r for r in man['records']}
++    assert len(by_path) == len(man['records']) == 896
++    rows = []
++    for c in cases():
++        ims, ir = [], []
++        for i, im in enumerate(c['images']):
++            p = safe(Path(C.R49) / im['path'])
++            assert p.is_relative_to(Path(C.R49) / 'images')
++            rec = by_path[im['path']]
++            assert p.stat().st_size == rec['size'] and sha(p) == rec['file_sha256']
++            rgb, info = C.load_rgb(im['path'])
++            assert info['native_pixel_sha256'] == rec['pixel_sha256']
++            assert info['alpha_min'] in (None, 255)
++            ir.append({'index': i, 'path': im['path'], 'file_sha256': sha(p), **info})
++            ims.append(rgb)
++        cols = min(4, len(ims))
++        sheet = Image.new('RGB', (cols*384, ((len(ims)+cols-1)//cols)*384), (40,40,40))
++        d = ImageDraw.Draw(sheet)
++        for i, im in enumerate(ims):
++            x,y = (i%cols)*384, (i//cols)*384
++            sheet.paste(im.resize((384,384), Image.Resampling.LANCZOS), (x,y))
++            d.rectangle([x,y,x+22,y+16], fill=(255,255,0))
++            d.text((x+4,y+2), str(i), fill=(0,0,0))
++        cid = c['case_key'].replace('Case number ', 'c')
++        sp = safe(OLD / 'sheets' / (cid+'.png'))
++        with Image.open(sp) as saved:
++            assert saved.mode == sheet.mode and saved.size == sheet.size
++            assert saved.tobytes() == sheet.tobytes(), cid
++        rows.append({'case_id': cid, 'case_key': c['case_key'], 'sheet': str(sp.relative_to(ROOT)),
++                     'sheet_sha256': sha(sp), 'ordered_images': ir, 'visual_status': 'pending'})
++    audit_files = []
++    for p in sorted((OLD/'decisions').glob('*')):
++        name = p.name
++        status = 'unverified'
++        if name.startswith('image_part') or (name.startswith('image_redo_') and int(p.stem[-2:])<=25):
++            status = 'invalid'
++        elif name == 'image_redo_26.json':
++            status = 'mixed_invalid_c620_c621_other_valid_candidates'
++        elif name.startswith(('image_redo_', 'image_valid_')):
++            status = 'valid_candidate_requires_render_evidence'
++        audit_files.append({'path': str(p.relative_to(ROOT)), 'sha256': sha(p), 'status': status,
++                            'inherited_visual_decisions': False})
++    reuse = json.loads((ROOT.parent/'agent/runs/iter_050/reuse_manifest.json').read_text())
++    blobs = {}
++    for name, info in reuse['files'].items():
++        blob = subprocess.check_output(['git','hash-object','--',name], text=True).strip()
++        assert blob == info['blob']
++        blobs[name] = blob
++    write(OUT/'audit/source_check.json', {'status':'PASS','cases':rows,'n_cases':len(rows),
++          'n_images':sum(len(r['ordered_images']) for r in rows), 'decoder':PIL.__version__,
++          'python':sys.executable,'cuda_visible_devices':os.environ.get('CUDA_VISIBLE_DEVICES'),
++          'source_manifest_sha256':sha(manifest_path),'eligible_sha256':sha(Path(C.R49)/'audit_v2/eligible_cases.jsonl'),
++          'code_sha256':{p:sha(ROOT/p) for p in ['mt51_audit.py','mt50_common.py','mt50_prep.py']},
++          'base_plans':plans,'helper_blobs':blobs,'previous_audits':audit_files,
++          'note':'파일·sheet 연결 검증만 완료. 시각적 검증은 case별 신규 기록 필요.'})
++    print('PASS: 254 cases / 896 images, source and sheet pixel identity; visual pending')
++
++def record(batch, entries):
++    src = json.loads((OUT/'audit/source_check.json').read_text())
++    lookup = {r['case_id']:r for r in src['cases']}
++    records = []
++    for cid, decision, anatomy, note in entries:
++        assert decision in ('keep','exclude','pending')
++        r = lookup[cid]
++        assert sha(ROOT/r['sheet']) == r['sheet_sha256']
++        records.append({**r,'visual_status':decision,'anatomy':anatomy,'observation':note,
++                        'evidence':f'iter_051 Codex view_image batch {batch}; 실제 반환 영상 직접 확인',
++                        'reviewer':'Codex; 비전문가 주석 감사, 임상 gold 아님'})
++    write(OUT/'audit/visual'/f'{batch}.json', records)
++    print(batch, len(records))
++
++if __name__ == '__main__':
++    p=argparse.ArgumentParser(); p.add_argument('action', choices=['prepare']); a=p.parse_args()
++    prepare()
+diff --git a/mt51_finish.py b/mt51_finish.py
+new file mode 100644
+index 0000000..0b18823
+--- /dev/null
++++ b/mt51_finish.py
+@@ -0,0 +1,262 @@
++"""iter_051 감사 출처 연결, 중복 후보, 자료 gate. 과거 경로에 쓰지 않는다."""
++import argparse
++from collections import Counter, defaultdict
++import hashlib
++import json
++from pathlib import Path
++import re
++from statistics import NormalDist
++import numpy as np
++from PIL import Image
++import mt51_audit as A
++
++ROOT, OUT = A.ROOT, A.OUT
++
++def digest(obj):
++    return hashlib.sha256(json.dumps(obj, ensure_ascii=False, sort_keys=True).encode()).hexdigest()
++
++def load(p):
++    return json.loads(A.safe(p).read_text())
++
++def require(condition, reason):
++    if not condition:
++        raise ValueError(reason)
++
++def validate_input(row):
++    require(set(row)=={'id','history','options','images'}, 'input top-level allowlist')
++    require(isinstance(row['history'],str) and isinstance(row['id'],str), 'input types')
++    require(set(row['options'])==set('ABCDE') and all(isinstance(s,str) for s in row['options'].values()),'option keys')
++    require(len(set(' '.join(s.lower().split()) for s in row['options'].values()))==5,'duplicate options')
++    require(len(row['images'])>=2, 'image count')
++    for i,im in enumerate(row['images']):
++        require(set(im)=={'index','path','file_sha256','rgb_pixel_sha256'}, 'image allowlist')
++        require(im['index']==i, 'image order')
++        path=A.safe(ROOT/im['path'])
++        require(path.is_relative_to(Path(A.C.R49)/'images'),'image path scope')
++        require(A.sha(path)==im['file_sha256'],'input file digest')
++
++def validate_eval(row, inp):
++    require(set(row)=={'id','correct_answer','correct_answer_text'}, 'evaluation keys')
++    require(row['id']==inp['id'] and row['correct_answer'] in 'ABCDE' and len(row['correct_answer'])==1, 'answer letter')
++    require(inp['options'][row['correct_answer']]==row['correct_answer_text'],'answer text')
++
++def capacity(n, development=24, minimum=156):
++    require(n>=0 and development==24 and minimum==156, 'fixed gate settings')
++    upper=max(0,n-development)
++    return {'eligible_cases':n,'development_min_cases':development,'evaluation_cluster_upper_bound':upper,'minimum_evaluation_clusters':minimum,'run':upper>=minimum}
++
++def visual():
++    src = load(OUT/'audit/source_check.json')
++    expected = {r['case_id']: r for r in src['cases']}
++    records = {}
++    for n in range(1,40):
++        p = OUT/'audit/visual'/f'b{n:02}.json'
++        for r in load(p):
++            cid = r['case_id']
++            if cid in records or cid not in expected:
++                raise ValueError('duplicate/unknown visual case')
++            for k in ('case_key','sheet','sheet_sha256','ordered_images'):
++                if r[k] != expected[cid][k]:
++                    raise ValueError('visual source/order mismatch')
++            if A.sha(A.safe(ROOT/r['sheet'])) != r['sheet_sha256']:
++                raise ValueError('sheet digest mismatch')
++            if not r['evidence'].startswith('iter_051 Codex view_image batch b'):
++                raise ValueError('unverified inherited visual evidence')
++            records[cid] = dict(r, decision_file=str(p.relative_to(ROOT)))
++    if set(records) != set(expected):
++        raise ValueError('missing visual case; no default keep')
++    pending = {k for k,v in records.items() if v['visual_status']=='pending'}
++    resolutions = load(OUT/'audit/visual_resolutions.json')
++    if len(resolutions) != len(pending) or {r['case_id'] for r in resolutions} != pending:
++        raise ValueError('unresolved visual cases')
++    for r in resolutions:
++        orig = records[r['case_id']]
++        if r['source_check_sha256'] != A.sha(OUT/'audit/source_check.json'):
++            raise ValueError('resolution source mismatch')
++        for im in r['viewed_originals']:
++            if im != orig['ordered_images'][im['index']]:
++                raise ValueError('resolution image mismatch')
++        orig['visual_status'] = r['visual_status']
++        orig['resolution'] = r
++    if any(r['visual_status'] not in ('keep','exclude') for r in records.values()):
++        raise ValueError('pending case')
++    return records
++
++# 원문 재검토: 현재 확정 진단 공개와 검사/과거력/의심/미제공 subtype 구분.
++CORRECTIONS = {
++ 'c12509':'검사 결과가 pseudohypoparathyroidism 양상이라는 정보. 정답의 type E brachydactyly를 확정하지 않음.',
++ 'c1261':'Klein line 및 성장판 소견은 검사 결과. 정답 진단명 직접 공개로 분류하지 않음.',
++ 'c13075':'증상 및 cavernous blood gas 검사 결과이며 진단 직접 공개 아님.',
++ 'c2147':'cystic fibrosis는 과거력. 현재 small bowel disease 자체는 명시하지 않음.',
++ 'c3995':'diagnosis was proposed라는 의심 진단. 확정 사실 직접 공개와 구분.',
++ 'c5258':'tuberous sclerosis는 기존 병력. 현재 tibia/fibula 침범을 확정하지 않음.',
++ 'c6456':'질병 계열은 공개하나 정답 type 3 subtype은 공개하지 않음. 선택지 제거 자체는 제외 기준 아님.',
++ 'c791':'past history of filarial infection이며 현재 유방 석회화 진단 공개 아님.',
++ 'c865':'피부 biopsy의 urticaria pigmentosa 및 검사 결과. systemic mastocytosis 확정 진단 아님.',
++ 'c8818':'endemic area 노출 정보이며 현재 skeletal fluorosis 진단 공개 아님.',
++ 'c9353':'ossified stylohyoid ligament는 영상 소견. 임상 증후군 정답 직접 공개와 구분.',
++}
++
++def history():
++    cs = A.cases()
++    text = ''
++    for c in cs:
++        text += f"## {c['case_key']} | n_img={len(c['images'])} | {','.join(c['_audit']['sub_modalities'])}\n"
++        text += 'HISTORY: '+c['CLINICAL_HISTORY']+'\n'
++        for k in 'ABCDE':
++            text += '  '+('*' if k==c['_eval']['correct_answer'] else ' ')+k+' '+c['options'][k]+'\n'
++        text += '\n'
++    tp = A.OLD/'case_text_for_audit.md'
++    if text != tp.read_text():
++        raise ValueError('history source text mismatch')
++    lines=text.splitlines()
++    calls, evidence = {}, {}
++    stream=ROOT.parent/'agent/runs/iter_050/claude_stream.jsonl'
++    for no,line in enumerate(stream.open(),1):
++        try: r=json.loads(line)
++        except json.JSONDecodeError: continue
++        message=r.get('message',{})
++        if not isinstance(message,dict): continue
++        content=message.get('content',[])
++        if not isinstance(content,list): continue
++        for x in content:
++            if not isinstance(x,dict): continue
++            if x.get('type')=='tool_use' and x.get('name')=='Read' and str(x.get('input',{}).get('file_path','')).endswith('case_text_for_audit.md'):
++                calls[x['id']]=x['input']
++            if x.get('type')=='tool_result' and x.get('tool_use_id') in calls:
++                f=r.get('tool_use_result',{}).get('file',{})
++                start=f.get('startLine'); num=f.get('numLines')
++                if start not in (1,481,1001,1521): continue
++                if x.get('is_error') or not isinstance(f.get('content'),str): raise ValueError('history render failure')
++                if f['content'].rstrip('\n') != '\n'.join(lines[start-1:start-1+num]).rstrip('\n'):
++                    raise ValueError('history returned text differs')
++                # 실제 모델에 반환된 tool_result에도 전체 행이 있었는지 확인한다.
++                returned=x.get('content','')
++                if not isinstance(returned,str): raise ValueError('unexpected result')
++                for i,t in enumerate(lines[start-1:start-1+num],start):
++                    if t and f'{i}\t{t}' not in returned: raise ValueError('history response truncated')
++                evidence[start]={'stream_line':no,'tool_use_id':x['tool_use_id'],'start':start,'num_lines':num,'returned_text_sha256':digest(returned),'file_content_sha256':digest(f['content'])}
++    if set(evidence)!={1,481,1001,1521}: raise ValueError('missing history read evidence')
++    records=[]
++    for i,c in enumerate(cs):
++        line=8*i+1
++        part=1 if line<481 else 2 if line<1001 else 3 if line<1521 else 4
++        start=(1,481,1001,1521)[part-1]
++        oldp=A.OLD/'decisions'/f'history_part{part}.json'; old=load(oldp)
++        cid=c['case_key'].replace('Case number ','c')
++        prior=old['exclude'].get(c['case_key'])
++        corrected=cid in CORRECTIONS
++        decision='keep' if corrected or prior is None else 'exclude'
++        reason=CORRECTIONS.get(cid) or (prior[1] if prior else old.get('keep_flags',{}).get(c['case_key'],'원문 반환과 전체 범위 검토 기록 연결. 확정 정답 공개로 분류되지 않은 항목을 승계.'))
++        records.append({'case_id':cid,'case_key':c['case_key'],'history_status':decision,'reason':reason,'corrected':corrected,'previous_decision':prior,'history':c['CLINICAL_HISTORY'],'options':c['options'],'answer':c['_eval'],'source_case_digest':digest(c),'old_audit':str(oldp.relative_to(ROOT)),'old_audit_sha256':A.sha(oldp),'text_lines':[line,line+7],'read_evidence':evidence[start]})
++    A.write(OUT/'audit/history_linked.json',{'records':records,'coverage':len(records),'stream':str(stream),'stream_sha256':A.sha(stream),'text_sha256':A.sha(tp),'corrections':CORRECTIONS})
++    print('history',Counter(r['history_status'] for r in records),'corrections',len(CORRECTIONS))
++
++def duplicates():
++    src=load(OUT/'audit/source_check.json')
++    transform=np.cos(np.pi*np.arange(8)[:,None]*(2*np.arange(32)[None,:]+1)/64)*np.sqrt(2/32)
++    transform[0]/=np.sqrt(2)
++    rows=[]
++    for c in src['cases']:
++        for im in c['ordered_images']:
++            p=A.safe(Path(A.C.R49)/im['path'])
++            if A.sha(p)!=im['file_sha256']: raise ValueError('image digest')
++            with Image.open(p) as img:
++                g=img.convert('L').resize((32,32),Image.Resampling.LANCZOS)
++                ar=np.asarray(g,dtype=np.float64)
++                d=(transform@ar@transform.T).flatten()
++                bits=d>np.median(d[1:]); bits[0]=False
++                ph=sum(int(v)<<i for i,v in enumerate(bits))
++                small=np.asarray(img.convert('L').resize((8,8),Image.Resampling.LANCZOS),dtype=float)
++                ah=sum(int(v)<<i for i,v in enumerate((small>small.mean()).flatten()))
++            rows.append({'case_id':c['case_id'],**im,'phash':f'{ph:016x}','ahash':f'{ah:016x}'})
++    pairs=[]
++    for i,a in enumerate(rows):
++        for b in rows[i+1:]:
++            hd=(int(a['phash'],16)^int(b['phash'],16)).bit_count()
++            ad=(int(a['ahash'],16)^int(b['ahash'],16)).bit_count()
++            exact=a['native_pixel_sha256']==b['native_pixel_sha256']
++            if exact or hd<=6 or ad<=3:
++                pairs.append({'a':[a['case_id'],a['index']],'b':[b['case_id'],b['index']],'phash_hamming':hd,'ahash_hamming':ad,'exact':exact,'cross_case':a['case_id']!=b['case_id']})
++    A.write(OUT/'audit/duplicate_candidates.json',{'rule':'pHash DCT32/low8 median excluding DC hamming<=6 OR aHash8 hamming<=3 OR exact native pixel; candidates require visual review','images':rows,'pairs':pairs})
++    print('duplicates',len(pairs),'cross',sum(p['cross_case'] for p in pairs))
++
++def gate():
++    src=load(OUT/'audit/source_check.json')
++    require(A.sha(Path(A.C.R49)/'raw/train.jsonl')==A.C.TRAIN_SHA,'raw digest')
++    require(A.sha(Path(A.C.R49)/'image_manifest.json')==src['source_manifest_sha256'],'image manifest digest')
++    require(A.sha(Path(A.C.R49)/'audit_v2/eligible_cases.jsonl')==src['eligible_sha256'],'case manifest digest')
++    require(A.C.PIL.__version__=='12.3.0' if hasattr(A.C,'PIL') else A.PIL.__version__=='12.3.0','decoder')
++    for name,sha in src['code_sha256'].items():
++        if name!='mt51_audit.py': require(A.sha(ROOT/name)==sha,'inherited code digest')
++    for name,sha in src['base_plans'].items():
++        require(A.sha(ROOT.parent/'agent/runs/iter_050'/name)==sha,'base plan digest')
++    for record in src['previous_audits']:
++        require(A.sha(ROOT/record['path'])==record['sha256'],'prior audit changed')
++    vis=visual(); hist=load(OUT/'audit/history_linked.json')
++    require(A.sha(Path(hist['stream']))==hist['stream_sha256'],'history stream digest')
++    require(A.sha(A.OLD/'case_text_for_audit.md')==hist['text_sha256'],'history text digest')
++    hs={r['case_id']:r for r in hist['records']}
++    require(len(hs)==len(hist['records'])==254,'history coverage')
++    cs=A.cases(); raw={}
++    keys={c['case_key'] for c in cs}
++    for r in A.C.read_jsonl(Path(A.C.R49)/'raw/train.jsonl'):
++        if r['title'] in keys:
++            require(r['title'] not in raw,'raw duplicate title'); raw[r['title']]=r
++    require(set(raw)==keys,'raw case coverage')
++    allrows=[]; inputs=[]; labels=[]
++    for c in cs:
++        cid=c['case_key'].replace('Case number ','c'); h=hs[cid]; v=vis[cid]; r=raw[c['case_key']]
++        require(digest(c)==h['source_case_digest'],'history case digest')
++        require(A.sha(ROOT/h['old_audit'])==h['old_audit_sha256'],'old history digest')
++        require(c['CLINICAL_HISTORY']==r['CLINICAL_HISTORY'] and c['options']==r['options'],'raw text/options')
++        require(c['_eval']=={k:r[k] for k in ('correct_answer','correct_answer_text')},'raw answer')
++        require(r['is_longitudinal'] is False and r['image_count']==len(c['images']),'raw eligibility')
++        ims=[]
++        for i,(im,iv) in enumerate(zip(c['images'],v['ordered_images'])):
++            require(im['path']==r[f'image_{i+1:02}_path']==iv['path'] and im['id']==r[f'image_{i+1:02}_id'],'raw image order')
++            require(r[f'image_{i+1:02}_modality']=='X-ray','raw modality')
++            p=A.safe(Path(A.C.R49)/im['path'])
++            require(A.sha(p)==iv['file_sha256'],'current image hash')
++            rgb,info=A.C.load_rgb(im['path'])
++            require(info['native_pixel_sha256']==iv['native_pixel_sha256'] and info['pixel_sha256']==iv['pixel_sha256'],'current pixel digest')
++            ims.append({'index':i,'path':str(p.relative_to(ROOT)),'file_sha256':iv['file_sha256'],'rgb_pixel_sha256':iv['pixel_sha256']})
++        require(len(ims)==len(c['images'])==len(v['ordered_images']),'image coverage')
++        keep=h['history_status']=='keep' and v['visual_status']=='keep'
++        inp={'id':cid,'history':c['CLINICAL_HISTORY'],'options':c['options'],'images':ims}
++        lab={'id':cid,**c['_eval']}
++        validate_input(inp); validate_eval(lab,inp)
++        allrows.append({'id':cid,'eligible':keep,'image_count':len(ims),'subtypes':c['_audit']['sub_modalities'],'anatomy':v['anatomy'],'visual':v,'history':h})
++        if keep: inputs.append(inp); labels.append(lab)
++    cap=capacity(len(inputs))
++    # 충분한 case도 cluster 중복으로 실패할 수 있다. 이 경로는 명백한 상한 실패만 봉인한다.
++    require(not cap['run'],'upper bound passes; full clustering/split/precision required')
++    dup=load(OUT/'audit/duplicate_candidates.json')
++    histgroups=defaultdict(list); optgroups=defaultdict(list)
++    for inp in inputs:
++        histgroups[' '.join(inp['history'].lower().split())].append(inp['id'])
++        optgroups[digest(inp['options'])].append(inp['id'])
++    precision=[];z=NormalDist().inv_cdf(1-.0125/2)
++    for q in (.10,.25,.40):
++        precision.append({'assumed_discordance':q,'optimistic_n_clusters':cap['evaluation_cluster_upper_bound'],'normal_half_width':z*(q/cap['evaluation_cluster_upper_bound'])**.5,'equal_cluster_assumption':True})
++    report={'status':'DATA_GATE_FAIL','run_gpu':False,**cap,'n_source_cases':254,'n_source_images':896,
++      'visual_counts':dict(Counter(r['visual_status'] for r in vis.values())),
++      'history_counts':dict(Counter(r['history_status'] for r in hs.values())),
++      'history_corrections':len(CORRECTIONS),'eligible_images':sum(len(r['images']) for r in inputs),
++      'excluded_cases':254-len(inputs),'visual_and_history_excluded':sum(r['visual']['visual_status']=='exclude' and r['history']['history_status']=='exclude' for r in allrows),
++      'duplicate_screen':{'candidate_pairs':len(dup['pairs']),'cross_case_candidates':sum(r['cross_case'] for r in dup['pairs']),'exact_cross_case_pairs':sum(r['cross_case'] and r['exact'] for r in dup['pairs']),'phash_le6_cross_case_pairs':sum(r['cross_case'] and r['phash_hamming']<=6 for r in dup['pairs']),'history_groups':[v for k,v in histgroups.items() if k and len(v)>1],'options_groups':[v for v in optgroups.values() if len(v)>1],'candidate_review_complete':False},
++      'precision_scenarios':precision,'unequal_cluster_note':'실제 cluster 미확정. case 수만으로 E cluster 최대145가 증명되므로 unequal size는 이 상한을 개선할 수 없음. 정밀도 표는 낙관적 동일 크기 가정이며 비용/정밀도 실측 아님.',
++      'split_created':False,'why_no_split':'169개 전부 독립이라고 해도 D24 뒤 E 최대145<156. 후보 중복의 판정/층화 split은 GPU 진입 결정을 바꿀 수 없어 실행하지 않음. 실제 E cluster 수로 보고하지 않는다.',
++      'new_model_requests':0,'gpu_seconds':0,'hypothesis_tested':False,
++      'next':'현재 자료 범위 진단 보류. 모델 가설 기각이나 의료 VLM 전체 투자 중단을 뜻하지 않음.',
++      'code_amendment':{'mt51_audit.py_previous_sha256':src['code_sha256']['mt51_audit.py'],'current_sha256':A.sha(ROOT/'mt51_audit.py'),'change':'safe에서 .. 경로를 명시적으로 거부하는 2행 추가; 원본 render 검사/기존 결과 불변'},
++      'limitations':['에이전트 주석 감사는 임상 gold 검증 아님','실제 near-duplicate cluster 확정 및 D/E 생성은 미실행','모델 정상 사용·생성·재개·성능 비교는 자료 gate 미통과로 미실행']}
++    A.write(OUT/'data/inference_candidates.json',inputs)
++    A.write(OUT/'data/evaluation_private.json',labels)
++    A.write(OUT/'audit/case_decisions.json',allrows)
++    A.write(OUT/'audit/gate.json',report)
++    print(json.dumps({k:report[k] for k in ('status','eligible_cases','eligible_images','evaluation_cluster_upper_bound','minimum_evaluation_clusters','run_gpu')},ensure_ascii=False))
++
++if __name__=='__main__':
++    p=argparse.ArgumentParser();p.add_argument('action',choices=['history','duplicates','gate']);a=p.parse_args()
++    globals()[a.action]()
+diff --git a/mt51_verify.py b/mt51_verify.py
+new file mode 100644
+index 0000000..7e765bf
+--- /dev/null
++++ b/mt51_verify.py
+@@ -0,0 +1,101 @@
++"""생산 gate를 호출하지 않는 범위 제한 독립 재집계 및 digest 봉인."""
++import argparse
++import hashlib
++import json
++from collections import Counter
++from pathlib import Path
++
++ROOT=Path(__file__).resolve().parent
++OUT=ROOT/'results/iter_051'
++
++def sha(p):
++    with Path(p).open('rb') as f:
++        return hashlib.file_digest(f,'sha256').hexdigest()
++
++def read(p): return json.loads(Path(p).read_text())
++
++def save(p,obj):
++    if p.exists(): raise FileExistsError(p)
++    p.parent.mkdir(parents=True,exist_ok=True)
++    with p.open('x') as f: json.dump(obj,f,ensure_ascii=False,indent=2)
++
++def verify():
++    paths=[OUT/'audit/source_check.json',OUT/'audit/history_linked.json',OUT/'audit/visual_resolutions.json',OUT/'audit/gate.json',OUT/'audit/case_decisions.json',OUT/'audit/duplicate_candidates.json',OUT/'data/inference_candidates.json',OUT/'data/evaluation_private.json',OUT/'tests/fixtures.json']
++    paths += [OUT/'audit/visual'/f'b{i:02}.json' for i in range(1,40)]
++    paths += [ROOT/n for n in ('mt51_audit.py','mt51_finish.py','test_mt51.py','mt51_verify.py','mt50_common.py','mt50_prep.py')]
++    before={str(p):sha(p) for p in paths}
++    src=read(OUT/'audit/source_check.json'); expected={r['case_id']:r for r in src['cases']}
++    vis={}
++    for i in range(1,40):
++        for r in read(OUT/'audit/visual'/f'b{i:02}.json'):
++            assert r['case_id'] not in vis
++            assert r['ordered_images']==expected[r['case_id']]['ordered_images']
++            assert sha(ROOT/r['sheet'])==r['sheet_sha256']
++            vis[r['case_id']]=r['visual_status']
++    assert set(vis)==set(expected) and len(vis)==254
++    for r in read(OUT/'audit/visual_resolutions.json'):
++        assert vis[r['case_id']]=='pending';vis[r['case_id']]=r['visual_status']
++    assert 'pending' not in vis.values()
++    hist=read(OUT/'audit/history_linked.json')
++    hr={r['case_id']:r['history_status'] for r in hist['records']}
++    assert set(hr)==set(vis) and len(hist['records'])==254
++    eligible={c for c in vis if vis[c]=='keep' and hr[c]=='keep'}
++    inp=read(OUT/'data/inference_candidates.json'); labs=read(OUT/'data/evaluation_private.json')
++    assert len(inp)==len(labs)==len(eligible)==169
++    assert {r['id'] for r in inp}=={r['id'] for r in labs}==eligible
++    raw={}
++    rawpath=ROOT/'results/iter_049/raw/train.jsonl'
++    for line in rawpath.open():
++        r=json.loads(line);cid=r['title'].replace('Case number ','c')
++        if cid in expected:
++            assert cid not in raw;raw[cid]=r
++    assert set(raw)==set(expected)
++    labels={r['id']:r for r in labs}
++    images=0
++    for r in inp:
++        rr=raw[r['id']];lab=labels[r['id']]
++        assert set(r)=={'id','history','options','images'}
++        assert r['history']==rr['CLINICAL_HISTORY'] and r['options']==rr['options']
++        assert lab['correct_answer']==rr['correct_answer'] and lab['correct_answer_text']==rr['correct_answer_text']
++        assert r['options'][lab['correct_answer']]==lab['correct_answer_text']
++        assert len(r['images'])==rr['image_count']
++        for i,im in enumerate(r['images']):
++            assert set(im)=={'index','path','file_sha256','rgb_pixel_sha256'} and im['index']==i
++            assert im['path']=='results/iter_049/'+rr[f'image_{i+1:02}_path']
++            assert sha(ROOT/im['path'])==im['file_sha256'];images+=1
++    gate=read(OUT/'audit/gate.json');fixtures=read(OUT/'tests/fixtures.json')
++    assert fixtures['status']=='PASS' and all(r['passed'] for r in fixtures['checks'])
++    for n,h in fixtures['code_sha256'].items(): assert sha(ROOT/n)==h
++    assert fixtures['gate_sha256']==sha(OUT/'audit/gate.json')
++    assert gate['eligible_cases']==len(eligible) and gate['eligible_images']==images==559
++    assert gate['visual_counts']==dict(Counter(vis.values()))
++    assert gate['history_counts']==dict(Counter(hr.values()))
++    upper=len(eligible)-24
++    assert upper==145<156 and gate['evaluation_cluster_upper_bound']==upper
++    assert gate['run_gpu'] is False and gate['hypothesis_tested'] is False
++    assert all(sha(p)==h for p,h in before.items())
++    # 검증 대상과 출처 전체를 completion에 연결한다. stream은 상위 읽기 전용 자산이다.
++    dependencies={str(rawpath):sha(rawpath),hist['stream']:sha(hist['stream'])}
++    for r in src['cases']:
++        dependencies[str(ROOT/r['sheet'])]=r['sheet_sha256']
++        for im in r['ordered_images']: dependencies[str(ROOT/'results/iter_049'/im['path'])]=im['file_sha256']
++    for r in src['previous_audits']: dependencies[str(ROOT/r['path'])]=r['sha256']
++    for p in [ROOT.parent/'agent/runs/iter_051/plan.md',ROOT.parent/'agent/runs/iter_051/plan.json',ROOT.parent/'agent/runs/iter_050/plan.md',ROOT.parent/'agent/runs/iter_050/plan.json',ROOT/'results/iter_049/audit_v2/eligible_cases.jsonl',ROOT/'results/iter_049/image_manifest.json']:
++        dependencies[str(p)]=sha(p)
++    assert all(sha(p)==h for p,h in dependencies.items())
++    result={'status':'PASS','verified_files':before,'source_files':dependencies,'eligible_cases':len(eligible),'eligible_images':images,'evaluation_cluster_upper_bound':upper,'scope':'원본 연결·감사 집계·불충분 표본 상한만 검증. 영상 판정의 독립 임상 재판독이나 모델 실험 승인 아님.'}
++    save(OUT/'verification/independent.json',result)
++    save(OUT/'completion.json',{'status':'COMPLETE_DATA_GATE_FAIL','run_gpu':False,'hypothesis_tested':False,'self_check':'FAIL','verifier_sha256':sha(OUT/'verification/independent.json'),'verified_files':before,'source_files':dependencies,'unperformed':['near-duplicate 후보 수동 확정/실제 cluster split','모델·processor·실제 출력·실행기 재개 검증','T/D/C/R/X 비교'],'reason':'E cluster 상한145<156. 사전 자료 종료 조건 적용.'})
++    print('PASS: independent data gate verification; E clusters <=145 <156')
++
++def check():
++    c=read(OUT/'completion.json');v=read(OUT/'verification/independent.json')
++    assert c['verifier_sha256']==sha(OUT/'verification/independent.json')
++    assert v['status']=='PASS'
++    for k in ('verified_files','source_files'):
++        assert c[k]==v[k]
++        for p,h in c[k].items(): assert sha(p)==h,p
++    print('PASS: sealed files and sources unchanged')
++
++if __name__=='__main__':
++    p=argparse.ArgumentParser();p.add_argument('action',choices=['verify','check']);a=p.parse_args();globals()[a.action]()
+diff --git a/test_mt51.py b/test_mt51.py
+new file mode 100644
+index 0000000..71e951e
+--- /dev/null
++++ b/test_mt51.py
+@@ -0,0 +1,76 @@
++"""자료 gate의 실제 실패 분기와 결과 보존 회귀 검사. GPU 경로 검사가 아님."""
++import copy
++import json
++from pathlib import Path
++from unittest.mock import patch
++import mt51_finish as F
++import mt51_audit as A
++
++
++def main():
++    checks=[]
++    def good(name, fn):
++        fn(); checks.append({'name':name,'passed':True})
++    def bad(name, fn, expected):
++        try: fn()
++        except (ValueError,FileExistsError) as e:
++            assert expected in str(e),(name,str(e)); checks.append({'name':name,'passed':True,'expected_branch':expected,'observed':str(e)})
++        else: raise AssertionError(name+' accepted')
++    inp=F.load(F.OUT/'data/inference_candidates.json')[0]
++    lab=F.load(F.OUT/'data/evaluation_private.json')[0]
++    good('valid_allowlisted_input',lambda:F.validate_input(inp))
++    good('valid_answer',lambda:F.validate_eval(lab,inp))
++    for key in ('_eval','_audit','caption','findings','correct_answer','unknown'):
++        row=copy.deepcopy(inp);row[key]='injected'
++        bad('top_'+key,lambda row=row:F.validate_input(row),'input top-level allowlist')
++    for key in ('caption','answer','unknown'):
++        row=copy.deepcopy(inp);row['images'][0][key]='injected'
++        bad('image_'+key,lambda row=row:F.validate_input(row),'image allowlist')
++    row=copy.deepcopy(inp);row['images'].reverse()
++    bad('image_order_swap',lambda:F.validate_input(row),'image order')
++    row=copy.deepcopy(inp);row['images']=row['images'][:1]
++    bad('image_missing',lambda:F.validate_input(row),'image count')
++    row=copy.deepcopy(inp);row['images'][0]['file_sha256']='0'*64
++    bad('original_digest_tamper',lambda:F.validate_input(row),'input file digest')
++    row=copy.deepcopy(inp);row['options']['B']=row['options']['A']
++    bad('duplicate_options',lambda:F.validate_input(row),'duplicate options')
++    row=copy.deepcopy(lab);row['correct_answer']='F'
++    bad('wrong_answer_letter',lambda:F.validate_eval(row,inp),'answer letter')
++    row=copy.deepcopy(lab);row['correct_answer_text']='altered'
++    bad('wrong_answer_text',lambda:F.validate_eval(row,inp),'answer text')
++    bad('parent_escape',lambda:A.safe(A.ROOT/'results/iter_051/../../../../escape'),'path traversal')
++    bad('outside_root',lambda:A.safe('/outside/research'),'path escape')
++    with patch.object(Path,'is_symlink',lambda p:p.name=='iter_049'):
++        bad('ancestor_symlink',lambda:A.safe(Path(A.C.R49)/'images/x.jpg'),'symlink')
++    old=A.OLD/'decisions/history_part1.json'; prior=A.sha(old)
++    bad('old_output_write',lambda:A.write(old,{}),'old output path forbidden')
++    assert A.sha(old)==prior
++    current=F.OUT/'audit/gate.json'; prior=A.sha(current)
++    bad('output_overwrite',lambda:A.write(current,{}),'File exists')
++    assert A.sha(current)==prior
++    real=F.load
++    def alter_visual(mode):
++        def injected(p):
++            obj=real(p)
++            if Path(p).name=='b01.json':
++                if mode=='missing': return obj[1:]
++                if mode=='duplicate': return obj+[obj[0]]
++                if mode=='invalid': obj[0]['evidence']='image_redo_01 inherited'
++                if mode=='sheet': obj[0]['sheet_sha256']='0'*64
++                if mode=='order': obj[0]['ordered_images'].reverse()
++            return obj
++        return patch.object(F,'load',injected)
++    for mode,reason in [('missing','missing visual case'),('duplicate','duplicate/unknown'),('invalid','unverified inherited'),('sheet','visual source/order'),('order','visual source/order')]:
++        with alter_visual(mode): bad('visual_'+mode,F.visual,reason)
++    good('current_complete_visual',F.visual)
++    assert F.capacity(169)['evaluation_cluster_upper_bound']==145 and not F.capacity(169)['run']
++    assert not F.capacity(179)['run'] and F.capacity(180)['run']
++    checks.append({'name':'fixed_156_cluster_upper_bound_and_boundary','passed':True})
++    bad('changed_gate_threshold',lambda:F.capacity(169,minimum=145),'fixed gate settings')
++    result={'status':'PASS','checks':checks,'passed':len(checks),'scope':'CPU 자료 검증 경로만. 실제 GPU 생성·재개/동시성 검증 미실행.',
++            'code_sha256':{n:A.sha(F.ROOT/n) for n in ('mt51_audit.py','mt51_finish.py','test_mt51.py')},
++            'gate_sha256':A.sha(F.OUT/'audit/gate.json')}
++    A.write(F.OUT/'tests/fixtures.json',result)
++    print('PASS',len(checks))
++
++if __name__=='__main__': main()
