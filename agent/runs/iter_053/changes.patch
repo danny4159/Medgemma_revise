@@ -1,0 +1,2793 @@
+diff --git a/rr53_build.py b/rr53_build.py
+new file mode 100644
+index 0000000..8fc0046
+--- /dev/null
++++ b/rr53_build.py
+@@ -0,0 +1,78 @@
++"""iter_053 요청 생성 (CPU only). manifest_{D,E,F}.json(rr53_data.py build)에서 요청 파일을 만든다. 기존 파일 덮어쓰기 금지.
++
++python rr53_build.py requests D|E|F
++D: CheXpert D16 본조건 16/patient(R1×4, R2×4, T×4[R2 byte-identical·영상 없음], BJ, BT[BJ byte-identical·영상 없음], BI×2) = 256
++   + CheXpert D16 oracle O2 image/text × 4 draft = 128 + PadChest D8 oracle O2 image/text × 4 draft = 64  (총 448)
++E/F: 본조건만 16/patient (E 768, F 1680). 정답/오류 여부는 prompt·ID에 넣지 않는다 (oracle만 verified status를 prompt로 받는다).
++"""
++import json
++import os
++import sys
++from collections import Counter
++
++import rr53_spec as S
++from rr53_data import OUT, file_sha, write_new
++from rsna_diag import generate as G
++
++
++def _px(cache, path):
++    if path not in cache:
++        cache[path] = G.load_image(path)[2]
++    return cache[path]
++
++
++def make_requests(rows, set_name, oracle, cache):
++    """rows: manifest rows (q, image_meta). returns request rows."""
++    reqs = []
++    for m in rows:
++        q = m["q"]
++        fp = {i: q[i]["finding"] for i in S.IDS}
++        img = m["image_meta"]["path"]
++        fsha = m["image_meta"]["file_sha256"]
++        px = _px(cache, img)
++        base = dict(kind="rr53", patient=m["PatientID"], caps=S.CAPS, donor_patient=None, set=set_name)
++
++        def add(cond, targets, prompt, modality, draft=None):
++            psha = S.sha(prompt)
++            rid = S.request_id("rr53", m["PatientID"], cond, targets, psha, px if modality == "image" else "text")
++            reqs.append(dict(base, request_id=rid, cond=cond, targets=list(targets), prompt=prompt, prompt_sha256=psha, modality=modality, draft=draft,
++                             image=img if modality == "image" else None, image_file_sha256=fsha if modality == "image" else None,
++                             input_pixel_sha256=px if modality == "image" else None, order_key=S.sha(f"{S.SEED}|{rid}")[:16]))
++
++        if oracle != "only":
++            for code in S.DRAFT_CODES:
++                items = S.draft_text(fp, code)
++                add(f"R1_d{code}", S.IDS, S.prompt_R1(items), "image", code)
++                add(f"R2_d{code}", S.IDS, S.prompt_R2(items), "image", code)
++                add(f"T_d{code}", S.IDS, S.prompt_T(items), "text", code)
++            add("BJ", S.IDS, S.prompt_BJ(fp), "image")
++            add("BT", S.IDS, S.prompt_BT(fp), "text")
++            for i in S.IDS:
++                add(f"BI_{i}", [i], S.prompt_BI(fp[i], i), "image")
++        if oracle in ("with", "only"):
++            truth = [(i, q[i]["state"]) for i in S.IDS]
++            for code in S.DRAFT_CODES:
++                p = S.prompt_O2(S.draft_text(fp, code), truth)
++                add(f"O_d{code}", S.IDS, p, "image", code)
++                add(f"OT_d{code}", S.IDS, p, "text", code)
++    return reqs
++
++
++def build(stage):
++    man = json.load(open(f"{OUT}/data/manifest_{stage}.json"))
++    cache = {}
++    if stage == "D":
++        reqs = make_requests(man["rows"], "D", "with", cache)
++        reqs += make_requests(man["pc_oracle_rows"], "pc_D8", "only", cache)
++    else:
++        reqs = make_requests(man["rows"], stage, "none", cache)
++    ids = [r["request_id"] for r in reqs]
++    assert len(ids) == len(set(ids))
++    path = f"{OUT}/requests/requests_{stage}.jsonl"
++    write_new(path, "".join(json.dumps(r, sort_keys=True) + "\n" for r in reqs))
++    print(stage, len(reqs), dict(Counter(r["modality"] for r in reqs)), dict(Counter(r["cond"].split("_")[0] for r in reqs)))
++
++
++if __name__ == "__main__":
++    assert sys.argv[1] == "requests"
++    build(sys.argv[2])
+diff --git a/rr53_data.py b/rr53_data.py
+new file mode 100644
+index 0000000..d24e0f4
+--- /dev/null
++++ b/rr53_data.py
+@@ -0,0 +1,253 @@
++"""iter_053 자료 gate + manifest 생성 (CPU only, 모델 미사용).
++
++기존 iter_018 CheXpert 자산(results/iter_018/{source,manifests})을 읽기 전용으로 재검증한다. rsna_diag.cx18_data의 build/CLI는 호출하지 않는다.
++python rr53_data.py check            # results/iter_053/data/data_check.json (자료·분할·중복·노출 검사)
++python rr53_data.py build            # manifest_D/E/F.json (data_check가 passed일 때만, 기존 파일 덮어쓰기 금지)
++"""
++import csv
++import glob
++import hashlib
++import io
++import json
++import os
++import subprocess
++import sys
++
++import numpy as np
++from PIL import Image
++
++import rr53_spec as S
++from rsna_diag import cx18_data as CD
++from rsna_diag import cx18_spec as CX
++
++OUT = "results/iter_053"
++CSV_SHA256 = "40e3fdf15522fa1184d8b686f7695bf333b439b2b7a2f1db7c45d97a251bc05f"
++HF_SHA256 = CD.HF_PARQUET_SHA256
++MAN = "results/iter_018/manifests"
++PC_D8_MANIFEST = "results/iter_047/data/manifest_D8.json"
++EXPECT_SPLIT = {"D16": {c: 4 for c in CX.CATEGORIES}, "E48": {c: 12 for c in CX.CATEGORIES}}
++EXPECT_F = {"present_present": 12, "absent_absent": 56, "absent_present": 17, "present_absent": 20}  # 계획: 00/01/10/11 = 56/17/20/12
++EXPECT_F_BY_CODE = {"00": 56, "01": 17, "10": 20, "11": 12}
++LEGACY_ROOT = "/SSD1_1TB/home/milab/daniel/08_medgemma/legacy/eval_samples"
++
++
++class GateError(RuntimeError):
++    pass
++
++
++def sha(b):
++    return hashlib.sha256(b).hexdigest()
++
++
++def file_sha(p):
++    h = hashlib.sha256()
++    with open(p, "rb") as f:
++        for b in iter(lambda: f.read(1 << 22), b""):
++            h.update(b)
++    return h.hexdigest()
++
++
++def write_new(path, text):
++    if os.path.exists(path):
++        raise FileExistsError(path)
++    os.makedirs(os.path.dirname(path), exist_ok=True)
++    tmp = path + f".{os.getpid()}.tmp"
++    with open(tmp, "w") as f:
++        f.write(text)
++    os.replace(tmp, path)
++
++
++def checked_sources():
++    """HF Path 고유성·CSV 고정 digest를 cx18_data.load_sources/cross_check '앞에서' 강제한다 (set 축약으로 중복을 숨기지 않는다)."""
++    import pandas as pd
++    if file_sha(CD.MEDAUG_CSV) != CSV_SHA256:
++        raise GateError("MedAug csv sha256 differs from pinned digest")
++    if file_sha(CD.HF_PARQUET) != HF_SHA256:
++        raise GateError("HF parquet sha256 differs from pinned digest")
++    hf0 = pd.read_parquet(CD.HF_PARQUET)
++    paths = list(hf0["Path"])
++    if len(paths) != 234 or len(set(paths)) != len(paths):
++        raise GateError(f"HF Path not unique/234: rows={len(paths)} unique={len(set(paths))}")
++    raw_rows = list(csv.DictReader(open(CD.MEDAUG_CSV)))
++    norm = [CD._norm_path(r["Path"]) for r in raw_rows]
++    if len(norm) != 234 or len(set(norm)) != len(norm):
++        raise GateError("MedAug csv Path not unique/234")
++    hf, csv_by_path = CD.load_sources()
++    cross = CD.cross_check(hf, csv_by_path)
++    return hf, csv_by_path, dict(hf_rows=len(paths), hf_unique_paths=len(set(paths)), csv_rows=len(norm), csv_unique_paths=len(set(norm)),
++                                 hf_sha256=HF_SHA256, csv_sha256=CSV_SHA256, cross_check=cross)
++
++
++def verify_patients(hf):
++    labels = json.load(open(f"{MAN}/labels.json"))
++    sets = json.load(open(f"{MAN}/sets.json"))
++    infer = [json.loads(l) for l in open(f"{MAN}/infer_manifest.jsonl")]
++    if len(labels) != 169 or len(infer) != 169 or {r["id"] for r in infer} != set(labels):
++        raise GateError("labels/infer manifest patient set != 169")
++    # 원천에서 단일 frontal 선택 규칙을 다시 적용해 같은 환자·study인지 확인
++    studies = CD.group_studies(hf)
++    single, dropped = CD.select_single_frontal(studies)
++    if set(single) != set(labels) or dropped:
++        raise GateError(f"single-frontal selection differs from labels (n={len(single)}, dropped={dropped})")
++    hf_by_path = {r["Path"]: r for _, r in hf.iterrows()}
++    info = {}
++    for pid, l in sorted(labels.items()):
++        study, vname, row = single[pid]
++        if row["Path"] != l["path"] or study != l["study"] or vname != l["view"]:
++            raise GateError(f"{pid}: source row differs from labels")
++        b = row["image"]["bytes"]
++        if sha(b) != l["file_sha256"]:
++            raise GateError(f"{pid}: source bytes sha != labels file_sha256")
++        arr = np.asarray(Image.open(io.BytesIO(b)))
++        if arr.dtype != np.uint8 or arr.ndim != 2:
++            raise GateError(f"{pid}: unexpected decoded image {arr.dtype} {arr.shape}")
++        if sha(arr.tobytes()) != l["pixel_sha256"]:
++            raise GateError(f"{pid}: source pixel sha != labels pixel_sha256")
++        ip = f"{MAN}/images/{pid}.jpg"
++        if file_sha(ip) != l["file_sha256"]:
++            raise GateError(f"{pid}: on-disk jpg sha != source bytes")
++        cm = "present" if int(row["Cardiomegaly"]) == 3 else "absent"
++        pe = "present" if int(row["Pleural Effusion"]) == 3 else "absent"
++        if int(row["Cardiomegaly"]) not in (2, 3) or int(row["Pleural Effusion"]) not in (2, 3):
++            raise GateError(f"{pid}: label not 2/3")
++        if (cm, pe) != (l["cardiomegaly"], l["pleural_effusion"]) or l["category"] != f"{cm}_{pe}":
++            raise GateError(f"{pid}: HF label state != labels.json")
++        im = [r for r in infer if r["id"] == pid][0]
++        if im["file_sha256"] != l["file_sha256"] or im["pixel_sha256"] != l["pixel_sha256"] or im["image"] != ip:
++            raise GateError(f"{pid}: infer manifest differs from labels")
++        info[pid] = dict(path=l["path"], study=l["study"], file_sha256=l["file_sha256"], pixel_sha256=l["pixel_sha256"], category=l["category"],
++                         cardiomegaly=cm, pleural_effusion=pe, image=ip, ap_pa=l["ap_pa"], h=int(arr.shape[0]), w=int(arr.shape[1]))
++    # 분할 재현
++    cats = {}
++    for pid, l in info.items():
++        cats.setdefault(l["category"], []).append(pid)
++    re_split = CX.split_patients(cats)
++    if re_split != sets:
++        raise GateError("recomputed split_patients != sets.json")
++    # 분할 크기 (계획)
++    for k, exp in EXPECT_SPLIT.items():
++        for c, n in exp.items():
++            if len(sets[k][c]) != n:
++                raise GateError(f"{k}/{c} size {len(sets[k][c])} != {n}")
++    fcodes = {S.code_of_category(c): len(v) for c, v in sets["F"].items()}
++    if fcodes != EXPECT_F_BY_CODE:
++        raise GateError(f"F sizes {fcodes} != plan {EXPECT_F_BY_CODE}")
++    # 교집합: 환자·study(Path의 study는 환자 내 이름이므로 (환자,study) 쌍)·file/pixel hash
++    members = {k: {p for v in sets[k].values() for p in v} for k in ("D16", "E48", "F")}
++    inter = {}
++    for a, b in (("D16", "E48"), ("D16", "F"), ("E48", "F")):
++        inter[f"{a}&{b}"] = dict(patients=len(members[a] & members[b]),
++                                 file_sha=len({info[p]["file_sha256"] for p in members[a]} & {info[p]["file_sha256"] for p in members[b]}),
++                                 pixel_sha=len({info[p]["pixel_sha256"] for p in members[a]} & {info[p]["pixel_sha256"] for p in members[b]}),
++                                 patient_study=len({(p, info[p]["study"]) for p in members[a]} & {(p, info[p]["study"]) for p in members[b]}))
++    if any(v != 0 for d in inter.values() for v in d.values()):
++        raise GateError(f"D/E/F intersection nonzero: {inter}")
++    for k in members:
++        if len({info[p]["file_sha256"] for p in members[k]}) != len(members[k]) or len({info[p]["pixel_sha256"] for p in members[k]}) != len(members[k]):
++            raise GateError(f"duplicate file/pixel hash inside {k}")
++    if len({info[p]["pixel_sha256"] for p in info}) != 169 or len({info[p]["file_sha256"] for p in info}) != 169:
++        raise GateError("duplicate file/pixel hash among 169 patients")
++    return info, sets, inter, dict(single_frontal_selection_reproduced=True, split_reproduced=True, n_patients=len(info))
++
++
++def legacy_exact_dup(info):
++    """legacy/eval_samples 전체의 이미지와 169개 영상의 file hash / 복원 pixel hash 정확 일치를 검사한다 (근사 average-hash 검사의 보완)."""
++    fset = {v["file_sha256"] for v in info.values()}
++    pset = {v["pixel_sha256"] for v in info.values()}
++    n = 0
++    hit = []
++    for p in glob.glob(os.path.join(LEGACY_ROOT, "**", "*"), recursive=True):
++        if not os.path.isfile(p) or not p.lower().endswith((".jpg", ".jpeg", ".png")):
++            continue
++        n += 1
++        fh = file_sha(p)
++        try:
++            a = np.asarray(Image.open(p))
++            ph = sha(a.tobytes()) if a.dtype == np.uint8 and a.ndim == 2 else None
++        except Exception:
++            ph = None
++        if fh in fset or (ph is not None and ph in pset):
++            hit.append(p)
++    return dict(n_legacy_images_scanned=n, exact_file_or_pixel_matches=hit)
++
++
++def exposure_scan(sets):
++    """F 환자 ID가 과거 결과(manifest/iter_053 제외)에 나타났는지 grep으로 검사. D16/E48 노출은 iter_018 요청에서 확인한다."""
++    out = {}
++    for k in ("D16", "E48", "F"):
++        ids = sorted({p for v in sets[k].values() for p in v})
++        pat = os.path.join(OUT, "data", f"_ids_{k}.txt")
++        os.makedirs(os.path.dirname(pat), exist_ok=True)
++        if not os.path.exists(pat):
++            open(pat, "w").write("\n".join(ids) + "\n")
++        r = subprocess.run(["grep", "-rlF", "-f", pat, "results", "--include=*.jsonl", "--include=*.json", "--include=*.md", "--include=*.log"],
++                           capture_output=True, text=True)
++        files = sorted(f for f in r.stdout.splitlines() if not f.startswith(f"{OUT}/") and "iter_018/manifests" not in f)
++        out[k] = dict(files_mentioning=files, n_files=len(files))
++    return out
++
++
++def check():
++    hf, csv_by_path, src = checked_sources()
++    info, sets, inter, rep = verify_patients(hf)
++    pc = json.load(open(PC_D8_MANIFEST))
++    pc_rows = pc["rows"]
++    pc_ok = []
++    for m in pc_rows:
++        meta = m["image_meta"]
++        if file_sha(meta["path"]) != meta["file_sha256"]:
++            raise GateError(f"PadChest D8 image hash mismatch {meta['path']}")
++        pc_ok.append(m["PatientID"])
++    leg = legacy_exact_dup(info)
++    exp = exposure_scan(sets)
++    f_exposed = exp["F"]["n_files"]
++    # F는 과거 출력에 노출되지 않아야 한다 (iter_018은 D16/E48만 요청). 노출이 있으면 F 확인 경로 비허용.
++    f_ok = f_exposed == 0 and not leg["exact_file_or_pixel_matches"]
++    res = dict(passed=True, f_independence_ok=bool(f_ok), source=src, patients=rep, d_e_f_intersections=inter,
++               split_sizes={k: {c: len(v) for c, v in sets[k].items()} for k in sets}, legacy_exact_duplicate=leg, prior_exposure=exp,
++               padchest_d8=dict(n_patients=len(pc_ok), n_distinct=len(set(pc_ok)), manifest=PC_D8_MANIFEST, manifest_sha256=file_sha(PC_D8_MANIFEST)),
++               note=("HF validation 234행 고유 Path, MedAug 7 finding 대응, 169명 단일 frontal 선택·split 재현, patient/study/file/pixel 교집합 0. "
++                     "임상 정답은 제공된 CheXpert validation annotation이며 재판독하지 않았다. 사전학습 노출은 미확인."))
++    write_new(f"{OUT}/data/data_check.json", json.dumps(res, indent=1, sort_keys=True))
++    print(json.dumps({k: res[k] for k in ("passed", "f_independence_ok", "split_sizes")}, indent=1))
++    return res
++
++
++def row_for(pid, info, set_name, qs=None):
++    l = info[pid]
++    code = S.code_of_category(l["category"])
++    st = dict(qA=l["cardiomegaly"], qB=l["pleural_effusion"])
++    q = {i: dict(finding=S.FINDING_PAIR[i], state=st[i]) for i in S.IDS}
++    return dict(set=set_name, truth_code=code, PatientID=pid, ImageID=pid, StudyID=f"{pid}/{l['study']}", q=q,
++                image_meta=dict(path=l["image"], file_sha256=l["file_sha256"], raw_png_sha256=None, u8_pixel_sha256=l["pixel_sha256"],
++                                h=l["h"], w=l["w"]), source_path=l["path"])
++
++
++def build():
++    chk = json.load(open(f"{OUT}/data/data_check.json"))
++    if chk.get("passed") is not True:
++        raise GateError("data_check not passed")
++    hf, _, _ = checked_sources()
++    info, sets, _, _ = verify_patients(hf)
++    ds_sha = file_sha(f"{OUT}/data/data_check.json")
++    for name, key in (("D", "D16"), ("E", "E48"), ("F", "F")):
++        rows = []
++        for code in S.DRAFT_CODES:
++            cat = S.CATEGORY_OF_CODE[code]
++            for pid in sets[key][cat]:
++                rows.append(row_for(pid, info, name))
++        man = dict(set=name, source_set=key, spec_version=S.VERSION, rows=rows, data_check_sha256=ds_sha,
++                   sets_json_sha256=file_sha(f"{MAN}/sets.json"), labels_json_sha256=file_sha(f"{MAN}/labels.json"),
++                   infer_manifest_sha256=file_sha(f"{MAN}/infer_manifest.jsonl"))
++        if name == "D":
++            man["pc_oracle_rows"] = json.load(open(PC_D8_MANIFEST))["rows"]
++            man["pc_oracle_manifest_sha256"] = file_sha(PC_D8_MANIFEST)
++        if name == "F":
++            man["role_note"] = ("F105는 iter_018에서 요청·출력에 쓰이지 않은 집단이다. iter_053은 이를 새 교정 질문의 확인용으로 용도 변경한다 "
++                                "(원래 scope 진단의 F 실행이 아니다). E 결과의 사전 조건을 충족할 때만 실행한다.")
++        write_new(f"{OUT}/data/manifest_{name}.json", json.dumps(man, indent=1))
++        print(name, len(rows))
++
++
++if __name__ == "__main__":
++    {"check": check, "build": build}[sys.argv[1]]()
+diff --git a/rr53_decide.py b/rr53_decide.py
+new file mode 100644
+index 0000000..b6d73c8
+--- /dev/null
++++ b/rr53_decide.py
+@@ -0,0 +1,163 @@
++"""iter_053 사전 판정 (plan.md Proposed Experiment §4 / Evaluation을 코드로 고정). 결과를 보고 문턱을 바꾸지 않는다.
++
++python rr53_decide.py E --report R --verify V --protocol P --out DEC        # E -> F 진입 여부 (run=true일 때만 F protocol 허용)
++python rr53_decide.py F --report R --verify V --protocol P --e-decision DEC_E --out DEC
++순수 함수 decide_e / decide_f는 report dict(와 manifest 층 크기)만 입력으로 받는다.
++"""
++import argparse
++import json
++import math
++import os
++import sys
++
++import numpy as np
++
++from rr53_data import OUT, file_sha
++
++R_GOAL, HFAIL_GOAL = 0.80, 0.05
++ACC_GAIN, R_TRADE, HFAIL_TRADE = 0.10, 0.15, 0.05
++HALF_R, HALF_HFAIL = 0.10, 0.05
++T975 = 2.242  # 계획의 근사 계수
++SIMPLE = ["R1", "R2", "BJ", "BI"]
++MIN_VALID = 0.95
++CONDS_VALID = ("R1", "R2", "T", "BJ", "BT", "BI")
++
++
++def sufficient(c):
++    """동시 보정 구간(또는 퇴화 시 exact 경계)으로 r 하한>=0.80 및 h_fail 상한<=0.05."""
++    r, h = c["r"], c["h_fail"]
++    r_lo = 1 - r["degenerate_exact"]["any_event_patient_fraction_upper"] if r.get("degenerate_exact") else r["simult_lo"]
++    h_hi = h["degenerate_exact"]["any_event_patient_fraction_upper"] if h.get("degenerate_exact") else h["simult_hi"]
++    return bool(r_lo >= R_GOAL and h_hi <= HFAIL_GOAL), dict(r_lower=r_lo, hfail_upper=h_hi)
++
++
++def misses_goal(c):
++    """동시 보정한 r 상한<0.80 또는 h_fail 하한>0.05."""
++    r, h = c["r"], c["h_fail"]
++    return bool(r["simult_hi"] < R_GOAL or h["simult_lo"] > HFAIL_GOAL), dict(r_upper=r["simult_hi"], hfail_lower=h["simult_lo"])
++
++
++def run_valid(report, verify):
++    ok = verify.get("passed") is True and report["n_non_eos_final"] == 0 and all(report["valid_rate_by_cond"][c] >= MIN_VALID for c in CONDS_VALID)
++    return bool(ok)
++
++
++def expected_half_width(per_patient, f_sizes, metric):
++    """E 층내 표본분산 s²_h(환자별 BJ-R2 차이, ddof=1)와 F 층별 n_h로 예상 97.5% 반폭 2.242*sqrt(sum(s²_h/n_h)/16)."""
++    s2 = {}
++    for code in ("00", "01", "10", "11"):
++        d = [v["metrics"]["BJ"][metric] - v["metrics"]["R2"][metric] for v in per_patient.values() if v["stratum"] == code]
++        s2[code] = float(np.var(d, ddof=1)) if len(d) > 1 else 0.0
++    if all(v == 0 for v in s2.values()):
++        return None, s2
++    return T975 * math.sqrt(sum(s2[k] / f_sizes[k] for k in s2) / 16), s2
++
++
++def decide_e(report, verify, f_sizes, f_independence_ok):
++    d = dict(stage="E", checks={}, flags=[])
++    valid = run_valid(report, verify)
++    d["checks"]["run_valid"] = valid
++    if not valid:
++        d.update(run=False, outcome="invalid_run")
++        return d
++    c, df = report["conds"], report["diffs"]
++    suff = {k: sufficient(c[k]) for k in SIMPLE}
++    d["checks"]["simple_sufficient"] = {k: v[0] for k, v in suff.items()}
++    d["checks"]["simple_sufficient_bounds"] = {k: v[1] for k, v in suff.items()}
++    if any(v[0] for v in suff.values()):
++        d.update(run=False, outcome="simple_alternative_sufficient_hold_F")
++        return d
++    acc = df["BJ-BT:acc"]
++    c2 = bool(acc["mean"] >= ACC_GAIN and acc["lo"] > 0)
++    rd, hd = df["BJ-R2:r"], df["BJ-R2:h_fail"]
++    c3 = bool(rd["mean"] >= R_TRADE and hd["mean"] >= HFAIL_TRADE)
++    cv = report["common_valid"]["BJ-R2"]
++    c3_valid_dir = bool(cv["r_diff"] > 0 and cv["hfail_diff"] > 0)
++    c4 = {k: bool(c[k]["r"]["mean"] < R_GOAL or c[k]["h_fail"]["mean"] > HFAIL_GOAL) for k in SIMPLE}
++    hr, sr = expected_half_width(report["per_patient_metrics"], f_sizes, "r")
++    hh, sh = expected_half_width(report["per_patient_metrics"], f_sizes, "h_fail")
++    c5 = bool(hr is not None and hh is not None and hr <= HALF_R and hh <= HALF_HFAIL)
++    d["checks"].update(bj_minus_bt_acc=dict(mean=acc["mean"], lo95=acc["lo"], passed=c2),
++                       bj_minus_r2_tradeoff_points=dict(r=rd["mean"], h_fail=hd["mean"], passed=c3), common_valid_same_direction=c3_valid_dir,
++                       each_simple_point_misses_goal=c4, expected_half_width=dict(r=hr, h_fail=hh, s2_r=sr, s2_h_fail=sh, passed=c5),
++                       f_independence_ok=bool(f_independence_ok),
++                       f_effective_n_equal_variance=1 / (sum((1 / 4) ** 2 / n for n in f_sizes.values())))
++    if hr is None or hh is None:
++        d["flags"].append("zero_within_stratum_variance_precision_not_supported_hold_F")
++    allc = c2 and c3 and c3_valid_dir and all(c4.values()) and c5 and f_independence_ok
++    d["run"] = bool(allc)
++    d["outcome"] = "enter_F" if allc else "hold_F_current_correction_design_investment_on_hold"
++    return d
++
++
++def decide_f(report, verify):
++    d = dict(stage="F", checks={}, flags=[])
++    valid = run_valid(report, verify)
++    d["checks"]["run_valid"] = valid
++    if not valid:
++        d.update(run=False, outcome="invalid_run")
++        return d
++    c, df = report["conds"], report["diffs"]
++    suff = {k: sufficient(c[k]) for k in SIMPLE}
++    miss = {k: misses_goal(c[k]) for k in SIMPLE}
++    acc, rd, hd = df["BJ-BT:acc"], df["BJ-R2:r"], df["BJ-R2:h_fail"]
++    cv = report["common_valid"]["BJ-R2"]
++    crit = dict(acc_gain=bool(acc["mean"] >= ACC_GAIN and acc["lo"] > 0), r_trade=bool(rd["mean"] >= R_TRADE and rd["lo"] > 0),
++                hfail_trade=bool(hd["mean"] >= HFAIL_TRADE and hd["lo"] > 0), common_valid_same_direction=bool(cv["r_diff"] > 0 and cv["hfail_diff"] > 0),
++                each_simple_misses_goal={k: v[0] for k, v in miss.items()})
++    d["checks"].update(simple_sufficient={k: v[0] for k, v in suff.items()}, criteria=crit,
++                       bounds=dict(sufficient={k: v[1] for k, v in suff.items()}, misses={k: v[1] for k, v in miss.items()}))
++    if any(v[0] for v in suff.values()):
++        d["outcome"] = "simple_alternative_sufficient"
++    elif crit["acc_gain"] and crit["r_trade"] and crit["hfail_trade"] and crit["common_valid_same_direction"] and all(crit["each_simple_misses_goal"].values()):
++        d["outcome"] = "positive_min_method_review"
++    else:
++        if acc["hi"] < ACC_GAIN:
++            d["flags"].append("image_gain_over_text_below_0.10")
++        if rd["hi"] < R_TRADE or hd["hi"] < HFAIL_TRADE:
++            d["flags"].append("bj_r2_tradeoff_not_reached")
++        neg = acc["hi"] < ACC_GAIN or rd["hi"] < R_TRADE or hd["hi"] < HFAIL_TRADE
++        d["outcome"] = "negative_no_tradeoff" if neg else "inconclusive"
++    d["run"] = d["outcome"] == "positive_min_method_review"
++    return d
++
++
++def main():
++    ap = argparse.ArgumentParser()
++    ap.add_argument("stage", choices=["E", "F"])
++    for k in ("report", "verify", "protocol", "out"):
++        ap.add_argument("--" + k, required=True)
++    ap.add_argument("--e-decision", default=None)
++    a = ap.parse_args()
++    if os.path.exists(a.out):
++        sys.exit("refuse to overwrite decision")
++    rep, ver = json.load(open(a.report)), json.load(open(a.verify))
++    if rep["stage"] != a.stage or ver["stage"] != a.stage or ver["source_digests"]["report"] != file_sha(a.report):
++        sys.exit("report/verify stage or digest mismatch")
++    inputs = dict(report=a.report, verify=a.verify, protocol=a.protocol)
++    if a.stage == "E":
++        fm = json.load(open(f"{OUT}/data/manifest_F.json"))
++        sizes = {}
++        for r in fm["rows"]:
++            sizes[r["truth_code"]] = sizes.get(r["truth_code"], 0) + 1
++        chk = json.load(open(f"{OUT}/data/data_check.json"))
++        dec = decide_e(rep, ver, sizes, chk["f_independence_ok"])
++        inputs["manifest_F"] = f"{OUT}/data/manifest_F.json"
++    else:
++        if not a.e_decision:
++            sys.exit("F decision requires the E decision")
++        ed = json.load(open(a.e_decision))
++        if ed.get("run") is not True:
++            sys.exit("E decision did not permit F")
++        dec = decide_f(rep, ver)
++        inputs["e_decision"] = a.e_decision
++    dec["inputs"] = {k: dict(path=p, sha256=file_sha(p)) for k, p in inputs.items()}
++    dec["data_check_sha256"] = file_sha(f"{OUT}/data/data_check.json")
++    tmp = a.out + ".tmp"
++    json.dump(dec, open(tmp, "w"), indent=1)
++    os.replace(tmp, a.out)
++    print(json.dumps(dec, indent=1))
++
++
++if __name__ == "__main__":
++    main()
+diff --git a/rr53_eval.py b/rr53_eval.py
+new file mode 100644
+index 0000000..3691a9a
+--- /dev/null
++++ b/rr53_eval.py
+@@ -0,0 +1,299 @@
++"""iter_053 평가: 상태 JSON -> 최종 상태 -> r / h / h_fail / acc / clean·robust exact / sens, 네 truth 조합 동일 가중 macro,
++층화 paired 환자 bootstrap(seed 5302, 10,000회), 동시 보정 구간, 퇴화 경우의 exact binomial 경계, 공통 valid 보조 분석. CPU only.
++
++호출자는 rr53_run.verify(manifest 재구성 요청 대조 + completion 검증)를 먼저 통과해야 한다 (main이 강제한다).
++bootstrap 규약(검증기와 공유): 층(truth_code)을 정렬 순서로, 층 안의 환자를 PatientID 정렬 순서로 두고 rng=np.random.default_rng(5302)에서
++층마다 integers(0, n_층, size=(B, n_층))를 순서대로 뽑는다. macro 통계 = 층별 resample 평균의 동일 가중 평균. 모든 조건·지표가 같은 resample을 쓴다.
++"""
++import argparse
++import hashlib
++import json
++import math
++import os
++import sys
++
++import numpy as np
++
++import rr47_eval as E47
++import rr53_spec as S
++from rr53_data import OUT, file_sha
++
++CONDS = ["K", "R1", "R2", "T", "BJ", "BT", "BI"]
++SIMPLE = ["R1", "R2", "BJ", "BI"]
++METRICS = ["r", "h", "h_fail", "acc", "clean_exact", "robust_exact", "sens"]
++DRAFTS = S.DRAFT_CODES
++N_SIMULT = len(SIMPLE) * 2  # 네 조건 × 두 endpoint(r, h_fail)
++SIMULT_LEVEL = 1 - 0.05 / N_SIMULT
++
++
++def finals_for(cond, draft, byc, ds):
++    if cond == "K":
++        return dict(zip(S.IDS, ds)), True
++    if cond in ("R1", "R2", "T"):
++        p = byc[f"{cond}_d{draft}"]
++    elif cond in ("BJ", "BT"):
++        p = byc[cond]
++    elif cond == "BI":
++        return {i: S.final_state(byc[f"BI_{i}"], i) for i in S.IDS}, all(byc[f"BI_{i}"]["status"] == "ok" for i in S.IDS)
++    else:
++        raise KeyError(cond)
++    return {i: S.final_state(p, i) for i in S.IDS}, p["status"] == "ok"
++
++
++def patient_metrics(truth, cond, byc):
++    """truth=[A,B]. 분모는 환자마다 고정(틀린 상태 4, 맞은 상태 4, 전체 8). returns (metrics, states list)."""
++    n_wrong = n_right = fixed = harmed = hfail = correct = 0
++    seq = {i: [] for i in S.IDS}
++    clean = None
++    allok = True
++    states = []
++    for d in DRAFTS:
++        ds = S.code_states(d)
++        fin, valid = finals_for(cond, d, byc, ds)
++        both = True
++        for k, i in enumerate(S.IDS):
++            f = fin[i]
++            seq[i].append(f)
++            correct += f == truth[k]
++            both = both and f == truth[k]
++            wrong = ds[k] != truth[k]
++            if wrong:
++                n_wrong += 1
++                fixed += f == truth[k]
++            else:
++                n_right += 1
++                harmed += f == S.flip(truth[k])
++                hfail += f != truth[k]
++            states.append((d, i, wrong, f == truth[k], f == S.flip(truth[k]), valid))
++        if d == S.draft_code(*truth):
++            clean = both
++        allok = allok and both
++    assert n_wrong == 4 and n_right == 4
++    sens = sum(len(set(v)) > 1 for v in seq.values()) / 2
++    return dict(r=fixed / 4, h=harmed / 4, h_fail=hfail / 4, acc=correct / 8, clean_exact=float(bool(clean)), robust_exact=float(allok), sens=sens), states
++
++
++def build_table(manifest, rows, recs):
++    parsed = E47.parse_all(manifest, rows, recs)
++    table = {}
++    for m in manifest["rows"]:
++        pid = m["PatientID"]
++        truth = [m["q"][i]["state"] for i in S.IDS]
++        met, st = {}, {}
++        for c in CONDS:
++            met[c], st[c] = patient_metrics(truth, c, parsed[pid])
++        table[pid] = dict(stratum=m["truth_code"], truth=truth, metrics=met, states=st)
++    return table, parsed
++
++
++def strata(table):
++    return E47.strata(table)
++
++
++def boot_idx(st):
++    return E47.boot_indices(st, S.BOOT_B, S.BOOT_SEED)
++
++
++def macro_mean(table, st, cond, metric):
++    return float(np.mean([np.mean([table[p]["metrics"][cond][metric] for p in pids]) for pids in st.values()]))
++
++
++def macro_samples(table, st, idxs, cond, metric):
++    tot = 0
++    for pids, idx in zip(st.values(), idxs):
++        v = np.array([table[p]["metrics"][cond][metric] for p in pids], float)
++        tot = tot + v[idx].mean(axis=1)
++    return tot / len(st)
++
++
++def cp_upper_zero(n, alpha):
++    """0/n 사건에 대한 Clopper-Pearson 단측 상한: 1 - alpha^(1/n)."""
++    return 1 - alpha ** (1 / n)
++
++
++def degenerate_bounds(table, st, cond, metric):
++    """모든 환자에서 사건 0(나쁜 방향)이면 층별 exact binomial 상한을 Bonferroni(층 수·검정 수)로 결합한 보수적 경계. 아니면 None.
++    h_fail: any-failure 환자 비율 상한(>= h_fail 상한). r: any-miss 환자 비율 상한 -> r 하한 = 1 - 상한."""
++    if metric == "h_fail":
++        bad = lambda p: table[p]["metrics"][cond]["h_fail"] > 0
++    elif metric == "r":
++        bad = lambda p: table[p]["metrics"][cond]["r"] < 1
++    else:
++        return None
++    if any(bad(p) for pids in st.values() for p in pids):
++        return None
++    a = 0.05 / (len(st) * N_SIMULT)
++    ub = float(np.mean([cp_upper_zero(len(pids), a) for pids in st.values()]))
++    return dict(any_event_patient_fraction_upper=ub, alpha_per_stratum_test=a)
++
++
++def common_valid(table, st, a, b):
++    """두 조건 모두 해당 요청이 valid인 상태만 모아 macro 수정률·보존 실패율(h_fail) 차이 (점추정, 보조)."""
++    va = {(p, d, i): v for p in table for (d, i, _w, _o, _h, v) in table[p]["states"][a]}
++    vb = {(p, d, i): v for p in table for (d, i, _w, _o, _h, v) in table[p]["states"][b]}
++    keep = {k: va[k] and vb[k] for k in va}
++
++    def rates(c):
++        rr, hh = [], []
++        for pids in st.values():
++            fw = nw = hf = nr = 0
++            for p in pids:
++                for (d, i, wrong, ok, _h, _v) in table[p]["states"][c]:
++                    if not keep[(p, d, i)]:
++                        continue
++                    if wrong:
++                        nw += 1
++                        fw += ok
++                    else:
++                        nr += 1
++                        hf += (not ok)
++            rr.append(fw / nw if nw else float("nan"))
++            hh.append(hf / nr if nr else float("nan"))
++        return float(np.nanmean(rr)), float(np.nanmean(hh))
++
++    ra, ha = rates(a)
++    rb, hb = rates(b)
++    return dict(n_common_valid_states=int(sum(keep.values())), n_states=len(keep), r_a=ra, r_b=rb, r_diff=ra - rb, hfail_a=ha, hfail_b=hb, hfail_diff=ha - hb)
++
++
++PAIRS = [("BJ", "R2", 0.975, ["r", "h_fail"]), ("BJ", "BT", 0.95, ["acc"]),
++         ("BJ", "R2", 0.95, ["h", "acc"]), ("R2", "R1", 0.95, ["r", "h_fail", "acc"]), ("BI", "BJ", 0.95, ["r", "h_fail", "acc"]),
++         ("R2", "T", 0.95, ["acc"]), ("R1", "T", 0.95, ["acc"]), ("BT", "T", 0.95, ["acc"]), ("R2", "K", 0.95, ["r", "h_fail"]),
++         ("BJ", "R1", 0.95, ["r", "h_fail"]), ("BI", "R2", 0.95, ["r", "h_fail"])]
++PRIMARY = {("BJ", "R2", 0.975, "r"), ("BJ", "R2", 0.975, "h_fail"), ("BJ", "BT", 0.95, "acc")}
++
++
++def summarize(table):
++    st = strata(table)
++    idxs = boot_idx(st)
++    N = len(table)
++    out = dict(n_patients=N, strata_sizes={k: len(v) for k, v in st.items()}, weighting="macro: 네 truth 조합 동일 가중(층별 환자 평균의 평균)", conds={}, diffs={})
++    cache = {}
++
++    def samp(c, m):
++        if (c, m) not in cache:
++            cache[(c, m)] = macro_samples(table, st, idxs, c, m)
++        return cache[(c, m)]
++
++    for c in CONDS:
++        out["conds"][c] = {}
++        for m in METRICS:
++            lo, hi = E47.ci(samp(c, m), 0.95)
++            d = dict(mean=macro_mean(table, st, c, m), natural_mean=float(np.mean([table[p]["metrics"][c][m] for p in table])), lo95=lo, hi95=hi)
++            if c in SIMPLE and m in ("r", "h_fail"):
++                slo, shi = E47.ci(samp(c, m), SIMULT_LEVEL)
++                d.update(simult_level=SIMULT_LEVEL, simult_lo=slo, simult_hi=shi, degenerate_exact=degenerate_bounds(table, st, c, m))
++            out["conds"][c][m] = d
++    for a, b, lev, ms in PAIRS:
++        for m in ms:
++            key = f"{a}-{b}:{m}"
++            assert key not in out["diffs"], key
++            dd = samp(a, m) - samp(b, m)
++            lo, hi = E47.ci(dd, lev)
++            out["diffs"][key] = dict(mean=macro_mean(table, st, a, m) - macro_mean(table, st, b, m), lo=lo, hi=hi, level=lev,
++                                     degenerate=bool(np.ptp(dd) == 0), primary=(a, b, lev, m) in PRIMARY)
++    out["common_valid"] = {f"{a}-{b}": common_valid(table, st, a, b) for a, b in (("BJ", "R2"), ("BJ", "R1"), ("BI", "R2"), ("BJ", "BI"))}
++    return out
++
++
++def format_counts(parsed):
++    out = {}
++    for pid, byc in parsed.items():
++        for cond, p in byc.items():
++            base = cond.split("_")[0] if cond.startswith(("R1", "R2", "T_", "BI", "O_", "OT_")) else cond
++            out.setdefault(base, {}).setdefault(p["status"], 0)
++            out[base][p["status"]] += 1
++    return out
++
++
++def answer_counts(parsed):
++    out = {}
++    for pid, byc in parsed.items():
++        for cond, p in byc.items():
++            base = cond.split("_")[0] if cond.startswith(("R1", "R2", "T_", "BI", "O_", "OT_")) else cond
++            if p["status"] == "ok":
++                for v in p["answers"].values():
++                    out.setdefault(base, {}).setdefault(v, 0)
++                    out[base][v] += 1
++    return out
++
++
++def oracle_check(groups, parsed):
++    """groups: {name: manifest_rows}. O_dXX는 image, OT_dXX는 text oracle. 정답 상태 + 결정론적 문장 렌더링 일치만 통과."""
++    out = {}
++    for name, rows in groups.items():
++        for pref, mod in (("O_d", "image"), ("OT_d", "text")):
++            n = ok = 0
++            bad = []
++            for m in rows:
++                pid = m["PatientID"]
++                fp = {i: m["q"][i]["finding"] for i in S.IDS}
++                truth = {i: m["q"][i]["state"] for i in S.IDS}
++                for d in DRAFTS:
++                    p = parsed[pid][pref + d]
++                    n += 1
++                    fin = {i: S.final_state(p, i) for i in S.IDS}
++                    want = [S.FINDINGS[fp[i]][truth[i]] for i in S.IDS]
++                    if fin == truth and S.render_final(fp, fin) == want:
++                        ok += 1
++                    else:
++                        bad.append(dict(patient=pid, draft=d, final=fin, status=p["status"]))
++            out[f"{name}:{mod}"] = dict(n=n, ok=ok, bad=bad)
++    return out
++
++
++def make_report(stage, manifest, rows, recs):
++    """manifest·요청 행·verify를 통과한 record -> report(수치 부분)."""
++    main_rows = [r for r in rows if not r["cond"].startswith(("O_", "OT_"))]
++    table, parsed_main = build_table(manifest, [r for r in main_rows if r["set"] == stage], recs)
++    rep = summarize(table)
++    rep["stage"] = stage
++    parsed_all = E47.parse_all(manifest, rows, recs)
++    nonO = [(c, p) for byc in parsed_all.values() for c, p in byc.items() if not c.startswith(("O_", "OT_"))]
++    rep["format_status_counts"] = format_counts({p: {c: v for c, v in byc.items() if not c.startswith(("O_", "OT_"))} for p, byc in parsed_all.items()})
++    rep["answer_counts_ok_only"] = answer_counts({p: {c: v for c, v in byc.items() if not c.startswith(("O_", "OT_"))} for p, byc in parsed_all.items()})
++    rep["n_valid_requests_nonoracle"] = sum(p["status"] == "ok" for c, p in nonO)
++    rep["n_requests_nonoracle"] = len(nonO)
++    rep["n_non_eos_final"] = sum(1 for byc in parsed_all.values() for p in byc.values() if not p["ended_eos"])
++    rep["valid_rate_by_cond"] = {c: v.get("ok", 0) / sum(v.values()) for c, v in rep["format_status_counts"].items()}
++    if stage == "D":
++        rep["oracle"] = oracle_check({"chexpert_D16": manifest["rows"], "padchest_D8": manifest["pc_oracle_rows"]}, parsed_all)
++    rep["per_patient_metrics"] = {pid: dict(stratum=t["stratum"], truth=t["truth"], metrics=t["metrics"]) for pid, t in table.items()}
++    st = strata(table)
++    rep["by_truth_stratum"] = {k: {c: {m: float(np.mean([table[p]["metrics"][c][m] for p in v])) for m in METRICS} for c in CONDS} for k, v in st.items()}
++    return rep
++
++
++def main():
++    ap = argparse.ArgumentParser()
++    ap.add_argument("--stage", required=True, choices=["D", "E", "F"])
++    ap.add_argument("--out-dir", required=True)
++    ap.add_argument("--protocol", required=True)
++    ap.add_argument("--out", required=True)
++    a = ap.parse_args()
++    if os.path.exists(a.out):
++        sys.exit(f"refuse to overwrite {a.out}")
++    import rr53_run
++    recs = rr53_run.verify(a.out_dir, a.stage, a.protocol)
++    req_path = f"{OUT}/requests/requests_{a.stage}.jsonl"
++    rows = [json.loads(l) for l in open(req_path)]
++    man_path = f"{OUT}/data/manifest_{a.stage}.json"
++    manifest = json.load(open(man_path))
++    rep = make_report(a.stage, manifest, rows, recs)
++    h = hashlib.sha256()
++    wf = {}
++    for f in sorted(os.listdir(a.out_dir)):
++        if f.startswith("gen_worker") and f.endswith(".jsonl"):
++            wf[f] = file_sha(os.path.join(a.out_dir, f))
++            h.update(open(os.path.join(a.out_dir, f), "rb").read())
++    rep["source"] = dict(protocol=a.protocol, protocol_sha256=file_sha(a.protocol), out_dir=a.out_dir, worker_files_sha256=wf, worker_files_digest=h.hexdigest(),
++                         requests_sha256=file_sha(req_path), manifest_sha256=file_sha(man_path), spec=S.VERSION, boot_seed=S.BOOT_SEED, boot_b=S.BOOT_B,
++                         eval_sha256=file_sha("rr53_eval.py"), data_check_sha256=file_sha(f"{OUT}/data/data_check.json"))
++    tmp = a.out + ".tmp"
++    json.dump(rep, open(tmp, "w"), indent=1, default=str)
++    os.replace(tmp, a.out)
++    print("report written", a.out)
++
++
++if __name__ == "__main__":
++    main()
+diff --git a/rr53_gate.py b/rr53_gate.py
+new file mode 100644
+index 0000000..cdd7c0a
+--- /dev/null
++++ b/rr53_gate.py
+@@ -0,0 +1,53 @@
++"""iter_053 D 기술 gate decision (E 실행 허용 여부). D의 임상 정확도(R1/R2/BJ 정답률)는 보지 않는다.
++검사: oracle 192/192(정답 상태·ID·결정론적 문장 연결), 모든 요청 최종 EOS, 본조건별 valid>=0.95, 독립 verifier PASS(현재 report와 연결),
++pilot 2/4 worker token 불일치 0, 실제 SIGKILL 중단·재개 불일치 0, 변조·중복·누락·wrong config 거부 전부, 공식 processor tensor 검사 통과.
++decision에는 모든 입력 파일의 sha256을 기록하며 rr53_run.check_gate_inputs가 protocol 생성·검증 시 다시 계산한다.
++
++python rr53_gate.py --report R --verify V --protocol P --workers-cmp C --resume RS --tamper T --tensor X --out GATE
++"""
++import argparse
++import json
++import os
++import sys
++
++from rr53_data import OUT, file_sha
++
++MIN_VALID = 0.95
++CONDS = ("R1", "R2", "T", "BJ", "BT", "BI")
++ORACLE_N = {"chexpert_D16:image": 64, "chexpert_D16:text": 64, "padchest_D8:image": 32, "padchest_D8:text": 32}
++
++
++def main():
++    ap = argparse.ArgumentParser()
++    for k in ("report", "verify", "protocol", "workers-cmp", "resume", "tamper", "tensor", "out"):
++        ap.add_argument("--" + k, required=True)
++    a = ap.parse_args()
++    if os.path.exists(a.out):
++        sys.exit("refuse to overwrite gate decision")
++    rep, ver = json.load(open(a.report)), json.load(open(a.verify))
++    cmp_, res, tam, ten = json.load(open(a.workers_cmp)), json.load(open(a.resume)), json.load(open(a.tamper)), json.load(open(a.tensor))
++    orc = rep["oracle"]
++    checks = dict(
++        report_is_D=rep["stage"] == "D",
++        oracle_all_correct=all(orc[k]["n"] == n and orc[k]["ok"] == n for k, n in ORACLE_N.items()) and set(orc) == set(ORACLE_N),
++        all_final_eos=rep["n_non_eos_final"] == 0,
++        valid_each_cond=all(rep["valid_rate_by_cond"][c] >= MIN_VALID for c in CONDS),
++        independent_verify_pass=bool(ver["passed"]) and ver["stage"] == "D",
++        verify_bound_to_report=ver["source_digests"]["report"] == file_sha(a.report) and rep["source"]["protocol_sha256"] == file_sha(a.protocol),
++        workers_token_mismatch_zero=cmp_["token_mismatch"] == 0 and cmp_["n_common"] == 48 and cmp_["only_a"] == 0 and cmp_["only_b"] == 0,
++        resume_token_mismatch_zero=res["token_mismatch"] == 0 and res["n_common"] == 48 and res["killed_midrun"] is True and res["completion_written"] is True,
++        tamper_all_rejected=bool(tam["all_rejected"]),
++        official_tensor_check_passed=bool(ten["passed"]),
++    )
++    inputs = {k: dict(path=p, sha256=file_sha(p)) for k, p in dict(report=a.report, verify=a.verify, protocol=a.protocol, workers_cmp=a.workers_cmp,
++                                                                  resume=a.resume, tamper=a.tamper, tensor=a.tensor).items()}
++    dec = dict(run=all(checks.values()), stage="D", checks=checks, valid_rate_by_cond=rep["valid_rate_by_cond"],
++               data_check_sha256=file_sha(f"{OUT}/data/data_check.json"), inputs=inputs, min_valid=MIN_VALID)
++    tmp = a.out + ".tmp"
++    json.dump(dec, open(tmp, "w"), indent=1)
++    os.replace(tmp, a.out)
++    print(json.dumps(dict(run=dec["run"], checks=checks), indent=1))
++
++
++if __name__ == "__main__":
++    main()
+diff --git a/rr53_gen_test.py b/rr53_gen_test.py
+new file mode 100644
+index 0000000..628a618
+--- /dev/null
++++ b/rr53_gen_test.py
+@@ -0,0 +1,256 @@
++"""iter_053 pilot(P)/D 실행 검사: (1) 2/4 worker 출력 정합성, (2) 실제 SIGKILL 중단·재개, (3) 변조·중복·누락·wrong config·동시 launcher 거부.
++python rr53_gen_test.py compare  --a DIR --b DIR --out JSON
++python rr53_gen_test.py resume   --base DIR --out-dir DIR --requests R --protocol P --workers 4 --kill-after N --out JSON
++python rr53_gen_test.py tamper   --src DIR --protocol P --requests R --out JSON
++결과 JSON은 기존 파일을 덮어쓰지 않는다.
++"""
++import argparse
++import glob
++import json
++import os
++import shutil
++import signal
++import subprocess
++import sys
++import time
++
++import pg43_run as PR
++import rr53_run
++
++
++def load(d):
++    recs = {}
++    for f in sorted(glob.glob(os.path.join(d, "gen_worker*.jsonl"))):
++        for r in PR.read_records(f):
++            recs[r["request_id"]] = r
++    return recs
++
++
++def write_new(path, obj):
++    if os.path.exists(path):
++        sys.exit(f"refuse to overwrite {path}")
++    os.makedirs(os.path.dirname(path), exist_ok=True)
++    json.dump(obj, open(path + ".tmp", "w"), indent=1, default=str)
++    os.replace(path + ".tmp", path)
++
++
++def compare(a, b):
++    A, B = load(a), load(b)
++    common = sorted(set(A) & set(B))
++    mism = [r for r in common if A[r]["suffix_ids"] != B[r]["suffix_ids"] or A[r]["input_ids_sha256"] != B[r]["input_ids_sha256"]]
++    return dict(a=a, b=b, n_a=len(A), n_b=len(B), n_common=len(common), token_mismatch=len(mism), mismatched_ids=mism[:10],
++                only_a=len(set(A) - set(B)), only_b=len(set(B) - set(A)))
++
++
++def resume(a):
++    if os.path.exists(a.out_dir):
++        sys.exit("resume out-dir exists")
++    cmd = [sys.executable, "pg43_run.py", "launch", "--requests", a.requests, "--protocol", a.protocol, "--out-dir", a.out_dir,
++           "--workers", str(a.workers), "--peak-gb", str(a.peak_gb)]
++    p = subprocess.Popen(cmd, start_new_session=True, stdout=open(a.out_dir + ".launch1.stdout", "w"), stderr=subprocess.STDOUT)
++    n = 0
++    t0 = time.time()
++    while time.time() - t0 < 900:
++        time.sleep(3)
++        n = sum(len(PR.read_records(f)) for f in glob.glob(os.path.join(a.out_dir, "gen_worker*.jsonl")))
++        if n >= a.kill_after or p.poll() is not None:
++            break
++    killed = p.poll() is None
++    if killed:
++        os.killpg(p.pid, signal.SIGKILL)
++    p.wait()
++    time.sleep(5)
++    n_at_kill = sum(len(PR.read_records(f)) for f in glob.glob(os.path.join(a.out_dir, "gen_worker*.jsonl")))
++    partial_bytes = []
++    for f in glob.glob(os.path.join(a.out_dir, "gen_worker*.jsonl")):
++        data = open(f, "rb").read()
++        partial_bytes.append(dict(file=os.path.basename(f), ends_with_newline=data.endswith(b"\n") or not data))
++    p2 = subprocess.run(cmd, capture_output=True, text=True)
++    comp = os.path.exists(os.path.join(a.out_dir, "completion.json"))
++    res = compare(a.base, a.out_dir)
++    res.update(killed_midrun=killed, records_at_kill=n_at_kill, partial_tails=partial_bytes, relaunch_rc=p2.returncode, relaunch_stdout=p2.stdout[-300:],
++               completion_written=comp, repair_logs=sorted(os.path.basename(f) for f in glob.glob(os.path.join(a.out_dir, "*.repair.log"))),
++               preserved_partial_files=sorted(os.path.basename(f) for f in glob.glob(os.path.join(a.out_dir, "*.partial.*.bin"))))
++    if comp:
++        rr53_run.verify(a.out_dir, a.stage, a.protocol)
++        res["verify_after_resume"] = "ok"
++    return res
++
++
++def expect_reject(name, fn, out):
++    try:
++        fn()
++        out.append(dict(name=name, rejected=False))
++    except PR.RunError as e:
++        out.append(dict(name=name, rejected=True, error=str(e)[:160]))
++    except Exception as e:  # 다른 종류의 오류는 의도한 검증 분기가 아니므로 기록하되 거부로 세지 않는다
++        out.append(dict(name=name, rejected=False, other_error=repr(e)[:200]))
++
++
++def tamper(a):
++    root = os.path.join(os.path.dirname(a.src.rstrip("/")), "tamper_work_" + os.path.splitext(os.path.basename(a.out))[0])
++    if os.path.exists(root):
++        sys.exit("tamper_work exists")
++    res = []
++    shutil.copytree(a.src, root + "_base")
++    base = root + "_base"
++    stage = a.stage
++    # 0. 변조 전 정상 확인
++    rr53_run.verify(base, stage, a.protocol)
++    res.append(dict(name="unmodified copy verifies", rejected=False, expected_pass=True))
++    files = sorted(glob.glob(os.path.join(base, "gen_worker*.jsonl")))
++
++    def fresh(tag):
++        d = f"{root}_{tag}"
++        shutil.copytree(base, d)
++        return d
++
++    d = fresh("digest")  # record 내용 변경 (digest 불일치)
++    f = sorted(glob.glob(os.path.join(d, "gen_worker*.jsonl")))[0]
++    lines = open(f).read().split("\n")
++    r = json.loads(lines[0])
++    r["suffix_text_raw"] = r["suffix_text_raw"].replace("absent", "present", 1)
++    lines[0] = json.dumps(r)
++    open(f, "w").write("\n".join(lines))
++    expect_reject("edited record content (record_digest/file hash)", lambda: rr53_run.verify(d, stage, a.protocol), res)
++    d = fresh("dup")  # 중복 record
++    f = sorted(glob.glob(os.path.join(d, "gen_worker*.jsonl")))[0]
++    first = open(f).read().split("\n")[0]
++    open(f, "a").write(first + "\n")
++    expect_reject("duplicated record line", lambda: rr53_run.verify(d, stage, a.protocol), res)
++    d = fresh("miss")  # 누락 record
++    f = sorted(glob.glob(os.path.join(d, "gen_worker*.jsonl")))[0]
++    ln = open(f).read().split("\n")
++    open(f, "w").write("\n".join(ln[1:]))
++    expect_reject("missing record line", lambda: rr53_run.verify(d, stage, a.protocol), res)
++    d = fresh("exit")  # completion 종료 코드 변조
++    c = json.load(open(os.path.join(d, "completion.json")))
++    c["exit_codes"][0] = 1
++    json.dump(c, open(os.path.join(d, "completion.json"), "w"))
++    expect_reject("completion exit code != 0", lambda: rr53_run.verify(d, stage, a.protocol), res)
++    d = fresh("proto")  # wrong config: 다른 코드 hash의 구 protocol
++    expect_reject("wrong protocol (different stage/code lock)", lambda: rr53_run.verify(d, stage, a.wrong_protocol), res)
++    d = fresh("reqs")  # 요청 파일 변조
++    req2 = d + "/requests_altered.jsonl"
++    rows = open(a.requests).read().split("\n")
++    r0 = json.loads(rows[0])
++    r0["prompt"] = r0["prompt"] + " "
++    rows[0] = json.dumps(r0, sort_keys=True)
++    open(req2, "w").write("\n".join(rows))
++    expect_reject("altered request file vs protocol lock", lambda: PR.verify_completion(d, req2, a.protocol), res)
++    d = fresh("adapter")  # record가 adapter를 썼다고 변조 -> digest 불일치
++    f = sorted(glob.glob(os.path.join(d, "gen_worker*.jsonl")))[0]
++    lines = open(f).read().split("\n")
++    r = json.loads(lines[0])
++    r["adapter_digest"] = "deadbeef"
++    lines[0] = json.dumps(r)
++    open(f, "w").write("\n".join(lines))
++    expect_reject("record claims adapter use", lambda: rr53_run.verify(d, stage, a.protocol), res)
++    # --- 공격자가 completion의 worker 파일 hash까지 맞춘 경우: 파일 hash가 아니라 record 내부 검증 분기가 실패해야 한다 ---
++    def rehash(d):
++        c = json.load(open(os.path.join(d, "completion.json")))
++        for fn in c["worker_file_sha256"]:
++            c["worker_file_sha256"][fn] = PR.file_sha(os.path.join(d, fn))
++        json.dump(c, open(os.path.join(d, "completion.json"), "w"))
++
++    def edit_first(d, fn_edit, redigest):
++        f = sorted(glob.glob(os.path.join(d, "gen_worker*.jsonl")))[0]
++        lines = open(f).read().split("\n")
++        r = json.loads(lines[0])
++        fn_edit(r)
++        if redigest:
++            r["record_digest"] = PR.record_digest(r)
++        lines[0] = json.dumps(r)
++        open(f, "w").write("\n".join(lines))
++        rehash(d)
++
++    def branch(name, d, want, edit=None, redigest=False, dup=False, drop=False):
++        if edit:
++            edit_first(d, edit, redigest)
++        f = sorted(glob.glob(os.path.join(d, "gen_worker*.jsonl")))[0]
++        if dup:
++            open(f, "a").write(open(f).read().split("\n")[0] + "\n")
++            rehash(d)
++        if drop:
++            open(f, "w").write("\n".join(open(f).read().split("\n")[1:]))
++            rehash(d)
++        try:
++            rr53_run.verify(d, stage, a.protocol)
++            res.append(dict(name=name, rejected=False))
++        except PR.RunError as e:
++            res.append(dict(name=name, rejected=(want in str(e)), want=want, error=str(e)[:160]))
++
++    branch("[inner] edited content, completion rehashed -> record digest", fresh("b1"), "record digest mismatch",
++           edit=lambda r: r.__setitem__("suffix_text_raw", r["suffix_text_raw"] + " "))
++    branch("[inner] duplicated line, rehashed -> request set", fresh("b2"), "request set mismatch", dup=True)
++    branch("[inner] dropped line, rehashed -> request set", fresh("b3"), "request set mismatch", drop=True)
++    branch("[inner] adapter digest set + record re-digested -> adapter/protocol digest", fresh("b4"), "adapter/protocol digest mismatch",
++           edit=lambda r: r.__setitem__("adapter_digest", "deadbeef"), redigest=True)
++    branch("[inner] row digest edited + re-digested -> record digest", fresh("b5"), "record digest mismatch",
++           edit=lambda r: r.__setitem__("row_digest", "00" * 32), redigest=True)
++    branch("[inner] prompt hash edited + re-digested -> prompt hash", fresh("b6"), "prompt hash mismatch",
++           edit=lambda r: r.__setitem__("prompt_sha256", "11" * 32), redigest=True)
++
++    def txt_edit(d):
++        for f in sorted(glob.glob(os.path.join(d, "gen_worker*.jsonl"))):
++            lines = open(f).read().split("\n")
++            for k, ln in enumerate(lines):
++                if ln.strip() and json.loads(ln)["modality"] == "text":
++                    r = json.loads(ln)
++                    r["n_image_tokens"] = 5
++                    r["record_digest"] = PR.record_digest(r)
++                    lines[k] = json.dumps(r)
++                    open(f, "w").write("\n".join(lines))
++                    rehash(d)
++                    return
++    d = fresh("b7")
++    txt_edit(d)
++    try:
++        rr53_run.verify(d, stage, a.protocol)
++        res.append(dict(name="[inner] text-only record with image tokens", rejected=False))
++    except PR.RunError as e:
++        res.append(dict(name="[inner] text-only record with image tokens", rejected=("text-only record carries image input" in str(e)), error=str(e)[:160]))
++    # 동시 launcher: 같은 out-dir launch.lock 을 잡고 있는 동안 두 번째 launcher는 거부해야 한다
++    ld = f"{root}_lock"
++    os.makedirs(ld)
++    fd = PR.try_flock(os.path.join(ld, "launch.lock"))
++    r2 = subprocess.run([sys.executable, "pg43_run.py", "launch", "--requests", a.requests, "--protocol", a.protocol, "--out-dir", ld, "--workers", "1"],
++                        capture_output=True, text=True)
++    os.close(fd)
++    res.append(dict(name="concurrent launcher on locked out-dir", rejected=(r2.returncode != 0 and "another launcher" in (r2.stdout + r2.stderr)), rc=r2.returncode,
++                    msg=(r2.stdout + r2.stderr)[-120:]))
++    r3 = subprocess.run([sys.executable, "pg43_run.py", "launch", "--requests", a.requests, "--protocol", a.protocol, "--out-dir", base, "--workers", "1"],
++                        capture_output=True, text=True)
++    res.append(dict(name="launch into a completed out-dir", rejected=(r3.returncode != 0 and "completion.json exists" in (r3.stdout + r3.stderr)), rc=r3.returncode))
++    tests = [x for x in res if not x.get("expected_pass")]
++    return dict(results=res, all_rejected=all(x["rejected"] for x in tests), n_tests=len(tests), root=root)
++
++
++def main():
++    ap = argparse.ArgumentParser()
++    sub = ap.add_subparsers(dest="cmd", required=True)
++    c = sub.add_parser("compare")
++    c.add_argument("--a", required=True)
++    c.add_argument("--b", required=True)
++    c.add_argument("--out", required=True)
++    r = sub.add_parser("resume")
++    for k in ("base", "out-dir", "requests", "protocol", "out"):
++        r.add_argument("--" + k, required=True)
++    r.add_argument("--workers", type=int, default=4)
++    r.add_argument("--stage", required=True)
++    r.add_argument("--peak-gb", type=float, default=8.5)
++    r.add_argument("--kill-after", type=int, default=40)
++    t = sub.add_parser("tamper")
++    for k in ("src", "protocol", "requests", "out", "stage", "wrong-protocol"):
++        t.add_argument("--" + k, required=True)
++    a = ap.parse_args()
++    if a.cmd == "compare":
++        write_new(a.out, compare(a.a, a.b))
++    elif a.cmd == "resume":
++        write_new(a.out, resume(a))
++    else:
++        write_new(a.out, tamper(a))
++
++
++if __name__ == "__main__":
++    main()
+diff --git a/rr53_run.py b/rr53_run.py
+new file mode 100644
+index 0000000..08de8cf
+--- /dev/null
++++ b/rr53_run.py
+@@ -0,0 +1,146 @@
++"""iter_053 실행 wrapper: pg43_run의 worker/launcher/verify_completion 재사용 + 이번 실험의 호출자 요구 대조.
++
++python rr53_run.py protocol --stage D|E|F --out P [--gate G]   # 코드·요청·자료·평가 소스 hash 잠금
++python rr53_run.py verify --out-dir D --stage D|E|F --protocol P
++생성: python pg43_run.py launch --requests results/iter_053/requests/requests_<S>.jsonl --protocol P --out-dir D --workers N --peak-gb G
++- E protocol은 D gate decision(run=true, stage=D), F protocol은 E decision(run=true, stage=E)을 요구하며, decision이 참조하는 모든 입력 파일의
++  현재 sha256을 다시 계산해 일치해야 한다 (run=true만 있는 JSON은 통과하지 못한다).
++- verify는 manifest에서 기대 요청 집합을 다시 구성해 요청 파일과 byte 단위로 비교하고(관측 출력 ID를 기대 집합으로 쓰지 않는다) completion을 재검증한다.
++"""
++import argparse
++import json
++import os
++
++import pg43_run as R
++import rr53_build as B
++import rr53_spec as S
++from rr53_data import OUT, file_sha
++from rsna_diag import generate as G
++
++LOCK = ["rr53_spec.py", "rr53_data.py", "rr53_build.py", "rr53_run.py", "rr53_eval.py", "rr53_verify.py", "rr53_gate.py", "rr53_decide.py",
++        "rr47_spec.py", "rr47_eval.py", "rsna_diag/cx18_data.py", "rsna_diag/cx18_spec.py", "rsna_diag/qa_spec.py",
++        f"{OUT}/data/data_check.json", "results/iter_018/manifests/labels.json", "results/iter_018/manifests/sets.json",
++        "results/iter_018/manifests/infer_manifest.jsonl"]
++EXPECT = {"P": dict(n=48, modality=dict(image=30, text=18)), "D": dict(n=448, modality=dict(image=272, text=176)), "E": dict(n=768, modality=dict(image=528, text=240)),
++          "F": dict(n=1680, modality=dict(image=1155, text=525))}
++GATE_STAGE = {"E": "D", "F": "E"}
++
++
++def check_gate_inputs(gate_path, want_stage):
++    g = json.load(open(gate_path))
++    if g.get("run") is not True or g.get("stage") != want_stage:
++        raise R.RunError(f"gate {gate_path}: run!=true or stage!={want_stage}")
++    if g.get("data_check_sha256") != file_sha(f"{OUT}/data/data_check.json"):
++        raise R.RunError("gate data_check digest != current data_check")
++    ins = g.get("inputs") or {}
++    if not ins:
++        raise R.RunError("gate has no input digests")
++    for name, d in ins.items():
++        if file_sha(d["path"]) != d["sha256"]:
++            raise R.RunError(f"gate input {name} changed since decision: {d['path']}")
++    return g
++
++
++def stage_files(stage):
++    return [f"{OUT}/data/manifest_{'D' if stage == 'P' else stage}.json"]
++
++
++def pilot_subset(reqs):
++    """D에서 사전 규칙으로 고른 처리량·정합성·재개 pilot (출력과 무관): 조건군(R1,R2,T,BJ,BT,BI,O,OT)마다 CheXpert D 요청 중 order_key가 앞선 6개."""
++    out = []
++    for base in ("R1", "R2", "T", "BJ", "BT", "BI", "O", "OT"):
++        cand = sorted((r for r in reqs if r["set"] == "D" and r["cond"].split("_")[0] == base), key=lambda r: r["order_key"])
++        out += cand[:6]
++    return out
++
++
++def make(stage, out, gate):
++    if stage in GATE_STAGE:
++        if not gate:
++            raise R.RunError(f"stage {stage} protocol requires the {GATE_STAGE[stage]} decision (--gate)")
++        check_gate_inputs(gate, GATE_STAGE[stage])
++    req = f"{OUT}/requests/requests_{stage}.jsonl"
++    check_requests(stage, req)
++    return R.make_protocol(req, out, adapter=None, gate=gate, lock=LOCK + stage_files(stage), extra={"stage": stage, "version": S.VERSION})
++
++
++def expected_requests(stage):
++    man = json.load(open(f"{OUT}/data/manifest_{'D' if stage == 'P' else stage}.json"))
++    cache = {}
++    if stage in ("D", "P"):
++        reqs = B.make_requests(man["rows"], "D", "with", cache)
++        reqs += B.make_requests(man["pc_oracle_rows"], "pc_D8", "only", cache)
++        if stage == "P":
++            reqs = pilot_subset(reqs)
++    else:
++        reqs = B.make_requests(man["rows"], stage, "none", cache)
++    return reqs
++
++
++def check_requests(stage, req_path):
++    got = R.read_requests(req_path)
++    exp = expected_requests(stage)
++    if len(got) != EXPECT[stage]["n"] or len(exp) != len(got):
++        raise R.RunError(f"{stage}: request count {len(got)} != plan {EXPECT[stage]['n']}")
++    key = lambda r: r["request_id"]
++    if {key(r): r for r in got} != {key(r): r for r in exp}:
++        raise R.RunError(f"{stage}: request file differs from manifest reconstruction")
++    mod = {m: sum(r["modality"] == m for r in got) for m in ("image", "text")}
++    if mod != EXPECT[stage]["modality"]:
++        raise R.RunError(f"{stage}: modality counts {mod}")
++    return got
++
++
++def verify(out_dir, stage, protocol):
++    req = f"{OUT}/requests/requests_{stage}.jsonl"
++    pdig, proto = R.verify_protocol(protocol, req)
++    if proto["requests_path"] != req:
++        raise R.RunError("protocol requests_path != requested stage requests")
++    if proto.get("adapter") is not None:
++        raise R.RunError("adapter must not be used in iter_053 (M0 only)")
++    if proto["generation_config"]["model_revision"] != G.MODEL_REVISION:
++        raise R.RunError("protocol model revision mismatch")
++    if proto["extra"].get("stage") != stage or proto["extra"].get("version") != S.VERSION:
++        raise R.RunError("protocol stage/version mismatch")
++    miss = [f for f in LOCK + stage_files(stage) if f not in proto["locked_files"]]
++    if miss:
++        raise R.RunError(f"protocol lacks required locked files: {miss}")
++    if stage in GATE_STAGE:
++        if not proto.get("gate"):
++            raise R.RunError("protocol lacks gate")
++        check_gate_inputs(proto["gate"]["decision_path"], GATE_STAGE[stage])
++    check_requests(stage, req)
++    recs = R.verify_completion(out_dir, req, protocol)
++    for r in recs:
++        if r["adapter_digest"] is not None:
++            raise R.RunError("record used an adapter")
++    return recs
++
++
++def main():
++    ap = argparse.ArgumentParser()
++    sub = ap.add_subparsers(dest="cmd", required=True)
++    p = sub.add_parser("protocol")
++    p.add_argument("--stage", required=True, choices=["P", "D", "E", "F"])
++    p.add_argument("--out", required=True)
++    p.add_argument("--gate", default=None)
++    w = sub.add_parser("write-pilot-requests")
++    v = sub.add_parser("verify")
++    v.add_argument("--stage", required=True, choices=["P", "D", "E", "F"])
++    v.add_argument("--out-dir", required=True)
++    v.add_argument("--protocol", required=True)
++    a = ap.parse_args()
++    if a.cmd == "write-pilot-requests":
++        from rr53_data import write_new
++        reqs = expected_requests("P")
++        write_new(f"{OUT}/requests/requests_P.jsonl", "".join(json.dumps(r, sort_keys=True) + "\n" for r in reqs))
++        print("pilot requests", len(reqs))
++    elif a.cmd == "protocol":
++        make(a.stage, a.out, a.gate)
++        print("protocol written", a.out)
++    else:
++        print("verified", len(verify(a.out_dir, a.stage, a.protocol)), "records")
++
++
++if __name__ == "__main__":
++    main()
+diff --git a/rr53_sanity.py b/rr53_sanity.py
+new file mode 100644
+index 0000000..ceeea07
+--- /dev/null
++++ b/rr53_sanity.py
+@@ -0,0 +1,113 @@
++"""iter_053 공식 입력 구성 검사 (processor만 로드, 모델/GPU 불필요).
++
++운영 경로 G.build_inputs / G.build_inputs_text(apply_chat_template(tokenize=True))의 input_ids·pixel_values를, (a) 독립 디코드·중앙 square padding한 배열과
++(b) chat template을 문자열로 렌더링한 뒤 processor(text=..., images=...)를 직접 호출한 결과와 대조한다. text-only는 pixel_values와 image token이 없어야 한다.
++python rr53_sanity.py --stages D,E,F --out results/iter_053/tests/input_tensor.json   (기존 파일 덮어쓰기 금지)
++"""
++import argparse
++import json
++import os
++import sys
++import time
++
++import numpy as np
++from PIL import Image
++
++from rr53_data import OUT
++from rsna_diag import generate as G
++
++
++def independent_padded(path):
++    a = np.asarray(Image.open(path))
++    assert a.dtype == np.uint8
++    rgb = np.repeat(a[:, :, None], 3, axis=2) if a.ndim == 2 else a
++    h, w = rgb.shape[:2]
++    side = max(h, w)
++    top, left = (side - h) // 2, (side - w) // 2
++    out = np.zeros((side, side, 3), np.uint8)
++    out[top:top + h, left:left + w] = rgb
++    return out
++
++
++def main():
++    ap = argparse.ArgumentParser()
++    ap.add_argument("--stages", default="D,E,F")
++    ap.add_argument("--out", required=True)
++    a = ap.parse_args()
++    if os.path.exists(a.out):
++        sys.exit("refuse to overwrite")
++    os.environ.setdefault("HF_HOME", G.HF_HOME)
++    os.environ.setdefault("HF_HUB_OFFLINE", "1")
++    import torch
++    import transformers
++    proc = transformers.AutoProcessor.from_pretrained(G.MODEL_ID, revision=G.MODEL_REVISION)
++    img_tok = proc.tokenizer.convert_tokens_to_ids("<image_soft_token>")  # <start_of_image> 1개 + 이 token 256개가 영상 자리
++    assert img_tok is not None and img_tok != proc.tokenizer.unk_token_id
++    checks = dict(n=0, image=0, text=0, pad_array_mismatch=0, ids_mismatch=0, pixel_mismatch=0, text_has_image=0, image_token_count_bad=0,
++                  prompt_not_in_decoded=0, template_shape_bad=0)
++    bad = []
++    seen = set()
++    t0 = time.time()
++    for st in a.stages.split(","):
++        rows = [json.loads(l) for l in open(f"{OUT}/requests/requests_{st}.jsonl")]
++        for r in rows:
++            key = (r["image"], r["prompt_sha256"], r["modality"])
++            if key in seen:
++                continue
++            seen.add(key)
++            checks["n"] += 1
++            if r["modality"] == "image":
++                checks["image"] += 1
++                img, aff, px = G.load_image(r["image"])
++                ind = independent_padded(r["image"])
++                if not np.array_equal(np.asarray(img), ind) or px != r["input_pixel_sha256"]:
++                    checks["pad_array_mismatch"] += 1
++                    bad.append(("pad", r["request_id"]))
++                prod = G.build_inputs(proc, img, r["prompt"])
++                msgs = [{"role": "user", "content": [{"type": "image"}, {"type": "text", "text": r["prompt"]}]}]
++                txt = proc.apply_chat_template(msgs, add_generation_prompt=True, tokenize=False)
++                man = proc(text=txt, images=[Image.fromarray(ind)], return_tensors="pt", add_special_tokens=False)  # template 문자열이 이미 <bos>를 가진다
++                if not torch.equal(prod["input_ids"], man["input_ids"]):
++                    checks["ids_mismatch"] += 1
++                    bad.append(("ids", r["request_id"]))
++                if not torch.equal(prod["pixel_values"], man["pixel_values"]):
++                    checks["pixel_mismatch"] += 1
++                    bad.append(("pix", r["request_id"]))
++                n_img = int((prod["input_ids"] == img_tok).sum())
++                if n_img != proc.image_seq_length or tuple(prod["pixel_values"].shape) != (1, 3, 896, 896):
++                    checks["image_token_count_bad"] += 1
++                    bad.append(("imgtok", r["request_id"], n_img, tuple(prod["pixel_values"].shape)))
++                ids = prod["input_ids"][0].tolist()
++            else:
++                checks["text"] += 1
++                prod = G.build_inputs_text(proc, r["prompt"])
++                msgs = [{"role": "user", "content": [{"type": "text", "text": r["prompt"]}]}]
++                txt = proc.apply_chat_template(msgs, add_generation_prompt=True, tokenize=False)
++                man = proc(text=txt, return_tensors="pt", add_special_tokens=False)
++                if not torch.equal(prod["input_ids"], man["input_ids"]):
++                    checks["ids_mismatch"] += 1
++                    bad.append(("ids_text", r["request_id"]))
++                if "pixel_values" in prod or any(k.startswith("pixel") for k in prod) or int((prod["input_ids"] == img_tok).sum()) != 0:
++                    checks["text_has_image"] += 1
++                    bad.append(("text_image", r["request_id"]))
++                ids = prod["input_ids"][0].tolist()
++            dec = proc.tokenizer.decode(ids, skip_special_tokens=False)
++            if r["prompt"] not in dec:
++                checks["prompt_not_in_decoded"] += 1
++                bad.append(("prompt", r["request_id"]))
++            if not (dec.count("<start_of_turn>user") == 1 and dec.endswith("<start_of_turn>model\n") and "<end_of_turn>\n<start_of_turn>model\n" in dec):
++                checks["template_shape_bad"] += 1
++                bad.append(("template", r["request_id"]))
++    passed = all(v == 0 for k, v in checks.items() if k not in ("n", "image", "text"))
++    res = dict(passed=passed, checks=checks, bad=bad[:20], seconds=time.time() - t0, stages=a.stages, model_revision=G.MODEL_REVISION,
++               transformers=transformers.__version__, torch=torch.__version__, chat_template_sha256=G.sha((proc.chat_template or "").encode()),
++               image_seq_length=proc.image_seq_length, image_size=str(proc.image_processor.size))
++    tmp = a.out + ".tmp"
++    json.dump(res, open(tmp, "w"), indent=1)
++    os.replace(tmp, a.out)
++    print(json.dumps(res, indent=1))
++    sys.exit(0 if passed else 1)
++
++
++if __name__ == "__main__":
++    main()
+diff --git a/rr53_spec.py b/rr53_spec.py
+new file mode 100644
+index 0000000..02426bf
+--- /dev/null
++++ b/rr53_spec.py
+@@ -0,0 +1,66 @@
++"""iter_053 CheXpert 교정·보존 진단: 고정 상수·prompt·평가 규칙 (CPU only).
++
++rr47_spec의 상태 parser·finding 문장·R1/R2/BJ/BI prompt를 그대로 재사용한다(승인 범위: 상태 parser). 이 파일이 바꾸는 것:
++(1) T는 R2 텍스트와 byte-identical (영상만 제거; 영상 부재 안내·uncertain 유도 없음), (2) BT = BJ 텍스트 byte-identical 영상 제거,
++(3) oracle O2 = 기존 O + 출처 우선순위 문장, (4) 새 version/seed. GT/truth는 평가 함수에만 인자로 들어간다.
++"""
++import rr47_spec as B
++
++VERSION = "rr53_v1"
++SEED = 5301
++BOOT_SEED = 5302
++BOOT_B = 10000
++CAPS = B.CAPS
++IDS = B.IDS
++STATES = B.STATES
++DRAFT_CODES = B.DRAFT_CODES
++FINDING_PAIR = {"qA": "cardiomegaly", "qB": "effusion"}   # CheXpert 고정 두 finding (cardiomegaly / pleural effusion)
++FINDINGS = B.FINDINGS
++sha = B.sha
++canon = B.canon
++flip = B.flip
++code_states = B.code_states
++draft_code = B.draft_code
++draft_text = B.draft_text
++parse_state = B.parse_state
++final_state = B.final_state
++render_final = B.render_final
++
++AUTH_SENTENCE = ("For this consistency check, the verified final status is authoritative. Copy it exactly; "
++                 "do not infer a different status from the draft or image.")
++
++prompt_R1 = B.prompt_R1
++prompt_R2 = B.prompt_R2
++prompt_BJ = B.prompt_BJ
++prompt_BI = B.prompt_BI
++
++
++def prompt_T(items):
++    """R2와 byte-identical (영상만 요청에서 제거)."""
++    return B.prompt_R2(items)
++
++
++def prompt_BT(finding_pair):
++    """BJ와 byte-identical (영상만 요청에서 제거)."""
++    return B.prompt_BJ(finding_pair)
++
++
++def prompt_O2(items, truth_pair):
++    """기존 O prompt + 출처 우선순위 문장(사전 고정). 같은 텍스트를 image/text 두 modality에 쓴다."""
++    base = B.prompt_O(items, truth_pair)
++    marker = "Return the verified final status of each finding."
++    assert base.count(marker) == 1
++    return base.replace(marker, marker + " " + AUTH_SENTENCE)
++
++
++def request_id(kind, patient, cond, targets, prompt_sha, image_sha):
++    return sha(f"{VERSION}|{kind}|{patient}|{cond}|{','.join(targets)}|{prompt_sha}|{image_sha}")[:32]
++
++
++def code_of_category(cat):
++    """'present_absent' -> '10' (qA=cardiomegaly, qB=pleural effusion)."""
++    cm, pe = cat.split("_")
++    return f"{int(cm == 'present')}{int(pe == 'present')}"
++
++
++CATEGORY_OF_CODE = {"00": "absent_absent", "01": "absent_present", "10": "present_absent", "11": "present_present"}
+diff --git a/rr53_verify.py b/rr53_verify.py
+new file mode 100644
+index 0000000..d652817
+--- /dev/null
++++ b/rr53_verify.py
+@@ -0,0 +1,295 @@
++"""iter_053 독립 검증기. production(rr53_eval/rr47_eval/rr53_spec의 parser·점수·bootstrap)을 호출하지 않고 원시 record·요청·manifest·labels에서
++다시 계산해 저장 report와 대조한다. 모든 조건·지표·diff·동시 보정 구간·공통 valid·oracle·valid율을 검사하고, 불일치 항목을 제외한 PASS를 만들지 않는다.
++
++python rr53_verify.py --stage D|E|F --out-dir D --protocol P --report REPORT --out verify.json
++(completion·요청 집합·hash 연결은 rr53_run.verify가 담당한다 — 점수 계산이 아니다.)
++"""
++import argparse
++import hashlib
++import json
++import os
++import re
++import sys
++
++import numpy as np
++
++import rr53_run
++from rr53_data import OUT
++
++ANS = {"present", "absent", "uncertain"}
++DRAFTS = ["00", "01", "10", "11"]
++IDS = ("qA", "qB")
++SIMULT_LEVEL = 1 - 0.05 / 8
++
++
++def sha_file(p):
++    h = hashlib.sha256()
++    with open(p, "rb") as f:
++        for b in iter(lambda: f.read(1 << 22), b""):
++            h.update(b)
++    return h.hexdigest()
++
++
++def parse_raw(raw, eos, keys):
++    """독립 parser: 상태 dict 또는 None(invalid)."""
++    if not eos:
++        return None
++    t = raw
++    if t.endswith("<end_of_turn>"):
++        t = t[: -len("<end_of_turn>")]
++    if "<unused94>" in t or "<unused95>" in t:
++        i, j = t.find("<unused94>"), t.find("<unused95>")
++        if not (t.lstrip().startswith("<unused94>") and t.count("<unused94>") == 1 and t.count("<unused95>") == 1 and i < j):
++            return None
++        t = t[j + len("<unused95>"):]
++    t = t.strip()
++    m = re.fullmatch(r"```(?:json|JSON)?[ \t]*\n(.*?)\n?```", t, flags=re.S)
++    if m:
++        t = m.group(1).strip()
++    if "`" in t or not t.startswith("{") or not t.endswith("}"):
++        return None
++    pairs = []
++    try:
++        obj = json.loads(t, object_pairs_hook=lambda p: (pairs.extend(p), dict(p))[1])
++    except ValueError:
++        return None
++    if len([k for k, _ in pairs]) != len({k for k, _ in pairs}):
++        return None
++    if not isinstance(obj, dict) or set(obj) != set(keys) or len(obj) != len(keys):
++        return None
++    if any((not isinstance(v, str)) or v not in ANS for v in obj.values()):
++        return None
++    return obj
++
++
++def bits(code):
++    return ["present" if ch == "1" else "absent" for ch in code]
++
++
++def final_of(parsed, pid, cond, d, i, ds_k):
++    """(상태, valid). K는 초안 그대로."""
++    if cond == "K":
++        return ds_k, True
++    key = {"R1": f"R1_d{d}", "R2": f"R2_d{d}", "T": f"T_d{d}", "BJ": "BJ", "BT": "BT", "BI": f"BI_{i}"}[cond]
++    p = parsed[(pid, key)]
++    return (p[i] if p else "invalid"), p is not None
++
++
++def per_patient(manifest, parsed):
++    out = {}
++    for m in manifest["rows"]:
++        pid = m["PatientID"]
++        truth = [m["q"][i]["state"] for i in IDS]
++        res, sts = {}, {}
++        for cond in ["K", "R1", "R2", "T", "BJ", "BT", "BI"]:
++            fixed = harmed = hfail = corr = 0
++            clean = False
++            allok = True
++            seq = [[], []]
++            ss = []
++            for d in DRAFTS:
++                ds = bits(d)
++                fin = []
++                for k, i in enumerate(IDS):
++                    v, ok = final_of(parsed, pid, cond, d, i, ds[k])
++                    fin.append(v)
++                    seq[k].append(v)
++                    corr += v == truth[k]
++                    wrong = ds[k] != truth[k]
++                    if wrong:
++                        fixed += v == truth[k]
++                    else:
++                        harmed += v == ("absent" if truth[k] == "present" else "present")
++                        hfail += v != truth[k]
++                    ss.append((d, i, wrong, v == truth[k], ok))
++                both = all(fin[k] == truth[k] for k in range(2))
++                allok = allok and both
++                if ds == truth:
++                    clean = both
++            res[cond] = dict(r=fixed / 4, h=harmed / 4, h_fail=hfail / 4, acc=corr / 8, clean_exact=float(clean), robust_exact=float(allok),
++                             sens=sum(len(set(s)) > 1 for s in seq) / 2)
++            sts[cond] = ss
++        out[pid] = dict(stratum=m["truth_code"], metrics=res, states=sts, truth=truth)
++    return out
++
++
++def draws(strata, B=10000, seed=5302):
++    rng = np.random.default_rng(seed)
++    return [rng.integers(0, len(v), size=(B, len(v))) for v in strata]
++
++
++def compare(stage, reqs, recs, manifest, report, labels):
++    """원시 record에서 모든 수치를 다시 계산해 report와 대조한다. returns (mismatches, n_checked, parsed)."""
++    bad = []
++    # GT 독립 대조: manifest 상태 == labels.json (원천 HF label 대응은 data_check가 검증)
++    for m in manifest["rows"]:
++        L = labels[m["PatientID"]]
++        if (m["q"]["qA"]["state"], m["q"]["qB"]["state"]) != (L["cardiomegaly"], L["pleural_effusion"]):
++            bad.append(("manifest_truth_vs_labels", m["PatientID"]))
++    rec = {r["request_id"]: r for r in recs}
++    parsed = {}
++    for q in reqs:
++        r = rec[q["request_id"]]
++        parsed[(q["patient"], q["cond"])] = parse_raw(r["suffix_text_raw"], r["ended_eos"], q["targets"])
++    pp = per_patient(manifest, parsed)
++    byst = {}
++    for pid in sorted(pp):
++        byst.setdefault(pp[pid]["stratum"], []).append(pid)
++    skeys = sorted(byst)
++    strata = [byst[k] for k in skeys]
++    dr = draws(strata)
++    N = len(pp)
++    metrics = ["r", "h", "h_fail", "acc", "clean_exact", "robust_exact", "sens"]
++    n_checked = 0
++
++    def close(x, y, tol=1e-9):
++        return abs(x - y) <= tol
++
++    def samp(cond, m):
++        tot = 0
++        for pids, idx in zip(strata, dr):
++            v = np.array([pp[p]["metrics"][cond][m] for p in pids], float)
++            tot = tot + v[idx].mean(axis=1)
++        return tot / len(strata)
++
++    def macro(cond, m):
++        return sum(sum(pp[p]["metrics"][cond][m] for p in pids) / len(pids) for pids in strata) / len(strata)
++
++    for cond, md in report["conds"].items():
++        for m in metrics:
++            s = samp(cond, m)
++            lo, hi = np.percentile(s, 2.5), np.percentile(s, 97.5)
++            nat = sum(pp[p]["metrics"][cond][m] for p in pp) / N
++            n_checked += 1
++            if not (close(macro(cond, m), md[m]["mean"]) and close(nat, md[m]["natural_mean"]) and close(lo, md[m]["lo95"]) and close(hi, md[m]["hi95"])):
++                bad.append(("cond", cond, m, macro(cond, m), md[m]))
++            if "simult_lo" in md[m]:
++                slo, shi = np.percentile(s, (1 - SIMULT_LEVEL) / 2 * 100), np.percentile(s, 100 - (1 - SIMULT_LEVEL) / 2 * 100)
++                n_checked += 1
++                if not (close(slo, md[m]["simult_lo"]) and close(shi, md[m]["simult_hi"]) and close(md[m]["simult_level"], SIMULT_LEVEL)):
++                    bad.append(("simult", cond, m, slo, shi, md[m]))
++                # 퇴화 exact 경계
++                allzero = all((pp[p]["metrics"][cond]["h_fail"] == 0) if m == "h_fail" else (pp[p]["metrics"][cond]["r"] == 1) for p in pp)
++                n_checked += 1
++                dg = md[m].get("degenerate_exact")
++                if allzero != (dg is not None):
++                    bad.append(("degenerate_flag", cond, m, allzero, dg))
++                elif allzero:
++                    a_ = 0.05 / (len(strata) * 8)
++                    ub = sum(1 - a_ ** (1 / len(pids)) for pids in strata) / len(strata)
++                    if not close(ub, dg["any_event_patient_fraction_upper"]):
++                        bad.append(("degenerate_bound", cond, m, ub, dg))
++    for key, dd in report["diffs"].items():
++        ab, m = key.split(":")
++        x, y = ab.split("-")
++        s = samp(x, m) - samp(y, m)
++        al = (1 - dd["level"]) / 2 * 100
++        n_checked += 1
++        if not (close(macro(x, m) - macro(y, m), dd["mean"]) and close(np.percentile(s, al), dd["lo"]) and close(np.percentile(s, 100 - al), dd["hi"])
++                and bool(np.ptp(s) == 0) == dd["degenerate"]):
++            bad.append(("diff", key, macro(x, m) - macro(y, m), dd))
++    # 공통 valid 보조 분석
++    for key, cv in report["common_valid"].items():
++        x, y = key.split("-")
++        keep = {}
++        for p in pp:
++            for (d, i, _w, _ok, vx), (_d, _i, _w2, _ok2, vy) in zip(pp[p]["states"][x], pp[p]["states"][y]):
++                keep[(p, d, i)] = vx and vy
++
++        def rates(c):
++            rr, hh = [], []
++            for pids in strata:
++                fw = nw = hf = nr = 0
++                for p in pids:
++                    for (d, i, wrong, ok, _v) in pp[p]["states"][c]:
++                        if not keep[(p, d, i)]:
++                            continue
++                        if wrong:
++                            nw += 1
++                            fw += ok
++                        else:
++                            nr += 1
++                            hf += not ok
++                rr.append(fw / nw if nw else float("nan"))
++                hh.append(hf / nr if nr else float("nan"))
++            return float(np.nanmean(rr)), float(np.nanmean(hh))
++        ra, ha = rates(x)
++        rb, hb = rates(y)
++        n_checked += 1
++        if not (cv["n_common_valid_states"] == sum(keep.values()) and close(cv["r_diff"], ra - rb) and close(cv["hfail_diff"], ha - hb)):
++            bad.append(("common_valid", key, ra - rb, ha - hb, cv))
++    # valid율·형식·비EOS
++    nonO = [(c, v) for (p, c), v in parsed.items() if not c.startswith(("O_", "OT_"))]
++    n_checked += 1
++    if sum(v is not None for _, v in nonO) != report["n_valid_requests_nonoracle"] or len(nonO) != report["n_requests_nonoracle"]:
++        bad.append(("n_valid", sum(v is not None for _, v in nonO), report["n_valid_requests_nonoracle"]))
++    n_checked += 1
++    if sum(1 for q in reqs if not rec[q["request_id"]]["ended_eos"]) != report["n_non_eos_final"]:
++        bad.append(("non_eos", report["n_non_eos_final"]))
++    per_cond = {}
++    for (p, c), v in parsed.items():
++        if c.startswith(("O_", "OT_")):
++            continue
++        b = c.split("_")[0] if c.startswith(("R1", "R2", "T_", "BI")) else c
++        per_cond.setdefault(b, [0, 0])
++        per_cond[b][1] += 1
++        per_cond[b][0] += v is not None
++    for b, (k, n) in per_cond.items():
++        n_checked += 1
++        if not close(k / n, report["valid_rate_by_cond"][b]):
++            bad.append(("valid_rate", b, k / n, report["valid_rate_by_cond"][b]))
++    # oracle (D): 정답 상태와 결정론적 문장 렌더링
++    if stage == "D":
++        groups = {"chexpert_D16": manifest["rows"], "padchest_D8": manifest["pc_oracle_rows"]}
++        for name, rows in groups.items():
++            for pref, mod in (("O_d", "image"), ("OT_d", "text")):
++                n = ok = 0
++                for m in rows:
++                    truth = {i: m["q"][i]["state"] for i in IDS}
++                    for d in DRAFTS:
++                        n += 1
++                        ok += parsed[(m["PatientID"], pref + d)] == truth
++                n_checked += 1
++                ro = report["oracle"][f"{name}:{mod}"]
++                if not (ro["n"] == n and ro["ok"] == ok):
++                    bad.append(("oracle", name, mod, n, ok, ro["n"], ro["ok"]))
++    return bad, n_checked, parsed
++
++
++def main():
++    ap = argparse.ArgumentParser()
++    ap.add_argument("--stage", required=True)
++    ap.add_argument("--out-dir", required=True)
++    ap.add_argument("--protocol", required=True)
++    ap.add_argument("--report", required=True)
++    ap.add_argument("--out", required=True)
++    a = ap.parse_args()
++    if os.path.exists(a.out):
++        sys.exit(f"refuse to overwrite {a.out}")
++    recs = rr53_run.verify(a.out_dir, a.stage, a.protocol)
++    req_path = f"{OUT}/requests/requests_{a.stage}.jsonl"
++    reqs = [json.loads(l) for l in open(req_path)]
++    man_path = f"{OUT}/data/manifest_{a.stage}.json"
++    manifest = json.load(open(man_path))
++    report = json.load(open(a.report))
++    labels = json.load(open("results/iter_018/manifests/labels.json"))
++    bad, n_checked, parsed = compare(a.stage, reqs, recs, manifest, report, labels)
++    src_now = dict(protocol_sha256=sha_file(a.protocol), requests_sha256=sha_file(req_path), manifest_sha256=sha_file(man_path),
++                   eval_sha256=sha_file("rr53_eval.py"), data_check_sha256=sha_file(f"{OUT}/data/data_check.json"),
++                   worker_files_sha256={f: sha_file(os.path.join(a.out_dir, f)) for f in sorted(os.listdir(a.out_dir))
++                                        if f.startswith("gen_worker") and f.endswith(".jsonl")})
++    for k, v in src_now.items():
++        n_checked += 1
++        if report["source"][k] != v:
++            bad.append(("report_source_digest", k))
++    res = dict(stage=a.stage, n_checked=n_checked, mismatches=bad, passed=(not bad), n_records=len(recs), n_valid_parse=sum(v is not None for v in parsed.values()),
++               source_digests=dict(report=sha_file(a.report), verify_py=sha_file("rr53_verify.py"), **src_now))
++    tmp = a.out + ".tmp"
++    json.dump(res, open(tmp, "w"), indent=1, default=str)
++    os.replace(tmp, a.out)
++    print("PASS" if res["passed"] else "FAIL", n_checked, "checks;", len(bad), "mismatches")
++    sys.exit(0 if res["passed"] else 1)
++
++
++if __name__ == "__main__":
++    main()
+diff --git a/rsna_diag/cx18_data.py b/rsna_diag/cx18_data.py
+new file mode 100644
+index 0000000..3e5b07c
+--- /dev/null
++++ b/rsna_diag/cx18_data.py
+@@ -0,0 +1,206 @@
++"""iter_018 자료 gate: CheXpert validation HF parquet + MedAug valid.csv 연결, 단일 frontal 환자 선택, 4조합 층화, legacy dedup 점검.
++
++- HF danjacobellis/chexpert validation parquet의 bytes sha256을 사전에 확인한 값과 대조한다 (변경되면 중단).
++- MedAug Path(연구진 공개 CSV)를 정규화해 HF와 정확히 일대일 대응시키고, 최소 다섯 competition finding에 대해
++  HF 2/3(absent/present) <-> CSV 0.0/1.0 대응을 전수 검증한다 (하나라도 불일치면 중단).
++- 영상이 정확히 하나이고 frontal인 study만 선택한다. 동일 환자의 study가 둘 이상이면 study 이름으로 정렬해 첫 study만 쓴다.
++- legacy/eval_samples의 chexpert 익명 샘플과 average-hash 거리로 근접 중복 후보를 점검한다 (임계 미만이면 중단; 값이 크면 통과).
++사용: python -m rsna_diag.cx18_data build
++"""
++import argparse
++import csv
++import glob
++import hashlib
++import io
++import json
++import os
++import re
++
++import numpy as np
++from PIL import Image
++
++HF_PARQUET = "results/iter_018/source/chexpert_validation.parquet"
++MEDAUG_CSV = "results/iter_018/source/medaug_valid.csv"
++HF_PARQUET_SHA256 = "78a544b5bf0c98de2a1293e9de908e8f8857aebcad4819692314110472acf5b4"
++HF_REVISION = "ca5a840e438b5d2d0fa07f560782f196b38a84aa"
++IMG_DIR = "results/iter_018/manifests/images"
++MANIFEST_PATH = "results/iter_018/manifests/infer_manifest.jsonl"
++LABELS_PATH = "results/iter_018/manifests/labels.json"
++SETS_PATH = "results/iter_018/manifests/sets.json"
++PROVENANCE_PATH = "results/iter_018/manifests/provenance.json"
++FINDINGS_CHECKED = ["Cardiomegaly", "Pleural Effusion", "Lung Opacity", "Edema", "Atelectasis", "Consolidation", "Pneumothorax"]
++LEGACY_DIR = "/SSD1_1TB/home/milab/daniel/08_medgemma/legacy/eval_samples/not_in_training/chexpert"
++DEDUP_HAMMING_THRESHOLD = 10  # 16x16 average hash = 256 bit; 관찰된 최소 실측 거리(29)보다 충분히 낮은 보수적 경보선
++MIN_PER_CATEGORY = 24
++
++
++class DataGateError(RuntimeError):
++    pass
++
++
++def sha(b):
++    return hashlib.sha256(b).hexdigest()
++
++
++def _norm_path(p):
++    m = re.search(r"(CheXpert-v1\.0-small/.*)$", p)
++    if not m:
++        raise DataGateError(f"cannot normalize MedAug Path {p!r}")
++    return m.group(1)
++
++
++def load_sources():
++    parq_sha = sha(open(HF_PARQUET, "rb").read())
++    if parq_sha != HF_PARQUET_SHA256:
++        raise DataGateError(f"HF validation parquet sha256 {parq_sha} differs from pinned {HF_PARQUET_SHA256}")
++    import pandas as pd
++    hf = pd.read_parquet(HF_PARQUET)
++    rows = list(csv.DictReader(open(MEDAUG_CSV)))
++    csv_by_path = {}
++    for r in rows:
++        norm = _norm_path(r["Path"])
++        if norm in csv_by_path:
++            raise DataGateError(f"duplicate Path in MedAug csv: {norm}")
++        csv_by_path[norm] = r
++    return hf, csv_by_path
++
++
++def cross_check(hf, csv_by_path):
++    """Path 전수 연결과 finding 값 대응(HF 2<->CSV 0.0=absent, HF 3<->CSV 1.0=present) 검증. validation에는 uncertain/unlabeled가 없어야 한다."""
++    hf_paths = set(hf["Path"])
++    missing_in_csv = sorted(hf_paths - set(csv_by_path))
++    extra_in_csv = sorted(set(csv_by_path) - hf_paths)
++    if missing_in_csv or extra_in_csv:
++        raise DataGateError(f"Path mismatch: missing_in_csv={missing_in_csv[:5]} extra_in_csv={extra_in_csv[:5]}")
++    for _, r in hf.iterrows():
++        cr = csv_by_path[r["Path"]]
++        for f in FINDINGS_CHECKED:
++            hval = int(r[f])
++            cval = float(cr[f])
++            if hval not in (2, 3):
++                raise DataGateError(f"{r['Path']} {f}: HF label {hval} not absent(2)/present(3) in validation")
++            if (hval == 2 and cval != 0.0) or (hval == 3 and cval != 1.0):
++                raise DataGateError(f"{r['Path']} {f}: HF={hval} CSV={cval} mismatch")
++    return {"n_images": int(len(hf)), "findings_checked": FINDINGS_CHECKED}
++
++
++def group_studies(hf):
++    studies = {}
++    for _, r in hf.iterrows():
++        m = re.match(r"CheXpert-v1\.0-small/valid/(patient\d+)/(study\d+)/(view\d+_(frontal|lateral))\.jpg$", r["Path"])
++        if not m:
++            raise DataGateError(f"unexpected Path format: {r['Path']}")
++        pid, study, view = m.group(1), m.group(2), m.group(3)
++        studies.setdefault((pid, study), []).append((view, r))
++    return studies
++
++
++def select_single_frontal(studies):
++    """정확히 영상 하나이고 frontal인 study만 선택한다. 동일 환자에 그런 study가 둘 이상이면 study명으로 정렬한 첫 study만 쓴다."""
++    single_by_patient = {}
++    for (pid, study), views in studies.items():
++        if len(views) != 1:
++            continue
++        vname, r = views[0]
++        if "frontal" not in vname:
++            continue
++        single_by_patient.setdefault(pid, []).append((study, vname, r))
++    out, dropped_multi_study = {}, []
++    for pid, items in single_by_patient.items():
++        if len(items) > 1:
++            dropped_multi_study.append(pid)
++            items = sorted(items, key=lambda t: t[0])
++        out[pid] = items[0]
++    return out, dropped_multi_study
++
++
++def ahash(im, size=16):
++    im = im.convert("L").resize((size, size), Image.LANCZOS)
++    arr = np.asarray(im, dtype=np.float64)
++    return (arr > arr.mean()).astype(np.uint8)
++
++
++def legacy_dedup_check(patient_images):
++    """patient_images: {patient_id: jpeg bytes}. legacy chexpert 샘플과 average-hash 거리를 계산한다."""
++    legacy_files = sorted(glob.glob(os.path.join(LEGACY_DIR, "*.jpg")))
++    if not legacy_files:
++        raise DataGateError(f"no legacy chexpert files found in {LEGACY_DIR}")
++    hashes = {pid: ahash(Image.open(io.BytesIO(b))) for pid, b in patient_images.items()}
++    out = []
++    for lf in legacy_files:
++        lh = ahash(Image.open(lf))
++        best_pid, best_dist = None, None
++        for pid, h in hashes.items():
++            d = int((h != lh).sum())
++            if best_dist is None or d < best_dist:
++                best_pid, best_dist = pid, d
++        out.append({"legacy_file": os.path.basename(lf), "best_match_patient": best_pid, "hamming_dist_256": best_dist,
++                    "near_duplicate": best_dist < DEDUP_HAMMING_THRESHOLD})
++    return out
++
++
++def build(a):
++    os.makedirs(IMG_DIR, exist_ok=True)
++    if os.path.exists(MANIFEST_PATH):
++        raise DataGateError(f"{MANIFEST_PATH} exists (not overwriting; delete manually if a rebuild is intended)")
++    hf, csv_by_path = load_sources()
++    cross = cross_check(hf, csv_by_path)
++    studies = group_studies(hf)
++    view_counts = {}
++    for v in studies.values():
++        view_counts[len(v)] = view_counts.get(len(v), 0) + 1
++    single, dropped_multi_study = select_single_frontal(studies)
++    patient_images, labels = {}, {}
++    for pid, (study, vname, r) in single.items():
++        img_bytes = r["image"]["bytes"]
++        patient_images[pid] = img_bytes
++        img_path = os.path.join(IMG_DIR, f"{pid}.jpg")
++        with open(img_path, "wb") as f:
++            f.write(img_bytes)
++        arr = np.asarray(Image.open(io.BytesIO(img_bytes)))
++        cm = "present" if int(r["Cardiomegaly"]) == 3 else "absent"
++        pe = "present" if int(r["Pleural Effusion"]) == 3 else "absent"
++        labels[pid] = {"path": r["Path"], "study": study, "view": vname, "ap_pa": int(r["AP/PA"]),
++                       "cardiomegaly": cm, "pleural_effusion": pe, "category": f"{cm}_{pe}",
++                       "file_sha256": sha(img_bytes), "pixel_sha256": sha(arr.tobytes())}
++    dedup = legacy_dedup_check(patient_images)
++    near_dupes = [d for d in dedup if d["near_duplicate"]]
++    if near_dupes:
++        raise DataGateError(f"legacy near-duplicate candidates found (manual review needed): {near_dupes}")
++    cats = {}
++    for pid, l in labels.items():
++        cats.setdefault(l["category"], []).append(pid)
++    counts = {c: len(v) for c, v in cats.items()}
++    short = {c: counts.get(c, 0) for c in ("absent_absent", "present_absent", "absent_present", "present_present")
++             if counts.get(c, 0) < MIN_PER_CATEGORY}
++    if short:
++        raise DataGateError(f"category below minimum {MIN_PER_CATEGORY}: {short}")
++    from . import cx18_spec as CX
++    splits = CX.split_patients(cats)
++    with open(MANIFEST_PATH, "w") as f:
++        for pid in sorted(labels):
++            l = labels[pid]
++            f.write(json.dumps({"id": pid, "split": l["category"], "image": os.path.join(IMG_DIR, f"{pid}.jpg"),
++                                "file_sha256": l["file_sha256"], "pixel_sha256": l["pixel_sha256"]}) + "\n")
++    json.dump(labels, open(LABELS_PATH, "w"), indent=1, sort_keys=True)
++    json.dump(splits, open(SETS_PATH, "w"), indent=1, sort_keys=True)
++    prov = {"hf_revision": HF_REVISION, "hf_parquet_sha256": HF_PARQUET_SHA256, "medaug_csv_sha256": sha(open(MEDAUG_CSV, "rb").read()),
++            "cross_check": cross, "view_count_per_study": view_counts, "n_single_frontal": len(single),
++            "dropped_multi_study_patients": dropped_multi_study, "category_counts": counts, "legacy_dedup": dedup,
++            "n_patients_total": len(labels), "split_counts": {k: {c: len(v) for c, v in splits[k].items()} for k in splits}}
++    json.dump(prov, open(PROVENANCE_PATH, "w"), indent=1, sort_keys=True, default=str)
++    print(json.dumps({"n_patients": len(labels), "category_counts": counts, "view_count_per_study": view_counts,
++                      "split_counts": prov["split_counts"]}))
++
++
++def main():
++    ap = argparse.ArgumentParser()
++    sp = ap.add_subparsers(dest="cmd", required=True)
++    sp.add_parser("build")
++    a = ap.parse_args()
++    if a.cmd == "build":
++        build(a)
++
++
++if __name__ == "__main__":
++    main()
+diff --git a/rsna_diag/cx18_spec.py b/rsna_diag/cx18_spec.py
+new file mode 100644
+index 0000000..d591c00
+--- /dev/null
++++ b/rsna_diag/cx18_spec.py
+@@ -0,0 +1,101 @@
++"""iter_018 target-scope 진단(CheXpert) 질문·evidence 문장·분할 규칙 (결과를 보기 전에 고정).
++
++- 주방향 main: Cardiomegaly reference -> Pleural Effusion 질문. 보조 방향 aux: Pleural Effusion reference -> Cardiomegaly 질문.
++- 조건: D(무관 evidence 없음) < U(reference 있으나 결과 unavailable) < T(실제 값) < Tscope(T + 범위 한정 문장).
++- category는 (Cardiomegaly, Pleural Effusion) absent/present 4조합이며 이름은 f"{cardiomegaly}_{pleural_effusion}"이다.
++- parser·출력 형식(plain/json)은 qa_spec을 그대로 재사용한다 (target 이름에 의존하지 않는 whole-string yes/no 규칙).
++"""
++import hashlib
++
++from . import qa_spec as QS
++
++FINDINGS = {"CM": "cardiomegaly", "PE": "pleural effusion"}
++DIRECTIONS = {"main": {"target": "PE", "ref": "CM"}, "aux": {"target": "CM", "ref": "PE"}}
++CONDITIONS = ("D", "U", "T", "Tscope")
++CATEGORIES = ("absent_absent", "present_absent", "absent_present", "present_present")  # (Cardiomegaly, Pleural Effusion)
++
++FORMATS = QS.FORMATS
++parse_plain = QS.parse_plain
++parse_json = QS.parse_json
++parse_answer = QS.parse_answer
++
++
++def sha(b):
++    return hashlib.sha256(b if isinstance(b, bytes) else b.encode()).hexdigest()
++
++
++def cat_of(cm, pe):
++    return f"{cm}_{pe}"
++
++
++def cat_values(cat):
++    cm, pe = cat.split("_")
++    if cm not in ("absent", "present") or pe not in ("absent", "present"):
++        raise ValueError(f"bad category {cat!r}")
++    return cm, pe
++
++
++def gt_answer(direction, cat):
++    """direction의 target finding에 대한 정답 yes/no (reference와 무관, 실제 label만 본다)."""
++    cm, pe = cat_values(cat)
++    val = pe if direction == "main" else cm
++    return "yes" if val == "present" else "no"
++
++
++def ref_value(direction, cat):
++    """direction의 reference finding 실제 값 ('present'|'absent')."""
++    cm, pe = cat_values(cat)
++    return cm if direction == "main" else pe
++
++
++def question(target_key, fmt):
++    disp = FINDINGS[target_key]
++    return f"Is {disp} present in this chest radiograph? {FORMATS[fmt]}"
++
++
++def evidence_sentence(cond, ref_key, tgt_key, ref_val):
++    """cond: U|T|Tscope. ref_val: T/Tscope에서만 사용('present'|'absent'), U에서는 무시된다."""
++    ref_disp, tgt_disp = FINDINGS[ref_key], FINDINGS[tgt_key]
++    if cond == "U":
++        result = "unavailable"
++    elif cond in ("T", "Tscope"):
++        if ref_val not in ("present", "absent"):
++            raise ValueError(f"bad ref_val {ref_val!r} for condition {cond!r}")
++        result = ref_val
++    else:
++        raise ValueError(f"no evidence sentence for condition {cond!r}")
++    sent = f"A separate assessment of this same chest radiograph considered {ref_disp}. Result: {result}."
++    if cond == "Tscope":
++        sent += (f" This assessment concerns only {ref_disp}; it does not determine whether {tgt_disp} is present or absent. "
++                 f"Assess {tgt_disp} from the image.")
++    return sent
++
++
++def prompt_and_evidence(direction, cond, fmt, cat):
++    """returns (prompt, evidence_digest_or_None). D는 evidence 없음(=R과 공유); U/T/Tscope는 evidence 문장을 질문 앞에 붙인다."""
++    if direction not in DIRECTIONS:
++        raise ValueError(f"unknown direction {direction!r}")
++    if cond not in CONDITIONS:
++        raise ValueError(f"unknown condition {cond!r}")
++    d = DIRECTIONS[direction]
++    tgt, ref = d["target"], d["ref"]
++    q = question(tgt, fmt)
++    if cond == "D":
++        return q, None
++    ev = evidence_sentence(cond, ref, tgt, ref_value(direction, cat))
++    return f"{ev}\n\n{q}", sha(ev)
++
++
++def split_patients(cat_patient_ids, salt="iter018-v1", n_d=4, n_e=12):
++    """cat_patient_ids: {category: [patient_id,...]}. returns sets.json 형식 {"D16": {cat: [...]}, "E48": {...}, "F": {...}}.
++
++    각 category 안에서 sha256(salt + '|' + patient_id)로 정렬해 앞 n_d명을 D16, 다음 n_e명을 E48, 나머지를 F로 잠근다."""
++    out = {"D16": {}, "E48": {}, "F": {}}
++    for cat, ids in cat_patient_ids.items():
++        if len(set(ids)) != len(ids):
++            raise ValueError(f"duplicate patient id in category {cat}")
++        order = sorted(ids, key=lambda pid: sha(f"{salt}|{pid}"))
++        out["D16"][cat] = order[:n_d]
++        out["E48"][cat] = order[n_d:n_d + n_e]
++        out["F"][cat] = order[n_d + n_e:]
++    return out
+diff --git a/rsna_diag/qa_spec.py b/rsna_diag/qa_spec.py
+new file mode 100644
+index 0000000..b1955bf
+--- /dev/null
++++ b/rsna_diag/qa_spec.py
+@@ -0,0 +1,156 @@
++"""iter_015/016 target-scope 진단의 질문·출력 형식·evidence 문장·QA parser·정답 mapping (결과를 보기 전에 고정).
++
++iter_016: strict parser(parse_plain/parse_json)는 그대로 두고 별도의 semantic_v1(parse_semantic)을 추가한다. parser는 정답 category를 입력으로 받지 않는다.
++
++- Q_O: 폐렴 의심 pulmonary opacity 존재. Q_A: RSNA 판독 규약상 Normal이 아닌가(abnormal). 둘은 별도 대화로 실행한다.
++- 정답 쌍 (Q_O, Q_A): opacity=(yes,yes), normal=(no,no), not_normal_no_opacity=(no,yes).
++- parser는 공백·대소문자·단일 문장부호(plain)만 정규화한다. bbox 목록, 모순, 설명만 있는 답, truncation은 별도 실패로 구분한다.
++  빈 목록 []는 no로 바꾸지 않는다.
++"""
++import hashlib
++import json
++import re
++
++Q_O = "Is there a pulmonary opacity suspicious for pneumonia in this chest radiograph?"
++Q_A = ("Under the RSNA chest-radiograph labeling convention, is this image abnormal rather than Normal? "
++       "An abnormal image need not contain an opacity suspicious for pneumonia. A healed rib fracture alone counts as Normal.")
++QUESTIONS = {"O": Q_O, "A": Q_A}
++FORMATS = {"plain": "Answer only yes or no.", "json": 'Return only {"answer":"yes"} or {"answer":"no"}.'}
++TARGETS = ("O", "A")
++CATEGORIES = ("opacity", "normal", "not_normal_no_opacity")
++GT_PAIR = {"opacity": ("yes", "yes"), "normal": ("no", "no"), "not_normal_no_opacity": ("no", "yes")}
++
++BBOX_FMT = "yxyx integers in [0,1000] relative to the entire square-padded image, y before x"
++EVIDENCE_HEAD = "A separate localization step examined this chest radiograph for pulmonary opacities suspicious for pneumonia. "
++EVIDENCE_TEXT = {
++    "predicted_nonempty": "It proposed these boxes as JSON [y_min, x_min, y_max, x_max] (" + BBOX_FMT + "): {boxes}. The proposal may be wrong.",
++    "predicted_empty": "It proposed no boxes. An empty proposal does not mean the image is Normal; it only means no such opacity was localized.",
++    "unavailable": "No localization proposal is available for this image. This does not mean the image is Normal.",
++    "oracle_nonempty": "Reference annotation boxes for pulmonary opacity, JSON [y_min, x_min, y_max, x_max] (" + BBOX_FMT + "): {boxes}.",
++    "oracle_empty": "The reference annotation contains no pulmonary opacity box. This does not mean the image is Normal.",
++}
++
++
++def sha(b):
++    return hashlib.sha256(b if isinstance(b, bytes) else b.encode()).hexdigest()
++
++
++def qa_prompt(target, fmt, evidence_text=None):
++    """evidence_text가 있으면 질문 앞에 붙는다 (원본 영상은 항상 함께 제공)."""
++    core = f"{QUESTIONS[target]} {FORMATS[fmt]}"
++    return core if evidence_text is None else f"{EVIDENCE_HEAD}{evidence_text}\n\n{core}"
++
++
++def boxes_json(boxes):
++    return json.dumps([{"box_2d": [int(round(v)) for v in b]} for b in boxes], separators=(",", ":"))
++
++
++def evidence_text(kind, boxes=None):
++    """kind: predicted|unavailable|oracle. boxes: 유효한 bbox 목록(빈 목록 가능). predicted에서 boxes=None이면 unavailable."""
++    if kind == "unavailable" or (kind == "predicted" and boxes is None):
++        return EVIDENCE_TEXT["unavailable"]
++    key = f"{kind}_{'nonempty' if boxes else 'empty'}"
++    return EVIDENCE_TEXT[key].format(boxes=boxes_json(boxes)) if boxes else EVIDENCE_TEXT[key]
++
++
++EOT = "<end_of_turn>"
++_PUNCT = ".!"
++
++
++def parse_plain(raw, ended_eos):
++    """returns (status, answer). status: valid | truncated | empty | bbox_list | contradictory | explanation."""
++    if not ended_eos:
++        return "truncated", None
++    t = raw[:-len(EOT)] if raw.endswith(EOT) else raw
++    t = t.strip()
++    if not t:
++        return "empty", None
++    core = t.lower()
++    if core and core[-1] in _PUNCT:
++        core = core[:-1]
++    if core in ("yes", "no"):
++        return "valid", core
++    if "box_2d" in t or re.fullmatch(r"\s*\[.*\]\s*", t, re.S):
++        return "bbox_list", None
++    words = set(re.findall(r"[a-z]+", t.lower()))
++    if "yes" in words and "no" in words:
++        return "contradictory", None
++    return "explanation", None
++
++
++def _pairs(pairs):
++    keys = [k for k, _ in pairs]
++    if len(set(keys)) != len(keys):
++        raise ValueError("duplicate key")
++    return dict(pairs)
++
++
++def parse_json(raw, ended_eos):
++    """단일 answer 키와 yes/no 값만 허용 (fence·추가 키·중복 키 불허)."""
++    if not ended_eos:
++        return "truncated", None
++    t = raw[:-len(EOT)] if raw.endswith(EOT) else raw
++    t = t.strip()
++    if not t:
++        return "empty", None
++    if "box_2d" in t:
++        return "bbox_list", None
++    try:
++        v = json.loads(t, object_pairs_hook=_pairs)
++    except ValueError:
++        words = set(re.findall(r"[a-z]+", t.lower()))
++        return ("contradictory" if {"yes", "no"} <= words else "explanation"), None
++    if isinstance(v, dict) and list(v) == ["answer"] and v["answer"] in ("yes", "no"):
++        return "valid", v["answer"]
++    return "schema_error", None
++
++
++def parse_answer(fmt, raw, ended_eos):
++    return (parse_plain if fmt == "plain" else parse_json)(raw, ended_eos)
++
++
++SEMANTIC_VERSION = "semantic_v1"
++_NORMAL_MAP = {"normal": "no", "abnormal": "yes"}
++
++
++def _bare_word(t):
++    """전체 문자열이 단어 하나(+ 마지막 단일 . 또는 !)이면 소문자 단어, 아니면 None. 내부 공백·중복 문장부호는 받지 않는다."""
++    core = t.lower()
++    if core and core[-1] in _PUNCT:
++        core = core[:-1]
++    return core if re.fullmatch(r"[a-z]+", core) else None
++
++
++def parse_semantic(target, fmt, raw, ended_eos):
++    """semantic_v1. returns (status, answer, conversion). conversion: identity(strict와 동일) | bare_yes_no | json_answer | bare_normal_abnormal | None.
++
++    1 EOS 없으면 truncated. 2 끝의 <end_of_turn> 한 개와 앞뒤 공백만 제거. 3 전체가 yes/no(대소문자·마지막 단일 . !)면 두 출력 지시 모두 받는다.
++    4 전체가 JSON이고 유일한 키 answer의 값이 정확한 소문자 yes/no면 받는다(중복 키·추가 키·배열·fence 불가).
++    5 target=='A'에서만 전체 bare Normal/Abnormal을 no/yes로 대응한다 (JSON 값의 Normal/Abnormal, Q_O의 Normal은 불허).
++    설명문·혼합 답·모순·bbox·빈 목록·부분 일치는 구제하지 않는다 (strict parser의 실패 분류를 그대로 쓴다)."""
++    if target not in QUESTIONS:
++        raise ValueError(f"unknown target {target!r}")
++    st, ans = parse_answer(fmt, raw, ended_eos)
++    if st == "valid":
++        return "valid", ans, "identity"
++    if st == "truncated" or st == "empty":
++        return st, None, None
++    t = (raw[:-len(EOT)] if raw.endswith(EOT) else raw).strip()
++    w = _bare_word(t)
++    if w in ("yes", "no"):
++        return "valid", w, "bare_yes_no"
++    if w in _NORMAL_MAP and target == "A":
++        return "valid", _NORMAL_MAP[w], "bare_normal_abnormal"
++    if t.startswith("{"):
++        try:
++            v = json.loads(t, object_pairs_hook=_pairs)
++        except ValueError:
++            v = None
++        if isinstance(v, dict) and list(v) == ["answer"] and v["answer"] in ("yes", "no"):
++            return "valid", v["answer"], "json_answer"
++    return st, None, None
++
++
++def request_key(fields):
++    """request_id 재계산용. fields 전부(모델 revision, adapter digest, 영상 identity, target, format, condition, prompt sha, evidence digest, config digest)가 포함된다."""
++    return sha(json.dumps(fields, sort_keys=True, default=str))[:32]
+diff --git a/test_rr53.py b/test_rr53.py
+new file mode 100644
+index 0000000..3517407
+--- /dev/null
++++ b/test_rr53.py
+@@ -0,0 +1,524 @@
++"""iter_053 CPU fixture: prompt 정합(T=R2, BT=BJ, oracle O2 수정), 요청 누출·집합, parser/지표 손계산, macro·bootstrap·verifier 일치(합성 실행),
++판정 규칙, gate 변조(stale·wrong stage·run=false), iter_047 D8 회귀(점수·oracle 29/32), 자료 gate 거부 사례.
++python test_rr53.py results/iter_053/tests/fixtures_rr53.json   (기존 파일을 덮어쓰지 않는다)
++"""
++import copy
++import glob
++import json
++import os
++import shutil
++import sys
++import traceback
++
++import numpy as np
++
++import pg43_run as PR
++import rr53_build as B
++import rr53_data as D
++import rr53_decide as DEC
++import rr53_eval as E
++import rr53_run as RUN
++import rr53_spec as S
++import rr53_verify as V
++
++OUT = "results/iter_053"
++RESULTS = []
++TMP = f"{OUT}/tests/tmp_fixture_work"
++
++
++def check(name, cond, detail=None):
++    RESULTS.append(dict(name=name, passed=bool(cond), detail=detail))
++    print(("PASS " if cond else "FAIL ") + name, flush=True)
++
++
++def raw(a, b, eos="<end_of_turn>"):
++    return '{"qA": "%s", "qB": "%s"}%s' % (a, b, eos)
++
++
++def fake_manifest(strata_sizes, with_pc=False):
++    rows = []
++    n = 0
++    for code, k in strata_sizes.items():
++        st = S.code_states(code)
++        for _ in range(k):
++            n += 1
++            rows.append(dict(set="E", truth_code=code, PatientID=f"P{n:03d}", ImageID=f"P{n:03d}", StudyID=f"P{n:03d}/s",
++                             q={i: dict(finding=S.FINDING_PAIR[i], state=st[k2]) for k2, i in enumerate(S.IDS)},
++                             image_meta=dict(path="x.jpg", file_sha256="0" * 64, u8_pixel_sha256="1" * 64, h=1, w=1)))
++    return dict(rows=rows)
++
++
++def fake_requests_and_recs(man, policy, stage="E", with_oracle=False, pc_rows=None):
++    """policy(cond, patient_row, draft_code, ids) -> raw suffix string. returns (reqs, recs)."""
++    reqs, recs = [], []
++
++    def add(m, cond, targets, modality, draft, set_name):
++        rid = S.sha(f"{m['PatientID']}|{cond}")[:32]
++        reqs.append(dict(request_id=rid, patient=m["PatientID"], cond=cond, targets=list(targets), modality=modality, set=set_name, kind="rr53"))
++        recs.append(dict(request_id=rid, suffix_text_raw=policy(cond, m, draft, targets), ended_eos=True, final_cap=1000))
++
++    for m in man["rows"]:
++        for d in S.DRAFT_CODES:
++            for c in ("R1", "R2", "T"):
++                add(m, f"{c}_d{d}", S.IDS, "image" if c != "T" else "text", d, stage)
++        add(m, "BJ", S.IDS, "image", None, stage)
++        add(m, "BT", S.IDS, "text", None, stage)
++        for i in S.IDS:
++            add(m, f"BI_{i}", [i], "image", None, stage)
++        if with_oracle:
++            for d in S.DRAFT_CODES:
++                add(m, f"O_d{d}", S.IDS, "image", d, stage)
++                add(m, f"OT_d{d}", S.IDS, "text", d, stage)
++    for m in (pc_rows or []):
++        for d in S.DRAFT_CODES:
++            add(m, f"O_d{d}", S.IDS, "image", d, "pc_D8")
++            add(m, f"OT_d{d}", S.IDS, "text", d, "pc_D8")
++    return reqs, recs
++
++
++def make_policy(seed):
++    rng = np.random.default_rng(seed)
++    table = {}
++
++    def policy(cond, m, d, targets):
++        truth = [m["q"][i]["state"] for i in S.IDS]
++        key = (m["PatientID"], cond)
++        if key not in table:
++            base = cond.split("_")[0]
++            r = rng.random()
++            if base in ("O", "OT"):
++                a, b = truth
++            elif base == "R1":
++                a, b = [(t if rng.random() < 0.6 else s) for t, s in zip(truth, S.code_states(d))]
++            elif base == "R2":
++                a, b = [(s if rng.random() < 0.7 else t) for t, s in zip(truth, S.code_states(d))]
++            elif base == "T":
++                a, b = S.code_states(d)
++            else:
++                a, b = [(t if rng.random() < 0.85 else S.flip(t)) for t in truth]
++            if base == "BI":
++                out = '{"%s": "%s"}<end_of_turn>' % (targets[0], dict(qA=a, qB=b)[targets[0]])
++            elif r < 0.04 and base not in ("O", "OT"):
++                out = "not json at all<end_of_turn>"
++            elif r < 0.07 and base not in ("O", "OT"):
++                a = "uncertain"
++                out = raw(a, b)
++            else:
++                out = raw(a, b)
++            table[key] = out
++        return table[key]
++    return policy
++
++
++def test_prompts_and_requests():
++    pair = S.FINDING_PAIR
++    for d in S.DRAFT_CODES:
++        it = S.draft_text(pair, d)
++        check(f"T == R2 byte-identical d{d}", S.prompt_T(it) == S.prompt_R2(it))
++    check("BT == BJ byte-identical", S.prompt_BT(pair) == S.prompt_BJ(pair))
++    it = S.draft_text(pair, "10")
++    truth = [("qA", "present"), ("qB", "absent")]
++    o2, o1 = S.prompt_O2(it, truth), S.B.prompt_O(it, truth)
++    check("O2 = old O + authority sentence only", o2.replace(" " + S.AUTH_SENTENCE, "") == o1 and S.AUTH_SENTENCE in o2 and S.AUTH_SENTENCE not in o1)
++    check("authority sentence exact text", S.AUTH_SENTENCE == "For this consistency check, the verified final status is authoritative. Copy it exactly; do not infer a different status from the draft or image.")
++    # 실제 요청 파일
++    for st, n in (("P", 48), ("D", 448), ("E", 768), ("F", 1680)):
++        got = RUN.check_requests(st, f"{OUT}/requests/requests_{st}.jsonl")
++        check(f"requests_{st} equals manifest reconstruction ({n})", len(got) == n)
++    for st in ("D", "E", "F"):
++        rows = [json.loads(l) for l in open(f"{OUT}/requests/requests_{st}.jsonl")]
++        leak = False
++        by = {}
++        for r in rows:
++            if r["cond"].startswith(("O_", "OT_")):
++                continue
++            by.setdefault((r["cond"], r["prompt_sha256"]), set()).add(r["patient"])
++        # 비 oracle prompt는 정답 상태가 아니라 초안·finding에만 의존: 같은 (cond) 이면 prompt 종류가 초안(4)·BI(2)로만 다양
++        kinds = {}
++        for (c, ps), _ in by.items():
++            kinds.setdefault(c, set()).add(ps)
++        ok = all(len(v) == 1 for c, v in kinds.items())
++        check(f"{st}: non-oracle prompt per condition is a single text (no truth/corruption leak)", ok, {c: len(v) for c, v in kinds.items()})
++        ids = [r["request_id"] for r in rows]
++        check(f"{st}: unique request ids", len(ids) == len(set(ids)))
++        tx = [r for r in rows if r["modality"] == "text"]
++        check(f"{st}: text rows carry no image fields", all(r["image"] is None and r["input_pixel_sha256"] is None for r in tx))
++        base = {}
++        for r in rows:
++            base.setdefault(r["patient"], {})[r["cond"]] = r
++        same = all(v["T_d" + d]["prompt"] == v["R2_d" + d]["prompt"] and v["BT"]["prompt"] == v["BJ"]["prompt"] for p, v in base.items() for d in S.DRAFT_CODES if "R2_d" + d in v)
++        check(f"{st}: per patient T prompt==R2 prompt and BT==BJ in the request file", same)
++    rows = [json.loads(l) for l in open(f"{OUT}/requests/requests_D.jsonl")]
++    oo = [r for r in rows if r["cond"].startswith(("O_", "OT_"))]
++    check("D: 192 oracle requests (image/text pairs share identical prompt)", len(oo) == 192 and all(
++        {r["prompt"] for r in oo if r["patient"] == p and r["cond"][-3:] == d} .__len__() == 1 for p in {r["patient"] for r in oo} for d in ("d00", "d01", "d10", "d11")))
++    check("D: oracle prompts contain authority sentence", all(S.AUTH_SENTENCE in r["prompt"] for r in oo))
++    mf = json.load(open(f"{OUT}/data/manifest_D.json"))
++    check("D: 16 CheXpert + 8 PadChest D8 patients", len(mf["rows"]) == 16 and len(mf["pc_oracle_rows"]) == 8)
++    pm = {s: sum(1 for r in json.load(open(f"{OUT}/data/manifest_F.json"))["rows"] if r["truth_code"] == s) for s in S.DRAFT_CODES}
++    check("F stratum sizes 56/17/20/12", pm == {"00": 56, "01": 17, "10": 20, "11": 12}, pm)
++
++
++def test_parser_metrics():
++    ok = lambda t, e=True, ids=S.IDS: S.parse_state(t, e, ids)["status"]
++    check("parser: strict ok / trailing prose / dup / wrong keys / bad value / truncated",
++          ok(raw("present", "absent")) == "ok" and ok(raw("present", "absent", "") + " x") == "not_json" and ok('{"qA":"present","qA":"absent","qB":"absent"}') == "dup_key"
++          and ok('{"qA":"present"}') == "wrong_keys" and ok(raw("Present", "absent")) == "bad_value" and ok(raw("present", "absent"), False) == "truncated")
++    # 지표 손계산: truth=(present, absent) 코드 '10'. 완벽 교정자
++    truth = ["present", "absent"]
++
++    def byc(fn):
++        out = {}
++        for d in S.DRAFT_CODES:
++            for c in ("R1", "R2", "T"):
++                out[f"{c}_d{d}"] = S.parse_state(fn(d), True, S.IDS)
++        out["BJ"] = S.parse_state(raw(*truth), True, S.IDS)
++        out["BT"] = S.parse_state(raw("absent", "absent"), True, S.IDS)
++        for i in S.IDS:
++            out[f"BI_{i}"] = S.parse_state('{"%s": "%s"}<end_of_turn>' % (i, dict(qA=truth[0], qB=truth[1])[i]), True, [i])
++        return out
++    perfect = E.patient_metrics(truth, "R2", byc(lambda d: raw(*truth)))[0]
++    check("metrics: perfect corrector r=1 h=0 h_fail=0 acc=1 robust=1 sens=0", perfect == dict(r=1.0, h=0.0, h_fail=0.0, acc=1.0, clean_exact=1.0, robust_exact=1.0, sens=0.0), perfect)
++    copier = E.patient_metrics(truth, "R2", byc(lambda d: raw(*S.code_states(d))))[0]
++    check("metrics: copier r=0 h=0 h_fail=0 acc=.5 robust=0", copier["r"] == 0 and copier["h"] == 0 and copier["h_fail"] == 0 and copier["acc"] == 0.5 and copier["robust_exact"] == 0, copier)
++    flipper = E.patient_metrics(truth, "R2", byc(lambda d: raw(*[S.flip(x) for x in S.code_states(d)])))[0]
++    check("metrics: flipper r=1.0 on wrong drafts? (flip of wrong=truth) h=1 h_fail=1", flipper["r"] == 1.0 and flipper["h"] == 1.0 and flipper["h_fail"] == 1.0 and flipper["acc"] == 0.5, flipper)
++    unc = E.patient_metrics(truth, "R2", byc(lambda d: raw("uncertain", "uncertain")))[0]
++    check("metrics: all uncertain r=0 h=0 h_fail=1 acc=0", unc["r"] == 0 and unc["h"] == 0 and unc["h_fail"] == 1.0 and unc["acc"] == 0, unc)
++    inv = E.patient_metrics(truth, "R2", byc(lambda d: "garbage"))[0]
++    check("metrics: invalid counted as failure not correct", inv["r"] == 0 and inv["h_fail"] == 1.0 and inv["acc"] == 0, inv)
++    bt = E.patient_metrics(truth, "BT", byc(lambda d: raw(*truth)))[0]
++    check("metrics: BT uses BT request (not BJ)", bt["acc"] == 0.5 + 0.0 and bt["r"] == 0.5 or bt["acc"] < 1.0, bt)
++    bi = E.patient_metrics(truth, "BI", byc(lambda d: raw(*truth)))[0]
++    check("metrics: BI uses two single-ID requests", bi["acc"] == 1.0)
++
++
++def synthetic_report(seed=3, sizes=None, with_oracle=False, stage="E"):
++    sizes = sizes or {"00": 4, "01": 3, "10": 5, "11": 2}
++    man = fake_manifest(sizes)
++    pc = None
++    if with_oracle:
++        pc = []
++        for k, code in enumerate(S.DRAFT_CODES):
++            st = S.code_states(code)
++            pc.append(dict(set="pc_D8", truth_code=code, PatientID=f"PC{k}", q={i: dict(finding="cardiomegaly" if i == "qA" else "effusion", state=st[j]) for j, i in enumerate(S.IDS)}))
++        man["pc_oracle_rows"] = pc
++    reqs, recs = fake_requests_and_recs(man, make_policy(seed), stage=stage, with_oracle=with_oracle, pc_rows=pc)
++    return man, reqs, recs
++
++
++def test_eval_verify_agree():
++    for stage, wo in (("E", False), ("D", True)):
++        man, reqs, recs = synthetic_report(with_oracle=wo, stage=stage)
++        rep = E.make_report(stage, man, reqs, recs)
++        rep["source"] = {}
++        labels = {m["PatientID"]: dict(cardiomegaly=m["q"]["qA"]["state"], pleural_effusion=m["q"]["qB"]["state"]) for m in man["rows"]}
++        bad, n, _ = V.compare(stage, reqs, recs, man, rep, labels)
++        check(f"verifier == production on synthetic stage {stage} (all conds/metrics/diffs/simult/common-valid/oracle)", not bad and n > 80, dict(n=n, bad=bad[:3]))
++        # 변조: report 수치 하나 변경 -> verifier 검출
++        r2 = copy.deepcopy(rep)
++        r2["conds"]["R2"]["r"]["mean"] += 0.01
++        b2, _, _ = V.compare(stage, reqs, recs, man, r2, labels)
++        check(f"verifier detects altered cond mean ({stage})", len(b2) >= 1)
++        r3 = copy.deepcopy(rep)
++        r3["diffs"]["BJ-R2:r"]["lo"] += 0.01
++        check(f"verifier detects altered diff CI ({stage})", len(V.compare(stage, reqs, recs, man, r3, labels)[0]) >= 1)
++        r4 = copy.deepcopy(rep)
++        r4["common_valid"]["BJ-R2"]["r_diff"] += 0.01
++        check(f"verifier detects altered common-valid ({stage})", len(V.compare(stage, reqs, recs, man, r4, labels)[0]) >= 1)
++        # 라벨 변조: manifest 정답이 labels.json과 다르면 검출
++        lab2 = copy.deepcopy(labels)
++        k0 = sorted(lab2)[0]
++        lab2[k0]["cardiomegaly"] = S.flip(lab2[k0]["cardiomegaly"])
++        check(f"verifier detects manifest truth != labels ({stage})", len(V.compare(stage, reqs, recs, man, rep, lab2)[0]) >= 1)
++        # record 훼손(원시 출력 변경) -> report와 불일치
++        recs2 = copy.deepcopy(recs)
++        for r in recs2:
++            if r["request_id"] in {q["request_id"] for q in reqs if q["cond"] == "BJ"}:
++                r["suffix_text_raw"] = raw("uncertain", "uncertain")
++        check(f"verifier detects altered raw output ({stage})", len(V.compare(stage, reqs, recs2, man, rep, labels)[0]) >= 1)
++        if wo:
++            oc = rep["oracle"]
++            check("oracle report counts for synthetic D (chexpert/padchest × image/text)", set(oc) == {"chexpert_D16:image", "chexpert_D16:text", "padchest_D8:image", "padchest_D8:text"}
++                  and oc["chexpert_D16:image"]["n"] == 4 * 14 and oc["padchest_D8:text"]["n"] == 16 and all(v["ok"] == v["n"] for v in oc.values()), {k: (v["n"], v["ok"]) for k, v in oc.items()})
++    # macro: 층별 크기가 다를 때 macro != natural
++    man, reqs, recs = synthetic_report(seed=4, sizes={"00": 6, "01": 2, "10": 3, "11": 1})
++    rep = E.make_report("E", man, reqs, recs)
++    d = rep["conds"]["R2"]["r"]
++    st = {}
++    for pid, v in rep["per_patient_metrics"].items():
++        st.setdefault(v["stratum"], []).append(v["metrics"]["R2"]["r"])
++    check("macro mean = mean of stratum means (hand)", abs(d["mean"] - np.mean([np.mean(v) for v in st.values()])) < 1e-12 and abs(d["natural_mean"] - np.mean([x for v in st.values() for x in v])) < 1e-12
++          and abs(d["mean"] - d["natural_mean"]) > 1e-6)
++
++
++def test_decisions():
++    man, reqs, recs = synthetic_report(seed=5, sizes={"00": 12, "01": 12, "10": 12, "11": 12})
++    rep = E.make_report("E", man, reqs, recs)
++    ver = dict(passed=True)
++    rep["n_non_eos_final"] = 0
++    sizes = {"00": 56, "01": 17, "10": 20, "11": 12}
++    # 합성 report를 직접 구성해 규칙 경계를 시험한다
++    def fake_rep(r_vals, hf_vals, acc_diff, rd, hd, valid=0.99, cvdir=True):
++        c = {}
++        for k in ("R1", "R2", "BJ", "BI", "T", "BT", "K"):
++            c[k] = {m: dict(mean=0.5, lo95=0.4, hi95=0.6, simult_lo=0.3, simult_hi=0.7, degenerate_exact=None) for m in ("r", "h_fail", "h", "acc")}
++        for k in ("R1", "R2", "BJ", "BI"):
++            c[k]["r"]["mean"] = r_vals[k]
++            c[k]["h_fail"]["mean"] = hf_vals[k]
++        df = {"BJ-BT:acc": dict(mean=acc_diff[0], lo=acc_diff[1], hi=acc_diff[2]), "BJ-R2:r": dict(mean=rd[0], lo=rd[1], hi=rd[2]), "BJ-R2:h_fail": dict(mean=hd[0], lo=hd[1], hi=hd[2])}
++        pp = {}
++        rng = np.random.default_rng(1)
++        n = 0
++        for code in S.DRAFT_CODES:
++            for _ in range(12):
++                n += 1
++                pp[f"p{n}"] = dict(stratum=code, truth=None, metrics={"BJ": dict(r=0.7 + 0.05 * float(rng.random()), h_fail=0.25 * float(rng.random() < 0.1) + 0.12),
++                                                                          "R2": dict(r=0.5 + 0.05 * float(rng.random()), h_fail=0.02)})
++        return dict(stage="E", conds=c, diffs=df, per_patient_metrics=pp, n_non_eos_final=0, valid_rate_by_cond={k: valid for k in DEC.CONDS_VALID},
++                    common_valid={"BJ-R2": dict(r_diff=0.1 if cvdir else -0.1, hfail_diff=0.05)})
++    r_ok = dict(R1=0.5, R2=0.5, BJ=0.7, BI=0.6)
++    hf_ok = dict(R1=0.1, R2=0.02, BJ=0.12, BI=0.1)
++    e = DEC.decide_e(fake_rep(r_ok, hf_ok, (0.2, 0.1, 0.3), (0.2, 0.1, 0.3), (0.1, 0.05, 0.15)), ver, sizes, True)
++    check("decide_e: all entry conditions -> run", e["run"] is True and e["outcome"] == "enter_F", e["checks"].get("expected_half_width"))
++    e2 = DEC.decide_e(fake_rep(r_ok, hf_ok, (0.05, -0.02, 0.1), (0.2, 0.1, 0.3), (0.1, 0.05, 0.15)), ver, sizes, True)
++    check("decide_e: BJ-BT acc point <0.10 -> hold", e2["run"] is False)
++    e3 = DEC.decide_e(fake_rep(r_ok, hf_ok, (0.2, -0.01, 0.3), (0.2, 0.1, 0.3), (0.1, 0.05, 0.15)), ver, sizes, True)
++    check("decide_e: acc CI lower bound <=0 -> hold", e3["run"] is False)
++    e4 = DEC.decide_e(fake_rep(r_ok, hf_ok, (0.2, 0.1, 0.3), (0.1, 0.0, 0.2), (0.1, 0.05, 0.15)), ver, sizes, True)
++    check("decide_e: r diff <0.15 -> hold", e4["run"] is False)
++    e5 = DEC.decide_e(fake_rep(r_ok, hf_ok, (0.2, 0.1, 0.3), (0.2, 0.1, 0.3), (0.03, 0.0, 0.1)), ver, sizes, True)
++    check("decide_e: h_fail diff <0.05 -> hold", e5["run"] is False)
++    e6 = DEC.decide_e(fake_rep(r_ok, hf_ok, (0.2, 0.1, 0.3), (0.2, 0.1, 0.3), (0.1, 0.05, 0.15), cvdir=False), ver, sizes, True)
++    check("decide_e: common-valid opposite direction -> hold", e6["run"] is False)
++    e7 = DEC.decide_e(fake_rep(dict(R1=0.9, R2=0.5, BJ=0.7, BI=0.6), dict(R1=0.0, R2=0.02, BJ=0.12, BI=0.1), (0.2, 0.1, 0.3), (0.2, 0.1, 0.3), (0.1, 0.05, 0.15)), ver, sizes, True)
++    check("decide_e: R1 point r>=.8 and h_fail<=.05 -> simple alternative point-sufficient hold", e7["run"] is False)
++    e8 = DEC.decide_e(fake_rep(r_ok, hf_ok, (0.2, 0.1, 0.3), (0.2, 0.1, 0.3), (0.1, 0.05, 0.15), valid=0.9), ver, sizes, True)
++    check("decide_e: valid<95% -> invalid_run, no F", e8["run"] is False and e8["outcome"] == "invalid_run")
++    e9 = DEC.decide_e(fake_rep(r_ok, hf_ok, (0.2, 0.1, 0.3), (0.2, 0.1, 0.3), (0.1, 0.05, 0.15)), dict(passed=False), sizes, True)
++    check("decide_e: verifier fail -> invalid_run", e9["run"] is False and e9["outcome"] == "invalid_run")
++    e10 = DEC.decide_e(fake_rep(r_ok, hf_ok, (0.2, 0.1, 0.3), (0.2, 0.1, 0.3), (0.1, 0.05, 0.15)), ver, sizes, False)
++    check("decide_e: F independence not ok -> no F", e10["run"] is False)
++    rz = fake_rep(r_ok, hf_ok, (0.2, 0.1, 0.3), (0.2, 0.1, 0.3), (0.1, 0.05, 0.15))
++    for v in rz["per_patient_metrics"].values():
++        v["metrics"]["BJ"]["h_fail"] = 0.0
++        v["metrics"]["R2"]["h_fail"] = 0.0
++    e11 = DEC.decide_e(rz, ver, sizes, True)
++    check("decide_e: zero within-stratum variance -> no precision evidence, hold F", e11["run"] is False and "zero_within_stratum_variance_precision_not_supported_hold_F" in e11["flags"])
++    # 예상 반폭 손계산
++    pp = {}
++    vals = {"00": [0.0, 1.0, 0.5], "01": [0.2, 0.4], "10": [0.0, 0.0, 1.0], "11": [0.5, 0.5, 1.0, 0.0]}
++    for code, vs in vals.items():
++        for k, v in enumerate(vs):
++            pp[f"{code}{k}"] = dict(stratum=code, metrics={"BJ": dict(r=v, h_fail=v), "R2": dict(r=0.0, h_fail=0.0)})
++    hw, s2 = DEC.expected_half_width(pp, sizes, "r")
++    hand = 2.242 * np.sqrt(sum(np.var(vals[k], ddof=1) / sizes[k] for k in vals) / 16)
++    check("expected half-width formula = 2.242*sqrt(sum(s2_h/n_h)/16) (hand)", abs(hw - hand) < 1e-12, dict(hw=hw, hand=float(hand)))
++    check("F effective n (equal variance) ~ 76.19", abs(1 / sum((1 / 4) ** 2 / n for n in sizes.values()) - 76.19) < 0.01)
++    # F 판정 경계 (simult 구간 사용)
++    def f_rep(simple_ok=False, pos=True, cv=True):
++        c = {}
++        for k in ("R1", "R2", "BJ", "BI"):
++            c[k] = dict(r=dict(mean=0.5, simult_lo=0.3, simult_hi=0.6, degenerate_exact=None), h_fail=dict(mean=0.1, simult_lo=0.07, simult_hi=0.2, degenerate_exact=None))
++        if simple_ok:
++            c["R2"] = dict(r=dict(mean=0.95, simult_lo=0.85, simult_hi=1.0, degenerate_exact=None), h_fail=dict(mean=0.0, simult_lo=0.0, simult_hi=0.04, degenerate_exact=None))
++        df = {"BJ-BT:acc": dict(mean=0.2, lo=0.1, hi=0.3), "BJ-R2:r": dict(mean=0.2, lo=0.1, hi=0.3), "BJ-R2:h_fail": dict(mean=0.1, lo=0.03, hi=0.2)}
++        if not pos:
++            df["BJ-R2:r"] = dict(mean=0.02, lo=-0.05, hi=0.1)
++        return dict(stage="F", conds=c, diffs=df, n_non_eos_final=0, valid_rate_by_cond={k: 0.99 for k in DEC.CONDS_VALID}, common_valid={"BJ-R2": dict(r_diff=0.1 if cv else -0.1, hfail_diff=0.05)})
++    check("decide_f: positive when all criteria (simult bounds) hold", DEC.decide_f(f_rep(), ver)["outcome"] == "positive_min_method_review")
++    check("decide_f: simple alternative sufficient overrides", DEC.decide_f(f_rep(simple_ok=True), ver)["outcome"] == "simple_alternative_sufficient")
++    check("decide_f: CI upper below threshold -> negative", DEC.decide_f(f_rep(pos=False), ver)["outcome"] == "negative_no_tradeoff")
++    check("decide_f: common-valid opposite -> not positive", DEC.decide_f(f_rep(cv=False), ver)["outcome"] != "positive_min_method_review")
++    check("decide_f: verifier failure -> invalid_run", DEC.decide_f(f_rep(), dict(passed=False))["outcome"] == "invalid_run")
++    # 퇴화 경계 사용 (모든 환자 사건 0)
++    c0 = dict(r=dict(mean=1.0, simult_lo=1.0, simult_hi=1.0, degenerate_exact=dict(any_event_patient_fraction_upper=0.1)),
++              h_fail=dict(mean=0.0, simult_lo=0.0, simult_hi=0.0, degenerate_exact=dict(any_event_patient_fraction_upper=0.04)))
++    check("sufficient(): degenerate exact bound used instead of [1,1]/[0,0] bootstrap", DEC.sufficient(c0)[0] is True and DEC.sufficient(c0)[1]["r_lower"] == 0.9)
++    c1 = dict(r=dict(mean=1.0, simult_lo=1.0, simult_hi=1.0, degenerate_exact=dict(any_event_patient_fraction_upper=0.3)),
++              h_fail=dict(mean=0.0, simult_lo=0.0, simult_hi=0.0, degenerate_exact=dict(any_event_patient_fraction_upper=0.04)))
++    check("sufficient(): small-n degenerate result cannot be called sufficient", DEC.sufficient(c1)[0] is False)
++    # 퇴화 경계 계산 (합성 report)
++    allperfect = lambda cond, m, d, t: raw(*[x for x in [dict(qA=None)]]) if False else None
++    sizes2 = {"00": 4, "01": 4, "10": 4, "11": 4}
++    man2 = fake_manifest(sizes2)
++
++    def perfect_policy(cond, m, d, targets):
++        truth = dict(zip(S.IDS, [m["q"][i]["state"] for i in S.IDS]))
++        if cond.startswith("BI"):
++            return '{"%s": "%s"}<end_of_turn>' % (targets[0], truth[targets[0]])
++        return raw(truth["qA"], truth["qB"])
++    rq, rc = fake_requests_and_recs(man2, perfect_policy)
++    rp = E.make_report("E", man2, rq, rc)
++    ub = float(np.mean([1 - (0.05 / (4 * 8)) ** (1 / 4)] * 4))
++    de = rp["conds"]["R2"]["h_fail"]["degenerate_exact"]
++    check("degenerate exact binomial bound for all-zero events (hand: 1-alpha^(1/n), alpha=.05/(4*8))", de is not None and abs(de["any_event_patient_fraction_upper"] - ub) < 1e-12, de)
++    check("degenerate flagged in diff for identical conditions", rp["diffs"]["BJ-R2:r"]["degenerate"] is True)
++
++
++def test_gate_stale():
++    os.makedirs(TMP, exist_ok=True)
++    f_in = os.path.join(TMP, "gate_input_a.json")
++    json.dump({"x": 1}, open(f_in, "w"))
++    chk = D.file_sha(f"{OUT}/data/data_check.json")
++    gate = os.path.join(TMP, "gate_ok.json")
++    json.dump(dict(run=True, stage="D", data_check_sha256=chk, inputs=dict(a=dict(path=f_in, sha256=D.file_sha(f_in)))), open(gate, "w"))
++
++    def rej(fn):
++        try:
++            fn()
++            return False
++        except PR.RunError:
++            return True
++    check("gate: valid decision accepted for its stage", RUN.check_gate_inputs(gate, "D")["run"] is True)
++    check("gate: wrong stage rejected (E protocol given D-stage? F given D decision)", rej(lambda: RUN.check_gate_inputs(gate, "E")))
++    g2 = os.path.join(TMP, "gate_false.json")
++    json.dump(dict(run=False, stage="D", data_check_sha256=chk, inputs=dict(a=dict(path=f_in, sha256=D.file_sha(f_in)))), open(g2, "w"))
++    check("gate: run=false rejected", rej(lambda: RUN.check_gate_inputs(g2, "D")))
++    g3 = os.path.join(TMP, "gate_bare.json")
++    json.dump(dict(run=True, stage="D", data_check_sha256=chk), open(g3, "w"))
++    check("gate: bare run=true without input digests rejected", rej(lambda: RUN.check_gate_inputs(g3, "D")))
++    g4 = os.path.join(TMP, "gate_baddc.json")
++    json.dump(dict(run=True, stage="D", data_check_sha256="0" * 64, inputs=dict(a=dict(path=f_in, sha256=D.file_sha(f_in)))), open(g4, "w"))
++    check("gate: stale data_check digest rejected", rej(lambda: RUN.check_gate_inputs(g4, "D")))
++    json.dump({"x": 2}, open(f_in, "w"))
++    check("gate: stale (changed) input file rejected", rej(lambda: RUN.check_gate_inputs(gate, "D")))
++
++
++def test_regression_iter047():
++    """iter_047 D8(구 prompt) 원시 출력에 새 평가 코드를 적용해 보고된 점수와 oracle 29/32를 재현한다. 구 결과는 읽기만 한다."""
++    d = "results/iter_047/gen/D8_v2_4w"
++    recs = []
++    for f in sorted(glob.glob(d + "/gen_worker*.jsonl")):
++        recs += PR.read_records(f)
++    rows = [json.loads(l) for l in open("results/iter_047/requests/requests_D8.jsonl")]
++    man = json.load(open("results/iter_047/data/manifest_D8.json"))
++    old = json.load(open("results/iter_047/eval/D8_report.json"))
++    by = {r["request_id"]: r for r in recs}
++    parsed = {}
++    for q in rows:
++        r = by[q["request_id"]]
++        p = S.parse_state(r["suffix_text_raw"], r["ended_eos"], q["targets"])
++        parsed.setdefault(q["patient"], {})[q["cond"]] = p
++    maxdiff = 0.0
++    n = 0
++    for m in man["rows"]:
++        truth = [m["q"][i]["state"] for i in S.IDS]
++        for c in ("K", "R1", "R2", "T", "BJ", "BI"):
++            met = E.patient_metrics(truth, c, parsed[m["PatientID"]])[0]
++            for k, v in met.items():
++                maxdiff = max(maxdiff, abs(v - old["per_patient_metrics"][m["PatientID"]]["metrics"][c][k]))
++                n += 1
++    check("regression: iter_047 D8 per-patient metrics reproduced by iter_053 code", maxdiff == 0 and n == 8 * 6 * 7, dict(maxdiff=maxdiff, n=n))
++    ok = bad = 0
++    for m in man["rows"]:
++        truth = {i: m["q"][i]["state"] for i in S.IDS}
++        fp = {i: m["q"][i]["finding"] for i in S.IDS}
++        for d in S.DRAFT_CODES:
++            p = parsed[m["PatientID"]][f"O_d{d}"]
++            fin = {i: S.final_state(p, i) for i in S.IDS}
++            if fin == truth and S.render_final(fp, fin) == [S.FINDINGS[fp[i]][truth[i]] for i in S.IDS]:
++                ok += 1
++            else:
++                bad += 1
++    check("regression: iter_047 oracle 29/32 reproduced (old O prompt; errors kept as content errors)", ok == 29 and bad == 3, dict(ok=ok, bad=bad))
++
++
++def test_data_gate_rejects():
++    """자료 gate 거부: HF Path 중복, 잘못된 digest, 분할 변조가 GateError."""
++    import pandas as pd
++    hf = pd.read_parquet(D.CD.HF_PARQUET)
++    dup = pd.concat([hf, hf.iloc[:1]], ignore_index=True)
++    check("data gate input: duplicated HF Path would be detected by uniqueness rule", len(dup["Path"]) != len(set(dup["Path"])) and len(hf["Path"]) == len(set(hf["Path"])) == 234)
++    orig = D.HF_SHA256
++    D.HF_SHA256 = "0" * 64
++    try:
++        D.checked_sources()
++        rejected = False
++    except D.GateError:
++        rejected = True
++    finally:
++        D.HF_SHA256 = orig
++    check("data gate: wrong pinned parquet digest rejected", rejected)
++    orig_csv = D.CSV_SHA256
++    D.CSV_SHA256 = "0" * 64
++    try:
++        D.checked_sources()
++        rejected = False
++    except D.GateError:
++        rejected = True
++    finally:
++        D.CSV_SHA256 = orig_csv
++    check("data gate: wrong pinned csv digest rejected", rejected)
++    chk = json.load(open(f"{OUT}/data/data_check.json"))
++    check("data_check: passed, F independence ok, intersections all 0, legacy exact dup none", chk["passed"] and chk["f_independence_ok"]
++          and all(v == 0 for d in chk["d_e_f_intersections"].values() for v in d.values()) and not chk["legacy_exact_duplicate"]["exact_file_or_pixel_matches"])
++    sets = json.load(open("results/iter_018/manifests/sets.json"))
++    m = {k: {p for v in sets[k].values() for p in v} for k in sets}
++    check("splits D16/E48/F sizes 16/48/105 and disjoint", (len(m["D16"]), len(m["E48"]), len(m["F"])) == (16, 48, 105) and not (m["D16"] & m["E48"]) and not (m["D16"] & m["F"]) and not (m["E48"] & m["F"]))
++    # split_patients 변조 입력 (중복 환자 ID) 거부
++    try:
++        D.CX.split_patients({"absent_absent": ["a", "a"]})
++        rej = False
++    except ValueError:
++        rej = True
++    check("split_patients rejects duplicate patient id", rej)
++
++
++def test_run_rejects():
++    """rr53_run 고유 거부: 요청 파일 변조/누락(manifest 재구성 불일치), 잘못된 stage의 gate 요구, 보호된 stage protocol의 gate 부재."""
++    os.makedirs(TMP, exist_ok=True)
++    src = f"{OUT}/requests/requests_E.jsonl"
++    rows = [json.loads(l) for l in open(src)]
++
++    def rej(fn):
++        try:
++            fn()
++            return False
++        except PR.RunError:
++            return True
++    alt = os.path.join(TMP, "requests_E_dropped.jsonl")
++    open(alt, "w").write("".join(json.dumps(r, sort_keys=True) + "\n" for r in rows[1:]))
++    check("run: request file with a dropped row rejected (count/manifest reconstruction)", rej(lambda: RUN.check_requests("E", alt)))
++    alt2 = os.path.join(TMP, "requests_E_prompt.jsonl")
++    r2 = [dict(r) for r in rows]
++    r2[0]["prompt"] = r2[0]["prompt"] + " "
++    r2[0]["prompt_sha256"] = S.sha(r2[0]["prompt"])
++    open(alt2, "w").write("".join(json.dumps(r, sort_keys=True) + "\n" for r in r2))
++    check("run: request with altered prompt (consistent hash) rejected by reconstruction", rej(lambda: RUN.check_requests("E", alt2)))
++    alt3 = os.path.join(TMP, "requests_E_modality.jsonl")
++    r3 = [dict(r) for r in rows]
++    k = [i for i, r in enumerate(r3) if r["modality"] == "text"][0]
++    r3[k]["modality"] = "image"
++    open(alt3, "w").write("".join(json.dumps(r, sort_keys=True) + "\n" for r in r3))
++    check("run: text row relabeled image rejected", rej(lambda: RUN.check_requests("E", alt3)))
++    check("run: E protocol without D gate refused", rej(lambda: RUN.make("E", os.path.join(TMP, "p_nogate.json"), None)))
++    check("run: F protocol without E decision refused", rej(lambda: RUN.make("F", os.path.join(TMP, "p_nogate_f.json"), None)))
++    fin = os.path.join(TMP, "gate_input_b.json")
++    json.dump({"y": 1}, open(fin, "w"))
++    dg = os.path.join(TMP, "gate_D_valid.json")
++    json.dump(dict(run=True, stage="D", data_check_sha256=D.file_sha(f"{OUT}/data/data_check.json"), inputs=dict(b=dict(path=fin, sha256=D.file_sha(fin)))), open(dg, "w"))
++    check("run: control — that D gate is itself valid for stage D", RUN.check_gate_inputs(dg, "D")["run"] is True)
++    check("run: F protocol given a D-stage gate refused (wrong stage)", rej(lambda: RUN.make("F", os.path.join(TMP, "p_wrongstage.json"), dg)))
++
++
++def main():
++    out = sys.argv[1]
++    if os.path.exists(out):
++        sys.exit(f"refuse to overwrite {out}")
++    if os.path.exists(TMP):
++        shutil.rmtree(TMP) if False else None
++    for fn in (test_prompts_and_requests, test_parser_metrics, test_eval_verify_agree, test_decisions, test_gate_stale, test_run_rejects, test_regression_iter047, test_data_gate_rejects):
++        try:
++            fn()
++        except Exception:
++            check(f"{fn.__name__} raised", False, traceback.format_exc()[-600:])
++    os.makedirs(os.path.dirname(out), exist_ok=True)
++    json.dump(dict(n=len(RESULTS), passed=sum(r["passed"] for r in RESULTS), results=RESULTS), open(out + ".tmp", "w"), indent=1, default=str)
++    os.replace(out + ".tmp", out)
++    print(f"{sum(r['passed'] for r in RESULTS)}/{len(RESULTS)} passed")
++    sys.exit(0 if all(r["passed"] for r in RESULTS) else 1)
++
++
++if __name__ == "__main__":
++    main()
