@@ -270,3 +270,19 @@ PadChest-GR 개발96명에서 직접 SFT의 큰 개선을 확인해, 낮은 기�
 - 접근법: 문장 grounding의 모듈형 대안 비교 (`approach/modular-grounding-comparison`), 시도: iter_044, iter_045, iter_046
 - 커밋: e908c7d9ccf65e8db0b499d74bbd7fa042f6fce9, 2e431cdc7c7366960e12b7d055c7d3b70fec35c5, bab147379dde1bcd68550e298cc596ee15091e99
 - 자세히: DECISIONS.md의 iter_046, `agent/runs/iter_046/review.md`
+
+## 🏁 공동 grounding 손실은 직접 학습으로 상당 부분 회복되지만 추가 방법의 실용 근거는 남지 않았다
+
+*iter_048 · 2026-10-02 18:25 · 판정: CONTINUE / inconclusive*
+
+공동 요청의 큰 성능 저하는 학습 형식으로 상당 부분 설명되지만, 현재 과제의 새 방법 투자는 보류한다.
+- **고민:** iter_041에서 독립 SFT의 F1@0.3 0.578이 공동 요청에서 약0.368로 낮아졌다.
+- **시도:** iter_046의 적응 MedGrounder가 강한 대안이 된 뒤, 같은 C 초기 상태와 annotation 노출로 추가 독립 SFT E와 공동 직접 SFT J를 비교했다.
+- **개발:** 두 trajectory의 공통 checkpoint 선택, 원시 출력 평가와 6개 paired 비용 block을 연결했다.
+- **결과:** 개발 V96에서 공동 F1은 E 0.333→J 0.523으로 개선됐고 차이의 97.5% CI는 [0.138, 0.244]였다.
+- **한계:** J의 독립 대비 공동 손실은 0.067 남았고, 적응 MedGrounder의 F1 0.594 대비 필요한 정확도 이점과 J/E 비용 절감 기준은 미달이었다.
+- **의미:** 일반적인 결합 능력 결함으로 단정할 수 없으며, 잔여 손실만을 이유로 새 loss를 추가하지 않는다. 단일 seed·개발 자료의 관찰을 보존하고 다음 중요한 연구 질문을 선택한다.
+
+- 접근법: 공동 형식 직접 학습 대조 (`approach/joint-format-control`), 시도: iter_048
+- 커밋: 54607a22c7046d0ab75fde09b2a5616edf0e2344
+- 자세히: DECISIONS.md의 iter_048, `agent/runs/iter_048/review.md`

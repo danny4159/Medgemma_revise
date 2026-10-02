@@ -182,24 +182,27 @@ RSNA seed17 grounding SFT의 nonempty 개발 출력 C201/E402에서 마지막 �
 
 ## padchest-sentence-grounding-and-joint-retention — observed
 
-PadChest-GR 개발 V96에서 직접 SFT C의 공동 요청 grounding 저하 관찰은 유지된다(독립 F1@0.3 0.57795, 공동 AB/BA 0.38108/0.35417). 그러나 문장별 비교에서 비적응 MedGrounder-P 대비 나타났던 C의 정확도 이점은 동일 T305 annotation으로 MedGrounder를 적응시킨 뒤 점추정치에서 남지 않았다. 고정 threshold 0.4의 적응 효과는 F1@0.3 +0.18333이고, D24 선택 적응 모델 A−C는 +0.01649였다. 적응 효과는 지지되지만 A−C의 F1@0.3 및 FP 신뢰구간은 사전 허용폭을 충족하지 못해 모듈형 대안의 충분성은 불확정이다. 공동 요청 손실의 원인·해법과 VLM 내부 방법의 필요성은 이번 비교로 판정하지 않는다.
+PadChest-GR 개발 V96의 공동 요청 손실은 직접 공동 형식 학습으로 상당 부분 회복되지만 완전히 해소되지는 않았다. 동일 C 초기 상태·T305 annotation 노출·seed17·8 epoch에서 추가 독립 SFT E와 공동 SFT J의 공동 F1@0.3은 0.333116/0.523251이었다. 선택적 회복 기준은 충족했으나 J의 독립 대비 공동 손실 0.067225가 남았고, 독립 성능 보존 충분성·적응 MedGrounder 대비 필요한 정확도 이점·공동 처리 비용 기회는 충족하지 못했다. 이는 학습 형식 개입의 제한적 효과이며 일반적인 결합 능력 결함이나 순수한 내부 원인을 확정하지 않는다. iter_046의 MedGrounder 적응 효과와 대안 충분성의 불확정 판정은 유지한다.
 
 - 적용 목표 시작: iter_003
-- 최신 리뷰: agent/runs/iter_046/review.json
-- 근거: research/results/iter_046/eval/report.json 및 원시 출력: V96 96명·192문장, P/A@0.4/A@sel/C F1@0.3=0.395313/0.578646/0.594444/0.577951.
-- 근거: A@0.4−P F1@0.3=0.183333, 97.5% CI [0.113366, 0.254863]; A@sel−C=0.016493, CI [-0.071704, 0.109377].
-- 근거: A@sel−C F1@0.5=0.102951, 97.5% CI [0.027424, 0.181081]; FP/문장 차이=0.010417, CI [-0.109375, 0.130208].
-- 근거: research/results/iter_046/timing/: 6 paired block의 A/P device-seconds 비율 1.009338, 95% CI [0.984285, 1.035029]. 신규 A/C 동시 비용 비교는 미실행이다.
-- 근거: agent/runs/iter_041/review.json의 공동 요청 관찰 및 비용 결합 판정 blocker는 그대로 유지한다.
-- 사용·평가 검증: 리뷰에서 별도 JSON parser·좌표 변환·최대 cardinality matching으로 C/P/A@0.4/A@sel의 768개 문장 점수를 재계산했고 네 지표의 저장값 차이는 0이었다.
-- 사용·평가 검증: 주요 두 paired 비교의 네 지표 bootstrap과 원시 timing의 device span·throughput·p95 및 t(5) CI를 독립 재계산했다.
-- 사용·평가 검증: T305/D24/V96 환자·study·영상 ID 교집합 0, D24/V96 현재 영상 파일 hash 120/120 일치를 확인했다. 전체 train pixel 검사와 pixel 비중복은 gate_data_v2.json에 보존돼 있다.
-- 사용·평가 검증: 공식 소스 44개 hash, 리뷰 대상 소스 11개와 commit SHA 일치, 6개 학습 checkpoint digest, 최종 checkpoint 선택 및 V96 이전 평가 잠금을 확인했다.
-- 사용·평가 검증: S 100 updates·3,050문장 노출과 U 300 updates·9,150문장 노출, 연속 step 및 유한 loss/gradient를 원시 학습 로그에서 확인했다.
-- 미해결: 동일 annotation은 동일 사전학습·학습 연산·설정 탐색량을 뜻하지 않는다. 적응이 중요한 경쟁 설명이라는 근거이며 원인의 완전한 분해는 아니다.
-- 미해결: 단일 seed와 반복 사용한 개발 V96의 결과다. 독립 환자·기관 일반화와 비열등성은 미확인이다.
-- 미해결: 공동 형식 직접 SFT, 부재 거부, 근거 기반 답변은 이번 비교 대상이 아니다. 기존 관찰의 보존이 자동 후속 투자를 뜻하지 않는다.
-- 미해결: iter_041 비용 blocker와 이번 실행기의 재사용 결함은 별도 보완 없이 해제하지 않는다.
+- 최신 리뷰: agent/runs/iter_048/review.json
+- 근거: research/results/iter_048/eval/report.json 및 원시 C/E/J 출력 각 384건: 독립/공동 F1@0.3은 C 0.577951/0.367622, E 0.558883/0.333116, J 0.590476/0.523251이다.
+- 근거: J_J−E_J=0.190135, 97.5% CI [0.138051, 0.243955]; 손실 감소 (E_I−E_J)−(J_I−J_J)=0.158542, CI [0.096577, 0.220512].
+- 근거: J_I−E_I의 95% CI 하한은 약 −0.014로 −0.03 보존 기준을 충족한다. 그러나 J_AB/BA의 E_I 대비 복합 충분성 기준은 미달이다.
+- 근거: 적응 MedGrounder A의 원시 192문장 재채점: F1@0.3=0.594444, F1@0.5=0.394097. J_J−A F1@0.3은 약 −0.071193이다.
+- 근거: research/results/iter_048/timing/: 6 paired block의 J/E device-seconds 비율 0.963408 [0.922054, 1.006618], throughput 비율 1.033075 [0.990435, 1.077552].
+- 근거: 원본 좌표 변환까지 포함해 리뷰에서 보정한 A/E device-seconds 비율은 0.031804 [0.030755, 0.032889]이다. 원 보고서의 작은 집계 누락을 보정해도 투자 판단은 변하지 않는다.
+- 사용·평가 검증: 리뷰에서 production 평가기를 호출하지 않고 C/E/J 원시 JSON, 좌표 변환, 최대 일대일 matching을 재구현했다. 환자별 네 지표의 저장 벡터와 최대 차이는 5.56e-17이며 두 주비교 bootstrap을 독립 재현했다.
+- 사용·평가 검증: A의 원시 192문장을 별도 matching 구현으로 재채점해 F1@0.3/0.5를 재현했다.
+- 사용·평가 검증: T305/D24/V96의 환자·study·영상 ID 교집합은 모두 0이며 현재 V96 영상 file hash는 96/96 일치했다. 전체 pixel 검사는 tests/gate_data_final.json에 보존돼 있다.
+- 사용·평가 검증: 공식 processor·assistant mask·EOS·GT 대조 32개 입력과 결정적 GPU 검사, 재개 검사 결과를 확인했다. 마지막 비EOS 출력은 평가 분모에 유지됐다.
+- 사용·평가 검증: E/J 학습 로그에서 각 312개 연속 update, 각 2,440회 환자 노출, LR1e-5, 유한 loss/gradient를 확인했다.
+- 사용·평가 검증: 리뷰 대상 SHA 54607a22c7046d0ab75fde09b2a5616edf0e2344의 변경 파일과 작업 파일이 일치하고, completion에 기록된 파일 digest 및 평가 verifier의 report/selection 연결을 확인했다.
+- 미해결: 단일 seed·반복 사용한 개발 V96이며 독립 환자·기관 재현이 아니다.
+- 미해결: 공동 학습은 prompt·직렬화·영상 반복 횟수를 함께 바꾸므로 순수한 syntax 효과나 내부 원인을 분리하지 못한다.
+- 미해결: D24 생성 점수 상승과 teacher-forced CE 악화가 함께 있어 수렴한 공동 학습 전체의 한계로 일반화할 수 없다.
+- 미해결: 부재 거부·보고서 생성·근거 기반 답변은 이번 비교로 설명하거나 기각하지 않는다.
+- 미해결: iter_041의 원 비용 blocker는 유지한다. 이번 신규 측정은 과거 결과의 소급 확증이 아니다.
 
 ## padchest-presence-grounding-interface — observed
 

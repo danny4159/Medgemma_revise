@@ -1372,5 +1372,23 @@ Claude 계정의 /usage 또는 Settings > Usage에서 제한을 확인한 뒤 �
   - 새 브랜치 `approach/joint-format-control` ← 68117cf (68117cf)
   - ⚠ 권한 거부 2건
 - ⏹ 중단: 오류: codex 실행 준비 실패 (errno=2): No such file or directory. 로그: /SSD1_1TB/home/milab/daniel/08_medgemma/agent/runs/iter_048/review_codex.log (GPT 리뷰 중)
+- ↻ 재실행: '리뷰' 단계부터 이어서 (orchestrator 39987f0+수정)
+- 🔍 **리뷰** (GPT normal): [CONTINUE / inconclusive] 개발 V96에서 공동 SFT는 공동 F1을 0.333→0.523으로 회복했지만 MedGrounder(0.594) 대비 이점과 비용 절감 기준은 미달했다. 현재 공동 grounding 투자는 보류하며 일반적 VLM 능력은 기각하지 않는다.
+  - 접근법 판단: 학습 형식의 선택적 회복은 지지됐지만 직접 공동 SFT의 보존 충분성과 실용 가치 복합 기준은 미달이며, 현재 과제의 추가 투자는 보류한다.
+  - 목표 진전: 실제 학습·신규 출력·비용 측정을 완료한 유효한 진단이다. 공동 직접 SFT는 추가 독립 SFT보다 공동 F1@0.3을 0.190135 개선해 학습 형식이라는 경쟁 설명을 지지했다. 잔여 공동 손실은 남지만 적응 MedGrounder 대비 필요한 정확도 이점과 J/E 비용 기회는 확보되지 않아 현재 과제의 새 방법 투자는 정당화되지 않는다. 새로운 방법론·독립 일반화·논문 contribution은 미입증이다.
+  - 판정 범위: 실용 가치 기준 미달은 PadChest-GR T305, seed17, 동일 C 초기 checkpoint에서 추가 학습한 E/J, 공통 epoch8, 두 양성 문장과 반복 사용한 개발 V96, 현재 2 GPU 실행 구성에 한정된다. 학습 형식의 선택적 회복은 지지된다. 보존 충분성·모듈형 대비 필요한 이점의 미확보를 모든 공동 학습이나 의료 VLM의 실패로 확대하지 않는다.
+  - 재사용 전 수정: pg48_train.py는 실제 a.lr과 기록된 CFG.lr을 일치시키고 재개 digest에 실제 적용값을 포함해야 한다.
+  - 재사용 전 수정: pg48_final.py는 eval/timing verifier가 동일 raw/report/selection/source를 검사했는지 digest를 대조해야 한다. timing verifier에도 입력 digest가 필요하다.
+  - 재사용 전 수정: pg48_verify.py의 provenance에 C 공동 출력과 A 원시 파일을 포함하고 요청 행렬·target label 검사를 강화해야 한다.
+  - 재사용 전 수정: MedGrounder device 시간은 원본 좌표 변환 완료인 t_orig_done까지 포함하도록 보고기와 verifier를 함께 수정해야 한다. 원 결과는 보존한다.
+  - 재사용 전 수정: pg43_run의 재개 worker mapping KeyError와 attempt가 섞인 비용 집계를 수정하고 다른 worker 수로 재개하는 회귀 검사를 수행해야 한다.
+  - 재사용 전 수정: MG 공식 소스 44개·text encoder 불변성 및 D8 공식 입력 tensor 대조 등 미완료 required_checks는 실제 재사용 전에 완료하거나 기존 검증과 현재 자산의 불변성을 명시적으로 연결해야 한다.
+  - 추후 개선: 결정적 모드의 정확한 재개 검사를 비결정적 본학습의 bitwise 재현 보장으로 표현하지 않는다.
+  - 추후 개선: D24 CE 악화와 생성 점수 상승, 단일 seed 및 작은 선택 집단의 불확실성은 수렴·일반화 주장 범위를 제한한다.
+  - 추후 개선: loading·실패·재시도·checkpoint I/O를 포함한 통합 비용 장부와 CPU/RAM/I/O 경합 기록은 부족하다.
+  - 추후 개선: pg48_gentests의 expected-branch 문자열 오류를 다음 실제 사용 시 정정한다. 이번 변조 거부 자체는 확인됐다.
+  - 추후 개선: 긴 반복 출력과 외부 부하에 대한 견고성은 향후 해당 경로를 다시 사용할 때 다룬다.
+  - 다음: 현재 두 양성 문장 공동 grounding의 추가 방법 투자를 보류하고, GOAL 안의 다른 중요한 질문을 선택하는 전략 계획으로 전환한다. iter_040~048의 같은 research_track 이력과 비용을 이어받아 강한 단순 대안 이후에도 남는 중요한 실제 사용 문제를 우선순위화한다. 직접 공동 SFT의 회복과 잔여 손실은 보존하되 추가 epoch·seed·표본·prompt·timing·새 loss를 자동 추가하지 않는다. 재개는 독립 VLM의 필요한 정확도 이점과 공동 처리의 비용 기회를 바꿀 구체적 새 근거가 생길 때만 검토한다. 다음 계획은 후보 하나, 단순 대조군, 실제 출력의 진입 근거, 결과별 투자 결정과 종료점을 정하고 주변 진단 목록으로 끝내지 않는다. 미사용 pg48 파이프라인 정비를 별도 반복으로 만들지 않는다. 기존 blocker·RSNA 자산·보호 reserve·VinDr 승인 대기를 유지한다.
+- 🏁 **마일스톤**: 공동 grounding 손실은 직접 학습으로 상당 부분 회복되지만 추가 방법의 실용 근거는 남지 않았다 — JOURNEY.md
 - 📁 원본: `agent/runs/iter_048/`
 
