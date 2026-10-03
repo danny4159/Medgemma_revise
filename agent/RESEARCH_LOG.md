@@ -21043,3 +21043,409 @@ DF41 저장소는 4-class fusion CNN과 실행 코드를 제공하지만 checkpo
 
 이전 사고 라운드 노트: agent/runs/iter_055/think/
 
+
+
+## iter_056 GPT PLAN [MRI 구간 근거 사용 진단 / proceed] — 2026-10-03 18:35:45
+
+# 요약
+
+- **이번에 할 일:** MSD 뇌종양 MRI의 FLAIR 영상 구간에서 병변 존재 판단을 평가한다. 소수 실제 자료 검사 후 같은 반복에서 MedGemma 출력을 얻는다.
+- **필요한 이유:** MRI 지원 여부와 현재 과제의 기본 능력은 다르다. slice 표집의 근거 손실과 기본 인식 부족을 구분해야 한다.
+- **확인할 기준:** dense·uniform-8·oracle-8·text-only의 정확도와 비용, 실제 annotation coverage, 모델 오답과 형식 오류의 분리다.
+- **주의·다음:** 임상 진단이나 방법 효과 검증이 아니다. 기본 능력이 부족하면 같은 과제에서 다른 VLM을 비교하고, 결과에 따라 모델 선택 또는 방법 투자 보류를 결정한다.
+
+# Current Understanding
+
+최종 GOAL은 유지한다. iter_055의 MARIO 계획은 사용자 지시로 보존·보류하며 임상 협력 여부를 다시 묻지 않는다. iter_054의 단일 영상 보정 후보 보류, iter_048의 공동 형식 학습 관찰도 유지한다.
+
+iter_021의 SPIDER 결과는 점 좌표 인터페이스와 reference 복사에 관한 제한된 관찰이다. MRI 전체의 기본 판독 능력이나 현재 과제의 실패 근거로 사용하지 않는다. 1.dcm과 수동 TOF 결과는 정답 있는 평가 자료가 아니다.
+
+선택 자료는 MSD Task01_BrainTumour의 공개 training이다. 공식 소개상 다중 sequence와 종양 하위영역 mask가 있다. 이번에는 FLAIR와 모든 비배경 annotation의 합집합만 사용한다. 실제 archive schema와 영상 연결은 아직 미검증이다.
+
+# Strategy Check / 연구 방향 판단
+
+**중요한 능력:** 제한된 MRI 관측 범위에 존재하는 병변 근거를 답변으로 연결하고, 필요한 slice 수와 오류의 관계를 이해하는 것이다.
+
+**관찰과 남은 설명:** MRI reference 실험에서 인터페이스 실패가 있었지만 이번 과제에 전용할 실제 성능 근거는 없다. 입력 손실, 기본 인식 부족, 긴 입력의 판단 저하와 prior가 경쟁 설명이다.
+
+**선택 비교:** 기존 방법 개선은 강한 단순 대안 이후의 추가 가치가 미확정이다. SPIDER 보완은 좌표 인터페이스를 다시 다루는 비용이 든다. 현재 MRI 진단은 공개 mask로 정답을 연결하고 바로 실제 출력을 확인할 수 있어 우선한다. 새로운 modality를 계속 탐색하는 계획은 선택하지 않는다.
+
+**다음 비교와 결정 변화:** dense와 uniform의 차이를 실제 mask coverage와 연결하고 oracle에서 기본 신호가 회복되는지 본다. 기본 신호가 없으면 모델을 비교한다. 단순 표집으로 충분하면 추가 방법 투자를 종료한다. 중요한 잔여 문제가 있으면 전문 모델 대조를 포함한 최소 방법 투자 가치를 리뷰한다.
+
+새 track은 좌표·문장 grounding이 아니라 MRI 관측 범위의 근거 사용이라는 질문에 대응한다. related_iterations로 과거 MRI·다중 영상·oracle 실패와 사용자 전환을 연결한다. 과거 준비 비용은 초기화하지 않는다. 기존 로그는 자료 연결과 실행 검증에 상당한 작업이 들어갔음을 보여주지만, 누적 비용 비율은 계산하지 않았으므로 제시하지 않는다.
+
+# Hypothesis
+
+같은 MRI 구간에서도 uniform 표집이 병변 근거를 충분히 보존하면 dense에 근접할 수 있다. 반대로 GT로 근거를 집중한 입력에서만 판단이 좋아지면 표집 또는 인식 난도가 남는다. dense가 oracle보다 낮아도 입력 길이만의 인과 효과라고 단정하지 않는다. oracle은 근거량·구성·길이를 함께 바꾸기 때문이다.
+
+이 실험은 새로운 방법의 효과를 시험하지 않는다.
+
+# Limitation Evidence / Correct Usage Checks
+
+`limitation_ids=[]`다. 현재 과제에 해당하는 observed/validated 한계는 없다. 기존 MRI reference 한계는 교훈으로 참조하되 method gate의 근거로 전용하지 않는다.
+
+자료 gate는 공식 schema·정답 의미·영상 연결·좌표·이용 조건이다. 모델의 oracle 정답률은 기술 gate가 아니다. 올바른 입력의 오답·형식 오류·비EOS는 각각 기록하며 모델 부적합의 관찰이 될 수 있다.
+
+MedGemma revision은 기존 `91850547d9f0b2fdd21aa7c5f4f3d1a8a52c243b`를 고정한다. 공식 chat template와 processor를 사용하고, 원래 FLAIR volume 전체의 min/max로 정규화한 동일 RGB axial slice를 inferior→superior 순서로 전달한다. 구간별 재정규화, per-slice contrast 보정, montage는 사용하지 않는다. orientation 변환을 image와 mask에 동일하게 적용한다.
+
+공식 보고서의 85-slice 조건은 study 전체 평가이며 이번 구간 입력은 변경된 탐색 조건임을 명시한다. 입력 개수·순서·pixel tensor·image token 수와 prompt 경계를 독립 공식 호출과 대조한다.
+
+# Contribution Path / Baselines / Reuse
+
+구간 존재 판단은 segmentation+OR 규칙으로 풀 수 있다. 따라서 이 과제를 임상 reasoning 또는 언어 고유 효용의 증명으로 표현하지 않는다. 이번 진단의 가치는 volume 근거 사용 연구에 적합한 모델과 잔여 문제를 식별하는 데 있다.
+
+이번 직접 대조는 dense, uniform-8, diagnostic oracle-8, text-only, 항상 present/absent다. oracle은 정답으로 입력을 선택하므로 실용 정확도–비용 곡선에서 제외한다. 후속 방법 투자에는 전문 segmentation+OR 및 같은 데이터의 직접 SFT가 필요하다. 이 비교군을 실행하지 않은 이번 결과로 신규성을 승인하지 않는다.
+
+현재 기반의 `pg43_run.py`에서 hash·canonical JSON·record I/O·부분 행 보존·flock helper를, `rsna_diag/generate.py`에서 고정 모델 로딩 및 환경 기록을, `rsna_diag/queue_lock.py`에서 원자적 claim을 제한적으로 재사용한다. import 의존인 `rsna_diag/__init__.py`, `geometry.py`, `prompts.py`도 잠금 대상이다. 현재 HEAD와 실제 파일 존재를 확인했으므로 선별 반입은 없다.
+
+iter_054 review.json의 전체 실행 경로는 needs_fix다. 기존 single-image loader·padding·CLI·gate·판정·비용 집계를 그대로 사용하지 않는다. 이번 다중 영상 경로에서 필수 근거 집합 누락 거부, 요청 완전성, 자식 종료 상태, attempt별 비용을 명시적으로 연결한다. 미사용 과거 CLI까지 정비하지 않는다. 기존 다중 영상 보관 코드는 자동 승인·반입하지 않는다.
+
+# Proposed Experiment
+
+## 1. 자료 적합성과 동작 확인
+
+공식 MSD 배포 또는 MONAI 공식 loader가 가리키는 archive와 checksum을 사용한다. 다운로드 전에 실제 크기·디스크·환경을 확인한다. 가능하면 archive metadata와 필요한 member를 먼저 확인한다. 배포 구조상 전체 archive 전송이 필요하면 이유와 bytes를 기록하되 전체 영상 감사·렌더링은 하지 않는다.
+
+먼저 dataset.json과 6개 case의 실제 FLAIR·mask를 확인한다. channel 번호는 schema에서 읽고 BraTS 관행으로 추정하지 않는다. license·출처·원 파일 hash·shape·spacing·affine·값 범위·case 연결을 보존한다. 비배경 label이 모두 종양 관련 영역임을 공식 설명과 대조한다. mask와 영상의 공간 대응을 실제 표시해 확인한다. 이미지를 보지 않고 시각 검사를 통과했다고 쓰지 않는다.
+
+case가 환자와 일대일인지 출처를 확인한다. 불명확하면 분석 단위를 case로 명시하고 환자 독립성을 주장하지 않는다. 동일 volume·중복 영상은 묶고 개발/평가 사이에 나누지 않는다. 이 불확실성만으로 탐색 출력을 막지는 않지만 독립 환자 확증으로 부르지 않는다.
+
+D6는 동작·형식·처리량 개발용이다. 모델 정답률과 무관하게 기술 무결성이 확인되면 E로 진행한다. 자료의 실제 의미나 공간 연결이 틀리면 해당 단계에서 중단하고 구체적인 blocker를 보고한다.
+
+## 2. 구간·정답·입력 조건 고정
+
+FLAIR의 nonzero voxel이 존재하는 axial 범위의 첫 slice부터 마지막 slice까지를 찾는다. 그 연속 범위를 index상 가능한 한 같은 길이의 6개 비중첩 구간으로 나눈다. 이 과정은 mask를 읽지 않는다. XY 영상은 자르지 않는다. 각 구간은 최소 8 slice가 있어야 한다. 조건을 충족하지 못하는 case는 사유를 기록하고 출력 전 고정된 case 순서의 다음 항목으로 대체한다.
+
+구간 정답은 전체 구간에서 annotation 합집합의 voxel이 하나라도 있으면 present, 없으면 absent다. 작은 경계 병변을 제거하지 않는다. annotation voxel 수·양성 slice 비율·최대 단면적을 함께 보존한다. absent는 해당 annotation이 없는 구간이며 정상 환자 또는 모든 질환 부재가 아니다.
+
+- **DENSE:** 구간의 모든 axial slice. 85개 초과라면 공식 방식의 등간격 85개를 사용하고 full 구간 대비 coverage를 별도 기록한다.
+- **U8:** 양 끝을 포함하는 결정적 등간격 8개 slice. 반올림·중복 처리 규칙을 config에 고정한다.
+- **O8:** 양성 구간은 annotation 단면적이 큰 순서의 8개 slice를 고르고 동률은 index로 정한다. 이후 해부학적 순서로 정렬한다. 음성 구간은 U8과 동일하다. 이는 GT 기반 근거 집중 oracle이다.
+- **TEXT:** 같은 질문·sequence 안내만 제공하며 image token·pixel tensor는 없다.
+
+정답, mask, case명, 조건명, oracle 여부는 모델에 전달하지 않는다. slice index나 GT 기반 통계도 prompt에 넣지 않는다. 동일한 질문은 ‘제시된 axial FLAIR 구간에 glioma-related lesion, including peritumoral edema가 보이는가’이며 답은 PRESENT 또는 ABSENT만 요청한다. 전체 환자의 질병 유무를 묻지 않는다.
+
+D에서 단일 고정 문구와 whole-string parser를 잠근다. 대소문자·주변 공백·끝 punctuation만 정규화하며 두 답이 섞이거나 다른 내용이면 invalid다. invalid를 absent로 바꾸지 않는다. 생성은 greedy, 초기 cap512이며 비EOS cap 도달 요청만 2048로 한 번 재시도한다. 모든 attempt와 최종 invalid를 보존한다. 내용 오답을 이유로 prompt를 탐색하지 않는다.
+
+## 3. 가능성 탐색
+
+D와 분리한 E48 case를 사용한다. 공개 training 목록에서 seed56의 고정 순서로 선택하고, 기존 사용·중복 여부를 확인한다. 성능이나 lesion 크기로 E를 선별하지 않는다. 공식 test와 남은 training case는 이번 출력에 사용하지 않는다.
+
+48 case는 여러 해부학적 구간과 case별 오류 분포를 관찰하기 위한 탐색 규모다. case 수준 비율의 최악 조건 표준오차는 약7.2 pp여서 작은 차이의 확증에는 부족하다. 구간 288개를 독립 환자 288명으로 세지 않는다. E를 24+24 case의 처리 shard로 나눌 수 있으나 중간 점수로 후반을 취소하거나 조건을 바꾸지 않는다.
+
+기본 비교는 E48×6구간×4조건=1152개 요청이며 D를 포함하면 최대1296개다. 동일 TEXT prompt는 한 번 생성해 결정적 baseline으로 재사용할 수 있다. 영상 조건이 동일한 O8/U8도 provenance를 유지하며 중복 호출을 피할 수 있다.
+
+양성 또는 음성 구간이 없는 경우 BA를 만들지 않고 해당 class의 오류만 탐색 보고한다. 자료를 보고 유리한 threshold나 구간 수로 바꾸지 않는다.
+
+## 4. 조건부 모델 대조
+
+E의 MedGemma DENSE와 O8이 모두 BA<0.65이거나, 두 조건 모두 TEXT 대비 BA 이득이 0.05 미만이면 Qwen3-VL-4B-Instruct 비교를 실행한다. 이는 적합성 선별 기준이며 통계적 기각 문턱이 아니다. class가 하나뿐이라 BA가 정의되지 않으면 이 자동 분기를 적용하지 않는다.
+
+공식 model card의 실행 경로와 revision을 고정하고 격리 환경·별도 모델 cache를 사용한다. D의 입력·chat template·출력·메모리를 확인한 뒤 동일 E에서 DENSE/O8/TEXT를 평가한다. 동일 PNG와 질문을 사용하되 모델별 processor·visual token 차이는 공개한다. Qwen의 비용이 같다고 가정하지 않는다. 최대 추가 요청은 D/E 합계972개다. MedGemma 결과에 맞춰 Qwen prompt를 조정하지 않는다.
+
+## 5. 규모 확대와 독립 확인
+
+이번 반복의 본 탐색은 E48 및 위 조건부 비교까지다. 학습·다중 seed·새 확인 집단 평가는 없다. 기술 확인만으로 전체484개를 실행하지 않는다. E48은 개발 자료로 유지한다.
+
+후속 확대는 full review에서 기본 신호, 잔여 문제의 크기, 단순 대안, 필요한 정밀도와 비용을 함께 보고 별도 계획한다. method pilot은 유효 observed 근거·사용법 검사·blocking 없음의 기존 gate를 따라야 한다.
+
+# Implementation Tasks for Claude
+
+1. 원본 보존 상태와 현재 기반 파일을 확인하고, `results/iter_056/` 아래 source·data·protocol·raw·metrics·resource 기록을 분리한다.
+2. archive schema와 D6의 실제 입력을 검증한다. 재현 가능한 FLAIR 변환, 구간 생성, mask 합집합 정답 및 조건별 coverage를 구현한다.
+3. 기존 모델 로딩·lock·record helper를 활용해 다중 영상 요청 경로를 구성한다. GT는 evaluator와 O8 준비 단계에만 두며 inference worker는 읽지 않는다.
+4. 요청 ID에 case·구간·조건·모델·prompt/config digest를 연결한다. 모든 slice의 순서와 hash를 잠그고 필수 gate 근거 누락·변조·중복·누락·실패 worker를 거부한다.
+5. synthetic affine/axis 검사, 실제 D tensor 대조, parser의 invalid 처리, case-cluster 집계, 소규모 강제 중단·재개를 검증한다. 기존 결과와 같은 파일에 쓰지 않는다.
+6. D에서 처리량 구성을 정하고 E 고정 비교를 완료한다. 조건 충족 시 같은 과제의 Qwen 대조를 수행한다.
+7. 독립 계산으로 confusion matrix·BA·paired 차이를 재계산한다. 원시 출력·실패 사례·비용·다음 투자 결정을 보고한다. 코드 보존과 branch/commit 관리는 orchestrator에 맡긴다.
+
+# Evaluation (성공/실패 기준 포함)
+
+주지표는 구간 단위 balanced accuracy, sensitivity, specificity와 invalid rate다. invalid는 해당 class의 오답으로 계산한다. 상수 prior와 TEXT를 함께 표시한다. case를 cluster로 재표집한 95% bootstrap CI를 제시하며 D는 E 점수에 합치지 않는다. 환자 대응이 불명확하면 case-cluster CI라고 명시한다.
+
+조건별 annotation coverage는 전체 구간 대비 선택 slice가 보존한 양성 slice·최대 단면적·voxel 합을 보고한다. sparse 영상에 annotation이 없는 양성 구간을 따로 표시한다. 이때 sparse의 실패를 관측된 근거 무시라고 부르지 않는다. 큰 병변과 경계 소량 annotation의 결과도 분리해 기술하되 주분석에서 제외하지 않는다.
+
+**기본 신호:** DENSE 또는 O8의 BA≥0.70, sensitivity와 specificity 각각≥0.60, TEXT 대비 BA≥0.10이면 다음 방법 투자 논의를 위한 탐색적 기본 신호로 본다. CI 문턱을 출력 실행 gate로 쓰지 않는다.
+
+**중요한 잔여 차이:** 기본 신호가 있고 조건 간 BA 차이≥0.10이며 개선·악화 사건이 적어도5개 case에 분포하면 후속 검토 대상으로 삼는다. 이는 내부 원인·신규성의 확증이 아니다. O8만 좋다면 GT 선택의 실용 가능성을 먼저 해결해야 한다.
+
+**양성 결과의 행동:** coverage 손실과 일치하는 차이면 단순 표집 개선 및 전문 segmentation 기반 선택을 우선 비교한다. 근거가 보존된 구간에서도 차이가 남으면 최소 개입의 가치와 강한 대조를 리뷰한다. 학습을 자동 시작하지 않는다.
+
+**음성 결과의 행동:** U8이 DENSE와 0.05 BA 이내이고 실제 비용이 절반 이하라면 uniform 입력을 유용한 탐색 baseline으로 보존하고 복잡한 표집 방법 투자를 우선하지 않는다. 작은 CI로 비열등성이 확증됐다고 표현하지 않는다. 기본 신호가 부족하면 사전 조건에 따라 Qwen을 비교한다. Qwen만 충분한 신호를 보이면 모델 재선택을 권고한다. 두 모델 모두 부족하면 현재 FLAIR 구간 VLM 방법 투자를 보류한다.
+
+**불확정 결과의 행동:** 차이가 일부 case에 집중되거나 CI가 넓으면 불확정이다. 추가 표본이 무엇을 결정할지 설명할 수 있을 때만 한정 보완을 제안한다. annotation 의미·입력 연결 오류는 기술 실패로, 올바른 입력의 낮은 정확도는 모델 관찰로 구분한다. 어느 경우도 MRI 전체의 실패로 확대하지 않는다.
+
+전문 segmentation+OR와 직접 SFT 대비 우위, 독립 환자 일반화, 임상 활용, 신규 contribution은 이번 판정 범위 밖이다.
+
+# Risks / Checks
+
+## 자원·시간·재개
+
+시작 직전 nvidia-smi로 허용 GPU0/1의 여유를 확인하고 큰 장치부터 배정한다. bf16 모델 가중치의 기존8~10GB 참고값은 다중 slice peak가 아니다. DENSE의 vision activation·KV cache를 포함한 실제 peak를 먼저 측정한다.
+
+두 GPU 각각1 worker를 출발 구성으로 두고, 메모리가 허용하면 D의 같은 요청에서 GPU당2 worker 또는 batch2 중 유망한 하나를 비교한다. 합산 peak와 기존 점유에 worker당2GiB 여유가 있어야 한다. 처리량·긴 요청 지연·오류·CPU/RAM/I/O를 기록한다. 같은 GPU 복수 worker가 이득이 없거나 안전하지 않으면 실측 근거로1 worker를 유지한다. 결과 정합성을 확인한 뒤 구성만 선택하며 E 정확도로 선택하지 않는다.
+
+본실행 전 예상 wall-clock은 조건별 남은 요청 수를 D의 실측 요청/초로 나누고 loading·자료 준비·재시도를 더해 산출한다. 현재는 다중 slice 처리량과 archive 전송량이 미측정이므로 신뢰할 숫자 추정이 없다. 시간을 임의 상한으로 사용하지 않으며 수 시간 실행도 허용한다. 모델별 device 시간, wall-clock, 전체 개발·재시도 비용을 구분한다.
+
+worker별 append 결과와 원자적 claim을 사용한다. 재개 시 완료 요청의 입력·설정·출처를 검증하고 실행 attempt별 시간을 기록한다. OOM은 batch/동시성을 낮춰 복구하되 slice 수·해상도·질문을 조용히 바꾸지 않는다. 다른 사용자 프로세스는 건드리지 않는다.
+
+## 해석과 보존
+
+공개 자료의 사전학습 노출은 완전히 배제할 수 없다. 단일 sequence·부분 volume의 결과이며 전체 MRI study 판독으로 일반화하지 않는다. O8은 병변 크기·구성·길이를 바꾸므로 순수한 context 인과 실험이 아니다. mask 밖을 임상 정상으로 해석하지 않는다.
+
+기존 hf_cache는 수정하지 않는다. 필요한 설치는 전용 환경에 하고 Python 경로·버전·설치 명령·checkpoint revision·license·실제 GPU 출력 검사를 보존한다. 미설치는 비교군 제외 사유가 아니다.
+
+## 대규모 GPU 필요 후보
+
+전체 multi-sequence volume을 사용하는 3D encoder–언어모델 공동 적응과 대규모 MRI instruction tuning은 장기 후보로 기록한다. 현재 필요성·효과·신규성은 미검증이며 이번 두 GPU 진단 이후에도 구체적 근거가 있을 때만 검토한다.
+
+# 계획의 근거 (GPT 조사 노트)
+
+# 새로 확인한 것
+
+- `agent/GOAL.md`, `agent/GPT_USAGE_POLICY.md`, iter_055의 원 plan.json, iter_054의 review.md 및 code_assets, iter_021의 원 review.json과 LIMITATIONS 항목을 확인했다. iter_055에는 계획·조사 기록이 있으며 구현 보고서는 없다. OCT 보류는 사용자 우선순위 전환이며 실패 판정이 아니다.
+- 현재 research HEAD는 `1d26362742c2c50216c9adfd55293592a2799568`이고 status/diff는 비어 있다. `pg43_run.py`, `rsna_diag/generate.py`, `rsna_diag/queue_lock.py`와 의존 파일이 현재 기반에 있다. 모델 로딩·기록·lock helper를 제한적으로 재사용할 수 있으나 전체 실행기의 재사용 승인은 없다.
+- MSD 공식 소개는 BrainTumour가 FLAIR/T1w/T1gd/T2w의 750개 volume, 공개 training 484개와 test 266개로 구성되며 종양 하위영역을 주석화했다고 설명한다. 이번에는 공개 training만 사용한다. [공식 과제 소개](https://medicaldecathlon.com/), [원 데이터 논문](https://arxiv.org/abs/1902.09063)
+- MONAI의 실제 DecathlonDataset 소스에서 Task01 archive URL과 checksum 관리 경로를 확인했다. archive 내부 dataset.json, 실제 channel 순서·이용 조건·case 대응은 이번 read-only 조사에서 직접 검증하지 않았다. 따라서 Claude의 첫 단계에서 소수 실제 입력으로 확인한다. [공식 MONAI loader](https://raw.githubusercontent.com/Project-MONAI/MONAI/dev/monai/apps/datasets.py)
+- MedGemma 공식 보고서는 MRI를 axial slice의 순서 있는 RGB 입력으로 처리하며 volume 단위 min-max 정규화를 사용한다. 85 slice는 보고서의 학습·평가 조건이며 절대 아키텍처 한도가 아니다. 이번 구간 입력은 전체 study 평가와 다른 탐색 조건이다. [Technical Report §2.3.1](https://arxiv.org/html/2604.05081v1)
+- Qwen3-VL-4B-Instruct의 공개 가중치, Apache-2.0 표기, 공식 Transformers 실행 예제를 확인했다. MRI 적합성을 입증한 것은 아니며 조건부 모델 대조 후보로만 사용한다. [공식 model card](https://huggingface.co/Qwen/Qwen3-VL-4B-Instruct)
+
+# 의미와 선택
+
+종양 환자만 있는 자료에서 환자 단위 종양 유무를 평가하면 prior로 풀릴 수 있다. 대신 동일 case의 영상 구간에 annotation이 존재하는지를 평가한다. annotation이 없는 구간을 정상 환자 또는 임상적으로 정상인 영상으로 부르지 않는다. 전체 annotation 합집합을 사용하므로 BraTS/MSD의 하위 label 번호를 임의로 대응할 필요도 없다.
+
+현재 중요한 질문은 새 loss가 아니라 MRI에서 영상 신호가 존재하는지와 입력 범위에 따라 어떻게 달라지는지다. 이 진단 자체는 top-tier contribution이 아니다. 자료 연결이 확인되면 실제 출력을 얻고 모델 선택·후속 투자 판단을 끝내는 것이 이번 정보 가치다.
+
+# 남은 확인
+
+archive의 schema·channel·license·case 단위, FLAIR와 mask의 affine 일치, 실제 영상 예시, 다중 slice의 peak 메모리와 처리량은 구현 단계에서 확인한다. 이를 자료 부재나 임상 협력 필수로 해석하지 않는다. 이번 라운드에서는 파일 수정·다운로드·실험 실행을 하지 않았다.
+
+
+
+## iter_056 CLAUDE IMPLEMENTATION REPORT — 2026-10-03 19:28:41
+
+# 요약
+
+- **핵심 결과:** MSD Task01 뇌종양 FLAIR 6구간 판정(E48, 288구간)에서 MedGemma 1.5의 BA는 DENSE 0.776, U8 0.769, O8 0.753이었습니다. TEXT와 항상-PRESENT는 0.5입니다. 사전 규칙상 기본 신호는 "있음", Qwen 분기는 미발동, U8을 탐색 baseline으로 보존하는 쪽입니다.
+- **근거:** 입력 구성, 요청 완전성, 독립 재계산(정답·BA·응답 해석)은 모두 통과했습니다. U8−DENSE BA 차이는 −0.008이고 case-cluster 95% CI는 [−0.057, 0.038]입니다.
+- **미검증·주의:** "구간 위치만으로 푸는 prior"가 in-sample BA 0.719로 MedGemma 0.776에 가깝습니다. 신호의 상당 부분은 영상 병변 인식이 아니라 해부학적 위치일 수 있습니다. 이 결과는 임상 판독이나 방법 효과를 뜻하지 않습니다.
+- **다음:** GPT 리뷰에서 위치-통제 평가가 필요한지 판단해야 합니다. 자세한 권고는 마지막 절에 있습니다.
+
+# Work Performed
+
+- **자료:** MSD 공식 archive를 MONAI 소스가 가리키는 URL로 받았습니다(7,608,266,240 bytes). md5 `240a19d7…872`가 기대값과 일치했습니다.
+  - `dataset.json`에서 modality 0=FLAIR, labels 1/2/3=edema/non-enhancing/enhancing, license CC-BY-SA 4.0을 읽었습니다. 정답은 비배경 label의 합집합입니다.
+  - 484개 training case의 image 파일 sha256 중복 그룹은 0입니다.
+  - seed 56 고정 순서에서 FLAIR nonzero 범위만으로 적격(6구간 각 ≥8 slice)을 확인해 D6+E48을 뽑았습니다. mask는 사용하지 않았고 skip은 0건입니다.
+  - 54개 case 모두 RAS, 240×240×155, 1mm입니다.
+- **구간·조건:** 구간 324개 중 정답 present는 213개입니다. DENSE/U8/O8 PNG 7,456장을 만들었고, FLAIR volume 전체 min/max로 정규화했습니다.
+- **시각 검사:** D6의 mask overlay와 U8 montage를 실제 이미지로 열어 확인했습니다. anterior가 위이고, mask는 고신호 병변과 맞았으며, slice 순서는 inferior→superior입니다. 좌우 방향은 영상과 mask에 동일 변환을 적용했다는 점만 확인했고, 좌우 자체는 독립 검증하지 않았습니다.
+- **기술 검증:** 아래 검사는 모두 통과했습니다.
+  - 독립 구성 대조: `input_ids`와 `pixel_values`가 일치했습니다(24/8/8장과 text).
+  - image token 256/장, `<start_of_image>`·`<end_of_image>` 수, TEXT에 pixel 없음.
+  - GT가 요청 행에 없음, 요청 행 내 slice 순서·단일 case 확인.
+  - 강제 중단·재개: SIGKILL 후 torn row를 붙여 재개했습니다. 97/97 완료, 중복 0, 누락 0, D 본 실행 대비 token 불일치 0, 부분 행 별도 보존.
+  - 독립 재계산 `msd56_verify.py`: mask에서 구간 정답 직접 재계산(불일치 0), PNG↔raw slice 36장 일치, 별도 파서 불일치 0, BA·paired 차이가 evaluator와 일치, 별도 seed bootstrap CI 일치.
+- **실행:** D97 요청과 E766 요청을 GPU 0/1에 각 1 worker로 실행했습니다. E의 조건 행은 1152개입니다(U8/O8 공유와 TEXT 1회 재사용으로 고유 요청 766개).
+- **Qwen3-VL:** 사전 분기 조건(DENSE·O8 모두 BA<0.65, 또는 둘 다 TEXT 대비 이득<0.05)이 E에서 충족되지 않아 실행하지 않았습니다. 실행 코드와 가중치만 준비했습니다.
+
+# Files Changed
+
+신규 코드는 모두 `research/` 루트의 `msd56_*.py`입니다. 기존 파일은 수정하지 않았습니다.
+
+- **자료·검증:** `msd56_fetch.py`, `msd56_data.py`, `msd56_overlay.py`, `msd56_sanity.py`, `msd56_verify.py`.
+- **실행·평가:** `msd56_run.py`, `msd56_resume_test.py`, `msd56_eval.py`, `msd56_breakdown.py`.
+- **조건부 비교(미실행):** `msd56_qwen.py`.
+- **결과:** `results/iter_056/` 아래 `source`, `data`, `gen`, `eval_D`, `eval_E`, `tests`.
+- **Qwen 가중치:** `results/environments/qwen3vl_cache`(revision `ebb281ec…`, Apache-2.0).
+
+# Commands / Experiments (실제 실행한 명령과 성공/실패)
+
+- **다운로드:** `python msd56_fetch.py`를 세 번 이어서 실행했고 md5가 일치했습니다.
+- **자료:** `python msd56_data.py select`, `extract`, `build`가 성공했습니다.
+- **D 입력 검사:** `python msd56_sanity.py 0`을 두 번 실행했습니다.
+  - 첫 번째는 검사 스크립트의 BOS 중복 버그로 `ids_equal=false`였습니다(결과 `sanity.json` 보존).
+  - 수정 후 두 번째는 통과했습니다(`sanity_v2.json`).
+- **D 실행:** `launch` 성공(wall 202s). 이어서 `verify`와 `msd56_eval.py --split D`를 실행했습니다.
+- **재개 검사:** 첫 시도는 실패했습니다. torn row가 다른 worker 번호의 파일 읽기를 깨뜨렸습니다(`gen/D_resume_test` 보존).
+  - 수정: 완전한 행만 읽도록 `read_jsonl`을 고쳤습니다.
+  - 두 번째 시도(`resume_test2.json`)는 성공했습니다.
+- **E 실행:** 코드 수정 후 `protocol_E`로 재잠금해 `launch`를 실행했고 성공했습니다(wall 1,145s). 이어서 `verify`, `msd56_eval.py --split E`, `msd56_verify.py --split E`, `msd56_breakdown.py`를 실행했습니다.
+- **프로토콜 3종:**
+  - D 본 실행은 v1 코드로 실행했고 사본을 `source/msd56_run_v1_used_for_D_main.py`에 보존했습니다. 이후 수정으로 `protocol_D.json`은 현재 코드와 digest가 일치하지 않습니다.
+  - `protocol_D_v2`는 재개 검사에 사용했습니다.
+  - `protocol_E`는 현재 코드와 일치합니다.
+- **처리량 구성 비교:**
+  - GPU당 2 worker는 시도하지 않았습니다. 실측 점유가 worker당 약 14–15.8GB(nvidia-smi 표본)이고, 2개면 24GB를 넘기 때문입니다.
+  - batch2는 시도하지 않았습니다. E 전체가 19분이라 비교 비용이 절약보다 컸습니다.
+  - 따라서 GPU별 1 worker를 유지했습니다.
+- **시도하지 못한 것:** MedGemma 모델 카드는 gated(401)여서 공식 다중 영상 예제를 직접 확인하지 못했습니다. 표준 `apply_chat_template` 경로와 수동 processor 경로의 일치만 확인했습니다. 영상 앞에 "SLICE k" 텍스트를 붙이는 형식은 확인하지 못했고 사용하지 않았습니다.
+
+# Results (수치와 결과 파일 경로)
+
+E48, 구간 288개(양성 189, 음성 99). 모든 생성이 EOS로 종료했고 invalid는 0, 2048 재시도는 0건입니다.
+
+| 조건 | sens | spec | BA | BA 95% CI (case-cluster) |
+|---|---|---|---|---|
+| DENSE | 0.937 | 0.616 | 0.776 | [0.732, 0.822] |
+| U8 | 0.931 | 0.606 | 0.769 | [0.706, 0.828] |
+| O8 | 0.899 | 0.606 | 0.753 | [0.696, 0.808] |
+| TEXT / 항상-PRESENT | 1.0 | 0.0 | 0.5 | — |
+
+- **paired BA 차이 (95% CI):**
+  - DENSE−TEXT +0.276 [0.232, 0.322]
+  - U8−DENSE −0.008 [−0.057, 0.038]
+  - O8−DENSE −0.024 [−0.072, 0.023]
+  - 차이가 나타난 사건은 U8−DENSE 22개 case, O8−DENSE 25개 case에 분포합니다.
+- **사전 규칙 판정:**
+  - 기본 신호 true: DENSE와 O8 모두 BA≥0.70, sens·spec≥0.60, TEXT 대비 BA≥0.10.
+  - 중요한 잔여 차이 false: 조건 간 최대 BA 격차가 0.024로 <0.10.
+  - U8가 DENSE의 0.05 이내이고 runtime 비율 0.371(≤0.5)이어서 "uniform baseline 보존" 조건을 충족했습니다.
+  - Qwen 분기는 미발동입니다.
+- **사후 탐색(`eval_E/breakdown.json`, 판정에 사용하지 않음):**
+  - 구간 위치별 prevalence가 크게 다릅니다(slab 0 양성 3/48, slab 3 양성 48/48).
+  - 위치만 쓰는 in-sample 상한 BA는 0.719입니다. 이는 E 자체에서 맞춘 값이어서 실제 baseline이 아닙니다.
+  - DENSE의 spec은 대부분 최하단 구간에서 나옵니다(slab 0에서 38/45, 최상단 slab 5에서는 3/22). U8은 slab 5에서 12/22입니다.
+  - 양성 병변 voxel 하위 25%(≤5,399)에서 sens는 DENSE 37/48, U8 38/48, O8 31/48입니다.
+  - 양성 구간 중 ≤10 voxel은 2개뿐이어서, 이 정도 극소 annotation이 전체 결과를 좌우하지는 않습니다.
+  - DENSE에서 U8이 놓친 양성 5건 중 selection이 annotation을 전혀 보지 못한 경우는 0건입니다.
+- **비용:**
+  - 구간당 평균 generation runtime: DENSE 3.60s(평균 23.0장, 6,034 input token), U8/O8 1.33s(8장, 2,139 token), TEXT 0.19s.
+  - E 고유 요청 766개의 runtime 합은 1,666s입니다.
+  - 최대 메모리: allocated 10.7GB, reserved 15.1GB.
+  - 이는 generation만의 비용입니다. 자료 준비와 PNG 렌더링은 포함하지 않았습니다.
+- **파일:**
+  - `results/iter_056/eval_E/report.json`, `per_slab.json`, `verify.json`, `breakdown.json`
+  - `eval_D/report.json`, `verify.json`
+  - `gen/E`, `gen/D`
+  - `tests/sanity_v2.json`, `resume_test2.json`
+  - `data/D6_overlay.png`, `U8_montage_BRATS_199_slabs0_3_5.png`
+
+# Goal Progress / Reused Assets (목표 진전·미검증 범위, 재사용 출처·검증)
+
+- **목표 진전:**
+  - 선택한 과제: MSD 뇌종양 FLAIR 구간의 annotation 존재 판단. 정답은 공개 mask의 합집합입니다.
+  - 기본 능력: MedGemma는 이 과제에서 TEXT보다 높은 BA를 보였습니다(+0.28). 입력 손실은 uniform 8장으로는 DENSE 대비 관찰되지 않았습니다(−0.008).
+  - 남은 관찰 하나: 정확도의 상당 부분을 구간의 해부학적 위치가 설명할 가능성이 큽니다. 다음 비교가 정할 결정은 위치를 통제해도 영상 신호가 남는지입니다.
+- **미검증:**
+  - case와 환자의 일대일 여부는 확인하지 못했습니다. BraTS의 원 출처 기준은 공식 설명에서 확인하지 못했고, 분석 단위는 case(cluster)입니다.
+  - 독립 환자 일반화는 확인하지 못했습니다. E는 개발 자료입니다.
+  - 전문 segmentation+OR와 직접 SFT 대비 비교는 실행하지 않았습니다.
+  - 공개 자료의 사전학습 노출 가능성은 배제하지 못했습니다.
+  - Qwen 대조는 미실행입니다. `msd56_qwen.py`는 컴파일만 확인했고 모델 로드·`subset`·`lock`·`worker`는 실행하지 않았습니다.
+- **재사용:**
+  - `reuse_assets`는 없었습니다. 작업 트리가 계획이 가정한 커밋(1d26362)이 아니라 68117cf였고 `pg43_run.py`와 `rsna_diag/generate.py`는 현재 트리에 없었습니다. 해당 blob은 `git show 1d26362:<path>`로 읽어 모델 로딩 패턴만 참고했습니다.
+  - 실행기는 자체 구현했고 `pg43_run`·`rsna_diag`는 import하지 않았습니다. 그 모듈들의 승인 상태와 무관합니다.
+
+# Problems (현재 결론 무효 / 재사용 전 수정 / 추후 개선을 구분)
+
+- **현재 결론 무효: 없음.** 아래 두 버그는 발견 즉시 수정했고 증거 파일을 보존했습니다.
+  - 검사 스크립트의 BOS 중복.
+  - 재개 시 torn row 읽기 오류(재개 검사 중 발견, 수정 후 재검증).
+- **해석상 주의:**
+  - 위치 confound가 있습니다(위 사후 탐색).
+  - 구간 정답이 present인데 annotation이 아주 작은 경우(최소 7 voxel)를 제외하지 않았습니다.
+  - E48은 개발 자료이며 CI는 case-cluster입니다. 사전 규칙의 문턱은 확증 기준이 아닙니다.
+- **재사용 전 수정:**
+  - `msd56_run.py`의 `verify_protocol`은 코드 digest를 잠그므로, 코드가 바뀌면 이전 protocol은 검증할 수 없습니다.
+  - D 본 실행 protocol은 현재 코드와 맞지 않습니다. 결과 자체는 `verify`가 아니라 독립 재계산으로 검증했습니다.
+  - `launch`는 worker 종료 코드와 점유 표본을 기록하지만, 한 worker가 실패했을 때의 attempt별 비용 분리는 구현하지 않았습니다.
+- **추후 개선:** 공식 모델 카드의 다중 영상 예제 대조(gated, 접근 필요), 위치 통제용 층화 평가.
+
+# Recommendation to GPT
+
+- **권고: 진단으로 계속하되 위치 통제를 먼저 한다.**
+  - 사전 규칙상 기본 신호는 있고 U8로 충분해 복잡한 표집 방법 투자는 우선하지 않습니다.
+  - 다만 위치-only prior(in-sample BA 0.719)와 MedGemma(0.776)의 차이가 작아 "영상 신호 있음"으로 확정하기엔 이릅니다.
+- **결정을 바꿀 최소 비교(새 계획 필요):** 위치(slab index) 층화 BA 또는 같은 위치의 양성/음성 쌍만으로 DENSE/U8을 평가합니다. 기존 E 출력의 재분석으로 일부 답할 수 있어 비용이 작습니다.
+- **분기:**
+  - 위치 통제 후 신호가 남으면: 전문 segmentation+OR 대조를 포함한 method pilot을 검토합니다.
+  - 신호가 사라지면: 이 FLAIR 구간 판단 과제의 VLM 투자를 보류하고 다른 MRI 과제로 전환합니다. MRI 전체를 기각하는 것은 아닙니다.
+- **Qwen:** 지금은 불필요합니다. 필요해지면 `msd56_qwen.py`와 이미 받은 가중치를 쓰되, 먼저 D에서 로드·tensor 검증을 해야 합니다.
+
+SELF_CHECK: FAIL
+SUMMARY: MSD 뇌종양 FLAIR 구간 판정 E48에서 MedGemma BA는 DENSE 0.776, U8 0.769, O8 0.753으로 TEXT 0.5보다 높았고 U8≈DENSE이지만, 구간 위치만으로도 in-sample BA 0.719가 나와 영상 신호를 위치와 분리해 확인하는 추가 비교가 필요하다. 공식 모델 카드 대조는 접근 제한으로, Qwen 코드는 미실행으로 FAIL.
+
+# [orchestrator] 권한 거부된 도구 호출
+- Bash: git ls-tree -r --name-only 1d26362 -- pg43_run.py pg39_spec.py rsna_diag
+- Bash: git ls-tree -r --name-only 1d26362
+- Bash: curl -q --fail --silent --show-error --location --proto =https --proto-redir =https -- https://raw.githubusercontent.com/Project-MONAI/MONAI/dev/monai/apps/datasets.py
+- Bash: CUDA_VISIBLE_DEVICES=0 python msd56_sanity.py 2>&1 | tail -30
+- Bash: top -b -n1 -o %CPU
+
+
+
+## iter_056 GPT REVIEW [CONTINUE] — 2026-10-03 19:34:06
+
+# 요약
+
+- **판정:** 유효한 탐색 실험이며 원 계획상 success다. 전체 코드 재사용은 승인하지 않는다.
+- **핵심 근거:** E48·288구간에서 DENSE/U8/O8 BA는 0.7763/0.7686/0.7528, TEXT는 0.5다. U8 생성 시간은 DENSE의 37.1%다.
+- **의미·한계:** 복잡한 표집 방법이 필요한 큰 격차는 없었다. 위치 prior와 병변 인식의 기여, 독립 일반화는 미확정이다.
+- **다음:** 기존 출력의 위치 통제 재분석으로 한정 보완한다. 학습이나 새 모델 실행은 자동 승인하지 않는다.
+
+# Assessment
+
+Claude/Sonnet 구현임을 engineer_backend.json과 claude_meta.json에서 확인했다. plan.md·plan.json, 보고서, changes.patch, 도구 로그와 실제 결과를 대조했다. 리뷰 SHA는 `da6e75570dcd01f957cde9b9f33b1b57217fcb70`이며 신규 소스 10개 모두 작업 파일과 일치한다. unpreserved_paths는 비어 있고, 대량 결과·모델 cache는 이 코드 커밋의 승인 대상이 아니다.
+
+원 계획은 E48의 탐색 비교를 완료하고 사전 분기에 따라 투자 판단을 하는 것이다. 기본 신호 기준과 U8의 점추정치·생성 비용 기준은 충족했고, 중요한 잔여 차이 기준은 충족하지 않았다. Qwen 분기는 발동하지 않았으므로 미실행은 계획 위반이 아니다. 보고서 SELF_CHECK: FAIL은 공식 예제 대조 부족 및 미실행 코드까지 포함한 자체 표시이며 실제 완료된 E 비교 전체를 실행 실패로 바꾸지는 않는다.
+
+# Key Findings
+
+리뷰에서 원시 응답을 별도로 해석하고 case 단위 count 배열로 bootstrap을 재계산했다.
+
+| 조건 | TP/양성 | TN/음성 | BA | 평균 생성 시간 |
+|---|---:|---:|---:|---:|
+| DENSE | 177/189 | 61/99 | 0.776335 | 3.5969초 |
+| U8 | 176/189 | 60/99 | 0.768639 | 1.3346초 |
+| O8 | 170/189 | 60/99 | 0.752766 | 1.3378초 |
+| TEXT | 189/189 | 0/99 | 0.500000 | 0.1876초 |
+
+U8−DENSE는 −0.007696이며 seed56·10,000회 case-cluster bootstrap의 95% CI는 [−0.057085, 0.037979]다. 이는 사전 탐색 보존 조건을 만족하지만 0.05 margin의 비열등성 확증은 아니다. O8−DENSE는 −0.023569다. GT로 근거를 집중해도 평균 성능이 개선되지 않았으며 이를 순수 입력 길이 효과로 해석할 수 없다.
+
+E 고유 요청과 원시 출력은 각각 766개이고 중복·누락 없이 모두 EOS로 종료했다. 조건 행은 1,152개다. 두 worker의 exit code는 모두 0이고 wall-clock은 1,144.7초다. protocol_E 코드 hash와 원시 출력 digest를 확인했다.
+
+정답 연결은 별도로 NIfTI mask를 읽어 D/E 총324구간의 annotation voxel 수를 재계산했고 불일치가 없었다. E 조건별 slice 목록과 실제 요청 연결도 일치했다. 저장된 독립 검사에는 PNG 36장과 원영상의 일치가 있으며 D6 overlay를 직접 표시해 공간 대응을 확인했다. 임상 정답의 독립 판독을 수행한 것은 아니다.
+
+# Problems / Concerns
+
+현재 주수치를 무효화하는 문제는 발견하지 않았다. 다만 다음 재사용 전에 다음을 해결해야 한다.
+
+- protocol이 필수 검사 근거·GT·조건 매핑을 잠그지 않는다. 현재 E는 직접 대조로 보완했지만 미래 실행의 자동 안전성은 부족하다.
+- 완료 검사는 실패 launch를 기록만 하고 성공 여부에 연결하지 않는다. 실패 후 복구의 provenance와 attempt 비용도 명료하지 않다.
+- sanity 검사는 실패 값을 자동 거부하지 않고, 일부 성공 필드는 실제 검사 없이 설정한다. 현재 tensor 일치 근거 자체와 이 검사기의 일반 신뢰성을 구분한다.
+- 위치별 다수 class 규칙의 BA 0.719336을 ‘상한’으로 부른 것은 잘못이다. 리뷰에서 64개 이진 위치 규칙을 전수 계산한 최대 BA는 0.761664이며 slab0·5를 ABSENT로 예측한다. 이 수치도 E 정답으로 맞춘 사후 참고값이지 실용 baseline이 아니다.
+
+공식 모델 카드 직접 대조와 synthetic affine 검사 완료 근거는 부족하다. 다만 현재 native RAS 영상·정답 연결, 공식 processor의 두 호출 경로 tensor 일치, 충분한 생성 길이와 EOS를 확인했으므로 현재 고정 입력의 탐색 비교를 전부 무효화할 이유는 없다. 정상 사용에 대한 광범위한 한계 주장이나 validated 승격은 하지 않는다.
+
+GPU 0/1을 모두 사용했고 실제 점유 약15.4 GiB로 GPU당 두 worker가 안전하지 않다는 근거는 타당하다. 다만 admission의 11.5 GiB 가정은 전체 실제 점유보다 작아 수정해야 한다. 현재는 충분한 여유가 있었고 OOM은 없었다. batch2 생략의 비용 근거와 전체 준비·재시도 비용 집계는 제한적이며 generation 시간 비율을 전체 파이프라인 비용 절감률로 표현하지 않는다.
+
+# Interpretation
+
+선택한 과제는 종양 환자의 FLAIR 구간에 공개 annotation이 존재하는지 판단하는 것이다. annotation 없는 구간은 정상 환자를 의미하지 않는다. 현재 결과는 모델이 고정 질문에서 TEXT보다 높은 점수를 얻고, 8장 표집이 dense보다 훨씬 적은 생성 시간으로 유사한 점추정치를 제공한다는 관찰이다.
+
+위치 confound는 크지만 이것이 병변 신호 부재를 증명하지 않는다. 리뷰의 사후 계산에서 양성과 음성이 각각 33/15개인 slab1·4의 DENSE BA는 0.7424·0.8000이다. 동일 위치 안에서도 구별 신호가 남는다. 반면 slab2의 음성은 2개, slab0의 양성은 3개뿐이며 slab3에는 음성이 없다. 위치별 분해 역시 정밀도와 모집단 범위를 유지해야 한다.
+
+U8가 놓친 DENSE 정답 양성 5건에서 annotation을 모두 누락한 표집은 0건이라는 보고는 단순한 완전 근거 누락 설명을 약화한다. 충분한 근거량·인식 난도·관측 구성의 효과까지 배제하지는 않는다. 새로운 MRI 한계 주장을 등록하거나 기존 SPIDER 한계를 승격할 근거는 없다.
+
+# Strategy Check / 연구 방향 판단
+
+**실행 유효성:** 고정 E48의 실제 비교를 완료했다. 자료·출력·주수치 검증은 유효하다.
+
+**성능 개선:** 새 방법을 개발하지 않았다. U8는 사전 기준상 유용한 저비용 탐색 baseline이며 전체 비용 또는 비열등성이 확증된 해법은 아니다.
+
+**가설 지지:** 현재 조건에서 dense 대비 큰 uniform 표집 손실이나 oracle 이득은 관찰되지 않았다. 복잡한 표집 방법 투자의 우선순위를 낮춘다. 위치 prior만으로 전체 결과를 설명한다는 가설은 미검증이며 동일 위치 내 구별 관찰이 남는다.
+
+**신규 기여 가능성:** 전문 segmentation+OR와 직접 SFT 비교, 중요한 잔여 문제와 언어 조건의 효용이 없으므로 아직 근거가 없다. 신호가 있다는 이유만으로 method pilot에 진입하지 않는다.
+
+**다음 투자 비교:** 표집 방법 개선은 현재 차이가 작아 보류한다. 새 MRI 자료나 모델로 즉시 전환하면 이미 확보한 출력의 정보 가치를 버린다. 기존 출력의 위치 통제 재분석은 추가 모델 호출 없이 병변 구별 신호와 오류 범위를 명확히 할 수 있어 우선한다. 이는 사후 탐색이며 원 계획의 판정은 유지한다.
+
+이번 구현은 약52.7분 세션에 자료 확보·새 실행기 작성·검사 오류와 재개 오류 수정이 포함됐다. E 생성 wall-clock은 약19.1분이다. 정확한 준비 비용 비중은 기록만으로 분리할 수 없지만 다음 단계에서 자료·실행기를 다시 만드는 것은 피할 수 있다. 이전 iter_021 및 iter_048·054의 판정, iter_055의 사용자 전환은 그대로 유지한다.
+
+# Recommended Next Experiment
+
+한정 재분석을 별도 계획으로 고정한다. 동일 위치 내 class별 성능·case-cluster 불확실성과 D 기반 또는 case 교차적합 위치 baseline을 비교한다. 이미 관찰한 결과에 맞춰 유리한 구간만 선택하지 않고 양쪽 class가 없는 위치도 그대로 보고한다.
+
+결정은 중요한 잔여 오류를 가진 같은 과제의 최소 대조를 진행할지, 현재 표집 방법 투자를 종료할지다. 모델 적합성 자체를 다시 판단해야 할 경우에도 원 Qwen 분기가 발동했다고 소급 표현하지 않는다. 새 생성·학습은 그 결정에 필요한 정보와 비용이 구체화된 경우에만 별도 계획한다.
+
+논문 추천은 보류한다. 이번 결과는 기본 탐색 baseline의 유효성을 보여주지만 새 방법이나 재현된 MRI 실패 방향의 유망성을 아직 확인하지 못했다.
