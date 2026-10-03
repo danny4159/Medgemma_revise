@@ -65,6 +65,7 @@
 - iter_057 [CONTINUE] (deep_medium/standard/normal) <MRI 구간 근거 사용 진단: success> 💾144227e1c8a0faf1a8f88df126e8a49803030db8 MRI E48에서 위치 통제 BA 0.717 [0.614, 0.814]와 33개 case의 오류를 확인했다. 위치 규칙 대비 전체 이득은 불확정이며 전문 모델 대조로 다음 투자를 판단한다. → 다음: 전문 segmentation+OR의 한정 비교를 계획해 현재 MRI 구간 오류가 단순 대안으로 해결되는지 판단한다. 기존 D/E·정답·U8 baseline과 복잡한 표집 투자 보류를 유지한다. 공식 checkpoint의 학습 중복, FLAIR-only 지원 및 추가 sequence 사용 여부를 먼저 확인하고, 중복된 평가를 일반화 근거로 쓰지 않는다. 동일 입력 비교와 추가 정보가 있는 전문 모델 비교는 구분한다. BA 5 pp와 전체 pipeline 비용을 기준으로 결과별 투자·보류 조건을 고정하되 U8의 37.1% 생성 시간 비율을 전체 비용으로 전용하지 않는다. 대안이 오류를 충분히 해결하면 현재 VLM 구간 판정 방법 투자를 보류하고, 중요한 잔여 오류가 남으면 구별할 최소 개입과 강한 단순 baseline의 가치를 검토한다. 불확정이면 판단을 바꿀 정밀도·비용 근거가 있을 때만 한정 확대한다. GPU 실행 전 관련 재사용 결함과 실제 메모리 admission을 해결하고 두 GPU의 안전한 처리량 구성을 실측한다. 같은 출력의 가중치·prompt 탐색은 종료한다.
 - iter_058 [CONTINUE] (deep_medium/standard/normal) <MRI 구간 근거 사용 진단: inconclusive> 💾e203cbd0b4c7d8e6c1f75fbd37625a82b14c232d MRI E48에서 HD-GLIO+OR의 BA는 U8 0.769→0.950으로 높아졌다. 정확도 개선은 재현했지만 비용 측정에 전처리·최종 답변 단계가 빠져 대안 충분성은 불확정이다. → 다음: 전체 비용의 한정 재측정으로 전문 대안 채택 여부를 결정한다. iter_058 plan의 D6/E48·입력·정답·U8·정확도 기준을 유지하고 E 재생성·추가 표본·모델 탐색은 하지 않는다. 원본 NIfTI부터 channel 분리, 공식 추론, native-grid OR, 여섯 답변 저장까지 같은 경계로 측정하고 loading 포함 및 steady-state를 분리한다. 기존 D6의 세 block·두 순서를 사용하며, 누락 단계가 결정을 바꿀 수 있는지 직접 확인한다. 필요한 실행 경로의 provenance·admission·실패 검사만 먼저 보완한다. 전체 비용 비율≤1이면 현재 다중 sequence 개발 조건의 전문 대안을 채택하고 VLM 구간 적응 투자를 보류한다. 비용 증가 또는 불확정이면 정확도 이득을 유지한 채 원 복합 기준 미충족으로 종료하고, 구체적인 사용 가치 없이 timing·prompt 탐색을 연장하지 않는다.
 - iter_059 [CONTINUE] (normal/standard/normal) <MRI 구간 근거 사용 진단: success> 💾463d215b4d5a92a17dec80f2be29daefab44cc3e MRI 개발 E48에서 전문 모델+OR는 U8 대비 BA 0.769→0.950, D6 전체 비용은 0.601배였다. 현재 구간 판정 적응 투자는 보류하며 동일 입력 우위·독립 일반화는 미검증이다. → 다음: 현재 MRI 구간 판정의 VLM 적응 투자를 보류하고, 전문 모델+규칙 이후에도 중요한 문제가 남는 MRI 질문 하나를 선택한다. iter_056~059의 입력·출력·전문 baseline을 자산으로 보존하고 같은 D6 timing, E48 prompt 탐색 또는 단순 점수 추격은 종료한다. 다음 계획은 언어 조건이나 여러 sequence의 정보 사용이 실제 답변을 바꾸는 공개 정답 과제를 우선 검토하되, 기존 자산으로 판별 가능한 한정 비교와 새 자료 준비 비용을 비교한다. 소수 실제 입력·정답 연결, 강한 단순 대안, 결과별 투자 종료점을 먼저 정한다. 현재 잔여 16개 구간 오류나 미분리 요인만으로 새 loss를 정당화하지 않는다. 코드 수정은 선택한 재사용 경로에 필요한 범위만 포함하며 별도 정비 반복을 만들지 않는다.
+- iter_060 [CONTINUE] (deep_medium/standard/normal) <MRI 질문별 sequence 근거 진단: execution_failed> 💾adfbb52dd9cd838e203e9baa14a3c8cc184e4153 UCSF-PDGM-VQA의 확인한 배포 경로에서 QA를 확보하지 못해 모델 비교는 미실행이다. MRI 근거 사용 질문은 유지하되 실제 자료 연결이 가능한 경로를 먼저 선택한다. → 다음: 한정 자료 보완을 권고한다. 모델 능력의 실패가 아니라 annotation 접근 장애이므로 같은 MRI 근거 사용 질문을 먼저 유지한다. 기존 접근 오류를 반복 조회하지 말고 새로운 공식 배포 근거가 있는지와 접근 가능한 대체 자료의 실제 QA·환자·sequence 연결을 비교해 하나를 선택한다. 원 자료를 확보하면 iter_060의 T/U/R·동일 영상 예산·선택지 대조·단계별 확대 기준을 유지하고 미완료 검사부터 진행한다. 대체 자료의 정답이나 관측 단위가 달라지면 별도 계획으로 범위와 기준을 고정한다. 자료 연결 통과 시 같은 구현 단계에서 소규모 실제 출력까지 수행하고, 실패하면 구체적 장애와 종료점을 남긴다. 단순 segmentation+규칙으로 끝나는 과제로 돌아가거나 검증되지 않은 자료 후보를 나열하는 반복은 피한다. 외부 연락은 자동 수행하지 않으며 공개 자료 선택 자체를 사용자 승인 대기로 돌리지 않는다.
 
 ## 이전 목표들의 접근법 (참고용, 현재 목표의 재평가 횟수에는 안 들어감)
 
@@ -98,11 +99,13 @@
 - 자연 영상쌍의 조건부 판별 진단 [approach/paired-visual-discrimination]: 1회 (iter_054), 유효한 실험 1회, 미분류 0회, 최근 판정: inconclusive, 커밋: 1d26362742c2c50216c9adfd55293592a2799568
 - 시간 비교의 판독 가능성 진입 검토 [approach/temporal-comparability]: 1회 (iter_055), 유효한 실험 0회, 미분류 0회, 최근 판정: 사용자 보완으로 전환 (검증 미완료), 커밋: 없음
 - MRI 구간 근거 사용 진단 [approach/mri-slab-evidence]: 4회 (iter_056, iter_057, iter_058, iter_059), 유효한 실험 4회, 미분류 0회, 최근 판정: success, 커밋: da6e75570dcd01f957cde9b9f33b1b57217fcb70, 144227e1c8a0faf1a8f88df126e8a49803030db8, e203cbd0b4c7d8e6c1f75fbd37625a82b14c232d, 463d215b4d5a92a17dec80f2be29daefab44cc3e
+- MRI 질문별 sequence 근거 진단 [approach/mri-query-sequence-evidence]: 1회 (iter_060), 유효한 실험 0회, 미분류 0회, 최근 판정: execution_failed, 커밋: adfbb52dd9cd838e203e9baa14a3c8cc184e4153
 
-현재 연구 브랜치: approach/mri-slab-evidence (코드 위치: /SSD1_1TB/home/milab/daniel/08_medgemma/research)
+현재 연구 브랜치: approach/mri-query-sequence-evidence (코드 위치: /SSD1_1TB/home/milab/daniel/08_medgemma/research)
 
 ### 최근 계획의 대안 순위
 
-1. MRI 구간 근거 사용 진단: D6 전체 비용의 한정 보완으로 전문 대안 채택 결정을 마친다.
-2. 현재 VLM 적응 투자 보류: 추가 실행 비용은 없지만 수정 가능한 비용 질문을 미해결로 남긴다.
-3. 동일 FLAIR 전문 모델·직접 SFT 비교: 정보 조건은 더 공정하지만 새 학습 투자에 필요한 사용 가치가 아직 구체화되지 않았다.
+1. MRI 질문별 sequence 근거 진단: UCSF-PDGM 소견 QA에서 자료 연결과 단순 routing 효과를 함께 확인한다.
+2. 기존 MSD의 동일 입력 대조: 자산은 준비됐지만 전문 대안 채택 이후 추가 투자 결정을 바꿀 사용 가치가 부족하다.
+3. OmniBrainBench MRI 하위 과제: 다중 영상 loader는 확인됐으나 환자·sequence 연결과 적격 소견 QA를 새로 확인해야 한다.
+4. Longitudinal MRI 변화 판단: 중요한 후보지만 현재 공개 정답·시간점 연결 비용 때문에 후순위로 유지한다.
