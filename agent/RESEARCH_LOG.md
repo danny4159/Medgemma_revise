@@ -22841,3 +22841,381 @@ D6/E24/E64, GPU 추론, 새 학습, tensor 검사 및 평가 계산은 모두 �
 다음 계획은 자료 선택을 실제 파일 연결로 확정하고, 통과하면 같은 구현 단계에서 소규모 T/U/R 출력을 얻도록 한다. 원 자료를 회복하면 iter_060의 비교·metric·확대 기준을 유지한다. 자료가 달라지면 정답 의미와 독립 단위를 먼저 확인해 별도 기준을 고정한다.
 
 최소 비교는 영상의 text-only 대비 신호와 동일 예산의 배분 효과를 구분해야 한다. 자료 확보 성공을 방법 성공으로 처리하지 않으며, 자료 연결 실패 시에는 구체적 장애와 재개 조건을 남기고 해당 경로를 종료한다. 공개 자료 선택은 자율적으로 진행할 수 있고 저자 연락이나 별도 접근 권한이 실제 필요할 때만 그 행위를 사용자에게 요청한다.
+
+
+## iter_061 GPT PLAN [MRI 공동·개별 영상 답변 대조 / proceed] — 2026-10-03 21:05:33
+
+# 요약
+
+- **이번에 할 일:** OmniBrainBench의 brain MRI 질환 진단 QA를 연결하고 text-only, 전체 영상, 개별 영상 및 단순 투표를 비교한다.
+- **필요한 이유:** UCSF annotation 접근 실패는 모델 실패가 아니다. 실제 접근 근거가 있는 자료에서 MRI 근거 사용 질문을 이어간다.
+- **확인할 기준:** 자료·정답 연결, 영상의 기본 신호, 공동 입력의 정확도 변화와 추론 비용이다.
+- **주의·다음:** 실제 MRI 사례 연결은 아직 미검증이다. 통과하면 같은 반복에서 출력하고, 결과에 따라 최소 방법 검토·모델 비교 검토·투자 보류를 선택한다.
+
+# Current Understanding
+
+iter_060은 자료 접근 단계의 execution_failed이고 모델 출력은 없다. UCSF의 enhancement/FLAIR extension T/U/R 가설은 미검증으로 보존한다. 이번 계획은 그 실행 복구가 아니라 정답·관측 단위가 달라진 별도 진단이다. 과거 계획의 문턱이나 판정은 변경하지 않는다.
+
+iter_059의 MSD 구간 판정에서는 HD-GLIO+OR가 U8보다 정확하고 저렴했다. 해당 과제의 추가 VLM 적응과 timing 반복은 종료한다. 이 결과가 질환 진단 QA까지 해결했다는 뜻은 아니다.
+
+대체 자료는 [OmniBrainBench 공식 배포](https://huggingface.co/datasets/FrankPN/OmniBrainBench/tree/main)다. annotation JSON과 영상 ZIP의 존재는 확인했지만 실제 MRI 진단 행·영상·사례 연결은 구현 단계에서 확인해야 한다. 원본 volume이 아니라 배포된 2D key image를 사용한다. 실제 임상 전체 study 판독으로 일반화하지 않는다.
+
+유지: 최종 GOAL, MRI 우선순위, 기존 결과·checkpoint·reserve. 보류: UCSF routing, MSD 추가 적응, OCT 전환. 변경: 특정 sequence 배분에서 같은 사례의 공동/개별 영상 답변 비교로 좁힌다.
+
+# Strategy Check / 연구 방향 판단
+
+- **관찰:** 기존 구간 판정은 전문 대안이 충분했다. 새 QA에서는 기본 신호조차 아직 관찰하지 못했다.
+- **남은 설명:** 기본 인식 부족, 공동 입력의 정보 활용 문제, 질문 prior, 선택지 효과, 정답 모호성이다.
+- **최소 비교:** 같은 질문·영상 집합에서 공동 J와 개별 S_i/투표 V를 비교하고 T를 둔다.
+- **바뀔 결정:** 영상 신호가 없으면 모델 적합성을 먼저 검토한다. 개별 신호가 공동 입력에서 손실되면 최소 개입 후보가 생긴다. 단순 투표가 충분하면 추가 방법 필요성이 줄어든다.
+
+현재 방법 개선은 실제 오류 근거가 없어 이르다. 동일 MRI 질문의 한정 자료 보완은 원인 구분에 직접 도움이 된다. MRI 밖 전환은 준비 비용을 다시 지불하면서 이번 접근 실패를 설명하지 못하므로 후순위다.
+
+mri-volume-evidence-use track과 iter_056~060의 비용·교훈을 유지한다. iter_060의 지배 비용은 자료 접근 확인이며 GPU 실험은 없었다. 이번에도 범용 benchmark 구축이나 전수 시각 감사를 만들지 않는다. iter_049~052의 다중 영상 준비·gate 실패를 연결하되 CT 결과를 MRI 능력의 근거로 옮기지 않는다.
+
+# Hypothesis
+
+동일 사례의 개별 영상에서 진단 신호가 나타나더라도 공동 입력은 그 신호를 항상 유지하지 못할 수 있다. 반대로 공동 입력이 상보적 근거를 활용해 더 정확할 수도 있다. 방향을 미리 가정하지 않는다.
+
+개별 영상은 정답에 필요한 정보가 부족할 수 있다. 따라서 S_i의 오답을 곧바로 판독 결함으로 해석하지 않는다. 같은 정답에 대한 제한 관측 조건의 성능으로 보고한다. 공동 입력 저하 역시 입력 길이·형식·시각 처리 변화가 섞인 결과이며 내부 통합 기전의 확정 증거가 아니다.
+
+# Limitation Evidence / Correct Usage Checks
+
+이번 MRI 진단 QA의 observed/validated 근거가 없어 limitation_ids=[]이며 diagnostic/none으로 진행한다. 기존 SPIDER reference-interface 관찰은 과제가 다르므로 method 진입 근거로 사용하지 않는다.
+
+MedGemma 1.5 revision 91850547d9f0b2fdd21aa7c5f4f3d1a8a52c243b, bf16, 공식 processor/chat template, greedy decoding을 사용한다. 배포 RGB 영상은 보존하고 추가 min-max·회전·crop·montage를 하지 않는다. volume의 axial 정렬 가정을 PNG에 적용하지 않는다.
+
+실제 D 입력에서 공식 processor 구성과 wrapper의 input_ids, pixel_values 및 영상 순서를 대조한다. J는 원 annotation의 영상 순서를 유지한다. 파일명·source·정답·caption·보고서를 모델 입력에서 제외한다. 영상 누락 시 text-only로 묵시 전환하지 않는다. 모델의 오답 또는 oracle 불일치는 기술 gate 실패가 아니다.
+
+# Contribution Path / Baselines / Reuse
+
+가장 가까운 선행은 [OmniBrainBench 다중 영상 평가](https://arxiv.org/html/2511.00846v2)와 개별 추론 후 late voting이다. 이번 paired 진단은 문항 난이도가 다른 영상 개수별 집계와 구분된다. 새로운 contribution은 아직 없다.
+
+비교군:
+
+- T: 같은 질문·선택지, 영상 없음.
+- J: 해당 QA에 연결된 모든 영상.
+- S_i: 해당 집합의 i번째 영상 하나. 영상 순서대로 모두 평가한다.
+- V: S_i의 유효 답변을 원본 선택지 ID로 복원한 뒤 plurality vote. 동률은 원본 선택지 문자열의 SHA256 순서로 결정한다. 전부 invalid면 invalid다. GT와 제시 위치는 동률 해소에 사용하지 않는다.
+- S_mean: 모든 S_i 정확도의 평균. 무작위 한 영상 선택의 기대값이며 학습된 selector가 아니다.
+- prior: 1/5 무작위 기대값과 D에서 정한 가장 빈번한 정답 문자열 선택 규칙. 문자열이 선택지에 없으면 고정 hash 규칙을 사용하고 적용 빈도를 표시한다. E 정답 빈도로 prior를 맞추지 않는다.
+
+J와 V는 같은 고유 영상을 보지만 V는 K회 질문·생성을 수행한다. 이미지 token, text token, 요청 수, GPU 시간 차이를 함께 제시한다. any-correct와 GT best-single은 선택 가능성을 살피는 사후 oracle이며 실용 baseline·성공 기준으로 사용하지 않는다.
+
+전문 segmentation+OR는 이번 질환 진단의 직접 비교군이 아니다. 이를 이유로 전문 모델의 불가능성을 주장하지 않는다. 후속 방법 투자에는 별도 학습 자료의 직접 SFT와 적절한 encoder+질문별 head, 단순 집계의 공정한 비교가 필요하다.
+
+재사용은 iter_060 SHA adfbb52dd9cd838e203e9baa14a3c8cc184e4153의 msd56_run.py 중 load_model, env_info, build_inputs, generate 범위다. 파일은 현재 브랜치에 있으나 새 branch 반입을 위해 reuse_assets에 지정했다. source blob은 확인했다. MSD 전용 parser, request builder, launcher는 사용하지 않는다. generate의 기존 time.time 값에 의존하지 말고 이번 adapter의 monotonic 전체 경계를 기록한다. 원 리뷰의 미사용 모듈 문제를 전부 정비하지 않는다.
+
+# Proposed Experiment
+
+## 1. 한정 자료 연결
+
+공식 배포 revision을 고정하고 closed-ended-qa_6823.json, 필요한 metadata 및 closed-ended-qa_6823.zip만 확보한다. open-ended archive는 받지 않는다. 먼저 JSON을 읽고 실제 schema와 후보 수를 확인한다. 선택 영상의 개별 취득이 불가능하면 약 734 MB ZIP을 받되 디스크·압축 해제 크기와 안전한 archive 경로를 점검한다. hf_cache는 수정하지 않는다.
+
+자료 card의 CC BY-SA 3.0과 논문의 4.0 차이를 기록한다. 로컬 연구 사용에 적용할 배포 조건과 선택 원천의 이용 조건을 확인하고 원본 출처를 보존한다. 재배포나 외부 연락은 이번 범위가 아니다. 실제로 추가 권한이 필요한 source만 제외 또는 중단한다.
+
+대상 과제는 **brain MRI에 근거한 질환 또는 병변 종류의 진단 선택** 하나다. 포함 여부는 질문·선택지·modality/source metadata로 정하고 모델 출력을 보지 않는다. 촬영 sequence 식별, 단순 병변 존재·개수·좌표, 치료·예후·분자형, 시간 변화, 질문에 정답이 명시된 문항은 제외한다. MRI와 CT/병리 등이 섞인 사례는 제외한다. 원문 임상 문맥이 있으면 모든 조건에서 그대로 유지하되 영상 외 추가 사실을 보충하지 않는다. 정답을 새로 만들거나 바꾸지 않는다.
+
+원본 options의 유일성, answer의 단일 대응, label 문자열과의 일치, 실제 영상 파일을 확인한다. metadata가 없다고 filename만으로 서로 다른 영상을 같은 환자의 sequence로 합치지 않는다. 다중 영상은 원 QA의 image_path 목록만 사용한다. 같은 사례를 나타낸다는 근거가 부족한 목록은 공동 입력 해석 대상에서 제외하고 사유를 보존한다.
+
+독립 단위는 확인 가능한 patient/case다. 동일 환자·study·원천 문서와 공유 영상 hash를 이용해 연결 component를 만들고 component당 QA 하나를 hash 순서로 선택한다. source_file이라는 큰 파일명 자체를 환자 ID로 해석하지 않는다. 환자 연결이 없으면 확인 가능한 원천 사례/문서 cluster를 사용하고 환자 독립성을 주장하지 않는다. 그 연결도 불가능하면 결과는 항목 수준 기술통계로 제한하며 CI에 근거한 확대·method 투자 판단을 하지 않는다.
+
+적격 목록과 제외 이유를 출력 전에 잠근다. D에서 실제 이미지를 표시해 MRI 여부, 손상·중복·답변을 직접 노출하는 overlay, 영상–질문 대응을 확인한다. 선택된 E 영상도 동일한 비성능 기준으로 점검하고 출력 전에 제외를 고정한다. 시각 검사 기록에 실제 표시한 파일과 근거를 남긴다. 이것을 전문의 정답 재판독으로 부르지 않는다.
+
+## 2. 동작 확인 D6
+
+서로 다른 사례 cluster 최대 6개를 사용한다. 다중 영상이 있으면 이미지 수와 원천이 다른 사례를 우선 포함하고 가장 긴 적격 입력도 기술 검사에 포함한다. 6개는 정확도 추정용이 아니라 입력 유형·순열·재개·메모리 경로 점검용이다. 작은 적격 집단이면 D를 최대 2개로 줄여 E를 남기며 변경은 출력 전에 기록한다. 적격 사례가 하나뿐이면 그 사례의 기술·탐색 출력만 얻고 집단 비교를 종료한다.
+
+질문과 원본 다섯 선택지를 그대로 사용한다. QA ID와 seed61로 정한 permutation 및 그 역순을 모든 조건에 적용한다. prompt는 제공된 영상과 임상 문맥을 바탕으로 선택하고 마지막 단독 줄을 ANSWER: A|B|C|D|E로 쓰도록 한다. 부분 영상 조건에서도 질문 본문을 다시 작성하지 않는다.
+
+parser는 마지막 비공백 줄의 해당 형식만 허용한다. invalid는 오답 처리하고 비율을 별도 보고한다. cap512에서 시작하며 EOS 없이 cap에 도달한 요청만 동일 입력 cap2048로 한 번 재시도한다. 두 attempt와 비용을 보존한다. D 후 prompt/parser를 잠그며 E 결과로 변경하지 않는다.
+
+GT 역매핑, 입력 tensor, T의 영상 token 부재, J/S_i 집합, 요청 hash, 실제 중단·재개를 검사한다. 기술 gate는 정확도와 독립적이다. 큰 입력의 메모리가 부족하면 batch/worker를 먼저 낮춘다. 일부 영상을 조용히 버리거나 montage로 바꾸지 않는다. 불가피한 미실행은 해당 사례와 비교의 누락으로 보고하고 성공 주장을 제한한다.
+
+## 3. 가능성 탐색 E24
+
+D와 분리한 사례 cluster를 SHA256(seed61, cluster_id)로 정렬한다. 다중 영상 사례가 있으면 그것을 주 분석 집단으로 선택한다. 이미지 수 구간 2, 3–4, 5 이상과 source에 따라 후보를 번갈아 추출해 쉬운 짧은 입력만 선택하지 않는다. 동일 규칙으로 E24와 누적 E64 목록을 출력 전에 함께 잠근다. cluster당 질문 하나를 사용한다.
+
+E24는 큰 실패 유형과 paired 차이를 관찰하는 개발 집단이다. 24 cluster의 이진 정확도는 최악 조건에서 95% 반폭이 약20 pp이므로 작은 효과를 확정할 수 없다. 적격 집단이 부족해도 가용 E를 수행하며 확증 표본 문턱으로 막지 않는다.
+
+다중 영상 적격 사례가 전혀 없지만 단일 영상 진단 사례가 있으면 **T/I 기본 능력 분기**로 E24까지만 수행한다. 이 분기는 영상 신호만 관찰하고 공동 입력 가설은 미검증으로 끝낸다. 질환 QA가 없으면 sequence 식별이나 segmentation+규칙 과제로 자동 전환하지 않는다.
+
+## 4. 조건부 E64 확대
+
+신뢰할 cluster 연결이 있고 기술적으로 유효한 다중 영상 E24를 마친 경우에만 적용한다. V−T 또는 J−T의 점추정치가 0.10 이상이거나, 그 CI 상한이 0.10 이상이고 영상/T 정오가 다른 cluster가 6개 이상이면 E64까지 한 번 확대한다. 또는 V−J나 S_mean−J가 0.10 이상이고 해당 개별 영상 기반 점수가 T보다 높으면 확대한다.
+
+이는 10 pp 규모의 실용적으로 큰 신호·손실을 더 구체화하기 위한 탐색 분기다. 선택지 순서만으로 방향이 뒤집히거나 자료 모호성이 비교를 지배하면 표본 확대하지 않는다. E64의 최악 정확도 반폭도 약12 pp이므로 작은 차이 확증을 보장하지 않는다. 모든 중간·최종 결과와 확대 이유를 함께 보고한다. E64 이후 표본·seed·prompt를 자동 추가하지 않는다.
+
+## 5. 독립 확인
+
+이번 반복은 학습과 독립 확증을 하지 않는다. 배포 split 이름이 test여도 이번 D/E는 연구개발에 사용한 자료로 기록한다. 선택되지 않은 사례는 생성하지 않는다. 후속 설정 선택 후에는 별도 사례·원천의 확인이 필요하며, 기존 MSD/SPIDER/CT reserve를 소비하지 않는다.
+
+## 자원·예상 비용·재개
+
+학습은 없다. 다중 영상 QA의 K개 입력에 대해 두 순서의 요청은 2(K+2)개다. E24/E64와 D의 실제 K를 metadata에서 합산해 본실행 전에 기록한다. V·S_mean·oracle 분석은 저장된 출력만 사용한다. 기술·처리량 반복과 cap 재시도는 별도 집계한다.
+
+실행 직전 nvidia-smi로 GPU 0/1의 실제 UUID·여유를 확인하고 여유가 큰 장치부터 배치한다. 허용 CUDA_VISIBLE_DEVICES 안에서 논리/물리 대응을 확인한다. MedGemma의 기존 8–10 GB는 참고값이며 이번 최대 이미지·출력 길이의 peak를 D에서 측정한다.
+
+두 GPU에 독립 shard를 배정한다. 각 1 worker와 메모리가 허용하는 GPU당 2 worker 또는 batch 확대 중 유망한 구성 하나를 같은 D 요청으로 비교한다. 전체 요청/분, GPU별 실제 점유·peak, 긴 출력 지연, 오류·OOM·CPU/I/O 경합, 출력 정합성을 기록한다. 동시 worker peak와 다른 점유에 worker당 2 GiB 여유를 더해 용량 내일 때만 증설한다. 1 worker 유지 시 실측 근거를 남긴다.
+
+현재 이 자료의 처리량은 미측정이므로 근거 없는 숫자 시간 상한을 두지 않는다. D 후 예상 wall-clock을 다운로드 바이트/전송률 + loading + 조건별 요청량/실측 처리량 + 검증 시간으로 산출하고 E 전에 기록한다. 실제 GPU 시간·token·출력 수와 함께 추정/실측을 구분한다.
+
+요청 ID에는 cluster/QA, 조건, 영상 집합·순서 hash, 선택지 순열, prompt/model/config digest를 포함한다. worker별 append 결과와 원자적 claim/완료 기록을 사용한다. 완료 결과의 source/input/protocol/output hash를 검증하고 미완료만 재개한다. 실패·부분 attempt는 보존한다. 평가에서도 같은 잠금을 검사한다.
+
+# Implementation Tasks for Claude
+
+1. agent/runs/iter_060의 원 계획·리뷰와 이번 계획을 읽고 유지·보류·변경 범위를 보고서에 남긴다. 새 결과는 research/results/iter_061에 저장한다.
+2. 공식 annotation과 선택 영상, provenance·이용 조건, 적격/제외 목록과 cluster 연결을 확인한다. 실제 사례 몇 개로 성립 여부를 먼저 판단한다.
+3. 지정 msd56_run.py의 선택 함수만 재사용한다. 새 QA adapter·parser·평가가 필요한 이유를 명시하고 보관된 기존 함수를 새로 복제하지 않는다.
+4. 영상 누락·GT 순열 오류·중복 cluster·source/request/protocol 변조·기술 gate 실패·중단 재개를 실제 실행 경로에서 검사한다. 무관한 범용 리팩터링은 하지 않는다.
+5. D의 실제 표시·tensor·출력·메모리·처리량을 확인한 뒤 설정과 E 목록을 잠근다. E24 및 사전 조건에 따른 E64를 실행한다.
+6. 원시 답변에서 별도 집계로 T/J/S_mean/V와 paired 차이를 재계산한다. 누락·중복·invalid·cap·비용을 포함한다.
+7. 보고서에서 자료 준비, 실행 유효성, 모델 관찰, 방법 필요성, 신규 기여를 구분한다. 자료 실패 시 실제 오류와 재개에 필요한 새 근거를 남기고 다른 데이터셋 조회로 연장하지 않는다.
+
+# Evaluation (성공/실패 기준 포함)
+
+주지표는 cluster당 선택된 QA의 두 순서 정확도를 평균한 뒤 cluster 간 평균한 accuracy다. S_mean은 각 순서에서 모든 S_i 정확도를 평균한다. J−T, V−T, J−V, J−S_mean을 모두 보고한다. cluster 연결이 확인되면 seed61, 10,000회 paired cluster bootstrap 95% CI를 계산한다. 순서별 정확도·정답 문자열 불일치, source·이미지 수별 기술통계, invalid/EOS 비율을 함께 제시한다. 다중 비교와 조건부 확대를 포함한 개발 탐색이지 확증 검정이 아니다.
+
+- **영상 기본 신호:** J−T 또는 V−T가 10 pp 이상이고 해당 CI 하한이 0보다 크면 큰 영상 신호의 제한적 양성 관찰로 본다. 두 비교를 모두 공개한다.
+- **공동 입력 손실:** V−J 또는 S_mean−J가 10 pp 이상, CI 하한>0, 두 선택지 순서에서 방향이 같고 해당 개별 기반 점수가 T보다 높으면 공동 입력 손실 후보로 기록한다. 이 기준은 내부 원인이나 method 승인을 자동 확정하지 않는다.
+- **공동 입력 이득:** J−V가 10 pp 이상, CI 하한>0이고 영상 기본 신호도 있으면 단순 집계 이상의 이득으로 보존한다. 남은 중요한 실패가 없으면 추가 손실 탐색은 종료한다.
+- **단순 대안:** V가 J보다 충분히 정확해도 K회 비용을 함께 평가한다. V−J가 최소 5 pp이며 비용 증가가 없을 때만 실용적 우위로 표현한다. 비용 증가가 있으면 정확도–비용 trade-off다. J−V의 CI 상한이 5 pp 미만이면 큰 공동 정확도 이점이 지지되지 않는다고 보고하되 V의 비용 충분성과 혼동하지 않는다.
+- **음성:** 영상 신호의 CI 상한이 10 pp 미만이면 현재 과제·입력에서 큰 추가 영상 신호가 약하다는 근거다. 모델 무능력 전체나 영상 무사용으로 확대하지 않는다. MedGemma 통합 방법 투자는 보류하고 같은 고정 자료의 다른 모델 비교 가치를 다음 리뷰에서 판단한다.
+- **불확정:** E64 또는 가용 집단 소진 뒤에도 기준을 구분하지 못하면 현재 후보의 투자를 보류한다. 추가 표본·prompt·seed는 자동 승인하지 않는다. 정답/cluster 불확실성은 그 한계를 기록하며 CI 수치로 덮지 않는다.
+
+비용은 입력 읽기→processor→생성→답변 저장의 monotonic wall과 GPU별 실행 시간, token·호출 수로 계산하고 loading을 분리한다. V는 모든 S_i 비용을 합산한다. 병렬 wall을 device 시간으로 오표기하지 않는다. 별도 timing 캠페인은 만들지 않는다.
+
+자료/GT/tensor/누수 오류는 해당 비교의 execution_failed다. 올바른 입력에서 오답·형식 오류는 성능 관찰로 남긴다. 사후 annotation 문제는 원점수를 보존하고 별도 민감도 분석으로만 제시한다. 자료 준비와 테스트 통과만으로 valid_experiment=true를 부여하지 않는다.
+
+# Risks / Checks
+
+- 공개 benchmark의 정답은 독립 임상 gold와 같지 않다. 질환 진단의 모호성·교육용 key image 선택을 기록한다.
+- 환자/문서 연결과 pretrained exposure는 완전히 확인되지 않을 수 있다. 확인 범위보다 넓은 독립성·일반화를 주장하지 않는다.
+- MRI metadata 목록이 영상별 sequence를 보장하지 않는다. 이번에는 확인되지 않은 sequence routing을 만들지 않는다.
+- 질문에 다중 패널 참조가 있으면 S_i의 부분 관측으로 표시한다. 없는 panel을 조작하거나 질문을 유리하게 다시 쓰지 않는다.
+- 입력 영상 수, token, 반복 질문 비용이 다르므로 J/S/V 차이를 순수한 융합 기전으로 해석하지 않는다.
+- 공식 loader의 누락 영상 fallback을 사용하지 않는다. 전체 모델·평가기 설치도 필요 없이 선택된 경로만 구성한다.
+- 격리 환경이 필요하면 설치 경로·버전·checkpoint 출처와 작은 실제 입력 검증을 기록한다. 기본 medgemma 환경과 hf_cache는 변경하지 않는다.
+
+## 대규모 GPU 필요 후보
+
+다중 sequence/3D 시각 encoder와 언어 모델의 공동 사전학습, 다양한 질환·기관의 근거 정합성 학습은 장기 후보로 보존한다. 현재 관찰 전에는 필요성·신규성을 주장하지 않는다. 이번 두 GPU에서는 먼저 정상 사용의 실제 신호와 단순 대안 이후의 잔여 문제를 확인한다.
+
+# 계획의 근거 (GPT 조사 노트)
+
+## 새로 확인한 것
+
+- iter_060의 plan.md, review.md/review.json, claude_report.md를 읽었다. QA 미확보로 D/E 및 GPU 출력이 전혀 없었으며, 모델·routing 가설은 미판정이다. iter_059 review.md의 전문 대안 채택과 구간 판정 투자 보류를 유지한다.
+- UCSF-PDGM-VQA 검색에서 원 annotation 접근을 회복할 새로운 공식 배포 근거를 확보하지 못했다. 기존 실패 endpoint는 반복 조회하지 않았다. 검색에 나온 3-study VQA demo 영상은 원 QA 대체 근거로 채택하지 않았다.
+- [OmniBrainBench 공식 저장소](https://github.com/CUHK-AIM-Group/OmniBrainBench)는 공식 Hugging Face 배포를 연결한다. [파일 목록](https://huggingface.co/datasets/FrankPN/OmniBrainBench/tree/main)에서 closed-ended-qa_6823.json 약 4.98 MB, closed-ended-qa_6823.zip 약 734 MB를 확인했다. 이는 실제 압축 해제·영상 연결 검증 완료를 뜻하지 않는다.
+- [공식 viewer](https://huggingface.co/datasets/FrankPN/OmniBrainBench)의 실제 행에는 id/question/image_path/options/answer/source_file/modality_type이 있고, sub-/ses- 이름을 사용하는 예시가 있다. 그 예시만으로 다른 source의 환자 연결을 보장하지 않는다. 공개 JSON 본문과 영상은 이번 계획에서 열지 못했다. 로컬 읽기 전용 HTTP 조회는 DNS 오류였고 web의 raw 접근도 실패했다.
+- [공식 loader](https://raw.githubusercontent.com/CUHK-AIM-Group/OmniBrainBench/master/utils/OmniBrainBench/OmniBrainBench.py)는 image_path 문자열·목록과 5-choice QA를 지원한다. 영상 읽기 실패를 건너뛰거나 text-only로 바꾸는 경로가 있어 그대로 사용하면 안 된다.
+- [논문 §4.5 및 Appendix A](https://arxiv.org/html/2511.00846v2)는 영상 개수별 평가와 CC BY-SA 4.0을 기술하지만 배포 card는 CC BY-SA 3.0이다. 두 공개 조건의 차이를 기록하고 원천별 조건도 확인한다. 논문 집계는 이번 paired 개입의 결과가 아니다.
+
+## 기존 자산과 판단
+
+GOAL, LIMITATIONS의 MRI 항목, CODE_ASSETS의 iter_059/060 항목과 실제 msd56_run.py를 확인했다. research HEAD는 adfbb52dd9cd838e203e9baa14a3c8cc184e4153이며 status/diff 출력은 비어 있었다. loader·generate 함수는 자체적인 외부 패키지 의존성을 사용하지만 전체 runner는 MSD 경로에 고정돼 있다. 새 adapter만 연결하고 그 경로의 필수 검사만 보완한다.
+
+현재 MRI QA에 연결할 observed/validated limitation은 없다. SPIDER의 reference 좌표 관찰은 이번 질환 QA의 한계 근거로 사용하지 않는다. 실제 출력 diagnostic이 먼저다.
+
+## 의미·한계
+
+자료와 정답이 달라지므로 iter_060의 T/U/R 기준을 조용히 변경하는 복구가 아니다. UCSF sequence 배분은 보류하고 동일 track 안에서 공동 영상 근거 사용을 별도 비교한다. 원시 annotation·사례 연결의 미확인은 구현 단계 한정 검사로 남기며, 통과하면 같은 호출에서 실제 출력을 얻는다. 논문 추천 대상이 되는 긍정적 실험 근거는 아직 없다.
+
+
+
+## iter_061 CLAUDE IMPLEMENTATION REPORT — 2026-10-03 23:10:23
+
+# Work Performed
+
+- **요약 (핵심):** OmniBrainBench의 brain MRI 진단 QA(공개 closed-ended 6,823문항)를 연결하고, MedGemma 1.5로 D6와 E24(24 cluster)를 실제 출력까지 실행했다. E24에서 영상 신호가 text-only(T)를 넘지 못했다.
+- **근거:** E24 정확도는 T 0.500, J(전체 영상) 0.4375, S_mean(개별 영상 평균) 0.410, V(개별 답변 plurality vote) 0.4375다. J−T −0.0625 [−0.208, 0.0625], V−T −0.0625 [−0.208, 0.0625]이다. 영상 신호 CI 상한이 10 pp 미만이라 사전 규칙상 E64 확대는 하지 않았다.
+- **미검증·주의:** 24 cluster는 확증 표본이 아니다(최악 반폭 약 20 pp). BraTS·ISLES의 질문 본문이 병변 소견을 서술해 T가 유리할 수 있다. PubMedVision은 논문 단위 cluster여서 환자 독립성이 없다. 임상 능력 결론은 내지 않는다.
+- **다음:** MedGemma 통합 방법 투자는 보류하고, 같은 고정 자료에서 다른 VLM과 비교할 가치만 GPT가 리뷰에서 판단한다.
+- **iter_060·iter_055 범위:** UCSF routing, MSD 추가 적응, OCT 후보는 보류로 유지했다. 기존 결과·reserve는 소비하지 않았다.
+- **자료·적격성 (모델 출력 보기 전에 확정):**
+  - 공식 revision `899f22f9…`의 JSON과 ZIP(sha256 `471d4e7f…`)을 받아 14,738개 영상 경로가 ZIP basename과 모두 1:1 대응함을 확인했다.
+  - 적격 규칙은 Disease Diagnosis Reasoning, MRI 계열 modality만, 질문에 "diagnos" 포함, 선택지 5개 유일, 정답 문자열이 질문에 없음, 영상 존재다. 결과는 1,148 QA → 1,144 component이다.
+  - cluster는 case/article ID와 공유 영상 pixel hash를 합친 component로 만들었다. 원천이 PubMedVision이면 환자 독립성은 없다.
+- **시각 감사:** 실제 영상 contact sheet를 열어 D·E 후보를 보고 혼합 modality·비뇌·MRS plot·동물·segmentation overlay 등 7개 cluster를 제외했다. 제외 후 D와 E 목록을 다시 고정했다. 전문의 재판독이 아니다.
+- **구현:**
+  - 모델 loading, env 기록, chat template 입력은 `msd56_run.py`의 `load_model`·`env_info`·`build_inputs`를 재사용했다. 이 파일은 blob `63347081…`로 반입된 것이다.
+  - 새 adapter는 QA 요청 구성, 선택지 permutation, parser, 평가, worker·launch·verify 경로다. MSD 전용 부분은 쓰지 않았다.
+- **parser 변경 (D 기준):** D6에서 모델이 `ANSWER: X` 대신 `Final Answer: …\boxed{X}`를 자주 써서 strict(v1) 유효율이 38.6%였다. 그래서 `\boxed` 한 줄을 허용하는 v2를 D 관찰만으로 정해 `mri61_parse.py`에 고정했다. E 결과는 보지 않았다.
+- **E24 선택 방식:** D와 분리한 뒤 원천×이미지 수(2, 3–4, 5 이상)별로 번갈아 뽑았다. E64 목록도 잠갔지만 확대 조건을 충족하지 못해 실행하지 않았다.
+
+# Files Changed
+
+새로 만든 코드는 `research/` 아래다.
+- `mri61_explore.py`: 적격성 탐색
+- `mri61_data.py`: 적격성·cluster·D/E 잠금
+- `mri61_sheet.py`: 감사용 contact sheet
+- `mri61_spec.py`: prompt·permutation·strict parser
+- `mri61_parse.py`: parser v2
+- `mri61_run.py`: build·lock·worker·launch·verify·tech
+- `mri61_eval.py`: 평가
+- `mri61_test.py`: 실행 경로 검사
+- `msd56_run.py`: 반입 파일, 수정 없음
+
+# Commands / Experiments
+
+- **자료:** HF 파일 JSON·README·ZIP 다운로드(성공), `mri61_data.py` 실행 3회(제외 목록 반영, 성공).
+- **tech 검사:** D88 요청과 E24 264 요청에서 공식 processor 경로(`apply_chat_template` → processor, `add_special_tokens=False`)와 wrapper의 `input_ids`·`pixel_values`·영상 수를 대조했다. D는 44건+32건, E24는 132건+84건에서 불일치 0이다. 첫 시도는 BOS 중복이 원인인 대조 코드 오류로 실패했고 수정 후 통과했다.
+- **D 생성:** 88요청을 2 worker(GPU 0·1 각 1개)로 실행했다. wall 1700초, peak 11.3/11.0 GB, 종료 코드 [0,0], verify 문제 0이다.
+- **E24 생성:** 264요청을 같은 구성으로 실행했다. 종료 코드 [0,0], verify 문제 0이다.
+  - 처리량은 D 기준으로 약 85분 추정했으나 실제 수치는 `gen_E24/launch_*.json`에 있다.
+  - E24는 worker 간 부하 불균형으로 말미에 한 장만 사용한 구간이 있다.
+- **worker 수 결정:** GPU당 worker 2개는 시도하지 않았다. peak 11.3 GB에 worker당 2 GiB 여유를 더하면 24 GB를 넘기 때문이다. 이 이유로 1 worker/GPU를 유지했다.
+- **실행 경로 검사 (`mri61_test.py`):** 6요청으로 아래를 확인했고 전부 통과했다.
+  - 중단 후 재개: 3건 처리 후 중단, 손상된 tail 추가, 재개 시 미완료만 처리, torn line 제거
+  - 재개 출력의 token이 D 출력과 6/6 동일
+  - requests 변조 차단
+  - 누락 detect(verify가 실패 코드 반환)
+  - tech gate 실패 시 launch가 exit 2로 중단되고 출력 디렉터리 미생성
+
+# Results
+
+- 보고 파일: `results/iter_061/D_report_v2.json`, `E24_report.json`, 원시 출력 `gen_D_2w/`, `gen_E24/`, 선택 잠금 `data/selection_lock.json`.
+
+D6은 기술 검증용이며 성능 추정이 아니다. E24는 24 cluster(다중 영상 24)이고 파일명·정답·source는 입력에서 제외했다.
+
+| 조건 | E24 정확도 |
+|---|---|
+| T (text-only) | 0.500 |
+| J (전체 영상) | 0.4375 |
+| S_mean (개별 영상 평균) | 0.410 |
+| V (S_i plurality vote) | 0.4375 |
+| prior (가장 빈번한 정답 문자열) | 0.25 |
+| any-S (사후 oracle, 실용 baseline 아님) | 0.479 |
+
+- **paired 차이 (seed61, 10,000회 cluster bootstrap):**
+  - J−T −0.0625, 95% CI [−0.208, 0.0625]
+  - V−T −0.0625, 95% CI [−0.208, 0.0625]
+  - J−V 0.000, 95% CI [−0.104, 0.125]
+  - J−S_mean +0.028, 95% CI [−0.066, 0.135]
+- **선택지 순서:** F와 R에서 T는 0.50/0.50, J는 0.417/0.458이다.
+- **J와 T가 다른 cluster:** 8개다.
+- **원천별(소표본):**
+  - NOVA 7: T 0.50, J 0.50, S_mean 0.56
+  - PubMedVision 7: T 0.43, J 0.50
+  - BraTS-GLI 2: 모두 1.0
+  - ISLES 3: T 0.67, J 0.17
+- **형식:** strict v1 유효율은 전체 70%다. v2 기준 invalid는 T 6.25%, J 0%, S 0%다. T는 retry 46%였고 cap에서 EOS 없이 끝난 요청이 1건 있다.
+- **비용:** T는 입력 token이 가장 적지만 출력이 길다(wall 합 3377초). J wall 합은 1184초, S 합은 3395초다. V 비용은 S 전체 합이며 J보다 요청이 많다.
+- **독립 재계산:** 별도 정규식으로 T 0.500, J 0.4375를 다시 얻었다.
+- **E64 확대 조건:** J−T와 V−T 점추정이 0.10 이상이 아니고 CI 상한도 0.10 미만이다. V−J, S_mean−J도 0.10 미만이어서 확대하지 않았다.
+- **판정:** 사전 기준의 음성(영상 신호 CI 상한 10 pp 미만)에 해당한다. 현재 과제·입력에서 큰 추가 영상 신호가 약하다는 근거일 뿐, 모델 무능력이나 영상 무사용으로 확대하지 않는다.
+
+# Goal Progress / Reused Assets
+
+- **구분:**
+  - 자료 준비는 통과했다.
+  - 실행 유효성은 verify 문제 0건, tech 불일치 0건으로 통과했다.
+  - 모델 관찰은 J−T −0.0625로 영상 신호가 text-only를 넘지 못한 것이다.
+  - 방법 필요성(공동 입력 손실)은 V−J, S_mean−J 모두 문턱 미달이라 지지되지 않았다.
+  - 신규 기여는 없다.
+- **재사용:** `msd56_run.py`의 `load_model`, `env_info`, `build_inputs`, `generate`를 썼다. 필수 검사는 아래와 같이 수행했다.
+  - 반입 blob 일치: 확인
+  - 공식 processor와 입력 대조: 수행(D·E24)
+  - T의 영상 token 부재: verify가 `n_image_tokens==0`으로 검사
+  - J/S_i 영상 집합 연결: S_i가 J의 i번째 영상 slice와 같음을 검사
+  - 독립 점수 계산: 수행
+  - 변조·재개: 수행
+  - tech gate 실패 시 nonzero 종료: 수행
+  - 비용: `time.perf_counter` 기반 wall을 기록
+- **미검증 범위:**
+  - 24 cluster는 확증용이 아니다.
+  - 동일 질문에 임상 소견이 포함된 BraTS·ISLES는 text-only가 유리하다.
+  - 실제 모델 호출 시 `msd56_run.generate` 내부는 time.time을 쓴다. 비용 집계는 monotonic wall을 쓴다.
+  - 다른 모델 비교, 직접 SFT, encoder+head 비교는 실행하지 않았다.
+
+# Problems
+
+**현재 결론 무효:** 없음.
+
+**재사용 전 수정:**
+- D protocol은 `mri61_run.py` 수정 전에 잠갔다. 파일이 바뀌어 이후 `D_protocol.json` verify는 digest 불일치가 난다. D 결과 verify는 수정 전에 통과했다. E24는 수정 후 코드로 새로 잠가 일관하다.
+- 평가 코드(`mri61_eval.py`)와 `mri61_parse.py`는 protocol 잠금 대상이 아니다. 평가 입력 provenance 잠금을 보강해야 한다.
+- 영상은 원 QA에서 선택했으며, PubMedVision cluster는 논문 단위다. 환자 독립성이 없다.
+
+**추후 개선:** worker 간 부하 불균형(정적 shard)으로 마지막 구간에 한 GPU가 놀았다. 동적 claim 방식으로 바꾸면 처리량이 개선될 것이다.
+
+# Recommendation to GPT
+
+- 이 과제에서 MedGemma의 영상 신호가 약하게 관찰됐으므로 MedGemma 전용 통합 방법 투자는 보류를 권한다.
+- 다음 후보로 같은 고정 자료(NOVA 다중 영상 중심)에서 다른 VLM과 같은 T/J/S_i/V 조건 비교를 검토한다. 이때 BraTS·ISLES 같은 소견 서술형 문항은 text 유출 때문에 분리해서 봐야 한다.
+- 자료 한계(정답 key 영상 선택·pretrained exposure)와 24 cluster의 정밀도를 리뷰에서 같이 판단해 달라.
+
+SELF_CHECK: PASS
+SUMMARY: OmniBrainBench brain MRI 진단 QA(E24, 24 cluster)에서 MedGemma 1.5의 J−T는 −0.0625 [−0.208, 0.0625]로 영상 신호가 text-only를 넘지 못해 E64 확대와 통합 방법 투자는 보류했다. 작은 개발 표본이고 소견 서술 문항은 text가 유리할 수 있다.
+
+
+## iter_061 GPT REVIEW [CONTINUE] — 2026-10-03 23:14:02
+
+# 요약
+
+- **판정:** 제한된 diagnostic은 유효하며 사전 음성 분기를 확인했다. CONTINUE, 전체 코드 재사용은 보류한다.
+- **핵심 근거:** E24 264응답에서 T 0.500, J/V 0.4375, S_mean 0.40972를 독립 재현했다. J−T와 V−T의 95% CI 상한은 0.0625다.
+- **의미·한계:** 큰 추가 영상 신호와 공동 입력 손실은 지지되지 않았다. 일부 문항은 원 적격성 규칙과 맞지 않으며, 기본 인식·질문 정보 충분성·결합 능력은 분리되지 않았다.
+- **다음:** 기존 출력의 한정 적격성 정정 후 같은 사례·질문의 타 계열 비교를 검토한다. MedGemma 전용 통합 방법 투자는 보류한다.
+
+# Assessment
+
+구현 담당은 engineer_backend.json과 claude_meta.json에서 Claude, sonnet/medium으로 확인했다. 리뷰 대상은 84f865b7aa2a8e07d2f5f0e10cf6b7c99ec5080b이며 before SHA와 changes.patch, 현재 작업 파일을 대조했다. 승인 대상 소스는 해당 commit 내용과 일치하고 unpreserved_paths는 없다.
+
+D 88건과 E24 264건이 실제 생성됐다. E24 launcher는 두 worker 모두 exit 0이며 wall-clock은 4,878.64초, 약 81.31분이다. 본 반복에서 학습과 E64·독립 확인은 실행하지 않았다. 보고서의 약 85분은 예상치이며 실측과 구분한다.
+
+원 계획의 영상 신호 음성 기준과 확대 중단 판단은 저장된 E24에서 충족한다. 다만 순수한 brain MRI 진단 모집단의 검증 완료라는 표현은 과하다. 유효한 고정 출력 비교를 보존하고 적격성 위반의 영향을 별도로 다룬다.
+
+# Key Findings
+
+리뷰에서 원 annotation의 options/answer와 labels를 대조하고, 원시 마지막 응답을 별도 정규식으로 해석해 선택지 역매핑·투표·cluster 평균·bootstrap을 재계산했다.
+
+| 비교 | 독립 재계산 결과 |
+|---|---|
+| T / J / S_mean / V | 0.500 / 0.4375 / 0.409722 / 0.4375 |
+| J−T | −0.0625, 95% CI [−0.208333, 0.0625] |
+| V−T | −0.0625, 95% CI [−0.208333, 0.0625] |
+| J−V | 0, 95% CI [−0.104167, 0.125] |
+| J−S_mean | 0.027778, 95% CI [−0.065972, 0.135417] |
+
+근거는 research/results/iter_061/E24_requests.jsonl, E24_requests_labels.json, gen_E24/worker*.jsonl 및 E24_report.json이다. 264개 요청·출력의 ID가 일치하며 중복은 없다. E24 protocol의 코드·요청·영상 digest도 독립 재계산해 일치했다.
+
+D_tech의 44개 입력·32개 subset 검사와 E24_tech의 132개 입력·84개 subset 검사에서 실패 0을 확인했다. 실제 검사 대상은 F 순서이며 두 순서를 모두 tensor 대조한 것으로 확대하지 않는다. T/J/S 입력 연결과 공식 processor 대조는 기록되어 있다.
+
+claude_stream.jsonl에서 parser v2 작성이 E24 launch보다 앞섬을 확인했다. D 관찰에 따른 형식 보정이며 E 결과에 맞춘 parser 선택 증거는 없다. 독립 재계산의 invalid는 T 3/48, J/S 0건이다.
+
+# Problems / Concerns
+
+**적격성:** mri61_data.py는 diagnosis라는 문자열과 metadata를 중심으로 필터링하며 치료·시간 변화 제외를 구현하지 않았다. 실제 E24 QA 2322는 진단과 intervention을 함께 묻고 전후 영상을 설명한다. QA 1419는 수술 후 재발의 longitudinal 문맥을 포함한다. QA 2033은 부비동 질환으로 brain 과제 범위가 불명확하다. contact sheet를 실제 열었던 로그와 audit_E_a.png를 확인했으나, 시각 감사가 문항 의미의 적격성 검사를 대신하지 못했다.
+
+영향을 확인하기 위한 사후 민감도 계산에서 QA 2322만 제외한 23개 cluster의 J−T는 −0.06522, CI [−0.19565, 0.06522]였다. 위 세 문항을 모두 제외한 21개에서는 J−T −0.04762, CI [−0.19048, 0.09524]였다. 이는 음성 방향이 특정 의심 문항 하나에만 의존하지 않음을 보여주지만, 새 사전 분석이나 독립 확인은 아니다. 공식 결과를 이 수치로 교체하지 않는다.
+
+**재사용:** evaluator는 protocol 검증 없이 실행되고 labels·parser 잠금이 없다. worker는 기존 rid만으로 완료를 판단한다. 정상 종료 후 torn tail을 추가한 시험은 실제 강제 중단 복구를 충분히 검증하지 못한다. tests/run_path_tests.json의 제한된 통과는 인정하되 전체 실행 안전성으로 확대하지 않는다.
+
+**비용:** 현재 monotonic 요청 시간은 저장/fsync를 포함하지 않아 계획의 전체 비용 경계와 다르다. 정확도 결과에는 영향이 없지만 실용 비용 우위 주장에는 사용할 수 없다. GPU당 2 worker를 피한 메모리 근거는 합리적이며 낮은 utilization을 실패 사유로 삼지 않는다. batch 확대 비교와 부하 균형은 다음 실행에서 보완한다.
+
+# Interpretation
+
+현재 질문은 상당한 영상 소견과 임상 문맥을 이미 텍스트로 제공한다. T가 높다는 사실은 영상 무사용이나 기본 시각 인식 부재를 증명하지 않는다. 원문 정보를 모든 조건에 동일하게 제공했으므로 이를 자동으로 부정한 leakage라고 부르는 것도 부정확하다.
+
+J와 V의 점수는 같지만 CI는 양방향 차이를 허용한다. 투표가 충분한 해법이라는 결론도, 공동 입력이 개별 근거를 손상한다는 결론도 나오지 않았다. 복수 영상의 존재만으로 상보적 근거 결합을 평가했다고 볼 수 없다. 이번에는 새로운 observed 모델 결함을 등록하지 않는다.
+
+논문 추천은 보류한다. 이번 음성 결과는 투자 범위를 좁히지만 새 방법이나 특정 해결 방향의 유망성을 확인하지 못했다.
+
+# Strategy Check / 연구 방향 판단
+
+- **실행 유효성:** 실제 고정 출력 비교와 수치 재현은 확보했다. 적격성 오류 때문에 모집단 표현은 제한한다.
+- **성능 개선:** 없다. J와 V 모두 T보다 점추정치가 낮다.
+- **가설 지지:** 큰 추가 영상 신호 및 공동 입력 손실 가설은 지지되지 않았다. 인식 부족, 텍스트 정보 충분성, 관측 충분성은 남은 경쟁 설명이다.
+- **신규 기여 가능성:** 미확인이다. 모델 교체나 benchmark 점수 비교 자체는 contribution이 아니다.
+
+mri-volume-evidence-use track의 자료 접근·준비 비용을 이어받는다. 이번에는 자료 연결 이후 약 81분의 E24 생성까지 진행했으므로 준비만 반복한 것은 아니다. 자료 준비·감사·기술 수정·생성의 전체 비용 중 무엇이 지배적이었는지는 합산 계측이 없어 단정하지 않는다.
+
+새 방법 개발보다 기존 E24의 한정 정정과 타 계열 한 모델 비교가 다음 결정을 바꿀 가능성이 크다. 다른 MRI 자료로 즉시 이동하면 현재의 모델 특이성과 질문 특성을 구분하지 못한 채 준비 비용을 다시 지불한다. 기존 결과만으로 NOVA를 유리한 하위집단으로 선택하지 않는다. 타 계열 비교는 iter_062 이후 정책에 따른 후속 권고이며 이번 반복의 소급 gate가 아니다.
+
+# Recommended Next Experiment
+
+기존 출력의 적격성 정정을 먼저 끝내고, 같은 질문·관측 정보에서 타 계열 모델 하나의 기본 신호를 비교하는 한정 계획을 세운다. 원 제외 규칙, parser, 비교 범위와 종료 결정을 출력 전에 고정한다. 모델별 공식 입력·해상도·비용 차이를 기록한다.
+
+타 모델만 기본 영상 신호를 보이면 MedGemma 특이 범위와 교체 가치를 판단한다. 모두 약하면 현재 질문의 정보 충분성·입력 적합성 범위에서 투자를 종료하거나 보류한다. 단독 인식은 되지만 공동 조건에서 손실되는 실제 관찰이 확보될 때만 선택 대조나 최소 method pilot으로 넘어간다. 여러 기본 모델의 실패를 기존 해결책의 부족함이나 VLM 전체 한계로 해석하지 않는다.
