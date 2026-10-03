@@ -1,0 +1,1469 @@
+diff --git a/msd56_data.py b/msd56_data.py
+new file mode 100644
+index 0000000..142c67d
+--- /dev/null
++++ b/msd56_data.py
+@@ -0,0 +1,220 @@
++"""iter_056 MSD Task01_BrainTumour FLAIR 구간 자료: 선택·추출·구간/정답/조건 생성.
++
++원칙
++- 채널은 dataset.json(modality["0"]=="FLAIR")에서 읽는다. 정답=모든 비배경 label(1,2,3)의 합집합 (전부 tumour/oedema 계열; dataset.json labels).
++- image·mask는 동일 함수(canonical RAS 재배열 + 동일 축 변환)로 처리한다. 구간은 FLAIR nonzero 범위만으로 정한다(mask 미사용).
++- 렌더링: FLAIR volume 전체 min/max로 uint8 선형 정규화(구간별/slice별 재정규화 없음), 동일 RGB 3채널.
++- 표시 방향: slice[k] = arr_RAS[::-1, :, k].T[::-1]  -> 행: anterior가 위, 열: patient right가 영상 왼쪽(radiological).
++사용: python msd56_data.py select | extract | build
++"""
++import hashlib
++import io
++import json
++import os
++import random
++import sys
++import tarfile
++
++import numpy as np
++
++ROOT = "results/iter_056"
++TAR = f"{ROOT}/source/Task01_BrainTumour.tar"
++DATA = f"{ROOT}/data"
++SEED = 56
++N_D, N_E, N_SLAB, MIN_SLAB = 6, 48, 6, 8
++VERSION = "msd56_data_v1"
++
++
++def sha256(b):
++    return hashlib.sha256(b).hexdigest()
++
++
++def training_ids():
++    d = json.load(open(f"{ROOT}/source/dataset.json"))
++    assert d["modality"]["0"] == "FLAIR", d["modality"]
++    ids = []
++    for e in d["training"]:
++        assert e["image"].startswith("./imagesTr/") and e["label"].startswith("./labelsTr/")
++        a, b = e["image"].rsplit("/", 1)[1], e["label"].rsplit("/", 1)[1]
++        assert a == b and not a.startswith("._")
++        ids.append(a[:-len(".nii.gz")])
++    assert len(ids) == len(set(ids)) == 484
++    return sorted(ids)
++
++
++def case_paths(cid):
++    return f"{DATA}/raw/{cid}_img.nii.gz", f"{DATA}/raw/{cid}_lbl.nii.gz"
++
++
++def load_case(cid):
++    """returns flair float32 (RAS canonical), mask uint8 (same), header info dict."""
++    import nibabel as nib
++    ip, lp = case_paths(cid)
++    img, lbl = nib.load(ip), nib.load(lp)
++    if img.shape[:3] != lbl.shape[:3] or not np.allclose(img.affine, lbl.affine, atol=1e-4):
++        raise ValueError(f"{cid}: image/label grid mismatch {img.shape} {lbl.shape}")
++    assert img.ndim == 4 and img.shape[3] == 4
++    info = {"shape": list(img.shape), "label_shape": list(lbl.shape), "zooms": [float(z) for z in img.header.get_zooms()[:3]],
++            "orig_axcodes": "".join(nib.aff2axcodes(img.affine)), "affine": img.affine.round(4).tolist(),
++            "dtype": str(img.get_data_dtype())}
++    can = nib.as_closest_canonical(img)
++    canl = nib.as_closest_canonical(lbl)
++    info["canon_axcodes"] = "".join(nib.aff2axcodes(can.affine))
++    assert info["canon_axcodes"] == "RAS"
++    flair = np.asarray(can.dataobj[..., 0], dtype=np.float32)
++    mask = np.asarray(canl.dataobj).astype(np.uint8)
++    if not np.isfinite(flair).all():
++        raise ValueError(f"{cid}: non-finite FLAIR")
++    return flair, mask, info
++
++
++def nonzero_range(flair):
++    nz = np.where((flair != 0).reshape(-1, flair.shape[2]).any(axis=0))[0]
++    return int(nz[0]), int(nz[-1])
++
++
++def make_slabs(z0, z1, n=N_SLAB):
++    L = z1 - z0 + 1
++    base, rem = divmod(L, n)
++    out, s = [], z0
++    for i in range(n):
++        ln = base + (1 if i < rem else 0)
++        out.append([s, s + ln - 1])
++        s += ln
++    assert out[-1][1] == z1
++    return out
++
++
++def render(flair, k, vmin, vmax):
++    sl = flair[::-1, :, k].T[::-1]
++    u = np.clip((sl - vmin) / (vmax - vmin), 0, 1) * 255.0
++    g = np.round(u).astype(np.uint8)
++    return np.repeat(g[:, :, None], 3, axis=2)
++
++
++def mask_slice(mask, k):
++    return (mask[::-1, :, k].T[::-1] > 0)
++
++
++def equi(n, m):
++    """양 끝 포함 결정적 등간격 m개 index (0..n-1), 중복 없어야 함."""
++    idx = [int(round(i * (n - 1) / (m - 1))) for i in range(m)]
++    assert len(set(idx)) == m, (n, m, idx)
++    return idx
++
++
++def conditions_for_slab(z0, z1, area):
++    """area: slab 내 slice별 annotation voxel 수(단면적) list. returns dict cond -> absolute slice list (inferior->superior)."""
++    n = z1 - z0 + 1
++    dense = list(range(z0, z1 + 1))
++    dense_note = "all"
++    if n > 85:
++        dense = [z0 + i for i in equi(n, 85)]
++        dense_note = "equispaced85"
++    u8 = [z0 + i for i in equi(n, 8)]
++    if sum(area) > 0:
++        order = sorted(range(n), key=lambda i: (-area[i], i))[:8]
++        o8 = sorted(z0 + i for i in order)
++    else:
++        o8 = list(u8)
++    return {"DENSE": dense, "U8": u8, "O8": o8}, dense_note
++
++
++def cmd_select():
++    os.makedirs(f"{DATA}/raw", exist_ok=True)
++    ids = training_ids()
++    t = tarfile.open(TAR)
++    hashes = {}
++    for cid in ids:
++        for kind in ("images", "labels"):
++            m = t.getmember(f"Task01_BrainTumour/{kind}Tr/{cid}.nii.gz")
++            hashes[f"{kind}/{cid}"] = (sha256(t.extractfile(m).read()), m.size)
++    img_dups = {}
++    for k, (h, _) in hashes.items():
++        if k.startswith("images/"):
++            img_dups.setdefault(h, []).append(k)
++    dup_groups = [v for v in img_dups.values() if len(v) > 1]
++    order = list(ids)
++    random.Random(SEED).shuffle(order)
++    json.dump({"seed": SEED, "n_training": len(ids), "shuffled_order": order,
++               "file_hashes": {k: {"sha256": h, "bytes": s} for k, (h, s) in hashes.items()},
++               "duplicate_image_file_groups": dup_groups, "version": VERSION},
++              open(f"{DATA}/case_order.json", "w"), indent=1)
++    print("n", len(ids), "dup groups", dup_groups)
++
++
++def extract_case(t, cid):
++    ip, lp = case_paths(cid)
++    for kind, p in (("images", ip), ("labels", lp)):
++        if os.path.exists(p):
++            continue
++        b = t.extractfile(f"Task01_BrainTumour/{kind}Tr/{cid}.nii.gz").read()
++        with open(p + ".part", "wb") as f:
++            f.write(b)
++        os.replace(p + ".part", p)
++
++
++def cmd_extract():
++    """고정 순서에서 FLAIR nonzero 범위만으로 적격(6 구간 각 >=8 slice)한 case를 D6, E48 순으로 채운다. mask는 정하는 데 사용하지 않는다."""
++    co = json.load(open(f"{DATA}/case_order.json"))
++    t = tarfile.open(TAR)
++    chosen, skipped = [], []
++    for cid in co["shuffled_order"]:
++        if len(chosen) >= N_D + N_E:
++            break
++        extract_case(t, cid)
++        flair, _, info = load_case(cid)
++        z0, z1 = nonzero_range(flair)
++        slabs = make_slabs(z0, z1)
++        if min(b - a + 1 for a, b in slabs) < MIN_SLAB:
++            skipped.append({"case": cid, "reason": f"slab<{MIN_SLAB}", "range": [z0, z1]})
++            continue
++        chosen.append({"case": cid, "split": "D" if len(chosen) < N_D else "E", "z_range": [z0, z1], "slabs": slabs,
++                       "vmin": float(flair.min()), "vmax": float(flair.max()), "info": info,
++                       "img_sha256": co["file_hashes"][f"images/{cid}"]["sha256"],
++                       "lbl_sha256": co["file_hashes"][f"labels/{cid}"]["sha256"]})
++    json.dump({"chosen": chosen, "skipped": skipped, "version": VERSION}, open(f"{DATA}/cases.json", "w"), indent=1)
++    print("chosen", len(chosen), "skipped", len(skipped))
++
++
++def cmd_build():
++    """구간별 정답·coverage·조건별 slice 선택과 PNG 렌더, requests 원본(manifest) 생성. GT는 manifest_gt.json에만 둔다."""
++    cs = json.load(open(f"{DATA}/cases.json"))["chosen"]
++    os.makedirs(f"{DATA}/png", exist_ok=True)
++    gt, inputs = [], {}
++    for c in cs:
++        flair, mask, _ = load_case(c["case"])
++        ann = mask > 0
++        for si, (a, b) in enumerate(c["slabs"]):
++            area = [int(ann[:, :, k].sum()) for k in range(a, b + 1)]
++            conds, dn = conditions_for_slab(a, b, area)
++            tot = sum(area)
++            row = {"case": c["case"], "split": c["split"], "slab": si, "z0": a, "z1": b, "n_slices": b - a + 1,
++                   "present": bool(tot > 0), "ann_voxels": tot, "n_pos_slices": int(sum(x > 0 for x in area)),
++                   "pos_slice_frac": float(sum(x > 0 for x in area)) / (b - a + 1), "max_slice_area": max(area),
++                   "dense_note": dn, "cond": {}}
++            for cn, sl in conds.items():
++                ar = [area[k - a] for k in sl]
++                row["cond"][cn] = {"slices": sl, "n": len(sl), "cov_pos_slices": int(sum(x > 0 for x in ar)),
++                                   "cov_voxels": int(sum(ar)),
++                                   "cov_max_area": max(ar),
++                                   "cov_frac_voxels": (sum(ar) / tot) if tot else None,
++                                   "cov_frac_pos_slices": (sum(x > 0 for x in ar) / row["n_pos_slices"]) if tot else None,
++                                   "cov_frac_max_area": (max(ar) / max(area)) if tot else None,
++                                   "missed_positive": bool(tot > 0 and sum(ar) == 0)}
++            gt.append(row)
++            for k in sorted({k for sl in conds.values() for k in sl}):
++                p = f"{DATA}/png/{c['case']}_z{k:03d}.png"
++                if not os.path.exists(p):
++                    from PIL import Image
++                    Image.fromarray(render(flair, k, c["vmin"], c["vmax"])).save(p + ".tmp.png")
++                    os.replace(p + ".tmp.png", p)
++                if p not in inputs:
++                    inputs[p] = sha256(open(p, "rb").read())
++    json.dump({"rows": gt, "version": VERSION}, open(f"{DATA}/gt_slabs.json", "w"), indent=1)
++    json.dump(inputs, open(f"{DATA}/png_sha256.json", "w"), indent=1)
++    print("slabs", len(gt), "pos", sum(r["present"] for r in gt), "pngs", len(inputs))
++
++
++if __name__ == "__main__":
++    {"select": cmd_select, "extract": cmd_extract, "build": cmd_build}[sys.argv[1]]()
+diff --git a/s64_checkdata.py b/s64_checkdata.py
+new file mode 100644
+index 0000000..e8356de
+--- /dev/null
++++ b/s64_checkdata.py
+@@ -0,0 +1,116 @@
++"""iter_064 자료 검사: (1) NIfTI→PNG 독립 계산(nibabel orientation 변환 경로, msd56_data와 다른 코드) 비교
++(2) P/N 규칙 독립 재선택 (3) split/ID/pixel 중복 (4) 요청 구조·GT 비노출 (5) D6 overlay 저장.
++출력: results/iter_064/tests/data_check.json, D6_overlay.png"""
++import json, hashlib, sys
++import numpy as np, nibabel as nib
++from PIL import Image
++import msd56_data as MD
++import s64_data as S
++
++ROOT = S.ROOT
++res = {'fails': 0, 'checks': []}
++
++
++def chk(name, ok, **kw):
++    res['checks'].append({'name': name, 'ok': bool(ok), **kw})
++    if not ok:
++        res['fails'] += 1
++
++
++def indep_arrays(cid):
++    ip, lp = MD.case_paths(cid)
++    img, lbl = nib.load(ip), nib.load(lp)
++    ornt = nib.orientations.io_orientation(img.affine)
++    ras = nib.orientations.axcodes2ornt(('R', 'A', 'S'))
++    tr = nib.orientations.ornt_transform(ornt, ras)
++    fl = nib.orientations.apply_orientation(np.asarray(img.dataobj[..., 0], dtype=np.float32), tr)
++    mk = nib.orientations.apply_orientation(np.asarray(lbl.dataobj), tr)
++    return fl, mk
++
++
++def disp(a, k):  # 행: anterior 위, 열: 환자 right가 영상 왼쪽 (서술된 규약을 별도 표현)
++    s = a[:, :, k]            # (R,A)
++    s = np.flipud(s)          # R축 반전 -> 왼쪽이 patient right 쪽... (msd56_data: [::-1,:,k].T[::-1])
++    s = s.T                   # (A,R)
++    return np.flipud(s)       # anterior 위
++
++
++def main():
++    cases = {c['case']: c for c in json.load(open(f'{S.SRC}/cases.json'))['chosen']}
++    allp = {}
++    seen_img, seen_split = {}, {}
++    for split in ('D', 'E'):
++        man = json.load(open(f'{ROOT}/data/target_manifest_{split}.json'))
++        reqs = [json.loads(l) for l in open(f'{ROOT}/data/requests_{split}.jsonl')]
++        labels = json.load(open(f'{ROOT}/data/labels_{split}.json'))
++        for t in man['targets']:
++            cid = t['case']
++            fl, mk = indep_arrays(cid)
++            c = cases[cid]
++            ann = mk > 0
++            areas = [int(ann[:, :, k].sum()) for k in range(ann.shape[2])]
++            nzs = [int((fl[:, :, k] != 0).sum()) for k in range(fl.shape[2])]
++            Pz = int(np.argmax(areas))  # argmax = first max = smallest z
++            zero = [k for k in range(len(areas)) if areas[k] == 0]
++            Nz = max(zero, key=lambda k: (nzs[k], -k))
++            chk(f'{cid} P/N reselect', Pz == t['P_z'] and Nz == t['N_z'] and areas[Pz] > 0 and areas[Nz] == 0, P=Pz, N=Nz)
++            for kind, z in (('P', Pz), ('N', Nz)):
++                s = disp(fl, z)
++                u = np.round(np.clip((s - c['vmin']) / (c['vmax'] - c['vmin']), 0, 1) * 255).astype(np.uint8)
++                png = np.array(Image.open(t[f'{kind}_png']))
++                chk(f'{cid} {kind} png==indep', png.shape == (*u.shape, 3) and (png == u[:, :, None]).all() and (png[..., 0] == png[..., 1]).all())
++                chk(f'{cid} {kind} mask-slice match', int(disp(ann, z).sum()) == t[f'{kind}_mask_sum'] == (areas[z]))
++                chk(f'{cid} {kind} png sha', S.sha_file(t[f'{kind}_png']) == t[f'{kind}_png_sha256'])
++                allp.setdefault(t[f'{kind}_png_sha256'], []).append((cid, kind))
++            seen_img.setdefault(t['img_sha256'], []).append(cid)
++            seen_split.setdefault(cid, []).append(split)
++        # 요청 구조
++        by = {}
++        for r in reqs:
++            by[r['rid']] = r
++            ims = r['images']
++            tgt = ims[r['k'] - 1]
++            tman = {t['case']: t for t in man['targets']}[r['case']]
++            ok = tgt == tman[f"{r['target']}_png"] and len(ims) == (1 if r['cond'] == 'S' else 2) and r['prompt'] == S.PROMPT.format(k=r['k'])
++            if r['cond'].startswith('R'):
++                ok = ok and ims[0] == ims[1]
++            if r['cond'].startswith('C'):
++                oth = ims[2 - r['k']]
++                ok = ok and oth == tman['N_png' if r['target'] == 'P' else 'P_png']
++            chk(f"req {r['rid']}", ok)
++            blob = json.dumps(r)
++            leak = [x for x in (r['case'], 'BRATS', 'mask', 'label') if x in r['prompt'] or any(x in p for p in ims)]
++            chk(f"leak {r['rid']}", not leak and r['rid'].count('__') == 2)
++        chk(f'{split} requests==labels keys', set(by) == set(labels) and len(by) == 10 * len(man['targets']))
++        # overlay (D만)
++        if split == 'D':
++            rows = []
++            for t in man['targets']:
++                c = cases[t['case']]
++                fl, mk = indep_arrays(t['case'])
++                tiles = []
++                for kind in ('P', 'N'):
++                    z = t[f'{kind}_z']
++                    g = np.array(Image.open(t[f'{kind}_png'])).copy()
++                    m = disp(mk > 0, z)
++                    edge = m & ~(np.roll(m, 1, 0) & np.roll(m, -1, 0) & np.roll(m, 1, 1) & np.roll(m, -1, 1))
++                    g[edge] = [255, 0, 0]
++                    tiles.append(g)
++                rows.append(np.concatenate(tiles, axis=1))
++            w = max(r.shape[1] for r in rows)
++            rows = [np.pad(r, ((0, 0), (0, w - r.shape[1]), (0, 0))) for r in rows]
++            Image.fromarray(np.concatenate(rows, axis=0)).save(f'{ROOT}/tests/D6_overlay.png')
++    dup_img = [v for v in seen_img.values() if len(v) > 1]
++    chk('no duplicate raw image across D/E cases', not dup_img, dup=dup_img)
++    chk('case in exactly one split', all(len(v) == 1 for v in seen_split.values()))
++    ps = [v for v in allp.values() if len(v) > 1]
++    chk('no duplicate rendered png across (case,kind)', not ps, dup=ps[:3])
++    json.dump(res, open(f'{ROOT}/tests/data_check.json', 'w'), indent=1)
++    print('fails', res['fails'], 'of', len(res['checks']))
++    sys.exit(1 if res['fails'] else 0)
++
++
++if __name__ == '__main__':
++    import os
++    os.makedirs(f'{ROOT}/tests', exist_ok=True)
++    main()
+diff --git a/s64_data.py b/s64_data.py
+new file mode 100644
+index 0000000..44ef5da
+--- /dev/null
++++ b/s64_data.py
+@@ -0,0 +1,118 @@
++"""iter_064 target-slice 대조 자료: 기존 MSD D6/E48(cases.json)에서 case별 양성 P/음성 N slice를 mask로 고정 규칙 선택하고
++S/R/C 요청을 만든다. msd56_data.py(원 SHA da6e755 반입)는 load_case/render/mask_slice만 사용한다.
++
++선택 규칙(결과 보기 전 고정)
++ P: mask>0 단면적 최대 axial slice(동률 작은 z). 합>0이어야 함.
++ N: mask 합=0 slice 중 FLAIR nonzero pixel 수 최대(동률 작은 z). 합=0이어야 함.
++ 둘 중 하나가 없으면 부적격(대체 없음).
++GT(정답)는 labels_*.json에만 둔다. 요청에는 case ID/좌표/slice index를 넣지 않고 영상은 anon 파일명으로 저장한다.
++서브명령: audit | build --split D|E
++"""
++import hashlib, json, os, sys
++import numpy as np
++import msd56_data as MD
++
++ROOT = 'results/iter_064'
++SRC = 'results/iter_056/data'
++PROMPT = ('The images are axial FLAIR slices from the same brain MRI. Consider only image {k} in the supplied order. '
++          'Is a glioma-related lesion, including peritumoral edema, visible in that image? '
++          'Answer with exactly one word: PRESENT or ABSENT.')
++CONDS = ['S', 'R1', 'R2', 'C1', 'C2']
++
++
++def sha_file(p):
++    h = hashlib.sha256()
++    with open(p, 'rb') as f:
++        for ch in iter(lambda: f.read(1 << 22), b''):
++            h.update(ch)
++    return h.hexdigest()
++
++
++def sha_b(b):
++    return hashlib.sha256(b).hexdigest()
++
++
++def select_targets(flair, mask):
++    """returns (P_z, N_z, info) 또는 부적격 시 (None|z, None|z, info). 순수 함수(합성 검사용)."""
++    ann = mask > 0
++    areas = np.array([int(ann[:, :, k].sum()) for k in range(ann.shape[2])])
++    nz = np.array([int((flair[:, :, k] != 0).sum()) for k in range(flair.shape[2])])
++    P = None
++    if areas.max() > 0:
++        P = int(np.flatnonzero(areas == areas.max())[0])
++    zero = np.flatnonzero(areas == 0)
++    N = None
++    if len(zero):
++        zn = nz[zero]
++        N = int(zero[np.flatnonzero(zn == zn.max())[0]])
++        if nz[N] == 0:
++            N = None
++    return P, N, {'area_P': int(areas[P]) if P is not None else None, 'area_N': int(areas[N]) if N is not None else None,
++                  'nz_P': int(nz[P]) if P is not None else None, 'nz_N': int(nz[N]) if N is not None else None}
++
++
++def png_name(cid, kind, z):
++    # 영상 파일명에 case ID를 쓰지 않는다 (processor는 경로를 보지 않지만 기록 분리).
++    return f'{ROOT}/png/{sha_b(f"{cid}|{kind}|{z}".encode())[:16]}.png'
++
++
++def build_requests(rows):
++    """rows: [{case, split, P:{png,z}, N:{png,z}}]. 요청과 정답 생성(순수)."""
++    reqs, labels = [], {}
++    for r in rows:
++        for tk, ok in (('P', 'N'), ('N', 'P')):
++            t, o = r[tk]['png'], r[ok]['png']
++            spec = {'S': ([t], 1), 'R1': ([t, t], 1), 'R2': ([t, t], 2), 'C1': ([t, o], 1), 'C2': ([o, t], 2)}
++            for cond in CONDS:
++                ims, k = spec[cond]
++                rid = f"{r['case']}__{tk}__{cond}"
++                reqs.append({'rid': rid, 'case': r['case'], 'target': tk, 'cond': cond, 'k': k, 'images': ims,
++                             'prompt': PROMPT.format(k=k)})
++                labels[rid] = {'answer': 'PRESENT' if tk == 'P' else 'ABSENT', 'case': r['case'], 'target': tk, 'cond': cond}
++    return reqs, labels
++
++
++def cmd_build(split):
++    cs = [c for c in json.load(open(f'{SRC}/cases.json'))['chosen'] if c['split'] == split]
++    co = json.load(open(f'{SRC}/case_order.json'))
++    os.makedirs(f'{ROOT}/png', exist_ok=True)
++    os.makedirs(f'{ROOT}/data', exist_ok=True)
++    from PIL import Image
++    rows, inelig, tm = [], [], []
++    for c in cs:
++        cid = c['case']
++        ip, lp = MD.case_paths(cid)
++        # raw hash 대조 (cases.json / case_order.json)
++        assert MD.sha256(open(ip, 'rb').read()) == c['img_sha256'] == co['file_hashes'][f'images/{cid}']['sha256'], cid
++        assert MD.sha256(open(lp, 'rb').read()) == c['lbl_sha256'] == co['file_hashes'][f'labels/{cid}']['sha256'], cid
++        flair, mask, info = MD.load_case(cid)
++        assert info['shape'] == c['info']['shape'] and abs(float(flair.min()) - c['vmin']) < 1e-4 and abs(float(flair.max()) - c['vmax']) < 1e-4
++        P, N, inf = select_targets(flair, mask)
++        if P is None or N is None:
++            inelig.append({'case': cid, 'P': P, 'N': N, 'info': inf})
++            continue
++        ent = {'case': cid, 'split': split, 'img_sha256': c['img_sha256'], 'lbl_sha256': c['lbl_sha256'], **inf}
++        row = {'case': cid}
++        for kind, z in (('P', P), ('N', N)):
++            p = png_name(cid, kind, z)
++            Image.fromarray(MD.render(flair, z, c['vmin'], c['vmax'])).save(p + '.tmp.png')
++            os.replace(p + '.tmp.png', p)
++            row[kind] = {'png': p, 'z': z}
++            ent[f'{kind}_z'] = z
++            ent[f'{kind}_png'] = p
++            ent[f'{kind}_png_sha256'] = sha_file(p)
++            ent[f'{kind}_mask_sum'] = int(MD.mask_slice(mask, z).sum())
++        assert ent['P_mask_sum'] > 0 and ent['N_mask_sum'] == 0, cid
++        rows.append(row); tm.append(ent)
++    reqs, labels = build_requests(rows)
++    with open(f'{ROOT}/data/requests_{split}.jsonl', 'w') as f:
++        for r in reqs:
++            f.write(json.dumps(r) + '\n')
++    json.dump(labels, open(f'{ROOT}/data/labels_{split}.json', 'w'), indent=1)
++    json.dump({'targets': tm, 'ineligible': inelig, 'rule': 'P=max mask area (tie small z); N=mask sum 0 with max FLAIR nonzero (tie small z)',
++               'prompt': PROMPT}, open(f'{ROOT}/data/target_manifest_{split}.json', 'w'), indent=1)
++    print(split, 'eligible', len(tm), 'ineligible', len(inelig), 'requests', len(reqs))
++
++
++if __name__ == '__main__':
++    cmd_build(sys.argv[2]) if sys.argv[1] == 'build' else sys.exit('usage')
+diff --git a/s64_eval.py b/s64_eval.py
+new file mode 100644
+index 0000000..9f0ff8c
+--- /dev/null
++++ b/s64_eval.py
+@@ -0,0 +1,157 @@
++"""iter_064 평가: 모델별 S/R/C BA, sens/spec, invalid·비EOS, L_count/L_content/L_total(case paired bootstrap seed64, 10,000).
++진입 전 s64_run verify 통과(verify.json의 protocol digest·파일 hash 일치)를 요구한다. invalid는 오답으로 계산(주분석), valid-only는 보조.
++사용: python s64_eval.py --requests R --labels L --target-manifest M --gen-dir D --verify D/verify.json --model m --out report.json"""
++import argparse, glob, hashlib, json, os, sys
++import numpy as np
++import msd56_run as M
++import s64_run as R
++
++SEED, NB = 64, 10000
++
++
++def ba(y, p):
++    """y,p in {0,1} 배열(1=PRESENT). balanced accuracy."""
++    y, p = np.asarray(y), np.asarray(p)
++    return 0.5 * ((p[y == 1] == 1).mean() + (p[y == 0] == 0).mean())
++
++
++def load(a):
++    v = json.load(open(a.verify))
++    assert v['n_problems'] == 0 and v['n_records'] == v['n_requests'], 'verify not clean'
++    for f, h in v['record_file_sha256'].items():
++        assert R.sha_file(f) == h, 'record file changed after verify ' + f
++    lab = json.load(open(a.labels))
++    reqs = {r['rid']: r for r in R.read_jsonl(a.requests)}
++    recs = {}
++    for f in sorted(glob.glob(f'{a.gen_dir}/worker*.jsonl')):
++        for r in R.read_jsonl(f):
++            assert r['rid'] not in recs, 'dup'
++            recs[r['rid']] = r
++    assert set(recs) == set(reqs) == set(lab)
++    return lab, reqs, recs, v
++
++
++def table(lab, recs):
++    """case -> cond -> target -> dict(pred in {1,0,None}, correct, eos, text)"""
++    T = {}
++    for rid, r in recs.items():
++        l = lab[rid]
++        txt = r['attempts'][-1]['text']
++        pa = M.parse_answer(txt)
++        pred = None if pa is None else (1 if pa == 'PRESENT' else 0)
++        gt = 1 if l['answer'] == 'PRESENT' else 0
++        T.setdefault(l['case'], {}).setdefault(l['cond'], {})[l['target']] = {
++            'pred': pred, 'gt': gt, 'correct': int(pred == gt), 'eos': bool(r['attempts'][-1]['ended_eos']), 'text': txt, 'retried': len(r['attempts']) > 1}
++    return T
++
++
++GROUPS = {'S': ['S'], 'R': ['R1', 'R2'], 'C': ['C1', 'C2'], 'R1': ['R1'], 'R2': ['R2'], 'C1': ['C1'], 'C2': ['C2']}
++
++
++def case_arrays(T, cases, valid_only=False):
++    """returns dict group -> (sens_c, spec_c) arrays per case (위치 평균). valid_only면 모든 비교 응답이 valid인 case만(호출자가 cases 제한)."""
++    out = {}
++    for g, cs in GROUPS.items():
++        se = np.array([np.mean([T[c][k]['P']['correct'] for k in cs]) for c in cases])
++        sp = np.array([np.mean([T[c][k]['N']['correct'] for k in cs]) for c in cases])
++        out[g] = (se, sp)
++    return out
++
++
++def ba_arr(arr, idx=None):
++    se, sp = arr
++    if idx is not None:
++        se, sp = se[idx], sp[idx]
++    return 0.5 * (se.mean() + sp.mean())
++
++
++def boot(arrs, pairs, n_cases):
++    rng = np.random.default_rng(SEED)
++    idx = rng.integers(0, n_cases, size=(NB, n_cases))
++    res = {}
++    for name, (g1, g2) in pairs.items():
++        d = []
++        for g in (g1, g2):
++            se, sp = arrs[g]
++            d.append(0.5 * (se[idx].mean(axis=1) + sp[idx].mean(axis=1)))
++        diff = d[0] - d[1]
++        res[name] = {'ci95': [float(np.percentile(diff, 2.5)), float(np.percentile(diff, 97.5))]}
++    return res
++
++
++PAIRS = {'L_count': ('S', 'R'), 'L_content': ('R', 'C'), 'L_total': ('S', 'C'), 'L_content_pos1': ('R1', 'C1'), 'L_content_pos2': ('R2', 'C2')}
++
++
++def analyze(T, valid_only=False):
++    cases = sorted(T)
++    if valid_only:
++        cases = [c for c in cases if all(T[c][k][t]['pred'] is not None for k in T[c] for t in T[c][k])]
++    arrs = case_arrays(T, cases)
++    out = {'n_cases': len(cases), 'groups': {}, 'diffs': {}}
++    for g, a in arrs.items():
++        out['groups'][g] = {'BA': float(ba_arr(a)), 'sens': float(a[0].mean()), 'spec': float(a[1].mean())}
++    point = {k: out['groups'][g1]['BA'] - out['groups'][g2]['BA'] for k, (g1, g2) in PAIRS.items()}
++    cis = boot(arrs, PAIRS, len(cases)) if len(cases) else {}
++    for k in PAIRS:
++        out['diffs'][k] = {'point': point[k], **cis.get(k, {})}
++    # case 분포: R보다 C가 나쁜 case 수 (case BA 기준)
++    ba_c = {g: 0.5 * (arrs[g][0] + arrs[g][1]) for g in arrs}
++    out['cases_C_worse_than_R'] = int((ba_c['R'] - ba_c['C'] > 0).sum())
++    out['cases_C_better_than_R'] = int((ba_c['R'] - ba_c['C'] < 0).sum())
++    out['cases_R_worse_than_S'] = int((ba_c['S'] - ba_c['R'] > 0).sum())
++    out['position_diff_both_positive'] = bool(point['L_content_pos1'] > 0 and point['L_content_pos2'] > 0)
++    return out
++
++
++def main():
++    ap = argparse.ArgumentParser()
++    for k in ('requests', 'labels', 'target-manifest', 'gen-dir', 'verify', 'model', 'out'):
++        ap.add_argument('--' + k, required=True)
++    a = ap.parse_args()
++    a.target_manifest = getattr(a, 'target_manifest')
++    assert not os.path.exists(a.out), 'report exists'
++    lab, reqs, recs, v = load(a)
++    T = table(lab, recs)
++    rep = {'model': a.model, 'requests_sha256': R.sha_file(a.requests), 'labels_sha256': R.sha_file(a.labels), 'verify_sha256': R.sha_file(a.verify),
++           'protocol_digest': v['protocol_digest'], 'seed': SEED, 'n_boot': NB}
++    rep['primary_invalid_as_wrong'] = analyze(T)
++    rep['conditional_all_valid_cases'] = analyze(T, valid_only=True)
++    # 형식·cap
++    fmt = {}
++    for g in ('S', 'R1', 'R2', 'C1', 'C2'):
++        rows = [T[c][g][t] for c in T for t in ('P', 'N')]
++        fmt[g] = {'n': len(rows), 'invalid': sum(r['pred'] is None for r in rows), 'non_eos_final': sum(not r['eos'] for r in rows),
++                  'retried_2048': sum(r['retried'] for r in rows),
++                  'exact_PRESENT_ABSENT_uppercase': sum(r['text'].strip() in ('PRESENT', 'ABSENT') for r in rows)}
++    rep['format'] = fmt
++    # P/N·위치별 정답률, confusion
++    byt = {}
++    for g in ('S', 'R1', 'R2', 'C1', 'C2'):
++        for t in ('P', 'N'):
++            rows = [T[c][g][t] for c in T]
++            byt[f'{g}_{t}'] = {'acc': float(np.mean([r['correct'] for r in rows])), 'pred_present': sum(r['pred'] == 1 for r in rows),
++                               'pred_absent': sum(r['pred'] == 0 for r in rows), 'invalid': sum(r['pred'] is None for r in rows)}
++    rep['by_target_cond'] = byt
++    # S 정답 사례(target 단위)에서 C가 틀리는 비율 (보조, 사전 충분성 집단 아님)
++    s_ok = [(c, t) for c in T for t in ('P', 'N') if T[c]['S'][t]['correct']]
++    rep['aux_S_correct_then_C_wrong'] = {'n_S_correct_targets': len(s_ok),
++        'C_wrong_frac_pos_avg': float(np.mean([1 - np.mean([T[c][k][t]['correct'] for k in ('C1', 'C2')]) for c, t in s_ok])) if s_ok else None,
++        'R_wrong_frac_pos_avg': float(np.mean([1 - np.mean([T[c][k][t]['correct'] for k in ('R1', 'R2')]) for c, t in s_ok])) if s_ok else None}
++    # routing 동일성: S 출력 공유 근거(요청 k번째 영상 == S 영상)
++    rep['routing'] = {'rule': 'image index k in prompt -> that file only == S input', 'same_image_requests': sum(
++        R.sha_file(r['images'][r['k'] - 1]) == R.sha_file(reqs[f"{r['case']}__{r['target']}__S"]['images'][0]) for r in reqs.values()),
++        'n_requests': len(reqs), 'note': 'routed 입력은 S 입력과 동일 파일/처리 tensor(tech 검사); routed 성능=S 출력 공유로 정의, 별도 생성 없음'}
++    # 비용(실측): 조건별 평균 입력 token·요청 처리 시간
++    cost = {}
++    for g in ('S', 'R1', 'R2', 'C1', 'C2'):
++        rs = [recs[r] for r in recs if lab[r]['cond'] == g]
++        cost[g] = {'mean_input_tokens': float(np.mean([r['n_input_tokens'] for r in rs])), 'mean_read_to_flush_s': float(np.mean([r['total_read_to_flush_s'] for r in rs])),
++                   'mean_gen_s': float(np.mean([sum(x['runtime_s'] for x in r['attempts']) for r in rs]))}
++    rep['cost_measured_per_request'] = cost
++    json.dump(rep, open(a.out, 'w'), indent=1)
++    p = rep['primary_invalid_as_wrong']
++    print(a.model, {g: round(p['groups'][g]['BA'], 4) for g in ('S', 'R', 'C')}, {k: round(v['point'], 4) for k, v in p['diffs'].items() if k in ('L_count', 'L_content', 'L_total')})
++
++
++if __name__ == '__main__':
++    main()
+diff --git a/s64_run.py b/s64_run.py
+new file mode 100644
+index 0000000..de7dba2
+--- /dev/null
++++ b/s64_run.py
+@@ -0,0 +1,592 @@
++"""iter_064 S/R/C target-slice runner (Qwen2.5-VL-7B / MedGemma 1.5). q63_run.py의 입력·backend 경로를 따르되 계획의 수정을 구현.
++
++수정점(q63 대비)
++ - JSONL: 소유 worker 시작 시 '개행 없는 마지막 행'만 .corrupt_*로 보존 후 제거. 중간 손상은 예외. 다른 worker 파일 읽기는 완결(개행) 행만 읽어
++   기록 중인 꼬리 행과의 경합을 막고, 중간 손상은 예외.
++ - 답변과 비용(attempt 시간·token)은 한 행(원자적 단일 write)에 저장 -> 답변↔비용 연결 누락이 구조적으로 없음.
++ - claim 후 완료 상태 재확인, 종료 worker의 claim은 stale 처리. launcher는 out_dir 단위 flock.
++ - protocol: 코드·요청·labels·target manifest·원천(cases/case_order/msd56_data)·영상·모델/processor 파일 '내용 hash'(lock 시 전체, worker는 stat 일치+소형 파일 내용,
++   verify는 전체 재hash)·캡 설정을 잠그고 worker/launch/verify/tech 진입 시 재검증.
++ - GPU: 허용 CUDA_VISIBLE_DEVICES 안에서만, 시작 직전 nvidia-smi 여유 admission.
++서브명령: lock | worker | launch | verify | tech
++"""
++import argparse, fcntl, glob, hashlib, json, os, subprocess, sys, time
++
++MODELS = ('qwen', 'medgemma')
++QPKGS = '/SSD1_1TB/home/milab/daniel/08_medgemma/research/results/environments/qwen25vl_pkgs'
++QCACHE = '/SSD1_1TB/home/milab/daniel/08_medgemma/research/results/environments/qwen25vl_cache'
++QFETCH = 'results/iter_062/env/qwen_fetch.json'
++QID = 'Qwen/Qwen2.5-VL-7B-Instruct'
++HFHOME = '/SSD1_1TB/home/milab/daniel/08_medgemma/hf_cache'
++CAPS = [512, 2048]
++COMMON_CODE = ['s64_run.py', 's64_data.py', 'msd56_data.py']
++CODE = {'qwen': COMMON_CODE, 'medgemma': COMMON_CODE + ['msd56_run.py']}
++SRC_FILES = ['results/iter_056/data/cases.json', 'results/iter_056/data/case_order.json']
++RUNNER = 's64_run_v1'
++
++
++def _setup_env(model):
++    os.environ['HF_HUB_OFFLINE'] = '1'
++    if model == 'qwen':
++        if QPKGS not in sys.path:
++            sys.path.insert(0, QPKGS)
++    else:
++        os.environ.setdefault('HF_HOME', HFHOME)
++
++
++def sha_file(p):
++    h = hashlib.sha256()
++    with open(p, 'rb') as f:
++        for ch in iter(lambda: f.read(1 << 22), b''):
++            h.update(ch)
++    return h.hexdigest()
++
++
++def sha_s(x):
++    return hashlib.sha256(x if isinstance(x, bytes) else x.encode()).hexdigest()
++
++
++def read_jsonl(p):
++    """완결(개행으로 끝난) 행만 strict 파싱. 개행 없는 꼬리는 기록 중/torn row라 무시(소유 worker만 repair_tail로 정리). 중간 손상은 예외."""
++    out = []
++    if not os.path.exists(p):
++        return out
++    raw = open(p, 'rb').read()
++    lines = raw.split(b'\n')
++    lines = lines[:-1]  # 마지막 조각은 개행으로 끝나지 않은 부분(빈 문자열이거나 torn)
++    for l in lines:
++        if l.strip():
++            out.append(json.loads(l))
++    return out
++
++
++def repair_tail(path):
++    """개행 없이 끝난 마지막 조각만 보존·제거. 완결 행의 손상은 예외로 알린다. returns 제거 bytes."""
++    if not os.path.exists(path):
++        return 0
++    raw = open(path, 'rb').read()
++    cut = raw.rfind(b'\n') + 1
++    for l in raw[:cut].split(b'\n'):
++        if l.strip():
++            json.loads(l)  # 중간 손상 -> JSONDecodeError (복구 거부)
++    if cut == len(raw):
++        return 0
++    open(f'{path}.corrupt_{time.time_ns()}', 'wb').write(raw[cut:])
++    with open(path, 'r+b') as f:
++        f.truncate(cut); f.flush(); os.fsync(f.fileno())
++    return len(raw) - cut
++
++
++def append_row(path, obj):
++    b = (json.dumps(obj) + '\n').encode()
++    fd = os.open(path, os.O_WRONLY | os.O_APPEND | os.O_CREAT)
++    try:
++        n = os.write(fd, b)
++        if n != len(b):
++            raise IOError('short write')
++        os.fsync(fd)
++    finally:
++        os.close(fd)
++
++
++# ---------------- model info / protocol ----------------
++def snapshot_dir(model):
++    if model == 'qwen':
++        return json.load(open(QFETCH))['snapshot_path']
++    import msd56_run as M
++    return f'{HFHOME}/hub/models--google--medgemma-1.5-4b-it/snapshots/{M.MODEL_REVISION}'
++
++
++def model_files(model, full):
++    snap = snapshot_dir(model)
++    out = {}
++    for f in sorted(os.listdir(snap)):
++        real = os.path.realpath(os.path.join(snap, f))
++        st = os.stat(real)
++        ent = {'size': st.st_size, 'mtime_ns': st.st_mtime_ns}
++        if full:
++            ent['sha256'] = sha_file(real)
++        out[f] = ent
++    return out
++
++
++def model_id_rev(model):
++    if model == 'qwen':
++        return QID, json.load(open(QFETCH))['revision']
++    import msd56_run as M
++    return M.MODEL_ID, M.MODEL_REVISION
++
++
++def components(model, requests, labels, target_manifest, full_model_hash=False):
++    _setup_env(model)
++    rows = read_jsonl(requests)
++    imgs = sorted({p for r in rows for p in r['images']})
++    mid, rev = model_id_rev(model)
++    mf = model_files(model, full_model_hash)
++    comp = {'model_key': model, 'runner': RUNNER, 'code': {f: sha_file(f) for f in CODE[model]}, 'requests': sha_file(requests),
++            'labels': sha_file(labels), 'target_manifest': sha_file(target_manifest),
++            'source': {f: sha_file(f) for f in SRC_FILES}, 'images': {p: sha_file(p) for p in imgs},
++            'model_id': mid, 'model_revision': rev, 'caps': CAPS,
++            'gen_spec': 'greedy do_sample=False, checkpoint generation_config 유지, max_new_tokens=cap; cap512 비EOS만 2048 1회 재시도'}
++    return comp, mf
++
++
++def digest(comp, mf_full):
++    return sha_s(json.dumps({'c': comp, 'm': {k: v.get('sha256') for k, v in mf_full.items()}}, sort_keys=True))
++
++
++def cmd_lock(a):
++    comp, mf = components(a.model, a.requests, a.labels, a.target_manifest, full_model_hash=True)
++    assert not os.path.exists(a.out), 'protocol already exists'
++    d = digest(comp, mf)
++    json.dump({'digest': d, 'components': comp, 'model_files': mf, 'requests_file': a.requests, 'labels_file': a.labels,
++               'target_manifest': a.target_manifest, 'model': a.model, 'locked_at': time.strftime('%Y-%m-%dT%H:%M:%S')},
++              open(a.out, 'w'), indent=1)
++    print('locked', d)
++
++
++def check_protocol(model, requests, labels, target_manifest, protocol, full=False):
++    p = json.load(open(protocol))
++    assert p['model'] == model, 'protocol model mismatch'
++    comp, mf = components(model, requests, labels, target_manifest, full_model_hash=full)
++    if comp != p['components']:
++        sys.exit('PROTOCOL MISMATCH in ' + str([k for k in comp if comp[k] != p['components'].get(k)]))
++    for f, ent in p['model_files'].items():
++        cur = mf.get(f)
++        if cur is None or cur['size'] != ent['size'] or (full and cur['sha256'] != ent['sha256']):
++            sys.exit('MODEL FILE MISMATCH ' + f)
++        if not full and (cur['mtime_ns'] != ent['mtime_ns']):
++            # mtime 변동은 내용 재hash로 확인한다(작은 파일은 즉시, 큰 파일은 stat+size만 신뢰하지 않고 전체 hash)
++            real = os.path.realpath(os.path.join(snapshot_dir(model), f))
++            if sha_file(real) != ent['sha256']:
++                sys.exit('MODEL FILE CONTENT MISMATCH ' + f)
++    if set(mf) != set(p['model_files']):
++        sys.exit('MODEL FILE SET MISMATCH')
++    if set(mf) != set(p['model_files']):
++        sys.exit('MODEL FILE SET MISMATCH')
++    if digest(p['components'], p['model_files']) != p['digest']:
++        sys.exit('PROTOCOL DIGEST TAMPERED')
++    return p['digest']
++
++
++# ---------------- backends ----------------
++def load_model(model):
++    _setup_env(model)
++    import torch, transformers
++    torch.manual_seed(0)
++    if model == 'qwen':
++        rev = json.load(open(QFETCH))['revision']
++        proc = transformers.AutoProcessor.from_pretrained(QID, revision=rev, cache_dir=QCACHE)
++        m = transformers.Qwen2_5_VLForConditionalGeneration.from_pretrained(QID, revision=rev, cache_dir=QCACHE, dtype=torch.bfloat16, device_map='cuda')
++        m.eval()
++        return torch, proc, m
++    import msd56_run as M
++    return M.load_model()
++
++
++def env_info(model, torch, proc, m):
++    import transformers, PIL
++    if model == 'medgemma':
++        import msd56_run as M
++        return M.env_info(torch, proc, m)
++    import importlib.metadata as im
++    return {'model_id': QID, 'model_revision': json.load(open(QFETCH))['revision'], 'transformers': transformers.__version__,
++            'torch': torch.__version__, 'PIL': PIL.__version__, 'qwen_vl_utils': im.version('qwen-vl-utils'), 'dtype': str(m.dtype),
++            'cuda_visible_devices': os.environ.get('CUDA_VISIBLE_DEVICES'), 'gpu_name': torch.cuda.get_device_name(0),
++            'gpu_uuid': str(torch.cuda.get_device_properties(0).uuid), 'generation_config': m.generation_config.to_dict(),
++            'chat_template_sha256': sha_s(proc.chat_template or '')}
++
++
++def open_images(row):
++    from PIL import Image
++    return [Image.open(p).convert('RGB') for p in row['images']]
++
++
++def build_inputs(model, proc, row):
++    ims = open_images(row)
++    if model == 'medgemma':
++        content = [{'type': 'image', 'image': im} for im in ims] + [{'type': 'text', 'text': row['prompt']}]
++        return proc.apply_chat_template([{'role': 'user', 'content': content}], add_generation_prompt=True, tokenize=True,
++                                        return_dict=True, return_tensors='pt')
++    from qwen_vl_utils import process_vision_info
++    msgs = [{'role': 'user', 'content': [{'type': 'image', 'image': im} for im in ims] + [{'type': 'text', 'text': row['prompt']}]}]
++    text = proc.apply_chat_template(msgs, tokenize=False, add_generation_prompt=True)
++    iis, _ = process_vision_info(msgs)
++    return proc(text=[text], padding=True, return_tensors='pt', **({'images': iis} if iis else {}))
++
++
++def image_token_id(model, m):
++    return m.config.image_token_id if model == 'qwen' else m.config.image_token_index
++
++
++def per_image_pixels(model, inp):
++    """영상별 처리 pixel tensor의 sha 목록과 (qwen) grid. 영상 순서 = placeholder 순서."""
++    import numpy as np
++    pv = inp['pixel_values'].float()
++    if model == 'medgemma':
++        return [sha_s(pv[i].numpy().tobytes()) for i in range(pv.shape[0])], None
++    grids = inp['image_grid_thw'].tolist()
++    out, s = [], 0
++    for t, h, w in grids:
++        n = int(t * h * w)
++        out.append(sha_s(pv[s:s + n].numpy().tobytes()))
++        s += n
++    assert s == pv.shape[0]
++    return out, grids
++
++
++def expected_img_tokens(model, inp, n_images):
++    if model == 'medgemma':
++        return 256 * n_images
++    return int(sum(int(t * h * w) // 4 for t, h, w in inp['image_grid_thw'].tolist())) if n_images else 0
++
++
++def generate(torch, m, inp, cap, eos_ids):
++    x = {k: (v.to('cuda', dtype=torch.bfloat16) if k == 'pixel_values' else v.to('cuda')) for k, v in inp.items()}
++    torch.cuda.synchronize(); torch.cuda.reset_peak_memory_stats()
++    t0 = time.perf_counter()
++    with torch.no_grad():
++        out = m.generate(**x, max_new_tokens=cap, do_sample=False)
++    torch.cuda.synchronize()
++    dt = time.perf_counter() - t0
++    ids = out[0, x['input_ids'].shape[1]:].tolist()
++    return {'cap': cap, 'suffix_ids': ids, 'n_new': len(ids), 'ended_eos': bool(ids and ids[-1] in eos_ids), 'runtime_s': dt,
++            'peak_mem_alloc_gb': torch.cuda.max_memory_allocated() / 2**30, 'peak_mem_reserved_gb': torch.cuda.max_memory_reserved() / 2**30}
++
++
++def run_one(model, torch, proc, m, eos, row):
++    t_start = time.perf_counter()
++    inp = build_inputs(model, proc, row)
++    ids = inp['input_ids'][0].tolist()
++    n_img = sum(1 for t in ids if t == image_token_id(model, m))
++    if n_img != expected_img_tokens(model, inp, len(row['images'])):
++        raise RuntimeError(f"input structure mismatch {row['rid']}: images={len(row['images'])} tok={n_img}")
++    pxs, grids = per_image_pixels(model, inp)
++    t_proc = time.perf_counter()
++    attempts = []
++    for cap in CAPS:
++        g = generate(torch, m, inp, cap, eos)
++        g['text'] = proc.decode(g['suffix_ids'], skip_special_tokens=True)
++        attempts.append(g)
++        if g['ended_eos']:
++            break
++    return {'rid': row['rid'], 'n_input_tokens': len(ids), 'n_image_tokens': n_img, 'n_images': len(row['images']),
++            'input_ids_sha': sha_s(json.dumps(ids)), 'img_pixel_sha': pxs, 'img_grid_thw': grids,
++            'image_file_sha': [sha_file(p) for p in row['images']], 'attempts': attempts,
++            'proc_s': t_proc - t_start, 'gen_attempts_s': time.perf_counter() - t_proc,
++            'total_read_to_flush_s': None}, t_start
++
++
++# ---------------- claims / worker ----------------
++def pid_alive(pid):
++    try:
++        os.kill(pid, 0); return True
++    except ProcessLookupError:
++        return False
++    except PermissionError:
++        return True
++
++
++def claim(claim_dir, rid, meta):
++    p = f'{claim_dir}/{rid}.claim'
++    for _ in range(2):
++        try:
++            fd = os.open(p, os.O_CREAT | os.O_EXCL | os.O_WRONLY)
++            os.write(fd, json.dumps(meta).encode()); os.close(fd)
++            return True
++        except FileExistsError:
++            try:
++                owner = json.load(open(p))
++            except Exception:
++                return False
++            if pid_alive(owner.get('pid', -1)):
++                return False
++            try:
++                os.rename(p, f'{p}.stale_{os.getpid()}_{time.time_ns()}')
++            except FileNotFoundError:
++                pass
++    return False
++
++
++def done_set(out_dir):
++    d = set()
++    for f in glob.glob(f'{out_dir}/worker*.jsonl'):
++        d |= {r['rid'] for r in read_jsonl(f)}
++    return d
++
++
++def cmd_worker(a):
++    pdig = check_protocol(a.model, a.requests, a.labels, a.target_manifest, a.protocol)
++    rows = read_jsonl(a.requests)
++    by = {r['rid']: r for r in rows}
++    os.makedirs(f'{a.out_dir}/claims', exist_ok=True)
++    lockf = open(f'{a.out_dir}/worker{a.worker}.lock', 'w')
++    try:
++        fcntl.flock(lockf, fcntl.LOCK_EX | fcntl.LOCK_NB)
++    except BlockingIOError:
++        sys.exit('worker already running')
++    out = f'{a.out_dir}/worker{a.worker}.jsonl'
++    dropped = repair_tail(out)
++    for f in glob.glob(f'{a.out_dir}/worker*.jsonl'):
++        for r in read_jsonl(f):
++            if r.get('protocol_digest') != pdig or r['rid'] not in by:
++                sys.exit(f'existing record incompatible with protocol: {f} {r.get("rid")}')
++    tl = time.perf_counter()
++    torch, proc, m = load_model(a.model)
++    env = env_info(a.model, torch, proc, m)
++    load_s = time.perf_counter() - tl
++    eos_cfg = m.generation_config.eos_token_id
++    eos = set(eos_cfg if isinstance(eos_cfg, list) else [eos_cfg])
++    attempt = str(time.time_ns())
++    json.dump({'attempt': attempt, 'env': env, 'load_s': load_s, 'pid': os.getpid(), 'dropped_tail_bytes': dropped,
++               'n_done_at_start': len(done_set(a.out_dir)), 'gpu_env': os.environ.get('CUDA_VISIBLE_DEVICES')},
++              open(f'{a.out_dir}/worker{a.worker}.attempt_{attempt}.json', 'w'), default=str)
++    meta = {'worker': a.worker, 'pid': os.getpid(), 'attempt': attempt}
++    n, t0 = 0, time.perf_counter()
++    for row in rows:
++        if a.limit and n >= a.limit:
++            break
++        if row['rid'] in done_set(a.out_dir):
++            continue
++        if not claim(f'{a.out_dir}/claims', row['rid'], meta):
++            continue
++        if row['rid'] in done_set(a.out_dir):  # claim 후 최신 완료 상태 재확인
++            continue
++        rec, ts = run_one(a.model, torch, proc, m, eos, row)
++        rec['total_read_to_flush_s'] = time.perf_counter() - ts
++        rec.update({'protocol_digest': pdig, 'worker': a.worker, 'attempt_id': attempt, 'cond': row['cond'],
++                    'answer_sha': sha_s(rec['attempts'][-1]['text'])})
++        if a.die_after_write and n + 1 >= a.die_after_write:  # 시험용: 저장 후 즉시 강제 종료
++            append_row(out, rec)
++            os._exit(9)
++        if a.torn_after and n + 1 >= a.torn_after:  # 시험용: 행 중간까지만 쓰고 종료(torn tail)
++            b = (json.dumps(rec) + '\n').encode()
++            with open(out, 'ab') as f:
++                f.write(b[:len(b) // 2]); f.flush(); os.fsync(f.fileno())
++            os._exit(9)
++        append_row(out, rec)
++        n += 1
++        print(f'w{a.worker} {n} {time.perf_counter() - t0:.0f}s', flush=True)
++    print('worker done', n, time.perf_counter() - t0, flush=True)
++
++
++# ---------------- launcher ----------------
++def smi(q):
++    o = subprocess.check_output(['nvidia-smi', f'--query-gpu=index,uuid,{q}', '--format=csv,noheader,nounits'], text=True)
++    return {int(l.split(',')[0]): (l.split(',')[1].strip(), int(l.split(',')[2])) for l in o.strip().splitlines()}
++
++
++def cmd_launch(a):
++    """jobs: [{model, gpu, workers, protocol, out_dir, tech, peak_gb}]. 같은 requests/labels/target_manifest를 모두 사용."""
++    jobs = json.load(open(a.jobs))
++    allowed = os.environ.get('CUDA_VISIBLE_DEVICES')
++    total, used = smi('memory.total'), smi('memory.used')
++    need = {}
++    for j in jobs:
++        check_protocol(j['model'], a.requests, a.labels, a.target_manifest, j['protocol'])
++        tj = json.load(open(j['tech']))
++        if tj.get('fails', 1) != 0 or tj.get('requests_sha256') != sha_file(a.requests) or tj.get('protocol_digest') != json.load(open(j['protocol']))['digest']:
++            sys.exit('tech gate failed/mismatch ' + j['out_dir'])
++        if allowed:
++            assert str(j['gpu']) in allowed.split(','), 'GPU outside allowed set'
++        need[j['gpu']] = need.get(j['gpu'], 0) + j['workers'] * (j['peak_gb'] * 1024 + 2048)
++    for g, n in need.items():
++        assert total[g][1] - used[g][1] >= n, f'GPU{g} free {total[g][1] - used[g][1]} < need {n} MiB'
++    t0 = time.perf_counter()
++    ps, wl, locks = [], [], []
++    for j in jobs:
++        os.makedirs(j['out_dir'], exist_ok=True)
++        ll = open(f"{j['out_dir']}/launcher.lock", 'w')
++        try:
++            fcntl.flock(ll, fcntl.LOCK_EX | fcntl.LOCK_NB)
++        except BlockingIOError:
++            sys.exit('another launcher is running for ' + j['out_dir'])
++        locks.append(ll)
++        for lf in glob.glob(f"{j['out_dir']}/worker*.lock"):
++            f = open(lf, 'w')
++            try:
++                fcntl.flock(f, fcntl.LOCK_EX | fcntl.LOCK_NB)
++            except BlockingIOError:
++                sys.exit(f'live worker holds {lf}')
++            f.close()
++        os.makedirs(f"{j['out_dir']}/claims", exist_ok=True)
++        done = done_set(j['out_dir'])
++        for c in glob.glob(f"{j['out_dir']}/claims/*.claim"):
++            if os.path.basename(c)[:-6] not in done:
++                os.rename(c, f'{c}.stale_launch_{time.time_ns()}')
++        for w in range(j['workers']):
++            env = dict(os.environ, CUDA_VISIBLE_DEVICES=str(j['gpu']))
++            cmd = [sys.executable, 's64_run.py', 'worker', '--model', j['model'], '--requests', a.requests, '--labels', a.labels,
++                   '--target-manifest', a.target_manifest, '--protocol', j['protocol'], '--out-dir', j['out_dir'], '--worker', str(w)]
++            if a.limit:
++                cmd += ['--limit', str(a.limit)]
++            ps.append(subprocess.Popen(cmd, env=env, stdout=open(f"{j['out_dir']}/worker{w}.stdout.log", 'a'), stderr=subprocess.STDOUT))
++            wl.append({'model': j['model'], 'out_dir': j['out_dir'], 'worker': w, 'gpu': j['gpu'], 'uuid': used[j['gpu']][0]})
++    samples, rcs, tend = [], [None] * len(ps), [None] * len(ps)
++    while any(r is None for r in rcs):
++        time.sleep(2)
++        rcs = [p.poll() for p in ps]
++        for i, r in enumerate(rcs):
++            if r is not None and tend[i] is None:
++                tend[i] = time.perf_counter() - t0
++        samples.append({g: u[1] for g, u in smi('memory.used').items()})
++    comp = {'workers': wl, 'exit_codes': rcs, 'worker_end_s': tend, 'wall_monotonic_s': time.perf_counter() - t0,
++            'peak_used_mib_all_gpus': {g: max(s[g] for s in samples) for g in samples[0]}, 'used_mib_before': {g: u[1] for g, u in used.items()}}
++    for d in {j['out_dir'] for j in jobs}:
++        json.dump(comp, open(f'{d}/launch_{time.time_ns()}.json', 'w'))
++    print(comp)
++    if any(rcs):
++        sys.exit(1)
++
++
++# ---------------- verify ----------------
++def cmd_verify(a):
++    pdig = check_protocol(a.model, a.requests, a.labels, a.target_manifest, a.protocol, full=True)
++    rows = read_jsonl(a.requests)
++    by = {r['rid']: r for r in rows}
++    recs, files, problems = [], {}, []
++    for f in sorted(glob.glob(f'{a.out_dir}/worker*.jsonl')):
++        raw = open(f, 'rb').read()
++        if raw and not raw.endswith(b'\n'):
++            problems.append('torn tail in ' + f)
++        recs += read_jsonl(f); files[f] = sha_file(f)
++    ids = [r['rid'] for r in recs]
++    if len(ids) != len(set(ids)):
++        problems.append('duplicate records')
++    if set(ids) != set(by):
++        problems.append(f'missing {len(set(by) - set(ids))} extra {len(set(ids) - set(by))}')
++    for r in recs:
++        q = by.get(r['rid'])
++        if not q:
++            continue
++        if r['protocol_digest'] != pdig:
++            problems.append('protocol digest ' + r['rid'])
++        if r['n_images'] != len(q['images']) or r['n_image_tokens'] == 0:
++            problems.append('image count/tokens ' + r['rid'])
++        if r['image_file_sha'] != [sha_file(p) for p in q['images']]:
++            problems.append('image file sha ' + r['rid'])
++        if not r['attempts'] or any(x['cap'] not in CAPS for x in r['attempts']) or r['answer_sha'] != sha_s(r['attempts'][-1]['text']):
++            problems.append('attempts/answer sha ' + r['rid'])
++        if r['cond'] != q['cond']:
++            problems.append('cond ' + r['rid'])
++    lm = {os.path.basename(f): json.load(open(f))['exit_codes'] for f in glob.glob(f'{a.out_dir}/launch_*.json')}
++    res = {'n_requests': len(rows), 'n_records': len(recs), 'problems': problems[:20], 'n_problems': len(problems),
++           'protocol_digest': pdig, 'record_file_sha256': files, 'launch_exit_codes': lm, 'sealed_at': time.strftime('%Y-%m-%dT%H:%M:%S')}
++    json.dump(res, open(f'{a.out_dir}/verify.json', 'w'), indent=1)
++    print({k: v for k, v in res.items() if k != 'record_file_sha256'})
++    if problems:
++        sys.exit(1)
++
++
++# ---------------- tech ----------------
++def cmd_tech(a):
++    """(1) adapter vs 공식 직접 호출 tensor (2) 영상별 처리 tensor: target은 S/R/C에서 동일, R은 복제, C의 비-target은 다른 target과 동일
++    (3) 영상 token/grid·순서 (4) prompt 형식 (5) 누출 문자열 (6) routing(요청 k의 영상 == S 영상) 동일성."""
++    _setup_env(a.model)
++    import torch, transformers
++    pdig = check_protocol(a.model, a.requests, a.labels, a.target_manifest, a.protocol)
++    rows = read_jsonl(a.requests)
++    import s64_data as S
++    if a.model == 'qwen':
++        proc = transformers.AutoProcessor.from_pretrained(QID, revision=json.load(open(QFETCH))['revision'], cache_dir=QCACHE)
++        img_id = proc.tokenizer.convert_tokens_to_ids('<|image_pad|>')
++        place = '<|vision_start|><|image_pad|><|vision_end|>'
++    else:
++        import msd56_run as M
++        proc = transformers.AutoProcessor.from_pretrained(M.MODEL_ID, revision=M.MODEL_REVISION)
++        img_id = proc.tokenizer.convert_tokens_to_ids('<image_soft_token>')
++        assert img_id == 262144, img_id  # config.image_token_index
++    info, fails, res = {}, 0, []
++    for r in rows:
++        inp = build_inputs(a.model, proc, r)
++        msgs = [{'role': 'user', 'content': [{'type': 'image', 'image': im} for im in open_images(r)] + [{'type': 'text', 'text': r['prompt']}]}]
++        ims = open_images(r)
++        if a.model == 'qwen':
++            from qwen_vl_utils import process_vision_info
++            t2 = proc.apply_chat_template(msgs, tokenize=False, add_generation_prompt=True)
++            iis, vis = process_vision_info(msgs)
++            ref = proc(text=[t2], images=iis, videos=vis, padding=True, return_tensors='pt')
++        else:
++            t2 = proc.apply_chat_template(msgs, add_generation_prompt=True, tokenize=False)
++            ref = proc(text=t2, images=ims, return_tensors='pt', add_special_tokens=False)
++        ok_ids = torch.equal(inp['input_ids'], ref['input_ids'])
++        ok_pv = torch.equal(inp['pixel_values'], ref['pixel_values'])
++        ok_grid = a.model != 'qwen' or torch.equal(inp['image_grid_thw'], ref['image_grid_thw'])
++        pxs, grids = per_image_pixels(a.model, inp)
++        ids = inp['input_ids'][0].tolist()
++        text_all = proc.decode(ids)
++        leak = [s for s in [r['case'], 'BRATS'] + [os.path.basename(p)[:-4] for p in r['images']] if s in text_all]
++        ok_struct = len(pxs) == len(r['images'])
++        if a.model == 'qwen':
++            n_tok = sum(1 for t in ids if t == img_id)
++            ok_struct = ok_struct and n_tok == expected_img_tokens('qwen', inp, len(ims))
++        else:
++            ok_struct = ok_struct and inp['pixel_values'].shape[0] == len(ims)
++            ntok = sum(1 for t in ids if t == img_id) if img_id is not None else None
++            ok_struct = ok_struct and (ntok is None or ntok == 256 * len(ims))
++        ok_prompt = r['prompt'] == S.PROMPT.format(k=r['k']) and r['prompt'] in text_all
++        info[r['rid']] = {'pxs': pxs, 'grids': grids, 'n_tok': len(ids)}
++        res.append({'rid': r['rid'], 'ok_ids': ok_ids, 'ok_pv': ok_pv, 'ok_grid': ok_grid, 'ok_struct': ok_struct, 'ok_prompt': ok_prompt,
++                    'leak': leak, 'n_input_tokens': len(ids), 'n_images': len(ims), 'img_grids': grids})
++        if not (ok_ids and ok_pv and ok_grid and ok_struct and ok_prompt and not leak):
++            fails += 1
++    # 영상별 tensor 불변성/routing
++    by = {r['rid']: r for r in rows}
++    inv_fail = []
++    routing_same = 0
++    for r in rows:
++        case, tk = r['case'], r['target']
++        s_rid = f'{case}__{tk}__S'
++        s = info[s_rid]
++        x = info[r['rid']]
++        k = r['k']
++        if x['pxs'][k - 1] != s['pxs'][0] or (x['grids'] and x['grids'][k - 1] != s['grids'][0]):
++            inv_fail.append(('target tensor', r['rid']))
++        if r['cond'].startswith('R') and x['pxs'][0] != x['pxs'][1]:
++            inv_fail.append(('R dup', r['rid']))
++        if r['cond'].startswith('C'):
++            ok_tk = 'N' if tk == 'P' else 'P'
++            o = info[f'{case}__{ok_tk}__S']
++            if x['pxs'][2 - k] != o['pxs'][0]:
++                inv_fail.append(('C other', r['rid']))
++        # routing: 요청 prompt의 k번째 영상 파일만 S 입력으로 쓰면 S와 동일 영상 파일
++        if sha_file(r['images'][k - 1]) == sha_file(by[s_rid]['images'][0]):
++            routing_same += 1
++        else:
++            inv_fail.append(('routing', r['rid']))
++    fails += len(inv_fail)
++    out = {'requests_sha256': sha_file(a.requests), 'protocol_digest': pdig, 'model': a.model, 'n_checked': len(res), 'fails': fails,
++           'invariance_failures': inv_fail[:10], 'routing_same_image': routing_same,
++           'token_len_by_cond': {c: sorted({v['n_input_tokens'] for v in res if v['rid'].endswith('__' + c)}) for c in S.CONDS},
++           'details': res, 'max_input_tokens': max(x['n_input_tokens'] for x in res)}
++    json.dump(out, open(a.out, 'w'), indent=1)
++    print('tech fails', fails, 'of', len(res), 'routing_same', routing_same, 'max tokens', out['max_input_tokens'])
++    if fails:
++        sys.exit(1)
++
++
++def main():
++    ap = argparse.ArgumentParser()
++    sp = ap.add_subparsers(dest='cmd', required=True)
++    for n in ('lock', 'worker', 'verify', 'tech', 'launch'):
++        p = sp.add_parser(n)
++        p.add_argument('--requests', required=True); p.add_argument('--labels', required=True); p.add_argument('--target-manifest', required=True)
++        if n != 'launch':
++            p.add_argument('--model', required=True, choices=MODELS)
++        if n in ('worker', 'verify', 'tech'):
++            p.add_argument('--protocol', required=True)
++        if n in ('worker', 'verify'):
++            p.add_argument('--out-dir', required=True)
++        if n == 'worker':
++            p.add_argument('--worker', type=int, required=True); p.add_argument('--limit', type=int, default=0)
++            p.add_argument('--die-after-write', type=int, default=0); p.add_argument('--torn-after', type=int, default=0)
++        if n in ('lock', 'tech'):
++            p.add_argument('--out', required=True)
++        if n == 'launch':
++            p.add_argument('--jobs', required=True); p.add_argument('--limit', type=int, default=0)
++    a = ap.parse_args()
++    {'lock': cmd_lock, 'worker': cmd_worker, 'launch': cmd_launch, 'verify': cmd_verify, 'tech': cmd_tech}[a.cmd](a)
++
++
++if __name__ == '__main__':
++    main()
+diff --git a/s64_test.py b/s64_test.py
+new file mode 100644
+index 0000000..1ae16cd
+--- /dev/null
++++ b/s64_test.py
+@@ -0,0 +1,153 @@
++"""iter_064 검사. cpu: 합성 자료·parser·JSONL 복구·통계. runtime: D(MedGemma)에서 저장 경계 강제 종료·torn tail·재개·동시 worker·protocol/원천 변조 거부.
++사용: python s64_test.py cpu | runtime <gpu>
++결과: results/iter_064/tests/{cpu,runtime}_tests.json (이미 있으면 거부)"""
++import json, os, shutil, subprocess, sys, tempfile
++import numpy as np
++import s64_data as S, s64_run as R
++
++OUT = 'results/iter_064/tests'
++res = {'checks': [], 'fails': 0}
++
++
++def chk(name, ok, **kw):
++    res['checks'].append({'name': name, 'ok': bool(ok), **kw})
++    if not ok:
++        res['fails'] += 1
++
++
++def cpu():
++    # --- select_targets 합성
++    fl = np.zeros((10, 10, 6), np.float32); mk = np.zeros((10, 10, 6), np.uint8)
++    for z, n in enumerate([0, 5, 20, 20, 0, 1]):
++        fl[:n, 0, z] = 1.0
++    fl[:3, :3, 0] = 1; fl[:2, :2, 4] = 1  # nz(z0)=9+..., 비-mask slice z0/z4
++    mk[:4, 0, 2] = 1; mk[:4, 0, 3] = 1; mk[0, 0, 1] = 1
++    P, N, inf = S.select_targets(fl, mk)
++    nz = [int((fl[:, :, k] != 0).sum()) for k in range(6)]
++    chk('P tie -> smaller z', P == 2 and inf['area_P'] == 4, P=P)
++    zero = [k for k in range(6) if k not in (1, 2, 3)]
++    chk('N max-nonzero among mask-free', N == max(zero, key=lambda k: (nz[k], -k)) and inf['area_N'] == 0, N=N, nz=nz)
++    fl2 = fl.copy(); P2, N2, _ = S.select_targets(fl2, np.zeros_like(mk))
++    chk('no mask -> P None (ineligible)', P2 is None and N2 is not None)
++    P3, N3, _ = S.select_targets(fl, np.ones_like(mk))
++    chk('all slices annotated -> N None (ineligible)', N3 is None and P3 is not None)
++    # --- 요청 구성
++    rows = [{'case': 'c1', 'P': {'png': 'p.png', 'z': 1}, 'N': {'png': 'n.png', 'z': 2}}]
++    reqs, lab = S.build_requests(rows)
++    by = {r['rid']: r for r in reqs}
++    chk('10 requests/case', len(reqs) == 10 and len(lab) == 10)
++    chk('S single', by['c1__P__S']['images'] == ['p.png'] and by['c1__P__S']['k'] == 1)
++    chk('R dup + k', by['c1__P__R2']['images'] == ['p.png', 'p.png'] and by['c1__P__R2']['k'] == 2 and by['c1__N__R1']['images'] == ['n.png', 'n.png'])
++    chk('C order target first/second', by['c1__P__C1']['images'] == ['p.png', 'n.png'] and by['c1__P__C2']['images'] == ['n.png', 'p.png']
++        and by['c1__N__C1']['images'] == ['n.png', 'p.png'] and by['c1__N__C2']['images'] == ['p.png', 'n.png'])
++    chk('target at position k always', all(r['images'][r['k'] - 1] == ('p.png' if r['target'] == 'P' else 'n.png') for r in reqs))
++    chk('labels P/N', lab['c1__P__S']['answer'] == 'PRESENT' and lab['c1__N__C2']['answer'] == 'ABSENT')
++    chk('prompt has no case/path/answer', all('c1' not in r['prompt'] and 'png' not in r['prompt'] for r in reqs))
++    # --- parser
++    import msd56_run as M
++    P_ = M.parse_answer
++    chk('parser valid', P_('PRESENT') == 'PRESENT' and P_(' absent. ') == 'ABSENT' and P_('Absent.') == 'ABSENT')
++    chk('parser invalid', P_('PRESENT or ABSENT') is None and P_('The lesion is PRESENT') is None and P_('') is None and P_('I cannot') is None)
++    # --- JSONL
++    d = tempfile.mkdtemp()
++    p = f'{d}/w.jsonl'
++    open(p, 'w').write('{"rid":"a"}\n{"rid":"b"}\n{"rid":"c"')
++    chk('read ignores torn tail', [r['rid'] for r in R.read_jsonl(p)] == ['a', 'b'])
++    dropped = R.repair_tail(p)
++    chk('repair removes only torn tail + keeps copy', dropped == len('{"rid":"c"') and open(p).read() == '{"rid":"a"}\n{"rid":"b"}\n'
++        and any('.corrupt_' in f for f in os.listdir(d)))
++    open(p, 'w').write('{"rid":"a"}\n{"rid" BAD}\n{"rid":"c"}\n')
++    try:
++        R.repair_tail(p); ok = False
++    except json.JSONDecodeError:
++        ok = True
++    chk('repair rejects mid-file corruption', ok and open(p).read().startswith('{"rid":"a"}\n{"rid" BAD}'))
++    try:
++        R.read_jsonl(p); ok = False
++    except json.JSONDecodeError:
++        ok = True
++    chk('read rejects mid-file corruption', ok)
++    # --- 평가기(paired bootstrap) 합성
++    import s64_eval as E
++    chk('balanced acc', abs(E.ba(np.array([1, 1, 0, 0]), np.array([1, 0, 0, 0])) - 0.75) < 1e-12)
++    json.dump(res, open(f'{OUT}/cpu_tests.json', 'w'), indent=1)
++    print('cpu fails', res['fails'], 'of', len(res['checks']))
++
++
++def sh(cmd, env=None, check=False):
++    return subprocess.run(cmd, capture_output=True, text=True, env=env)
++
++
++def runtime(gpu):
++    D = 'results/iter_064/D'
++    base = ['python', 's64_run.py']
++    common = ['--requests', f'results/iter_064/data/requests_D.jsonl', '--labels', 'results/iter_064/data/labels_D.json',
++              '--target-manifest', 'results/iter_064/data/target_manifest_D.json']
++    prot = f'{D}/protocol_medgemma_v2.json'
++    env = dict(os.environ, CUDA_VISIBLE_DEVICES=str(gpu))
++    ref = {}
++    for l in open(f'{D}/gen_A_medgemma/worker0.jsonl'):
++        r = json.loads(l); ref[r['rid']] = r['attempts'][-1]['suffix_ids']
++    out = f'{D}/gen_resume_medgemma_v2'
++    assert not os.path.exists(out), 'exists'
++    # 1) 3건 저장 직후 강제 종료
++    r1 = sh(base + ['worker', '--model', 'medgemma', *common, '--protocol', prot, '--out-dir', out, '--worker', '0', '--die-after-write', '3'], env)
++    chk('die-after-write exit 9', r1.returncode == 9, rc=r1.returncode)
++    n1 = len(R.read_jsonl(f'{out}/worker0.jsonl'))
++    chk('3 records saved before kill', n1 == 3, n=n1)
++    # 2) 재시작 -> 2건 더 쓰고 torn tail로 종료 (stale claim 회수 포함)
++    r2 = sh(base + ['worker', '--model', 'medgemma', *common, '--protocol', prot, '--out-dir', out, '--worker', '0', '--torn-after', '2'], env)
++    raw = open(f'{out}/worker0.jsonl', 'rb').read()
++    chk('torn tail present', r2.returncode == 9 and not raw.endswith(b'\n'), rc=r2.returncode)
++    # 3) 동시 worker 2개로 재개 완료(복구 + claim 경합)
++    jobs = [{'model': 'medgemma', 'gpu': int(gpu), 'workers': 2, 'protocol': prot, 'out_dir': out, 'tech': f'{D}/tech_medgemma_v2.json', 'peak_gb': 9}]
++    json.dump(jobs, open(f'{D}/jobs_resume.json', 'w'))
++    r3 = sh(base + ['launch', *common, '--jobs', f'{D}/jobs_resume.json'], env)
++    chk('relaunch exit 0', r3.returncode == 0, tail=(r3.stdout + r3.stderr)[-300:])
++    recs = []
++    import glob
++    for f in glob.glob(f'{out}/worker*.jsonl'):
++        recs += R.read_jsonl(f)
++    ids = [r['rid'] for r in recs]
++    chk('no missing/duplicate after resume', len(ids) == 60 and len(set(ids)) == 60, n=len(ids), uniq=len(set(ids)))
++    chk('torn bytes preserved as .corrupt_', len(glob.glob(f'{out}/worker0.jsonl.corrupt_*')) == 1)
++    mism = [r['rid'] for r in recs if r['attempts'][-1]['suffix_ids'] != ref[r['rid']]]
++    chk('suffix tokens == uninterrupted run', not mism, mismatches=len(mism))
++    v = sh(base + ['verify', '--model', 'medgemma', *common, '--protocol', prot, '--out-dir', out], env)
++    chk('verify passes after resume', v.returncode == 0, tail=v.stdout[-200:])
++    # 4) 변조 거부: 요청 파일 사본(1줄 변경)·원천 파일 변조 모사(사본 protocol의 source hash 변경)
++    t = tempfile.mkdtemp()
++    rq = f'{t}/req.jsonl'
++    lines = open(common[1]).read().splitlines()
++    shutil.copy(common[1], rq)
++    with open(rq, 'a') as f:
++        f.write('\n')
++    open(rq, 'w').write('\n'.join(lines[:-1]) + '\n')
++    r4 = sh(base + ['worker', '--model', 'medgemma', '--requests', rq, '--labels', common[3], '--target-manifest', common[5], '--protocol', prot,
++                    '--out-dir', f'{t}/o', '--worker', '0', '--limit', '1'], env)
++    chk('worker rejects modified requests', r4.returncode != 0 and 'PROTOCOL MISMATCH' in (r4.stdout + r4.stderr), out=(r4.stdout + r4.stderr)[-200:])
++    pj = json.load(open(prot)); pj['components']['source']['results/iter_056/data/cases.json'] = '0' * 64
++    pp = f'{t}/p.json'; json.dump(pj, open(pp, 'w'))
++    r5 = sh(base + ['worker', '--model', 'medgemma', *common, '--protocol', pp, '--out-dir', f'{t}/o2', '--worker', '0', '--limit', '1'], env)
++    chk('worker rejects source-hash change', r5.returncode != 0 and 'PROTOCOL' in (r5.stdout + r5.stderr))
++    pj = json.load(open(prot)); k = next(iter(pj['model_files'])); pj['model_files'][k]['sha256'] = '1' * 64
++    json.dump(pj, open(pp, 'w'))
++    r6 = sh(base + ['verify', '--model', 'medgemma', *common, '--protocol', pp, '--out-dir', out], env)
++    chk('verify rejects model-file hash edit', r6.returncode != 0, out=(r6.stdout + r6.stderr)[-200:])
++    # 5) 중간 손상 복구 거부(사본)
++    od = f'{t}/mid'; os.makedirs(od)
++    ls = open(f'{out}/worker0.jsonl').read().splitlines()
++    open(f'{od}/worker0.jsonl', 'w').write(ls[0] + '\n{BAD}\n' + ls[1] + '\n')
++    r7 = sh(base + ['worker', '--model', 'medgemma', *common, '--protocol', prot, '--out-dir', od, '--worker', '0', '--limit', '1'], env)
++    chk('worker refuses mid-file corruption', r7.returncode != 0 and 'JSONDecodeError' in (r7.stdout + r7.stderr))
++    json.dump(res, open(f'{OUT}/runtime_tests_v2.json', 'w'), indent=1)
++    print('runtime fails', res['fails'], 'of', len(res['checks']))
++
++
++if __name__ == '__main__':
++    os.makedirs(OUT, exist_ok=True)
++    if sys.argv[1] == 'cpu':
++        assert not os.path.exists(f'{OUT}/cpu_tests.json'); cpu()
++    else:
++        assert not os.path.exists(f'{OUT}/runtime_tests_v2.json'); runtime(sys.argv[2])
++    sys.exit(1 if res['fails'] else 0)
+diff --git a/s64_verify_eval.py b/s64_verify_eval.py
+new file mode 100644
+index 0000000..d90e00f
+--- /dev/null
++++ b/s64_verify_eval.py
+@@ -0,0 +1,71 @@
++"""iter_064 독립 재계산: s64_eval/msd56_run parser를 import하지 않고 원시 JSONL+labels에서 BA·sens·spec·L_* 점추정과 case paired bootstrap(seed64)을 재구현해 report와 대조.
++사용: python s64_verify_eval.py <split> -> results/iter_064/<split>/independent_verify.json (존재 시 거부)"""
++import glob, json, os, re, sys, random
++
++split = sys.argv[1]
++ROOT = f'results/iter_064/{split}'
++out = {'split': split, 'models': {}, 'max_abs_diff': 0.0}
++lab = json.load(open(f'results/iter_064/data/labels_{split}.json'))
++assert not os.path.exists(f'{ROOT}/independent_verify.json')
++
++
++def parse(t):
++    t = t.replace('<end_of_turn>', '').strip()
++    t = re.sub(r'[\s.!?,;:]+$', '', t).strip().upper()
++    return t if t in ('PRESENT', 'ABSENT') else None
++
++
++for m in ('qwen', 'medgemma'):
++    rep = json.load(open(f'{ROOT}/report_{m}.json'))
++    pc = {}  # (case,cond,target)->correct
++    inval = 0
++    for f in glob.glob(f'{ROOT}/gen_{m}/worker*.jsonl'):
++        for l in open(f):
++            r = json.loads(l)
++            p = parse(r['attempts'][-1]['text'])
++            inval += p is None
++            pc[(lab[r['rid']]['case'], lab[r['rid']]['cond'], lab[r['rid']]['target'])] = int(p == lab[r['rid']]['answer'])
++    cases = sorted({k[0] for k in pc})
++    assert len(pc) == 10 * len(cases)
++
++    def grp(cs, cl):
++        se = sum(pc[(c, k, 'P')] for c in cl for k in cs) / (len(cs) * len(cl))
++        sp = sum(pc[(c, k, 'N')] for c in cl for k in cs) / (len(cs) * len(cl))
++        return se, sp
++
++    G = {'S': ['S'], 'R': ['R1', 'R2'], 'C': ['C1', 'C2'], 'R1': ['R1'], 'R2': ['R2'], 'C1': ['C1'], 'C2': ['C2']}
++    ba = lambda g, cl: sum(grp(G[g], cl)) / 2
++    res = {'invalid_total': inval, 'groups': {}, 'diffs': {}}
++    mx = 0.0
++    for g in G:
++        se, sp = grp(G[g], cases)
++        res['groups'][g] = {'BA': (se + sp) / 2, 'sens': se, 'spec': sp}
++        d = abs(res['groups'][g]['BA'] - rep['primary_invalid_as_wrong']['groups'][g]['BA'])
++        d = max(d, abs(se - rep['primary_invalid_as_wrong']['groups'][g]['sens']), abs(sp - rep['primary_invalid_as_wrong']['groups'][g]['spec']))
++        mx = max(mx, d)
++    P = {'L_count': ('S', 'R'), 'L_content': ('R', 'C'), 'L_total': ('S', 'C'), 'L_content_pos1': ('R1', 'C1'), 'L_content_pos2': ('R2', 'C2')}
++    for k, (a, b) in P.items():
++        pt = ba(a, cases) - ba(b, cases)
++        mx = max(mx, abs(pt - rep['primary_invalid_as_wrong']['diffs'][k]['point']))
++        res['diffs'][k] = {'point': pt}
++    # bootstrap(독립 구현: numpy 없이; seed 체계가 달라 CI는 동일 난수가 아니라 근사 일치만 확인)
++    rnd = random.Random(64)
++    n = len(cases)
++    bs = {k: [] for k in P}
++    for _ in range(4000):
++        cl = [cases[rnd.randrange(n)] for _ in range(n)]
++        for k, (a, b) in P.items():
++            bs[k].append(ba(a, cl) - ba(b, cl))
++    for k in P:
++        v = sorted(bs[k])
++        lo, hi = v[int(0.025 * len(v))], v[int(0.975 * len(v)) - 1]
++        res['diffs'][k]['ci95_indep'] = [lo, hi]
++        rc = rep['primary_invalid_as_wrong']['diffs'][k]['ci95']
++        res['diffs'][k]['ci_report'] = rc
++        res['diffs'][k]['ci_max_abs_gap'] = max(abs(lo - rc[0]), abs(hi - rc[1]))
++    res['max_abs_diff_point_estimates'] = mx
++    res['invalid_matches_report'] = inval == sum(v['invalid'] for v in rep['format'].values())
++    out['models'][m] = res
++    out['max_abs_diff'] = max(out['max_abs_diff'], mx)
++json.dump(out, open(f'{ROOT}/independent_verify.json', 'w'), indent=1)
++print('max point diff', out['max_abs_diff'], {m: {k: round(v['ci_max_abs_gap'], 3) for k, v in r['diffs'].items()} for m, r in out['models'].items()})

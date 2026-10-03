@@ -224,3 +224,21 @@ PadChest-GR의 새 개발 집단 흉수 양성 29명·보고서상 음성 40명�
 - 미해결: presence gate의 양성 손실이 사전 허용 폭 0.05 이내인지와 실제 두 단계 latency는 미확정이다.
 - 미해결: 현재 사전 규칙은 투자 보류다. 이 불확실성만으로 환자·prompt·seed·학습을 자동 추가하지 않는다.
 
+## mri-explicit-target-context-effect — observed
+
+반복 사용한 MSD Task01 개발 E48에서 고정 FLAIR 양성·음성 slice와 명시적 target index를 사용했을 때, MedGemma 1.5의 BA는 동일 영상 복제 R 0.7708에서 반대 annotation 상태 영상 추가 C 0.5000으로 낮아졌다. 차이는 0.2708이고 case bootstrap 95% CI는 [0.2031, 0.3385]다. Qwen2.5-VL-7B에서는 같은 저하가 관찰되지 않았다. 두 모델 모두 사전 단독 기본 신호 기준을 충족하지 못했으므로, 충분한 인식을 전제로 한 선택 실패나 일반적인 다중 영상 한계로 확정하지 않는다.
+
+- 적용 목표 시작: iter_003
+- 최신 리뷰: agent/runs/iter_064/review.json
+- 근거: research/results/iter_064/E/gen_medgemma/worker0.jsonl 및 worker1.jsonl: 고유 480요청, C의 음성 정답은 위치별 각각 1/48.
+- 근거: research/results/iter_064/E/gen_qwen/worker0.jsonl: 고유 480요청, R−C BA −0.05208, 95% CI [−0.11458, 0.00521].
+- 근거: 리뷰에서 원시 응답과 labels_E.json으로 BA, confusion counts, seed64·10,000회 paired bootstrap CI를 독립 재현했다.
+- 사용·평가 검증: E protocol의 코드·요청·정답·target manifest·source manifest·PNG hash와 현재 파일을 대조했고 출력 seal도 일치했다.
+- 사용·평가 검증: tech_medgemma.json 및 tech_qwen.json은 각각 480요청에서 공식 입력 대조·target tensor 불변성·순서·routing 검사 실패 0이다.
+- 사용·평가 검증: data_check.json 1,463검사와 cpu_tests.json 18검사 통과 기록을 확인했다. D6 overlay를 직접 표시했다.
+- 사용·평가 검증: 고정 whole-string parser에서 E invalid 0이며 사전 기본 신호 기준을 변경하지 않았다.
+- 미해결: FLAIR 단독에서 annotation이 시각적으로 충분한지와 기본 인식 오류는 미분리다.
+- 미해결: 내용·해부학 차이, 지시 해석, 근거 선택 중 어느 요인이 손실을 설명하는지는 미확인이다.
+- 미해결: 독립 사례·다른 prompt에서의 재현 및 사전학습 노출은 미확인이다.
+- 미해결: 명시적 index routing으로 피할 수 있는 손실을 넘어 새로운 방법이 필요한 실제 사용 조건은 확보되지 않았다.
+
