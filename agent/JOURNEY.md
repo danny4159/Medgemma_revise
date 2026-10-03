@@ -286,3 +286,20 @@ PadChest-GR 개발96명에서 직접 SFT의 큰 개선을 확인해, 낮은 기�
 - 접근법: 공동 형식 직접 학습 대조 (`approach/joint-format-control`), 시도: iter_048
 - 커밋: 54607a22c7046d0ab75fde09b2a5616edf0e2344
 - 자세히: DECISIONS.md의 iter_048, `agent/runs/iter_048/review.md`
+
+## 🏁 MRI 구간 판정은 기존 전문 모델이 더 정확하고 저렴한 대안이었다
+
+*iter_059 · 2026-10-03 20:44 · 판정: CONTINUE / success*
+
+현재 MRI 개발 과제에서는 전문 모델+규칙이 정확도와 전체 처리 비용 기준을 함께 충족했다.
+- **고민:** MRI 구간 답변의 오류를 새로운 VLM 적응으로 해결할 가치가 있는지 판단해야 했다.
+- **시도:** iter_056~057의 출력 진단 이후 iter_058에서 HD-GLIO segmentation+OR를 비교했다.
+- **문제:** 정확도 이득은 확인했지만 비용 측정에 channel 분리·OR·답변 저장이 빠졌다.
+- **개발:** iter_059에서 원본 NIfTI부터 답변 저장까지 경계를 맞춰 D6를 재측정했다.
+- **결과:** 개발 E48 BA는 U8 0.769 대비 HD 0.950이며, 전체 비용 비율은 0.601이었다. 여섯 paired 비교 모두 같은 방향이었다.
+- **의미:** 네 sequence를 쓸 수 있는 현재 조건에서는 전문 대안을 채택하고 구간 판정용 VLM 적응 투자를 보류한다.
+- **한계:** 동일 입력 우위·독립 일반화·새 방법 기여는 검증하지 않았다. 다음은 전문 대안 이후에도 중요한 문제가 남는 MRI 질문을 선택한다.
+
+- 접근법: MRI 구간 근거 사용 진단 (`approach/mri-slab-evidence`), 시도: iter_056, iter_057, iter_058, iter_059
+- 커밋: da6e75570dcd01f957cde9b9f33b1b57217fcb70, 144227e1c8a0faf1a8f88df126e8a49803030db8, e203cbd0b4c7d8e6c1f75fbd37625a82b14c232d, 463d215b4d5a92a17dec80f2be29daefab44cc3e
+- 자세히: DECISIONS.md의 iter_059, `agent/runs/iter_059/review.md`
