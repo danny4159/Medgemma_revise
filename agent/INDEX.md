@@ -63,6 +63,7 @@
 - iter_055 [사용자 보완으로 전환 → iter_056] 기존 기록 보존, 성공·실패 판정 아님 (계획 확인)
 - iter_056 [CONTINUE] (deep_medium/standard/normal) <MRI 구간 근거 사용 진단: success> 💾da6e75570dcd01f957cde9b9f33b1b57217fcb70 MRI E48에서 BA는 DENSE 0.776, U8 0.769였고 U8 생성 비용은 37%였다. 복잡한 표집 투자는 보류하며, 위치 prior와 병변 구별 신호는 기존 출력으로 한정 분리한다. → 다음: 기존 D/E 출력의 위치 통제 재분석을 한정 보완으로 수행해 병변 구별 신호와 후속 비교의 가치를 판단한다. iter_056의 원 기준·결과는 유지하고 새 결과 경로에 사후 탐색으로 기록한다. 위치별 양성·음성 수, 동일 위치 내 sensitivity/specificity 및 case-cluster 불확실성을 보고하고, 위치 prior는 D에서 정하거나 case 단위 교차적합하여 E 자체 최적화와 구분한다. 리뷰에서 이미 확인한 위치별 수치와 BA 상한 정정은 재발견하지 않는다. 병변 구별 신호만 남는다고 method pilot으로 자동 진입하지 말고 중요한 잔여 오류와 전문 segmentation+규칙 대비 검증할 가치를 명시한다. 기존 출력으로 판단 가능하면 종료하고, 부족하면 모델 선택이나 방법 투자 결정을 실제로 바꿀 최소 대조만 별도 제안한다. prompt·seed·전체 자료 확대와 Qwen 실행은 자동 연결하지 않는다.
 - iter_057 [CONTINUE] (deep_medium/standard/normal) <MRI 구간 근거 사용 진단: success> 💾144227e1c8a0faf1a8f88df126e8a49803030db8 MRI E48에서 위치 통제 BA 0.717 [0.614, 0.814]와 33개 case의 오류를 확인했다. 위치 규칙 대비 전체 이득은 불확정이며 전문 모델 대조로 다음 투자를 판단한다. → 다음: 전문 segmentation+OR의 한정 비교를 계획해 현재 MRI 구간 오류가 단순 대안으로 해결되는지 판단한다. 기존 D/E·정답·U8 baseline과 복잡한 표집 투자 보류를 유지한다. 공식 checkpoint의 학습 중복, FLAIR-only 지원 및 추가 sequence 사용 여부를 먼저 확인하고, 중복된 평가를 일반화 근거로 쓰지 않는다. 동일 입력 비교와 추가 정보가 있는 전문 모델 비교는 구분한다. BA 5 pp와 전체 pipeline 비용을 기준으로 결과별 투자·보류 조건을 고정하되 U8의 37.1% 생성 시간 비율을 전체 비용으로 전용하지 않는다. 대안이 오류를 충분히 해결하면 현재 VLM 구간 판정 방법 투자를 보류하고, 중요한 잔여 오류가 남으면 구별할 최소 개입과 강한 단순 baseline의 가치를 검토한다. 불확정이면 판단을 바꿀 정밀도·비용 근거가 있을 때만 한정 확대한다. GPU 실행 전 관련 재사용 결함과 실제 메모리 admission을 해결하고 두 GPU의 안전한 처리량 구성을 실측한다. 같은 출력의 가중치·prompt 탐색은 종료한다.
+- iter_058 [CONTINUE] (deep_medium/standard/normal) <MRI 구간 근거 사용 진단: inconclusive> 💾e203cbd0b4c7d8e6c1f75fbd37625a82b14c232d MRI E48에서 HD-GLIO+OR의 BA는 U8 0.769→0.950으로 높아졌다. 정확도 개선은 재현했지만 비용 측정에 전처리·최종 답변 단계가 빠져 대안 충분성은 불확정이다. → 다음: 전체 비용의 한정 재측정으로 전문 대안 채택 여부를 결정한다. iter_058 plan의 D6/E48·입력·정답·U8·정확도 기준을 유지하고 E 재생성·추가 표본·모델 탐색은 하지 않는다. 원본 NIfTI부터 channel 분리, 공식 추론, native-grid OR, 여섯 답변 저장까지 같은 경계로 측정하고 loading 포함 및 steady-state를 분리한다. 기존 D6의 세 block·두 순서를 사용하며, 누락 단계가 결정을 바꿀 수 있는지 직접 확인한다. 필요한 실행 경로의 provenance·admission·실패 검사만 먼저 보완한다. 전체 비용 비율≤1이면 현재 다중 sequence 개발 조건의 전문 대안을 채택하고 VLM 구간 적응 투자를 보류한다. 비용 증가 또는 불확정이면 정확도 이득을 유지한 채 원 복합 기준 미충족으로 종료하고, 구체적인 사용 가치 없이 timing·prompt 탐색을 연장하지 않는다.
 
 ## 이전 목표들의 접근법 (참고용, 현재 목표의 재평가 횟수에는 안 들어감)
 
@@ -95,13 +96,13 @@
 - 다중 영상 근거 종합 대조 [approach/multi-image-evidence-control]: 4회 (iter_049, iter_050, iter_051, iter_052), 유효한 실험 0회, 미분류 0회, 최근 판정: execution_failed, 커밋: 05bd6b0b543ae786a7e250f7502b70db7a6dc7f8, d298808193836dee0c5269aef418f0ae6b1b70bd, 3f9bff15a0cd2d198171580f783919eb9d84c9d9
 - 자연 영상쌍의 조건부 판별 진단 [approach/paired-visual-discrimination]: 1회 (iter_054), 유효한 실험 1회, 미분류 0회, 최근 판정: inconclusive, 커밋: 1d26362742c2c50216c9adfd55293592a2799568
 - 시간 비교의 판독 가능성 진입 검토 [approach/temporal-comparability]: 1회 (iter_055), 유효한 실험 0회, 미분류 0회, 최근 판정: 사용자 보완으로 전환 (검증 미완료), 커밋: 없음
-- MRI 구간 근거 사용 진단 [approach/mri-slab-evidence]: 2회 (iter_056, iter_057), 유효한 실험 2회, 미분류 0회, 최근 판정: success, 커밋: da6e75570dcd01f957cde9b9f33b1b57217fcb70, 144227e1c8a0faf1a8f88df126e8a49803030db8
+- MRI 구간 근거 사용 진단 [approach/mri-slab-evidence]: 3회 (iter_056, iter_057, iter_058), 유효한 실험 3회, 미분류 0회, 최근 판정: inconclusive, 커밋: da6e75570dcd01f957cde9b9f33b1b57217fcb70, 144227e1c8a0faf1a8f88df126e8a49803030db8, e203cbd0b4c7d8e6c1f75fbd37625a82b14c232d
 
 현재 연구 브랜치: approach/mri-slab-evidence (코드 위치: /SSD1_1TB/home/milab/daniel/08_medgemma/research)
 
 ### 최근 계획의 대안 순위
 
-1. MRI 구간 근거 사용 진단: 기존 출력의 위치 통제 분석으로 같은 과제의 후속 비교 가치를 판단한다.
-2. 전문 segmentation+OR 비교: 중요한 잔여 오류가 구체화되면 유력하지만 이번 분석 전에 실행할 필요는 없다.
-3. 다른 VLM의 동일 과제 비교: 위치 통제 결과가 모델 재선택의 필요성을 뒷받침할 때 별도 계획한다.
-4. 새 MRI 과제 탐색: 현재 출력으로 해결할 질문을 먼저 마친 뒤 기회비용을 비교한다.
+1. MRI 구간 근거 사용 진단: 같은 D/E에 HD-GLIO 전문 대안을 추가해 정확도·비용과 잔여 오류를 확인한다.
+2. 동일 FLAIR 전문 baseline 학습: 입력 차이를 통제할 수 있지만 새 split·학습·수렴 검증 비용이 크므로 이번 대안 비교 후 필요성을 판단한다.
+3. MedGemma 직접 SFT: 기본 신호는 있으나 전문 대안 이후의 가치와 현재 한계 id 근거가 아직 정리되지 않아 자동 진입하지 않는다.
+4. 다른 MRI 질문으로 전환: 공개 정답과 기존 관찰이 있는 현재 질문의 최소 비교보다 지금의 정보 이득이 작아 보류한다.

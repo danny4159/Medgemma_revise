@@ -1,0 +1,888 @@
+diff --git a/hdglio58_cli_check.py b/hdglio58_cli_check.py
+new file mode 100644
+index 0000000..3abcc81
+--- /dev/null
++++ b/hdglio58_cli_check.py
+@@ -0,0 +1,26 @@
++"""iter_058: 공식 hd_glio_predict(단일 case CLI) 출력과 wrapper(predict_from_folder) 출력의 일치 검사. 사용: python hdglio58_cli_check.py CASE"""
++import json
++import os
++import subprocess
++import sys
++
++import nibabel as nib
++import numpy as np
++
++ROOT = os.path.abspath(".")
++cid = sys.argv[1]
++out = f"{ROOT}/results/iter_058/hd/cli_check"
++os.makedirs(out, exist_ok=True)
++inp = f"{ROOT}/results/iter_058/hd/input_D"
++env = dict(os.environ, HD_GLIO_PARAMS=f"{ROOT}/results/iter_058/external/weights/params", CUDA_VISIBLE_DEVICES="1")
++cmd = [f"{ROOT}/results/environments/hdglio58/bin/hd_glio_predict", "-t1", f"{inp}/{cid}_0000.nii.gz", "-t1c", f"{inp}/{cid}_0001.nii.gz",
++       "-t2", f"{inp}/{cid}_0002.nii.gz", "-flair", f"{inp}/{cid}_0003.nii.gz", "-o", f"{out}/{cid}_cli.nii.gz"]
++r = subprocess.run(cmd, env=env, capture_output=True, text=True)
++open(f"{out}/{cid}_cli.log", "w").write(r.stdout + r.stderr)
++a = np.asarray(nib.load(f"{out}/{cid}_cli.nii.gz").dataobj)
++b = np.asarray(nib.load(f"{ROOT}/results/iter_058/hd/run_D_1w/g0w0/pred/{cid}.nii.gz").dataobj)
++res = {"case": cid, "rc": r.returncode, "shape_equal": a.shape == b.shape, "n_diff_voxels": int((a != b).sum()),
++       "n_fg_cli": int((a > 0).sum()), "n_fg_wrapper": int((b > 0).sum()), "labels_cli": np.unique(a).tolist(),
++       "note": "CLI는 GPU1, wrapper는 GPU0에서 실행"}
++json.dump(res, open(f"{out}/{cid}_compare.json", "w"), indent=1)
++print(res)
+diff --git a/hdglio58_env.py b/hdglio58_env.py
+new file mode 100644
+index 0000000..36e962f
+--- /dev/null
++++ b/hdglio58_env.py
+@@ -0,0 +1,44 @@
++"""iter_058 HD-GLIO 격리 환경 구성. 기존 medgemma/hf_cache는 건드리지 않는다.
++사용: python hdglio58_env.py install | check
++"""
++import json
++import os
++import subprocess
++import sys
++
++ROOT = os.path.abspath("results/environments/hdglio58")
++PY = f"{ROOT}/bin/python"
++LOG = "results/iter_058/env"
++SHA = "d1a37c79cfb0e5a253403b6e35cf66010950752b"
++SRC = os.path.abspath(f"results/iter_058/external/HD-GLIO-{SHA}")
++PKGS = ["torch==2.5.1", "torchvision==0.20.1"]
++
++
++def run(args, name):
++    os.makedirs(LOG, exist_ok=True)
++    with open(f"{LOG}/{name}.log", "a") as f:
++        f.write("$ " + " ".join(args) + "\n")
++        f.flush()
++        r = subprocess.run(args, stdout=f, stderr=subprocess.STDOUT)
++        f.write(f"rc={r.returncode}\n")
++    print(name, "rc", r.returncode)
++    return r.returncode
++
++
++def install():
++    assert os.path.exists(PY)
++    run([PY, "-m", "pip", "install", "--upgrade", "pip", "wheel", "setuptools<81"], "pip0")
++    assert run([PY, "-m", "pip", "install"] + PKGS, "torch") == 0
++    assert run([PY, "-m", "pip", "install", "nibabel", "numpy<2", "SimpleITK", "scikit-image", "batchgenerators", "nnunet==1.7.1", "pandas"], "deps") == 0
++    assert run([PY, "-m", "pip", "install", "--no-deps", SRC], "hdglio") == 0
++    run([PY, "-m", "pip", "freeze"], "freeze")
++
++
++def check():
++    code = ("import torch,nnunet,hd_glio;print(torch.__version__,torch.cuda.is_available(),torch.cuda.device_count());"
++            "import SimpleITK,nibabel;print(SimpleITK.__version__,nibabel.__version__)")
++    run([PY, "-c", code], "check")
++
++
++if __name__ == "__main__":
++    {"install": install, "check": check}[sys.argv[1]]()
+diff --git a/hdglio58_eval.py b/hdglio58_eval.py
+new file mode 100644
+index 0000000..19f285b
+--- /dev/null
++++ b/hdglio58_eval.py
+@@ -0,0 +1,165 @@
++"""iter_058: HD-GLIO foreground의 구간 OR 평가와 기존 U8(iter_056 출력)와의 paired 비교. CPU only.
++
++python hdglio58_eval.py E results/iter_058/eval_E   (D도 동일 함수; D는 기술 검사용이며 E와 합치지 않는다)
++- 정답은 iter_056 gt_slabs.json이며, raw label에서 구간 present를 독립 재계산해 대조한다(불일치면 중단).
++- U8 답변은 msd57_analysis.load_split(iter_056 gen 검증 포함)에서 읽는다. 재분석이므로 새 생성 없음.
++- bootstrap: case-cluster paired 10,000회, seed58, 모든 비교에 동일 재표집.
++"""
++import glob
++import hashlib
++import json
++import os
++import sys
++import time
++
++import nibabel as nib
++import numpy as np
++
++import msd57_analysis as A57
++
++SRC = "results/iter_056"
++HD = "results/iter_058/hd"
++NS = 6
++SEED, B = 58, 10000
++
++
++def sha_file(p):
++    return hashlib.sha256(open(p, "rb").read()).hexdigest()
++
++
++def atomic_write(path, obj):
++    tmp = path + ".tmp"
++    json.dump(obj, open(tmp, "w"), indent=1, default=int)
++    os.replace(tmp, path)
++
++
++def collect_pred(split, run):
++    """shard별 pred를 모아 case->path. 중복/누락/잉여 검사."""
++    cases = json.load(open(f"{HD}/{split}_cases.json"))
++    got = {}
++    for f in sorted(glob.glob(f"{HD}/run_{run}/*/pred/BRATS_*.nii.gz")):
++        cid = os.path.basename(f)[:-len(".nii.gz")]
++        if cid in got:
++            raise RuntimeError(f"duplicate pred {cid}")
++        got[cid] = f
++    if sorted(got) != sorted(cases):
++        raise RuntimeError(f"pred/case mismatch miss={set(cases) - set(got)} extra={set(got) - set(cases)}")
++    rc = json.load(open(f"{HD}/run_{run}/launch.json"))["rc"]
++    if any(v != 0 for v in rc.values()):
++        raise RuntimeError(f"worker rc {rc}")
++    man = json.load(open(f"{HD}/run_{run}/pred_manifest.json"))
++    if sorted(man) != sorted(cases):
++        raise RuntimeError("pred_manifest case set mismatch")
++    for cid, f in got.items():
++        if sha_file(f) != man[cid]["pred_sha256"]:
++            raise RuntimeError(f"{cid}: pred file changed vs manifest")
++        for s, h in man[cid]["input_sha256"].items():
++            if sha_file(f"{HD}/input_{split}/{cid}_{s}.nii.gz") != h:
++                raise RuntimeError(f"{cid}: input {s} changed vs manifest")
++    return got
++
++
++def hd_slab_table(split, run, gt_rows):
++    preds = collect_pred(split, run)
++    gt = {(g["case"], g["slab"]): g for g in gt_rows if g["split"] == split}
++    rows, case_info = [], []
++    for cid in sorted(preds):
++        p = nib.load(preds[cid])
++        i = nib.load(f"{HD}/input_{split}/{cid}_0003.nii.gz")
++        if p.shape != i.shape[:3] or not np.allclose(p.affine, i.affine, atol=1e-4):
++            raise RuntimeError(f"{cid}: pred grid != input grid")
++        a = np.asarray(p.dataobj)
++        if not set(np.unique(a).tolist()) <= {0, 1, 2}:
++            raise RuntimeError(f"{cid}: unexpected labels")
++        lbl = np.asarray(nib.load(f"{SRC}/data/raw/{cid}_lbl.nii.gz").dataobj) > 0
++        pr = a > 0
++        for s in range(NS):
++            g = gt[(cid, s)]
++            z0, z1 = g["z0"], g["z1"]
++            gt_present = bool(lbl[:, :, z0:z1 + 1].any())
++            if gt_present != g["present"] or int(lbl[:, :, z0:z1 + 1].sum()) != g["ann_voxels"]:
++                raise RuntimeError(f"{cid} slab{s}: gt_slabs != raw label")
++            hv = int(pr[:, :, z0:z1 + 1].sum())
++            rows.append({"case": cid, "slab": s, "present": g["present"], "answer": "PRESENT" if hv > 0 else "ABSENT",
++                         "ann_voxels": g["ann_voxels"], "hd_fg_voxels_in_slab": hv,
++                         "hd_l1_in_slab": int((a[:, :, z0:z1 + 1] == 1).sum()), "hd_l2_in_slab": int((a[:, :, z0:z1 + 1] == 2).sum()),
++                         "hd_in_gt_voxels": int((pr & lbl)[:, :, z0:z1 + 1].sum())})
++        inter = int((pr & lbl).sum())
++        case_info.append({"case": cid, "gt_voxels": int(lbl.sum()), "hd_voxels": int(pr.sum()), "hd_label1": int((a == 1).sum()),
++                          "hd_label2": int((a == 2).sum()), "dice_union": 2 * inter / max(1, int(pr.sum() + lbl.sum())),
++                          "hd_outside_gt_voxels": int(pr.sum() - inter), "gt_outside_hd_voxels": int(lbl.sum() - inter),
++                          "pred_sha256": sha_file(preds[cid])})
++    if len(rows) != len(gt):
++        raise RuntimeError("row count != gt")
++    return rows, case_info, preds
++
++
++def sens(S):
++    return S[..., 0].sum(-1) / S[..., 1].sum(-1)
++
++
++def spec(S):
++    return S[..., 2].sum(-1) / S[..., 3].sum(-1)
++
++
++def cell_stats(A):
++    S = A.sum(0).sum(0)
++    tp, p, tn, n = S
++    return {"TP": int(tp), "FN": int(p - tp), "TN": int(tn), "FP": int(n - tn), "P": int(p), "N": int(n),
++            "sens": tp / p, "spec": tn / n, "BA": (tp / p + tn / n) / 2}
++
++
++def run(split, run_name, out_dir):
++    os.makedirs(out_dir, exist_ok=True)
++    gt_rows = json.load(open(f"{SRC}/data/gt_slabs.json"))["rows"]
++    table, gt, _, _ = A57.load_split(split, gt_rows)
++    u8 = [t for t in table if t["cond"] == "U8"]
++    hd_rows, case_info, preds = hd_slab_table(split, run_name, gt_rows)
++    cases = sorted({t["case"] for t in u8})
++    if cases != sorted(c["case"] for c in case_info):
++        raise RuntimeError("case sets differ")
++    A = {"U8": A57.counts_by_case(u8, cases, lambda t: t["answer"]),
++         "HD": A57.counts_by_case(hd_rows, cases, lambda t: t["answer"])}
++    supp = A57.support_positions(A["U8"])
++    rep = {"split": split, "note": "HD-GLIO uses 4 sequences+whole volume; U8 uses FLAIR 8 slices. Not a same-input comparison. E is repeated development data.",
++           "n_cases": len(cases), "n_slabs": len(hd_rows), "support_positions": supp, "created": time.strftime("%Y-%m-%dT%H:%M:%S")}
++    rep["point"] = {k: {**cell_stats(v), "BA_all": float(A57.ba_overall(v.sum(0)[None])[0]),
++                        "BA_std": float(A57.ba_std(v.sum(0)[None], supp)[0]), "by_slab": A57.cell(v)} for k, v in A.items()}
++    fns = {"HD.BA_all": lambda S: A57.ba_overall(S["HD"]), "U8.BA_all": lambda S: A57.ba_overall(S["U8"]),
++           "HD-U8.BA_all": lambda S: A57.ba_overall(S["HD"]) - A57.ba_overall(S["U8"]),
++           "HD-U8.sens": lambda S: sens(S["HD"]) - sens(S["U8"]), "HD-U8.spec": lambda S: spec(S["HD"]) - spec(S["U8"]),
++           "HD-U8.BA_std": lambda S: A57.ba_std(S["HD"], supp) - A57.ba_std(S["U8"], supp),
++           "HD.BA_std": lambda S: A57.ba_std(S["HD"], supp), "U8.BA_std": lambda S: A57.ba_std(S["U8"], supp)}
++    ci = A57.cluster_boot_stats(A, fns, seed=SEED, b=B)
++    rep["bootstrap"] = {"seed": SEED, "B": B, "unit": "case (6 slabs together), same draw for HD and U8", "ci95_lo_hi_nvalid": ci}
++    d = {"BA_all": rep["point"]["HD"]["BA_all"] - rep["point"]["U8"]["BA_all"],
++         "sens": rep["point"]["HD"]["sens"] - rep["point"]["U8"]["sens"], "spec": rep["point"]["HD"]["spec"] - rep["point"]["U8"]["spec"]}
++    rep["diff_point"] = d
++    # 오류 case 분포·겹침
++    ur = {(t["case"], t["slab"]): t for t in u8}
++    hr = {(t["case"], t["slab"]): t for t in hd_rows}
++    err_u = {k for k, t in ur.items() if (t["answer"] == "PRESENT") != t["present"]}
++    err_h = {k for k, t in hr.items() if (t["answer"] == "PRESENT") != t["present"]}
++    cs = lambda s: sorted({k[0] for k in s})
++    rep["errors"] = {"U8_slab_err": len(err_u), "HD_slab_err": len(err_h), "both_slab_err": len(err_u & err_h),
++                     "U8_case_err": len(cs(err_u)), "HD_case_err": len(cs(err_h)), "both_case_err": len(set(cs(err_u)) & set(cs(err_h))),
++                     "HD_FP": sorted(f"{c}:{s}" for c, s in err_h if not hr[(c, s)]["present"]),
++                     "HD_FN": sorted(f"{c}:{s}" for c, s in err_h if hr[(c, s)]["present"]),
++                     "FN_ann_voxels": {f"{c}:{s}": hr[(c, s)]["ann_voxels"] for c, s in sorted(err_h) if hr[(c, s)]["present"]},
++                     "FP_hd_voxels": {f"{c}:{s}": hr[(c, s)]["hd_fg_voxels_in_slab"] for c, s in sorted(err_h) if not hr[(c, s)]["present"]},
++                     "case_ge5_common": len(set(cs(err_u)) & set(cs(err_h))) >= 5}
++    dsc = [c["dice_union"] for c in case_info]
++    rep["aux_union_dice"] = {"mean": float(np.mean(dsc)), "median": float(np.median(dsc)), "min": float(np.min(dsc)),
++                             "note": "auxiliary; not comparable to slab BA",
++                             "hd_to_gt_voxel_ratio_mean": float(np.mean([c["hd_voxels"] / max(1, c["gt_voxels"]) for c in case_info]))}
++    atomic_write(f"{out_dir}/report.json", rep)
++    atomic_write(f"{out_dir}/per_slab_hd.json", hd_rows)
++    atomic_write(f"{out_dir}/per_case_hd.json", case_info)
++    print(json.dumps({"point": {k: {m: v[m] for m in ("sens", "spec", "BA", "BA_all", "BA_std")} for k, v in rep["point"].items()},
++                      "diff": d, "ci": ci, "errors": {k: v for k, v in rep["errors"].items() if not isinstance(v, (list, dict))},
++                      "dice": rep["aux_union_dice"]}, indent=1))
++
++
++if __name__ == "__main__":
++    split, run_name, out = sys.argv[1:4]
++    run(split, run_name, out)
+diff --git a/hdglio58_launch.py b/hdglio58_launch.py
+new file mode 100644
+index 0000000..065cc05
+--- /dev/null
++++ b/hdglio58_launch.py
+@@ -0,0 +1,82 @@
++"""iter_058: HD-GLIO shard 실행기. python hdglio58_launch.py SPLIT OUTNAME GPUS(e.g. 0,1) WORKERS_PER_GPU [CASE_LIMIT]
++case를 round-robin으로 worker에 배정하고 worker별 pred/timing 폴더에 쓴다(출력 충돌 없음). 허용 GPU는 상속된 CUDA_VISIBLE_DEVICES의 논리 index.
++"""
++import json
++import os
++import subprocess
++import sys
++import time
++
++ROOT = os.path.abspath(".")
++PY = f"{ROOT}/results/environments/hdglio58/bin/python"
++PARAMS = f"{ROOT}/results/iter_058/external/weights/params"
++
++
++def sha_file(p):
++    import hashlib
++    h = hashlib.sha256()
++    with open(p, "rb") as f:
++        for b in iter(lambda: f.read(1 << 20), b""):
++            h.update(b)
++    return h.hexdigest()
++
++
++def write_manifest(base, split):
++    """run 디렉터리의 pred와 입력 4채널 hash를 case별로 연결해 기록한다(eval이 검증). 이미 있으면 덮어쓰지 않는다."""
++    import glob
++    mp = f"{base}/pred_manifest.json"
++    if os.path.exists(mp):
++        raise FileExistsError(mp)
++    man = {}
++    for f in sorted(glob.glob(f"{base}/*/pred/BRATS_*.nii.gz")):
++        cid = os.path.basename(f)[:-len(".nii.gz")]
++        assert cid not in man, f"duplicate {cid}"
++        man[cid] = {"pred_sha256": sha_file(f),
++                    "input_sha256": {s: sha_file(f"{ROOT}/results/iter_058/hd/input_{split}/{cid}_{s}.nii.gz") for s in ("0000", "0001", "0002", "0003")}}
++    json.dump(man, open(mp + ".tmp", "w"), indent=1)
++    os.replace(mp + ".tmp", mp)
++
++
++def main():
++    if sys.argv[1] == "manifest":  # python hdglio58_launch.py manifest SPLIT NAME  (사후 생성; 기존 run 용)
++        write_manifest(f"{ROOT}/results/iter_058/hd/run_{sys.argv[3]}", sys.argv[2])
++        return
++    split, name, gpus, wpg = sys.argv[1], sys.argv[2], sys.argv[3].split(","), int(sys.argv[4])
++    limit = int(sys.argv[5]) if len(sys.argv) > 5 else None
++    inherited = os.environ.get("CUDA_VISIBLE_DEVICES")
++    allowed = inherited.split(",") if inherited else None
++    if allowed is not None:
++        assert all(g in allowed for g in gpus), (gpus, allowed)
++    cases = json.load(open(f"{ROOT}/results/iter_058/hd/{split}_cases.json"))
++    if limit:
++        cases = cases[:limit]
++    workers = [(g, k) for g in gpus for k in range(wpg)]
++    shards = {w: [c for i, c in enumerate(cases) if i % len(workers) == j] for j, w in enumerate(workers)}
++    base = f"{ROOT}/results/iter_058/hd/run_{name}"
++    os.makedirs(base, exist_ok=True)
++    procs = []
++    t0 = time.time()
++    for (g, k), cs in shards.items():
++        if not cs:
++            continue
++        tag = f"g{g}w{k}"
++        os.makedirs(f"{base}/{tag}", exist_ok=True)
++        cj = f"{base}/{tag}/cases.json"
++        json.dump(cs, open(cj, "w"))
++        env = dict(os.environ, HD_GLIO_PARAMS=PARAMS, CUDA_VISIBLE_DEVICES=g, HDG_PROCS=os.environ.get("HDG_PROCS", "2"))
++        log = open(f"{base}/{tag}/stdout.log", "w")
++        p = subprocess.Popen([PY, f"{ROOT}/hdglio58_pred.py", f"{ROOT}/results/iter_058/hd/input_{split}", f"{base}/{tag}/pred",
++                              cj, f"{base}/{tag}/timing.json"], stdout=log, stderr=subprocess.STDOUT, env=env)
++        procs.append((tag, p))
++    rcs = {tag: p.wait() for tag, p in procs}
++    wall = time.time() - t0
++    json.dump({"split": split, "gpus": gpus, "workers_per_gpu": wpg, "n_cases": len(cases), "rc": rcs, "wall_s": wall,
++               "shards": {f"g{g}w{k}": v for (g, k), v in shards.items()}}, open(f"{base}/launch.json", "w"), indent=1)
++    print("rc", rcs, "wall", wall)
++    if all(r == 0 for r in rcs.values()):
++        write_manifest(base, split)
++    sys.exit(0 if all(r == 0 for r in rcs.values()) else 1)
++
++
++if __name__ == "__main__":
++    main()
+diff --git a/hdglio58_overlay.py b/hdglio58_overlay.py
+new file mode 100644
+index 0000000..1afdc67
+--- /dev/null
++++ b/hdglio58_overlay.py
+@@ -0,0 +1,49 @@
++"""iter_058: 네 sequence + HD-GLIO 예측(빨강 채움: label1 노랑/label2 빨강) + GT 외곽(초록) overlay.
++python hdglio58_overlay.py RUN_DIR_GLOB_OUT SPLIT RUN CASE OUT.png [z]"""
++import glob
++import sys
++
++import nibabel as nib
++import numpy as np
++from PIL import Image
++
++SRC = "results/iter_056"
++HD = "results/iter_058/hd"
++
++
++def disp(a2):
++    return a2[::-1, :].T[::-1]
++
++
++def norm(sl):
++    v = sl[sl > 0]
++    hi = np.percentile(v, 99.5) if v.size else 1.0
++    return (np.clip(sl / hi, 0, 1) * 255).astype(np.uint8)
++
++
++def main():
++    split, run, cid, out = sys.argv[1:5]
++    pf = glob.glob(f"{HD}/run_{run}/*/pred/{cid}.nii.gz")[0]
++    pred = np.asarray(nib.load(pf).dataobj)
++    gt = np.asarray(nib.load(f"{SRC}/data/raw/{cid}_lbl.nii.gz").dataobj) > 0
++    z = int(sys.argv[5]) if len(sys.argv) > 5 else int(np.argmax(((pred > 0) | gt).sum((0, 1))))
++    tiles = []
++    for suf, nm in (("0000", "T1"), ("0001", "T1c"), ("0002", "T2"), ("0003", "FLAIR")):
++        v = np.asarray(nib.load(f"{HD}/input_{split}/{cid}_{suf}.nii.gz").dataobj)[:, :, z]
++        g = np.repeat(disp(norm(v))[:, :, None], 3, axis=2).astype(np.float32)
++        p = disp(pred[:, :, z])
++        for lab, col in ((1, (255, 220, 0)), (2, (255, 0, 0))):
++            m = p == lab
++            g[m] = 0.55 * g[m] + 0.45 * np.array(col)
++        gm = disp(gt[:, :, z])
++        pad = np.pad(gm, 1)
++        inner = pad[1:-1, 1:-1] & pad[:-2, 1:-1] & pad[2:, 1:-1] & pad[1:-1, :-2] & pad[1:-1, 2:]
++        edge = gm & ~inner
++        g[edge] = (0, 255, 0)
++        tiles.append(g.astype(np.uint8))
++    Image.fromarray(np.concatenate(tiles, axis=1)).save(out)
++    print(cid, "z", z, "gt vox in z", int(gt[:, :, z].sum()), "pred vox in z", int((pred[:, :, z] > 0).sum()))
++
++
++if __name__ == "__main__":
++    main()
+diff --git a/hdglio58_pred.py b/hdglio58_pred.py
+new file mode 100644
+index 0000000..82dbd6b
+--- /dev/null
++++ b/hdglio58_pred.py
+@@ -0,0 +1,45 @@
++"""iter_058: 공식 HD-GLIO v2.0 predict_from_folder 호출 wrapper (venv hdglio58의 python으로 실행).
++설정은 공식 hd_glio_predict_folder와 동일: fold (0,), TTA 사용(tta=True), mixed precision 기본값, checkpoint model_final_checkpoint.
++case 단위 shard를 입력 폴더 하위 symlink 없이 case 목록 파일로 받아 임시 폴더에 hard-link하여 호출한다.
++사용: HD_GLIO_PARAMS=... CUDA_VISIBLE_DEVICES=k hdglio58 python hdglio58_pred.py IN_DIR OUT_DIR CASE_LIST.json TIMING.json
++출력: OUT_DIR/{case}.nii.gz (label 0/1/2), TIMING.json: 단계별 wall(sync) 기록
++"""
++import json
++import os
++import shutil
++import sys
++import time
++
++import torch
++
++from hd_glio.paths import folder_with_parameter_files
++from nnunet.inference.predict import predict_from_folder
++
++
++def main():
++    in_dir, out_dir, case_json, timing = sys.argv[1:5]
++    cases = json.load(open(case_json))
++    procs = int(os.environ.get("HDG_PROCS", "2"))
++    assert os.path.isdir(folder_with_parameter_files), folder_with_parameter_files
++    work = out_dir + ".in_tmp"
++    shutil.rmtree(work, ignore_errors=True)
++    os.makedirs(work)
++    os.makedirs(out_dir, exist_ok=True)
++    for c in cases:
++        for s in ("0000", "0001", "0002", "0003"):
++            os.link(f"{in_dir}/{c}_{s}.nii.gz", f"{work}/{c}_{s}.nii.gz")
++    t0 = time.time()
++    predict_from_folder(folder_with_parameter_files, work, out_dir, (0,), False, procs, procs, None, 0, 1, True,
++                        overwrite_existing=True, checkpoint_name="model_final_checkpoint")
++    torch.cuda.synchronize()
++    t1 = time.time()
++    shutil.rmtree(work, ignore_errors=True)
++    json.dump({"cases": cases, "t_start": t0, "t_end": t1, "wall_s": t1 - t0, "procs": procs,
++               "peak_alloc_MiB": torch.cuda.max_memory_allocated() / 2**20,
++               "peak_reserved_MiB": torch.cuda.max_memory_reserved() / 2**20,
++               "cuda_visible": os.environ.get("CUDA_VISIBLE_DEVICES")}, open(timing, "w"), indent=1)
++    print("done", len(cases), t1 - t0)
++
++
++if __name__ == "__main__":
++    main()
+diff --git a/hdglio58_prep.py b/hdglio58_prep.py
+new file mode 100644
+index 0000000..01df92d
+--- /dev/null
++++ b/hdglio58_prep.py
+@@ -0,0 +1,80 @@
++"""iter_058: MSD Task01 4D NIfTI -> HD-GLIO 입력(채널 분리). 원본 label은 사용하지 않는다.
++
++MSD dataset.json modality: 0 FLAIR, 1 T1w, 2 t1gd, 3 T2w
++HD-GLIO 파일 규약: _0000 T1, _0001 T1c, _0002 T2, _0003 FLAIR
++iter_056 cases.json의 case 목록/순서/split을 변경하지 않는다.
++사용: python hdglio58_prep.py [D|E|DE]
++"""
++import hashlib
++import json
++import os
++import sys
++
++import nibabel as nib
++import numpy as np
++
++SRC = "results/iter_056"
++OUT = "results/iter_058/hd"
++MSD_TO_HD = {0: 1, 1: 3, 2: 0, 3: 2}  # HD index -> MSD channel: T1<-1, T1c<-2, T2<-3, FLAIR<-0 (아래 HD_CH 참고)
++HD_CH = {"0000": 1, "0001": 2, "0002": 3, "0003": 0}  # HD suffix -> MSD channel
++MODALITY = {"0": "FLAIR", "1": "T1w", "2": "t1gd", "3": "T2w"}
++
++
++def sha256_file(p):
++    h = hashlib.sha256()
++    with open(p, "rb") as f:
++        for b in iter(lambda: f.read(1 << 20), b""):
++            h.update(b)
++    return h.hexdigest()
++
++
++def prep_case(c, out_dir):
++    cid = c["case"]
++    ip = f"{SRC}/data/raw/{cid}_img.nii.gz"
++    got = sha256_file(ip)
++    assert got == c["img_sha256"], (cid, got)
++    img = nib.load(ip)
++    assert img.ndim == 4 and img.shape[3] == 4
++    assert "".join(nib.aff2axcodes(img.affine)) == "RAS"
++    assert np.allclose(img.affine, np.eye(4), atol=1e-4), (cid, img.affine)
++    data = np.asarray(img.dataobj)
++    assert np.isfinite(data).all()
++    rec = {"case": cid, "split": c["split"], "img_sha256": got, "shape": list(img.shape), "channels": {}}
++    os.makedirs(out_dir, exist_ok=True)
++    nz = []
++    for suf, ch in HD_CH.items():
++        vol = data[..., ch].astype(np.float32)
++        p = f"{out_dir}/{cid}_{suf}.nii.gz"
++        if not os.path.exists(p):
++            h = img.header.copy()
++            h.set_data_dtype(np.float32)
++            nib.save(nib.Nifti1Image(vol, img.affine, h), p + ".tmp.nii.gz")
++            os.replace(p + ".tmp.nii.gz", p)
++        nz.append(vol != 0)
++        rec["channels"][suf] = {"msd_channel": ch, "msd_name": {0: "FLAIR", 1: "T1w", 2: "t1gd", 3: "T2w"}[ch],
++                                "sha256": sha256_file(p), "nonzero_frac": float((vol != 0).mean()),
++                                "min": float(vol.min()), "max": float(vol.max())}
++    # 비뇌 영역 0 / 공통 지지 영역 일치도
++    u = np.logical_or.reduce(nz)
++    i = np.logical_and.reduce(nz)
++    rec["nonzero_union_frac"] = float(u.mean())
++    rec["nonzero_all_frac"] = float(i.mean())
++    rec["corners_zero"] = bool(all(not v[0, 0, 0] for v in nz))
++    return rec
++
++
++def main():
++    which = sys.argv[1] if len(sys.argv) > 1 else "DE"
++    cs = json.load(open(f"{SRC}/data/cases.json"))["chosen"]
++    recs = []
++    for c in cs:
++        if c["split"] in which:
++            recs.append(prep_case(c, f"{OUT}/input_{c['split']}"))
++            print(recs[-1]["case"], recs[-1]["nonzero_union_frac"], recs[-1]["nonzero_all_frac"], flush=True)
++    tag = f"prep_{which}.json"
++    json.dump({"records": recs, "mapping_note": "HD _0000 T1<-MSD ch1(T1w), _0001 T1c<-ch2(t1gd), _0002 T2<-ch3(T2w), _0003 FLAIR<-ch0",
++               "msd_modality": MODALITY}, open(f"{OUT}/{tag}", "w"), indent=1)
++
++
++if __name__ == "__main__":
++    main()
+diff --git a/hdglio58_timing.py b/hdglio58_timing.py
+new file mode 100644
+index 0000000..6a55b96
+--- /dev/null
++++ b/hdglio58_timing.py
+@@ -0,0 +1,72 @@
++"""iter_058: D6 paired 전체 pipeline 비용 측정(HD-GLIO vs U8) 및 U8 기술 검사.
++python hdglio58_timing.py u8check        # U8 D6 전체: PNG 동일성 + iter_056 답변과 대조 (GPU1)
++python hdglio58_timing.py blocks         # 3 block x 2 order, 동일 GPU 순차, block/order별 GPU 균형
++출력: results/iter_058/timing/
++"""
++import json
++import os
++import subprocess
++import sys
++import time
++
++ROOT = os.path.abspath(".")
++PYV = f"{ROOT}/results/environments/hdglio58/bin/python"
++PARAMS = f"{ROOT}/results/iter_058/external/weights/params"
++OUT = f"{ROOT}/results/iter_058/timing"
++BLOCKS = [["BRATS_053", "BRATS_199"], ["BRATS_368", "BRATS_380"], ["BRATS_037", "BRATS_455"]]
++
++
++def smi():
++    r = subprocess.run(["nvidia-smi", "--query-gpu=index,memory.used,utilization.gpu", "--format=csv,noheader,nounits"],
++                       capture_output=True, text=True)
++    return r.stdout.strip().splitlines()
++
++
++def run_u8(cases, gpu, out, check=False):
++    os.makedirs(out, exist_ok=True)
++    cj = f"{out}/cases.json"
++    json.dump(cases, open(cj, "w"))
++    env = dict(os.environ, CUDA_VISIBLE_DEVICES=str(gpu), U8_CHECK_PNG="1" if check else "0")
++    t = time.perf_counter()
++    r = subprocess.run([sys.executable, f"{ROOT}/hdglio58_u8.py", "D", cj, out], env=env, stdout=open(f"{out}/stdout.log", "w"),
++                       stderr=subprocess.STDOUT)
++    return {"rc": r.returncode, "wall_s": time.perf_counter() - t}
++
++
++def run_hd(cases, gpu, out):
++    os.makedirs(out, exist_ok=True)
++    cj = f"{out}/cases.json"
++    json.dump(cases, open(cj, "w"))
++    env = dict(os.environ, CUDA_VISIBLE_DEVICES=str(gpu), HD_GLIO_PARAMS=PARAMS, HDG_PROCS="2")
++    t = time.perf_counter()
++    r = subprocess.run([PYV, f"{ROOT}/hdglio58_pred.py", f"{ROOT}/results/iter_058/hd/input_D", f"{out}/pred", cj, f"{out}/timing.json"],
++                       env=env, stdout=open(f"{out}/stdout.log", "w"), stderr=subprocess.STDOUT)
++    return {"rc": r.returncode, "wall_s": time.perf_counter() - t}
++
++
++def u8check():
++    cases = json.load(open("results/iter_058/hd/D_cases.json"))
++    res = run_u8(cases, 1, f"{OUT}/u8check", check=True)
++    print(res)
++
++
++def blocks():
++    ev = []
++    for b, cs in enumerate(BLOCKS):
++        for o, order in enumerate((("U8", "HD"), ("HD", "U8"))):
++            gpu = (b + o) % 2
++            snap = {"smi_before": smi(), "loadavg": os.getloadavg()}
++            rec = {"block": b, "order": "->".join(order), "cases": cs, "gpu": gpu, **snap, "runs": {}}
++            for name in order:
++                d = f"{OUT}/b{b}_o{o}_{name}"
++                rec["runs"][name] = (run_u8 if name == "U8" else run_hd)(cs, gpu, d)
++                rec["runs"][name]["start_order_index"] = order.index(name)
++                rec["runs"][name]["dir"] = d
++            ev.append(rec)
++            json.dump(ev, open(f"{OUT}/blocks.json", "w"), indent=1)
++            print(rec["block"], rec["order"], {k: v["wall_s"] for k, v in rec["runs"].items()}, flush=True)
++
++
++if __name__ == "__main__":
++    os.makedirs(OUT, exist_ok=True)
++    {"u8check": u8check, "blocks": blocks}[sys.argv[1]]()
+diff --git a/hdglio58_u8.py b/hdglio58_u8.py
+new file mode 100644
+index 0000000..f419987
+--- /dev/null
++++ b/hdglio58_u8.py
+@@ -0,0 +1,96 @@
++"""iter_058: U8 전체 pipeline(원본 4D NIfTI -> FLAIR 읽기·정규화·8-slice 렌더 -> processor -> 6 구간 생성 -> 저장) 비용 측정용 실행기.
++iter_056의 prompt/모델 revision/caps/렌더 함수를 그대로 사용한다(msd56_run, msd56_data import). 렌더 결과는 PNG 저장 없이 메모리 PIL로 전달하며
++iter_056 PNG와 pixel 동일성을 검사한다(--check-png).
++
++python hdglio58_u8.py SPLIT CASES.json OUT_DIR  (CUDA_VISIBLE_DEVICES는 호출자가 지정)
++출력 OUT_DIR/u8_{case}.json (case별 원자적 기록), OUT_DIR/summary.json
++"""
++import json
++import os
++import sys
++import time
++
++T_PROC_START = time.time()
++
++import numpy as np  # noqa: E402
++
++import msd56_data as D  # noqa: E402
++import msd56_run as R  # noqa: E402
++
++SRC = "results/iter_056"
++
++
++def flair_only(cid):
++    import nibabel as nib
++    img = nib.load(f"{SRC}/data/raw/{cid}_img.nii.gz")
++    can = nib.as_closest_canonical(img)
++    assert "".join(nib.aff2axcodes(can.affine)) == "RAS"
++    fl = np.asarray(can.dataobj[..., 0], dtype=np.float32)
++    if not np.isfinite(fl).all():
++        raise R.RunError(f"{cid}: non-finite FLAIR")
++    return fl
++
++
++def main():
++    split, case_json, out = sys.argv[1:4]
++    cases = json.load(open(case_json))
++    os.makedirs(out, exist_ok=True)
++    check_png = os.environ.get("U8_CHECK_PNG") == "1"
++    from PIL import Image
++    t = time.time()
++    torch, proc, model = R.load_model()
++    eos = set(model.generation_config.eos_token_id if isinstance(model.generation_config.eos_token_id, list) else [model.generation_config.eos_token_id])
++    torch.cuda.synchronize()
++    t_load = time.time() - t
++    meta = {c["case"]: c for c in json.load(open(f"{SRC}/data/cases.json"))["chosen"]}
++    summ = {"split": split, "cases": cases, "t_import_s": t - T_PROC_START, "t_load_model_s": t_load, "per_case": {}}
++    for cid in cases:
++        tc0 = time.time()
++        fl = flair_only(cid)
++        z0, z1 = D.nonzero_range(fl)
++        slabs = D.make_slabs(z0, z1)
++        ref = meta[cid]
++        assert slabs == ref["slabs"] and float(fl.min()) == ref["vmin"] and float(fl.max()) == ref["vmax"], f"{cid}: slab/range mismatch vs iter_056"
++        rows = []
++        for si, (a, b) in enumerate(slabs):
++            zs = [a + i for i in D.equi(b - a + 1, 8)]
++            imgs = [Image.fromarray(D.render(fl, k, ref["vmin"], ref["vmax"])) for k in zs]
++            if check_png:
++                for k, im in zip(zs, imgs):
++                    p = np.asarray(Image.open(f"{SRC}/data/png/{cid}_z{k:03d}.png").convert("RGB"))
++                    assert np.array_equal(p, np.asarray(im)), f"{cid} z{k}: render != iter_056 png"
++            rows.append((si, zs, imgs))
++        t_prep = time.time() - tc0
++        res, t_gen, t_proc = [], 0.0, 0.0
++        for si, zs, imgs in rows:
++            tp = time.time()
++            content = [{"type": "image", "image": im} for im in imgs] + [{"type": "text", "text": R.PROMPT}]
++            inp = proc.apply_chat_template([{"role": "user", "content": content}], add_generation_prompt=True, tokenize=True,
++                                           return_dict=True, return_tensors="pt")
++            t_proc += time.time() - tp
++            attempts = []
++            for cap in R.CAPS:
++                at = R.generate(torch, model, inp, cap, eos)
++                attempts.append(at)
++                if at["ended_eos"]:
++                    break
++            txt = proc.tokenizer.decode(attempts[-1]["suffix_ids"], skip_special_tokens=False)
++            t_gen += sum(a_["runtime_s"] for a_ in attempts)
++            res.append({"slab": si, "slices": zs, "answer": R.parse_answer(txt), "raw": txt, "ended_eos": attempts[-1]["ended_eos"],
++                        "n_attempts": len(attempts)})
++        rec = {"case": cid, "t_case_s": time.time() - tc0, "t_read_prep_s": t_prep, "t_processor_s": t_proc, "t_generate_s": t_gen,
++               "answers": res, "t_start": tc0, "t_end": time.time()}
++        tmp = f"{out}/u8_{cid}.json.tmp"
++        json.dump(rec, open(tmp, "w"), indent=1)
++        os.replace(tmp, f"{out}/u8_{cid}.json")
++        summ["per_case"][cid] = {k: rec[k] for k in ("t_case_s", "t_read_prep_s", "t_processor_s", "t_generate_s")}
++        print(cid, round(rec["t_case_s"], 2), flush=True)
++    summ["t_total_s"] = time.time() - T_PROC_START
++    summ["peak_alloc_MiB"] = torch.cuda.max_memory_allocated() / 2**20
++    summ["peak_reserved_MiB"] = torch.cuda.max_memory_reserved() / 2**20
++    summ["cuda_visible"] = os.environ.get("CUDA_VISIBLE_DEVICES")
++    json.dump(summ, open(f"{out}/summary.json", "w"), indent=1)
++
++
++if __name__ == "__main__":
++    main()
+diff --git a/hdglio58_verify.py b/hdglio58_verify.py
+new file mode 100644
+index 0000000..969a5e0
+--- /dev/null
++++ b/hdglio58_verify.py
+@@ -0,0 +1,60 @@
++"""iter_058: E 수치 독립 재계산(평가 모듈 비사용). per_row_E.json(iter_057, U8 답변)과 per_slab_hd.json(HD-GLIO)만 읽고,
++GT는 raw NIfTI label에서 직접 구간 present를 재계산한다. 쓰기는 results/iter_058/eval_E/verify.json.
++"""
++import json
++
++import nibabel as nib
++import numpy as np
++
++E = "results/iter_058/eval_E"
++gt_rows = {(g["case"], g["slab"]): g for g in json.load(open("results/iter_056/data/gt_slabs.json"))["rows"] if g["split"] == "E"}
++u8 = {(r["case"], r["slab"]): r["answer"] for r in json.load(open("results/iter_057/analysis/per_row_E.json")) if r["cond"] == "U8"}
++hd = {(r["case"], r["slab"]): r["answer"] for r in json.load(open(f"{E}/per_slab_hd.json"))}
++cases = sorted({k[0] for k in gt_rows})
++assert len(gt_rows) == len(u8) == len(hd) == 288 and len(cases) == 48
++truth = {}
++for cid in cases:
++    lbl = np.asarray(nib.load(f"results/iter_056/data/raw/{cid}_lbl.nii.gz").dataobj) > 0
++    for s in range(6):
++        g = gt_rows[(cid, s)]
++        truth[(cid, s)] = bool(lbl[:, :, g["z0"]:g["z1"] + 1].any())
++assert all(truth[k] == gt_rows[k]["present"] for k in truth)
++
++
++def tab(pred):
++    arr = np.zeros((len(cases), 4))  # TP, P, TN, N
++    for i, c in enumerate(cases):
++        for s in range(6):
++            t, a = truth[(c, s)], pred[(c, s)]
++            arr[i, 1 if t else 3] += 1
++            arr[i, 0 if t else 2] += (a == "PRESENT") if t else (a == "ABSENT")
++    return arr
++
++
++def ba(a):
++    s = a.sum(0)
++    return ((s[0] / s[1]) + (s[2] / s[3])) / 2
++
++
++def sn(a):
++    s = a.sum(0)
++    return s[0] / s[1]
++
++
++a_h, a_u = tab(hd), tab(u8)
++rng = np.random.default_rng(1058)  # 평가 모듈과 다른 seed/구현: 값이 근사 일치하는지만 확인
++d, ds = [], []
++for _ in range(10000):
++    ix = rng.integers(0, 48, 48)
++    d.append(ba(a_h[ix]) - ba(a_u[ix]))
++    ds.append(sn(a_h[ix]) - sn(a_u[ix]))
++rep = {"BA_HD": ba(a_h), "BA_U8": ba(a_u), "diff": ba(a_h) - ba(a_u), "sens_HD": sn(a_h), "sens_U8": sn(a_u),
++       "ci_diff_BA_indep_seed1058": [float(np.percentile(d, 2.5)), float(np.percentile(d, 97.5))],
++       "ci_diff_sens_indep_seed1058": [float(np.percentile(ds, 2.5)), float(np.percentile(ds, 97.5))],
++       "gt_vs_raw_label_mismatch": 0}
++main = json.load(open(f"{E}/report.json"))
++rep["matches_report"] = {"BA_HD": bool(abs(rep["BA_HD"] - main["point"]["HD"]["BA_all"]) < 1e-12),
++                         "BA_U8": bool(abs(rep["BA_U8"] - main["point"]["U8"]["BA_all"]) < 1e-12)}
++assert all(rep["matches_report"].values())
++json.dump(rep, open(f"{E}/verify.json", "w"), indent=1)
++print(json.dumps(rep, indent=1))
+diff --git a/test_hdglio58.py b/test_hdglio58.py
+new file mode 100644
+index 0000000..3498956
+--- /dev/null
++++ b/test_hdglio58.py
+@@ -0,0 +1,103 @@
++"""iter_058 회귀·변조 fixture. python test_hdglio58.py  -> results/iter_058/tests/fixtures.json
++임시 디렉터리에 합성 입력/출력을 만들어 평가 경로가 변조를 거부하는지 검사한다(실제 결과 파일은 수정하지 않는다).
++"""
++import json
++import os
++import shutil
++import tempfile
++
++import nibabel as nib
++import numpy as np
++
++import hdglio58_eval as E
++
++OUT = "results/iter_058/tests"
++res = []
++
++
++def check(name, fn, expect_raise=None):
++    try:
++        fn()
++        ok = expect_raise is None
++        msg = "no raise"
++    except Exception as e:  # noqa: BLE001
++        ok = expect_raise is not None and expect_raise in str(e)
++        msg = f"{type(e).__name__}: {e}"
++    res.append({"name": name, "pass": bool(ok), "detail": msg[:200]})
++    print("PASS" if ok else "FAIL", name, "|", msg[:100])
++
++
++def make_tree(root, cases, rc=0):
++    """root/hd/{input_X,run_T/g0w0/pred} 합성. 입력 grid 4x4x4."""
++    run = f"{root}/run_T"
++    for c in cases:
++        os.makedirs(f"{root}/input_X", exist_ok=True)
++        for s in ("0000", "0001", "0002", "0003"):
++            nib.save(nib.Nifti1Image(np.ones((4, 4, 4), np.float32), np.eye(4)), f"{root}/input_X/{c}_{s}.nii.gz")
++        os.makedirs(f"{run}/g0w0/pred", exist_ok=True)
++        p = np.zeros((4, 4, 4), np.uint8)
++        p[1:3, 1:3, 1:3] = 1
++        nib.save(nib.Nifti1Image(p, np.eye(4)), f"{run}/g0w0/pred/{c}.nii.gz")
++    json.dump(cases, open(f"{root}/X_cases.json", "w"))
++    json.dump({"rc": {"g0w0": rc}}, open(f"{run}/launch.json", "w"))
++    man = {c: {"pred_sha256": E.sha_file(f"{run}/g0w0/pred/{c}.nii.gz"),
++               "input_sha256": {s: E.sha_file(f"{root}/input_X/{c}_{s}.nii.gz") for s in ("0000", "0001", "0002", "0003")}} for c in cases}
++    json.dump(man, open(f"{run}/pred_manifest.json", "w"))
++    return run
++
++
++def main():
++    os.makedirs(OUT, exist_ok=True)
++    old = E.HD
++    tmp = tempfile.mkdtemp()
++    try:
++        E.HD = tmp
++        make_tree(tmp, ["BRATS_A", "BRATS_B"])
++        check("collect_ok", lambda: E.collect_pred("X", "T"))
++        # 중복 pred (다른 shard에 같은 case)
++        os.makedirs(f"{tmp}/run_T/g1w0/pred", exist_ok=True)
++        shutil.copy(f"{tmp}/run_T/g0w0/pred/BRATS_A.nii.gz", f"{tmp}/run_T/g1w0/pred/BRATS_A.nii.gz")
++        check("duplicate_pred_rejected", lambda: E.collect_pred("X", "T"), "duplicate pred")
++        shutil.rmtree(f"{tmp}/run_T/g1w0")
++        # 누락
++        os.remove(f"{tmp}/run_T/g0w0/pred/BRATS_B.nii.gz")
++        check("missing_pred_rejected", lambda: E.collect_pred("X", "T"), "mismatch")
++        # 실패 worker
++        shutil.rmtree(tmp)
++        os.makedirs(tmp)
++        make_tree(tmp, ["BRATS_A", "BRATS_B"], rc=1)
++        check("failed_worker_rejected", lambda: E.collect_pred("X", "T"), "worker rc")
++        # case 교환(다른 case의 pred 내용을 덮어씀) -> manifest hash 불일치
++        shutil.rmtree(tmp)
++        os.makedirs(tmp)
++        run = make_tree(tmp, ["BRATS_A", "BRATS_B"])
++        p = np.zeros((4, 4, 4), np.uint8)
++        p[0, 0, 0] = 2
++        nib.save(nib.Nifti1Image(p, np.eye(4)), f"{run}/g0w0/pred/BRATS_B.nii.gz")
++        check("swapped_or_edited_pred_rejected", lambda: E.collect_pred("X", "T"), "changed vs manifest")
++        # 입력 변조
++        shutil.rmtree(tmp)
++        os.makedirs(tmp)
++        make_tree(tmp, ["BRATS_A", "BRATS_B"])
++        nib.save(nib.Nifti1Image(np.zeros((4, 4, 4), np.float32), np.eye(4)), f"{tmp}/input_X/BRATS_A_0003.nii.gz")
++        check("input_tamper_rejected", lambda: E.collect_pred("X", "T"), "changed vs manifest")
++        # grid 불일치/GT 불일치: hd_slab_table는 실제 SRC 경로의 raw label이 필요하므로 실제 case로 GT 변조만 검사
++        E.HD = old
++        gt = json.load(open("results/iter_056/data/gt_slabs.json"))["rows"]
++        dup = [dict(g) for g in gt if g["split"] == "D"]
++        dup[1] = dict(dup[1], present=not dup[1]["present"])
++        check("gt_flip_rejected", lambda: E.hd_slab_table("D", "D_2g1w", dup), "gt_slabs != raw label")
++        ok = E.hd_slab_table("D", "D_2g1w", gt)
++        check("real_D_ok_rows36", lambda: (len(ok[0]) == 36) or (_ for _ in ()).throw(AssertionError("rows")))
++        # 정상 D 결과가 저장 report와 같은 점추정을 재현
++        rep = json.load(open("results/iter_058/eval_D/report.json"))
++        check("D_report_point_matches", lambda: abs(rep["point"]["HD"]["BA_all"] - 0.7916666666666667) < 1e-12 or (_ for _ in ()).throw(AssertionError("BA")))
++    finally:
++        E.HD = old
++        shutil.rmtree(tmp, ignore_errors=True)
++    json.dump({"n": len(res), "n_pass": sum(r["pass"] for r in res), "checks": res}, open(f"{OUT}/fixtures.json", "w"), indent=1)
++    print(sum(r["pass"] for r in res), "/", len(res))
++
++
++if __name__ == "__main__":
++    main()
