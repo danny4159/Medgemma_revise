@@ -20460,3 +20460,475 @@ iter_048의 공동 SFT 회복과 잔여 손실, iter_046의 모듈형 적응 효
 현재 E/F를 실행하거나 oracle 문구를 추가 탐색하지 않는다. 다음 전략 계획에서 선택할 후보는 실제 사용 과제, 강한 단순 baseline, 남은 경쟁 설명과 결과별 종료 행동을 구체화해야 한다. 방법 pilot은 이전 유효 리뷰의 한계 근거와 연결하고, 이번 실패를 새 진입 근거로 삼지 않는다.
 
 코드 보완은 선택된 후속 경로에 필요한 것만 수행한다. 기존 원시 출력과 checkpoint는 보존한다. 이번에는 유효한 방법 개선이나 후속 탐구의 긍정적 근거를 확보하지 못했으므로 논문 추천과 milestone 기록은 보류한다.
+
+
+## iter_054 GPT PLAN [자연 영상쌍의 조건부 판별 진단 / proceed] — 2026-10-03 08:32:47
+
+# 요약
+
+- **이번에 할 일:** MediConfusion에서 MedGemma 1.5의 단일 영상 생성과 likelihood scoring, 선택지 순서·text-only prior 보정을 비교한다.
+- **필요한 이유:** 낮은 답변 정확도만으로 시각 판별 실패와 답변 선택 문제를 구분할 수 없다. 강한 단순 대안 이후 남는 격차가 다음 투자 대상이다.
+- **확인할 기준:** 영상별 상대 점수의 판별 신호, 실제 단일 영상 선택의 잔여 오류, 자료 의존성과 정답 모호성을 함께 평가한다.
+- **주의·다음:** 전체 benchmark는 개발 자료다. 상대 평가 영상을 쓰는 점수 분석은 실용 해법이 아니며, 양성 결과도 학습이나 contribution을 자동 승인하지 않는다.
+
+# Current Understanding
+
+판단의 기준은 `agent/runs/iter_054/think/round_01.json`과 이번 조사 노트다. iter_053의 oracle 183/192 실패와 E/F 미실행 판정은 유지한다. iter_048의 공동 형식 학습 효과와 모듈형 대안 이후 투자 보류, iter_052의 CT 자료·기술 gate 실패도 유지한다. iter_050 담당 전환의 일회성 인계는 후속 반복에서 처리됐으므로 반복하지 않는다. 현재 구현 담당은 Claude다.
+
+MediConfusion은 176쌍의 같은 질문·선택지와 서로 다른 정답을 제공한다. 공식 metadata에서 영상 재사용과 PMC 문서 공유를 확인했다. 고유 영상·문서·연결 성분 수는 출력 전에 정확히 집계한다. 환자 ID는 확인되지 않았으므로 환자 독립성을 주장하지 않는다.
+
+# Strategy Check / 연구 방향 판단
+
+round_01에서 기존 방법 개선, 교정·CT 보완, 자연 영상쌍 진단을 비교했다. 이번에는 그 선택을 유지하며 광범위한 전략 조사를 반복하지 않는다.
+
+중요한 능력은 동일 질문에서도 실제 영상에 따라 답을 바꾸는 능력이다. 기존 grounding에서는 직접 SFT와 모듈형 적응이 큰 차이를 설명했으며, 현재 새 loss의 필요성은 약하다. 새 후보는 실제 답변에서 영상 신호와 선택의 관계를 저비용으로 검사할 수 있다.
+
+같은 `language-conditioned-grounding` track의 누적 이력을 유지한다. iter_040~053의 유효 비교와 준비·실행 실패를 구분하며, 이번 질문이 다른 benchmark라는 이유로 체류 비용을 초기화하지 않는다. 해결된 것은 기존 일부 형식·적응 차이의 설명이다. 남은 질문은 단일 영상의 단순 선택 규칙 이후에도 활용 가능한 판별 신호가 남는가다.
+
+MediConfusion 점수 재현이나 prior 보정의 적용만으로 새 기여를 주장하지 않는다. 가까운 DoubleTake는 외부 reference와 두 평가 영상을 사용하는 단계가 있다. 이번에는 상대 평가 영상 없이 작동하는 조건을 평가하고, pair 정보의 이점은 별도 진단으로 표시한다. 단순 대안이 충분하거나 상대 순서 신호가 약하면 이 후보의 투자를 종료한다.
+
+# Hypothesis
+
+H1: 영상별 A/B margin의 상대 순서는 정답 방향과 일치하지만 단일 영상의 선택 문턱은 두 영상에 같은 답을 내도록 할 수 있다.
+
+경쟁 설명은 선택지 위치 편향, text-only 답변 prior, 생성 형식 오류, 상대 순서 자체의 실패, benchmark 정답 모호성이다. GD·PS·순서 평균·prior 차감은 기존 단순 대조군이다. 상대 순서가 맞아도 내부 표현이 충분하다거나 단일 영상에서 같은 개선을 얻을 수 있다고 결론 내리지 않는다.
+
+# Limitation Evidence / Correct Usage Checks
+
+현재 이 과제의 로컬 observed/validated 한계는 없다. `limitation_ids=[]`, `experiment_role=diagnostic`, `method_stage=none`을 유지한다. 다른 데이터의 validated grounding 한계를 이번 학습 진입 근거로 빌리지 않는다.
+
+MedGemma는 기존 revision `91850547d9f0b2fdd21aa7c5f4f3d1a8a52c243b`, bf16, eval, greedy로 고정한다. 공식 processor의 단일 영상 chat template를 사용한다. 모델·processor revision, package version, template hash, image processor 설정을 보존한다.
+
+원본 영상을 RGB로 처리해 공식 processor에 전달한다. grounding용 square padding, bbox overlay, 임의 crop은 적용하지 않는다. 원본 mode·크기·file/pixel hash를 기록한다. 비표준 mode는 출력 전에 명시적으로 처리·검증하며 조용한 정규화를 하지 않는다. text-only는 텍스트가 동일하고 영상 content만 제거하며 image token·pixel tensor가 없어야 한다.
+
+형식 invalid는 오류로 보존한다. MC가 완벽히 정답을 복사해야 한다는 oracle gate를 만들지 않는다. 기술 gate는 입력·scoring·완료 무결성에 적용하며 내용상 오답은 연구 관찰이다.
+
+# Contribution Path / Baselines / Reuse
+
+가장 가까운 자료·평가는 [MediConfusion](https://github.com/MShahabSepehri/MediConfusion), 추가 입력을 쓰는 가까운 방법은 [DoubleTake](https://arxiv.org/html/2602.02894v1)다. 이번에 DoubleTake의 미실행을 성능 열세로 표현하지 않는다. 외부 bank·caption 기반 retrieval·pair adjudicator가 없는 입력 범위의 진단이다.
+
+후속 방법을 검토하려면 이번 유효 리뷰 외에도 평가 자료와 분리된 학습 자료, 강한 직접 SFT, 동일 비용의 단순 보정, 외부 확인 계획이 필요하다. 새로운 loss·reference bank·encoder 학습은 이번 범위 밖이다.
+
+새 브랜치는 자동 승인 기반을 사용한다. 필요한 여섯 파일은 `reuse_assets`의 실제 SHA에서 반입한다. 현재 작업 파일과 해당 blob의 일치를 확인했다. 사용 범위는 `generate.load_model/build_inputs/build_inputs_text/generate/env_info`, `pg43_run`의 순수 digest·record I/O·부분 행 보존 함수, `queue_lock`의 lock 기능이다. `generate`의 기존 CLI, `load_image`, adapter 경로와 `pg43_run`의 기존 protocol/worker/launcher는 실행하지 않는다. 따라서 해당 미사용 경로의 lazy dependency와 PadChest 설정은 추가 반입하지 않는다.
+
+새 scoring 작업을 처리할 `mc54_*` 모듈에서 기존 저수준 기능을 호출하고, 이번 자료·요청·stage에 맞는 검증을 구현한다. 기존 파일을 전역 monkeypatch하거나 과거 실행기의 의미를 바꾸지 않는다. iter_053의 gate·재개 비용·평가 봉인 문제는 새 실제 실행 경로에서 해결한다.
+
+# Proposed Experiment
+
+## 1. 자료 고정
+
+공식 `data/dataset.json`, `data/image_dict.json`, `configs/prompts/answering.json`, 평가 소스의 revision과 digest를 보존한다. 공식 176 pair ID와 `question/option_A/option_B/im_*_correct`를 사용한다. AI_*로 바꾸지 않는다.
+
+영상 확보는 PMC 원천 archive의 해당 figure member만 안전하게 추출한다. 공식 download.py의 디렉터리 삭제 동작은 사용하지 않는다. 기존 자산을 먼저 검색하고 정확한 출처·hash가 같으면 재사용한다. 외부 다운로드·환경은 results 전용 경로를 사용하며 hf_cache를 수정하지 않는다. 자료의 이용 조건과 원천 연결을 기록한다.
+
+pair→영상→PMC 대응, 중복 key, ID 충돌, 동일 pixel, 공유 문서, 동일 질문·선택지의 반복을 검사한다. 같은 영상·PMC·정확 pixel을 공유하는 pair를 연결하여 dependency component를 만든다. 크기 분포와 최대 component 비중을 보존한다.
+
+caption·정답·AI_*·category·pair 위치·파일명 의미는 모델 입력에 넣지 않는다. 추론 manifest에는 불투명 request ID, 대상 영상, 질문·선택지만 전달한다. pair 연결과 정답은 평가 manifest에만 둔다.
+
+출력 전에 전체 metadata의 명백한 caption–선택지 모순 의심을 기록한다. 이는 임상 재판독이 아니다. 의심 항목을 원 점수에서 조용히 제거하거나 정답을 바꾸지 않는다. 전체 공식 집합과 사전 의심 항목 제외 민감도를 함께 보고한다. 실제 영상을 확인하지 않고 시각 감사 완료로 쓰지 않는다.
+
+## 2. 동작 확인
+
+seed 54의 ID hash 순서로 category를 가능한 한 포함하는 12쌍을 기술 표본으로 정한다. 12쌍은 두 영상·두 순서·text-only·두 scoring 경로 및 실행 재개를 검사하기 위한 표본이며 효과 탐색의 통계 표본이 아니다. 원본 크기가 가장 큰 영상과 답변 token이 가장 긴 항목은 자원 검사에 추가 포함한다.
+
+이 표본에서 원본 영상이 실제 rendering되는지, 공식 processor와 입력 tensor가 일치하는지 확인한다. parser·token 경계·batch·worker 설정만 검증하며 정확도에 따라 prompt나 scoring 규칙을 선택하지 않는다. 같은 조건으로 생성된 기술 표본 출력은 본집계에 재사용하고 독립 test라고 부르지 않는다.
+
+## 3. 고정 비교 조건
+
+MC와 GD의 공통 텍스트는 다음 형식이다.
+
+`Based on the image, choose the correct option for the following question.\nQuestion: {question}\nA: {option_A}\nB: {option_B}\nAnswer with the option's letter from the given choices directly. Your answer should be just one letter.\nAnswer:`
+
+각 pair에서 두 영상 각각에 원래 순서와 교환 순서를 적용한다. 동일 질문의 text-only는 순서별 한 번만 실행하고 두 영상의 독립 관측으로 중복 계산하지 않는다.
+
+- **MC:** 자유 greedy 생성. cap 128→512→2048은 비EOS일 때만 동일 입력으로 재시도한다. 원시 token·EOS·각 attempt를 보존한다. 공식 manual parser 결과와 whole-string A/B parser 결과를 함께 기록한다. whole-string parser는 공백·고정 wrapper·문장부호만 허용하고 설명 속 문자를 찾아 정답으로 만들지 않는다.
+- **GD:** 공통 prompt 다음 A/B의 log probability 차이. 실제 tokenizer에서 두 문자가 단일 token인지 검증한다. 단일 token이 아니면 전체 문자 continuation의 합 log likelihood를 사용하고 공식 GD와의 차이를 명시한다. canonical option_A 기준으로 교환 순서의 부호를 되돌린다.
+- **GD-avg:** 두 canonical margin의 산술평균으로 독립 선택한다.
+- **GD-cal:** 순서별 image margin에서 동일 text-only margin을 계수 1로 뺀 뒤 평균한다. 계수·문턱은 학습하지 않는다.
+- **PS:** 질문만 있는 user turn 다음에 각 원문 option을 assistant continuation으로 넣고, 답변 내용 token의 평균 log likelihood를 비교한다. 질문·template·EOS token은 평균에서 제외한다. PS는 선택지 순서를 prompt에 넣지 않으므로 중복 실행하지 않는다.
+- **PS-cal:** PS의 canonical score 차이에서 동일 질문의 text-only 차이를 계수 1로 뺀다.
+
+MC/GD의 원래·교환 순서, GD-avg, GD-cal, PS, PS-cal이 사전 고정 비교 집합이다. scoring의 정확한 동점은 abstain으로 처리한다. 수치 허용오차 안의 거의 같은 점수는 별도로 표시하고 작은 수치 차이를 강한 판별 신호로 해석하지 않는다.
+
+## 4. 상대 순서 진단
+
+추론 완료 후 평가 코드만 두 영상의 GD-avg margin을 연결한다. 정답 A 영상의 margin이 정답 B 영상보다 높으면 orientation=1, 낮으면 0, 동점이면 0.5로 정의한다. 평균을 O라 한다. 이 값은 두 영상의 점수와 서로 다른 정답이라는 구조를 이용한 진단이다. 무작위 방향의 기준은 0.5이며 독립 무작위 답변의 set accuracy 0.25와 혼동하지 않는다.
+
+PS의 orientation은 보조 분석이다. GD-cal은 pair 공통 text margin을 빼므로 orientation이 GD-avg와 같아야 한다. 이 불변성은 구현 회귀 검사다. 영상 없는 같은 질문의 orientation은 정확히 0.5여야 한다.
+
+## 5. 가능성 탐색과 규모
+
+작은 효과 표본의 결과에 따라 나머지 자료를 선택하지 않는다. 전체 공식 176쌍이 작고 반복 영상으로 독립 표본은 더 작으므로, 기술 검사를 통과하면 고정 조건의 전체 개발 평가를 한 번 수행한다. 학습률·seed·prompt 후보 탐색은 없다.
+
+영상 누락·손상은 대체 pair로 채우지 않는다. 확보된 부분 결과는 보존하되 미확보 pair의 가능한 결과를 포함한 최악/최선 범위를 보고한다. 완전 자료 또는 그 범위에서도 동일한 투자 판단이 유지되는 경우에만 양성 기준을 검토한다. 독립 확인과 학습 확대는 이번에 실행하지 않는다.
+
+# Implementation Tasks for Claude
+
+1. `results/iter_054/`에 source, data, protocol, tests, raw, eval, resource 산출물을 분리한다. 원본 source·영상·이전 결과를 덮어쓰지 않는다.
+2. metadata와 안전한 figure 확보·연결 검사를 구현한다. inference/evaluation manifest를 분리하고 모든 요청을 잠긴 source에서 재구성해 대조한다.
+3. 기존 모델·chat·생성 함수를 재사용하고 GD/PS scoring을 추가한다. token 경계는 실제 chat 문자열과 tokenizer 결과로 검증한다. 공식 PS의 문자열 token 검색·첫 token 제거를 복사하지 않는다.
+4. 동일 입력에서 teacher-forced 계산과 token-by-token autoregressive log probability를 비교한다. 질문에 답변 문자열이 이미 등장하는 fixture, 여러 token 답변, punctuation, A/B 교환, text-only, EOS 제외를 검사한다.
+5. 실제 launch가 필수 자료·기술 근거와 hash를 검증하도록 한다. generic run=true나 completion 존재만으로 진행하지 않는다. 새로운 파일은 protocol 잠금 전에 준비한다.
+6. lock·요청별 claim·worker별 파일을 재사용해 생성과 scoring을 저장한다. worker mapping을 바꾼 실제 중단·재개 및 동일 요청의 중복 방지를 검사한다. 완료 요청도 현재 입력·코드와 대조한다.
+7. raw에서 별도 구현으로 metric·orientation·bootstrap을 재계산한다. raw/code/protocol digest에 연결된 report·verifier·decision을 원자적으로 봉인한다.
+8. 보고서에 실제 자료 수, 고유 영상·문서·component 수, 불완전 자료, 정답 의심, 실제 요청/forward/재시도 수, 비용과 투자 판정을 구분한다.
+
+## GPU 배치·시간·재개
+
+실행 직전 `nvidia-smi`와 상속된 허용 장치를 확인한다. 여유가 큰 GPU부터 사용하고 논리/물리 index와 UUID를 기록한다. 우선 두 GPU에 worker 하나씩 배치한다. 기술 표본에서 GPU당 두 worker 또는 scoring batch 확대 중 유망한 하나를 비교한다. 전체 요청/분, 긴 답변 PS 지연, GPU별 실제 peak, CPU/RAM/I/O, 오류와 출력 정합성을 기록한다.
+
+모델 bf16 8–10GB는 참고값이다. processor가 만든 실제 image token과 PS full-sequence logits 메모리를 포함해 측정한다. 같은 GPU의 모든 worker peak와 다른 프로세스 점유에 worker당 2GB 여유를 더해 용량 이내일 때만 증설한다. scoring logits는 필요한 위치를 중심으로 저장하고 전체 vocabulary tensor를 결과에 기록하지 않는다.
+
+최대 기본 작업량은 MC 1,056건, GD 1,056건, PS 후보 forward 1,056건이다. MC 첫 단계 logits 재사용은 별도 forward와 일치 검증 후에만 허용한다. 조건별 성능을 보기 전에 실행 구성을 확정한다.
+
+iter_053의 448건/437초를 MC에 단순 적용하면 약17분이다. 이는 영상 크기·출력 길이가 다른 참고 환산이다. 본실행 전 실제 MC/GD/PS 처리량으로 `남은 작업량/측정 처리량 + loading`을 계산하고 자료 확보·검증 비용을 별도 기록한다. 이 수치를 timeout으로 사용하지 않는다.
+
+각 요청의 완료를 저장하고 launch attempt별 시작·loading·종료·GPU 구간을 append한다. generation 구간 합집합과 loading 포함 점유 구간은 동일 attempt 범위에서 비교한다. 비정상 종료의 관측 비용은 하한으로 표시한다. OOM은 batch/worker를 낮춰 재개하며 과학적 조건을 바꾸지 않는다.
+
+# Evaluation (성공/실패 기준 포함)
+
+## 지표와 불확실성
+
+각 고정 baseline의 individual accuracy, set accuracy S, invalid/abstention, image coverage, valid-pair coverage, 전체 pair 분모 same-answer 비율, 공식 valid-pair 조건부 confusion을 보고한다. invalid는 전체 정확도의 오답이다. accuracy와 비용은 함께 보고하되 단회 비용으로 CI를 만들지 않는다.
+
+일차 진단은 GD-avg orientation O와 `G = O − max_b S_b`다. max는 사전 고정한 전체 baseline 집합에 대해 계산한다. 선택된 최고 baseline을 독립 검증된 방법이라고 부르지 않는다. bootstrap마다 max를 다시 계산하여 선택을 반영한다. pair 재사용으로 인한 의존성은 공유 영상·PMC·pixel의 연결 성분 단위 bootstrap 10,000회, seed 54로 반영한다. pair 가중 평균을 유지한다.
+
+component 수·최대 비중과 leave-one-component-out 결과를 함께 제시한다. component가 20개 미만이거나 하나가 pair의 20%를 넘으면 bootstrap CI는 탐색적 보조로만 제시하고 이를 근거로 방법 투자 양성을 선언하지 않는다. 이는 실행 gate가 아니라 추론 범위 제한이다. 전체 176개가 독립이라는 이상적 경우에도 단일 비율의 최악 표준오차는 약3.8 pp이며, 실제 의존성은 정밀도를 더 낮출 수 있다.
+
+## 양성: 다음 최소 방법 시험의 검토 가치
+
+다음 조건을 모두 요구한다.
+
+- 기술·자료·평가 무결성이 유효하다.
+- O≥0.70이고 cluster 95% CI 하한이 0.50보다 크다.
+- G≥0.15이고 cluster 95% CI 하한이 0.05보다 크다.
+- GD-avg의 individual accuracy가 같은 text-only 순서 평균보다 최소5 pp 높고 차이의 CI 하한이 0보다 크다.
+- 사전 정답 의심 항목 제외와 leave-one-component-out에서 효과 방향이 유지되며, 위 component 추론 제한에 걸리지 않는다.
+
+15 pp의 격차는 176쌍에서 약26쌍 규모다. 좁은 점수 변화가 아니라 새로운 학습 투자를 검토할 만큼 큰 잔여 기회를 요구하는 탐색 기준이며 임상 성능 기준은 아니다. 양성이어도 pair 정보 없이 같은 개선을 얻는 방법은 아직 없다. 다음 리뷰는 별도 학습 자료와 직접 SFT를 대조하는 최소 방법 설계의 가치만 판단한다.
+
+## 단순 대안으로 설명되는 결과
+
+어떤 고정 단일 영상 baseline이 원래 순서 MC보다 set accuracy를 10 pp 이상 개선하고 paired 차이의 CI 하한이 0보다 크며, O와의 잔여 차이 점추정이 5 pp 이내이면 단순 대안이 이번 격차를 상당 부분 설명한다고 기록한다. 이 효과는 약18쌍 규모에 해당한다. 새 보정 방법의 투자를 종료하고 baseline을 보존한다. 다른 임상 과제의 충분성을 주장하지 않는다.
+
+## 음성·불확정·실행 실패
+
+O의 CI 상한이 0.70 미만이거나 G의 CI 상한이 0.15 미만이면 현재 큰 상대 신호–선택 격차 가설에 필요한 근거가 부족하다고 판단하고 해당 보정 후보를 보류한다. 낮은 scoring 점수는 encoder 병목의 증명이 아니다.
+
+나머지는 불확정이다. 전체 자료를 이미 사용했으므로 prompt·seed·pair 추가로 자동 연장하지 않는다. 정답 모호성이나 component 의존성이 남아도 별도 자료 감사 반복을 자동 발주하지 않는다. 새 외부 근거가 생길 때만 별도 계획으로 재개한다.
+
+scoring alignment·입력·자료 대응·완료 연결 오류가 있으면 실행 실패로 구분한다. 명확한 구현 오류의 영향을 받는 요청만 고쳐 재측정하며 기존 출력과 수정 전 코드를 보존한다. 통계 결과를 보고 문턱이나 표본을 바꾸지 않는다.
+
+# Risks / Checks
+
+- benchmark label은 독립 임상 gold가 아니다. 낮은 점수를 일반 의료 판독 결함으로 확대하지 않는다.
+- 반복 영상·문서와 공개 자료의 사전학습 노출을 통제했다고 주장하지 않는다. ROCO의 원 train/test 이름은 이번 독립 분할을 의미하지 않는다.
+- 전체 집합은 개발용이다. 기술 표본을 포함한 결과를 독립 확인이라고 부르지 않는다.
+- pair ranking은 두 평가 입력의 점수를 사용한다. 이를 단일 영상 정확도 개선이나 실용 비용 우위로 보고하지 않는다.
+- prefix 점수는 답변 길이 정규화와 template에 민감하다. 평균·합 log likelihood를 모두 저장하되 합 점수는 보조 분석이며 결과에 따라 주지표를 교체하지 않는다.
+- parser가 모호한 설명에서 A/B를 추출해 가짜 개선을 만들지 않도록 공식 parser와 엄격 parser의 차이를 보고한다.
+- scoring 수치 차이와 batch 차이는 실제 token 정합성·독립 계산으로 검증한다. threshold 근처 항목은 수치 민감도를 표시한다.
+
+## 대규모 GPU 필요 후보
+
+다양한 modality의 판별 영상–질문 자료로 visual encoder·projector·decoder를 공동 적응하는 방향은 장기 후보로 보존한다. 현재 encoder 원인이나 공동 적응 필요성은 확인되지 않았다. 이번 단일 영상 진단과 강한 단순 대안의 결과가 먼저다.
+
+# 계획의 근거 (GPT 조사 노트)
+
+# 새로 확인한 것
+
+`agent/runs/iter_054/think/round_01.json` 원문을 읽고 남은 네 질문에 집중했다. GOAL·GPT_USAGE_POLICY·LIMITATIONS 관련 내용과 iter_053 원본 리뷰를 대조했다. 기존 전략 보류를 바꿀 근거는 발견하지 않았다.
+
+## 1. 자료 구조와 분석 단위
+
+공식 `dataset.json`에는 `im_1/im_2`, local ID, question, option_A/B, 정답, caption, category, AI_* 필드가 있다. 공식 evaluator는 AI_*가 아닌 question/option_A/B를 사용한다. 같은 ROCO 영상이 여러 pair에 반복되는 것을 실제 항목에서 확인했다. 따라서 176쌍·352항목을 352개 독립 영상 또는 환자로 부르면 안 된다. `image_dict.json`은 ROCO 경로를 local ID·PMC archive·figure member에 연결하며 동일 PMC의 여러 figure도 존재한다. 전체 고유 영상 수와 연결 성분 수는 이번 조회에서 정확히 집계하지 않았고 구현의 출력 전 manifest 검사로 확정한다. [공식 metadata](https://raw.githubusercontent.com/MShahabSepehri/MediConfusion/main/data/dataset.json), [영상 출처 대응](https://raw.githubusercontent.com/MShahabSepehri/MediConfusion/main/data/image_dict.json)
+
+metadata에는 caption과 질문·선택지의 대응이 명확하지 않은 항목도 보인다. 예를 들어 10022는 caption의 병변 소실 서술과 선택지의 enhancing lesion 사이에 해석 문제가 있다. 이를 영상 정답 오류로 확정하지 않는다. 원 정답은 유지하고 출력 전 의심 항목을 기록하며 민감도 분석으로 분리한다. 이번 자료를 독립 임상 gold로 취급하지 않는다.
+
+공식 다운로드 스크립트는 save_path가 존재하면 삭제한다. 그대로 실행하지 않고 PMC 원천 자산을 새 결과 경로에 안전하게 확보해야 한다. shell의 읽기 전용 원격 조회는 DNS 오류였지만 web 조회로 metadata와 소스 원문을 확인했다. 실제 영상 다운로드 성공 여부는 아직 미검증이다. [다운로드 원문](https://raw.githubusercontent.com/MShahabSepehri/MediConfusion/main/scripts/download.py)
+
+## 2. 공식 scoring의 의미
+
+공식 MC는 생성 답변의 문자를 parser로 읽는다. GD는 마지막 위치의 A/B 점수를 비교한다. 확인한 LLaVA PS 구현은 답변 token 확률의 기하평균을 비교한다. MedGemma에는 모델별 template와 token 경계 검증이 필요하며 기존 구현의 token slicing을 복사하면 안 된다. 이번 PS는 같은 수학적 점수를 평균 log likelihood로 계산하는 MedGemma 이식이다. [모델별 scoring](https://raw.githubusercontent.com/MShahabSepehri/MediConfusion/main/Models/llava.py)
+
+공식 confusion은 둘 다 valid인 pair를 분모로 사용한다. invalid 증가가 confusion 감소로 보이지 않도록 전체 pair 분모의 same-answer 비율, valid-pair 조건부 confusion, coverage를 함께 보고한다. MC와 GD의 prompt를 같게 맞춘 비교는 공식 leaderboard의 완전한 재현이 아니라 통제된 이식으로 명시한다. [공식 evaluator](https://raw.githubusercontent.com/MShahabSepehri/MediConfusion/main/utils/answering.py), [공식 prompts](https://raw.githubusercontent.com/MShahabSepehri/MediConfusion/main/configs/prompts/answering.json)
+
+## 3. DoubleTake와의 경계
+
+DoubleTake의 pair adjudicator는 두 평가 영상과 각 evidence를 함께 받고, 서로 다른 답을 강제하지는 않는다. 따라서 선행을 강제 정답 배정 규칙이라고 설명하면 부정확하다. 그러나 단일 영상 조건보다 많은 정보를 받는다는 차이는 남는다. 이번에는 retrieval bank나 DoubleTake 전체를 재현하지 않으며 우월성을 주장하지 않는다. 단일 영상의 단순 scoring 이후에도 문제가 남는지 먼저 판단한다. [DoubleTake §3.3](https://arxiv.org/html/2602.02894v1)
+
+## 4. 실행과 재사용 판단
+
+현재 HEAD는 `7217b7045f48f95d8dc9b750544634e1c28d4f5c`이며 clean status다. 선택한 여섯 파일의 blob과 현재 파일을 byte 비교해 일치 확인했다. `generate.load_image`는 square padding을 수행하므로 이번에는 호출하지 않는다. 모델 로딩·chat 구성과 검증 가능한 파일/lock 함수만 사용한다. 공식 MedGemma 사용 예제의 단일 영상 chat 구조를 기준으로 새 입력 경로를 대조한다. [MedGemma 공식 카드](https://huggingface.co/google/medgemma-1.5-4b-it)
+
+iter_053의 재개 비용·gate 연결·평가 봉인 결함은 실제 선택한 실행 경로에서만 해결한다. 교정 parser나 E/F 평가기를 정비하지 않는다. 새 소스·결과는 이번 반복 경로에 저장하며 과거 결과를 수정하지 않는다.
+
+# 결론
+
+고정 benchmark를 개발용으로 한 번 평가하는 diagnostic을 실행한다. 낮은 set accuracy를 확인하는 데 그치지 않고, 단순 baseline 이후의 상대 순서 신호와 실제 선택 간 격차를 판정한다. 전체 자료의 반복 의존성이나 정답 불확실성이 결정을 막으면 후보를 보류한다. 새 학습·자료 확대·추가 사고 라운드는 이번에 승인하지 않는다.
+
+이전 사고 라운드 노트: agent/runs/iter_054/think/
+
+
+
+## iter_054 CLAUDE IMPLEMENTATION REPORT — 2026-10-03 09:10:34
+
+# 요약
+
+- **핵심 결과:** MediConfusion 175쌍(공식 176쌍 중 1쌍 영상 미확보)에서 MedGemma 1.5의 단일 영상 MC·GD·PS를 모두 실행했고(3,150건), 사전 고정 판정은 **indeterminate**(불확정)입니다. 영상별 GD margin의 상대 순서 O는 0.617(95% CI [0.545, 0.716])로 기준 0.70에 못 미칩니다.
+- **근거:**
+  - 가장 좋은 단일 영상 baseline은 GD-cal이고 set accuracy가 0.166입니다.
+  - 원래 순서 MC는 0.034입니다. 형식 오류가 큽니다(strict parser 기준 invalid 53%).
+  - G=O−max S=0.451(CI [0.383, 0.535])로 G 기준은 충족했습니다. 다만 모든 baseline S가 낮아서 생긴 값이고, O가 기준 미달이라 양성은 아닙니다.
+  - GD-avg의 개별 정확도는 text-only보다 0.0486 높습니다(CI [0.020, 0.083]). 사전 기준 0.05에 0.0014 못 미칩니다.
+  - 단순 대안이 격차를 설명한다는 조건(ΔS≥0.10, CI 하한>0, O와의 차이≤0.05)은 어느 baseline도 충족하지 못했습니다.
+- **미검증·주의:** 공식 176쌍 전체가 아니고, 개발 자료이며, 단일 seed입니다. 영상 확보 경로가 공식 다운로드와 다르고, 일부 검사는 기준 직전 수치로 통과했습니다(Problems 참조).
+- **다음:** 사전 규칙상 자동 연장 없이 단일 영상 보정 후보를 보류합니다. 새 학습·prompt 탐색은 하지 않았습니다.
+
+# Work Performed
+
+1. **공식 자료 고정:** MediConfusion revision `70544ddd2da23fdb2403587e46e2d287ae2fb27b`의 `dataset.json`, `image_dict.json`, prompts, 평가 소스를 `results/iter_054/source/`에 sha256과 함께 저장했습니다.
+2. **영상 확보:**
+   - 공식 `download.py`가 쓰는 NCBI `oa_package` 경로는 2026-10 현재 404였습니다. 그래서 PMC OA AWS 공개 버킷(`pmc-oa-opendata`)에서 `image_dict`의 figure 파일만 받았습니다. 이때 ETag/MD5와 크기를 검증했고, 디렉터리 삭제 동작은 쓰지 않았습니다.
+   - 228개 중 227개를 확보했습니다.
+   - 영상 20115(PMC3094658, pair 10137)는 서로 다른 두 버전(`.1`/`.2`)이 있어 선택 근거가 없습니다. 대체 pair 없이 미확보로 두고, 결과는 최악/최선 범위로 보고했습니다.
+3. **자료 정리 결과:**
+   - 고유 영상 227장, 고유 PMC 219개, 동일 pixel 중복 0.
+   - 가용 175쌍의 연결 성분(공유 영상/PMC/pixel) 57개, 최대 성분 비중 14.9%. 사전 기준(성분 ≥20, 최대 비중 ≤20%)을 충족해 추론 제한에 걸리지 않았습니다.
+   - 영상 mode는 L 130·RGB 97이며, L은 3채널 복제로만 처리했습니다. 영상 2장(20186 최대 크기, 20004)은 직접 열어 정상 표시를 확인했습니다.
+4. **요청 구성:** `mc54_requests.py`로 18건/쌍, 총 3,150건을 만들었습니다(MC 1,050 / GD 1,050 / PS 1,050, text-only 600건 포함). 추론 행에는 pair ID·정답·caption·category가 없습니다. prompt에 caption 문장이 들어간 행은 0건입니다.
+5. **구현:**
+   - `mc54_run.py`: MC 생성(cap 128→512→2048), GD(A/B logit 차이), PS(답변 token 평균 log likelihood). 영상은 padding 없이 RGB로 공식 processor에 직접 전달했습니다.
+   - logits는 마지막 hidden state에서 fp32 lm_head로 계산합니다. bf16 logits는 0.125 간격으로 양자화되어 A/B margin에 가짜 동점이 생기기 때문입니다. native bf16 margin도 함께 저장했습니다.
+   - protocol 잠금, 요청별 claim, worker별 파일, 부분 행 보존, attempt 이벤트 로그, launch gate를 구현했습니다.
+6. **평가:** 평가 코드·manifest·completion digest를 결과 확인 전에 잠갔습니다(`eval_lock.json`). 이어서 `mc54_eval.py`, 독립 verifier `mc54_verify.py`, 사전 규칙 `mc54_decide.py`, 최종 봉인 `mc54_seal.py` 순서로 실행했습니다.
+
+# Files Changed
+
+신규 코드(모두 `research/` 아래, 기존 파일 수정 없음):
+
+- `mc54_fetch_source.py`, `mc54_fetch_images.py`, `mc54_build.py`
+- `mc54_spec.py`, `mc54_requests.py`, `mc54_run.py`, `mc54_gate.py`
+- `mc54_test_model.py`, `mc54_test_runtime.py`, `mc54_tech_runs.py`, `mc54_throughput_summary.py`, `mc54_reuse_check.py`
+- `mc54_eval.py`, `mc54_verify.py`, `mc54_decide.py`, `mc54_make_eval_lock.py`, `mc54_seal.py`
+
+반입된 6개 파일(`pg43_run.py`, `rsna_diag/{__init__,generate,geometry,prompts,queue_lock}.py`)은 수정하지 않았습니다.
+
+결과 경로는 모두 `results/iter_054/` 아래입니다.
+
+- `source/`, `data/`: 자료와 요청
+- `protocol/`: protocol과 gate
+- `tests/`: 검사 결과
+- `raw/`: 원시 출력
+- `eval/`: 평가·verifier·판정·봉인
+
+# Commands / Experiments
+
+| 단계 | 결과 |
+|---|---|
+| source 다운로드 | 성공 (8개 파일) |
+| 영상 다운로드 | 227/228 성공, 1건 미확보(두 버전 모호) |
+| `mc54_build.py` | 성공 (요청 3,150건, 기술 표본 252건) |
+| `mc54_test_model.py` v1~v3 | 3회 FAIL, 모두 검사 코드 오류 (아래 참조) |
+| `mc54_test_model.py` v4 | 9/9 PASS |
+| 기술 단계 실행 `ref_w2` | 252건 완료, 100.7초 |
+| 기술 단계 실행 `cmp_w4` | 252건 완료, 70.5초 |
+| 기술 단계 실행 `resume` | SIGKILL 후 재개 완료 |
+| `mc54_test_runtime.py` v1 | 1건 FAIL (검사의 예상 분기 오류) |
+| `mc54_test_runtime.py` v2 | 30/30 PASS |
+| 기술 gate 생성 → main protocol → main 실행 | 3,150건 완료, 755초, 종료 코드 모두 0 |
+| `mc54_eval.py`, `mc54_verify.py`, `mc54_decide.py`, `mc54_seal.py` | 모두 성공, verifier 8/8 PASS |
+
+- **test_model v1~v3의 실패 원인:**
+  - v1: 직접 processor 호출에서 `add_special_tokens=False`를 빠뜨려 BOS가 이중으로 붙었습니다. 4번 fixture의 구분자도 잘못되어 있었습니다.
+  - v2: `torch` import 누락.
+  - v3: 모델 검사 자체는 통과했습니다. 이후 parser 보정을 반영해 v4로 다시 실행했습니다.
+- **test_runtime v1:** alien request ID 검사가 완료 검증에서는 집합 불일치로 먼저 거부되는데, 예상 분기를 "unexpected record"로 잘못 적었습니다. v2에서는 두 분기를 모두 검사했습니다.
+- v1 결과 파일(`runtime_checks.json`, `model_checks_v1~v3.json`)은 삭제하지 않고 보존했습니다.
+- **기술 단계 worker 비교:** 같은 252건에서 2 worker는 100.7초, 4 worker(GPU당 2개)는 70.5초(214 req/min)였고 출력은 완전히 일치했습니다. 본실행은 4 worker(GPU 0·1에 각 2개)로 했습니다. batch>1은 시험하지 않았습니다.
+- **재개 시험:** SIGKILL은 60 record 시점에 가했습니다. 이어서 개행 없는 부분 행(45바이트)을 주입하고 worker 수를 2→3으로 바꿔 재개했습니다. 부분 행은 `.partial.*.bin`으로 보존됐고(sha 일치), 중복 record는 0이며, 기준 실행과 출력이 모두 일치했습니다.
+- **메모리:** 샘플링한 GPU 사용량 최대는 2 worker일 때 약 9.2GB, GPU당 2 worker일 때 18.3GB입니다. torch reserved 최대는 8.58GB입니다.
+
+# Results
+
+**전체 완료·비용** (`raw/main/completion.json`)
+
+- 3,150/3,150건, MC 재시도 2건, 비EOS 최종 출력 0건.
+- 본 attempt wall 755초.
+- device-seconds: 이 디렉터리만 loading 포함 1,504초 / generation 1,367초. 기술 단계 부모 포함 모든 attempt 합산은 1,691초 / 1,527초.
+- 요청당 평균 wall: MC 1.75초, GD 0.25초, PS 0.25초.
+
+**시스템별 지표** (strict parser, 175쌍, `eval/report.json`)
+
+| 시스템 | set acc S | 개별 acc | invalid/abstain | 전체 pair 분모 same-answer |
+|---|---|---|---|---|
+| MC 원래 순서 | 0.034 | 0.271 | 0.531 | 0.320 |
+| MC 교환 | 0.011 | 0.263 | 0.549 | 0.303 |
+| GD 원래 순서 | 0.120 | 0.546 | 0 | 0.851 |
+| GD 교환 | 0.097 | 0.517 | 0 | 0.840 |
+| GD-avg | 0.137 | 0.549 | 0 | 0.823 |
+| GD-cal | 0.166 | 0.540 | 0 | 0.749 |
+| PS | 0.063 | 0.520 | 0 | 0.914 |
+| PS-cal | 0.063 | 0.517 | 0 | 0.909 |
+
+- **MC 형식:** 공식 manual parser를 쓰면 MC 원래 순서의 S는 0.091이고 invalid는 0.166입니다.
+  - strict 판정이 다른 응답은 1,050건 중 280건입니다.
+  - 영상 MC 700건 중 378건은 한 글자 대신 설명문을 냈습니다. 그 가운데 268건은 공식 parser가 설명문 속 문자에서 답을 뽑았습니다. 이는 내용 오류가 아니라 형식·parser 효과입니다.
+- **text-only:** 영상 없이 같은 질문만 주면 GD·PS는 개별 정확도 0.50(두 영상에 같은 답)이고, 모든 쌍에서 same-answer입니다.
+- **정확한 동점:** 없었습니다. 0.125 이내의 near-tie 슬롯은 GD-avg 7개, GD-cal 10개, PS 19개, PS-cal 25개입니다.
+
+**사전 고정 진단과 판정** (95% CI = 연결 성분 cluster bootstrap 10,000회, seed 54, 단위 57개)
+
+| 항목 | 점추정 | 95% CI | 판정 기준 대비 |
+|---|---|---|---|
+| O (GD-avg 상대 순서) | 0.617 | [0.545, 0.716] | 기준 0.70 미달 |
+| G = O − max S | 0.451 | [0.383, 0.535] | 충족 |
+| GD-avg 개별 acc − text-only | 0.0486 | [0.020, 0.083] | 기준 0.05 미달 |
+| ΔS GD-cal vs MC 원래 | 0.131 | [0.084, 0.188] | 단순 대안 조건 미충족 |
+
+- GD-cal의 O−S는 0.451이라 단순 대안 조건 "O와의 차이 ≤0.05"를 만족하지 못했습니다.
+- 보조 O: PS 0.571, text-only 0.5(정확히 0.5로 회귀 검사 통과). GD-cal과 GD-avg의 O가 쌍마다 같은 구현 회귀 검사도 통과했습니다.
+- 민감도: 사전 의심 3쌍을 제외해도 방향은 유지됩니다(O 0.616, G 0.448). leave-one-component-out에서는 O 최소 0.610, G 최소 0.441입니다. 미확보 1쌍을 최악/최선으로 채우면 O ∈ [0.614, 0.619], G ∈ [0.443, 0.455]입니다.
+- **최종 판정:** `indeterminate`, 행동은 `hold_no_automatic_extension`입니다. O의 CI 상한이 0.716으로 0.70을 넘기 때문에 negative도 아닙니다.
+- 결과 파일: `eval/report.json`, `eval/per_pair.json`, `eval/verify.json`, `eval/decision.json`, `eval/final_seal.json`
+
+# Goal Progress / Reused Assets
+
+**목표 진전**
+
+- 영상별 상대 점수에는 판별 신호가 일부 있지만(O 0.617), 사전 설정한 큰 신호(≥0.70)는 확인되지 않았습니다.
+- MC가 낮은 가장 큰 이유는 형식·parser입니다. 같은 모델에서 GD로 바꾸면 invalid가 0이 되고 set accuracy가 0.034에서 0.12~0.17로 올라갑니다.
+- 단일 영상 선택은 대부분 한쪽 문자로 쏠립니다. GD-avg의 same-answer 비율이 0.823이므로, 쏠림이 남아 있다는 것은 관찰되었습니다.
+- 위 수치는 이 benchmark·이 prompt·한 모델 범위의 관찰입니다. 시각 encoder 병목이나 일반 의료 판독 결함의 증거가 아닙니다.
+- 아직 하지 않은 것: 독립 확인, 다른 모델·prompt·seed, 학습 기반 비교(직접 SFT 등), DoubleTake류의 추가 입력 조건, 내부 원인 분석.
+
+**재사용 출처 (reuse_manifest `required_checks` 대조)**
+
+- **blob·의존성·import:** 반입 6개 파일의 worktree blob이 manifest와 모두 일치합니다. import도 성공했고, AST 검사에서 승인 범위 밖 함수 호출은 0건입니다(`tests/reuse_check.json`). 구체적으로 `G.load_model/build_inputs/build_inputs_text/generate/env_info/static_env`와 `pg43_run`의 순수 helper만 썼고, `load_image`(padding)·`load_adapter`·기존 CLI·launcher는 호출하지 않았습니다.
+- **공식 processor tensor 대조:** 영상 7건(최대 크기 영상 포함)은 `input_ids`·`pixel_values`·`token_type_ids`가 직접 processor 호출과 일치하고 image token이 256개입니다. 이 호출에는 `add_special_tokens=False`를 썼습니다. text-only 3건에는 image token과 pixel tensor가 없습니다(`tests/model_checks_v4.json`).
+- **scoring 독립 대조:**
+  - PS의 답변 token 경계는 1,050개 PS 행 전부에서 일치했습니다.
+  - fp32 head 기준 token-by-token 독립 계산과 구현의 최대 평균 차이는 0.0185 nats이고, native bf16 대비는 0.15 nats 이내입니다.
+  - 질문에 답변 문자열이 이미 등장하는 fixture에서도 실제 답변 위치가 맞았습니다.
+  - GD의 마지막 위치 logit은 전체 forward와 일치합니다.
+- **launch gate·재개·변조 거부:** 변조 사례 30개 검사가 모두 의도한 분기에서 거부됐습니다. 완료된 out-dir 재실행도 거부됐습니다. main 단계 protocol은 gate 없음/`run=false`/증거 hash 변경/증거 `all_pass=false`를 모두 거부합니다.
+- **비용 집계:** 모든 launch attempt를 같은 범위로 집계했습니다. 강제 종료된 프로세스는 하한으로 표시하며, 재개 시험에서 2건이 하한으로 집계됐습니다.
+- **최종 연결:** raw–report–verifier–decision은 `final_seal.json`에 digest로 봉인했습니다. verifier는 독립 구현으로 점추정, 10,000회 bootstrap CI(최대 차이 5.6e-17), record digest를 재계산해 일치했습니다.
+
+# Problems
+
+**현재 결론을 무효화하는 것:** 발견하지 못했습니다.
+
+**재사용 전 수정 필요**
+
+- 영상 출처가 공식 download.py가 쓰는 원본 tar.gz와 다릅니다. PMC OA 버킷의 현재 파일이며, 원 ROCO 2018 추출본과 byte 동일한지는 확인하지 못했습니다. 또 1장은 두 버전 중 선택 근거가 없어 pair 10137을 제외했습니다.
+- 사전 의심 선별은 어휘 규칙입니다. 3쌍만 표시됐으며 임상 재판독이나 영상 기반 감사가 아닙니다.
+- 기술 검사의 일부 수치가 허용 기준 가까이에 있습니다. PS 독립 계산의 평균 차이는 0.0185로, 기준 0.02 직전입니다. 이는 bf16 수치 잡음 수준입니다.
+- batch>1과 MC 첫 단계 logits 재사용은 시험하지 않았습니다.
+- `mc54_*.py` 일부는 protocol 잠금 코드(`CODE_FILES`)에 포함되고 일부는 평가 잠금에만 포함됩니다. 재사용하려면 이 구분을 정리해야 합니다.
+
+**추후 개선**
+
+- 기존 `rsna_diag/queue_lock` 계열의 일반 한계(과거 리뷰 지적)는 이번 범위에서 다루지 않았습니다.
+- 영상 확보 경로를 원본 ROCO 기준으로 교차 확인하는 작업은 하지 않았습니다.
+
+# Recommendation to GPT
+
+- **리뷰할 점:** 판정이 O 기준 미달과 ACC 기준 0.0014 미달에 걸려 있습니다. 문턱은 사후 변경하지 않았습니다. MC의 낮은 성능은 형식 문제가 지배적입니다. 단순 baseline(GD-cal)이 MC를 크게 개선했지만, GD-cal의 same-answer 비율 0.749가 남는 쏠림으로 관찰됩니다.
+- **권고:** 사전 규칙대로 단일 영상 보정 후보를 보류합니다. 자동 연장(prompt·seed·pair 추가)은 하지 않습니다. 이어서 조사한다면 별도 계획으로 "pair 정보 없이 쏠림을 줄이는 효과가 직접 SFT 대비 실제로 남는가"를 먼저 판단하는 쪽이 정보 가치가 큽니다.
+- **연구 기여:** 새 기여는 주장하지 않습니다. 이번 비교로 확인된 사실은 baseline 수치와 쏠림 관찰까지입니다.
+
+SELF_CHECK: PASS
+SUMMARY: MediConfusion 175쌍에서 MedGemma 1.5의 MC·GD·PS 3,150건을 실행해 사전 판정 indeterminate를 얻었다. GD margin 상대 순서 O=0.617(95% CI [0.545, 0.716])로 기준 0.70에 못 미치고, 최고 단일 영상 baseline GD-cal은 set accuracy 0.166이다. 영상 1장은 미확보, 출처는 공식 다운로드와 다르다.
+
+# [orchestrator] 권한 거부된 도구 호출
+- Bash: curl -q --fail --silent --show-error --location --proto =https --proto-redir =https -- https://raw.githubusercontent.com/MShahabSepehri/MediConfusion/main/configs/prompts/answering.json
+- Bash: CUDA_VISIBLE_DEVICES=0 python mc54_test_model.py results/iter_054/tests/model_checks_v1.json 2>&1 | tail -30
+- Bash: grep -n "final_logit_softcapping\|logits_to_keep\|self.lm_head\|def forward\|class Gemma3ForConditionalGeneration" /home/test/.conda/envs/medgemma/lib/python3.11/site-packages/transformers/models/gemma3/modeling_gemma3.py | tail -30
+- Bash: grep -n -e final_logit_softcapping -e logits_to_keep -e "self.lm_head" /home/test/.conda/envs/medgemma/lib/python3.11/site-packages/transformers/models/gemma3/modeling_gemma3.py
+- Bash: python - <<'EOF'
+import json,glob,os
+import mc54_run as RUN
+out={}
+for name,d in (("ref_w2","results/iter_054/raw/tech_ref_w2"),("cmp_w4","results/iter_054/raw/tech_cmp_w4"),("resume","results/iter_054/raw/tech_resume")):
+    comp=json.load(open(d+"/completion.json"))
+    peak={}
+    for l in open(d+"/resource_log.jsonl"):
+        for g in json.loads(l)["gpu"]:
+            i,u,_=g.split(",");peak[i.strip()]=max(peak.get(i.strip(),0),int(u))
+    errs=[f for f in glob.glob(d+"/worker*.stderr") if "Error" in open(f).read() or "Traceback" in open(f).read()]
+    c=comp["cost_this_dir_only"]
+    out[name]={"workers":comp["workers"],"wall_s_launcher":comp["wall_s_this_attempt"],"n":comp["n_unique"],
+      "device_s_incl_loading_union":c["device_seconds_incl_loading_union"],"device_s_generate_union":c["device_seconds_generate_union"],
+      "requests_per_min_launcher_wall":comp["n_unique"]/comp["wall_s_this_attempt"]*60,
+      "peak_gpu_mem_used_mib_nvidia_smi_sampled":peak,"peak_mem_reserved_gb_max_torch":comp["peak_mem_reserved_gb_max"],
+      "stderr_files_with_error":errs,"mean_wall_s_by_kind":comp["by_kind_mean_wall_s"]}
+out["note"]="resume wall is only the 3-worker resume attempt (192 remaining requests)"
+out["decision"]={"main_workers":4,"gpus":"0,1","per_gpu_workers":2,"reason":"4 workers (2/GPU) finished the same 252 tech requests in less wall time than 2 workers with identical outputs; sampled peak GPU memory leaves >2GB per worker. Batch>1 not tested (padding/variable image count; not needed)."}
+# peak check: per-GPU sampled peak + 2GB*workers/gpu within 24576
+ok=all(max(v["peak_gpu_mem_used_mib_nvidia_smi_sampled"].values())+0<24576-2048 for k,v in out.items() if k in("ref_w2","cmp_w4","resume"))
+out["all_pass"]=bool(ok and not any(v["stderr_files_with_error"] for k,v in out.items() if isinstance(v,dict) and "stderr_files_with_error" in v) and out["cmp_w4"]["wall_s_launcher"]<out["ref_w2"]["wall_s_launcher"])
+json.dump(out,open("results/iter_054/tests/worker_throughput.json","x"),indent=1)
+print(json.dumps(out,indent=1))
+EOF
+
+
+
+## iter_054 GPT REVIEW [CONTINUE] — 2026-10-03 09:16:36
+
+# 요약
+
+- **판정:** 유효한 실험이며 `inconclusive`다. 현재 단일 영상 보정 후보의 투자는 보류한다.
+- **핵심 근거:** 175쌍·3150개 고유 record를 확인했다. O=0.6171 [0.5447, 0.7157], 최고 단일 영상 S=0.1657이다.
+- **의미·한계:** 일부 영상 판별 신호는 있지만 사전 방법 투자 기준을 충족하지 못했다. 상대 영상 정보를 이용한 진단 격차를 실용적 개선 여지로 동일시할 수 없다.
+- **다음:** 같은 자료의 자동 연장을 중단하고 다음 투자 하나를 선택한다. 코드 전체 재사용은 gate·판정 방어 보완 전까지 승인하지 않는다.
+
+# Assessment
+
+원 계획의 진단 비교는 실제 완료됐다. `engineer_backend.json`과 `claude_meta.json`은 Claude Sonnet/medium 실행을 기록한다. 사용자 지정 복귀 시각 이후 시작한 반복이므로 담당 전환 지시와 충돌하지 않는다. iter_050의 무효 영상 감사를 이번 근거로 승계하지 않았다.
+
+리뷰 대상은 `1d26362742c2c50216c9adfd55293592a2799568`이다. changes.patch와 변경 소스를 확인했고 대상 23개 파일의 commit 내용이 작업 파일과 일치했다. unpreserved_paths는 없다. 커밋 보존과 재사용 승인은 구분한다.
+
+# Key Findings
+
+`raw/tech_ref_w2`와 `raw/main`을 합쳐 3150개 고유 record를 확인했다. MC/GD/PS는 각각 1050건이다. 보고서의 text-only 600건은 잘못된 요약이며 실제 요청은 1050건이다.
+
+원시 GD·PS 점수에서 canonical 순서 변환과 prior 차감을 별도 계산했다. GD_orig/GD_swap/GD_avg/GD_cal/PS/PS-cal의 S는 각각 0.1200/0.0971/0.1371/0.1657/0.0629/0.0629로 일치했다. MC도 별도 whole-string 정규식으로 원래 순서 6/175, 교환 순서 2/175의 set 정답을 재현했다. invalid는 각각 186/350, 192/350이다.
+
+57개 연결 성분을 재표집한 10000회 bootstrap에서 O의 CI [0.544680, 0.715686], G의 CI [0.382775, 0.534887], GD-avg−text 정확도 차이의 CI [0.020445, 0.082570]을 재현했다. G는 0.451429이고 정확도 차이는 0.048571이다. O≥0.70 및 정확도 차이≥0.05가 미달했다. O의 CI 상한은 0.70보다 커 음성 조건도 충족하지 않는다. 문턱을 바꾸지 않은 `indeterminate` 판정이 맞다.
+
+영상 227개의 file hash는 모두 일치했다. JPEG decoder 환경 차이를 분리한 뒤 실제 실행 Python `/home/test/.conda/envs/medgemma/bin/python`에서 pixel hash도 모두 일치했다. source 대응·RGB 변환·PS causal shift·답변 경계 코드와 보존된 model 검사 결과를 확인했다. protocol 및 eval lock의 코드 hash와 실제 gate 근거 hash도 일치했다.
+
+기술 표본 252건에서 2 worker 100.7초 대비 4 worker 70.5초로 처리량이 개선됐다. 최대 표본 GPU 점유 18308 MiB는 GPU당 두 worker의 각 2 GiB 여유를 포함해 24 GiB 안에 들어간다. 본실행의 4 worker 선택은 근거가 있다. batch 확대를 추가로 수행하지 않았다는 이유로 결과를 기각하지 않는다.
+
+# Problems / Concerns
+
+현재 제한된 비교 결론을 무효화하는 blocker는 발견하지 못했다. 다만 재사용 방어는 부족하다. gate는 제공된 evidence만 검사하고 필수 검사 집합을 강제하지 않는다. 실제 이번 근거는 존재하지만 향후 누락 검사를 승인할 수 있다. decision 코드도 누락 pair의 가능한 범위를 양성 조건에 반영하지 않는다. 이번에는 O와 정확도 조건에서 이미 미달해 판정에 영향이 없다.
+
+보고서의 비용 표현은 범위를 좁혀야 한다. main과 부모의 비용은 전체 개발·worker 비교·재개·모델 검사 비용이 아니다. resume 처리량도 누적 완료 건수를 마지막 attempt 시간으로 나누면 과대평가된다. 현재 단순 구성 선택은 별도 ref/cmp 비교에 근거하므로 유지한다.
+
+MC의 낮은 strict 점수에는 큰 형식 효과가 있다. 공식 parser의 원래 순서 S도 0.091이므로 형식만으로 모든 내용 오류가 설명됐다고 할 수 없다. 동일 답변 비율은 pair 내 같은 선택을 뜻하며, 전역 문자 편향이나 내부 원인을 직접 증명하지 않는다.
+
+PMC 원천 figure와 원 ROCO 추출본의 byte 동일성은 미확인이다. 1쌍은 버전 모호성으로 제외됐으며 현재 결과는 확보한 175쌍에 한정한다. 의심 항목 제외 분석은 임상 재판독을 대신하지 않는다.
+
+# Interpretation
+
+단순 scoring은 생성 형식 오류를 피하며 strict MC보다 높은 점수를 보였다. 이는 유용한 baseline 결과지만 신규 방법의 성과는 아니다. O가 0.5보다 높은 것은 제한된 영상별 상대 신호를 지지한다. 그러나 O는 서로 다른 정답을 가진 두 영상의 점수를 연결하므로 단일 영상의 달성 가능한 정확도가 아니다. 큰 G만으로 새 보정 방법이나 충분한 내부 시각 표현을 주장할 수 없다.
+
+새 한계 주장은 등록하지 않는다. 이번 결과의 핵심은 사전 투자 가설의 불확정이며, 독립 재현된 일반적 결함으로 승격할 근거는 없다. 기존 limitation 상태도 변경하지 않는다.
+
+# Strategy Check / 연구 방향 판단
+
+**실행 유효성:** 고정 가용 자료의 생성·scoring과 통계 비교는 완료됐다. **성능 개선:** 단순 GD-cal이 strict MC를 개선했지만 형식·선택 규칙이 함께 바뀐 baseline 비교다. **가설 지지:** 일부 상대 판별 신호는 있지만 사전 요구한 크기는 확인하지 못했다. **신규 기여 가능성:** pair 정보 없이 신호를 이용할 방법과 직접 SFT 대비 이점은 미확인이다.
+
+대안이 충분하다는 조건도 충족하지 않았다. 따라서 이번 보류는 대안의 완전한 충분성이나 연구 가치 부재의 증명이 아니라, 현재 후보에 학습 투자를 시작할 증거가 부족하다는 판단이다. 완전한 가용 benchmark를 사용했고 같은 자료의 추가 탐색은 독립 정보를 크게 늘리지 않는다.
+
+iter_048의 공동 형식 회복 관찰은 유지하지만 이번 문항 선택 비교가 설명하거나 반박하지 않는다. iter_052의 CT 자료·기술 gate 실패와 iter_053의 교정 oracle 실패도 그대로 남는다. 이들을 현재 결과로 해제하거나 일반 의료 VLM 능력의 실패로 묶지 않는다. 같은 track의 진단 체류와 준비 비용을 이어받되 횟수만으로 포기하지 않는다.
+
+현재 후보 개선은 실용적 신호 활용 경로가 미확인이고, 추가 진단은 같은 자료를 반복할 위험이 있다. 따라서 다음에는 다른 중요한 질문과 기존 유효 관찰에 연결된 최소 방법 시험을 비교해야 한다. 현재 결과만으로 직접 SFT나 새 loss 실행을 확정하지 않는다.
+
+# Recommended Next Experiment
+
+현재 보정 후보의 자동 연장을 보류한다. 다음 계획은 실제 사용 과제, 강한 단순 대안의 구체적 부족함, 결과에 따라 달라질 투자, 필요한 자료·비용과 종료점을 가진 후보 하나를 선택해야 한다. 현재 후보를 재개하려면 평가 pair 정보를 쓰지 않는 방법과 별도 학습·확인 자료가 구체화돼야 한다. 코드 수정은 선택된 실험에 필요한 경로만 수행한다.
+
+이번 방향은 사전 기준상 불확정이며 후속 방법의 유망성을 확인한 결과가 아니므로 논문 추천과 마일스톤 기록은 보류한다.
