@@ -1,0 +1,1267 @@
+diff --git a/q62_eval.py b/q62_eval.py
+new file mode 100644
+index 0000000..85dfcf4
+--- /dev/null
++++ b/q62_eval.py
+@@ -0,0 +1,232 @@
++"""iter_062 평가: 동일 E21 manifest에서 MedGemma(기존 E24 출력 재사용)와 Qwen2.5-VL의 T/J/S_mean/V,
++모델 내 paired cluster bootstrap과 모델 간 효과 차이. 원시 답변에서만 계산.
++
++사용: python q62_eval.py --out results/iter_062/eval/report.json
++진입 시 검증: Qwen protocol 재계산·verify seal 일치·records의 digest, MedGemma E24 protocol/records 연결, 요청 행 동일성.
++bootstrap: 모든 비교에 동일한 cluster 재표본(seed 61, 10,000회, rng를 비교마다 새로 생성)을 사용한다.
++"""
++import argparse, collections, glob, json, os, sys
++import numpy as np
++import mri61_spec as S
++import mri61_parse as P
++import q62_run as Q
++
++NB = 10000
++SEED = 61
++COMMON = ('T', 'J', 'Smean', 'V')
++
++
++def load_records(d):
++    recs = {}
++    for f in sorted(glob.glob(f'{d}/worker*.jsonl')):
++        for r in Q.read_jsonl(f):
++            assert r['rid'] not in recs, 'duplicate rid ' + r['rid']
++            recs[r['rid']] = r
++    return recs
++
++
++def attempt_text(rec):
++    return rec['attempts'][-1]['text'] if 'text' in rec['attempts'][-1] else None
++
++
++def resp_table(rows, recs, labels, cost=None):
++    resp = {}
++    for rid, r in rows.items():
++        rec = recs[rid]
++        a = rec['attempts'][-1]
++        letter = P.parse_v2(a['text'])
++        strict = S.parse_answer(a['text']) is not None
++        orig = S.letter_to_orig(letter, r['perm']) if letter else None
++        gt = labels[r['cluster_id']]['gt_orig_index']
++        resp[(r['cluster_id'], r['order'], r['cond'])] = {
++            'orig': orig, 'valid': orig is not None, 'strict': strict, 'correct': int(orig == gt) if orig is not None else 0,
++            'eos': bool(a['ended_eos']), 'retried': len(rec['attempts']) > 1, 'capped_final': (not a['ended_eos']),
++            'in_tok': rec['n_input_tokens'], 'out_tok': sum(x['n_new'] for x in rec['attempts']),
++            'gen_s': sum(x['runtime_s'] for x in rec['attempts']),
++            'wall': (cost or {}).get(rid, rec.get('wall_monotonic_s'))}
++    return resp
++
++
++def per_cluster(resp, labels):
++    per = {}
++    for cid, lab in labels.items():
++        K, opts = lab['K'], lab['options']
++        d = {'K': K, 'source': lab['source'], 'unstated': lab['unstated_findings']}
++        for o in 'FR':
++            d[f'T_{o}'] = resp[(cid, o, 'T')]['correct']
++            d[f'J_{o}'] = resp[(cid, o, 'J')]['correct']
++            Ss = [resp[(cid, o, f'S{i + 1}')] for i in range(K)]
++            d[f'Smean_{o}'] = float(np.mean([s['correct'] for s in Ss]))
++            votes = collections.Counter(s['orig'] for s in Ss if s['valid'])
++            if votes:
++                mx = max(votes.values())
++                pick = min([k for k, c in votes.items() if c == mx], key=lambda k: S.sha(opts[k]))
++                d[f'V_{o}'] = int(pick == lab['gt_orig_index'])
++            else:
++                d[f'V_{o}'] = 0
++            d[f'anyS_{o}'] = int(any(s['correct'] for s in Ss))
++        for k in COMMON + ('anyS',):
++            d[k] = (d[f'{k}_F'] + d[f'{k}_R']) / 2
++        per[cid] = d
++    return per
++
++
++def boot_idx(n):
++    return np.random.default_rng(SEED).integers(0, n, (NB, n))
++
++
++def ci(diff_vec, idx):
++    m = np.asarray(diff_vec, float)[idx].mean(1)
++    return [float(np.percentile(m, 2.5)), float(np.percentile(m, 97.5))]
++
++
++def effects(per, cids, idx_all, order=None):
++    """cids: 사용 cluster 순서. order=None은 두 순서 평균, 'F'/'R'은 해당 순서."""
++    g = (lambda c, k: per[c][k]) if order is None else (lambda c, k: per[c][f'{k}_{order}'])
++    v = {k: np.array([g(c, k) for c in cids], float) for k in COMMON}
++    out = {k: float(v[k].mean()) for k in COMMON}
++    for name, (x, y) in {'J-T': ('J', 'T'), 'V-T': ('V', 'T'), 'V-J': ('V', 'J'), 'Smean-J': ('Smean', 'J'),
++                         'Smean-T': ('Smean', 'T')}.items():
++        d = v[x] - v[y]
++        out[name] = {'est': float(d.mean()), 'ci95': ci(d, idx_all)}
++    return out, v
++
++
++def run(a):
++    rows = {r['rid']: r for r in Q.read_jsonl(a.requests)}
++    labels = json.load(open(a.labels))
++    # ---- Qwen: protocol·completion seal·records
++    pdig = Q.check_protocol(a.requests, a.labels, a.qwen_protocol)
++    ver = json.load(open(f'{a.qwen_dir}/verify.json'))
++    assert ver['n_problems'] == 0 and ver['protocol_digest'] == pdig, 'qwen verify seal invalid'
++    for f, h in ver['record_file_sha256'].items():
++        assert Q.sha_file(f) == h, 'qwen record file changed after seal ' + f
++    qrecs = load_records(a.qwen_dir)
++    assert set(qrecs) == set(rows), f'qwen incomplete {len(qrecs)}/{len(rows)}'
++    for r in qrecs.values():
++        assert r['protocol_digest'] == pdig
++    cost = {}
++    for f in glob.glob(f'{a.qwen_dir}/cost_worker*.jsonl'):
++        for c in Q.read_jsonl(f):
++            cost[c['rid']] = c['total_read_to_flush_s']
++    # ---- MedGemma E24 재사용: 요청 행 동일성 + protocol
++    e24_rows = {r['rid']: r for r in Q.read_jsonl(a.medgemma_requests)}
++    for rid, r in rows.items():
++        assert e24_rows[rid] == r, 'E21 row differs from E24 row'
++    mp = json.load(open(a.medgemma_protocol))
++    assert Q.sha_file(a.medgemma_requests) == mp['requests_sha256'], 'E24 requests changed'
++    mver = json.load(open(f'{a.medgemma_dir}/verify.json'))
++    assert mver['n_problems'] == 0
++    mrecs_all = load_records(a.medgemma_dir)
++    mrecs = {rid: mrecs_all[rid] for rid in rows}
++    for r in mrecs.values():
++        assert r['protocol_digest'] == mp['digest']
++    elig = json.load(open(a.manifest))['E21_clusters']
++    cids = list(elig)
++    assert cids == list(labels), 'cluster order'
++    n = len(cids)
++    idx = boot_idx(n)
++
++    models = {'MedGemma': (mrecs, None), 'Qwen2.5-VL-7B': (qrecs, cost)}
++    pers, res = {}, {'n_clusters': n, 'n_requests': len(rows), 'bootstrap': {'seed': SEED, 'n': NB, 'unit': 'cluster'},
++                     'qwen_protocol_digest': pdig, 'medgemma_protocol_digest': mp['digest'], 'models': {}}
++    vecs = {}
++    for name, (recs, cs) in models.items():
++        resp = resp_table(rows, recs, labels, cs)
++        per = per_cluster(resp, labels)
++        pers[name] = per
++        m = {}
++        m['all'], vecs[(name, None)] = effects(per, cids, idx)
++        for o in 'FR':
++            m[f'order{o}'], vecs[(name, o)] = effects(per, cids, idx, o)
++        m['anyS_posthoc_oracle'] = float(np.mean([per[c]['anyS'] for c in cids]))
++        m['prior_note'] = 'class prior는 이번 비교에서 사용하지 않음(질문별 선택지 순열 후 정답 prior는 D에서만 계산한 iter_061 방식)'
++        # 하위집단 기술통계
++        for gname, sel in (('unstated6', [c for c in cids if per[c]['unstated']]), ('stated15', [c for c in cids if not per[c]['unstated']])):
++            m[gname] = {'n': len(sel), **{k: float(np.mean([per[c][k] for c in sel])) for k in COMMON},
++                        'J-T': float(np.mean([per[c]['J'] - per[c]['T'] for c in sel])),
++                        'V-T': float(np.mean([per[c]['V'] - per[c]['T'] for c in sel]))}
++        bysrc = collections.defaultdict(list)
++        for c in cids:
++            bysrc[per[c]['source']].append(c)
++        m['by_source'] = {s: {'n': len(cs), **{k: float(np.mean([per[c][k] for c in cs])) for k in COMMON}} for s, cs in bysrc.items()}
++        byK = collections.defaultdict(list)
++        for c in cids:
++            byK[per[c]['K']].append(c)
++        m['by_K'] = {str(k): {'n': len(cs), **{kk: float(np.mean([per[c][kk] for c in cs])) for kk in COMMON}} for k, cs in sorted(byK.items())}
++        # 형식·비용
++        cond = collections.defaultdict(lambda: collections.defaultdict(list))
++        for (cid, o, cd), v in resp.items():
++            k = 'T' if cd == 'T' else 'J' if cd == 'J' else 'S'
++            for f in ('valid', 'strict', 'eos', 'retried', 'capped_final', 'in_tok', 'out_tok', 'gen_s', 'wall'):
++                cond[k][f].append(v[f])
++        m['format_and_cost'] = {k: {'n_requests': len(v['valid']), 'invalid_rate': 1 - float(np.mean(v['valid'])),
++                                    'strict_v1_valid_rate': float(np.mean(v['strict'])), 'eos_rate': float(np.mean(v['eos'])),
++                                    'retry_rate': float(np.mean(v['retried'])), 'final_cap_hit_rate': float(np.mean(v['capped_final'])),
++                                    'sum_in_tok': int(np.sum(v['in_tok'])), 'sum_out_tok': int(np.sum(v['out_tok'])),
++                                    'sum_gen_s': float(np.sum(v['gen_s'])),
++                                    'sum_wall_s': float(np.sum([w for w in v['wall'] if w is not None])) if any(w is not None for w in v['wall']) else None}
++                                for k, v in cond.items()}
++        # 원 선택지 답변 불일치(두 순서의 유효 답이 서로 다른 원 선택지)
++        disc = collections.defaultdict(list)
++        for (cid, o, cd), v in resp.items():
++            if o == 'F':
++                w = resp[(cid, 'R', cd)]
++                if v['valid'] and w['valid']:
++                    disc['T' if cd == 'T' else 'J' if cd == 'J' else 'S'].append(int(v['orig'] != w['orig']))
++        m['order_answer_disagreement'] = {k: {'n_pairs': len(v), 'rate': float(np.mean(v)) if v else None} for k, v in disc.items()}
++        m['per_cluster_all'] = {c: {k: pers[name][c][k] for k in ('T_F', 'T_R', 'J_F', 'J_R', 'Smean_F', 'Smean_R', 'V_F', 'V_R', 'K', 'source')} for c in cids}
++        res['models'][name] = m
++    # ---- 모델 간 차이(같은 bootstrap index)
++    cross = {}
++    for tag, o in (('both_orders', None), ('orderF', 'F'), ('orderR', 'R')):
++        vq, vm = vecs[('Qwen2.5-VL-7B', o)], vecs[('MedGemma', o)]
++        for name, (x, y) in {'J-T': ('J', 'T'), 'V-T': ('V', 'T'), 'V-J': ('V', 'J')}.items():
++            dq, dm = vq[x] - vq[y], vm[x] - vm[y]
++            d = dq - dm
++            cross[f'{tag}:(Qwen {name}) - (MedGemma {name})'] = {'est': float(d.mean()), 'ci95': ci(d, idx)}
++        for k in ('T', 'J', 'V', 'Smean'):
++            d = vq[k] - vm[k]
++            cross[f'{tag}:Qwen {k} - MedGemma {k}'] = {'est': float(d.mean()), 'ci95': ci(d, idx)}
++    res['cross_model'] = cross
++    # ---- 사전 기준의 기계적 평가(해석은 보고서에서)
++    crit = {}
++    for name in models:
++        mm = res['models'][name]['all']
++        fo, ro = res['models'][name]['orderF'], res['models'][name]['orderR']
++        crit[name] = {
++            'JT_ge10_ciLow_gt0': mm['J-T']['est'] >= 0.10 and mm['J-T']['ci95'][0] > 0,
++            'VT_ge10_ciLow_gt0': mm['V-T']['est'] >= 0.10 and mm['V-T']['ci95'][0] > 0,
++            'JT_ci_upper_lt10': mm['J-T']['ci95'][1] < 0.10, 'VT_ci_upper_lt10': mm['V-T']['ci95'][1] < 0.10,
++            'VJ_ge10_ciLow_gt0': mm['V-J']['est'] >= 0.10 and mm['V-J']['ci95'][0] > 0,
++            'SmeanJ_ge10_ciLow_gt0': mm['Smean-J']['est'] >= 0.10 and mm['Smean-J']['ci95'][0] > 0,
++            'VJ_same_sign_both_orders': (fo['V-J']['est'] > 0) == (ro['V-J']['est'] > 0) and fo['V-J']['est'] != 0 and ro['V-J']['est'] != 0,
++            'SmeanJ_same_sign_both_orders': (fo['Smean-J']['est'] > 0) == (ro['Smean-J']['est'] > 0) and fo['Smean-J']['est'] != 0 and ro['Smean-J']['est'] != 0,
++            'V_gt_T': mm['V'] > mm['T'], 'Smean_gt_T': mm['Smean'] > mm['T'],
++            'VJ_ge5': mm['V-J']['est'] >= 0.05}
++    qc = res['cross_model']
++    crit['Qwen2.5-VL-7B']['model_specific_positive'] = bool(
++        (crit['Qwen2.5-VL-7B']['JT_ge10_ciLow_gt0'] and qc['both_orders:(Qwen J-T) - (MedGemma J-T)']['est'] > 0 and qc['both_orders:(Qwen J-T) - (MedGemma J-T)']['ci95'][0] > 0) or
++        (crit['Qwen2.5-VL-7B']['VT_ge10_ciLow_gt0'] and qc['both_orders:(Qwen V-T) - (MedGemma V-T)']['est'] > 0 and qc['both_orders:(Qwen V-T) - (MedGemma V-T)']['ci95'][0] > 0))
++    crit['negative_both_models'] = bool(all(crit[m]['JT_ci_upper_lt10'] and crit[m]['VT_ci_upper_lt10'] for m in models))
++    res['criteria_mechanical'] = crit
++    os.makedirs(os.path.dirname(a.out), exist_ok=True)
++    json.dump(res, open(a.out, 'w'), indent=1, default=float)
++    for name in models:
++        m = res['models'][name]
++        print(name, {k: round(m['all'][k], 4) for k in COMMON}, {k: (round(m['all'][k]['est'], 4), [round(x, 3) for x in m['all'][k]['ci95']]) for k in ('J-T', 'V-T', 'V-J', 'Smean-J')})
++    print('criteria', json.dumps(crit))
++
++
++if __name__ == '__main__':
++    ap = argparse.ArgumentParser()
++    ap.add_argument('--requests', default='results/iter_062/data/E21_requests.jsonl')
++    ap.add_argument('--labels', default='results/iter_062/data/E21_labels.json')
++    ap.add_argument('--manifest', default='results/iter_062/data/selection_manifest.json')
++    ap.add_argument('--qwen-dir', default='results/iter_062/gen_E21_qwen')
++    ap.add_argument('--qwen-protocol', default='results/iter_062/E21_protocol.json')
++    ap.add_argument('--medgemma-dir', default='results/iter_061/gen_E24')
++    ap.add_argument('--medgemma-protocol', default='results/iter_061/E24_protocol.json')
++    ap.add_argument('--medgemma-requests', default='results/iter_061/E24_requests.jsonl')
++    ap.add_argument('--out', default='results/iter_062/eval/report.json')
++    run(ap.parse_args())
+diff --git a/q62_fetch.py b/q62_fetch.py
+new file mode 100644
+index 0000000..e6089d3
+--- /dev/null
++++ b/q62_fetch.py
+@@ -0,0 +1,29 @@
++"""iter_062: Qwen2.5-VL-7B-Instruct 공식 checkpoint를 별도 캐시에 확보하고 revision/digest를 기록한다.
++기존 hf_cache는 건드리지 않는다. 사용: python q62_fetch.py
++"""
++import hashlib, json, os, sys
++os.environ.pop('HF_HUB_OFFLINE', None)
++from huggingface_hub import HfApi, snapshot_download
++
++REPO = 'Qwen/Qwen2.5-VL-7B-Instruct'
++CACHE = '/SSD1_1TB/home/milab/daniel/08_medgemma/research/results/environments/qwen25vl_cache'
++OUT = 'results/iter_062/env/qwen_fetch.json'
++
++os.makedirs(os.path.dirname(OUT), exist_ok=True)
++info = HfApi().model_info(REPO)
++rev = info.sha
++print('revision', rev, 'license', (info.card_data or {}).get('license') if info.card_data else None)
++path = snapshot_download(REPO, revision=rev, cache_dir=CACHE,
++                         allow_patterns=['*.json', '*.safetensors', '*.txt', '*.model', '*.jinja'])
++files = {}
++for root, _, fs in os.walk(path):
++    for f in sorted(fs):
++        p = os.path.join(root, f)
++        h = hashlib.sha256()
++        with open(os.path.realpath(p), 'rb') as fh:
++            for ch in iter(lambda: fh.read(1 << 24), b''):
++                h.update(ch)
++        files[os.path.relpath(p, path)] = {'sha256': h.hexdigest(), 'bytes': os.path.getsize(os.path.realpath(p))}
++json.dump({'repo': REPO, 'revision': rev, 'snapshot_path': path, 'cache_dir': CACHE,
++           'license': getattr(info.card_data, 'license', None), 'files': files}, open(OUT, 'w'), indent=1)
++print('files', len(files), 'total GB', sum(v['bytes'] for v in files.values()) / 2**30)
+diff --git a/q62_manifest.py b/q62_manifest.py
+new file mode 100644
+index 0000000..c299b20
+--- /dev/null
++++ b/q62_manifest.py
+@@ -0,0 +1,97 @@
++"""iter_062: E21(적격성 정정) / D3 manifest 고정. 모델 출력 없이 iter_061 자료에서만 구성한다.
++
++- E21 = iter_061 E24에서 QA 2322(intervention/전후 변화), 1419(수술 후 재발 longitudinal), 2033(비뇌 부비동)을 제외한 21 cluster
++- 요청은 mri61_spec.build_rows로 재구성하고 기존 E24 요청과 행 단위로 동일함을 검증(MedGemma 기존 출력 재사용 근거)
++- 소견 미서술 6개(QA 1552,1513,1475,1451,1596,1416)는 Qwen 출력 전에 고정하는 보조 분류
++사용: python q62_manifest.py
++"""
++import hashlib, json, os, sys
++import mri61_spec as S
++
++OUT = 'results/iter_062/data'
++P61 = 'results/iter_061'
++EXCL = {2322: 'intervention/전후 변화 질문', 1419: '수술 후 재발의 longitudinal 관측', 2033: '비뇌(부비동) 진단'}
++UNSTATED = [1552, 1513, 1475, 1451, 1596, 1416]
++D_QA = [694, 1518, 1253]
++
++
++def sha_file(p):
++    return hashlib.sha256(open(p, 'rb').read()).hexdigest()
++
++
++def jl(p):
++    return [json.loads(l) for l in open(p) if l.strip()]
++
++
++def main():
++    os.makedirs(OUT, exist_ok=True)
++    assert not os.path.exists(f'{OUT}/selection_manifest.json'), 'already locked'
++    lock = json.load(open(f'{S.DATA}/selection_lock.json'))
++    qa = {x['id']: x for x in json.load(open(f'{S.DATA}/eligible_qa.json'))}
++    imgm = json.load(open(f'{S.DATA}/image_manifest.json'))
++    e24 = {r['rid']: r for r in jl(f'{P61}/E24_requests.jsonl')}
++    e24_labels = json.load(open(f'{P61}/E24_requests_labels.json'))
++    d_all = {r['rid']: r for r in jl(f'{P61}/D_requests.jsonl')}
++    d_labels = json.load(open(f'{P61}/D_requests_labels.json'))
++    ex = lock['visual_exclusions']
++
++    E = [r for r in lock['E_ordered_multi'] if r['cluster_id'] not in ex][:24]
++    assert [r['cluster_id'] for r in E] == list(e24_labels), 'E24 order mismatch'
++    excl_rows = {}
++    for c in E:
++        if c['qa_id'] in EXCL:
++            excl_rows[c['cluster_id']] = {'qa_id': c['qa_id'], 'reason': EXCL[c['qa_id']],
++                                          'question_head': qa[c['qa_id']]['question'][:300]}
++    assert {v['qa_id'] for v in excl_rows.values()} == set(EXCL)
++    E21 = [c for c in E if c['qa_id'] not in EXCL]
++    assert len(E21) == 21
++
++    def build(cl, ref):
++        rows = S.build_rows(cl, qa, f'{S.DATA}/images')
++        for r in rows:
++            assert r['rid'] in ref and ref[r['rid']] == r, 'row differs from iter_061 request ' + r['rid']
++        assert len({r['rid'] for r in rows}) == len(rows)
++        return rows
++
++    rowsE = build(E21, e24)
++    labelsE = {c['cluster_id']: {**e24_labels[c['cluster_id']], 'unstated_findings': c['qa_id'] in UNSTATED} for c in E21}
++    assert sum(v['unstated_findings'] for v in labelsE.values()) == 6
++
++    Dc = [c for c in lock['D'] if c['qa_id'] in D_QA]
++    assert sorted(c['qa_id'] for c in Dc) == sorted(D_QA)
++    rowsD = build(Dc, d_all)
++    labelsD = {c['cluster_id']: d_labels[c['cluster_id']] for c in Dc}
++
++    # 영상 file hash 대조 + 개수
++    imgs = sorted({p for r in rowsE + rowsD for p in r['images']})
++    for p in imgs:
++        rel = os.path.relpath(p, f'{S.DATA}/images')
++        assert sha_file(p) == imgm[rel]['file_sha256'], 'image hash ' + p
++    n_img_E = sum(len(S_.get('images', [])) for S_ in E21)
++    cnt = {'E21_requests': len(rowsE), 'E21_T_J': sum(r['cond'] in ('T', 'J') for r in rowsE),
++           'E21_S': sum(r['cond'].startswith('S') for r in rowsE), 'E21_image_sum': n_img_E,
++           'D3_requests': len(rowsD)}
++    assert cnt['E21_requests'] == 232 and cnt['E21_T_J'] == 84 and cnt['E21_S'] == 148 and n_img_E == 74 and len(rowsD) == 34, cnt
++
++    for name, rows, labels in (('E21', rowsE, labelsE), ('D3', rowsD, labelsD)):
++        with open(f'{OUT}/{name}_requests.jsonl', 'w') as f:
++            for r in rows:
++                f.write(json.dumps(r) + '\n')
++        json.dump(labels, open(f'{OUT}/{name}_labels.json', 'w'), indent=1)
++    man = {'base_plan_sha256': 'e310aa2f05e57d0ea53062b2dffda860b7444223e774259ee3436a9e3ab9afcc',
++           'source_selection_lock_sha256': sha_file(f'{S.DATA}/selection_lock.json'),
++           'source_eligible_qa_sha256': sha_file(f'{S.DATA}/eligible_qa.json'),
++           'source_image_manifest_sha256': sha_file(f'{S.DATA}/image_manifest.json'),
++           'source_E24_requests_sha256': sha_file(f'{P61}/E24_requests.jsonl'),
++           'source_E24_labels_sha256': sha_file(f'{P61}/E24_requests_labels.json'),
++           'excluded': excl_rows, 'E21_clusters': [c['cluster_id'] for c in E21],
++           'unstated_findings_qa': UNSTATED, 'D3_qa': D_QA, 'counts': cnt,
++           'E21_requests_sha256': sha_file(f'{OUT}/E21_requests.jsonl'),
++           'D3_requests_sha256': sha_file(f'{OUT}/D3_requests.jsonl'),
++           'note': 'MedGemma 결과를 본 뒤의 정정 집합: 독립 검증이 아니다. 개발 자료. 대체 사례 없음.'}
++    json.dump(man, open(f'{OUT}/selection_manifest.json', 'w'), indent=1)
++    print(cnt)
++
++
++if __name__ == '__main__':
++    main()
+diff --git a/q62_regress.py b/q62_regress.py
+new file mode 100644
+index 0000000..31155fe
+--- /dev/null
++++ b/q62_regress.py
+@@ -0,0 +1,56 @@
++"""iter_062 회귀: iter_061 E24의 불변 provenance와 점수 보존 확인. 원 결과는 수정하지 않는다.
++- mri61_run.proto_digest(E24 requests) == E24_protocol digest (원 코드·요청·영상 hash 불변)
++- E24 verify.json 문제 0, 264 records
++- 원시 E24 출력에서 mri61_eval과 동일 방식으로 T/J/V를 재계산해 저장 report와 일치
++사용: python q62_regress.py
++"""
++import glob, json, os, sys
++import numpy as np
++import mri61_run as R61
++import mri61_spec as S
++import mri61_parse as P
++
++P61 = 'results/iter_061'
++OUT = 'results/iter_062/tests/regress_E24.json'
++os.makedirs(os.path.dirname(OUT), exist_ok=True)
++prot = json.load(open(f'{P61}/E24_protocol.json'))
++res = {'protocol_digest_recomputed': R61.proto_digest(f'{P61}/E24_requests.jsonl'), 'protocol_digest_saved': prot['digest']}
++res['protocol_ok'] = res['protocol_digest_recomputed'] == res['protocol_digest_saved']
++ver = json.load(open(f'{P61}/gen_E24/verify.json'))
++res['verify_n_records'], res['verify_n_problems'] = ver['n_records'], ver['n_problems']
++rows = {r['rid']: r for r in R61.read_jsonl(f'{P61}/E24_requests.jsonl')}
++labels = json.load(open(f'{P61}/E24_requests_labels.json'))
++recs = {}
++for f in glob.glob(f'{P61}/gen_E24/worker*.jsonl'):
++    for r in R61.read_jsonl(f):
++        recs[r['rid']] = r
++corr = {}
++for rid, r in rows.items():
++    L = P.parse_v2(recs[rid]['attempts'][-1]['text'])
++    o = S.letter_to_orig(L, r['perm']) if L else None
++    corr[(r['cluster_id'], r['order'], r['cond'])] = (o, int(o == labels[r['cluster_id']]['gt_orig_index']) if o is not None else 0)
++Ts, Js, Vs = [], [], []
++for cid, lab in labels.items():
++    t = np.mean([corr[(cid, o, 'T')][1] for o in 'FR'])
++    j = np.mean([corr[(cid, o, 'J')][1] for o in 'FR'])
++    vv = []
++    for o in 'FR':
++        votes = {}
++        for i in range(lab['K']):
++            x = corr[(cid, o, f'S{i + 1}')][0]
++            if x is not None:
++                votes[x] = votes.get(x, 0) + 1
++        if votes:
++            m = max(votes.values())
++            pick = min([k for k, c in votes.items() if c == m], key=lambda k: S.sha(lab['options'][k]))
++            vv.append(int(pick == lab['gt_orig_index']))
++        else:
++            vv.append(0)
++    Ts.append(t); Js.append(j); Vs.append(np.mean(vv))
++saved = json.load(open(f'{P61}/E24_report.json'))
++res.update({'T_recomputed': float(np.mean(Ts)), 'J_recomputed': float(np.mean(Js)), 'V_recomputed': float(np.mean(Vs)),
++            'T_saved': saved['T_multi'], 'J_saved': saved['J_multi'], 'V_saved': saved['V_multi']})
++res['scores_ok'] = all(abs(res[k + '_recomputed'] - res[k + '_saved']) < 1e-12 for k in 'TJV')
++json.dump(res, open(OUT, 'w'), indent=1)
++print(res)
++sys.exit(0 if res['protocol_ok'] and res['scores_ok'] and res['verify_n_problems'] == 0 else 1)
+diff --git a/q62_resume_test.py b/q62_resume_test.py
+new file mode 100644
+index 0000000..67772b4
+--- /dev/null
++++ b/q62_resume_test.py
+@@ -0,0 +1,54 @@
++"""iter_062 GPU 재개 검사: D3에서 worker를 SIGKILL로 강제 중단 + 손상 tail 주입 → launcher 재시작 → 중복/누락 0, 기준 실행과 token 일치.
++결과: results/iter_062/tests/resume_test.json
++"""
++import glob, json, os, signal, subprocess, sys, time
++import q62_run as Q
++
++D = 'results/iter_062/gen_D3_resume'
++REQ, LAB, PROT = 'results/iter_062/data/D3_requests.jsonl', 'results/iter_062/data/D3_labels.json', 'results/iter_062/D3_protocol.json'
++assert not os.path.exists(D)
++os.makedirs(D)
++env = dict(os.environ, CUDA_VISIBLE_DEVICES='0')
++p = subprocess.Popen([sys.executable, 'q62_run.py', 'worker', '--requests', REQ, '--labels', LAB, '--protocol', PROT,
++                      '--out-dir', D, '--worker', '0'], env=env, stdout=open(f'{D}/worker0.stdout.log', 'a'), stderr=subprocess.STDOUT)
++t0 = time.time()
++while time.time() - t0 < 300:
++    n = len(Q.read_jsonl(f'{D}/worker0.jsonl'))
++    if n >= 8:
++        break
++    time.sleep(0.5)
++p.send_signal(signal.SIGKILL)
++p.wait()
++n_before = len(Q.read_jsonl(f'{D}/worker0.jsonl'))
++with open(f'{D}/worker0.jsonl', 'a') as f:
++    f.write('{"rid": "torn", "attempts": [')  # 손상된 tail
++claims = len(glob.glob(f'{D}/claims/*.claim'))
++# worker 수 변경(1→2)으로 재개
++r = subprocess.run([sys.executable, 'q62_run.py', 'launch', '--requests', REQ, '--labels', LAB, '--protocol', PROT,
++                    '--tech', 'results/iter_062/D3_tech.json', '--gpus', '0,1', '--workers-per-gpu', '1', '--out-dir', D],
++                   capture_output=True, text=True)
++v = subprocess.run([sys.executable, 'q62_run.py', 'verify', '--requests', REQ, '--labels', LAB, '--protocol', PROT, '--out-dir', D],
++                   capture_output=True, text=True)
++
++
++def recs(d):
++    o = {}
++    for f in glob.glob(f'{d}/worker[0-9].jsonl'):
++        for x in Q.read_jsonl(f):
++            assert x['rid'] not in o
++            o[x['rid']] = x
++    return o
++
++
++A, B = recs('results/iter_062/gen_D3_qwen'), recs(D)
++mism = [k for k in A if A[k]['attempts'][-1]['suffix_ids'] != B[k]['attempts'][-1]['suffix_ids']]
++res = {'records_before_kill': n_before, 'stale_claims_after_kill': claims, 'launch_rc': r.returncode, 'verify_rc': v.returncode,
++       'n_records_final': len(B), 'duplicates': 0, 'missing': len(set(A) - set(B)),
++       'corrupt_copies': [os.path.basename(f) for f in glob.glob(f'{D}/worker0.jsonl.corrupt_*')],
++       'suffix_token_mismatch_vs_baseline': len(mism), 'n_compared': len(A),
++       'resumed_workers': 2, 'baseline_workers': 2}
++res['pass'] = (res['launch_rc'] == 0 and res['verify_rc'] == 0 and res['n_records_final'] == 34 and res['missing'] == 0
++               and len(res['corrupt_copies']) == 1 and n_before < 34)
++json.dump(res, open('results/iter_062/tests/resume_test.json', 'w'), indent=1)
++print(json.dumps(res, indent=1))
++print(r.stdout[-300:], r.stderr[-300:], v.stdout[-300:], v.stderr[-300:])
+diff --git a/q62_run.py b/q62_run.py
+new file mode 100644
+index 0000000..3a306b0
+--- /dev/null
++++ b/q62_run.py
+@@ -0,0 +1,506 @@
++"""iter_062 Qwen2.5-VL-7B-Instruct MRI QA runner (T/J/S_i, 두 선택지 순서).
++
++mri61_run.py(MedGemma, 수정 없이 보존)의 실행 구조를 따르되 이번 계획의 보완을 현재 경로에 직접 구현한다.
++ - protocol: 코드·prompt·parser·labels·선택 manifest·원 annotation·영상 hash·model/processor revision·generation 설정을 구성요소별로 잠금.
++   worker/launch/verify/tech 모두 진입 시 재검증(불일치 시 어떤 구성요소인지 출력하고 종료).
++ - launcher 배타성(flock) + 요청 claim(O_EXCL) + worker별 출력 + 손상 tail 보존(.corrupt_*) 후 복구.
++ - worker 수와 GPU 수 분리(--workers-per-gpu), 시작 직전 nvidia-smi 여유 기반 admission.
++ - 저장 포함 timing: 입력 읽기→답변 flush/fsync 완료까지를 cost_worker*.jsonl sidecar에 기록(loading은 attempt json).
++서브명령: lock | worker | launch | verify | tech
++GT는 requests에 없으며 worker는 GT를 읽지 않는다.
++"""
++import argparse, fcntl, glob, hashlib, json, os, subprocess, sys, time
++PKGS = '/SSD1_1TB/home/milab/daniel/08_medgemma/research/results/environments/qwen25vl_pkgs'
++if PKGS not in sys.path:
++    sys.path.insert(0, PKGS)
++os.environ['HF_HUB_OFFLINE'] = '1'
++import mri61_spec as S
++import mri61_parse as P
++
++MODEL_ID = 'Qwen/Qwen2.5-VL-7B-Instruct'
++CACHE = '/SSD1_1TB/home/milab/daniel/08_medgemma/research/results/environments/qwen25vl_cache'
++FETCH = 'results/iter_062/env/qwen_fetch.json'
++DATA = 'results/iter_062/data'
++CAPS = [512, 2048]
++CODE = ['q62_run.py', 'mri61_spec.py', 'mri61_parse.py']
++GEN_SPEC = {'do_sample': False, 'note': 'checkpoint generation_config(repetition_penalty 등) 유지, max_new_tokens=cap'}
++
++
++def sha_file(p):
++    h = hashlib.sha256()
++    with open(p, 'rb') as f:
++        for ch in iter(lambda: f.read(1 << 22), b''):
++            h.update(ch)
++    return h.hexdigest()
++
++
++def sha_s(x):
++    return hashlib.sha256(x if isinstance(x, bytes) else x.encode()).hexdigest()
++
++
++def revision():
++    return json.load(open(FETCH))['revision']
++
++
++def read_jsonl(p, strict=False):
++    """정상 prefix만 반환. 손상 줄에서 중단. (rows, n_bad_tail_bytes)"""
++    out = []
++    if not os.path.exists(p):
++        return out
++    for l in open(p):
++        if not l.strip():
++            continue
++        try:
++            out.append(json.loads(l))
++        except json.JSONDecodeError:
++            if strict:
++                raise
++            break
++    return out
++
++
++# ---------------- protocol ----------------
++def components(requests, labels):
++    rows = read_jsonl(requests)
++    fm = json.load(open(FETCH))
++    imgs = sorted({p for r in rows for p in r['images']})
++    return {'code': {f: sha_file(f) for f in CODE}, 'requests': sha_file(requests), 'labels': sha_file(labels),
++            'selection_manifest': sha_file(f'{DATA}/selection_manifest.json'),
++            'source_eligible_qa': sha_file(f'{S.DATA}/eligible_qa.json'),
++            'source_selection_lock': sha_file(f'{S.DATA}/selection_lock.json'),
++            'images': {p: sha_file(p) for p in imgs},
++            'model': {'id': MODEL_ID, 'revision': fm['revision'],
++                      'weights_files': {k: v['sha256'] for k, v in fm['files'].items()}},
++            'caps': CAPS, 'instr_sha': sha_s(S.INSTR), 'gen_spec': GEN_SPEC}
++
++
++def digest(comp):
++    return sha_s(json.dumps(comp, sort_keys=True))
++
++
++def cmd_lock(a):
++    comp = components(a.requests, a.labels)
++    d = digest(comp)
++    assert not os.path.exists(a.out), 'protocol already exists'
++    json.dump({'digest': d, 'components': comp, 'requests_file': a.requests, 'labels_file': a.labels,
++               'locked_at': time.strftime('%Y-%m-%dT%H:%M:%S')}, open(a.out, 'w'), indent=1)
++    print('locked', d)
++
++
++def check_protocol(requests, labels, protocol):
++    p = json.load(open(protocol))
++    comp = components(requests, labels)
++    if digest(comp) != p['digest'] or comp != p['components']:
++        diff = [k for k in comp if comp[k] != p['components'].get(k)]
++        sys.exit(f'PROTOCOL MISMATCH in {diff}')
++    return p['digest']
++
++
++# ---------------- model ----------------
++def load_model():
++    import torch, transformers
++    torch.manual_seed(0)
++    rev = revision()
++    proc = transformers.AutoProcessor.from_pretrained(MODEL_ID, revision=rev, cache_dir=CACHE)
++    model = transformers.Qwen2_5_VLForConditionalGeneration.from_pretrained(
++        MODEL_ID, revision=rev, cache_dir=CACHE, dtype=torch.bfloat16, device_map='cuda')
++    model.eval()
++    return torch, proc, model
++
++
++def env_info(torch, proc, model):
++    import transformers, PIL, importlib.metadata as im
++    gc = model.generation_config
++    return {'model_id': MODEL_ID, 'model_revision': revision(), 'transformers': transformers.__version__,
++            'torch': torch.__version__, 'PIL': PIL.__version__, 'qwen_vl_utils': im.version('qwen-vl-utils') if True else None,
++            'dtype': str(model.dtype), 'cuda_visible_devices': os.environ.get('CUDA_VISIBLE_DEVICES'),
++            'gpu_name': torch.cuda.get_device_name(0), 'gpu_uuid': str(torch.cuda.get_device_properties(0).uuid),
++            'generation_config': gc.to_dict(), 'chat_template_sha256': sha_s(proc.chat_template or ''),
++            'image_processor': proc.image_processor.to_dict(),
++            'attn_implementation': getattr(model.config, '_attn_implementation', None)}
++
++
++def open_images(row):
++    from PIL import Image
++    return [Image.open(p).convert('RGB') for p in row['images']]
++
++
++def build_inputs(proc, row, ims=None):
++    """모델 카드 경로: apply_chat_template(tokenize=False) + process_vision_info + processor."""
++    from qwen_vl_utils import process_vision_info
++    ims = open_images(row) if ims is None else ims
++    content = [{'type': 'image', 'image': im} for im in ims] + [{'type': 'text', 'text': row['prompt']}]
++    msgs = [{'role': 'user', 'content': content}]
++    text = proc.apply_chat_template(msgs, tokenize=False, add_generation_prompt=True)
++    image_inputs, video_inputs = process_vision_info(msgs)
++    kw = {'images': image_inputs} if image_inputs else {}
++    inp = proc(text=[text], padding=True, return_tensors='pt', **kw)
++    return inp, text
++
++
++def generate(torch, model, inp, cap, eos_ids):
++    x = {k: (v.to('cuda', dtype=torch.bfloat16) if k == 'pixel_values' else v.to('cuda')) for k, v in inp.items()}
++    torch.cuda.synchronize()
++    torch.cuda.reset_peak_memory_stats()
++    t0 = time.perf_counter()
++    with torch.no_grad():
++        out = model.generate(**x, max_new_tokens=cap, do_sample=False)
++    torch.cuda.synchronize()
++    dt = time.perf_counter() - t0
++    ids = out[0, x['input_ids'].shape[1]:].tolist()
++    ended = len(ids) > 0 and ids[-1] in eos_ids
++    return {'cap': cap, 'suffix_ids': ids, 'n_new': len(ids), 'ended_eos': bool(ended), 'runtime_s': dt,
++            'peak_mem_alloc_gb': torch.cuda.max_memory_allocated() / 2**30,
++            'peak_mem_reserved_gb': torch.cuda.max_memory_reserved() / 2**30}
++
++
++def merge_len(grid):
++    return int(sum(int(t * h * w) // 4 for t, h, w in grid))
++
++
++def run_one(torch, proc, model, eos, row):
++    t_start = time.perf_counter()
++    ims = open_images(row)
++    inp, text = build_inputs(proc, row, ims)
++    ids = inp['input_ids'][0].tolist()
++    n_img = sum(1 for t in ids if t == model.config.image_token_id)
++    grid = inp['image_grid_thw'].tolist() if 'image_grid_thw' in inp else []
++    if (len(row['images']) == 0) != (n_img == 0) or n_img != merge_len(grid) or len(grid) != len(row['images']):
++        raise RuntimeError(f"input structure mismatch {row['rid']}: img={len(row['images'])} tok={n_img} grid={grid}")
++    t_proc = time.perf_counter()
++    attempts = []
++    for cap in CAPS:
++        g = generate(torch, model, inp, cap, eos)
++        g['text'] = proc.decode(g['suffix_ids'], skip_special_tokens=True)
++        attempts.append(g)
++        if g['ended_eos']:
++            break
++    return {'rid': row['rid'], 'n_input_tokens': len(ids), 'n_image_tokens': n_img, 'n_images': len(row['images']),
++            'image_grid_thw': grid, 'input_ids_sha': sha_s(json.dumps(ids)),
++            'pixel_values_sha': sha_s(inp['pixel_values'].float().numpy().tobytes()) if 'pixel_values' in inp else None,
++            'image_file_sha': [sha_file(p) for p in row['images']], 'attempts': attempts,
++            'proc_s': t_proc - t_start, 'gen_attempts_s': time.perf_counter() - t_proc}, t_start
++
++
++# ---------------- files / claims ----------------
++def repair_tail(path):
++    """손상된(불완전) 줄이 있으면 원본을 .corrupt_<ts>로 보존하고 정상 prefix만 원자적으로 재작성."""
++    if not os.path.exists(path):
++        return 0
++    raw = open(path, 'rb').read()
++    good, n = [], 0
++    for l in raw.split(b'\n'):
++        if not l.strip():
++            continue
++        try:
++            json.loads(l)
++            good.append(l)
++        except json.JSONDecodeError:
++            break
++    clean = b''.join(g + b'\n' for g in good)
++    if clean != raw:
++        open(f'{path}.corrupt_{int(time.time() * 1000)}', 'wb').write(raw)
++        tmp = path + '.tmp'
++        with open(tmp, 'wb') as f:
++            f.write(clean)
++            f.flush(); os.fsync(f.fileno())
++        os.replace(tmp, path)
++        return len(raw) - len(clean)
++    return 0
++
++
++def pid_alive(pid):
++    try:
++        os.kill(pid, 0)
++        return True
++    except ProcessLookupError:
++        return False
++    except PermissionError:
++        return True
++
++
++def claim(claim_dir, rid, meta):
++    p = f'{claim_dir}/{rid}.claim'
++    for _ in range(2):
++        try:
++            fd = os.open(p, os.O_CREAT | os.O_EXCL | os.O_WRONLY)
++            os.write(fd, json.dumps(meta).encode()); os.close(fd)
++            return True
++        except FileExistsError:
++            try:
++                owner = json.load(open(p))
++            except Exception:
++                return False
++            if pid_alive(owner.get('pid', -1)):
++                return False
++            # 소유 프로세스가 죽은 claim: 원자적으로 치우고 재시도(rename 승자만 진행)
++            try:
++                os.rename(p, f"{p}.stale_{os.getpid()}_{time.time_ns()}")
++            except FileNotFoundError:
++                pass
++    return False
++
++
++def done_set(out_dir):
++    d = set()
++    for f in glob.glob(f'{out_dir}/worker*.jsonl'):
++        d |= {r['rid'] for r in read_jsonl(f)}
++    return d
++
++
++def cmd_worker(a):
++    pdig = check_protocol(a.requests, a.labels, a.protocol)
++    rows = read_jsonl(a.requests)
++    by = {r['rid']: r for r in rows}
++    os.makedirs(f'{a.out_dir}/claims', exist_ok=True)
++    lockf = open(f'{a.out_dir}/worker{a.worker}.lock', 'w')
++    try:
++        fcntl.flock(lockf, fcntl.LOCK_EX | fcntl.LOCK_NB)
++    except BlockingIOError:
++        sys.exit('worker already running')
++    out = f'{a.out_dir}/worker{a.worker}.jsonl'
++    dropped = repair_tail(out)
++    done = done_set(a.out_dir)
++    # 이전 worker 기록이 현재 protocol/요청과 다르면 재개 거부
++    for f in glob.glob(f'{a.out_dir}/worker*.jsonl'):
++        for r in read_jsonl(f):
++            if r.get('protocol_digest') != pdig or r['rid'] not in by:
++                sys.exit(f'existing record incompatible with protocol: {f} {r.get("rid")}')
++    tl = time.perf_counter()
++    torch, proc, model = load_model()
++    env = env_info(torch, proc, model)
++    load_s = time.perf_counter() - tl
++    eos_cfg = model.generation_config.eos_token_id
++    eos = set(eos_cfg if isinstance(eos_cfg, list) else [eos_cfg])
++    attempt = str(time.time_ns())
++    json.dump({'attempt': attempt, 'env': env, 'load_s': load_s, 'pid': os.getpid(), 'dropped_tail_bytes': dropped,
++               'n_done_at_start': len(done), 'gpu_env': os.environ.get('CUDA_VISIBLE_DEVICES')},
++              open(f'{a.out_dir}/worker{a.worker}.attempt_{attempt}.json', 'w'), default=str)
++    meta = {'worker': a.worker, 'pid': os.getpid(), 'attempt': attempt}
++    n = 0
++    t0 = time.perf_counter()
++    for row in rows:
++        if row['rid'] in done or (a.limit and n >= a.limit):
++            continue
++        if not claim(f'{a.out_dir}/claims', row['rid'], meta):
++            continue
++        rec, ts = run_one(torch, proc, model, eos, row)
++        rec.update({'protocol_digest': pdig, 'worker': a.worker, 'attempt_id': attempt})
++        with open(out, 'a') as f:
++            f.write(json.dumps(rec) + '\n')
++            f.flush(); os.fsync(f.fileno())
++        t_end = time.perf_counter()
++        with open(f'{a.out_dir}/cost_worker{a.worker}.jsonl', 'a') as f:
++            f.write(json.dumps({'rid': row['rid'], 'cond': row['cond'], 'K': row['K'], 'attempt_id': attempt,
++                                'total_read_to_flush_s': t_end - ts,
++                                'n_attempts': len(rec['attempts']),
++                                'in_tokens': rec['n_input_tokens'],
++                                'out_tokens': [x['n_new'] for x in rec['attempts']],
++                                'gen_s': [x['runtime_s'] for x in rec['attempts']]}) + '\n')
++            f.flush(); os.fsync(f.fileno())
++        n += 1
++        if n % 10 == 1:
++            print(f'w{a.worker} {n} {time.perf_counter() - t0:.0f}s', flush=True)
++    print('worker done', n, time.perf_counter() - t0, flush=True)
++
++
++# ---------------- launcher ----------------
++def smi(q):
++    o = subprocess.check_output(['nvidia-smi', f'--query-gpu=index,uuid,{q}', '--format=csv,noheader,nounits'], text=True)
++    return {int(l.split(',')[0]): (l.split(',')[1].strip(), int(l.split(',')[2])) for l in o.strip().splitlines()}
++
++
++def cmd_launch(a):
++    check_protocol(a.requests, a.labels, a.protocol)
++    tj = json.load(open(a.tech))  # 기술 gate
++    if tj.get('fails', 1) != 0 or tj.get('requests_sha256') != sha_file(a.requests) or tj.get('protocol_digest') != json.load(open(a.protocol))['digest']:
++        sys.exit('tech gate failed/mismatch')
++    os.makedirs(a.out_dir, exist_ok=True)
++    ll = open(f'{a.out_dir}/launcher.lock', 'w')
++    try:
++        fcntl.flock(ll, fcntl.LOCK_EX | fcntl.LOCK_NB)
++    except BlockingIOError:
++        sys.exit('another launcher is running')
++    gpus = [int(g) for g in a.gpus.split(',')]
++    allowed = os.environ.get('CUDA_VISIBLE_DEVICES')
++    if allowed:
++        assert set(map(str, gpus)) <= set(allowed.split(',')), 'GPU outside allowed set'
++    free = {g: tot[1] for g, tot in smi('memory.total').items()}
++    used = {g: u[1] for g, u in smi('memory.used').items()}
++    uuid = {g: u[0] for g, u in smi('memory.used').items()}
++    need = {}
++    for g in gpus:
++        need[g] = need.get(g, 0) + a.workers_per_gpu * (a.peak_gb * 1024 + 2048)
++    for g, n in need.items():
++        assert free[g] - used[g] >= n, f'GPU{g} free {free[g] - used[g]} < need {n} MiB'
++    # 실행 중 worker가 없는지 확인 후 죽은 claim 정리(rename으로 보존)
++    for lf in glob.glob(f'{a.out_dir}/worker*.lock'):
++        f = open(lf, 'w')
++        try:
++            fcntl.flock(f, fcntl.LOCK_EX | fcntl.LOCK_NB)
++        except BlockingIOError:
++            sys.exit(f'live worker holds {lf}')
++        f.close()
++    os.makedirs(f'{a.out_dir}/claims', exist_ok=True)
++    done = done_set(a.out_dir)
++    for c in glob.glob(f'{a.out_dir}/claims/*.claim'):
++        if os.path.basename(c)[:-6] not in done:
++            os.rename(c, f'{c}.stale_launch_{time.time_ns()}')
++    t0 = time.perf_counter()
++    ps, wl = [], []
++    w = 0
++    for g in gpus:
++        for _ in range(a.workers_per_gpu):
++            env = dict(os.environ, CUDA_VISIBLE_DEVICES=str(g))
++            cmd = [sys.executable, 'q62_run.py', 'worker', '--requests', a.requests, '--labels', a.labels,
++                   '--protocol', a.protocol, '--out-dir', a.out_dir, '--worker', str(w)]
++            if a.limit:
++                cmd += ['--limit', str(a.limit)]
++            ps.append(subprocess.Popen(cmd, env=env, stdout=open(f'{a.out_dir}/worker{w}.stdout.log', 'a'), stderr=subprocess.STDOUT))
++            wl.append({'worker': w, 'gpu': g, 'uuid': uuid[g]})
++            w += 1
++    samples, rcs = [], [None] * len(ps)
++    while any(r is None for r in rcs):
++        time.sleep(3)
++        rcs = [p.poll() for p in ps]
++        samples.append({g: u[1] for g, u in smi('memory.used').items()})
++    comp = {'workers': wl, 'exit_codes': rcs, 'wall_monotonic_s': time.perf_counter() - t0,
++            'peak_used_mib_all_gpus': {g: max(s[g] for s in samples) for g in samples[0]} if samples else {},
++            'used_mib_before': used, 'workers_per_gpu': a.workers_per_gpu}
++    json.dump(comp, open(f'{a.out_dir}/launch_{time.time_ns()}.json', 'w'))
++    print(comp)
++    if any(rcs):
++        sys.exit(1)
++
++
++def cmd_verify(a):
++    pdig = check_protocol(a.requests, a.labels, a.protocol)
++    rows = read_jsonl(a.requests)
++    by = {r['rid']: r for r in rows}
++    recs, files = [], {}
++    for f in sorted(glob.glob(f'{a.out_dir}/worker*.jsonl')):
++        rr = read_jsonl(f)
++        recs += rr
++        files[f] = sha_file(f)
++    problems = []
++    ids = [r['rid'] for r in recs]
++    if len(ids) != len(set(ids)):
++        problems.append('duplicate records')
++    if set(ids) != set(by):
++        problems.append(f'missing {len(set(by) - set(ids))} extra {len(set(ids) - set(by))}')
++    for r in recs:
++        q = by.get(r['rid'])
++        if not q:
++            continue
++        if r['protocol_digest'] != pdig:
++            problems.append('protocol digest ' + r['rid'])
++        if r['n_images'] != len(q['images']) or r['n_images'] != len(r['image_grid_thw']) or (r['n_images'] == 0) != (r['n_image_tokens'] == 0):
++            problems.append('image count/tokens ' + r['rid'])
++        if r['n_image_tokens'] != merge_len(r['image_grid_thw']):
++            problems.append('image token count ' + r['rid'])
++        if r['image_file_sha'] != [sha_file(p) for p in q['images']]:
++            problems.append('image file sha ' + r['rid'])
++        if not r['attempts'] or any(x['cap'] not in CAPS for x in r['attempts']):
++            problems.append('attempts ' + r['rid'])
++    cost_ids = set()
++    for f in glob.glob(f'{a.out_dir}/cost_worker*.jsonl'):
++        cost_ids |= {c['rid'] for c in read_jsonl(f)}
++    if set(ids) - cost_ids:
++        problems.append(f'cost sidecar missing {len(set(ids) - cost_ids)}')
++    lm = {}
++    for f in glob.glob(f'{a.out_dir}/launch_*.json'):
++        lm[os.path.basename(f)] = json.load(open(f))['exit_codes']
++    res = {'n_requests': len(rows), 'n_records': len(recs), 'problems': problems[:20], 'n_problems': len(problems),
++           'protocol_digest': pdig, 'record_file_sha256': files, 'launch_exit_codes': lm,
++           'sealed_at': time.strftime('%Y-%m-%dT%H:%M:%S')}
++    json.dump(res, open(f'{a.out_dir}/verify.json', 'w'), indent=1)
++    print({k: v for k, v in res.items() if k != 'record_file_sha256'})
++    if problems:
++        sys.exit(1)
++
++
++# ---------------- tech ----------------
++def cmd_tech(a):
++    """adapter vs 모델 카드 직접 호출 대조: input_ids·pixel_values·image_grid_thw, T 영상 token 부재, S_i⊂J, 누출 문자열 부재."""
++    import torch, transformers
++    from qwen_vl_utils import process_vision_info
++    proc = transformers.AutoProcessor.from_pretrained(MODEL_ID, revision=revision(), cache_dir=CACHE)
++    pdig = check_protocol(a.requests, a.labels, a.protocol)
++    rows = read_jsonl(a.requests)
++    labels = json.load(open(a.labels))
++    img_id = proc.tokenizer.convert_tokens_to_ids('<|image_pad|>')
++    res, fails, cache = [], 0, {}
++    for r in rows:
++        inp, text = build_inputs(proc, r)
++        # 모델 카드 예제를 그대로 옮긴 독립 호출
++        ims = open_images(r)
++        msgs = [{'role': 'user', 'content': [{'type': 'image', 'image': im} for im in ims] + [{'type': 'text', 'text': r['prompt']}]}]
++        t2 = proc.apply_chat_template(msgs, tokenize=False, add_generation_prompt=True)
++        iis, vis = process_vision_info(msgs)
++        ref = proc(text=[t2], images=iis, videos=vis, padding=True, return_tensors='pt') if iis else proc(text=[t2], padding=True, return_tensors='pt')
++        ok_ids = torch.equal(inp['input_ids'], ref['input_ids'])
++        ok_grid = ('image_grid_thw' in inp) == ('image_grid_thw' in ref) and ('image_grid_thw' not in inp or torch.equal(inp['image_grid_thw'], ref['image_grid_thw']))
++        ok_pv = ('pixel_values' in inp) == ('pixel_values' in ref) and ('pixel_values' not in inp or torch.equal(inp['pixel_values'], ref['pixel_values']))
++        n_tok = int((inp['input_ids'] == img_id).sum())
++        grid = inp['image_grid_thw'].tolist() if 'image_grid_thw' in inp else []
++        ok_n = (n_tok == merge_len(grid)) and len(grid) == len(r['images']) and ((len(r['images']) == 0) == ('pixel_values' not in inp))
++        # 누출 문자열: 파일명·cluster·source·정답 문자열이 chat text에 없어야 함(정답 텍스트는 선택지로는 존재하므로 'ANSWER_TEXT' 대신 파일명/id만 검사)
++        leak = [s for s in [r['cluster_id'], r['source']] + [os.path.basename(p) for p in r['images']] if s in text]
++        # source 이름이 질문 본문에 자연히 포함되지 않는지 확인(PubMedVision 등)
++        ok_leak = not leak
++        key = (r['cluster_id'], r['cond'], r['order'])
++        cache[key] = inp
++        res.append({'rid': r['rid'], 'cond': r['cond'], 'order': r['order'], 'K': r['K'], 'ok_ids': ok_ids, 'ok_grid': ok_grid,
++                    'ok_pv': ok_pv, 'ok_structure': ok_n, 'ok_no_leak': ok_leak, 'n_input_tokens': int(inp['input_ids'].shape[1]),
++                    'n_image_tokens': n_tok, 'grid': grid})
++        fails += not (ok_ids and ok_grid and ok_pv and ok_n and ok_leak)
++    sub = []
++    for (cid, cond, order), inp in cache.items():
++        if cond.startswith('S'):
++            i = int(cond[1:]) - 1
++            J = cache[(cid, 'J', order)]
++            g = J['image_grid_thw'].tolist()
++            off = sum(int(t * h * w) for t, h, w in g[:i])
++            n = int(g[i][0] * g[i][1] * g[i][2])
++            good = torch.equal(J['pixel_values'][off:off + n], inp['pixel_values']) and inp['image_grid_thw'].tolist() == [g[i]]
++            sub.append({'cluster': cid, 'cond': cond, 'order': order, 'S_equals_J_slice': bool(good)})
++            fails += not good
++    # 두 순서에서 영상 입력이 동일(prompt만 다름)
++    ord_ok = 0
++    for (cid, cond, order), inp in cache.items():
++        if order == 'F':
++            o = cache[(cid, cond, 'R')]
++            same = ('pixel_values' in inp) == ('pixel_values' in o) and ('pixel_values' not in inp or torch.equal(inp['pixel_values'], o['pixel_values']))
++            ord_ok += same
++            fails += not same
++    out = {'requests_sha256': sha_file(a.requests), 'protocol_digest': pdig, 'n_checked': len(res), 'fails': fails,
++           'subset_order': sub, 'order_pixel_equal': ord_ok, 'details': res,
++           'max_input_tokens': max(x['n_input_tokens'] for x in res)}
++    json.dump(out, open(a.out, 'w'), indent=1)
++    print('tech fails', fails, 'of', len(res), '+', len(sub), '+', ord_ok, 'max tokens', out['max_input_tokens'])
++    if fails:
++        sys.exit(1)
++
++
++def main():
++    ap = argparse.ArgumentParser()
++    sp = ap.add_subparsers(dest='cmd', required=True)
++    l = sp.add_parser('lock'); l.add_argument('--requests', required=True); l.add_argument('--labels', required=True); l.add_argument('--out', required=True)
++    for n in ('worker', 'launch', 'verify', 'tech'):
++        p = sp.add_parser(n)
++        p.add_argument('--requests', required=True); p.add_argument('--labels', required=True); p.add_argument('--protocol', required=True)
++        if n != 'tech':
++            p.add_argument('--out-dir', required=True)
++        if n == 'worker':
++            p.add_argument('--worker', type=int, required=True); p.add_argument('--limit', type=int, default=0)
++        if n == 'launch':
++            p.add_argument('--tech', required=True); p.add_argument('--gpus', required=True); p.add_argument('--workers-per-gpu', type=int, default=1)
++            p.add_argument('--peak-gb', type=float, default=18); p.add_argument('--limit', type=int, default=0)
++        if n == 'tech':
++            p.add_argument('--out', required=True)
++    a = ap.parse_args()
++    {'lock': cmd_lock, 'worker': cmd_worker, 'launch': cmd_launch, 'verify': cmd_verify, 'tech': cmd_tech}[a.cmd](a)
++
++
++if __name__ == '__main__':
++    main()
+diff --git a/q62_sens.py b/q62_sens.py
+new file mode 100644
+index 0000000..e7a9672
+--- /dev/null
++++ b/q62_sens.py
+@@ -0,0 +1,37 @@
++"""iter_062 사후 민감도(형식): 마지막 비공백 줄이 '[**]ANSWER: X[**]'(대소문자 무시, 굵게 표시 허용)인 경우도 유효로 인정.
++양 모델에 동일하게 적용하며 1차 결과(parse_v2)를 대체하지 않는다. 사후 정의이므로 탐색용이다.
++사용: python q62_sens.py
++"""
++import re, sys
++import mri61_parse as P
++import q62_eval as E
++
++_orig = P.parse_v2
++LEN = re.compile(r'^\**\s*answer\s*:\s*\**\s*([A-E])\s*\**\.?$', re.I)
++
++
++def lenient(text):
++    a = _orig(text)
++    if a:
++        return a
++    ls = [l.strip() for l in text.strip().splitlines() if l.strip()]
++    if not ls:
++        return None
++    m = LEN.match(ls[-1])
++    return m.group(1).upper() if m else None
++
++
++P.parse_v2 = lenient
++sys.argv = ['q62_eval.py', '--out', 'results/iter_062/eval/report_sensitivity_lenient_format.json']
++import argparse
++ap = argparse.ArgumentParser()
++ap.add_argument('--requests', default='results/iter_062/data/E21_requests.jsonl')
++ap.add_argument('--labels', default='results/iter_062/data/E21_labels.json')
++ap.add_argument('--manifest', default='results/iter_062/data/selection_manifest.json')
++ap.add_argument('--qwen-dir', default='results/iter_062/gen_E21_qwen')
++ap.add_argument('--qwen-protocol', default='results/iter_062/E21_protocol.json')
++ap.add_argument('--medgemma-dir', default='results/iter_061/gen_E24')
++ap.add_argument('--medgemma-protocol', default='results/iter_061/E24_protocol.json')
++ap.add_argument('--medgemma-requests', default='results/iter_061/E24_requests.jsonl')
++ap.add_argument('--out', default='results/iter_062/eval/report_sensitivity_lenient_format.json')
++E.run(ap.parse_args([]))
+diff --git a/q62_test.py b/q62_test.py
+new file mode 100644
+index 0000000..5c9b75a
+--- /dev/null
++++ b/q62_test.py
+@@ -0,0 +1,86 @@
++"""iter_062 CPU 검사: protocol 변조 차단, claim 원자성, 손상 tail 보존·복구. 결과: results/iter_062/tests/cpu_tests.json"""
++import json, os, shutil, sys
++import q62_run as Q
++
++T = 'results/iter_062/tests/cpu'
++os.makedirs(T, exist_ok=True)
++R = {}
++
++
++def expect_exit(fn):
++    try:
++        fn()
++    except SystemExit as e:
++        return str(e)
++    return None
++
++
++rows = [json.loads(l) for l in open('results/iter_062/data/D3_requests.jsonl')][:4]
++for i, r in enumerate(rows):
++    pass
++# 영상 복사본을 쓰는 mini 요청
++img_src = next(r['images'][0] for r in rows if r['images'])
++shutil.copy(img_src, f'{T}/img.png')
++mini = []
++for r in rows:
++    r = dict(r)
++    r['images'] = [f'{T}/img.png'] if r['images'] else []
++    mini.append(r)
++open(f'{T}/req.jsonl', 'w').write(''.join(json.dumps(r) + '\n' for r in mini))
++shutil.copy('results/iter_062/data/D3_labels.json', f'{T}/labels.json')
++if os.path.exists(f'{T}/prot.json'):
++    os.remove(f'{T}/prot.json')
++import argparse
++Q.cmd_lock(argparse.Namespace(requests=f'{T}/req.jsonl', labels=f'{T}/labels.json', out=f'{T}/prot.json'))
++chk = lambda: Q.check_protocol(f'{T}/req.jsonl', f'{T}/labels.json', f'{T}/prot.json')
++R['baseline_ok'] = chk() is not None
++
++
++def tamper(name, path, fn):
++    orig = open(path, 'rb').read()
++    try:
++        open(path, 'wb').write(fn(orig))
++        msg = expect_exit(chk)
++    finally:
++        open(path, 'wb').write(orig)
++    R[name] = {'blocked': msg is not None, 'msg': msg}
++
++
++tamper('tamper_requests', f'{T}/req.jsonl', lambda b: b + b'\n')
++tamper('tamper_labels', f'{T}/labels.json', lambda b: b.replace(b'"gt_orig_index": ', b'"gt_orig_index":  ', 1))
++tamper('tamper_image', f'{T}/img.png', lambda b: b + b'x')
++# 코드/parser/manifest/annotation 변조: CODE·경로를 임시 사본으로 치환해 같은 검사 경로 사용
++shutil.copy('mri61_parse.py', f'{T}/parse_copy.py')
++oldcode, olddata, oldS = Q.CODE, Q.DATA, Q.S.DATA
++Q.CODE = Q.CODE + [f'{T}/parse_copy.py']
++if os.path.exists(f'{T}/prot2.json'):
++    os.remove(f'{T}/prot2.json')
++Q.cmd_lock(argparse.Namespace(requests=f'{T}/req.jsonl', labels=f'{T}/labels.json', out=f'{T}/prot2.json'))
++chk2 = lambda: Q.check_protocol(f'{T}/req.jsonl', f'{T}/labels.json', f'{T}/prot2.json')
++orig = open(f'{T}/parse_copy.py', 'rb').read()
++open(f'{T}/parse_copy.py', 'ab').write(b'\n# changed\n')
++R['tamper_parser_or_code'] = {'blocked': expect_exit(chk2) is not None}
++open(f'{T}/parse_copy.py', 'wb').write(orig)
++R['restored_ok'] = chk2() is not None
++Q.CODE = oldcode
++# claim 원자성 / stale
++cd = f'{T}/claims'
++shutil.rmtree(cd, ignore_errors=True); os.makedirs(cd)
++a = Q.claim(cd, 'r1', {'pid': os.getpid()})
++b = Q.claim(cd, 'r1', {'pid': os.getpid() + 0})
++R['claim_second_rejected'] = a and not b
++open(f'{cd}/r2.claim', 'w').write(json.dumps({'pid': 2 ** 22 + 12345}))  # 존재하지 않는 pid
++R['claim_stale_taken_over'] = Q.claim(cd, 'r2', {'pid': os.getpid()})
++# 손상 tail 보존
++p = f'{T}/w.jsonl'
++open(p, 'w').write(json.dumps({'rid': 'a'}) + '\n' + json.dumps({'rid': 'b'}) + '\n' + '{"rid": "c", "att')
++n = Q.repair_tail(p)
++cor = [f for f in os.listdir(T) if f.startswith('w.jsonl.corrupt_')]
++R['tail_repair'] = {'dropped_bytes': n, 'kept_rids': [r['rid'] for r in Q.read_jsonl(p)], 'corrupt_preserved': len(cor) == 1,
++                    'preserved_has_torn_line': b'att' in open(f'{T}/{cor[0]}', 'rb').read() if cor else False}
++R['all_pass'] = (R['baseline_ok'] and all(R[k]['blocked'] for k in ('tamper_requests', 'tamper_labels', 'tamper_image', 'tamper_parser_or_code'))
++                 and R['restored_ok'] and R['claim_second_rejected'] and R['claim_stale_taken_over']
++                 and R['tail_repair']['kept_rids'] == ['a', 'b'] and R['tail_repair']['corrupt_preserved'])
++json.dump(R, open('results/iter_062/tests/cpu_tests.json', 'w'), indent=1)
++print(json.dumps(R, indent=1))
++sys.exit(0 if R['all_pass'] else 1)
+diff --git a/q62_verify.py b/q62_verify.py
+new file mode 100644
+index 0000000..812d095
+--- /dev/null
++++ b/q62_verify.py
+@@ -0,0 +1,116 @@
++"""iter_062 독립 재계산: q62_eval.py의 코드를 import하지 않고 원시 JSONL에서 점추정치와 bootstrap CI를 다시 계산해 report와 대조.
++parser는 별도 정규식으로 구현한다(마지막 비공백 줄이 'ANSWER: X' 또는 Final Answer ... \\boxed{X}).
++사용: python q62_verify.py --out results/iter_062/eval/verify.json
++"""
++import argparse, glob, hashlib, json, re, sys
++import numpy as np
++
++
++def H(s):
++    return hashlib.sha256(s.encode()).hexdigest()
++
++
++def letter(text):
++    ls = [l.strip() for l in text.strip().splitlines() if l.strip()]
++    if not ls:
++        return None
++    last = ls[-1]
++    m = re.fullmatch(r'ANSWER:\s*([A-E])', last)
++    if m:
++        return m.group(1)
++    if len(re.findall(r'\\boxed\{', last)) == 1:
++        m = re.fullmatch(r'(?:\*\*)?Final Answer:?(?:\*\*)?.*\\boxed\{\s*([A-E])\s*\}.*', last, flags=re.I)
++        if m:
++            return m.group(1)
++    return None
++
++
++def recs(d):
++    out = {}
++    for f in glob.glob(f'{d}/worker*.jsonl'):
++        for l in open(f):
++            if l.strip():
++                r = json.loads(l)
++                assert r['rid'] not in out
++                out[r['rid']] = r
++    return out
++
++
++def main(a):
++    rows = [json.loads(l) for l in open(a.requests) if l.strip()]
++    labels = json.load(open(a.labels))
++    rep = json.load(open(a.report))
++    cids = list(labels)
++    NB = 10000
++    idx = np.random.default_rng(61).integers(0, len(cids), (NB, len(cids)))
++    tab = {}
++    for name, d in (('MedGemma', a.medgemma_dir), ('Qwen2.5-VL-7B', a.qwen_dir)):
++        R = recs(d)
++        ans = {}
++        for r in rows:
++            L = letter(R[r['rid']]['attempts'][-1]['text'])
++            ans[(r['cluster_id'], r['order'], r['cond'])] = None if L is None else r['perm']['ABCDE'.index(L)]
++        v = {k: [] for k in ('T', 'J', 'Smean', 'V')}
++        per_order = {o: {k: [] for k in ('T', 'J', 'Smean', 'V')} for o in 'FR'}
++        for c in cids:
++            lab = labels[c]
++            gt = lab['gt_orig_index']
++            opts = lab['options']
++            for o in 'FR':
++                per_order[o]['T'].append(float(ans[(c, o, 'T')] == gt))
++                per_order[o]['J'].append(float(ans[(c, o, 'J')] == gt))
++                ss = [ans[(c, o, f"S{i + 1}")] for i in range(lab['K'])]
++                per_order[o]['Smean'].append(sum(x == gt for x in ss) / len(ss))
++                cnt = {}
++                for x in ss:
++                    if x is not None:
++                        cnt[x] = cnt.get(x, 0) + 1
++                if cnt:
++                    m = max(cnt.values())
++                    pick = sorted([k for k, n in cnt.items() if n == m], key=lambda k: H(opts[k]))[0]
++                    per_order[o]['V'].append(float(pick == gt))
++                else:
++                    per_order[o]['V'].append(0.0)
++        for k in v:
++            v[k] = [(per_order['F'][k][i] + per_order['R'][k][i]) / 2 for i in range(len(cids))]
++        tab[name] = {k: np.array(x) for k, x in v.items()}
++    maxdiff, checks = 0.0, []
++    def chk(name, got, want):
++        nonlocal maxdiff
++        d = abs(got - want)
++        maxdiff = max(maxdiff, d)
++        checks.append({'name': name, 'got': got, 'report': want, 'abs_diff': d})
++    for name, t in tab.items():
++        m = rep['models'][name]['all']
++        for k in ('T', 'J', 'Smean', 'V'):
++            chk(f'{name} {k}', float(t[k].mean()), m[k])
++        for nm, (x, y) in {'J-T': ('J', 'T'), 'V-T': ('V', 'T'), 'V-J': ('V', 'J'), 'Smean-J': ('Smean', 'J')}.items():
++            d = t[x] - t[y]
++            mm = d[idx].mean(1)
++            chk(f'{name} {nm} est', float(d.mean()), m[nm]['est'])
++            chk(f'{name} {nm} lo', float(np.percentile(mm, 2.5)), m[nm]['ci95'][0])
++            chk(f'{name} {nm} hi', float(np.percentile(mm, 97.5)), m[nm]['ci95'][1])
++    q, g = tab['Qwen2.5-VL-7B'], tab['MedGemma']
++    for nm, (x, y) in {'J-T': ('J', 'T'), 'V-T': ('V', 'T'), 'V-J': ('V', 'J')}.items():
++        d = (q[x] - q[y]) - (g[x] - g[y])
++        mm = d[idx].mean(1)
++        key = f'both_orders:(Qwen {nm}) - (MedGemma {nm})'
++        chk(key + ' est', float(d.mean()), rep['cross_model'][key]['est'])
++        chk(key + ' lo', float(np.percentile(mm, 2.5)), rep['cross_model'][key]['ci95'][0])
++        chk(key + ' hi', float(np.percentile(mm, 97.5)), rep['cross_model'][key]['ci95'][1])
++    res = {'n_checks': len(checks), 'max_abs_diff': maxdiff, 'pass': maxdiff < 1e-9, 'checks': checks}
++    json.dump(res, open(a.out, 'w'), indent=1)
++    print('verify', len(checks), 'max diff', maxdiff, 'PASS' if res['pass'] else 'FAIL')
++    if not res['pass']:
++        sys.exit(1)
++
++
++if __name__ == '__main__':
++    ap = argparse.ArgumentParser()
++    ap.add_argument('--requests', default='results/iter_062/data/E21_requests.jsonl')
++    ap.add_argument('--labels', default='results/iter_062/data/E21_labels.json')
++    ap.add_argument('--qwen-dir', default='results/iter_062/gen_E21_qwen')
++    ap.add_argument('--medgemma-dir', default='results/iter_061/gen_E24')
++    ap.add_argument('--report', default='results/iter_062/eval/report.json')
++    ap.add_argument('--out', default='results/iter_062/eval/verify.json')
++    main(ap.parse_args())
