@@ -75,6 +75,7 @@
 - iter_067 [CONTINUE] (deep_high/standard/normal) <MRI 임상 등급의 sequence 정보 가치: abandon> 💾acacfe155024c3673e8af606a723d1dd1a2df358 SPIDER 12명·81 IVD에서 공동 입력 BA02는 MedGemma 0.094, Qwen 0.500으로 확대 기준에 미달했다. 현재 경로는 종료하며 인식 부족과 답변 prior의 영향은 미분리다. → 다음: 현재 frozen Modic 확대는 종료하고, 기존 점수의 한정 재분석으로 답변 보정에 투자할 근거가 남는지만 확인한다. 새 GPU 호출·prompt·모델·F139 개방 없이 D/E12 원시 점수에서 환자 cluster 불확실성과 ordinal·영상 수·text-only 대조를 고정해 사후 순위 신호를 검토한다. 점수·조건을 결과에 맞춰 탐색하지 말고, D에서만 정한 단순 보정의 E12 결과를 개발 분석으로 구분한다. 교란 통제 후 판별 정보와 실용적 개선 여지가 함께 남을 때만 별도 방법 pilot의 가치와 gate를 검토하며, 순위 신호만으로 method 진입을 승인하지 않는다. 신호가 약하거나 12명 자료로 판별할 수 없으면 현재 Modic 경로를 보류하고 같은 자료의 추가 보정 탐색을 종료한다. 기존 plan의 중단 판정은 바꾸지 않는다.
 - iter_068 [CONTINUE] (deep_medium/standard/normal) <MRI 임상 등급의 sequence 정보 가치: abandon> 💾67946fde6559d6f1586835685ff28e0774ab0867 SPIDER 개발 12명에서 두 모델의 순위 AUROC는 0.73–0.74였지만 D 고정 보정 BA는 0.54–0.58로 기준 미달이다. 현재 Modic 보정 투자는 종료하며 인식·결합 원인은 미확정이다. → 다음: 현재 Modic 답변 보정 투자를 종료하고, MRI 근거 사용 질문에서 다음 투자 하나를 전략적으로 선택한다. iter_056~068의 유효 관찰과 종료 범위를 이어받아 기존 observed 문제의 최소 개입, 기본 인식에 적합한 강한 대안, 다른 실패 조건의 검증을 중요성·판별력·준비 비용으로 비교한다. 같은 D/E12의 점수 변환·threshold·prompt·추가 모델 탐색이나 E/F 개방은 이어가지 않는다. Modic 재개는 독립 자료를 늘리면 된다는 주장만으로 승인하지 말고, 강한 단순 대안과 구별할 중요한 잔여 문제 및 결과별 종료 결정을 제시할 때만 검토한다. 선택된 경로에 필요한 재사용 결함만 수정하고, 새 데이터 확보 자체를 다음 연구 질문으로 삼지 않는다.
 - iter_069 [CONTINUE] (deep_medium/standard/normal) <MRI 확산 신호와 판단 연결 검토: abandon> 💾76eb1036df95478f889ee6bfd8e31ca43e82b415 DWI–ADC 20 case에서 두 모델 모두 ADC 신호에 LOW만 답해 BA 0.50이었다. 현재 방법 투자는 종료하며, 인식·입력·질문 형식의 원인은 미분리다. → 다음: 현재 DWI–ADC frozen 후보의 투자를 종료하고, MRI 근거 사용 연구의 다음 투자 하나를 전략적으로 선택한다. iter_064·065·068·069의 관찰과 종료 범위를 이어받아 기본 인식을 확보할 강한 대안·적응, 기존 observed 문제의 최소 개입, 다른 실패 조건을 중요성·판별력·준비 비용으로 비교한다. 같은 20 case의 prompt·threshold·추가 모델 탐색이나 표본 보충을 자동 연장하지 않는다. 선택한 경로에는 단순 대안 이후 남는 문제와 양성·음성·불확정 결과별 종료점을 명시한다. 이번 대상 연결 문제는 향후 해당 자료를 사용할 때만 한정 수정하며, 이를 별도 정비 반복이나 무조건 재실행의 이유로 삼지 않는다. 목표 범위 내 선택에는 추가 사용자 승인이 필요하지 않다.
+- iter_070 [CONTINUE] (deep_medium/standard/normal) <MRI 전문 모델의 근거 인식 적합성 검토: abandon> 💾02a8adade58f7cea84638f9e96bf963a0fb64d55 AutoRG의 FLAIR 15 case에서 예측·annotation mask 모두 BA 0.614로 기준 미달이었다. 현재 frozen 후보는 종료하되 높은 mask 중첩과 정답·노출 불확실성 때문에 인식 원인과 결합 능력은 미판정이다. → 다음: 현재 frozen 후보의 투자를 종료하고, 기존 MRI 관찰을 바탕으로 직접 적응·최소 개입·투자 보류 중 다음 투자 하나를 선택한다. iter_059의 강한 전문 대안, iter_064의 모델 특이 context 손실, iter_065~070의 기본 신호 미확보를 서로 다른 과제의 증거로 유지한다. 새 데이터나 모델 확보 자체를 다음 질문으로 삼지 않는다. 직접 적응을 선택한다면 실제 사용상 중요한 과제와 강한 단순 baseline, 분리된 개발·확인 자료, 결과별 종료 결정을 먼저 구체화한다. 기존 observed 문제를 선택한다면 단순 routing 이후 남는 가치와 경쟁 설명을 구분하는 개입을 제시한다. 이번 15건의 prompt·parser 탐색, 공식 test 개방, 동일 frozen 비교 확대는 자동 연장하지 않는다. 코드 수정은 실제 선택된 재사용 경로에 필요한 범위만 수행한다.
 
 ## 이전 목표들의 접근법 (참고용, 현재 목표의 재평가 횟수에는 안 들어감)
 
@@ -114,12 +115,13 @@
 - MRI 답변 인터페이스와 영상 신호 분리 [approach/mri-answer-interface]: 1회 (iter_066), 유효한 실험 1회, 미분류 0회, 최근 판정: inconclusive, 커밋: 7bc3601ddfc6f4525a8ad73edf281f4c824b2fc6
 - MRI 임상 등급의 sequence 정보 가치 [approach/mri-sequence-grade-value]: 2회 (iter_067, iter_068), 유효한 실험 2회, 미분류 0회, 최근 판정: abandon, 커밋: acacfe155024c3673e8af606a723d1dd1a2df358, 67946fde6559d6f1586835685ff28e0774ab0867
 - MRI 확산 신호와 판단 연결 검토 [approach/mri-diffusion-evidence]: 1회 (iter_069), 유효한 실험 1회, 미분류 0회, 최근 판정: abandon, 커밋: 76eb1036df95478f889ee6bfd8e31ca43e82b415
+- MRI 전문 모델의 근거 인식 적합성 검토 [approach/mri-specialist-evidence]: 1회 (iter_070), 유효한 실험 1회, 미분류 0회, 최근 판정: abandon, 커밋: 02a8adade58f7cea84638f9e96bf963a0fb64d55
 
-현재 연구 브랜치: approach/mri-diffusion-evidence (코드 위치: /SSD1_1TB/home/milab/daniel/08_medgemma/research)
+현재 연구 브랜치: approach/mri-specialist-evidence (코드 위치: /SSD1_1TB/home/milab/daniel/08_medgemma/research)
 
 ### 최근 계획의 대안 순위
 
-1. MRI 확산 신호와 판단 연결 검토: 기존 명시적 주석으로 ADC 인식·공동 판단·단순 대안 충분성을 한 번에 구분한다.
-2. 기존 context 손실의 최소 방법 시험: routing과 타 계열 대안 이후의 잔여 가치가 확보되지 않아 보류한다.
-3. 기본 MRI 인식의 직접 적응: 강한 단순 대안과 구별할 과제 가치가 아직 부족해 즉시 학습하지 않는다.
-4. 새 MRI benchmark·모델 확보: 현재 후보의 판별력을 높이는 근거가 없어 이번에는 선택하지 않는다.
+1. MRI 전문 모델의 근거 인식 적합성 검토: 실제 보고서 변이가 확인된 FLAIR에서 동일 경로의 P/G 대조로 기존 해결책의 범위를 판단한다.
+2. 기존 context 손실의 최소 개입: iter_064 관찰은 보존하지만 routing·타 계열 대안 이후의 잔여 가치가 부족해 보류한다.
+3. 직접 MRI 경량 적응: 전문 baseline과 학습 가능한 정답을 확보한 뒤 판단하며 이번에는 발주하지 않는다.
+4. 다른 실패 조건으로 전환: 현재 자료 연결이나 평가 의미가 성립하지 않을 때 별도 전략 판단으로 선택한다.

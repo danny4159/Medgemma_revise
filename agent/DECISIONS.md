@@ -1941,3 +1941,33 @@ Claude 계정의 /usage 또는 Settings > Usage에서 제한을 확인한 뒤 �
   - 다음: 현재 DWI–ADC frozen 후보의 투자를 종료하고, MRI 근거 사용 연구의 다음 투자 하나를 전략적으로 선택한다. iter_064·065·068·069의 관찰과 종료 범위를 이어받아 기본 인식을 확보할 강한 대안·적응, 기존 observed 문제의 최소 개입, 다른 실패 조건을 중요성·판별력·준비 비용으로 비교한다. 같은 20 case의 prompt·threshold·추가 모델 탐색이나 표본 보충을 자동 연장하지 않는다. 선택한 경로에는 단순 대안 이후 남는 문제와 양성·음성·불확정 결과별 종료점을 명시한다. 이번 대상 연결 문제는 향후 해당 자료를 사용할 때만 한정 수정하며, 이를 별도 정비 반복이나 무조건 재실행의 이유로 삼지 않는다. 목표 범위 내 선택에는 추가 사용자 승인이 필요하지 않다.
 - 📁 원본: `agent/runs/iter_069/`
 
+## iter_070 — MRI 전문 모델의 근거 인식 적합성 검토 (1번째 시도) · 2026-10-04 14:44
+
+- 🔎 **사고 라운드 1** (GPT deep_high): 기존 MRI context 손실만으로 새 loss를 개발할 근거는 부족하다. MRI 전문 모델의 영역 접근과 내용 인식을 구분할 경로로 좁혔으며, AutoRG의 정답·입력 연결을 확인한 뒤 실행 여부를 결정한다.
+  - 스스로 던진 질문: RadGenome의 sequence별 보고서에 동일 병변의 명시적인 신호·형태 정답과 사례 간 변이가 있는가? modal_wise_finding.json과 split 원문을 확인해 sequence prior를 넘는 인식 대조가 가능한지 판단한다. · 선택할 보고서의 원본 volume·mask·환자 또는 case ID를 공개/기승인 경로로 연결할 수 있으며, AutoRG checkpoint의 학습·validation 노출을 어느 범위까지 확인할 수 있는가? 기존 MSD·OmniBrainBench 자산은 공식 대응이 있을 때만 연결한다. · AutoRG의 동일 생성·후처리 경로에서 예측 mask와 GT mask만 바꾸는 비교가 가능한가? 가능하면 한정 자료 점검과 GPU 출력을 묶은 계획을 확정하고, 불가능하거나 내용 정답이 부적합하면 이 후보를 종료한다.
+- 🧭 **계획** (GPT deep_medium): AutoRG-Brain의 FLAIR 신호 판독을 예측 mask와 정답 mask로 비교해 전문 baseline의 사용 가능성을 판단한다. 자료 연결을 먼저 확인하며, mask 효과만으로 새 기여나 결합 능력을 주장하지 않는다.
+  - 대안: 1) MRI 전문 모델의 근거 인식 적합성 검토: 실제 보고서 변이가 확인된 FLAIR에서 동일 경로의 P/G 대조로 기존 해결책의 범위를 판단한다. · 2) 기존 context 손실의 최소 개입: iter_064 관찰은 보존하지만 routing·타 계열 대안 이후의 잔여 가치가 부족해 보류한다. · 3) 직접 MRI 경량 적응: 전문 baseline과 학습 가능한 정답을 확보한 뒤 판단하며 이번에는 발주하지 않는다. · 4) 다른 실패 조건으로 전환: 현재 자료 연결이나 평가 의미가 성립하지 않을 때 별도 전략 판단으로 선택한다.
+  - 1순위 선택 근거: 실제 annotation에서 판별 가능한 내용 변이를 확인했고, 공식 모델의 동일 출력 경로로 최소 대조를 구성할 근거가 있다. 남은 자료 연결은 설치 전 한정 gate로 처리할 수 있어 추가 사고 라운드나 사용자 승인이 필요하지 않다.
+- ▶ **결정**: 자동 진행 (smart) — 1순위로 진행
+- 💾 **개발 이력 체크포인트** `02a8adade58f7cea84638f9e96bf963a0fb64d55`: implementation_finished (검증 승인 아님)
+- 🔧 **Claude** (standard): AutoRG-Brain RGv2를 공식 val FLAIR 적격 15건에서 예측 mask(P)·정답 mask(G)·prior(B)로 비교한 결과, P와 G 모두 BA 0.614·UNKNOWN 0.20으로 사전 기준 미달이었고 G−P는 0이어서 이 후보를 종료한다. 단 P≈G(Dice 0.92)와 학습 노출 때문에 영역 지원 효과나 일반 능력은 판단하지 못했다. [자체 검증 PASS, 파일 29387개 변경]
+  - 새 브랜치 `approach/mri-specialist-evidence` ← 68117cf (68117cf)
+  - ⚠ 권한 거부 8건
+- 🔍 **리뷰** (GPT normal): [CONTINUE / abandon] AutoRG의 FLAIR 15 case에서 예측·annotation mask 모두 BA 0.614로 기준 미달이었다. 현재 frozen 후보는 종료하되 높은 mask 중첩과 정답·노출 불확실성 때문에 인식 원인과 결합 능력은 미판정이다.
+  - 접근법 판단: 고정 val의 P/G 모두 사전 기준에 미달해 현재 frozen AutoRG·FLAIR 후보 투자를 종료한다. 기본 인식 부족의 원인과 영역 지원의 일반적 효과는 미판정이다.
+  - 목표 진전: 실제 전문 모델 출력 30건과 제한된 보고서 기술 비교는 확인했다. P/G 모두 사전 기본 판독 기준에 미달했고 G의 순이득도 없었다. 따라서 현재 frozen 후보를 유용한 근거 추출 baseline으로 채택할 근거는 확보하지 못했다. mask 중첩이 높고 정답 대상·학습 노출의 불확실성이 남아 인식 부족의 원인이나 영역 지원의 무효를 입증하지는 못했다. 방법 효과와 신규 contribution은 검증하지 않았다.
+  - 판정 범위: AutoRG-Brain RGv2의 RadGenome BraTS_GLI val 적격 FLAIR 15 case, HIGH/MIXED_HIGH_LOW 보고서 기술, 고정 given_mask P/G 생성 조건에서의 frozen baseline 선별 기준 미달이다. 임상 판독 능력, MRI 전체, 영역 지원의 일반적 효과, 다중 관측 선택·결합 또는 경량 적응 가능성의 기각이 아니다.
+  - 재사용 전 수정: ar70_run.py는 기존 결과가 있으면 protocol_hash·status·입력 hash를 검사하지 않고 건너뛴다. launcher seal도 실제 입력·가중치·patched source의 현재 내용 전체를 검증하지 않는다. 재개 시 오류 결과와 변경된 입력을 거부해야 한다.
+  - 재사용 전 수정: 동시 launcher를 막는 lock 또는 원자적 claim이 없다. 정적 shard는 단일 실행에서만 소유권을 보장하며, 동시 재개 시 같은 case·mask·결과를 중복 처리할 수 있다.
+  - 재사용 전 수정: ar70_eval.py는 현재 seal과 label·입력·외부 코드의 연결을 검증하지 않는다. ar70_verify.py는 일부 실패를 기록만 하며 no_gt_report_text_in_inputs는 상수 True다. 실제 검사와 실패 종료를 구분해야 한다.
+  - 재사용 전 수정: BraTS-GLI-00430-000의 P는 명시적 hyperintense 뒤에 heterogeneous tissue composition을 기술한다. 원 계획은 heterogeneous만으로 혼합을 추론하지 말라는 규칙이지만 구현은 HIGH도 UNKNOWN으로 만든다. 새 사용 전 의미 규칙을 고정하고 회귀 사례를 추가해야 한다. 현재 사례를 HIGH로 읽어도 MIXED 정답에 대한 오답이며 투자 판정은 바뀌지 않는다.
+  - 재사용 전 수정: 공식 경로 대 wrapper 출력 대조, P/G의 전처리 후 영상·anatomy tensor 불변성 검증이 계획보다 부족하다. 동일 파일 경로와 반복 출력 일치를 해당 검사로 대체해서는 안 된다.
+  - 재사용 전 수정: 비용 비교의 측정 경계를 통일해야 한다. main 211.616초는 loading을 포함하지만 단일 worker의 633.268초 환산은 loading을 제외한다. 약 3배는 직접 비교된 처리량 개선으로 사용할 수 없다.
+  - 추후 개선: 공식 자료 설명은 BraTS2021을 원천으로 명시하고 실제 영상은 BraTS2023 배포에서 확보했다. case ID 연결 외 release 간 동등성 근거와 원래 annotation 영역의 의미는 추가 확인이 필요하다. 현재 G는 seg>0 지원 조건이며 정확한 임상 oracle로 부르지 않는다.
+  - 추후 개선: SEG의 BraTS2021 학습과 RGv2의 RadGenome 사전학습은 확인되지만 이번 각 case의 실제 노출·checkpoint 선택 여부는 미확인이다. 독립 일반화로 해석하지 않는다.
+  - 추후 개선: HIGH 4건과 case ID 기반 15개 cluster로 정밀도가 낮다. CI만으로 무효과나 추가 표본의 무가치를 주장할 수 없다.
+  - 추후 개선: 사전 소규모 동시성 비교와 본실행 전 wall-clock 예측, 전체 device time 기록이 부족하다. GPU 총 점유 12,754/12,685 MiB는 GB 또는 GiB와 구분해 보고해야 한다.
+  - 추후 개선: results 아래 환경 파일과 중복 외부 사본은 연구 코드 체크포인트에 포함되지 않는다. 정리는 별도 관리 작업이며 현재 과학적 결론의 blocker가 아니다.
+  - 다음: 현재 frozen 후보의 투자를 종료하고, 기존 MRI 관찰을 바탕으로 직접 적응·최소 개입·투자 보류 중 다음 투자 하나를 선택한다. iter_059의 강한 전문 대안, iter_064의 모델 특이 context 손실, iter_065~070의 기본 신호 미확보를 서로 다른 과제의 증거로 유지한다. 새 데이터나 모델 확보 자체를 다음 질문으로 삼지 않는다. 직접 적응을 선택한다면 실제 사용상 중요한 과제와 강한 단순 baseline, 분리된 개발·확인 자료, 결과별 종료 결정을 먼저 구체화한다. 기존 observed 문제를 선택한다면 단순 routing 이후 남는 가치와 경쟁 설명을 구분하는 개입을 제시한다. 이번 15건의 prompt·parser 탐색, 공식 test 개방, 동일 frozen 비교 확대는 자동 연장하지 않는다. 코드 수정은 실제 선택된 재사용 경로에 필요한 범위만 수행한다.
+- 📁 원본: `agent/runs/iter_070/`
+

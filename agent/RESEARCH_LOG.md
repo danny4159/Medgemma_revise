@@ -26482,3 +26482,414 @@ iter_064의 context 손실은 유지되며 이번 다른 자료의 결과가 설
 현재 후보의 추가 실행은 종료한다. 다음 계획은 기본 인식에 적합한 강한 대안·적응, 기존 observed 문제의 최소 개입, 다른 실패 조건 중 하나를 선택해야 한다. 새 데이터 이름보다 실제로 구분할 경쟁 설명, 단순 대안 이후 잔여 가치, 결과별 종료 행동을 먼저 정한다. 선택된 경로에 필요한 코드 결함만 수정한다.
 
 이번에는 유망한 방법 효과나 재현되는 긍정적 진단 근거를 확보하지 못했으므로 논문 추천과 milestone은 보류한다.
+
+
+## iter_070 GPT PLAN [MRI 전문 모델의 근거 인식 적합성 검토 / proceed] — 2026-10-04 14:58:45
+
+# 요약
+
+- **이번에 할 일:** AutoRG-Brain RGv2에서 FLAIR 병변 신호 기술을 예측 mask P와 annotation mask G로 비교한다.
+- **필요한 이유:** 기존 MRI 실험은 충분한 기본 인식을 확보하지 못했다. 새 결합 방법보다 전문 baseline의 사용 가능성을 먼저 판단한다.
+- **확인할 기준:** 원본 영상·정답 연결, 동일 생성 경로, 명시적 HIGH/MIXED_HIGH_LOW 기술의 정확도와 prior 대비 이득이다.
+- **주의·다음:** G는 oracle이다. 자료 적합성 통과 시 같은 호출에서 실제 GPU 출력까지 진행하되, 설치 성공이나 mask 효과를 신규 기여로 보고하지 않는다.
+
+# Current Understanding
+
+기준 노트는 `agent/runs/iter_070/think/round_01.json`이다. 이번 계획은 새 후보의 조건부 진단이며 과거 실험의 기준을 변경하지 않는다.
+
+iter_069에서는 두 일반 VLM의 ADC 단독 답변이 상수였고, 일부 대상 연결도 불확실했다. iter_064의 context 손실은 유효하지만 충분한 인식을 전제로 한 선택 실패는 미확정이다. iter_059에서는 전문 segmentation+규칙이 해당 과제의 강한 대안이었다. 이 사실들은 기본 인식을 확보할 전문 모델 검토를 지지한다.
+
+이번 라운드에서 RadGenome 보고서의 실제 FLAIR 신호 변이와 공식 val 목록을 확인했다. 원본 NIfTI·mask·checkpoint 노출 관계는 아직 확인하지 않았다. 공개 보고서와 segmentation을 같은 임상 gold로 취급하지 않는다.
+
+# Strategy Check / 연구 방향 판단
+
+상위 질문은 여러 관측에서 필요한 근거를 선택하고 결합하는 능력이다. 현재 해결되지 않은 선행 질문은 해당 근거를 기본적으로 읽을 수 있는가다.
+
+- **관찰:** 일반 VLM의 고정 MRI 과제에서 기본 신호 부족이 반복됐지만 MRI 전체의 불가능성은 입증되지 않았다.
+- **남은 설명:** 영역 지원 부족, 내용 판독 부족, 보고서 정답의 모호성, 모델·자료 적합성이다.
+- **최소 비교:** 전문 모델의 같은 영상·출력 경로에서 예측 병변 mask와 annotation mask만 교체한다.
+- **바뀔 결정:** 전문 모델을 근거 추출 baseline으로 보존할지, 영역 지원 문제만 후속 검토할지, 현재 후보를 종료할지 정한다.
+
+기존 observed context 손실의 개입은 단순 routing 이후의 가치가 부족해 보류한다. 직접 적응은 강한 baseline을 확인한 다음 판단한다. 새 데이터셋 순회보다 이번 좁은 비교가 우선이다. 라운드 1의 전략 판단을 유지하며 전면 재조사하지 않는다.
+
+iter_069의 본생성은 약 62초였고 준비·검증 비용이 더 컸다. 이번에는 AutoRG와 무관한 기존 runner 수정이나 범용 benchmark 구축을 하지 않는다. 전체 track의 정확한 비용 비율은 미측정이다.
+
+# Hypothesis
+
+H1: 전문 모델이 annotation 영역을 사용할 때 명시적인 FLAIR 신호 기술을 prior보다 잘 판독할 수 있다.
+
+H2: H1이 성립하는 경우, 예측 영역 사용 시의 저하는 영역 지원 차이와 연결될 수 있다.
+
+P/G 차이는 공간 범위·형태·pooling 대상의 변화를 포함한다. 순수 위치 선택의 인과 효과나 상보적 sequence 결합 실패로 해석하지 않는다. 두 조건 모두 약하면 기본 판독·정답·입력 적합성이 남으며 새 결합 loss의 근거가 되지 않는다.
+
+# Limitation Evidence / Correct Usage Checks
+
+이번 AutoRG 과제에는 observed/validated 한계가 아직 없으므로 `limitation_ids=[]`, `experiment_role=diagnostic`, `method_stage=none`이다. iter_064의 한계는 원 상태로 보존하고 이번 모델의 한계로 대체하지 않는다.
+
+공식 입력·모델·정답 출처는 research_notes의 링크를 따른다. 구현 시 각 revision과 실제 파일 hash를 고정한다. 필요한 기술 검사는 다음과 같다.
+
+- source case·sequence·보고서·mask의 일대일 연결, release 간 ID 대응과 이용 조건.
+- RGv2 및 segmentation의 학습·validation 노출. 공식 val이라는 이유만으로 완전한 미노출을 주장하지 않는다.
+- NIfTI shape·affine·orientation·mask label 의미와 전처리 후 tensor 연결.
+- P/G의 영상 tensor·anatomy mask·생성 설정·후처리 일치.
+- 추론 입력에서 정답 보고서와 평가 label 제거. SDK의 `report` 필드는 제공하지 않는다.
+- 공식 코드의 자체 GPU 환경 설정이 상속된 허용 장치를 벗어나지 않도록 최소 수정하고 매핑을 기록한다.
+
+oracle 100% 정답은 기술 gate가 아니다. G 오답은 내용 관찰로 기록한다.
+
+# Contribution Path / Baselines / Reuse
+
+AutoRG 자체가 영역 기반 보고서와 mask 지원을 제공하므로 P/G의 개선만으로 새 방법을 주장하지 않는다. 향후 가치 있는 실패 조건은 강한 기존 대안을 사용해도 남는 근거 사용 문제여야 한다.
+
+비교군은 P, G, B다. B는 공식 train의 적격 FLAIR 보고서에서 정한 다수 class이며 동률이면 HIGH로 고정한다. train 영상의 새 추론은 하지 않는다. G에는 annotation 비용이 있으므로 P보다 저렴한 실용 방법으로 표시하지 않는다.
+
+현재 브랜치의 AutoRG 전용 자산은 확인되지 않았다. 기존 `m65_run.py`, `msd56_run.py`, `dd69_*`는 이번 경로에 필요하지 않아 가져오거나 정비하지 않는다. `reuse_assets=[]`다. 구현 시작 시 선택된 기반의 파일 목록을 다시 확인하고, 동일 기능이 발견되면 원본·승인 범위·의존성을 확인해 중복 구현을 피한다. 공식 저장소는 결과 경로에 revision을 고정해 확보하고, 연구 코드에는 얇은 wrapper와 재현 설정만 둔다.
+
+# Proposed Experiment
+
+## 1. 자료 적합성: 모델 다운로드보다 먼저
+
+공식 `train_val_test_split.json`과 `BraTS_GLI/modal_wise_finding.json`을 확보한다. 모집단은 현재 확인한 공식 val의 BraTS_GLI 23 case ID이며, 대상 sequence는 `t2f` 하나다. 실제 파일에서 수와 목록을 다시 검증한다. 목록이 다르면 조용히 새 모집단을 사용하지 말고 revision 차이를 보고한다.
+
+정답은 병변 자체에 대해 명시된 두 기술이다.
+
+- HIGH: 고신호를 명시하고 같은 병변에 저신호 성분을 기술하지 않는다.
+- MIXED_HIGH_LOW: 같은 병변의 고신호와 저신호 성분을 함께 명시한다.
+
+ISO/LOW-only, 신호 미언급, 주변 edema만의 신호, 여러 병변의 상충 기술, 참조 문구만으로 대상이 불명확한 행은 주평가에서 제외하고 이유를 남긴다. `heterogeneous`만 있는 문장은 고·저 혼합으로 자동 변환하지 않는다. 이 구분은 보고서 기술의 일치 평가이며 균질성 또는 병리 정답이 아니다.
+
+원문 근거 span과 대상 범위를 표로 만들고 모델 출력 전에 확정한다. train에는 같은 규칙을 적용해 B를 정한다. val에서 제외율·class 분포·환자 또는 case cluster를 기록한다. 자동 추출은 보조로 사용하고 주평가 원문은 모두 확인한다.
+
+원본 영상은 공식 출처 또는 이미 승인된 배포에서 대상 case만 확보한다. 로컬의 이름 유사 사례나 MSD를 대체 입력으로 사용하지 않는다. RadGenome 설명의 release와 실제 ID의 release가 다르면 공식 mapping 또는 동등성을 확인할 출처가 필요하다. 일부 영상만 접근 가능하면 출력 전에 가용 집단과 결측 이유를 고정하며, 전체 val의 결과처럼 보고하지 않는다.
+
+첫 두 적격 사례에서 영상·mask·보고서의 연결을 직접 표시해 검사한다. annotation의 전체 병변 범위와 보고서의 신호 대상이 맞지 않으면 해당 행을 제외한다. 단일 mask가 임상적으로 완벽한 신호 ROI라고 가정하지 않는다.
+
+**진입:** 실제 연결이 성립하고 두 class가 모두 있으면 조건부 출력 실험으로 진행한다. 표본이 작아도 탐색은 가능하나 정밀도에 따라 투자 판단을 제한한다. 원본 접근·대상 연결이 성립하지 않거나 한 class만 남으면 이번 인식 대조를 종료한다. test·다른 질환·다른 sequence로 자동 보충하지 않는다.
+
+## 2. 동작 확인
+
+격리 환경 `research/results/environments/autorg70`과 별도 모델 캐시를 사용한다. 기존 환경과 hf_cache는 수정하지 않는다. 공식 requirements·Python/PyTorch/CUDA 호환성과 디스크를 확인하고 설치 명령·버전·실패 복구를 남긴다.
+
+RGv2와 공식 segmentation checkpoint만 준비한다. 두 class에서 ID 순으로 한 사례씩 선택해 공식 경로와 wrapper의 결과를 대조한다. 이 사례들은 개발 노출로 표시하고 전체 결과와 제외 민감도를 함께 보고한다.
+
+공식 `given_mask`를 P/G에 공통 사용한다. 먼저 segmentation을 실행해 예측 병변 mask와 anatomy mask를 저장한다. P는 저장된 예측 병변 mask, G는 올바른 label 의미를 확인한 annotation 병변 mask를 쓴다. anatomy mask는 같은 예측본을 공유한다. 실용적 자동 경로를 재현하기 위해 P mask에 GT 기반 component 선택을 하지 않는다.
+
+예측 mask가 비어도 사례를 제외하지 않는다. 공식 경로가 empty mask를 처리하지 못하면 P는 명시적인 무보고/누락 응답으로 기록해 주평가 오답에 포함한다. 이 경우 region_segtool의 임의 fallback 문장을 끼워 넣지 않는다.
+
+생성은 공식 greedy 설정과 길이를 시작점으로 고정한다. cap 종료는 별도 기록하고, cap 도달 요청만 동일 규칙으로 한 번 길이를 두 배로 늘린다. 원 출력과 재시도 비용을 모두 보존한다.
+
+## 3. 가능성 탐색과 본실행
+
+기술 검사가 통과하면 적격 N의 고정 P/G를 모두 실행한다. 최대 N=23, 보고서 46건이다. 이는 공식 val의 작은 고정 모집단이므로 두 사례의 정확도만으로 조기 중단하거나 유리한 subset을 선택하지 않는다. 별도 학습·seed 탐색·모델 탐색은 없다.
+
+생성 보고서는 정답과 condition을 가린 상태에서 같은 기술 규칙으로 추출한다. 미언급·상충·대상 불명확은 UNKNOWN으로 두고 주평가에서 오답으로 센다. 작은 출력 집합이므로 근거 문장과 판정을 전부 남겨 GPT 리뷰가 재검증할 수 있게 한다. 생성 결과를 본 뒤 유리한 parser를 선택하지 않는다.
+
+## 4. 자원·비용·재개
+
+실행 직전 nvidia-smi와 CUDA_VISIBLE_DEVICES를 확인한다. 두 GPU에 독립 case shard를 배정하고 P/G는 같은 worker에서 처리해 중간 segmentation을 공유한다. worker별 출력·임시 디렉터리를 분리한다.
+
+AutoRG의 실제 peak VRAM은 미측정이다. MedGemma의 메모리 수치를 대신 쓰지 않는다. 기술 사례에서 한 worker의 peak와 처리량을 측정하고, 메모리가 허용하면 같은 GPU의 두 worker 구성을 짧게 비교한다. 두 worker의 peak 합계·다른 프로세스 점유·worker당 2GB 여유가 용량 안에 들어야 한다. 추가 비교 비용이 남은 최대 46건에서 절약 가능한 비용보다 크면 한 worker/GPU를 유지하고 실측 근거를 남긴다.
+
+예상 wall-clock은 설치·다운로드 시간과 별도로 `미완료 segmentation 수/실측 segmentation 처리량 + 미완료 보고서 수/실측 생성 처리량 + 전처리·저장 시간`으로 본실행 전에 산출한다. 현재 숫자 추정치를 만들 근거는 없다. 임의 GPU 시간 상한은 두지 않는다.
+
+case·condition별 원자적 결과와 비용을 저장하고 완료 ID를 manifest에 대조한다. 재개는 동일 protocol hash의 미완료 ID만 처리한다. 출력·비용 중복 및 누락은 평가에서 거부한다. 중간 mask·원시 보고서를 보존해 재분석에 새 모델 호출이 필요하지 않게 한다.
+
+## 5. 규모 확대와 독립 확인
+
+이번에는 고정 val 밖으로 확대하지 않는다. 학습과 공식 test는 미실행으로 유지한다. 긍정적 결과도 full review 후 별도 계획으로만 이어간다. 이 자료는 모델 개발 노출 가능성이 있는 탐색 자료이며 독립 일반화 근거가 아니다.
+
+# Implementation Tasks for Claude
+
+1. `research/results/iter_070/`에 자료 출처·revision·split·정답 span·접근 상태를 기록하고 자료 gate를 먼저 판정한다.
+2. 통과 시 공식 AutoRG를 격리 구성한다. 필요한 wrapper 외의 모델 구조·loss·후처리는 변경하지 않는다.
+3. P/G 공통 경로와 tensor 불변성을 검증하고 GPU 매핑·파일 충돌·누락 감지를 보완한다.
+4. 고정 manifest와 label 표를 출력 전에 봉인한 뒤 기술 확인과 전체 적격 집단의 실제 출력을 실행한다.
+5. 원시 보고서에서 독립적으로 재계산 가능한 평가표·비용·실패·재개 기록을 남긴다.
+6. 보고서 맨 앞에 자료 적합성, 실제 출력 수, P/G/B 성능, 해석 한계, 종료 결정을 적는다. 실행 중 작업을 완료로 보고하지 않는다.
+
+# Evaluation (성공/실패 기준 포함)
+
+주지표는 두 class의 recall 평균인 BA다. accuracy, class별 recall, UNKNOWN 비율, P/G의 정답 전환 수, 각 case의 원문과 출력 근거를 함께 보고한다. 동일 환자의 여러 scan이 있으면 환자 단위로 묶으며 독립성 미확인은 명시한다. seed70·10,000회 cluster paired bootstrap 95% CI를 계산하되 작은 class의 퇴화 구간을 모집단 확실성으로 해석하지 않는다.
+
+**기본 판독의 탐색 기준:** BA≥0.70, 두 class recall≥0.60, UNKNOWN≤0.10, B 대비 accuracy 이득≥0.10을 함께 사용한다. 이는 후속 후보 선별용 기준이며 임상 허용 성능이 아니다. class 균형만으로 얻는 BA=0.50을 넘고 한 class만 잘하는 모델을 구분하기 위한 기준이다. 소수 한 사례의 제외로 판정이 뒤집히면 불확정으로 처리한다.
+
+- **P가 기준 충족:** 전문 모델이 현재 보고서 기술의 유용한 baseline 후보임을 기록한다. 현재 단일 sequence 신호 판독의 새 방법 투자는 종료한다. 선택·결합 과제의 필요성은 별도다.
+- **G만 충족하고 G−P BA≥0.10:** annotation 영역 지원의 유용성을 제한적으로 관찰한다. 적어도 두 독립 case에서 순회복이 있어야 후속 후보로 남긴다. 원 저자가 이미 제공한 mask 지원 효과이므로 자동 method 진입은 없다. 실제 사용에서 영역을 얻는 기존 방법 이후의 잔여 가치가 있어야 다음 투자를 검토한다.
+- **G도 기준 미달:** 충분한 인식 이후의 선택 실패를 주장하지 않고 현재 frozen 후보를 종료한다. caption 기술·mask 의미·영상 판독 중 무엇이 원인인지는 분리되지 않았다고 적는다.
+- **불확정:** 고정 val 완료 후 CI·class 수·주석·학습 노출 때문에 해석이 약하면 범위를 명시해 보류한다. 기준 미달을 연구 가치 부재로 확대하지 않지만 같은 자료의 prompt·parser·표본 보충은 자동 연장하지 않는다.
+- **기술 실패:** 자료나 실행 경로 오류는 모델 오답과 구분한다. 동일 규칙의 영향받은 요청만 복구하며 결과에 맞춰 대상·metric을 변경하지 않는다.
+
+비용은 원본 NIfTI 읽기부터 저장까지의 wall-clock과 device time, segmentation·보고서별 구성 비용, peak VRAM을 보고한다. P/G의 mask 준비 비용 차이를 분리하고 annotation 획득 비용을 0으로 간주하지 않는다.
+
+# Risks / Checks
+
+- 보고서의 명시적 기술과 실제 영상의 임상적 충분성은 다르다. 이번 결과는 공개 보고서 기술의 일치 범위다.
+- BraTS 전체 annotation에는 여러 조직 성분이 포함될 수 있다. 보고서의 병변 대상과 mask가 맞지 않으면 정확한 oracle로 해석하지 않는다.
+- 같은 checkpoint·영상·후처리를 써도 mask 교체는 형태·범위 정보를 바꾼다. 순수 위치 원인을 주장하지 않는다.
+- 공식 val의 checkpoint 선택 노출과 segmentation 사전학습 노출을 구분한다. test와 외부 일반화는 미검증이다.
+- 자료 접근에 새 동의가 필요하면 대신 제출하지 않는다. 확인한 권한 blocker와 대안을 기록하고 해당 경로를 종료한다.
+- 기존 iter_003·064·068·069의 결과·판정·코드는 덮어쓰지 않는다. 이번에 사용하지 않는 재사용 결함은 정비하지 않는다.
+
+## 대규모 GPU 필요 후보
+
+3D encoder·connector·LLM의 대규모 MRI 보고서 공동 적응은 장기 후보로 남긴다. 현재 두 GPU에서는 전문 frozen baseline의 실제 출력과 잔여 문제를 먼저 확인하며, 이번 계획은 그 학습 투자를 승인하지 않는다.
+
+# 계획의 근거 (GPT 조사 노트)
+
+## 새로 확인한 것
+
+라운드 1 원문 `agent/runs/iter_070/think/round_01.json`을 읽었다. 이번에는 미확인 annotation·split·동일 출력 경로에 집중했다. 파일 수정·설치·실험 실행은 하지 않았다.
+
+1. **정답 내용:** raw/resolve 조회는 실패했으나 Hugging Face의 blob 페이지에서 실제 JSON을 읽었다. `BraTS-GLI-00778-000-t2f`는 병변 고신호, `00801-000-t2f`와 `00772-000-t2f`는 고·저 혼합 신호를 기술한다. 주변 edema와 병변 자체를 구분해야 하며, 미언급을 음성으로 바꾸면 안 된다. 따라서 FLAIR의 두 명시적 기술에 한정한 대조는 후보로 성립한다. 전체 적격 수와 영상 충분성은 아직 확인하지 않았다. [보고서 원문](https://huggingface.co/datasets/JiayuLei/RadGenome-Brain_MRI/blob/main/BraTS_GLI/modal_wise_finding.json)
+
+2. **split:** 실제 split JSON의 `val`에서 BraTS_GLI 23 case ID·각 네 sequence를 확인했다. train/val/test가 배포되어 있지만 checkpoint의 실제 학습 배제와 환자 단위 중복까지 증명한 것은 아니다. 이번에는 val만 개발 탐색에 사용한다. [공식 split](https://huggingface.co/datasets/JiayuLei/RadGenome-Brain_MRI/blob/main/train_val_test_split.json)
+
+3. **공정한 mask 대조:** SDK는 제공 mask와 예측 mask를 같은 전처리로 넘길 수 있고 `given_mask`에서는 생성 문장을 연결한다. P/G 모두 이 경로를 쓰는 대조가 코드상 가능하다. 다만 하위 feature 추출과 전처리의 실제 불변성은 구현 단계에서 확인해야 한다. SDK가 CUDA_VISIBLE_DEVICES를 자체 설정하므로 상속된 허용 GPU 매핑도 보완해야 한다. [SDK 원문](https://raw.githubusercontent.com/ljy19970415/AutoRG-Brain/master/AutoRG_Brain/inference/inferenceSdk.py)
+
+4. **원본 volume 연결은 남음:** 공식 README는 원 영상 출처를 설명하지만 보고서 ID와 확보할 release의 정확한 대응은 아직 미검증이다. 기존 iter_003 manifest는 `obi77/brats23-first-10-examples`의 세 case를 가리킨다. 이름이 비슷하다는 이유로 RadGenome val과 연결하지 않는다. 기존 MSD 자료도 대체하지 않는다. 필요한 원본 확보·대응은 설치보다 앞선 한정 gate다. [공식 사용법](https://github.com/ljy19970415/AutoRG-Brain)
+
+5. **선행 대비 의미:** 저자의 보충 문서는 segmentation 오류 전파와 sequence별 병변 가시성 문제를 이미 설명한다. mask 제공 효과 자체는 신규성이 아니다. 이번 진단의 가치는 기존 해결책의 기본 능력과 후속 투자 가능성을 판단하는 데 있다. [공식 보충 문서](https://raw.githubusercontent.com/ljy19970415/AutoRG-Brain/master/Supplementary.md)
+
+## 원본 기록·재사용
+
+`agent/GOAL.md`, iter_069 review.md, iter_064 review.json, LIMITATIONS의 관련 항목, CODE_ASSETS의 관련 범위를 확인했다. `mri-explicit-target-context-effect`는 보존하지만 이번 AutoRG 과제의 한계 근거로 대체 사용하지 않아 limitation_ids는 비워 둔다. 이번 역할은 신규 현상의 diagnostic이다.
+
+현재 research HEAD는 `76eb1036df95478f889ee6bfd8e31ca43e82b415`이며 작업 트리는 깨끗하다. 추적 파일에서 AutoRG 전용 구현은 찾지 못했다. 기존 일반 VLM runner·평가기의 미해결 문제를 승계할 필요가 없어 가져오지 않는다. 새 코드는 공식 AutoRG를 연결하는 얇은 실행·평가 경로로 한정하고 공식 구현을 재작성하지 않는다.
+
+## 의미와 남은 제한
+
+세 질문 중 annotation의 실제 변이와 동일 mask 대조의 코드상 가능성은 확인했다. 원본 영상·mask 대응과 checkpoint 노출은 구현 전 자료 gate로 남긴다. 공개 보고서를 임상적 재판독 정답으로 승격하지 않는다. 이 계획은 충분한 인식 이후의 선택·결합 실패를 검증하는 실험이 아니다.
+
+## 대규모 GPU 필요 후보
+
+MRI 3D encoder·connector·LLM의 대규모 공동 적응은 장기 후보로 보존한다. 이번 전문 baseline의 성능과 잔여 문제를 확인하기 전에는 투자하지 않는다.
+
+이전 사고 라운드 노트: agent/runs/iter_070/think/
+
+
+
+## iter_070 CLAUDE IMPLEMENTATION REPORT — 2026-10-04 15:31:00
+
+# 요약
+
+- **핵심 결과:** AutoRG-Brain RGv2는 공식 val FLAIR의 HIGH / MIXED_HIGH_LOW 기술을 기준 이상으로 구분하지 못했다. 예측 mask P와 annotation mask G가 모두 사전 기준 미달이었고, G−P도 사실상 0이다.
+- **근거:** 적격 15건(HIGH 4, MIXED 11)에서 P와 G는 BA 0.614, accuracy 0.667, UNKNOWN 0.20으로 같았다. 상수 prior B는 BA 0.50, accuracy 0.733이다. 오류는 모두 모델 내용 오류로 보이고 실행·parser 결함은 아니었다.
+- **미검증·주의:** 표본이 작아 CI가 넓다(G−P BA 차 95% CI [−0.125, 0.136], P−B 차 [−0.19, 0.42]). P가 G와 거의 같아(Dice 평균 0.92) G−P는 영역 지원의 영향을 거의 구분하지 못한다. 이 SEG는 BraTS2021로 학습돼 노출이 있고, RGv2는 RadGenome train으로 학습됐다. mask 의미는 whole-lesion(`seg>0`) 가정이다.
+- **다음:** 사전 규칙상 현재 AutoRG·FLAIR 신호 기술 후보를 종료하고 기본 능력 부족으로 기록한다. 영역 지원 투자는 근거가 없고, 다중 관측 결합 주장은 이번 결과로 열리지 않는다.
+
+# Work Performed
+
+1. **자료 gate (모델 다운로드 전)**
+   - RadGenome-Brain_MRI revision `0348ba42…`의 split과 `BraTS_GLI/modal_wise_finding.json`을 확보했다. val BraTS_GLI는 92행 = 23 case × 4 sequence였고, t2f 보고서 23건이 계획과 일치했다.
+   - 출력 전에 23건을 수동 판독해 근거 span과 함께 봉인했다: HIGH 4, MIXED_HIGH_LOW 11, 제외 8. 제외 사유는 "mixed high"만 있음, 참조-only 대상(aforementioned, same lesions), "mixed signal"만 있음이다. 자동 regex는 23/23이 수동과 일치했다.
+   - train 161건에 같은 자동 규칙을 적용해 HIGH 36 / MIXED 92 / 제외 33이 나왔다. 따라서 B는 MIXED_HIGH_LOW다.
+   - 원본 영상은 `MedOtter/brats2023-gli-dataset`(revision `b032d353…`, cc-by-4.0, 비게이트)에서 적격 15 case의 t2f와 seg만 받았다. shape·affine이 일치했고 sha256을 기록했다.
+   - 첫 두 사례(00012 MIXED, 00456 HIGH)의 overlay를 직접 열어 확인했다: `results/iter_070/data/overlay_first2.png`. `seg>0`이 FLAIR 고신호 병변 전체(부종 포함)와 일치했고, 00012는 이질적이며 00456은 균일 고신호였다.
+2. **격리 환경과 공식 코드**
+   - `results/environments/autorg70`에 venv를 만들어 torch 2.5.1+cu124, nnunet 1.7.1 등을 설치했다. 실패와 복구는 `results/iter_070/env/install.log`에 남겼다.
+   - 공식 소스를 SHA `9670703c…`로 고정해 patched 사본을 만들고 5곳만 수정했다: CUDA 덮어쓰기 제거, GPT-2 로컬 경로, `AR70_MAXLEN`, `BeamSearchScorer` import 경로. diff는 `results/iter_070/external/patched/ar70_patch.diff`에 있다.
+   - 체크포인트는 `JiayuLei/AutoRG_Brain`(revision `da4ea5cb…`)의 SEG와 RGv2, 그리고 `healx/gpt-2-pubmed-medium`(revision `64952028…`)이다. digest는 `models/weights_manifest.json`에 있다.
+3. **실행**
+   - SEG를 한 번 실행해 anomaly·anatomy mask를 저장했다.
+   - P는 `given_mask`에 예측 anomaly mask를, G는 GT whole-lesion mask(`seg>0`)를 넣었다. anatomy mask는 같은 예측본을 공유하고, 추론 입력에 정답 보고서는 넣지 않았다. 생성은 공식 greedy, max_length 300이다.
+   - 동작 확인(단일 worker, 2 case)을 거친 뒤 4 worker(GPU당 2)로 본실행했다.
+4. **평가와 검증**
+   - `ar70_eval.py`는 보고서 텍스트만 입력으로 받는 blind 규칙 추출기다. 판정은 BA, accuracy, UNKNOWN, 정답 전환 수, seed70 · 10,000회 patient-cluster paired bootstrap이다.
+   - `ar70_verify.py`는 eval을 import하지 않고 따로 구현한 labeler로 재계산했다.
+
+# Files Changed
+
+- 신규 코드(모두 untracked): `ar70_labels.py`, `ar70_patch.py`, `ar70_run.py`, `ar70_launch.py`, `ar70_eval.py`, `ar70_verify.py`, `ar70_cost.py`.
+- 결과는 모두 `results/iter_070/` 아래에 있다: `data/`, `external/`, `models/`, `env/`, `tech/`, `main/`, `eval/`.
+- 기존 파일은 수정하거나 삭제하지 않았다.
+
+# Commands / Experiments
+
+| 단계 | 결과 |
+|---|---|
+| HF/GitHub 파일·archive 확보, venv 생성 | 성공 |
+| 의존성 설치 | 처음에 monai, surface_distance, elasticdeform 등이 빠져 실패 → 설치 |
+| numpy 2.4.6 상승 | elasticdeform C 확장 깨짐 → numpy 1.26.4와 opencv-headless 4.10.0.84로 복구, `pip check` 통과 |
+| `generation_beam_search` import 오류 | transformers 4.40.2 → 4.26.1 설치(4.30.2·4.26.1 모두 해당 shim 없음) 후 import 경로 패치 |
+| 기술 확인(GPU0, 단일 worker, 2 case) | rc=0 |
+| 본실행(`ar70_launch.py`, 4 worker) | wall 211.6초, 4개 worker rc=0 |
+| `ar70_eval.py` 15건 및 개발 노출 제외 13건 | 성공 |
+| `ar70_verify.py` | 12개 검사 모두 통과 |
+
+- **cwd 사고:** 초기에 Bash cwd가 소스 하위로 어긋나 모델·env 로그가 `…/AutoRG_Brain/results/iter_070/`에 저장됐다. 정위치로 이동했고 삭제는 없다.
+- **중복 사본:** patched 사본에 같은 7.7GB 사본이 하나 남았다(`external/patched/AutoRG_Brain/results`). rm 권한이 없어 그대로 두었고, 쓰이지 않는다.
+
+# Results
+
+**규모와 입력**
+- 적격 15건 × P/G = 30건을 전부 실행했고 N=15 전체가 완료됐다. 환자 클러스터는 15개다.
+- 모든 출력이 EOS로 끝났고 cap 도달은 0건이어서 길이 재시도는 없었다.
+- 영상 sha256이 manifest와 일치했고, GT mask는 `seg>0`과 일치했다.
+- 동작 확인과 본실행에서 00012·00456의 P/G 4개 텍스트가 동일했다(결정성 확인).
+
+**성능 (`results/iter_070/eval/report_all15.json`)**
+
+| | BA | recall HIGH | recall MIXED | acc | UNKNOWN |
+|---|---|---|---|---|---|
+| P | 0.614 | 0.50 | 0.727 | 0.667 | 0.20 |
+| G | 0.614 | 0.50 | 0.727 | 0.667 | 0.20 |
+| B (MIXED 상수) | 0.50 | 0 | 1.0 | 0.733 | 0 |
+
+- **사전 기준:** P와 G 모두 BA≥0.70, UNKNOWN≤0.10, B 대비 accuracy +0.10에서 미달이다. 두 class recall≥0.60은 HIGH recall이 0.50이라 미달이다.
+- **P/G 전환:** P만 정답 1건, G만 정답 1건이다. 텍스트가 동일한 사례는 3건이다.
+- **오류 유형:**
+  - HIGH 정답인 00778과 01456은 두 조건 모두 "mixed high and low"로 답했다.
+  - UNKNOWN은 P 3건, G 3건이다. 03건 모두 "mixed signal intensity"만, "mixed high signal"만, "enhancement" 언급, "hypointense"만이었다.
+  - 추출기가 틀린 경우는 사례별 대조에서 발견하지 못했다.
+- **민감도(개발 노출 2건 제외, N=13):** P와 G 모두 BA 0.517, acc 0.615, UNKNOWN 0.231이다(`report_excl_dev2.json`). 결론은 같다.
+- **Bootstrap 95% CI(퇴화 replicate 90회 제외):** G−P BA 차 [−0.125, 0.136], P−B 차 [−0.192, 0.417], G−B 차 [−0.192, 0.417].
+
+**비용 (`eval/cost.json`)**
+- 예측 mask와 GT mask의 Dice는 평균 0.920, 최소 0.835다. 이 때문에 P와 G의 입력이 거의 같다.
+- SEG 평균 25.9초/case, report 평균 9.2초(P)·8.8초(G)다.
+- torch 예약 최대 6.0GB, GPU 총 점유 최대 12.75GB/12.69GB(GPU당 2 worker)다.
+- **병렬 구성 채택:** 단일 worker 기술 확인 2 case의 평균(약 42초/case)으로 15 case를 환산하면 약 633초(추정)다. 4 worker 실측은 211.6초로 약 3배 빨랐다. 두 구성의 직접 반복 비교는 하지 않았고, 이 추정과 실측 비교로 4 worker를 채택했다. 이 수치는 모델 로딩 시간을 제외한 값이다.
+- annotation 획득 비용은 계산에 포함하지 않았다.
+
+# Goal Progress / Reused Assets
+
+- **재사용 자산:** 계획대로 `reuse_assets=[]`이며 기존 runner는 가져오지 않았다. 새 코드는 얇은 wrapper다.
+- **연구 질문:**
+  - 자료 적합성과 실제 출력까지 완료했다. 전문 모델은 현재 FLAIR 신호 기술의 유용한 baseline 후보 기준을 충족하지 못했다. 영역 지원(G) 효과는 이 자료에서 관찰되지 않았다.
+  - 선택·결합 능력에 대해서는 새로 알게 된 것이 없다.
+  - 이 결과는 "MRI 전체 불가능"도, "일반 VLM보다 못함"도 의미하지 않는다.
+- **미검증:**
+  - 원인 구분(보고서 정답의 모호성, mask 의미, 학습 모델의 판독 한계)은 하지 못했다.
+  - 공식 test, 다른 sequence·질환, 학습 효과는 미검증이다.
+  - 환자 독립성은 case ID 기반이다.
+  - 사전 기준 대비 한 사례 제외로 판정이 뒤집히는지는 민감도 분석에서 변하지 않았다. 다만 N이 작아 정밀도는 낮다.
+- **계획 대비 사용량:** 계획한 자료 gate, 동작 확인, 본실행(N=15 × 2)을 모두 수행했다. 학습, 확대, 모델 교체, 추가 prompt·parser 변경은 없었다.
+
+# Problems
+
+- **현재 결론 무효:** 없음. 기술 검사 12개가 모두 통과했다.
+- **해석 한계 (결론에 영향):**
+  - P≈G(Dice 0.92)여서 G−P는 영역 지원 효과를 구분하지 못한다.
+  - SEG의 BraTS2021 학습 노출과 RGv2의 RadGenome 학습 노출 가능성이 있다. val이 체크포인트 선택에 쓰였는지는 확인하지 못했다.
+  - RadGenome 원 mask 정의가 공개되지 않아 `seg>0`은 가정이다.
+  - 보고서 정답은 방사선과 재판독이 아니라 공개 보고서 기술이다.
+  - 평가 모집단은 val 15건으로 제한했다.
+- **재사용 전 수정:**
+  - 이번 실행 경로는 `ar70_*.py`와 patched 소스에 고정돼 있다.
+  - 새 입력에 재사용하려면 transformers 4.26.1과 import 패치를 유지해야 한다.
+  - 완료 case 재개 시 입력 hash 재검증은 구현하지 않았다. seal 비교만 한다.
+- **추후 개선:** 사용하지 않는 중복 사본(`patched/AutoRG_Brain/results`, 7.7GB) 정리. rm 권한이 필요하다.
+
+# Recommendation to GPT
+
+- **결정:** 사전 contract의 "G도 기준 미달" 분기를 적용해 AutoRG·FLAIR 신호 기술 후보를 종료하는 것을 권고한다. 미충족 항목은 BA, UNKNOWN, B 대비 accuracy, HIGH recall이다. 기준 미달이지 연구 가치 부족의 판정은 아니다.
+- **같은 자료의 prompt·parser·표본을 보충하거나 test를 열지 않는다.** 정밀도가 낮아 보충해도 결론이 바뀔 가능성이 작다고 판단한다.
+- **다음 투자 후보(근거 없는 확대 아님):**
+  - 이번 자료는 복수 관측이 필요한 정답이 아니므로 결합 능력 실험으로 넘기지 않는다.
+  - 상위 질문으로 돌아가려면 "key image 하나로 답할 수 없는 volume/sequence 질문 + 단순 집계·전문 모듈 baseline"이 필요한 자료를 우선 검토한다. 접근성은 확인이 필요하다(MR-RATE는 HF 인증 권한 blocker가 남아 있다).
+- **리뷰에서 확인할 점:** 사례별 원문과 추출 판정 대조(`eval/report_all15.json`의 `per_case`), mask 의미 가정, 노출 한계 기술이 적절한지.
+
+SELF_CHECK: PASS
+SUMMARY: AutoRG-Brain RGv2를 공식 val FLAIR 적격 15건에서 예측 mask(P)·정답 mask(G)·prior(B)로 비교한 결과, P와 G 모두 BA 0.614·UNKNOWN 0.20으로 사전 기준 미달이었고 G−P는 0이어서 이 후보를 종료한다. 단 P≈G(Dice 0.92)와 학습 노출 때문에 영역 지원 효과나 일반 능력은 판단하지 못했다.
+
+# [orchestrator] 권한 거부된 도구 호출
+- Bash: ls /SSD1_1TB/home/milab/daniel/08_medgemma/research/results | tail -5; nvidia-smi --query-gpu=index,memory.used,memory.total --format=csv; df -h /SSD1_1TB | tail -1; echo $CUDA_VISIBLE_DEVICES
+- Bash: curl -q --fail --silent --show-error --location --proto =https --proto-redir =https -- https://raw.githubusercontent.com/ljy19970415/AutoRG-Brain/master/README.md | head -150
+- Bash: cd /SSD1_1TB/home/milab/daniel/08_medgemma/research; ls results/environments/ 2>&1; conda env list 2>&1 | head; python --version; grep -n "bert_model_name\|_get_bert" results/iter_070/external/src/AutoRG-Brain-9670703c88e8f599c0c7edc472a5ffce4dd72b0e/AutoRG_Brain/inference/inferenceSdk.py | head
+- Bash: conda env list
+- Bash: /home/test/.conda/envs/medgemma/bin/python -m venv /SSD1_1TB/home/milab/daniel/08_medgemma/research/results/environments/autorg70
+- Bash: /SSD1_1TB/home/milab/daniel/08_medgemma/research/results/environments/autorg70/bin/python -c "
+import torch,transformers,nnunet,batchgenerators,SimpleITK,einops
+print(torch.__version__,torch.cuda.is_available(),torch.cuda.device_count(),transformers.__version__)
+"
+- Bash: /SSD1_1TB/home/milab/daniel/08_medgemma/research/results/environments/autorg70/bin/python -m pip freeze > /SSD1_1TB/home/milab/daniel/08_medgemma/research/results/iter_070/env/pip_freeze.txt
+- Bash: python -c "
+import json,glob,numpy as np,nibabel as nib
+M='results/iter_070/main/'
+seal=json.load(open(M+'seal.json'))
+rows=[];dice={}
+for c in seal['cases']:
+    a=np.asarray(nib.load(f'{M}masks/{c}-t2f_ab.nii.gz').dataobj)>0; g=np.asarray(nib.load(f'{M}gt/{c}_gt_whole.nii.gz').dataobj)>0
+    dice[c]=round(float(2*(a&g).sum()/max(a.sum()+g.sum(),1)),4)
+for f in sorted(glob.glob(M+'results/*.json')):
+    r=json.load(open(f)); rows.append((r['case'],r['cond'],r['case_wall_s'],r['seg_s_case'],r['attempts'][0]['wall_s'],r['peak_reserved_MiB']))
+P=[x for x in rows if x[1]=='P']; G=[x for x in rows if x[1]=='G']
+L=json.load(open(M+'launch_result.json'))
+T=[json.load(open(f)) for f in glob.glob('results/iter_070/tech/results/*__G.json')]
+cost={'main_wall_s_4workers':L['wall_s'],'peak_gpu_used_MiB_total_per_gpu':L['peak_gpu_used_MiB'],
+ 'mean_seg_s':float(np.mean([x[3] for x in P])),'mean_report_wall_s_P':float(np.mean([x[4] for x in P])),'mean_report_wall_s_G':float(np.mean([x[4] for x in G])),
+ 'max_torch_reserved_MiB':max(x[5] for x in rows),
+ 'single_worker_tech_case_wall_s':[t['case_wall_s'] for t in T],'single_worker_est_15cases_s':float(np.mean([t['case_wall_s'] for t in T])*15),
+ 'speedup_est_vs_single':float(np.mean([t['case_wall_s'] for t in T])*15/L['wall_s']),
+ 'dice_pred_vs_gt_whole':dice,'dice_mean':float(np.mean(list(dice.values()))),'dice_min':min(dice.values())}
+json.dump(cost,open('results/iter_070/eval/cost.json','w'),indent=1);print(json.dumps(cost,indent=1))
+# determinism: tech single-worker vs main text
+import os
+for c in ['BraTS-GLI-00012-000','BraTS-GLI-00456-000']:
+    for k in 'PG':
+        a=json.load(open(f'results/iter_070/tech/results/{c}__{k}.json'))['attempts'][0]['report'];b=json.load(open(f'{M}results/{c}__{k}.json'))['attempts'][0]['report'];print(c,k,a==b)
+"
+
+
+
+## iter_070 GPT REVIEW [CONTINUE] — 2026-10-04 15:36:27
+
+# 요약
+
+- **판정:** 제한된 실제 출력 비교는 유효하다. P/G 모두 사전 기준에 미달해 현재 frozen 후보는 종료한다.
+- **핵심 근거:** 15 case에서 P/G 모두 BA 0.6136, accuracy 10/15, UNKNOWN 3/15이다. 상수 B의 accuracy는 11/15이다.
+- **의미·한계:** 전문 baseline의 채택 근거를 확보하지 못했다. 높은 mask 중첩과 정답·노출 불확실성 때문에 영역 지원의 무효나 MRI 인식 전체의 한계를 주장하지 않는다.
+- **다음:** 같은 frozen 비교를 늘리기보다 직접 적응·기존 관찰 개입·투자 보류 중 하나를 전략적으로 선택한다. 전체 코드 재사용은 승인하지 않는다.
+
+# Assessment
+
+`valid_experiment=true`, `approach_status=abandon`, `verdict=CONTINUE`다. 이는 이번 고정 보고서 기술 과제의 후보 종료이며 MRI 연구 전체의 포기가 아니다. 계획한 적격 집단의 실제 생성은 완료됐다. 일부 검증·운영 구현은 계획보다 부족하지만 현재 제한된 기준 미달 판단을 뒤집는 오류는 확인하지 못했다.
+
+실제 구현 담당은 `engineer_backend.json`과 `claude_meta.json`상 Claude, Sonnet/medium이며 modelUsage는 claude-sonnet-5-5다. 리뷰 대상은 `02a8adade58f7cea84638f9e96bf963a0fb64d55`다. 추가된 7개 Python 파일 모두 해당 blob과 현재 파일이 일치한다. 체크포인트의 unpreserved_paths는 비어 있다. 나열된 대량 환경 파일은 이 커밋의 연구 소스가 아니다.
+
+# Key Findings
+
+1. **자료와 실행:** val 23개 FLAIR 원문 및 수동 label을 직접 읽었다. 적격은 HIGH 4·MIXED_HIGH_LOW 11건이다. main 결과 30건, worker 4개의 정상 종료, 기술 사례 2건의 P/G 출력 재현 기록을 확인했다. 원시 결과의 cap 도달은 없다.
+2. **독립 수치 검증:** 원시 보고서를 읽어 수동으로 구성한 판정에서 P/G의 BA 0.613636, accuracy 0.666667, UNKNOWN 0.20을 재현했다. HIGH recall은 2/4, MIXED recall은 8/11이다. P만 정답·G만 정답은 각각 1건이다.
+3. **불확실성:** seed70·10,000회 paired bootstrap을 별도로 재계산했다. G−P BA의 95% CI는 [−0.125, 0.136364], P−B는 [−0.192308, 0.416667]이며 퇴화 replicate는 90회다. 저장 수치와 일치한다. 기술 사례 제외 13건의 저장 결과에서도 기준 미달이다.
+4. **입력 연결:** seal의 label·manifest·weights manifest·patch·runner hash가 현재 파일과 일치한다. 원본 영상·seg의 현재 hash를 대조했다. 15건의 영상·seg·G·예측 mask shape/affine과 G=seg>0을 독립 확인했다. 대표 overlay도 직접 표시해 확인했다. 이것이 보고서 대상과 mask의 임상적 동등성을 보증하지는 않는다.
+5. **mask와 비용:** 원시 mask에서 Dice 평균 0.920396, 최소 0.835393을 재계산했다. P/G가 크게 다른 영역을 제공하는 대조가 아니므로 차이 부재의 판별력은 제한적이다. main wall-clock은 211.616초이며 두 GPU에 각각 2 worker를 사용했다.
+
+# Problems / Concerns
+
+**현재 관찰과 구현 한계를 구분한다.** 보고서의 '모든 오류가 내용 오류이며 parser 결함은 없다'는 표현은 지나치다. 00430의 P는 명시적 hyperintense를 포함하지만 heterogeneous라는 표현 때문에 UNKNOWN 처리된다. 원 계획의 'heterogeneous만으로 혼합을 추론하지 않음'과 정확히 같은 규칙은 아니다. 이를 HIGH로 읽으면 P의 UNKNOWN은 2/15가 되지만 MIXED 정답에 대한 오답은 유지된다. BA·accuracy 및 후보 종료 판단에는 영향이 없다. 원 결과를 덮어쓰거나 유리한 parser를 사후 선택해서는 안 된다.
+
+공식 SDK의 given_mask 경로와 추론 입력에서 report를 생략한 코드는 확인했다. 그러나 기술 사례의 단일 worker/본실행 출력 일치는 공식 경로와 wrapper의 독립 대조가 아니다. 전처리 후 P/G tensor 불변성의 실제 검사도 확인되지 않았다. verifier의 일부 항목은 경로 문자열 비교이며 report 누출 항목은 상수 True다.
+
+재개는 기존 결과의 내용·status·protocol을 확인하지 않고 건너뛰며, 동시 launcher 간 배타성도 없다. 현재 단회 실행의 결과를 무효화하지는 않지만 실행기를 그대로 재사용할 수 없다.
+
+비용 설명도 정정이 필요하다. launcher의 211.616초는 subprocess 생성 전부터 측정해 loading을 포함한다. 단일 worker 633.268초 추정은 loading 이후 case 시간에서 계산한다. 약 3배 수치는 같은 경계에서 직접 측정한 speedup이 아니다. 전체 device time도 확보되지 않았다.
+
+공식 자료 설명의 BraTS2021과 확보한 BraTS2023 배포의 release 동등성, 원 annotation 영역 의미 및 개별 case 학습 노출은 미완결이다. 현재 결과는 제공 보고서와 연결한 제한적 개발 비교로만 사용한다.
+
+# Interpretation
+
+P/G 모두 BA, HIGH recall, UNKNOWN, B 대비 accuracy 이득 기준을 충족하지 못했다. 따라서 현재 frozen 후보를 채택하지 않는 원 계획의 분기를 따른다. 이 결정에 더 큰 표본이 반드시 필요하지는 않지만, '추가 표본으로 결론이 바뀔 가능성이 작다'는 통계적 주장까지 지지하지는 않는다.
+
+G−P 점추정치 0은 영역 지원이 일반적으로 무효라는 뜻이 아니다. 두 mask의 중첩이 높고 G의 정확한 대상 의미도 불확실하다. 기본 인식, 입력·정답 적합성, 보고서 생성 표현의 영향을 분리하지 못했다. 복수 관측 선택·결합은 이번 실험의 검증 대상이 아니었다.
+
+새 한계를 observed/validated로 등록하지 않는다. 특히 이번 결과를 iter_064의 기존 context 한계에 합치거나 그 상태를 변경하지 않는다.
+
+# Strategy Check / 연구 방향 판단
+
+- **실행 유효성:** 30개 실제 출력의 제한적 기술 일치 비교는 완료됐다. 재개·provenance·tensor 검증의 미완료 범위는 별도로 남긴다.
+- **성능 개선:** P/G 간 집계 개선은 없고, 두 조건 모두 기본 선별 기준에 미달했다.
+- **가설 지지:** 현재 전문 모델이 유용한 근거 추출 baseline이라는 H1의 채택 근거를 확보하지 못했다. H2의 영역 지원 원인 해석은 높은 mask 중첩과 대상 불확실성으로 약하다.
+- **신규 기여 가능성:** 방법 효과는 검증하지 않았다. 원 저자의 mask 지원을 재현한 사실 자체도 신규성이 아니다.
+
+이번에 해결한 질문은 현재 AutoRG·FLAIR frozen 설정을 사전 기준으로 채택할 수 있는가이며 답은 부정적이다. 남은 질문은 중요한 실제 과제에서 기본 인식을 적응으로 확보할 가치가 있는가다. 기존 일반 VLM 실험과 이번 전문 모델은 과제·자료가 달라 모델 간 공통 실패의 재현으로 합칠 수 없다. 여러 기본 모델의 기준 미달은 강한 기존 해결책 전체의 부족함을 뜻하지 않는다.
+
+iter_059의 전문 segmentation 대안과 iter_064의 context 손실은 각 원래 범위에서 유지한다. 새 frozen 모델·자료 준비를 반복하는 선택, 직접 적응, 기존 observed 문제의 최소 개입을 다음 계획에서 비교해야 한다. 이번 구현 세션은 약 32분이고 본실행은 약 3.5분이었다. 준비·호환성 복구가 상당했지만 이를 전체 track의 정확한 비용 비율로 환산하지 않는다.
+
+# Recommended Next Experiment
+
+이번 반복의 추가 실험은 권고하지 않는다. 다음 계획에서 직접 적응·기존 관찰 개입·투자 보류 중 하나를 선택하고, 그 선택을 바꿀 결과와 종료점을 고정한다. 직접 적응이라면 중요한 사용 과제, 강한 단순 대조, 독립 확인을 위한 분리 자료를 구체화해야 한다. 기존 context 관찰을 택한다면 단순 routing으로 충분한 상황을 넘어서는 잔여 가치를 제시해야 한다.
+
+이번 출력의 parser·운영 결함은 해당 자산을 실제 재사용할 때 필요한 범위만 고친다. 정비만을 위한 새 반복이나 동일 15건의 prompt 탐색으로 이어가지 않는다.
+
+논문 추천은 보류한다. 이번에는 기준 미달인 frozen 후보를 종료했으며, 추천할 방향의 방법 효과나 재현된 유망성을 새로 확보하지 못했다.

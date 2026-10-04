@@ -1,0 +1,656 @@
+diff --git a/ar70_cost.py b/ar70_cost.py
+new file mode 100644
+index 0000000..f999603
+--- /dev/null
++++ b/ar70_cost.py
+@@ -0,0 +1,38 @@
++"""iter_070 cost / mask-overlap / determinism summary from saved raw outputs."""
++import glob
++import json
++
++import nibabel as nib
++import numpy as np
++
++M = 'results/iter_070/main/'
++seal = json.load(open(M + 'seal.json'))
++dice = {}
++for c in seal['cases']:
++    a = np.asarray(nib.load(f'{M}masks/{c}-t2f_ab.nii.gz').dataobj) > 0
++    g = np.asarray(nib.load(f'{M}gt/{c}_gt_whole.nii.gz').dataobj) > 0
++    dice[c] = round(float(2 * (a & g).sum() / max(a.sum() + g.sum(), 1)), 4)
++rows = []
++for f in sorted(glob.glob(M + 'results/*.json')):
++    r = json.load(open(f))
++    rows.append((r['case'], r['cond'], r['case_wall_s'], r['seg_s_case'], r['attempts'][0]['wall_s'], r['peak_reserved_MiB']))
++P = [x for x in rows if x[1] == 'P']
++G = [x for x in rows if x[1] == 'G']
++L = json.load(open(M + 'launch_result.json'))
++T = [json.load(open(f)) for f in glob.glob('results/iter_070/tech/results/*__G.json')]
++single = float(np.mean([t['case_wall_s'] for t in T]) * 15)
++cost = {'main_wall_s_4workers': L['wall_s'], 'peak_gpu_used_MiB_per_gpu': L['peak_gpu_used_MiB'],
++        'mean_seg_s': float(np.mean([x[3] for x in P])), 'mean_report_wall_s_P': float(np.mean([x[4] for x in P])),
++        'mean_report_wall_s_G': float(np.mean([x[4] for x in G])), 'max_torch_reserved_MiB': max(x[5] for x in rows),
++        'single_worker_tech_case_wall_s': [t['case_wall_s'] for t in T], 'single_worker_est_15cases_s': single,
++        'speedup_est_vs_single': single / L['wall_s'],
++        'dice_pred_vs_gt_whole': dice, 'dice_mean': float(np.mean(list(dice.values()))), 'dice_min': min(dice.values())}
++det = {}
++for c in ['BraTS-GLI-00012-000', 'BraTS-GLI-00456-000']:
++    for k in 'PG':
++        a = json.load(open(f'results/iter_070/tech/results/{c}__{k}.json'))['attempts'][0]['report']
++        b = json.load(open(f'{M}results/{c}__{k}.json'))['attempts'][0]['report']
++        det[f'{c}__{k}'] = a == b
++cost['tech_vs_main_text_identical'] = det
++json.dump(cost, open('results/iter_070/eval/cost.json', 'w'), indent=1)
++print(json.dumps(cost, indent=1))
+diff --git a/ar70_eval.py b/ar70_eval.py
+new file mode 100644
+index 0000000..a7a9af8
+--- /dev/null
++++ b/ar70_eval.py
+@@ -0,0 +1,132 @@
++"""iter_070 evaluation: blind rule extraction from raw AutoRG reports -> BA, accuracy, UNKNOWN, P/G/B comparison.
++
++extract_label(text) depends only on the generated text (no GT, no condition). Rules fixed in plan.md before output:
++HIGH = explicit high/hyperintense lesion signal without low component; MIXED_HIGH_LOW = explicit high and low
++components; everything else (mixed/heterogeneous only, hypo only, enhancement, no signal statement, conflicting) = UNKNOWN.
++Usage: python ar70_eval.py <main_dir> <out_json> [exclude_dev_cases:0/1]
++"""
++import hashlib
++import json
++import os
++import re
++import sys
++
++import numpy as np
++
++CLS = ['HIGH', 'MIXED_HIGH_LOW']
++PRIOR_B = 'MIXED_HIGH_LOW'  # from train counts (ar70_labels.py: 92 vs 36)
++DEV_CASES = ['BraTS-GLI-00012-000', 'BraTS-GLI-00456-000']
++CUT = re.compile(r',?\s+(?:with|while|whereas|and)\s+(?:the\s+)?(?:surrounding|adjacent)', re.I)
++MIXED_HL = re.compile(r'mixed (?:high|hyperintens\w*) and (?:low|hypointens\w*)|mixed hyperintens\w* and hypointens\w*', re.I)
++HIGHP = re.compile(r'hyperintens|high[- ](?:fl?air )?signal|high signal|high intensit', re.I)
++LOWP = re.compile(r'hypointens|low[- ]signal|low intensit|\blow\b', re.I)
++MIXEDP = re.compile(r'mixed|heterogene', re.I)
++
++
++def extract_label(text):
++    """returns (label, evidence sentence or None)"""
++    if not text:
++        return 'UNKNOWN', None
++    sents = [s.strip() for s in re.split(r'(?<=[.])\s+', text) if s.strip()]
++    found = []
++    for s in sents:
++        if not re.search(r'lesion|abnormal signal|tumou?r', s, re.I):
++            continue
++        part = CUT.split(s)[0]
++        if MIXED_HL.search(part) or (HIGHP.search(part) and LOWP.search(part)):
++            found.append(('MIXED_HIGH_LOW', s))
++        elif HIGHP.search(part) and not MIXEDP.search(part) and not LOWP.search(part):
++            found.append(('HIGH', s))
++    labs = {f[0] for f in found}
++    if len(labs) == 1:
++        return found[0][0], found[0][1]
++    return 'UNKNOWN', (found[0][1] if found else None)
++
++
++def ba(y, p):
++    r = []
++    for c in CLS:
++        idx = [i for i, t in enumerate(y) if t == c]
++        r.append(np.mean([p[i] == c for i in idx]) if idx else np.nan)
++    return float(np.nanmean(r)), r
++
++
++def metrics(y, p):
++    b, r = ba(y, p)
++    return {'BA': b, 'recall_HIGH': r[0], 'recall_MIXED': r[1],
++            'acc': float(np.mean([a == c for a, c in zip(p, y)])),
++            'unknown_rate': float(np.mean([a == 'UNKNOWN' for a in p]))}
++
++
++def boot(y, pa, pb, clusters, n=10000, seed=70):
++    """cluster paired bootstrap of BA(pa)-BA(pb); returns mean, 95% CI, #degenerate replicates skipped."""
++    rng = np.random.default_rng(seed)
++    cl = sorted(set(clusters))
++    by = {c: [i for i, k in enumerate(clusters) if k == c] for c in cl}
++    ds, skipped = [], 0
++    for _ in range(n):
++        pick = rng.integers(0, len(cl), len(cl))
++        idx = [i for k in pick for i in by[cl[k]]]
++        yy = [y[i] for i in idx]
++        if len(set(yy)) < 2:
++            skipped += 1
++            continue
++        ds.append(ba(yy, [pa[i] for i in idx])[0] - ba(yy, [pb[i] for i in idx])[0])
++    return {'diff_mean': float(np.mean(ds)), 'ci95': [float(np.percentile(ds, 2.5)), float(np.percentile(ds, 97.5))], 'skipped': skipped}
++
++
++def main():
++    main_dir, out = sys.argv[1], sys.argv[2]
++    excl = len(sys.argv) > 3 and sys.argv[3] == '1'
++    L = json.load(open('results/iter_070/data/label_table.json'))
++    seal = json.load(open(os.path.join(main_dir, 'seal.json')))
++    cases = seal['cases']
++    if excl:
++        cases = [c for c in cases if c not in DEV_CASES]
++    raw = {}
++    for c in cases:
++        for cond in 'PG':
++            p = os.path.join(main_dir, 'results', f'{c}__{cond}.json')
++            assert os.path.exists(p), 'missing ' + p
++            r = json.load(open(p))
++            assert r['status'] == 'ok' and r['case'] == c and r['cond'] == cond
++            assert r['protocol_hash'] == json.load(open(os.path.join(main_dir, 'log', sorted(f for f in os.listdir(os.path.join(main_dir, 'log')) if f.startswith('worker_'))[0])))['protocol_hash']
++            raw[(c, cond)] = r
++    files = [f for f in os.listdir(os.path.join(main_dir, 'results')) if f.endswith('.json')]
++    assert len(files) == 2 * len(seal['cases']), (len(files), len(seal['cases']))
++    y = [L['val'][c]['label'] for c in cases]
++    clusters = [c.split('-')[2] for c in cases]
++    preds, ev = {}, {}
++    for cond in 'PG':
++        pl = []
++        for c in cases:
++            a = raw[(c, cond)]['attempts'][-1]
++            lab, e = extract_label(a['report'])
++            pl.append(lab)
++            ev.setdefault(c, {})[cond] = {'label': lab, 'evidence': e, 'report': a['report'], 'cap_hit_final': a['cap_hit'], 'n_attempts': len(raw[(c, cond)]['attempts'])}
++        preds[cond] = pl
++    preds['B'] = [PRIOR_B] * len(cases)
++    res = {'n': len(cases), 'excluded_dev_cases': excl, 'class_counts': {c: y.count(c) for c in CLS}, 'n_clusters': len(set(clusters)),
++           'metrics': {k: metrics(y, v) for k, v in preds.items()},
++           'conversions_P_to_G': {'P_wrong_G_right': sum(1 for i in range(len(y)) if preds['P'][i] != y[i] and preds['G'][i] == y[i]),
++                                  'P_right_G_wrong': sum(1 for i in range(len(y)) if preds['P'][i] == y[i] and preds['G'][i] != y[i]),
++                                  'same_label_text': sum(1 for c in cases if ev[c]['P']['report'] == ev[c]['G']['report'])},
++           'boot': {'G_minus_P_BA': boot(y, preds['G'], preds['P'], clusters), 'P_minus_B_BA': boot(y, preds['P'], preds['B'], clusters),
++                    'G_minus_B_BA': boot(y, preds['G'], preds['B'], clusters)}}
++    m = res['metrics']
++
++    def crit(k):
++        x = m[k]
++        return {'BA>=0.70': bool(x['BA'] >= 0.70), 'recalls>=0.60': bool(min(x['recall_HIGH'], x['recall_MIXED']) >= 0.60),
++                'unknown<=0.10': bool(x['unknown_rate'] <= 0.10), 'acc_gain_vs_B>=0.10': bool(x['acc'] - m['B']['acc'] >= 0.10)}
++    res['criteria'] = {k: crit(k) for k in 'PG'}
++    res['criteria_all_met'] = {k: all(v.values()) for k, v in res['criteria'].items()}
++    res['per_case'] = {c: {'gt': L['val'][c]['label'], **ev[c]} for c in cases}
++    res['inputs'] = {'labels_sha256': hashlib.sha256(open('results/iter_070/data/label_table.json', 'rb').read()).hexdigest(),
++                     'eval_sha256': hashlib.sha256(open(__file__, 'rb').read()).hexdigest()}
++    json.dump(res, open(out, 'w'), indent=1, ensure_ascii=False)
++    print(json.dumps({k: res[k] for k in ['n', 'class_counts', 'metrics', 'conversions_P_to_G', 'boot', 'criteria_all_met']}, indent=1))
++
++
++if __name__ == '__main__':
++    main()
+diff --git a/ar70_labels.py b/ar70_labels.py
+new file mode 100644
+index 0000000..fcf4528
+--- /dev/null
++++ b/ar70_labels.py
+@@ -0,0 +1,101 @@
++"""iter_070 label table: RadGenome BraTS_GLI t2f report -> HIGH / MIXED_HIGH_LOW / excluded.
++
++Rules fixed before any model output (plan.md section 1).
++ - HIGH: explicit high/hyperintense lesion signal, no low component in the same lesion.
++ - MIXED_HIGH_LOW: explicit high AND low (hypo) components of the lesion.
++ - excluded: 'mixed'/'heterogeneous' without explicit high+low, reference-only target
++   ('aforementioned', 'same lesions/locations'), no signal statement.
++VAL_MANUAL is the manual review of every val t2f report (authoritative for the main evaluation);
++auto_label() is the regex assistant, used for train (prior B) and as a cross-check on val.
++"""
++import json
++import re
++import sys
++
++REV = '0348ba42fad134da57b50e736ba858a8e73eb086'
++D = 'results/iter_070/data/radgenome/'
++
++# manual decision per val case: (label, evidence span or exclusion reason)
++VAL_MANUAL = {
++    'BraTS-GLI-00012-000': ('MIXED_HIGH_LOW', 'Mixed high and low signal intensities of the lesion'),
++    'BraTS-GLI-00184-000': ('MIXED_HIGH_LOW', 'the lesion ... demonstrates mixed high and low signal intensity'),
++    'BraTS-GLI-00187-000': ('MIXED_HIGH_LOW', 'the lesion demonstrates mixed high and low signals'),
++    'BraTS-GLI-00430-000': ('MIXED_HIGH_LOW', 'lesion exhibits mixed high and low signal intensity'),
++    'BraTS-GLI-00456-000': ('HIGH', 'the lesion in the right frontal lobe appears hyperintense'),
++    'BraTS-GLI-00590-000': ('EXCLUDED', 'only "mixed high signal intensity" (no explicit low component)'),
++    'BraTS-GLI-00683-001': ('EXCLUDED', 'only "mixed high signal intensity" (no explicit low component)'),
++    'BraTS-GLI-00725-001': ('MIXED_HIGH_LOW', 'mixed high and low signal intensity foci in bilateral frontal lobes and corpus callosum knee'),
++    'BraTS-GLI-00772-000': ('MIXED_HIGH_LOW', 'lesion exhibits mixed high and low signal intensity'),
++    'BraTS-GLI-00778-000': ('HIGH', 'the lesion in the left temporal lobe is hyperintense'),
++    'BraTS-GLI-00801-000': ('MIXED_HIGH_LOW', 'mixed high and low signal intensities'),
++    'BraTS-GLI-01063-000': ('EXCLUDED', 'only "mixed signal intensities" (no explicit high+low)'),
++    'BraTS-GLI-01077-000': ('HIGH', 'lesion in the right parietal lobe shows hyperintense signal'),
++    'BraTS-GLI-01105-000': ('MIXED_HIGH_LOW', 'lesion demonstrates mixed high and low signal intensities'),
++    'BraTS-GLI-01106-000': ('EXCLUDED', 'target defined by reference to the T2W description (lesions at the same locations)'),
++    'BraTS-GLI-01146-000': ('EXCLUDED', '"High mixed signal intensities" of "the same lesions" (reference target, no explicit low)'),
++    'BraTS-GLI-01157-000': ('EXCLUDED', 'target is "the aforementioned lesion" (reference-only target)'),
++    'BraTS-GLI-01175-000': ('EXCLUDED', '"hyperintense mixed signals" (no explicit low component)'),
++    'BraTS-GLI-01286-000': ('EXCLUDED', 'only "mixed high signal intensity" (no explicit low component)'),
++    'BraTS-GLI-01358-000': ('MIXED_HIGH_LOW', 'Mixed high and low signal intensity observed in the lesion'),
++    'BraTS-GLI-01440-000': ('MIXED_HIGH_LOW', 'lesion shows mixed hyperintensity and hypointensity'),
++    'BraTS-GLI-01456-000': ('HIGH', 'the lesion exhibits high signal intensity'),
++    'BraTS-GLI-01524-000': ('MIXED_HIGH_LOW', 'mixed hyperintense and hypointense signal'),
++}
++
++REF = re.compile(r'aforementioned|same lesions?|same locations?|mentioned in the', re.I)
++HIGH = re.compile(r'hyperintens|high (?:fl?air )?signal|high signal|high and low|high-signal', re.I)
++LOW = re.compile(r'hypointens|low signal|and low|high and low|low (?:signal )?intensit', re.I)
++MIXED_ONLY = re.compile(r'mixed|heterogene', re.I)
++
++
++def auto_label(text):
++    if REF.search(text):
++        return 'EXCLUDED'
++    first = re.split(r'(?<=[.])\s', text)[0] if text else ''
++    s = first
++    h, l = bool(HIGH.search(s)), bool(LOW.search(s))
++    mixed_hl = bool(re.search(r'mixed (?:high|hyperintens\w*) and (?:low|hypointens\w*)|mixed hyperintens\w* and hypointens\w*', s, re.I))
++    if mixed_hl or (h and l):
++        return 'MIXED_HIGH_LOW'
++    if h and not MIXED_ONLY.search(s):
++        return 'HIGH'
++    return 'EXCLUDED'
++
++
++def load():
++    sp = json.load(open(D + 'train_val_test_split.json'))
++    mw = json.load(open(D + 'BraTS_GLI/modal_wise_finding.json'))
++    return sp, mw
++
++
++def case_of(k):
++    return k.rsplit('-', 1)[0]
++
++
++def main():
++    sp, mw = load()
++    out = {'revision': REV, 'val': {}, 'train_counts': {}, 'crosscheck': {}}
++    val_t2f = sorted(k for k in sp['val'] if 'GLI' in k and k.endswith('t2f'))
++    assert len(val_t2f) == 23 and {case_of(k) for k in val_t2f} == set(VAL_MANUAL)
++    for k in val_t2f:
++        lab, ev = VAL_MANUAL[case_of(k)]
++        out['val'][case_of(k)] = {'key': k, 'label': lab, 'evidence': ev, 'report': mw[k], 'auto': auto_label(mw[k])}
++    out['crosscheck'] = {c: v['auto'] for c, v in out['val'].items() if v['auto'] != v['label']}
++    tr = sorted(k for k in sp['train'] if 'GLI' in k and k.endswith('t2f'))
++    cnt = {'HIGH': 0, 'MIXED_HIGH_LOW': 0, 'EXCLUDED': 0}
++    for k in tr:
++        cnt[auto_label(mw[k])] += 1
++    out['train_counts'] = cnt
++    out['train_n'] = len(tr)
++    out['prior_B'] = 'MIXED_HIGH_LOW' if cnt['MIXED_HIGH_LOW'] > cnt['HIGH'] else 'HIGH'
++    vc = {}
++    for v in out['val'].values():
++        vc[v['label']] = vc.get(v['label'], 0) + 1
++    out['val_counts'] = vc
++    out['val_patients'] = sorted({c.split('-')[2] for c in out['val']})
++    json.dump(out, open(sys.argv[1], 'w'), indent=1, ensure_ascii=False)
++    print(json.dumps({k: out[k] for k in ['val_counts', 'train_counts', 'train_n', 'prior_B', 'crosscheck']}, indent=1))
++
++
++if __name__ == '__main__':
++    main()
+diff --git a/ar70_launch.py b/ar70_launch.py
+new file mode 100644
+index 0000000..fbbbcea
+--- /dev/null
++++ b/ar70_launch.py
+@@ -0,0 +1,66 @@
++"""iter_070 launcher: seal inputs, shard eligible cases over workers (2 per GPU on GPUs 0,1), wait, record exit codes.
++
++Usage: python ar70_launch.py <out_dir> [workers_per_gpu]
++Cases are statically sharded (round-robin by sorted ID) so each case has exactly one owner; resume is by skipping
++existing per-(case,cond) results inside ar70_run.py.
++"""
++import hashlib
++import json
++import os
++import subprocess
++import sys
++import time
++
++PY = 'results/environments/autorg70/bin/python'
++LABELS = 'results/iter_070/data/label_table.json'
++
++
++def sha(p):
++    return hashlib.sha256(open(p, 'rb').read()).hexdigest()
++
++
++def main():
++    out = sys.argv[1]
++    wpg = int(sys.argv[2]) if len(sys.argv) > 2 else 2
++    os.makedirs(out, exist_ok=True)
++    L = json.load(open(LABELS))
++    cases = sorted(c for c, v in L['val'].items() if v['label'] != 'EXCLUDED')
++    seal = {'labels': sha(LABELS), 'brats_manifest': sha('results/iter_070/data/brats_manifest.json'),
++            'weights': sha('results/iter_070/models/weights_manifest.json'),
++            'patch': sha('results/iter_070/external/patched/ar70_patch.diff'), 'run': sha('ar70_run.py'),
++            'cases': cases, 'workers_per_gpu': wpg}
++    sp = os.path.join(out, 'seal.json')
++    if os.path.exists(sp):
++        old = json.load(open(sp))
++        assert {k: v for k, v in old.items() if k != 'workers_per_gpu'} == {k: v for k, v in seal.items() if k != 'workers_per_gpu'}, 'seal mismatch (resume with changed inputs)'
++    else:
++        json.dump(seal, open(sp, 'w'), indent=1)
++    allowed = [x for x in os.environ.get('CUDA_VISIBLE_DEVICES', '0,1').split(',') if x != '']
++    nw = wpg * len(allowed)
++    shards = [cases[i::nw] for i in range(nw)]
++    t0 = time.time()
++    procs = []
++    for i, sh in enumerate(shards):
++        if not sh:
++            continue
++        env = dict(os.environ, CUDA_VISIBLE_DEVICES=allowed[i % len(allowed)], PYTHONUNBUFFERED='1')
++        os.makedirs(os.path.join(out, 'log'), exist_ok=True)
++        f = open(os.path.join(out, 'log', f'worker{i}.log'), 'a')
++        p = subprocess.Popen([PY, 'ar70_run.py', '--cases', ','.join(sh), '--out', out], stdout=f, stderr=subprocess.STDOUT, env=env)
++        procs.append((i, allowed[i % len(allowed)], sh, p))
++    rcs = {}
++    peak = {}
++    while any(p.poll() is None for _, _, _, p in procs):
++        q = subprocess.run(['nvidia-smi', '--query-gpu=index,memory.used', '--format=csv,noheader,nounits'], capture_output=True, text=True).stdout
++        for ln in q.strip().splitlines():
++            gi, mu = [x.strip() for x in ln.split(',')]
++            peak[gi] = max(peak.get(gi, 0), int(mu))
++        time.sleep(3)
++    for i, g, sh, p in procs:
++        rcs[i] = {'physical_gpu': g, 'cases': sh, 'rc': p.wait()}
++    json.dump({'wall_s': time.time() - t0, 'peak_gpu_used_MiB': peak, 'workers': rcs}, open(os.path.join(out, 'launch_result.json'), 'w'), indent=1)
++    print(json.dumps({'wall_s': time.time() - t0, 'rcs': {i: v['rc'] for i, v in rcs.items()}}))
++
++
++if __name__ == '__main__':
++    main()
+diff --git a/ar70_patch.py b/ar70_patch.py
+new file mode 100644
+index 0000000..322b101
+--- /dev/null
++++ b/ar70_patch.py
+@@ -0,0 +1,60 @@
++"""iter_070: build a minimally patched copy of the official AutoRG-Brain source (pinned SHA).
++
++Patches (everything else is untouched):
++ 1. inferenceSdk.AutoRG_Brain.__init__: do not overwrite CUDA_VISIBLE_DEVICES (keep inherited GPU set).
++ 2. GPT-2 base 'healx/gpt-2-pubmed-medium' -> local pinned snapshot via env AR70_GPT2.
++ 3. generate(max_length=300) -> env AR70_MAXLEN (default 300), to allow the pre-registered single cap doubling.
++Writes a unified diff to <out>/ar70_patch.diff.
++"""
++import difflib
++import os
++import shutil
++import sys
++
++SHA = '9670703c88e8f599c0c7edc472a5ffce4dd72b0e'
++SRC = f'results/iter_070/external/src/AutoRG-Brain-{SHA}'
++DST = 'results/iter_070/external/patched'
++
++EDITS = [
++    ('AutoRG_Brain/inference/inferenceSdk.py',
++     '        os.environ["CUDA_VISIBLE_DEVICES"] = str(gpu_id[0])\n',
++     '        # ar70: inherited CUDA_VISIBLE_DEVICES is kept (original overwrote it); gpu_id[0] is the logical index\n'),
++    ('AutoRG_Brain/inference/inferenceSdk.py',
++     'max_length=300,',
++     "max_length=int(os.environ.get('AR70_MAXLEN', '300')),"),
++    ('AutoRG_Brain/network/language_model_patchwise.py',
++     'self.checkpoint = "healx/gpt-2-pubmed-medium"',
++     "self.checkpoint = __import__('os').environ.get('AR70_GPT2', 'healx/gpt-2-pubmed-medium')"),
++    ('AutoRG_Brain/network_training/nnUNetTrainerV2_llm_resize_new.py',
++     'checkpoint = "healx/gpt-2-pubmed-medium"',
++     "checkpoint = __import__('os').environ.get('AR70_GPT2', 'healx/gpt-2-pubmed-medium')"),
++    # 4. transformers moved BeamSearchScorer; same class, new module path (unused in greedy decoding)
++    ('AutoRG_Brain/network/language_model_patchwise.py',
++     'from transformers.generation_beam_search import BeamSearchScorer',
++     'from transformers.generation.beam_search import BeamSearchScorer'),
++]
++
++
++def main():
++    # --reapply: re-derive edited files from the pinned SRC into an existing DST (derived copy only)
++    reapply = len(sys.argv) > 1 and sys.argv[1] == '--reapply'
++    if os.path.exists(DST) and not reapply:
++        sys.exit('refusing to overwrite ' + DST)
++    if not os.path.exists(DST):
++        shutil.copytree(SRC, DST, ignore=shutil.ignore_patterns('__pycache__', 'results'))
++    diff = []
++    for f in dict.fromkeys(e[0] for e in EDITS):
++        orig = open(os.path.join(SRC, f)).read()
++        t = orig
++        for ef, old, new in EDITS:
++            if ef == f:
++                assert t.count(old) == 1, (f, old, t.count(old))
++                t = t.replace(old, new)
++        open(os.path.join(DST, f), 'w').write(t)
++        diff += list(difflib.unified_diff(orig.splitlines(True), t.splitlines(True), f'a/{f}', f'b/{f}'))
++    open(os.path.join(DST, 'ar70_patch.diff'), 'w').write(''.join(diff))
++    print(''.join(diff))
++
++
++if __name__ == '__main__':
++    main()
+diff --git a/ar70_run.py b/ar70_run.py
+new file mode 100644
+index 0000000..b04843d
+--- /dev/null
++++ b/ar70_run.py
+@@ -0,0 +1,147 @@
++"""iter_070 worker: AutoRG-Brain RGv2, FLAIR, P (predicted mask) vs G (annotation mask), same given_mask path.
++
++Run with the isolated env python (results/environments/autorg70). One worker processes its cases sequentially:
++  seg (official SegModel, saves *_ab/*_ana) -> P report (label=pred_ab,label2=pred_ana)
++                                             -> G report (label=GT whole-lesion mask, label2=pred_ana)
++Per (case, cond) atomic JSON in <out>/results/. Resume: existing results with same protocol hash are skipped.
++Generation: official greedy (max_length=300); a cap-reached output is re-run once with AR70_MAXLEN=600
++(both attempts are kept).
++"""
++import argparse
++import hashlib
++import json
++import os
++import sys
++import time
++import traceback
++
++ROOT = os.path.abspath(os.path.dirname(__file__))
++PATCHED = os.path.join(ROOT, 'results/iter_070/external/patched/AutoRG_Brain')
++MODELS = os.path.join(ROOT, 'results/iter_070/models')
++BRATS = os.path.join(ROOT, 'results/iter_070/data/brats/ASNR-MICCAI-BraTS2023-GLI-Challenge-TrainingData')
++
++
++def sha(path):
++    h = hashlib.sha256()
++    with open(path, 'rb') as f:
++        for ch in iter(lambda: f.read(1 << 22), b''):
++            h.update(ch)
++    return h.hexdigest()
++
++
++def protocol_hash():
++    keys = [os.path.join(MODELS, 'weights_manifest.json'), os.path.join(os.path.dirname(PATCHED), 'ar70_patch.diff'), os.path.abspath(__file__)]
++    return hashlib.sha256(b''.join(open(k, 'rb').read() for k in keys)).hexdigest()[:16]
++
++
++def atomic_json(path, obj):
++    tmp = path + '.tmp.%d' % os.getpid()
++    with open(tmp, 'w') as f:
++        json.dump(obj, f, indent=1, ensure_ascii=False)
++    os.replace(tmp, path)
++
++
++def make_gt_mask(case, out_dir):
++    import nibabel as nib
++    import numpy as np
++    p = f'{BRATS}/{case}/{case}-seg.nii.gz'
++    img = nib.load(p)
++    m = (np.asarray(img.dataobj) > 0).astype(np.uint8)
++    hdr = img.header.copy()
++    hdr.set_data_dtype(np.uint8)
++    o = os.path.join(out_dir, f'{case}_gt_whole.nii.gz')
++    if not os.path.exists(o):
++        nib.save(nib.Nifti1Image(m, img.affine, hdr), o)
++    return o, int(m.sum())
++
++
++def main():
++    ap = argparse.ArgumentParser()
++    ap.add_argument('--cases', required=True)
++    ap.add_argument('--out', required=True)
++    ap.add_argument('--conds', default='P,G')
++    a = ap.parse_args()
++    out = os.path.abspath(a.out)
++    for d in ['results', 'masks', 'gt', 'log']:
++        os.makedirs(os.path.join(out, d), exist_ok=True)
++    os.environ['AR70_GPT2'] = os.path.join(MODELS, 'gpt2pm')
++    os.environ['HF_HUB_OFFLINE'] = '1'
++    os.chdir(PATCHED)
++    sys.path.insert(0, PATCHED)
++    import torch
++    from inference.inferenceSdk import AutoRG_Brain
++
++    ph = protocol_hash()
++    t_load = time.time()
++    cfg = {'llm_folder': os.path.join(MODELS, 'autorg/RG_v2'), 'seg_folder': os.path.join(MODELS, 'autorg'),
++           'llm_chk': 'AutoRG_Brain_RGv2', 'seg_chk': 'AutoRG_Brain_SEG', 'output_dir': os.path.join(out, 'masks'),
++           'eval_mode': 'given_mask'}
++    model = AutoRG_Brain(gpu_id=[0], config=cfg)
++    load_s = time.time() - t_load
++    gen_log = []
++    orig_gen = model.trainer.llm_model.generate
++
++    def gen_wrap(*args, **kw):
++        o = orig_gen(*args, **kw)
++        eos = model.trainer.tokenizer.eos_token_id
++        gen_log.append({'max_length': kw.get('max_length'), 'shape': list(o.shape),
++                        'has_eos': [bool((row == eos).any().item()) for row in o[:, 1:]] if o.shape[1] > 1 else []})
++        return o
++    model.trainer.llm_model.generate = gen_wrap
++    meta = {'protocol_hash': ph, 'load_s': load_s, 'cuda_visible': os.environ.get('CUDA_VISIBLE_DEVICES'),
++            'device': torch.cuda.get_device_name(0), 'pid': os.getpid(), 'torch': torch.__version__}
++    atomic_json(os.path.join(out, 'log', f'worker_{os.getpid()}.json'), meta)
++
++    for case in a.cases.split(','):
++        img = f'{BRATS}/{case}/{case}-t2f.nii.gz'
++        stem = f'{case}-t2f'
++        need = [c for c in a.conds.split(',') if not os.path.exists(os.path.join(out, 'results', f'{case}__{c}.json'))]
++        if not need:
++            continue
++        torch.cuda.reset_peak_memory_stats()
++        t0 = time.time()
++        gt_path, gt_vox = make_gt_mask(case, os.path.join(out, 'gt'))
++        ab = os.path.join(out, 'masks', f'{stem}_ab.nii.gz')
++        ana = os.path.join(out, 'masks', f'{stem}_ana.nii.gz')
++        seg_s = None
++        if not (os.path.exists(ab) and os.path.exists(ana)):
++            ts = time.time()
++            try:
++                model.segmodel.seg([[img]], [None], [None], ['T2FLAIR'])
++            except Exception:
++                atomic_json(os.path.join(out, 'results', f'{case}__SEGFAIL.json'), {'case': case, 'err': traceback.format_exc()})
++                continue
++            seg_s = time.time() - ts
++        seg_peak = torch.cuda.max_memory_reserved() / 2**20
++        for cond in need:
++            label = ab if cond == 'P' else gt_path
++            rec = {'case': case, 'cond': cond, 'protocol_hash': ph, 'image': img, 'image_sha256': sha(img),
++                   'label_path': label, 'ana_path': ana, 'gt_whole_voxels': gt_vox, 'seg_s_case': seg_s,
++                   'attempts': [], 'status': 'ok'}
++            for maxlen in (300, 600):
++                os.environ['AR70_MAXLEN'] = str(maxlen)
++                del gen_log[:]
++                tg = time.time()
++                try:
++                    res = model.report([{'image': img, 'modal': 'T2FLAIR', 'label': label, 'label2': ana}])
++                    err = None
++                except Exception:
++                    res, err = None, traceback.format_exc()
++                att = {'max_length': maxlen, 'wall_s': time.time() - tg, 'gen': list(gen_log), 'error': err,
++                       'report': res[0]['pred_report'] if res else None}
++                cap = any((not all(g['has_eos'])) and g['shape'][1] >= maxlen - 1 for g in gen_log)
++                att['cap_hit'] = bool(cap)
++                rec['attempts'].append(att)
++                if err or not cap:
++                    break
++            if rec['attempts'][-1]['error']:
++                rec['status'] = 'error'
++            rec['peak_reserved_MiB'] = torch.cuda.max_memory_reserved() / 2**20
++            rec['seg_peak_reserved_MiB'] = seg_peak
++            rec['case_wall_s'] = time.time() - t0
++            atomic_json(os.path.join(out, 'results', f'{case}__{cond}.json'), rec)
++            print(case, cond, rec['status'], round(rec['case_wall_s'], 1), flush=True)
++
++
++if __name__ == '__main__':
++    main()
+diff --git a/ar70_verify.py b/ar70_verify.py
+new file mode 100644
+index 0000000..2723c5a
+--- /dev/null
++++ b/ar70_verify.py
+@@ -0,0 +1,70 @@
++"""iter_070 independent checks of main outputs (does not import ar70_eval): completeness, input hashes, GT mask,
++exit codes, caps, and recomputation of BA/acc/UNKNOWN from raw reports with a separate simple labeler (token rules)."""
++import hashlib
++import json
++import os
++import re
++import sys
++
++import nibabel as nib
++import numpy as np
++
++M = sys.argv[1]
++OUT = sys.argv[2]
++B = 'results/iter_070/data/brats/ASNR-MICCAI-BraTS2023-GLI-Challenge-TrainingData/'
++L = json.load(open('results/iter_070/data/label_table.json'))['val']
++seal = json.load(open(M + '/seal.json'))
++man = json.load(open('results/iter_070/data/brats_manifest.json'))['sha256']
++launch = json.load(open(M + '/launch_result.json'))
++chk = {'worker_rc_all_zero': all(w['rc'] == 0 for w in launch['workers'].values())}
++files = sorted(f for f in os.listdir(M + '/results') if f.endswith('.json'))
++chk['n_result_files'] = len(files)
++chk['expected_files'] = sorted(f'{c}__{k}.json' for c in seal['cases'] for k in 'PG') == files
++recs = [json.load(open(M + '/results/' + f)) for f in files]
++chk['all_status_ok'] = all(r['status'] == 'ok' for r in recs)
++chk['no_cap_hit'] = not any(a['cap_hit'] for r in recs for a in r['attempts'])
++chk['one_attempt_each'] = all(len(r['attempts']) == 1 for r in recs)
++chk['image_hash_match'] = all(r['image_sha256'] == man[f"ASNR-MICCAI-BraTS2023-GLI-Challenge-TrainingData/{r['case']}/{r['case']}-t2f.nii.gz"] for r in recs)
++gt_ok = []
++for c in seal['cases']:
++    seg = np.asarray(nib.load(f'{B}{c}/{c}-seg.nii.gz').dataobj) > 0
++    gt = np.asarray(nib.load(f'{M}/gt/{c}_gt_whole.nii.gz').dataobj) > 0
++    gt_ok.append(bool((seg == gt).all()))
++chk['gt_mask_equals_seg_gt0'] = all(gt_ok)
++chk['P_uses_pred_ab_G_uses_gt'] = all((r['label_path'].endswith('_ab.nii.gz')) == (r['cond'] == 'P') and r['ana_path'].endswith('_ana.nii.gz') for r in recs)
++chk['same_ana_mask_P_G'] = all(next(r for r in recs if r['case'] == c and r['cond'] == 'P')['ana_path'] == next(r for r in recs if r['case'] == c and r['cond'] == 'G')['ana_path'] for c in seal['cases'])
++chk['no_gt_report_text_in_inputs'] = True  # runner passes only image/modal/label/label2 (see ar70_run.py)
++
++
++def lab(t):
++    s = t.lower()
++    first = [x for x in re.split(r'(?<=\.)\s', s) if ('lesion' in x or 'abnormal signal' in x)]
++    hl, hi, lo = False, False, False
++    got = set()
++    for x in first:
++        x = re.split(r',?\s+(?:with|while|whereas|and)\s+(?:the\s+)?(?:surrounding|adjacent)', x)[0]
++        h = ('hyperintens' in x) or ('high signal' in x) or ('high-signal' in x) or ('high intensit' in x) or ('mixed high' in x)
++        l = ('hypointens' in x) or ('low signal' in x) or ('low intensit' in x) or (' low ' in x) or (' low' in x.split('mixed')[-1])
++        m = ('mixed' in x) or ('heterogene' in x)
++        if ('mixed high and low' in x) or ('mixed hyperintense and hypointense' in x) or (h and l):
++            got.add('M')
++        elif h and not m and not l:
++            got.add('H')
++    return {'M': 'MIXED_HIGH_LOW', 'H': 'HIGH'}[list(got)[0]] if len(got) == 1 else 'UNKNOWN'
++
++
++res = {}
++for k in 'PG':
++    y, p = [], []
++    for c in seal['cases']:
++        r = next(r for r in recs if r['case'] == c and r['cond'] == k)
++        y.append(L[c]['label'])
++        p.append(lab(r['attempts'][-1]['report']))
++    rec_h = np.mean([a == 'HIGH' for a, b in zip(p, y) if b == 'HIGH'])
++    rec_m = np.mean([a == 'MIXED_HIGH_LOW' for a, b in zip(p, y) if b == 'MIXED_HIGH_LOW'])
++    res[k] = {'BA': float((rec_h + rec_m) / 2), 'acc': float(np.mean([a == b for a, b in zip(p, y)])), 'unknown': float(np.mean([a == 'UNKNOWN' for a in p])), 'labels': p}
++main = json.load(open('results/iter_070/eval/report_all15.json'))
++chk['independent_matches_main_eval'] = all(abs(res[k]['BA'] - main['metrics'][k]['BA']) < 1e-12 and abs(res[k]['acc'] - main['metrics'][k]['acc']) < 1e-12 and abs(res[k]['unknown'] - main['metrics'][k]['unknown_rate']) < 1e-12 for k in 'PG')
++chk['labels_identical_per_case'] = all(res[k]['labels'][i] == main['per_case'][c][k]['label'] for k in 'PG' for i, c in enumerate(seal['cases']))
++json.dump({'checks': chk, 'independent': res}, open(OUT, 'w'), indent=1)
++print(json.dumps(chk, indent=1))
