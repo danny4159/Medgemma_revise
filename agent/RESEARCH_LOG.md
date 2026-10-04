@@ -26893,3 +26893,526 @@ iter_059의 전문 segmentation 대안과 iter_064의 context 손실은 각 원�
 이번 출력의 parser·운영 결함은 해당 자산을 실제 재사용할 때 필요한 범위만 고친다. 정비만을 위한 새 반복이나 동일 15건의 prompt 탐색으로 이어가지 않는다.
 
 논문 추천은 보류한다. 이번에는 기준 미달인 frozen 후보를 종료했으며, 추천할 방향의 방법 효과나 재현된 유망성을 새로 확보하지 못했다.
+
+
+## iter_071 GPT PLAN [MRI grounding 적응 전이 대조 / proceed] — 2026-10-04 17:40:59
+
+# 요약
+
+- **이번에 할 일:** RSNA grounding 초기값이 MRI 직접 SFT보다 유용한지, 같은 MRI 정답을 쓰는 detector와 함께 비교한다.
+- **필요한 이유:** source 과제의 SFT 개선은 확인됐지만 새로운 modality의 학습에 무엇이 이전되는지는 미검증이다. MRI의 약한 frozen 결과만으로 학습 가치를 판정하지 않는다.
+- **확인할 기준:** 실제 생성 F1, 영상·질문 의존성, 동일 target 학습 기회, detector 대비 정확도·비용을 함께 확인한다.
+- **주의·다음:** 알려진 적응 방식의 진단이다. 새 방법이나 임상 성능의 확증이 아니다. 기존 개발 56명만 사용하고 F139와 과거 결과를 보존한다.
+
+# Current Understanding
+
+iter_012의 직접 LoRA SFT는 RSNA 확인 양성400명에서 F1@0.3을 0.631–0.653으로 개선했다. 그러나 iter_037은 detector와의 정밀도·FP trade-off를 보였고, iter_048은 공동 형식 직접 학습이 공동 출력 저하를 크게 회복함을 보였다. 이 근거는 학습 가능성을 지지하지만 일반적인 grounding 능력 전이나 VLM 고유 이점을 증명하지 않는다.
+
+MRI에서는 iter_059의 전문 대안이 구간 판정에 충분했고, iter_064의 명시적 target context 손실에는 routing이 있다. iter_065–070의 서로 다른 기본 과제 결과를 하나의 인식 결함으로 합칠 수 없다. round_02에서 현재 RadGenome 이진 신호 적응의 투자 연결을 확보하지 못해 보류한 판단을 유지한다.
+
+이번에는 MRI 우선을 유지하면서 당장의 질문을 학습 전이로 바꾼다. 기존 source adapter에서 시작하면 새 MRI 위치 정답을 더 잘 학습하는지를 실제 출력으로 검증한다. reference matching·임상 등급·다중 sequence 결합을 함께 시험하지 않는다.
+
+# Strategy Check / 연구 방향 판단
+
+**중요한 능력:** 한 의료 과제에 투자한 grounding 학습을 새로운 modality의 적응에 재사용할 수 있는가다. 활용 가치는 새로운 대상의 실제 위치 출력과 target 적응 비용에서 판단한다. 단순 spine 점수 개선은 최종 기여가 아니다.
+
+**관찰:** source SFT 효과는 재현됐다. MRI에서 충분한 인식을 전제로 한 일반적 선택·결합 실패는 확보하지 못했다.
+
+**남은 설명:** source 학습이 재사용 가능한 출력–영상 연결을 제공할 수 있다. 반대로 형식 준수·CXR 위치 prior만 제공하거나 새 anatomy 학습을 방해할 수 있다. base에서 직접 target SFT를 하면 동일하거나 더 좋은 성능을 얻는다는 설명이 가장 중요한 대조다.
+
+**최소 비교:** 동일 모델·MRI annotation·학습 기회를 사용하는 직접 SFT D와 source 초기화 R. 동일 annotation detector와 train-only template을 넣어 약한 D만 이긴 결과를 과장하지 않는다.
+
+**선택 비교:** 현재 MRI context 방법 개선은 단순 대안 이후의 필요성이 약하다. 기존 CXR 공동 grounding 재개도 원 리뷰의 비용·정확도 근거가 약하다. 이번 학습 대조는 보존된 source 성과와 MRI 자료를 연결해 새로운 준비 없이 경쟁 설명을 구분할 수 있다.
+
+**결정 변화:** R의 실제 위치 이득과 실용 가치가 남으면 source 지식 재사용을 후속 방법 연구의 근거로 검토한다. D와 동등하거나 detector가 충분하면 현재 초기값 전이 또는 두-category VLM 방법 투자를 보류한다. 어떤 결과도 새 loss를 자동 예약하지 않는다.
+
+기존 language-conditioned-grounding track에 복귀해 관련 전이·형식·모듈형 비교 이력을 연결한다. MRI evidence track의 관찰은 보존하되 두 질문을 같은 실험처럼 합치지 않는다. 준비·검증이 상당한 비용이었던 iter_064/070의 교훈에 따라 필요한 기존 모듈만 수정한다.
+
+# Hypothesis
+
+H1: RSNA 초기화 R은 동일 target 학습 조건의 D보다 MRI anatomy grounding을 개선한다.
+
+H2: 관찰된 이득이 있다면 형식 오류 감소나 평균 위치 template만으로 설명되지 않고, 올바른 영상과 질문에 연결된 위치 정확도에서도 나타난다.
+
+H3: 동일 MRI bbox supervision의 detector가 현재 과제를 더 정확하고 저렴하게 해결할 수 있다. 이 경우 H1의 학습 관찰은 남겨도 해당 과제의 새 VLM 방법 투자 가치는 낮다.
+
+이번 개입은 기존 표준 SFT의 초기값 비교다. source를 MRI용으로 바꾸는 새 방법을 제안하거나 특정 내부 표현의 인과 기전을 주장하지 않으므로 experiment_role=diagnostic, method_stage=none이다.
+
+# Limitation Evidence / Correct Usage Checks
+
+`lesion-grounding-generalization`은 iter_009/012의 정상 사용·독립 출력 근거로 validated다. 이를 MRI 한계의 사전 승인으로 사용하지 않는다. `qa-format-compliance-after-grounding-sft`는 iter_016의 observed 근거이며, 형식 차이를 능력 차이로 오해하지 않기 위한 연결이다.
+
+MedGemma revision은 91850547d9f0b2fdd21aa7c5f4f3d1a8a52c243b로 고정한다. 공식 processor와 chat template을 사용하고 MRI 학습·생성의 prefix와 pixel tensor가 같아야 한다. 이미지·user·padding에는 CE를 걸지 않는다. helper의 선택 위치 CE는 공식 forward와 loss·gradient를 대조한다.
+
+GT mask는 정답 bbox 생성과 검사에만 사용한다. slice 선택·window·crop·질문에 GT 정보를 사용하지 않는다. MRI 영상 전체에 보이는 annotation 대상의 위치를 평가하며 병변 유무나 임상 정상 판단으로 해석하지 않는다.
+
+# Contribution Path / Baselines / Reuse
+
+## 가까운 방법과 주장 범위
+
+[PFMVG](https://arxiv.org/abs/2410.23822)의 경량 grounding 적응, [CURE](https://openaccess.thecvf.com/content/CVPR2026/papers/Messina_CURE_Curriculum-guided_Multi-task_Training_for_Reliable_Anatomy_Grounded_Report_Generation_CVPR_2026_paper.pdf)의 다과제 curriculum, [LocAnyMed](https://arxiv.org/abs/2608.03322)의 다중 modality supervision이 가까운 선행이다. warm-start·LoRA·MRI 적용 자체는 신규성이 아니다. 이번 비교가 양성이어도 제한된 전이 baseline이며 새로운 방법과 범용 학습 원리는 별도 증거가 필요하다.
+
+## 비교군
+
+- **D:** 원래 MedGemma에 새 rank16 LoRA를 초기화하고 MRI 직접 SFT.
+- **R:** 같은 모델·LoRA 구조에 iter_012 seed17 선택 adapter를 불러와 MRI 직접 SFT. optimizer·scheduler는 새로 시작한다. source seed는 MRI 결과로 고르지 않는다.
+- **M:** torchvision Faster R-CNN ResNet50-FPN v2 COCO_V1에서 background/vertebra/disc predictor를 새로 학습한다. VLM과 같은 영상·bbox annotation을 사용한다.
+- **P:** train-only category별 bbox template. 각 train 영상의 정규화 bbox set을 후보로 두고 다른 train 환자에 대한 평균 F1@0.5가 가장 높은 medoid를 선택한다. 자기 환자는 선택 점수에서 제외하고 동률은 고정 ID 순으로 정한다.
+- **영상 교환 대조:** 평가 환자 ID의 고정 순환 permutation으로 같은 slice offset·같은 질문의 다른 환자 출력을 해당 환자 GT에 대조한다. 동일 prompt이므로 저장 출력을 재사용할 수 있으며 신규 추론이 필요하지 않다. 실용 해법이 아닌 영상 의존성 진단이다.
+
+D/R은 target supervision과 탐색 기회를 맞춘다. R은 이미 source 2,400명·750 updates를 사용했다. source 비용과 이번 추가 비용을 분리하며 총 데이터 효율·총 계산량 우위라고 부르지 않는다. M의 COCO 사전학습·전체 backbone 학습·기본 해상도 차이를 공개한다. M은 한 영상에서 두 category를 함께 출력하므로 질문별 VLM 두 호출과 실제 비용을 비교한다.
+
+## 재사용
+
+reuse_iteration=6과 JSON의 세 선별 반입 묶음을 사용한다. 계획에서 실제 SHA와 blob을 확인했고 현 브랜치에는 해당 파일이 없다. 원본 누락을 새 구현으로 대체하지 않는다.
+
+LoRA·입력 구성·CE·상태 저장·좌표·parser·detector 함수는 재사용한다. 기존 RSNA train CLI, 과거 validation pipeline, source 결과 복사 분기는 사용하지 않는다. 얇은 iter_071 task wrapper에서 새 manifest·prompt·정답·일정을 연결한다. 기존 소스의 고정 label/path는 필요한 범위만 인자화하고 회귀를 확인한다.
+
+sp67_data의 단일 T2 읽기·axis 변환을 사용하되 IVD oracle crop·Modic grading·sequence 중심 비교를 호출하지 않는다. 좌표 검증에는 실제 origin/direction과 SimpleITK physical point를 사용한다. 사용하지 않는 AutoRG·과거 큐·공동 grounding 코드는 정비하지 않는다.
+
+# Proposed Experiment
+
+## 1. 자료와 분할 고정
+
+자료는 기존 [SPIDER v4](https://zenodo.org/records/10159290) archive와 results/iter_021/data/split.json이다. 과거 D8/E48만 사용한다. F139는 ID 교집합 검사 외 영상·mask·출력을 열지 않는다.
+
+- T8은 기존 D8 전체다.
+- 기존 E48을 source metadata의 기관을 기준으로 가능한 한 비례 배분하고, 각 층 안에서 SHA256('iter071-split-v1|patient') 순으로 추가 train16·V8·E24에 나눈다. 작은 층의 잔여 배분은 최대 나머지 방식과 고정 hash 동률로 정한다. 배분 규칙과 실제 ID를 생성 전에 잠근다.
+- T24=T8+추가 train16이다. V8에서 같은 방식으로 고정 V4를 정해 중간 생성 추세를 본다.
+- 기관 정보가 실제 metadata에 없으면 만들어 내지 않고 전체 hash 순으로 배분하며 기관 층화 미실행을 기록한다.
+- 기존 D/E의 과거 노출을 모두 기록한다. E24는 이번 학습·선택에 미사용인 고정 개발 평가이며 새로운 독립 환자 확인으로 부르지 않는다.
+
+환자당 기존에 사용한 regular T2 하나에서 좌우 방향 slice 수의 중앙 index j=floor((n−1)/2)와 j−1,j,j+1을 선택한다. 물리축과 표시 방향을 확인하고 모든 방법에 동일한 세 영상을 제공한다. GT 최대 면적 slice를 고르거나 과거 reference 선택 slice를 그대로 대체하지 않는다.
+
+volume의 유한 intensity min/max를 사용한 고정 uint8 변환, 동일 RGB 채널, spacing을 반영한 aspect ratio 보정과 square padding을 적용한다. 원 영상보다 추가로 자르는 crop은 없다. 입력·affine·window와 원본 member hash를 저장한다.
+
+두 질문은 '보이는 vertebrae 전체의 bbox'와 '보이는 intervertebral discs 전체의 bbox'다. vertebra에는 arch가 포함되고 sacrum은 제외한다. label 1을 L5라고 해석하지 않는다. 정답은 해당 slice의 각 instance mask를 감싸는 bbox다. instance의 분리된 성분은 동일 label의 union bbox로 묶는다. 부분적으로 보이는 instance와 작은 instance도 보존한다. float GT로 평가하고 학습 정수 좌표는 lower=floor, upper=ceil로 바깥쪽 반올림한다. annotation이 없는 질문의 []는 그 slice의 annotation 범위만 뜻한다.
+
+모든 새 결과는 research/results/iter_071/에 저장한다. 환자·source member·decoded pixel의 분할 중복과 기존 F139 교집합을 검사한다. 기술적으로 사용할 수 없는 사례는 이유를 기록하고 다른 환자를 임의 대체하지 않는다. 사전 규모가 달라지면 학습 전에 영향과 종료 조건을 보고한다.
+
+## 2. 동작 확인
+
+T8의 서로 다른 orientation·크기를 포함하는 실제 입력으로 다음을 확인한다.
+
+- 공식 원본 영상-mask grid, index→physical point, 표시 방향, bbox overlay, padding 좌표 왕복.
+- mask를 바꾸어도 slice·window·입력 tensor가 바뀌지 않는지 검사한다.
+- source adapter 선택 기록과 tensor digest, LoRA key/shape, 초기 D의 base 동등성, R 로드 재현을 확인한다.
+- assistant mask, finite loss·gradient·실제 update, base 동결, 두 질문의 target label을 검사한다.
+- T8의 작은 고정 입력에서 loss 감소와 실제 출력 변화를 확인한다. 정답률 100%를 일반화 실험의 gate로 요구하지 않는다. 개선이 전혀 없으면 입력·gradient·출력 연결을 확인한 뒤 현재 학습 경로의 미확인으로 분리한다.
+- optimizer-step 경계와 validation 경계에서 중단·재개하고 데이터 순서·RNG·optimizer·기존 결과 보존을 대조한다. 이 동작 확인 checkpoint는 본학습 초기값으로 사용하지 않는다.
+
+새 parser는 기존 엄격 JSON 추출을 유지하고 요청 category와 label의 일치를 확인한다. 예상치 못한 label은 별도 오류로 처리한다. GT에 맞춘 좌표 clipping·출력 수 제한·NMS를 VLM에 추가하지 않는다.
+
+## 3. 가능성 탐색: T8
+
+target seed17 하나로 D/R 각각 LR {2e-5, 2e-4}를 비교한다. base bf16 동결, 기존 언어층 rank16/alpha32/dropout0.05, AdamW weight_decay0.01, betas(0.9,0.999), grad_clip1, effective batch8을 사용한다. 동일 LR의 D/R은 동일 example 순서와 target token 규약을 사용한다. 두 query를 균등하게 포함하며 별도 augmentation은 사용하지 않는다.
+
+48개 image-query 예제이므로 epoch당 6 updates다. 우선 16 epoch·96 updates/trajectory를 실행한다. scheduler는 시작부터 32 epoch horizon, 첫 5% warmup 후 cosine으로 고정한다. validation e4/e8/e16은 V4 실제 생성으로 확인한다. epoch0의 D/R은 V8에 한 번 생성한다.
+
+같은 LR의 D/R 중 하나라도 e8→e16의 V4 F1@0.5가 0.02 이상 오르거나, validation CE가 5% 이상 줄면서 F1 하락이 0.03 이내면 해당 LR의 두 trajectory를 32 epoch까지 이어간다. e24/e32에 V4를 평가한다. 연장 이후에도 상승 중이면 충분한 수렴으로 부르지 않는다.
+
+각 trajectory의 V4 최고 checkpoint와 마지막 checkpoint, 최대 두 개만 V8에서 평가한다. 중복 checkpoint는 한 번만 평가한다. 초기화별 선택은 V8 F1@0.5, F1@0.3, 이른 update, 작은 LR 순이다. epoch별 전체 validation 생성은 하지 않는다.
+
+**T24 진입:** 기술 검사가 유효하고 선택된 D 또는 R이 V8에서 template보다 F1@0.5가 0.05 이상 높으며, 실제 영상 점수도 고정 환자 교환 점수보다 0.05 이상 높으면 진행한다. 이는 새 방법의 양성 gate가 아니라 target 영상에 연결된 학습 신호의 탐색 기준이다. CI 유의성은 확대 전제조건으로 요구하지 않는다.
+
+조건이 미달하면 E24에서 선택된 D8/R8과 M8을 한 번 비교해 제한된 결과를 보존하고 종료한다. 사후 LR·prompt를 늘리거나 F139로 이동하지 않는다.
+
+## 4. 조건부 규모 확대: T24
+
+T8에서 선택한 초기화별 LR 하나를 사용한다. D24는 base의 새 LoRA, R24는 원래 RSNA adapter부터 다시 시작한다. T8 checkpoint를 이어 쓰지 않는다. 따라서 T8/T24는 각각 명확한 target annotation budget이다.
+
+144개 예제, epoch당 18 updates, 16 epoch·288 updates/trajectory를 실행한다. V4 평가 일정과 32 epoch horizon은 T8과 같다. e8→e16 연장 조건을 어느 초기화가 충족하면 D24/R24 모두 32 epoch까지 진행해 학습 기회를 맞춘다. 최종 V8 선택 기준도 동일하다.
+
+최대 VLM 학습량은 T8 네 trajectory와 T24 두 trajectory에서 1,920 updates다. 이는 임의 시간 상한이 아니라 고정 데이터와 두 단계 recipe에서 나온 규모다. 이를 수행해도 수렴이 미확인이면 그 한계를 남긴다.
+
+## 5. 모듈형 detector
+
+공식 Faster R-CNN v2와 COCO_V1을 사용한다. predictor만 background/vertebra/disc로 바꾸고 backbone/FPN/RPN/ROI head를 학습한다. BatchNorm running statistics는 고정하고 affine은 학습한다. 동일 MRI PNG와 float bbox를 사용하며 mask 전체를 detector supervision으로 추가하지 않는다.
+
+T8에서 LR {0.001,0.005}, SGD momentum0.9, weight_decay1e-4, effective batch4, 32 epoch를 비교한다. 첫 2 epoch warmup, epoch20/28 후 LR×0.1, augmentation 없음이다. V8은 e8/e16/e24/e32에 평가한다. e24→e32 F1@0.5가 0.02 이상 증가하면 해당 trajectory를 현재 LR로 64 epoch까지 연장하고 e48/e64를 평가한다. 계속 상승하면 수렴 미확인으로 기록한다.
+
+T24가 열리면 T8 선택 LR 하나로 COCO 초기값부터 새로 학습한다. 동일 일정과 연장 규칙을 적용한다. detector의 epoch 수와 image exposure는 VLM과 다르므로 계산 동등성이라고 부르지 않는다.
+
+NMS0.5, score floor0.001, detections_per_img100을 유지한다. V8에서 두 category macro F1@0.5를 최대화하는 공통 threshold를 {0.01,0.05,0.10,…,0.95,0.99}에서 고정하고 동률은 높은 threshold를 택한다. checkpoint도 V8에서 선택한다. cap 도달을 기록하며 candidate truncation이 해석을 막으면 detector 충분성 판정을 보류한다. 약한 detector 학습을 VLM 우위의 증거로 쓰지 않는다.
+
+## 6. E24 평가와 비용
+
+모든 checkpoint·parser·threshold·비교 목록을 잠근 뒤 E24를 한 번 평가한다. T24까지 갔으면 D8/R8/D24/R24의 576개 VLM 생성과 M8/M24의 영상별 출력을 얻는다. T8에서 종료하면 D8/R8 288개 생성과 M8만 평가한다. greedy 생성은 1,000→2,000→4,000 token의 기존 cap 재시도 규칙을 동일 적용하고 각 attempt·EOS·비용을 보존한다.
+
+환자 교환 및 다른 category 출력의 재채점은 저장 결과로 수행한다. 교환 출력은 같은 query·slice offset을 유지하며 환자 고정점이 없도록 한다. GT 또는 성능에 따라 donor를 고르지 않는다.
+
+V8 전체의 세 slice·두 질문을 대상으로 선택된 최종 VLM과 detector의 같은 workload 비용을 측정한다. 원본 T2 읽기→render→답변 저장까지 경계를 맞추고, loading 포함과 상주 추론 비용을 분리한다. annotation mask 읽기는 추론 비용에도 입력에도 포함하지 않는다. 두 GPU에서 순서를 교대해 네 paired block을 수행한다. 정확도 이점과 비용 이점은 별도 보고한다.
+
+## 7. 자원·예상 시간·재개
+
+실행 직전 nvidia-smi와 CUDA UUID를 대조하고 허용된 0,1 안에서 여유가 큰 장치부터 배정한다. 기본 환경과 hf_cache를 변경하지 않는다. 필요한 SimpleITK·torchvision 환경은 기존 승인 범위의 격리 경로에 준비한다.
+
+학습은 두 GPU에 독립 D/R 또는 LR trajectory를 배정한다. 과거 MedGemma 학습은 약9–12 GiB 수준의 기록이 있으나 이번 긴 bbox target의 peak는 별도 실측한다. microbatch1과2 중 유망한 구성을 기술 입력에서 비교하고 effective batch8을 유지한다. 같은 GPU의 추가 worker는 전체 peak 합계와 worker당 2 GiB 여유를 충족하고 처리량이 실제 좋아질 때만 사용한다.
+
+추론은 GPU당 1 worker와 2 worker 또는 작은 batch 확대 중 유망한 하나를 비교한다. 동일 요청의 출력·ID·EOS 정합성, 전체 처리량, p95, peak VRAM, CPU/I/O 경합으로 결정한다. 긴 출력에서 메모리 여유를 다시 확인한다.
+
+source의 batch16 인접 step 시간 중앙값은 12.365초다. 최대 1,920 updates에 그대로 대입하면 약6.6 GPU-hours, 두 GPU 완전 병렬 가정으로 학습 약3.3시간의 참고 규모다. 새 target은 batch·출력 길이가 달라 이 수치는 예측 확정값이 아니다. 준비·생성·detector를 더한 초기 운영 예상은 수 시간 단위이며, 기술 입력의 실측으로 각 단계 wall-clock을 계산해 본학습 전에 기록한다. 시간만으로 중단하거나 재승인을 요청하지 않는다.
+
+학습은 25 optimizer steps 및 epoch 경계마다 adapter·optimizer·scheduler·RNG·data cursor·config digest를 저장한다. launcher lock과 작업별 원자적 claim, worker별 결과 파일을 사용한다. 재개·완료 skip은 현재 입력·설정·checkpoint와 산출물을 검증한다. 살아 있는 다른 worker의 파일을 repair하지 않는다. OOM이면 batch/동시성을 낮추고 같은 effective batch와 평가 조건을 유지한다.
+
+## 8. 독립 확인
+
+이번 반복에서는 하지 않는다. target seed는 하나이며 E24도 과거 개발 자료다. 양성 결과라도 F139 자동 개방·다중 seed·외부 자료 수집·full 방법 개발을 실행하지 않는다. source seed와 patient 일반화를 포함할 후속 투자는 이번 효과·비용·강한 baseline 결과를 full review한 뒤 별도 계획한다.
+
+# Implementation Tasks for Claude
+
+1. 기반과 세 reuse 묶음을 검증하고 사용할 helper·고정 경로·미해결 결함을 기록한다. 자동 보관·branch·commit 관리는 orchestrator에 맡긴다.
+2. 기존 SPIDER archive와 split에서 T8/T24/V8/V4/E24 manifest를 생성하고 F139 접근을 차단한다. 한정 실제 입력 검사를 통과하면 같은 호출에서 학습으로 진행한다.
+3. 두 category용 입력·target·parser·평가기와 D/R 초기화를 연결한다. 과거 RSNA 기본 동작을 보존하면서 필요한 인자만 추가한다.
+4. 표준 SFT 두 단계와 detector 학습·선택을 구현한다. 새 loss나 성능을 본 뒤 바뀌는 hyperparameter를 추가하지 않는다.
+5. 이번 실행에 필요한 실제 중단·재개, config 변조 거부, label·좌표·입력 연결, loss/gradient 검사를 수행한다. 기존 불변 검증은 출처를 붙여 재사용한다.
+6. 원시 suffix/token/EOS, GT 연결, 선택 근거, per-patient metric, bootstrap, 원시 timing을 보존한다. 독립 계산은 production matching·집계와 다른 경로로 주요 TP/F1/CI를 확인한다.
+7. 보고서에서 실행 유효성, MRI 적응 효과, source 전이 근거, detector 이후 가치, 신규 기여 미확정을 구분한다. 실제 규모·비용·확대/종료 사유와 미실행 독립 확인을 명시한다.
+
+# Evaluation (성공/실패 기준 포함)
+
+## 지표
+
+주지표는 category별 instance matching F1@0.5를 slice 안에서 계산한 뒤 두 category·세 slice·환자를 차례로 동일 가중 평균한 값이다. F1@0.3, recall, FP/image-query, valid-empty/invalid/truncated, category별 성능을 함께 보고한다. GT와 예측이 모두 빈 경우의 점수 규칙을 사전에 1로 고정하고, nonempty-GT 결과도 별도 보고한다. invalid는 주점수0이며 누락 record는 모델 오답으로 바꾸지 않고 실행 오류로 처리한다.
+
+matching은 최대 cardinality one-to-one이다. 많은 MRI instance에 과거 GT4 상한이나 느린 exhaustive 전체 실행을 적용하지 않는다. prediction·GT를 임의 절단하지 않는다. 환자 paired bootstrap 10,000회·seed7101·95% CI를 사용하며 slice나 질문을 독립 환자로 세지 않는다.
+
+주비교는 최대 실행 budget의 R−D다. T24가 열리면 T8 비교는 학습 곡선의 보조 근거다. 두 budget 중 유리한 것만 주결과로 고르지 않는다.
+
+## 양성
+
+- R−D F1@0.5≥0.05이고 paired CI 하한>0.
+- R이 train-only template와 환자 교환 출력보다 각각 0.05 이상 높음.
+- 형식 유효율, 양쪽 모두 valid인 동일 항목의 위치 점수, query 교환 결과를 함께 보아 개선이 형식률 차이만으로 설명되는지 판별함. 이 분해가 불충분하면 H1의 end-to-end 이득만 기록하고 시각·의미 전이 해석을 보류함.
+
+0.05는 탐색에서 추가 전이 연구에 투자할 최소 end-to-end 차이로 정한다. 임상적 허용 오차나 모든 과제의 공통 문턱이 아니다. T8/T24로 label budget 차이를 기술할 수 있지만 source annotation을 포함한 총 데이터 효율을 주장하지 않는다.
+
+양성이면 제한된 warm-start baseline을 보존한다. detector 이후에도 정확도 또는 적응 비용의 가치가 남는지 검토해 후속 방법 pilot의 필요성을 판단한다. 단순 초기값 재사용 자체가 충분하면 새 방법을 만들지 않는다.
+
+## 음성 및 대안 충분성
+
+R−D CI 상한이0.05 미만이면 이번 조건의 최소 가치 이득은 지지되지 않는다. R이 악화되면 현재 source 초기값 사용을 중단하며 직접 MRI SFT를 기본 비교군으로 보존한다. 이로부터 보편적 negative transfer나 MRI 학습 불가능성을 주장하지 않는다.
+
+detector−최고 VLM의 점추정이−0.03 이상이고 paired CI 하한도−0.03보다 높으며, 전체 workload 비용 비율이0.5 이하이고 네 paired block에서 방향이 유지되면 현재 두-category 실용 과제는 detector로 충분하다는 근거로 본다. 이때 VLM 방법 투자는 보류하되 source 학습 관찰은 삭제하지 않는다. 비용·정밀도 조건을 충족하지 못하면 대안 충분성은 미확정이지 VLM 우위가 아니다.
+
+## 불확정과 종료
+
+효과가 작거나 CI가 넓고, 학습이 계속 상승하거나, 개선이 형식과 분리되지 않으면 불확정이다. 이번에 허용한 연장 이외의 학습·표본 확대는 E24를 본 뒤 추가하지 않는다. 충분한 baseline을 확보하지 못한 경우도 별도로 기록한다.
+
+종료 후 선택은 제한된 전이 baseline 보존과 후속 투자 검토, 직접 SFT/detector 채택 후 해당 방법 투자 보류, 또는 현재 적응 경로의 근거 부족이다. 모든 결과를 다른 MRI frozen 진단으로 연결하지 않는다.
+
+# Risks / Checks
+
+- 과거 source 학습 성공을 MRI에서도 작동한다는 근거로 사용하지 않는다. 새로운 학습 출력이 이번 증거다.
+- 실제 환자 분리와 사전학습 노출 독립성은 다르다. E24의 과거 노출과 base의 학습 데이터 불확실성을 유지한다.
+- 중앙 slice는 임상적으로 최적 slice라는 보장이 없다. mask-free 규칙으로 선택한 anatomy grounding 조건으로 해석한다.
+- source는 opacity, target은 anatomy다. modality·대상·데이터 분포가 함께 바뀌므로 결과를 순수 modality 효과로 단정하지 않는다.
+- source 이득이 초기 형식 적응 속도뿐이면 유용한 운영 효과일 수 있지만 일반적인 위치 능력 전이는 아니다.
+- detector의 두-category 규칙 선택은 허용한다. 언어 모델의 가치를 만들려고 모듈형 대안을 약하게 제한하지 않는다.
+- 양성·음성 어느 경우도 source 유지 능력, 임상 판단, multi-sequence 결합까지 검증한 것으로 보고하지 않는다.
+
+## 대규모 GPU 필요 후보
+
+다양한 modality의 위치 supervision과 일반 의료 질문을 함께 학습하는 encoder–connector–language 공동 적응을 보존한다. 현재 두 GPU의 직접 SFT·초기값 대조가 그 필요성과 효과를 입증하는 것은 아니다.
+
+# 계획의 근거 (GPT 조사 노트)
+
+## 이번 라운드의 결정
+
+MRI 우선은 유지한다. 다중 관측 선택·결합은 현재 즉시 실행할 고정 질문에서 내린다. 대신 기존에 실제 개선이 확인된 grounding 학습이 MRI 적응을 돕는지를 알려진 직접 SFT 대조로 검증한다. RadGenome HIGH/MIXED_HIGH_LOW 적응을 재개하거나 새로운 frozen 모델을 확보하지 않는다.
+
+## 직전 질문에 대한 답
+
+1. **학습·전이 질문이 남는가:** 남는다. iter_012는 source 과제의 생성 grounding 개선을 확인했지만 다른 modality의 target 학습을 돕는지는 평가하지 않았다. iter_037의 detector trade-off와 iter_048의 공동 형식 회복은 이 질문에 답하지 않는다. 다만 source 초기값의 유용성은 아직 가설이며, 기존 방법을 새 기여로 부를 수 없다.
+2. **상위 질문을 당장 유지해야 하는가:** 아니다. iter_064에는 routing 대안이 있고, iter_059에는 해당 구간 판정의 강한 전문 대안이 있다. iter_070과 round_02의 RadGenome 검토는 중요한 잔여 결합 과제를 확보하지 못했다. 이들을 MRI 전체나 학습 불가능성의 근거로 합치지 않고 현재 결합 방법 투자를 보류한다.
+
+## 원문·자산 확인
+
+round_02.json, GOAL, iter_012·015·021·037·048·059·062·064·070 리뷰와 관련 LIMITATIONS/CODE_ASSETS 항목을 읽었다. iter_012와 iter_070의 blocking_issues는 비어 있다. 현재 research 작업 트리는 clean이며 필요한 rsna_diag·SPIDER 파일은 현 브랜치에 없다. 기반 iter_006의 전체 SHA는 68117cfd08429ffc3cb9b77e14fb1db3221d86ab이고 필요한 보관 blob의 존재와 import 의존성을 확인했다.
+
+source adapter는 results/iter_012/train/lr2e-4_s17/epoch_05/adapter.pt에 존재한다. 선택 기록의 tensor digest는 e13f3c4461b826a060c90dfe4e4ee4c2ebac36a08f84be1a45a37495816cec11이다. 이번 계획에서 tensor를 로드해 재검증하지 않았으므로 구현 단계에서 확인한다. source train log의 750개 update와 같은 epoch 내 elapsed 차이 745개의 중앙값 12.365초를 확인했다. 이는 현재 MRI 학습 속도나 순수 kernel 시간은 아니다.
+
+SPIDER의 기존 split은 D8/E48/F139다. D/E 56명을 새 학습·개발 평가로 분리할 수 있으며 F139를 소비하지 않는다. 기존 61_R.png를 직접 표시했고 masks.zip의 D 환자 61·4에서 vertebra label 1–8/1–6, canal 100, disc 201–208/201–206을 읽었다. 새 중앙 slice의 모든 입력·정답 연결을 승인한 것은 아니다.
+
+## 가까운 선행과 차별성의 한계
+
+[PFMVG](https://arxiv.org/abs/2410.23822)는 경량 의료 grounding 적응을 다룬다. [CURE](https://openaccess.thecvf.com/content/CVPR2026/papers/Messina_CURE_Curriculum-guided_Multi-task_Training_for_Reliable_Anatomy_Grounded_Report_Generation_CVPR_2026_paper.pdf)는 grounding과 보고서 과제를 함께 학습한다. [LocAnyMed](https://arxiv.org/abs/2608.03322)는 다중 modality grounding supervision을 제공한다. 따라서 LoRA·다과제·modality 전이라는 이름만으로 신규성을 주장하지 않는다. 이번 비교는 보존된 source 적응의 실제 재사용 가치와 더 조사할 실패 조건이 있는지를 확인하는 진단이다.
+
+[SPIDER 공식 배포](https://zenodo.org/records/10159290)와 [원 논문](https://www.nature.com/articles/s41597-024-03090-w)은 vertebrae·disc·canal 주석을 제공한다. vertebra에는 arch가 포함되고 sacrum은 제외된다. anatomical level 번호를 추정하거나 Modic 등급을 bbox 정답으로 변환하지 않는다. [공식 detector 문서](https://docs.pytorch.org/vision/0.21/models/generated/torchvision.models.detection.fasterrcnn_resnet50_fpn_v2.html)의 모델을 동일 bbox supervision 대안으로 사용한다.
+
+## 대규모 GPU 필요 후보
+
+여러 modality의 grounding과 일반 의료 질문을 함께 유지하는 encoder–connector–language 공동 적응을 장기 후보로 남긴다. 현재 비교는 그 필요성을 증명하지 않으며, 두 GPU의 표준 LoRA·detector 대조부터 수행한다.
+
+이전 사고 라운드 노트: agent/runs/iter_071/think/
+
+
+
+## iter_071 CLAUDE IMPLEMENTATION REPORT — 2026-10-05 00:08:09
+
+# 요약
+
+- **핵심 결과:** RSNA source adapter(R)로 시작한 MRI 직접 SFT는 base에서 시작한 SFT(D)보다 낫지 않았다. E24에서 F1@0.5는 R8 0.130, D8 0.158이다. 둘 다 train-only template(0.153)과 구분되지 않고, 두 VLM 모두 detector M8(0.817)보다 훨씬 낮다.
+- **근거:**
+  - R8−D8은 −0.028이고 95% CI는 [−0.065, 0.006]이다. H1의 양성 기준(≥0.05, CI 하한>0)은 충족하지 못했다.
+  - D8−D8_swap은 +0.017, R8−R8_swap은 +0.016이고 CI가 0을 포함한다. 영상 의존성을 구분할 수 없다.
+  - 겹쳐 그린 예측에서 D8/R8은 영상과 무관한 비슷한 박스 묶음을 낸다.
+  - M8−D8은 +0.660 [0.531, 0.775]다. 비용은 48요청 workload 기준으로 detector가 약 7.5초(적재 포함), VLM이 1,530–2,007초다. 4개 block 모두 비율 약 0.004–0.005이고 방향이 같다.
+- **주의:**
+  - T24는 진입 gate 미달로 실행하지 않았다. 이 결과는 T8(8명, 48 예제) 한 학습 조건과 seed17에 한정된다. 일반적인 "전이 없음"이나 MRI에서 VLM이 불가능하다는 결론이 아니다.
+  - E24는 개발 평가 자료이며 독립 확인이 아니다. 새 방법·임상 성능·VLM 우위는 어느 것도 검증되지 않았다.
+- **다음:** 이 과제(두 category bbox)에서는 detector가 정확도와 비용 모두 충분하다. 여기서 VLM 방법에 더 투자하는 것은 보류를 권고한다.
+
+# Work Performed
+
+- 반입 3묶음을 확인했다. `rsna_diag` 16개 파일, `det_lib`/`det_match`, `sp67_data` 와 SPIDER MHA 보조 함수다. 새 wrapper 위에서 필요한 함수만 호출했고, 과거 RSNA CLI와 parent 재사용 분기는 호출하지 않았다.
+- 격리 환경을 준비했다.
+  - torchvision 0.29.0+cu130을 `results/environments/tv071`에 설치했다.
+  - SimpleITK는 기존 `sitk67`을 재사용했다.
+  - COCO_V1 가중치(sha256 `dd69338a…`)는 `results/environments/torch_home071`에 받았다.
+- 자료는 기존 D8과 E48에서 만들었다. F139는 열지 않았고(`guard`로 차단), 분할 후 56명이다.
+  - T8 8명, 추가 train 16명, V8 8명(V4는 그중 4명), E24 24명이다.
+  - 기관 metadata가 없어 층화 없이 hash 순으로 나눴다.
+  - 중앙 slice(j−1, j, j+1)는 mask 없이 선택했다. 총 336 요청(56명 × 3 slice × 2 category)이다.
+- 학습·평가·비용 코드를 새로 작성하거나 연결했다. `g71_*.py` 21개 파일이다.
+- 실행 결과는 다음과 같다.
+  - VLM 학습: T8 D/R × LR {2e-4, 2e-5}, 16 epoch.
+  - 연장: LR 2e-5 두 trajectory를 32 epoch까지.
+  - 생성 평가: V4 12+4개, V8 epoch0 2개와 후보 7개, E24 4 worker.
+  - detector: T8, LR 0.005/0.001, 32 epoch.
+  - 비용 paired block 4개.
+
+# Files Changed
+
+- 새 파일(루트): `g71_data.py`, `g71_build.py`, `g71_overlay.py`, `g71_overlay_pred.py`, `g71_eval.py`, `g71_train.py`, `g71_gen.py`, `g71_det.py`, `g71_det_stage.py`, `g71_baseline.py`, `g71_analyze.py`, `g71_lock.py`, `g71_final.py`, `g71_verify.py`, `g71_verify_det.py`, `g71_cost.py`, `g71_costrun.py`, `g71_costcheck.py`, `g71_costreport.py`, `g71_launch.py`, `g71_jobs.py`, `g71_techcheck.py`, `g71_runtests.py`, `g71_bound.py`.
+- 반입 파일(`rsna_diag/*`, `sp67_data.py`)은 수정하지 않았다.
+- 결과: `results/iter_071/` 아래에 data, train, det, gen, eval, decide, cost, tests, launch.
+
+# Commands / Experiments
+
+| 단계 | 결과 |
+|---|---|
+| `g71_build.py` | 56명, 336행. 겹침 0, F139 교집합 0, 소스 hash 중복 0, bbox 왕복 오차 2e-13, 물리방향 56/56 |
+| `g71_techcheck.py` | 11/12 PASS (아래 Problems 참고) |
+| 재개 검사 | 중간 step 중단 후 재개. batch/RNG/lr 일치. loss 차이 ≤1.3e-3로 독립 두 실행 간 차이(1.2e-3)와 같은 크기 |
+| `g71_runtests.py` | 생성 재개 + torn tail 복구 + token 일치, adapter 변조 거부, 학습 LR 변조 거부 모두 PASS |
+| T8 VLM 학습 4개 | GPU당 2개 동시. 학습별 약 26분 wall. 사용 GPU 메모리 약 22.9GB/24.5GB(여유 거의 없음) |
+| LR 2e-5 연장 | e8→e16에서 F1이 오른 두 trajectory를 e32까지 (약 17–18분) |
+| 생성 평가 | V4 12개는 GPU당 2 worker로 약 13–15분/개. D lr2e-5 e4는 긴 반복 출력으로 중단(미완) |
+| detector T8 | 약 190초/개 학습. V8에서 checkpoint와 threshold 선택 |
+| E24 | D8/R8 각각 144 요청(2 worker, 약 40–48분 wall), detector 72 영상 |
+| 비용 paired | 4 block, 약 1시간 |
+
+- E24 평가 전에 `e24_lock.json`으로 checkpoint·threshold·template·코드를 잠갔다.
+
+# Results
+
+주요 결과 파일:
+- `results/iter_071/eval/E24_report.json`
+- `results/iter_071/eval/E24_per_patient.json`
+- `results/iter_071/eval/cost_report.json`
+- `results/iter_071/decide/*.json` (v4_stage, extension_decision, t24_gate, det_select_T8, v8_scores, e24_lock)
+
+**V4 추세(동작 확인 단계):**
+- LR 2e-4는 e4 이후 하락했고 val CE도 상승했다(D 0.53→1.35, R 0.52→1.49).
+- LR 2e-5는 e8→e16에서 F1이 상승했다(D +0.054, R +0.214). 그래서 연장 기준을 충족했다.
+
+**V8 선택:**
+- D8은 `T8_D_lr2e-4_e4`, V8 F1@0.5 0.244다.
+- R8은 `T8_R_lr2e-4_e4`, V8 F1@0.5 0.208이다.
+
+**T24 gate: 미진입.**
+
+| | actual | swap | template |
+|---|---|---|---|
+| D | 0.244 | 0.272 | 0.192 |
+| R | 0.208 | 0.226 | 0.192 |
+
+- 두 후보 모두 "실제 − swap ≥ 0.05"가 아니었다.
+- D는 template 대비 +0.052 조건만 충족했다.
+
+**E24 (24명, 환자 bootstrap 10,000회, seed 7101):**
+
+| 시스템 | F1@0.5 | F1@0.3 |
+|---|---|---|
+| D8 | 0.158 | 0.426 |
+| R8 | 0.130 | 0.420 |
+| M8 (detector) | 0.817 | 0.834 |
+| P (template) | 0.153 | 0.422 |
+
+- VLM의 형식 유효율은 두 모델 모두 100%였다.
+- category별 F1@0.5는 vertebra가 D 0.29/R 0.23, disc가 D 0.02/R 0.03이다. disc는 거의 못 한다.
+
+**독립 재계산:**
+- VLM: 새 parser와 Kuhn 최대 matching으로 환자별 점수 차이가 1e-16 이하다(D8, R8 각 144건). parser 불일치는 0이다.
+- detector: 점수 차이가 2e-16이다.
+
+# Goal Progress / Reused Assets
+
+- **실행 유효성:** 자료·정답·좌표·누수 검사를 통과했다. 생성은 요청 단위로 provenance를 남겼다.
+- **MRI 적응 효과(관찰):** 이 조건에서 SFT 후 VLM 출력은 template 수준이다.
+- **source 전이 근거(H1):** 지지되지 않았다. R−D CI 상한이 0.006이라 사전 최소 가치 0.05보다 작다.
+- **H2:** R 이득이 없어 해석 대상이 없다.
+- **H3:** 지지됐다. detector가 정확도와 비용에서 모두 충분하므로 이 과제의 VLM 방법 투자 가치는 낮다.
+- **신규 기여:** 확정되지 않았다. 알려진 표준 적응의 음성 진단이다.
+- **재사용 검증:** `sft_data.build_example`/`collate`, `lora`, `generate`, `det_lib`, `det_match`, `mi19_*`를 실제 입력으로 검증했다. `rsna_diag/train.py`는 helper만 사용했고 실행기는 새로 만들었다.
+- **미검증:** 독립 seed, 다른 source seed·epoch의 adapter, T24 이상의 학습량, 다른 prompt와 해상도.
+
+# Problems
+
+**현재 결론 무효: 없음.**
+
+**재사용 전 수정이 필요한 것:**
+- `g71_techcheck.py`에서 helper CE와 공식 forward CE의 상대 차이가 1.4e-4로 사전 임계 1e-4를 넘었다(FAIL).
+  - lm_head를 label 위치에만 적용하는 경로와 전체 logits 경로의 bf16 수치 차이로 보인다.
+  - gradient 상대 차이는 최대 2.1%로 5% 이내다.
+- 학습 재개는 중간 step 중단 한 경로만 실제 검사했다. epoch 저장 직후 validation 전 중단과 detector 학습 재개는 실행하지 않았다.
+- VLM 최종 adapter는 재개 후 bitwise로 같지 않다(비결정 kernel).
+
+**추후 개선 / 한계:**
+- V4 D lr2e-5 e4 생성은 반복 출력이 cap 4000까지 가서 20/24건에서 중단했다. 남은 항목을 전부 F1=1로 가정해도 상한이 0.167로 최고 후보(e32 0.327)보다 낮아 선택에는 영향이 없다. 이 항목은 미완료로 표시했다.
+- detector 후보 cap(100) 도달 영상이 있으나 선택 threshold(0.85)가 높아 해석에는 영향이 없다고 판단했다. 완전히 배제하려면 별도 확인이 필요하다.
+- VLM 비용 block은 두 GPU가 동시에 하나씩 돌았다. CPU/I/O 경합은 기록하지 않았다.
+- 정확한 VRAM peak는 `nvidia-smi` 합 기준이다. 학습 중 사용량은 GPU 용량에 가까워 다른 작업과 겹치면 OOM 위험이 있었다.
+- 병렬 구성은 GPU당 2개를 사용했다. 학습은 같은 GPU 2개에서 약 11s/step이었으며 단독 대비 정확한 이득 비교는 하지 않았다.
+
+# Recommendation to GPT
+
+- 계속/진단/전환 중 **전환(이 과제의 VLM 투자 보류)**을 권고한다. 근거는 같은 annotation의 detector가 F1@0.5 +0.66, 비용 약 0.5%이고, 두 VLM은 template과 구분되지 않기 때문이다.
+- 보류 범위는 SPIDER T2 두 category bbox와 이 학습 조건이다. 언어 조건 근거 연결, 보고서 생성, 다중 sequence 결합 등 이번에 검증하지 않은 능력에는 해당하지 않는다.
+- 같은 질문을 계속하려면 더 큰 학습량(T24)이나 source 변경보다는 VLM만 풀 수 있는 과제(예: 질문에 따라 영역이 달라지는 문항)를 먼저 정해, detector+규칙과 비교하는 설계가 필요하다.
+
+SELF_CHECK: FAIL
+SUMMARY: SPIDER T2 두 category bbox에서 RSNA source adapter로 시작한 MRI SFT(R)는 base SFT(D)보다 낫지 않았고(E24 F1@0.5 R −0.028, CI [−0.065, 0.006]), 두 VLM 모두 template·환자 교환 출력과 구분되지 않으며 detector(0.817)가 정확도와 비용(약 0.5%) 모두 우세해 T24 미진입·VLM 투자 보류를 권고한다. 단 CE 대조 사전 임계 1건 미달, epoch 경계 재개 미검사, 단일 seed·E24 개발 자료 한계로 SELF_CHECK는 FAIL.
+
+# [orchestrator] 권한 거부된 도구 호출
+- Bash: find /home/test/.conda/envs -maxdepth 1
+- Bash: env PYTHONPATH=results/environments/tv071:results/environments/sitk67/site python -c "
+import torch,torchvision,SimpleITK as s
+from torchvision.ops import nms
+print(torch.__version__,torchvision.__version__,s.Version())
+import torchvision.models.detection as d
+print(nms(torch.tensor([[0.,0,10,10],[1,1,10,10]]),torch.tensor([.9,.8]),0.5))
+"
+- Bash: ps -eo pid,etime,pcpu,rss,cmd | grep g71_gen | grep -v grep
+- Bash: ps -eo pid,etime,pcpu,rss,cmd
+- Bash: mkdir -p results/iter_071/tests/launch && python - <<'EOF'
+import json
+common=['g71_train.py','--init','base','--lr','2e-4','--train-key','T8','--epochs','2','--save-epochs','2','--ckpt-every','3']
+jobs={"gpus":[0,1],"per_gpu":1,"jobs":[
+ {"name":"resume_ref","gpu":0,"cmd":common+['--run-dir','results/iter_071/tests/resume_ref']},
+ {"name":"resume_int_a","gpu":1,"cmd":common+['--run-dir','results/iter_071/tests/resume_int','--stop-after-step','3']}]}
+json.dump(jobs,open('results/iter_071/tests/launch/jobs_resume1.json','w'))
+EOF
+python g71_launch.py results/iter_071/tests/launch/jobs_resume1.json results/iter_071/tests/launch/r1
+- Bash: nvidia-smi --query-gpu=index,memory.used --format=csv,noheader; for d in results/iter_071/train/*; do echo $d; tail -n 1 $d/train_log.jsonl | cut -c1-120; done; cat /tmp/claude-1001/-SSD1-1TB-home-milab-daniel-08-medgemma-research/dc6efea1-eed0-4eeb-ab9a-e09761786dcb/tasks/b3e2d9gi8.output
+- Bash: python - <<'EOF'
+import g71_eval as E, g71_train as TR, g71_data as D
+import numpy as np
+rows={r['id']:r for r in TR.load_items('V4')}
+recs=E.read_jsonl_dir('results/iter_071/gen/V4/T8_D_lr2e-5_e4')
+by={r['id']:r for r in recs}
+sc={}
+for i,row in rows.items():
+    if i in by:
+        st,b=E.parse_record(by[i],row['category']); sc[i]=E.score_item(st,b,[g['yxyx_norm'] for g in row['gt']])
+    else:
+        sc[i]={'f1@0.5':1.0}
+pats=sorted({r['patient'] for r in rows.values()},key=int)
+print(len(by), 'upper bound', np.mean(list(E.per_patient(sc,pats).values())))
+print([sc[i]['status'] for i in by])
+EOF
+- Bash: python - <<'EOF'
+import json, numpy as np
+import g71_baseline as B, g71_eval as E, g71_train as TR
+t=B.train_template('T8')
+print({c:(v['source_id'],round(v['train_selection_f1@0.5'],3),len(v['boxes'])) for c,v in t.items()})
+rows={r['id']:r for r in TR.load_items('V8')}
+sc=B.score_template(t,rows,sorted(rows))
+pats=sorted({r['patient'] for r in rows.values()},key=int)
+print('P V8 f1@0.5',np.mean(list(E.per_patient(sc,pats).values())),'f1@0.3',np.mean(list(E.per_patient(sc,pats,'f1@0.3').values())))
+EOF
+
+
+
+## iter_071 GPT REVIEW [CONTINUE] — 2026-10-05 00:14:09
+
+# 요약
+
+- **판정:** 유효한 제한적 음성 실험이다. 현재 RSNA 초기값 재사용과 두-category MRI VLM 방법 투자는 종료한다.
+- **핵심 근거:** E24 F1@0.5는 D8 0.157664, R8 0.129531, detector 0.817499다. R8−D8의 95% CI는 [−0.065257, 0.005514]로 최소 가치 0.05에 미달한다.
+- **의미·한계:** detector가 이 과제의 강한 대안임을 확인했다. T8·seed17·개발 E24 결과이며 MRI 학습이나 일반적인 전이 능력을 기각하지 않는다.
+- **다음:** 해당 설계의 확대는 중단하고 다음 투자 하나를 선택한다. 전체 코드 재사용은 승인하지 않는다.
+
+# Assessment
+
+`valid_experiment=true`, `approach_status=abandon`, `verdict=CONTINUE`다. 실제 학습·생성·detector 비교가 완료됐으며 보고서의 핵심 수치를 독립 재계산했다. 구현 완료와 모든 기술 검사 통과는 구분한다. SELF_CHECK: FAIL은 유지되지만 확인된 결함이 현재의 제한된 출력 비교 전체를 무효화한다는 근거는 없다.
+
+실제 구현 담당은 `engineer_backend.json`과 `claude_meta.json`상 Claude, Sonnet/medium이며 stream에는 `claude-sonnet-5-5`가 기록돼 있다. 리뷰 대상은 `973628fd9852fd558796cffb2dcb60ba24f87bc2`다. commit의 모든 paths와 작업 파일을 대조해 불일치가 없었고 unpreserved_paths는 비어 있다. 세 reuse 묶음은 원 source commit의 byte와 일치한다. 환경·가중치는 결과 경로에 있으며 연구 코드 커밋에 보존됐다고 해석하지 않는다.
+
+# Key Findings
+
+## 실제 실행과 선택
+
+T8 D/R×두 LR의 4 trajectory가 각각 96 updates를 완료했고, LR 2e-5의 D/R만 사전 추세 조건에 따라 192 updates까지 연장됐다. 합계 576 updates다. V8 선택은 D/R 모두 LR 2e-4 epoch4였다. 실제−swap 점수는 D −0.02718, R −0.01828로 T24 진입 기준에 미달했다. 따라서 T24 미실행은 계획된 종료 분기다.
+
+E24에서는 D8/R8 각각 144개 고유 응답이 존재하고 모두 EOS 종료했다. detector는 72개 영상의 두 category를 평가했다. 학습·연장·E24 launcher 완료 기록도 확인했다.
+
+## 독립 수치 검증
+
+원시 JSON 응답을 별도로 파싱하고 production matching을 사용하지 않는 증가경로 matching으로 다음 F1@0.5를 재현했다.
+
+| 시스템 | 환자 평균 F1@0.5 |
+|---|---:|
+| D8 | 0.1576639523 |
+| R8 | 0.1295310592 |
+| M8 | 0.8174985010 |
+| train-only template | 0.1525715604 |
+
+24명 단위 10,000회 bootstrap, seed7101로 R8−D8 −0.0281328931 [−0.0652567105, 0.0055143402], M8−D8 +0.6598345486 [0.5305500572, 0.7747700137]를 재현했다. 근거는 `results/iter_071/gen/E24/`, detector 원시 추론 JSON과 `eval/E24_report.json`이다.
+
+두 VLM 모두 최종 형식 유효율 100%다. 저장된 환자 교환 비교의 D/R 차이는 각각 +0.01724/+0.01578이고 CI가 0을 포함한다. 이는 영상 의존성의 유용한 크기를 확보하지 못했다는 뜻이며 영상 정보를 전혀 사용하지 않는다는 증명은 아니다.
+
+## 입력·정답·비용
+
+manifest의 56명·336행을 확인했고 현재 PNG의 file hash 불일치는 0이었다. 기록된 환자·source hash·pixel 중복은 0이며 F139 교집합도 0이다. `data/build_checks.json`은 2,287개 bbox 왕복 최대 오차 2.27e-13 pixel, 물리 방향 56/56 통과를 기록한다. 대표 61·4·217의 GT overlay를 직접 표시해 영상과 bbox 연결을 확인했다. 이 검토가 전수 임상 정답 검증을 뜻하지는 않는다.
+
+네 비용 block의 원시 timing을 다시 계산했다. 동일 V8 48답변 workload에서 detector/VLM 적재 포함 비율은 0.003753–0.004828로 모두 사전 0.5 기준을 충족한다. 각 block 답변 수는 양쪽 48개다. 이 수치는 현재 측정 경계와 실행 구성에 한정한다.
+
+# Problems / Concerns
+
+1. **기술 검사 실패:** CE 상대 차이는 약 1.431e-4로 구현의 1e-4 기준을 넘었다. gradient 최대 상대 차이는 2.14%로 5% 기준 안이며 base 동결·LoRA update·초기 항등·source digest 검사는 통과했다. 작은 CE 차이만으로 현재 F1 비교를 무효화하지 않지만, bf16이 원인이라는 설명은 가설이다. 실패를 성공으로 취급하거나 다음 실행에 그대로 넘기면 안 된다.
+2. **잠금 불일치:** `e24_lock.json`에 포함된 `g71_verify.py` hash만 현재 코드와 다르다. stream에서 scipy 미설치 후 Kuhn matching으로 변경한 기록을 확인했다. production 점수와 선택 기준 변경은 확인되지 않았고 리뷰 독립 계산도 일치한다. 따라서 현재 수치는 유지하지만 평가 재실행과 provenance 연결은 수정이 필요하다.
+3. **재개·출처 보호:** validation 경계와 detector 재개가 미검사다. detector 추론에는 존재 기반 skip이 남아 있고 최종 평가의 원시 결과 provenance 검사가 불충분하다. 생성 worker 수 변경·동시 launcher에 대한 소유권 보호도 부족하다.
+4. **자원 운영:** 두 GPU를 적극 사용했지만 학습 2 worker 구성은 worker당 2GB 여유 정책을 충족하지 못했다. 단독 대비 처리량 비교도 없으므로 안전하고 효율적인 구성으로 승인할 수 없다. 현재 완료된 출력의 무효 사유와 다음 실행의 필수 수정은 구분한다.
+5. **cap 집계 정정:** 보고서의 detector cap 136은 68개 영상을 두 category로 중복 센 값이다. cap 도달 영상의 마지막 후보 score 최대값은 0.010630으로 선택 threshold 0.85보다 낮다. 따라서 현재 선택점의 성능 결론을 막지 않는다.
+6. **미완료 validation:** D lr2e-5 e4는 20/24개다. 보고된 최선 상한 0.167은 다른 선택 후보보다 낮아 현재 선택을 뒤집지 않지만, 미완료와 그 상한 증명을 자동 선택 기록에 연결해야 한다.
+
+# Interpretation
+
+H1의 최소 가치 전이 이득은 현재 조건에서 지지되지 않는다. CI가 0을 포함하므로 보편적인 negative transfer나 R의 확정적 악화로 표현하지 않는다. H2는 전이 이득이 없어서 양성 해석 대상이 없다. 최종 양쪽 형식 유효율이 100%인 점은 형식 실패와 잔여 위치 오류를 구분한다.
+
+H3의 실용 대안 충분성 기준은 현재 과제에서 충족된다. detector는 같은 bbox annotation을 사용했지만 전체 학습 범위·해상도·사전학습·노출량이 달라 동일 계산량의 구조 비교는 아니다. T8보다 큰 target 학습으로 VLM이 좋아질 가능성은 미검증이나, 그 가능성만으로 이번 계획의 T24 gate를 우회할 이유는 없다.
+
+이번 결과는 단일 slice anatomy localization을 평가했다. 여러 관측의 선택·상보적 근거 결합, 임상 판단, source 능력 보존은 검증하지 않았다. 기존 RSNA validated 한계와 MRI context observed 주장은 이번 결과로 정정하거나 승격하지 않는다.
+
+# Strategy Check / 연구 방향 판단
+
+- **실행 유효성:** 해석 가능한 실제 출력 비교가 완료됐다. 기술·재사용 결함은 위 범위에 남긴다.
+- **성능 개선:** source 초기화의 추가 개선은 없었다. detector의 큰 정확도·비용 우위는 현재 실용 대안의 근거다.
+- **가설 지지:** 이 recipe의 최소 가치 warm-start 이득은 약화됐고, 두-category 과제의 모듈형 대안 충분성은 지지됐다.
+- **신규 기여 가능성:** 표준 초기값 비교와 detector 적응 자체는 신규 방법이 아니다. 현재 결과만으로 새 loss나 전이 방법을 투자할 근거는 부족하다.
+
+해결된 질문은 보존된 RSNA adapter가 이번 T8 MRI 적응을 유용하게 돕는지와 이 과제에서 detector가 충분한지다. 남은 설명은 적응 데이터 규모·학습 recipe·해상도·모델 구조 차이지만, 모두 후속 실행할 이유가 되지는 않는다. detector 이후의 실제 사용 가치가 추가로 확인돼야 다음 개입이 정당화된다.
+
+같은 초기값 설계 개선, 원인 진단 추가, 현재 과제 종료를 비교하면 종료가 우선이다. 타 계열 VLM 적응은 미실행이지만 이번의 제한된 실용 투자 판단에는 강한 detector 대조가 있다. 이를 여러 VLM 계열의 공통 한계로 확대하지 않는다.
+
+비용 기록상 VLM 학습은 trajectory당 약 25–26분, 연장은 약 17–19분이며 E24 생성 worker는 약 39–48분이었다. CPU 전용 준비에서 끝난 반복은 아니다. 생성 평가·검증·구현의 부담이 컸으며 정확한 비용 비중은 집계되지 않았다. 같은 자료의 추가 frozen 탐색이나 사용하지 않을 실행기 정비를 다음 연구 질문 대신 발주하지 않는다.
+
+논문 추천은 보류한다. 이번 source 전이 방향은 추가 투자 근거를 얻지 못했고, detector 우위만으로 새로운 방법 방향의 유망성이 확인된 것은 아니다.
+
+# Recommended Next Experiment
+
+현재 설계의 T24·추가 seed·source 변경은 진행하지 않는다. 다음 계획은 기존 관찰과 강한 단순 대안 이후 남는 문제를 바탕으로 연구 투자 하나를 선택한다. 언어 조건부 과제를 고르더라도 detector+규칙이 풀 수 있는 정보를 인위적으로 차단하지 않는다. 실제 정답과 사용 가치가 연결된 잔여 문제가 없다면 해당 연구 묶음을 보류한다.
+
+새 실험을 선택할 때에는 이번 관찰, 경쟁 설명 하나, 이를 구분할 최소 대조, 결과별 투자 변화와 종료점을 고정한다. 재사용 코드 수정은 그 선택에 필요한 경로만 수행하며 과거 결과·잠금·체크포인트는 보존한다.

@@ -303,3 +303,19 @@ PadChest-GR 개발96명에서 직접 SFT의 큰 개선을 확인해, 낮은 기�
 - 접근법: MRI 구간 근거 사용 진단 (`approach/mri-slab-evidence`), 시도: iter_056, iter_057, iter_058, iter_059
 - 커밋: da6e75570dcd01f957cde9b9f33b1b57217fcb70, 144227e1c8a0faf1a8f88df126e8a49803030db8, e203cbd0b4c7d8e6c1f75fbd37625a82b14c232d, 463d215b4d5a92a17dec80f2be29daefab44cc3e
 - 자세히: DECISIONS.md의 iter_059, `agent/runs/iter_059/review.md`
+
+## 🏁 현재 MRI anatomy grounding에서는 RSNA 초기값 이득 없이 detector가 충분한 대안이었다
+
+*iter_071 · 2026-10-05 00:14 · 판정: CONTINUE / abandon*
+
+RSNA grounding 학습의 성과가 MRI 적응에도 도움이 되는지 직접 검증했지만, 현재 조건에서는 추가 이득을 얻지 못했다.
+- **고민:** 기존 MRI frozen 진단의 기본 신호가 약해, 이미 효과가 확인된 grounding 학습 자산의 재사용 가치를 확인할 필요가 있었다.
+- **시도:** SPIDER T2에서 base 직접 SFT와 RSNA adapter 초기화 SFT를 같은 target supervision으로 비교했다.
+- **개발:** train-only 위치 template, 환자 간 예측 교환, 동일 bbox로 적응한 detector를 함께 평가했다.
+- **결과:** E24 24명의 F1@0.5는 D8 0.158, R8 0.130, detector 0.817이었다. R−D는 −0.028 [−0.065, 0.006]이었다.
+- **비용:** 고정 48답변 workload의 detector/VLM 시간 비율은 네 block에서 0.00375–0.00483이었다.
+- **의미:** 현재 두-category 과제의 VLM 확대 투자를 종료한다. T8·단일 seed·개발 자료의 결과이며 MRI 전이와 경량 학습 전체의 실패로 확대하지 않는다.
+
+- 접근법: MRI grounding 적응 전이 대조 (`approach/mri-grounding-transfer`), 시도: iter_071
+- 커밋: 973628fd9852fd558796cffb2dcb60ba24f87bc2
+- 자세히: DECISIONS.md의 iter_071, `agent/runs/iter_071/review.md`
