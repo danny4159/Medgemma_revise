@@ -73,6 +73,7 @@
 - iter_065 [CONTINUE] (deep_high/standard/normal) <MRI 질문별 관측 선택의 투자 가치 검토: inconclusive> 💾ce5f5991ee7274806e9b6ffbfbefa26d7189df62 MRI E48에서 질문별 고정 정책 이득은 MedGemma +2.81 pp, Qwen +1.60 pp로 5 pp 기준 미달이다. VLM 비교는 유효하나 HD 의미·전체 비용 검증이 빠져 복합 결론은 불확정이다. → 다음: 현재 mask 기반 관측 선택 방법 투자는 종료하고, 기존 MRI 관찰에서 다음 투자 하나를 다시 선택한다. 작은 정책 이득과 위치 prior, 큰 형식 실패를 함께 고려해 기존 출력으로 근거가 있는 최소 개입과 다른 MRI 질문으로의 전환을 비교한다. 이번 HD·비용 결함을 고치는 것만으로 현재 선택 방법을 자동 연장하지 않는다. 같은 E48의 prompt·표본·세 번째 모델·학습 확대도 자동 승인하지 않는다. 남은 관찰을 택한다면 기존 방법 이후의 부족함, 이를 구분할 최소 대조, 양성·음성·불확정별 종료 결정을 명시한다. iter_056~065의 결과와 비용을 같은 track에서 이어받고, 새 데이터 확보 자체를 다음 목표로 삼지 않는다.
 - iter_066 [CONTINUE] (deep_high/standard/normal) <MRI 답변 인터페이스와 영상 신호 분리: inconclusive> 💾7bc3601ddfc6f4525a8ad73edf281f4c824b2fc6 MRI E12 12 case에서 공동 입력 BA는 scoring으로 0.083→0.553 회복됐지만 위치 prior 0.766을 넘지 못해 확대를 보류한다. 영상 인식·결합 실패의 원인은 미확정이다. → 다음: 현재 frozen MedGemma의 mask 기반 공동 입력·답변 보정 투자를 보류하고, 같은 MRI 근거 사용 질문에서 판별력 있는 다음 비교 하나를 선택한다. iter_056~066의 결과를 이어받아 단일 관측의 충분성과 복수 관측의 필요성을 기존 정답으로 구분할 수 있는 조건을 우선 검토한다. 성립하면 가장 가까운 단순 대안과 최소 대조를 고정하고 실제 소규모 출력까지 이어가며, 성립하지 않으면 해당 세부 경로를 종료한다. 같은 E48의 답변 문자열·prompt·threshold·추가 모델·학습 확대는 자동으로 이어가지 않는다. 이번 재사용 결함은 다음에 실제 선택한 코드 경로에서만 수정한다.
 - iter_067 [CONTINUE] (deep_high/standard/normal) <MRI 임상 등급의 sequence 정보 가치: abandon> 💾acacfe155024c3673e8af606a723d1dd1a2df358 SPIDER 12명·81 IVD에서 공동 입력 BA02는 MedGemma 0.094, Qwen 0.500으로 확대 기준에 미달했다. 현재 경로는 종료하며 인식 부족과 답변 prior의 영향은 미분리다. → 다음: 현재 frozen Modic 확대는 종료하고, 기존 점수의 한정 재분석으로 답변 보정에 투자할 근거가 남는지만 확인한다. 새 GPU 호출·prompt·모델·F139 개방 없이 D/E12 원시 점수에서 환자 cluster 불확실성과 ordinal·영상 수·text-only 대조를 고정해 사후 순위 신호를 검토한다. 점수·조건을 결과에 맞춰 탐색하지 말고, D에서만 정한 단순 보정의 E12 결과를 개발 분석으로 구분한다. 교란 통제 후 판별 정보와 실용적 개선 여지가 함께 남을 때만 별도 방법 pilot의 가치와 gate를 검토하며, 순위 신호만으로 method 진입을 승인하지 않는다. 신호가 약하거나 12명 자료로 판별할 수 없으면 현재 Modic 경로를 보류하고 같은 자료의 추가 보정 탐색을 종료한다. 기존 plan의 중단 판정은 바꾸지 않는다.
+- iter_068 [CONTINUE] (deep_medium/standard/normal) <MRI 임상 등급의 sequence 정보 가치: abandon> 💾67946fde6559d6f1586835685ff28e0774ab0867 SPIDER 개발 12명에서 두 모델의 순위 AUROC는 0.73–0.74였지만 D 고정 보정 BA는 0.54–0.58로 기준 미달이다. 현재 Modic 보정 투자는 종료하며 인식·결합 원인은 미확정이다. → 다음: 현재 Modic 답변 보정 투자를 종료하고, MRI 근거 사용 질문에서 다음 투자 하나를 전략적으로 선택한다. iter_056~068의 유효 관찰과 종료 범위를 이어받아 기존 observed 문제의 최소 개입, 기본 인식에 적합한 강한 대안, 다른 실패 조건의 검증을 중요성·판별력·준비 비용으로 비교한다. 같은 D/E12의 점수 변환·threshold·prompt·추가 모델 탐색이나 E/F 개방은 이어가지 않는다. Modic 재개는 독립 자료를 늘리면 된다는 주장만으로 승인하지 말고, 강한 단순 대안과 구별할 중요한 잔여 문제 및 결과별 종료 결정을 제시할 때만 검토한다. 선택된 경로에 필요한 재사용 결함만 수정하고, 새 데이터 확보 자체를 다음 연구 질문으로 삼지 않는다.
 
 ## 이전 목표들의 접근법 (참고용, 현재 목표의 재평가 횟수에는 안 들어감)
 
@@ -110,13 +111,13 @@
 - MRI 공동·개별 영상 답변 대조 [approach/mri-multiview-qa-diagnostic]: 4회 (iter_061, iter_062, iter_063, iter_064), 유효한 실험 4회, 미분류 0회, 최근 판정: inconclusive, 커밋: 84f865b7aa2a8e07d2f5f0e10cf6b7c99ec5080b, 05494683bcd332a4529b9886ae0fe7bf57a6ab2a, 62e2a5246320458bc09a0d78b6b24a9e212cb835, c01661230041a54f50da493c61a098ed2bdbe46f
 - MRI 질문별 관측 선택의 투자 가치 검토 [approach/mri-observation-value]: 1회 (iter_065), 유효한 실험 1회, 미분류 0회, 최근 판정: inconclusive, 커밋: ce5f5991ee7274806e9b6ffbfbefa26d7189df62
 - MRI 답변 인터페이스와 영상 신호 분리 [approach/mri-answer-interface]: 1회 (iter_066), 유효한 실험 1회, 미분류 0회, 최근 판정: inconclusive, 커밋: 7bc3601ddfc6f4525a8ad73edf281f4c824b2fc6
-- MRI 임상 등급의 sequence 정보 가치 [approach/mri-sequence-grade-value]: 1회 (iter_067), 유효한 실험 1회, 미분류 0회, 최근 판정: abandon, 커밋: acacfe155024c3673e8af606a723d1dd1a2df358
+- MRI 임상 등급의 sequence 정보 가치 [approach/mri-sequence-grade-value]: 2회 (iter_067, iter_068), 유효한 실험 2회, 미분류 0회, 최근 판정: abandon, 커밋: acacfe155024c3673e8af606a723d1dd1a2df358, 67946fde6559d6f1586835685ff28e0774ab0867
 
 현재 연구 브랜치: approach/mri-sequence-grade-value (코드 위치: /SSD1_1TB/home/milab/daniel/08_medgemma/research)
 
 ### 최근 계획의 대안 순위
 
-1. MRI 임상 등급의 sequence 정보 가치: 기존 SPIDER 개발 자료에서 공동 처리와 단순 결합의 추가 가치를 한정 비교한다.
-2. 기본 MRI 인식의 직접 적응: 현재 MSD 전문 대안 이후의 중요한 잔여 과제가 없어 이번에는 보류한다.
-3. SPIDER Modic의 상보적 결합 실패 확증: 사례별 신호 주석과 희귀 유형 표본이 부족해 현재 자료로는 선택하지 않는다.
-4. 같은 MSD 답변 보정 연장: iter_066 종료 판단을 바꿀 새 근거가 없어 재개하지 않는다.
+1. MRI 임상 등급의 sequence 정보 가치: 기존 출력의 한정 재분석으로 답변 편향과 교란 설명을 구분하고 보정 투자를 결정한다.
+2. 현재 Modic 경로 즉시 보류: 추가 비용은 없지만 저장 점수만으로 확인할 수 있는 잔여 정보를 버리므로 한정 재분석보다 우선순위가 낮다.
+3. 직접 SFT 또는 전문 classifier 비교: 기본 신호의 이용 가능성과 필요한 잔여 가치가 아직 불명확해 이번에는 실행하지 않는다.
+4. 새 MRI 자료로 전환: 현재 경쟁 설명에 답하지 못하며 자료 연결 비용이 다시 발생하므로 이번에는 선택하지 않는다.
