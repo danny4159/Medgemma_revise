@@ -77,6 +77,7 @@
 - iter_069 [CONTINUE] (deep_medium/standard/normal) <MRI 확산 신호와 판단 연결 검토: abandon> 💾76eb1036df95478f889ee6bfd8e31ca43e82b415 DWI–ADC 20 case에서 두 모델 모두 ADC 신호에 LOW만 답해 BA 0.50이었다. 현재 방법 투자는 종료하며, 인식·입력·질문 형식의 원인은 미분리다. → 다음: 현재 DWI–ADC frozen 후보의 투자를 종료하고, MRI 근거 사용 연구의 다음 투자 하나를 전략적으로 선택한다. iter_064·065·068·069의 관찰과 종료 범위를 이어받아 기본 인식을 확보할 강한 대안·적응, 기존 observed 문제의 최소 개입, 다른 실패 조건을 중요성·판별력·준비 비용으로 비교한다. 같은 20 case의 prompt·threshold·추가 모델 탐색이나 표본 보충을 자동 연장하지 않는다. 선택한 경로에는 단순 대안 이후 남는 문제와 양성·음성·불확정 결과별 종료점을 명시한다. 이번 대상 연결 문제는 향후 해당 자료를 사용할 때만 한정 수정하며, 이를 별도 정비 반복이나 무조건 재실행의 이유로 삼지 않는다. 목표 범위 내 선택에는 추가 사용자 승인이 필요하지 않다.
 - iter_070 [CONTINUE] (deep_medium/standard/normal) <MRI 전문 모델의 근거 인식 적합성 검토: abandon> 💾02a8adade58f7cea84638f9e96bf963a0fb64d55 AutoRG의 FLAIR 15 case에서 예측·annotation mask 모두 BA 0.614로 기준 미달이었다. 현재 frozen 후보는 종료하되 높은 mask 중첩과 정답·노출 불확실성 때문에 인식 원인과 결합 능력은 미판정이다. → 다음: 현재 frozen 후보의 투자를 종료하고, 기존 MRI 관찰을 바탕으로 직접 적응·최소 개입·투자 보류 중 다음 투자 하나를 선택한다. iter_059의 강한 전문 대안, iter_064의 모델 특이 context 손실, iter_065~070의 기본 신호 미확보를 서로 다른 과제의 증거로 유지한다. 새 데이터나 모델 확보 자체를 다음 질문으로 삼지 않는다. 직접 적응을 선택한다면 실제 사용상 중요한 과제와 강한 단순 baseline, 분리된 개발·확인 자료, 결과별 종료 결정을 먼저 구체화한다. 기존 observed 문제를 선택한다면 단순 routing 이후 남는 가치와 경쟁 설명을 구분하는 개입을 제시한다. 이번 15건의 prompt·parser 탐색, 공식 test 개방, 동일 frozen 비교 확대는 자동 연장하지 않는다. 코드 수정은 실제 선택된 재사용 경로에 필요한 범위만 수행한다.
 - iter_071 [CONTINUE] (deep_high/standard/normal) <MRI grounding 적응 전이 대조: abandon> 💾973628fd9852fd558796cffb2dcb60ba24f87bc2 SPIDER E24에서 RSNA 초기화 R의 F1@0.5는 0.130으로 직접 SFT D(0.158)를 개선하지 못했고 detector는 0.817이었다. 현재 두-category VLM 투자는 종료하되 MRI 전이·학습 전체는 미판정이다. → 다음: 현재 두-category MRI grounding 투자를 종료하고, 강한 단순 대안 이후에도 중요한 문제가 남는 다음 연구 투자 하나를 선택한다. 이번 결과를 근거로 T24·추가 seed·source 교체를 자동 실행하지 않는다. 기존 언어 조건부 grounding 관찰과 MRI context 관찰에서 최소 개입의 가치가 남는지, 또는 해당 연구 묶음을 보류할지 비교한다. 선택한 과제는 실제 사용 가치, detector+규칙 또는 직접 SFT가 해결하지 못한 조건, 양성·음성·불확정에 따른 종료 행동을 명시해야 한다. 새로운 frozen 모델·자료 확보 자체를 연구 질문으로 삼지 않는다. 코드 수정은 선택된 재사용 경로에 필요한 항목만 수행한다.
+- iter_072 [진행 중]
 
 ## 이전 목표들의 접근법 (참고용, 현재 목표의 재평가 횟수에는 안 들어감)
 
@@ -118,12 +119,12 @@
 - MRI 확산 신호와 판단 연결 검토 [approach/mri-diffusion-evidence]: 1회 (iter_069), 유효한 실험 1회, 미분류 0회, 최근 판정: abandon, 커밋: 76eb1036df95478f889ee6bfd8e31ca43e82b415
 - MRI 전문 모델의 근거 인식 적합성 검토 [approach/mri-specialist-evidence]: 1회 (iter_070), 유효한 실험 1회, 미분류 0회, 최근 판정: abandon, 커밋: 02a8adade58f7cea84638f9e96bf963a0fb64d55
 - MRI grounding 적응 전이 대조 [approach/mri-grounding-transfer]: 1회 (iter_071), 유효한 실험 1회, 미분류 0회, 최근 판정: abandon, 커밋: 973628fd9852fd558796cffb2dcb60ba24f87bc2
+- MRI 부위별 판독의 투자 적합성 검토 [approach/mri-regional-reading]: 1회 (iter_072), 유효한 실험 0회, 미분류 0회, 최근 판정: 진행 중, 커밋: 없음
 
 현재 연구 브랜치: approach/mri-grounding-transfer (코드 위치: /SSD1_1TB/home/milab/daniel/08_medgemma/research)
 
 ### 최근 계획의 대안 순위
 
-1. MRI grounding 적응 전이 대조: 검증된 source 학습을 동일 MRI 직접 SFT와 비교해 재사용할 능력이 있는지 판단한다.
-2. 기존 MRI 근거 선택·결합의 최소 개입: routing·전문 대안 이후의 잔여 사용 가치를 확보하지 못해 현재 투자를 보류한다.
-3. CXR 공동 grounding·능력 보존 재개: 실제 적응 성과는 있지만 단순 대안 이후의 새 투자 근거가 없어 기존 종료 범위를 유지한다.
-4. 현재 세부 연구 묶음의 투자 보류: MRI 학습 대조에서도 판별 신호나 비용 대비 가치가 없으면 새 후보 수집으로 자동 연장하지 않는다.
+1. MRI 부위별 판독의 투자 적합성 검토: 접근 정보 확인 후에만 실행 설계를 재개한다.
+2. 현재 후보의 접근상 보류: 이용 가능한 영상이 없으면 과학적 실패와 구분해 보류한다.
+3. 기존 grounding·context 설계 재개: 새로운 투자 근거가 없어 자동 재개하지 않는다.
