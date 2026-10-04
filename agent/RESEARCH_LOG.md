@@ -26065,3 +26065,420 @@ iter_067에서 남긴 '순위가 있으면 보정으로 활용할 수 있는가'
 같은 자료에서 추가 보정을 실행하지 않는다. 다음 계획은 iter_056~068의 관찰을 이어받아, 중요한 실제 사용 문제와 이를 구분할 최소 대조가 있는 투자 하나를 선택한다. 기본 인식·단독 관측 충분성·복수 관측 필요성 중 무엇을 이미 알고 무엇을 새로 검증할지 명시한다. 선택한 경로에 필요한 코드만 수정하고 주변 정비 반복을 만들지 않는다.
 
 논문 추천은 보류한다. 이번에는 순위 관찰이 남았지만 후속 방법 투자의 유망성을 확인하는 복합 기준을 충족하지 못했다.
+
+
+## iter_069 GPT PLAN [MRI 확산 신호와 판단 연결 검토 / proceed] — 2026-10-04 14:11:56
+
+# 요약
+
+- **이번에 할 일:** 명시적 DWI–ADC 신호 주석이 있는 기존 사례에서 ADC 단독, 공동 판단, 개별 신호+규칙을 두 모델로 비교한다.
+- **필요한 이유:** 과거 MRI 결과는 기본 인식과 근거 사용을 충분히 분리하지 못했다. 이번에는 영상별 주석을 이용한다.
+- **확인할 기준:** ADC를 읽을 수 있는지, 공동 입력에서 판단 손실이 생기는지, 단순 대안이 정확도와 비용에서 충분한지 확인한다.
+- **주의·다음:** 복수 근거 필수 과제나 신규 기여라고 주장하지 않는다. 단순 대안이 충분하면 방법 투자를 종료한다.
+
+# Current Understanding
+
+iter_068의 Modic 보정 종료와 iter_064의 명시적 target 방법 투자 종료를 유지한다. 같은 D/E12 보정·prompt·모델 탐색이나 E/F 개방은 없다. iter_052의 CT 자료 gate와 실행 실패도 변경하지 않는다.
+
+라운드 01의 ‘DWI 고신호+ADC 대조가 필수 결합 과제인가’에는 부정적으로 답한다. 현재 후보는 ADC 단독으로 class를 구분할 수 있다. 이를 숨기지 않고 강한 직접 대조로 사용한다. 이번 질문은 필요한 관측의 선택과 사용에 한정하며 sequence 결합 능력 일반론을 검증하지 않는다.
+
+# Strategy Check / 연구 방향 판단
+
+상위 질문은 여러 관측 중 필요한 근거를 선택하고 사용하는가다. 기존 관찰은 MedGemma의 제한된 context 손실이며, 인식과 선택의 분리는 미완료다. 이번에 구분할 설명은 ADC 인식 부족 대 인식 가능한 ADC 근거의 최종 판단 손실이다.
+
+기존 context 방법 개발은 단순 routing 이후 가치가 부족하다. 바로 직접 SFT를 시작하면 기본 점수 개선과 중요한 연구 문제를 혼동할 수 있다. 기존 train의 명시적 신호 주석을 이용한 이번 대조는 준비 비용을 제한하면서 단순 대안 충분성을 결정할 수 있어 우선한다. 자료·코드 확보 자체를 진전으로 세지 않는다.
+
+두 계열 비교는 이미 확보한 MedGemma 1.5와 Qwen2.5-VL-7B로 수행한다. 한 모델만 실패하면 적용 범위를 그 모델로 제한한다. 같은 MRI track과 iter_049~068의 실패 교훈을 이어받는다. 지배 비용은 아직 실측하지 않았으며, 자료 연결·구현 검증이 생성보다 클 가능성이 있다.
+
+이번 결과가 바꿀 결정은 **이 DWI–ADC 근거 사용 경로에 새로운 방법을 투자할 것인가, 단순 대안으로 종료할 것인가**다. 더 많은 영상이나 새 데이터셋 확보는 결정 항목이 아니다.
+
+# Hypothesis
+
+DWI 고신호가 명시된 집단에서 ADC 비감소를 인식하면서도 공동 입력에서는 확산 제한을 긍정하는 손실이 있을 수 있다. 이는 아직 관찰되지 않은 가설이다.
+
+경쟁 설명은 ADC 인식 부족, 임상 지식·출력 인터페이스, 영상 수·순서, 대상 불일치·주석 모순이다. 공동 손실만으로 내부 attention 원인이나 필수 결합 실패를 주장하지 않는다.
+
+# Limitation Evidence / Correct Usage Checks
+
+`mri-explicit-target-context-effect`는 연결되는 observed 근거다. iter_064의 R−C BA 차이 0.27083은 보존하지만 현재 DWI–ADC 문제의 증거로 옮겨 쓰지 않는다. 이번은 diagnostic이며 method gate를 통과했다고 간주하지 않는다.
+
+정답은 원 caption과 IMAGING_FINDINGS의 명시적 대상·신호 연결을 사용한다. 두 필드가 충돌하면 제외한다. 모델이 맞혔다는 이유로 정답을 승인하거나 틀렸다는 이유로 표본을 제외하지 않는다. 정량 ADC threshold나 부분 영상의 임상 충분성을 새로 추정하지 않는다.
+
+[DWI consensus](https://pmc.ncbi.nlm.nih.gov/articles/PMC2631136/)와 [EUSOBI consensus](https://doi.org/10.1007/s00330-019-06510-3)를 배경으로 사용하되, 이번 label은 출처에 명시된 신호와 판단 범위로 제한한다. JPEG 강도는 정량 ADC가 아니다.
+
+# Contribution Path / Baselines / Reuse
+
+[MedThinkVQA](https://arxiv.org/html/2604.16506v1)의 개별 소견·통합 중간물 비교가 가장 가깝다. 분해 판독·oracle 소견·고정 규칙 자체를 새 방법이라고 하지 않는다.
+
+강한 대조는 ADC 단독 직접 판단, ADC 신호→규칙, DWI·ADC 개별 신호→규칙이다. 후자의 두 호출 비용을 모두 센다. Oracle은 정상 성능 비교에서 제외한다. 이번에는 학습하지 않으며, 다음 method를 선택하려면 직접 SFT와 단순 대안 대비 구체적인 가치가 필요하다.
+
+`reuse_assets`에 명시한 네 파일만 선별 재사용한다. downloader는 크기/hash·경합·symlink·출력 경로를 보완한다. backend는 load_model/build_inputs/env_info로 사용을 제한한다. MSD 전용 cmd_tech, evaluator, 데이터 생성과 Modic vision chunk patch는 호출하지 않는다. 원 파일을 찾지 못했다는 이유로 재구현하지 않는다. 자동 기반에 동일 파일이 이미 있으면 내용·manifest를 확인하며 임의 덮어쓰지 않는다.
+
+# Proposed Experiment
+
+## 1. 자료 적합성과 동작 확인
+
+기존 `results/iter_049/raw/train.jsonl`의 SHA256 `7b38ceddc9cb1cf3a8dc0f9179c694caf826cd5716bb1b326e71d36e9e7d9b3a`를 확인한다. HF revision은 `5555b80e167c4796efab92fe709fb05914077dc0`이다. 이용 조건과 원 출처를 기록하며 test는 열지 않는다.
+
+라운드 01의 검색을 재현한다: non-longitudinal이며 전체 caption에 ADC와 DWI 또는 diffusion-weighted 표현이 있는 180개 metadata 행이다. 이것은 적격 사례 수가 아니다. 이 유한 후보를 한 번 점검하되 영상은 다음 조건을 충족한 두 경로만 받는다.
+
+- 동일 시점·동일 병변의 별도 DWI와 ADC 영상이고, DWI 고신호와 ADC 감소 또는 명시적 비감소가 주석에 있다.
+- 원문에서 대상 위치를 답변 정보 없이 지정할 수 있다. 추론 입력은 sequence 이름·중립적 해부학 위치·기존 표식 참조만 허용한다.
+- ADC 감소/비감소와 출처의 확산 제한 판단이 모순되지 않는다. 단순 질환명이나 DWI의 ‘restriction’ 표현만으로 ADC 신호 label을 만들지 않는다.
+- 여러 병변·성분이 있으면 동일 대상 연결이 명시된 하나만 사용한다. 복수 적격 쌍이면 원 image index 순으로 첫 쌍을 선택한다.
+- 합성 panel에 상대 sequence가 함께 보이거나 진단·정답 문구가 들어 있으면 제외한다. 이를 살리기 위한 임의 crop·재주석을 하지 않는다.
+
+case16041처럼 원문이 충돌하는 사례는 제외한다. case14955 같은 ADC 등신호는 비감소로 포함할 수 있지만 원문상 판단 연결이 필요하다. mixed-modality case도 선택한 두 영상이 MRI이고 동일 대상이면 허용하며 다른 modality는 입력하지 않는다.
+
+실제 영상을 도구로 표시해 sequence·panel·대상 연결과 답변 누출을 확인한다. 반환 영상 없이 시각 판정을 작성하지 않는다. 원문 인용 위치와 포함/제외 이유를 짧게 남기며 새로운 임상 소견을 작성하지 않는다. 환자 ID가 없으면 case를 환자로 부르지 않는다. 동일 원천 case와 file/pixel 중복을 묶어 분석 단위를 보존한다.
+
+먼저 감소·비감소에서 원 case ID 순 첫 적격 사례 각 하나로 실제 입력 연결과 생성·parser·저장·재개를 확인한다. 모델 정확도는 기술 gate가 아니다. 한쪽 class가 없으면 비교 설계가 성립하지 않으므로 성능 본실행을 하지 않고 자료 범위의 실패로 종료한다. 적격 N을 출력 전에 고정하고 모든 적격 사례를 사용한다. N이 작아도 탐색 출력은 허용하되 한 사례의 뒤집힘이 결정을 바꾸면 투자 근거는 불확정으로 처리한다.
+
+## 2. 고정 실제 출력 탐색
+
+두 모델, greedy 생성, 학습 0이다. 사례별 다음 7조건을 고정한다.
+
+1. **SD:** DWI 단독에서 지정 대상의 신호를 HIGH / NOT_HIGH / UNCERTAIN으로 판독한다.
+2. **SA:** ADC 단독에서 지정 대상의 신호를 LOW / NOT_LOW / UNCERTAIN으로 판독한다.
+3. **A:** ADC 단독으로 지정 대상의 restricted diffusion 여부를 YES / NO / UNCERTAIN으로 답한다.
+4. **J_DA:** DWI 다음 ADC의 공동 입력으로 A와 같은 질문에 답한다.
+5. **J_AD:** 같은 두 영상을 역순으로 주고 동일 질문에 답한다.
+6. **T:** 영상 없이 같은 중립적 대상·질문으로 답한다. 신호·진단·caption은 넣지 않는다.
+7. **O:** 영상 없이 정답 DWI·ADC 신호 두 항목만 제공하고 동일 판단을 답한다. 이는 oracle이다.
+
+원 caption·IMAGING_FINDINGS·진단·MCQ 선택지는 일반 추론 입력과 물리적으로 분리한다. prompt·parser는 기술 사례의 출력 형식 확인 후 고정하며 내용 정확도에 맞춰 수정하지 않는다. 전체 문자열의 대소문자·공백·끝 문장부호만 정규화한다. UNCERTAIN과 invalid는 각각 기록하고 전체 정확도에서는 오답으로 센다.
+
+기존 공식 backend와 generation_config를 유지한다. max_new_tokens=512, 비EOS만 2048로 한 번 재시도하며 두 attempt를 보존한다. 최종 비EOS는 별도 실패로 기록한다. oracle 오답은 모델 내용 관찰이고 보편적 실행 중단 조건이 아니다.
+
+별도 호출 없이 SA의 LOW→YES, NOT_LOW→NO를 단순 baseline으로 계산한다. SD+SA 규칙은 HIGH와 LOW일 때 YES, 유효한 다른 조합은 NO, 하나라도 UNCERTAIN/invalid면 미판정이다. 이 규칙을 이 선택 집단 밖의 보편적 임상 판독기로 해석하지 않는다.
+
+## 3. 조건부 최소 보완
+
+모델별 A와 두 순서 평균 J의 BA 차이가 A−J≥0.10이면, 해당 모델·동일 전체 사례에서 **R: ADC 동일 영상 두 장 복제**를 한 번 실행한다. 복제임을 명시하고 A와 같은 질문을 사용한다. 이 비교는 영상 수의 영향을 분리하기 위한 것이며 새로운 표본·prompt 탐색이 아니다.
+
+J 손실이 이 기준보다 작으면 R은 실행하지 않는다. R을 실행한 이유와 선택에 따른 탐색 해석을 기록한다. R−J가 남아도 DWI 내용의 영향 후보일 뿐 내부 원인은 확정하지 않는다.
+
+## 4. 확대·독립 확인 경계
+
+이번 본실행은 위에서 봉인한 적격 N 전체와 조건부 R까지다. 학습 seed·추가 모델·새 자료·reserve 개방은 없다. 기술 사례는 개발 자료로 표시하고 최종 표에 별도 포함 여부를 명시한다. 전체 결과와 기술 사례 제외 결과를 함께 보고하며 좋은 쪽을 선택하지 않는다.
+
+후속 method나 독립 확인은 이번 full review에서 별도 결정한다. 준비 성공이나 낮은 p-value만으로 자동 확대하지 않는다.
+
+## 5. 자원·예산·재개
+
+기본 요청은 14N, 최대는 16N이다. N≤180은 원 검색 후보 수에서 나온 범위이며 표본 확보 보장은 아니다. 기술·재시도·처리량 검사는 별도 집계한다.
+
+시작 직전 nvidia-smi와 상속 GPU 범위를 확인한다. 우선 두 GPU에 모델별 작업을 배치한다. 기술 입력에서 batch1 대비 batch2 또는 MedGemma 두 worker 중 유망한 하나를 짧게 비교한다. Qwen도 실측 메모리가 허용할 때만 동시성을 늘린다. worker별 2GB 여유와 다른 프로세스 점유를 포함한다. 처리량·peak·오류·긴 출력 지연·출력 정합성을 기록하고 유리한 구성만 채택한다.
+
+iter_064의 960요청/198초는 참고값이며 단순 비례시 최대 기본 규모는 약10분이지만 이번 예상 시간으로 확정하지 않는다. 기술 사례에서 모델·조건별 초/요청을 측정하고, 실제 N과 남은 요청량·loading·다운로드·검증 비용을 합쳐 본실행 전 wall-clock 예상치를 기록한다. 임의 시간 상한은 없다.
+
+고유 task ID, worker별 출력, 원자적 claim, 완료 목록과 비용 연결을 사용한다. 저장 후 강제 종료·다른 worker 기록 중 읽기·손상 중간 행 거부·재개 중복/누락을 실제 확인한다. OOM이면 batch/worker를 낮추되 조건·사례는 바꾸지 않는다.
+
+# Implementation Tasks for Claude
+
+1. 기준 노트와 선택 자산의 원 리뷰를 읽고 네 파일의 반입·불변 내용을 확인한다.
+2. results/iter_069에 후보·정답·중립 입력·선택 이유를 분리해 저장하고, 소수 실제 영상 점검을 먼저 완료한다.
+3. 적격 N·정답·영상 연결·prompt·parser·요청 목록을 봉인한다. source와 label 변조가 평가 진입점에서 거부되는지 확인한다.
+4. 선택한 backend만 연결해 두 모델의 실제 입력 tensor·순서·공식 처리 경로를 확인한다. 기존 MSD/Modic 실험 경로를 실행하지 않는다.
+5. 기술 생성·처리량·재개 검사 후 고정 7조건과 사전 조건을 만족한 R만 실행한다.
+6. 원시 응답에서 독립 집계 가능한 confusion counts·사례별 paired 결과·비용을 저장한다. 계산 fixture는 invalid, class 누락, 중복 case, oracle 오답, 순서 평균과 조건부 R 경계를 포함한다.
+7. 원 결과·코드를 보존하고 실제 단계·사용량·미실행 조건·종료 결정을 보고한다. 커밋·브랜치는 orchestrator가 관리한다.
+
+# Evaluation (성공/실패 기준 포함)
+
+주지표는 사례 단위 BA와 class별 recall이다. J는 두 순서 점수의 사전 고정 평균이며 최선 순서를 선택하지 않는다. 단독 신호 정확도, A−J, R−J, 규칙−J, invalid/UNCERTAIN, 순서 불일치를 함께 보고한다. 10,000회 case/source-cluster bootstrap과 원 confusion counts를 제공하되 작은 표본의 CI 유의성을 실행 gate로 쓰지 않는다.
+
+**인식이 가능한 근거:** SA BA≥0.75, 각 class recall≥0.60을 탐색 투자 기준으로 둔다. SD는 고신호 선택 집단의 sensitivity만 보고한다. 이 수치는 임상 성능 인증이 아니다. T와 비교해 영상 기여를 확인하고, 중립 위치 문구가 class와 연결되는지 부위별 표로 점검한다.
+
+**판단 연결 손실 후보:** 위 SA 기준과 함께 A−J 또는 규칙−J≥0.10이고, J가 틀린 사례에서 해당 singleton 신호는 맞는 사건이 여러 독립 case에 존재하는지 확인한다. 한 사건의 제거로 기준 충족이 뒤집히면 불확정으로 처리한다. 조건부 subset은 전체 성능과 구분한다. O가 약하면 임상 지식·인터페이스 설명이 남고, 순수한 영상 통합 해석은 보류한다.
+
+**단순 대안 충분성:** A 또는 SA 규칙이 BA≥0.80, class별 recall≥0.70이고 J보다 낮지 않으며 실제 end-to-end 비용도 증가하지 않으면 해당 대안을 보존하고 새 방법 투자를 종료한다. 기준 미달은 자동으로 새로운 방법 필요성을 뜻하지 않는다.
+
+**후속 방법 검토:** 기본 신호와 판단 손실이 남으면서 위 저비용 대안이 충분하지 않고, SD+SA 규칙이 J보다 BA≥0.10 개선되지만 실제 비용이 J의 1.5배 이상일 때에만 단일 호출에서 그 정확도를 보존할 최소 방법의 투자 가치를 검토한다. 이는 비용 격차가 실제로 측정될 때만 적용한다. 후속 목표의 예는 규칙 대비 BA 손실 0.03 이내와 비용 30% 이상 감소이며, 이번에 방법 효과를 주장하지 않는다. method gate·직접 SFT 비교는 별도 계획 사항이다.
+
+**음성:** 공동 손실이 없거나 단순 대안이 충분하면 이 세부 방법 투자를 종료한다. SA가 약하면 인식 이후 선택 실패를 주장하지 않고 frozen 후보를 종료한다. 모델 한 계열만 손실을 보이면 그 모델로 범위를 제한한다.
+
+**불확정:** 사례·부위 의존성, 주석 충분성, 형식·oracle 문제로 해석이 갈리면 보류한다. 같은 자료의 prompt·threshold·추가 모델·표본 보충을 자동 실행하지 않는다. 기술 결함은 영향을 받는 요청만 동일 규칙으로 복구하고 별도 기록한다.
+
+비용은 입력 영상 읽기부터 답변 저장 완료까지의 monotonic wall time을 공통 경계로 측정한다. 두 singleton의 합과 공동 한 호출을 비교하고, cold load·재시도·batch throughput은 별도로 보고한다. 전향한 latency와 장치 병렬 throughput을 같은 수치로 비교하지 않는다.
+
+# Risks / Checks
+
+- DWI 고신호로 선택한 자료이므로 ADC 단독 충분성은 설계의 일부다. 결합 필수·일반 임상 판독·질환 감별 능력으로 확대하지 않는다.
+- 원 caption은 전문가 정답의 완전한 보증이 아니다. 모순·다중 성분·불명확한 영상 대응은 출력 전에 제외한다.
+- case가 환자 독립성을 보장하지 않는다. 원천 중복과 pretraining 노출 불확실성을 남긴다.
+- annotation 화살표와 중립 위치 안내는 대상 위치 보조 조건이다. 자동 병변 탐지 성능을 평가하지 않는다.
+- 연구 후보의 실제 영상은 이번 계획 단계에서 보지 않았다. 구현 단계에서 확인하고 기록해야 한다.
+- 자료 점검 비용이 커지더라도 주변 verifier·범용 benchmark 구축으로 범위를 넓히지 않는다. 현재 결론과 재사용 경로에 필요한 검사만 수행한다.
+- 대규모 GPU 후보인 sequence별 신호–판단 공동 사전학습은 보존하되 이번에는 실행하지 않는다.
+
+# 계획의 근거 (GPT 조사 노트)
+
+# 새로 확인한 것
+
+직전 `think/round_01.json` 원문과 iter_068·064 리뷰, 관련 LIMITATIONS 및 CODE_ASSETS, 선택한 코드의 원본을 확인했다. Modic 보정 종료와 iter_064의 제한된 관찰을 유지한다.
+
+## 직전 질문에 대한 답
+
+1. **복수 관측 필수 집단은 확인하지 못했다.** case11468은 DWI 등신호·ADC 증가, case8609는 DWI 저신호·ADC 고신호다. 이들로 네 신호 조합이 충분히 구성된다고 볼 수 없다. case16041에는 DWI caption의 ‘변화 없음’과 본문의 ‘restricted diffusion’이 충돌한다. case9059는 서로 다른 성분과 ADC 수치가 섞여 있다. 이런 사례를 필요한 반례로 억지로 편입하지 않는다.
+2. **ADC 단독을 정면으로 대조하면 한정 진단 가치는 있다.** case16384의 간 segment V 병변, case18963의 전두엽 병변, case19278의 비장 병변에는 DWI 고신호와 ADC 고신호가 명시된다. case14955는 DWI 고신호·ADC 등신호와 shine-through 설명을 가진다. 반면 case10971, case14583, case16138, case18876 등에는 고신호 DWI와 감소 ADC 연결이 있다. 이는 임상적으로 결정적인 ADC 근거를 공동 입력에서 유지하는지 묻는 자료 후보이지 필수 결합 benchmark가 아니다. 실제 영상 대응·충분성은 아직 미검증이다.
+3. **한정 자료 점검과 실제 출력을 같은 계획으로 묶는다.** 단일 ADC·개별 신호+규칙·공동 입력을 비교해 기본 인식, 답변 연결, 단순 대안 충분성 중 무엇이 설명되는지 판단한다. 새 주석 사업이나 전수 benchmark 구축은 하지 않는다.
+
+## 출처와 해석
+
+[DWI consensus](https://pmc.ncbi.nlm.nih.gov/articles/PMC2631136/)와 [EUSOBI consensus](https://doi.org/10.1007/s00330-019-06510-3)는 높은 DWI 신호만으로 확산 제한을 단정할 수 없다는 배경을 제공한다. 부위별 수치 threshold를 새로 추정하거나 JPEG로 정량 ADC를 측정하지 않는다.
+
+[MedThinkVQA](https://arxiv.org/html/2604.16506v1)는 이미 영상별 소견과 통합 중간물을 비교한다. 따라서 분해 판독 또는 oracle 효과 자체는 신규성이 아니다. 이번 범위의 차이는 명시적 신호 주석 아래 단일 관측의 충분성과 단순 대안의 비용을 함께 검사한다는 데 있다. 이것도 아직 contribution은 아니다.
+
+## 재사용과 비용
+
+HEAD `67946fde6559d6f1586835685ff28e0774ab0867`, 깨끗한 작업 트리와 현재 `m65_run.py`, `msd56_run.py`를 확인했다. `mt49_fetch.py`, `mt49_images.py`는 현재 브랜치에 없지만 원 SHA에서 확인했다. 선택한 backend의 import에는 MSD 자료 모듈이 필요하지 않으며, 기존 cmd_tech는 호출하지 않는다. 전체 실행기 승인을 의미하지 않는다.
+
+iter_064는 960개 E 요청을 약198초에 처리했지만 이번 JPEG·질문·출력 조건의 속도는 아니다. 후보 준비·자료 연결과 검증이 지배 비용일 수 있으므로 소수 실제 쌍부터 확인하고, 적격 N과 실측 속도로만 본실행 시간을 계산한다.
+
+## 대규모 GPU 필요 후보
+
+관측별 신호와 최종 판단을 함께 감독하는 volume–text 사전학습은 장기 후보로 보존한다. 현재는 단순 대안 이후의 문제와 학습 자료가 없으므로 투자하지 않는다.
+
+이전 사고 라운드 노트: agent/runs/iter_069/think/
+
+
+
+## iter_069 CLAUDE IMPLEMENTATION REPORT — 2026-10-04 14:39:25
+
+# 요약
+
+- **핵심 결과:** 영상으로 직접 확인한 20개 사례(LOW 15, NOT_LOW 5)에서 두 모델 모두 ADC 신호를 판독하지 못했다. SA(ADC 단독 신호 판독)는 MedGemma 1.5와 Qwen2.5-VL-7B 모두 20건을 전부 LOW로 답해 BA 0.50이다. 사전 기준(SA BA≥0.75)을 채우지 못해 "ADC는 읽지만 공동 입력에서 손실" 가설은 검증 대상이 되지 못했다.
+- **근거:**
+  - A−J는 MedGemma 0.000, Qwen +0.083이라 기준 0.10에 못 미쳤고, 조건부 R(ADC 복제 대조)은 실행하지 않았다.
+  - Qwen의 oracle(O)은 BA 1.00이라 질문·parser 형식 문제가 아니다.
+  - 원시 JSONL에서 별도 구현으로 다시 계산한 confusion과 BA가 보고서와 완전히 일치했다.
+- **주의:** N=20이고 NOT_LOW는 5건이다. SA·A는 이 고정 질문 형식에서 YES/LOW 쪽으로 쏠렸다. 프롬프트를 내용 정확도에 맞춰 바꾸지 않았으므로 질문 형식의 영향은 분리하지 못했다. 이 결과로 DWI–ADC 결합 능력이나 방법 효과를 주장할 수 없다.
+- **다음:** 이 DWI–ADC 후보는 기본 인식 부족으로 보류하고 방법 투자는 하지 않는다. 같은 자료에서 프롬프트나 모델을 추가로 바꾸는 시도는 계획상 금지다.
+
+# Work Performed
+
+- 180행 검색을 재현했다. non-longitudinal이고 캡션에 `\bADC\b`와 `\bDWI\b|diffusion[- ]weighted`가 모두 있는 행이 180개였다.
+- 그중 DWI·ADC 영상이 분리 캡션으로 구분되는 74개 case를 원문 캡션으로 판정했다. 캡션 근거 후보 26쌍을 골라 영상 52장을 받아 contact sheet 7장을 직접 열어 확인했다.
+- 6쌍을 영상 확인 후 제외했다. 수치 overlay, color map, 단면 level 불일치, 대상 불명 등이 사유다. 최종 20 case가 되었고 20개 모두 다른 원천 case이며 영상 file/pixel hash 중복은 0이다.
+- 7개 조건(SD, SA, A, J_DA, J_AD, T, O)의 prompt와 parser를 고정했다. 기술 사례(7006, 14955)의 실제 출력에서 형식 오류가 없어 prompt를 수정하지 않았다.
+- 입력 tensor 검사, 변조·경합·손상 재사용 거부 검사, 실제 강제 종료·재개 검사, 평가 fixture를 수행했다. 기술 사례 출력과 같은 조건을 두 모델로 돌려 처리량을 비교한 뒤 본실행을 했다.
+- 본실행은 두 모델 × 140요청 = 280요청이다. MedGemma는 GPU0에서 worker 2개, Qwen은 GPU1에서 worker 1개로 돌렸고 wall 62초였다.
+
+# Files Changed
+
+- 신규 코드(`research/`):
+  - `dd69_fetch.py`: 보완된 다운로더
+  - `dd69_cases.py`, `dd69_acquire.py`, `dd69_build.py`, `dd69_spec.py`: 자료 선정·봉인·prompt 명세
+  - `dd69_run.py`: 실행기
+  - `dd69_eval.py`: 평가기
+  - `dd69_test.py`, `dd69_resume_test.py`, `dd69_eval_test.py`: 검사
+  - `dd69_verify_eval.py`, `dd69_show.py`: 독립 재계산·요약 출력
+- 반입 4개 파일(`mt49_fetch.py`, `mt49_images.py`, `m65_run.py`, `msd56_run.py`)은 수정하지 않았다. `git hash-object` blob이 manifest와 4개 모두 일치한다.
+- `m65_run.py`와 `msd56_run.py`는 backend 함수(`load_model`, `env_info`, `build_inputs`, `generate` 등)만 호출했다.
+- `mt49_fetch.py`와 `mt49_images.py`는 실행하지 않았다. 계획이 요구한 보완(크기/hash 검증, symlink 거부, iter_069 경로 제한)은 새 `dd69_fetch.py`에 구현했다.
+- 결과 경로는 모두 `results/iter_069/` 아래다.
+
+# Commands / Experiments
+
+| 단계 | 결과 |
+|---|---|
+| `dd69_acquire.py` (영상 52장, 공식 listing 크기·oid 검증) | 성공 |
+| `dd69_build.py` (20 case, 요청 140+R 20) | 성공, 요청에 label·caption 없음 |
+| `dd69_run.py lock` v1 → tech | 실패 14/174. 원인은 내 누출 검사가 부분문자열로 매칭한 오탐(hypothalamic, yellow)이다. tensor·순서·prompt 검사는 전부 통과였다. |
+| `lock` v2 → tech | 두 모델 174건 실패 0 |
+| 기술 생성(2 case) | 28건 전부 EOS, 파싱 성공 |
+| `dd69_test.py` | 첫 실행 32/35. 실패 3건은 테스트 오류(요청 수 오기재, 프롬프트에 없는 문자열 치환)였고 수정 후 35/35 |
+| `dd69_resume_test.py` | 두 모델 PASS |
+| `dd69_eval_test.py` | 첫 실행 21/22. 테스트 설계 결함을 고쳐 22/22 |
+| 처리량 비교 (MedGemma 1 worker vs 2 worker) | 출력 token 불일치 0 |
+| 본실행 launch + verify | 양쪽 exit 0, problems 0 |
+| `dd69_eval.py run`, `dd69_verify_eval.py` | 성공, 독립 재계산 일치 |
+
+- 실패한 첫 실행의 결과 파일은 보존했다. `tech_*.json`, `cpu_tests_run1_failed_test_bugs.json`, `eval_fixtures_run1_testdesign_flaw.json`, `protocol_*.json` v1이 그것이다.
+- 재개 검사는 w0 3행 저장 직후 `os._exit`, 이어서 torn tail 종료, w1이 torn tail 파일을 읽으며 처리, w0 재시작으로 완료하는 순서였다.
+  - 두 모델 모두 14건에 중복·누락이 없었고, 기준 기술 실행과 suffix token 불일치가 0이다.
+  - 중간 손상 행은 worker가 거부했다. 답변은 저장됐지만 비용 행이 없는 경우도 verify가 1건 탐지했다.
+- 처리량 비교: MedGemma 2 worker는 14요청 wall 18.6초로 1 worker 22.7초보다 짧았고, 요청 평균 지연은 0.63초에서 0.83초로 늘었다. 합산 peak는 17.95GiB로 24GiB GPU 안이다. Qwen은 한 worker가 16.4GiB라 GPU당 1개만 가능하다. 두 구성 모두 출력이 동일하다.
+
+# Results
+
+| 조건 (BA, 20 case) | MedGemma | Qwen |
+|---|---|---|
+| SA | 0.500 | 0.500 |
+| A | 0.500 | 0.567 |
+| J (두 순서 평균) | 0.500 | 0.483 |
+| rule (SD+SA) | 0.500 | 0.500 |
+| T (text-only) | 0.500 | 0.000 (UNCERTAIN 20/20) |
+| O (oracle) | 0.567 | 1.000 |
+
+- SD: 두 모델 모두 20/20을 HIGH로 답했다. 선택 집단이 DWI 고신호라 sensitivity 1.0이다.
+- SA는 두 모델 모두 20/20이 LOW라 NOT_LOW 5건을 전부 놓쳤다(recall 1.0 / 0.0).
+- MedGemma의 A와 J_DA·J_AD도 20/20 YES다.
+- MedGemma의 oracle(O)은 LOW 15건 중 13건에서 NO로 답했다. 이는 oracle을 따르지 못한 모델 내용 관찰이며 실행 중단 조건이 아니다.
+- A−J는 MedGemma 0.000, Qwen +0.083(95% CI [−0.156, 0.361])이다. J_DA−J_AD는 MedGemma 0, Qwen 0.033이다.
+- 사전 기준 판정(`decision`):
+
+  | 항목 | MedGemma | Qwen |
+  |---|---|---|
+  | recognition_SA_ok | false | false |
+  | loss_candidate | false | false |
+  | sufficient_A | false | false |
+  | sufficient_SA_rule | false | false |
+  | followup_method_candidate | false | false |
+
+- 기술 사례 2건을 제외한 18 case(LOW 14, NOT_LOW 4)에서도 SA는 0.500이다. MedGemma의 A·J는 0.500이고, Qwen은 A 0.643, J 0.482였다.
+- 비용 비율(rule SD+SA / J, 요청당 latency): MedGemma 1.87(CI [1.52, 2.49]), Qwen 1.54(CI [1.25, 2.10]). 정확도 이점이 없어 방법 검토 조건을 만들지 못했다.
+- 한 class가 사라진 bootstrap replicate는 제외했고, 모델·대조별로 약 21~39회이며 JSON에 개수를 기록했다. 상수 응답이라 CI는 [0.5, 0.5]로 퇴화한다.
+- 결과 파일:
+  - `results/iter_069/eval/report_main.json`
+  - `results/iter_069/eval/independent_verify.json`
+  - `results/iter_069/gen/main_medgemma`, `gen/main_qwen`
+  - `results/iter_069/tests/`
+  - `results/iter_069/data/`
+  - `results/iter_069/protocol/`
+
+# Goal Progress / Reused Assets
+
+- **도달 단계:** 동작 확인과 가능성 탐색까지다. 확증과 독립 확인은 하지 않았다.
+- **실행 유효성:** 입력 tensor 대조, 변조 거부, 재개, 출력 seal, 독립 재계산이 통과했다.
+- **설명·반박·미검증:**
+  - 반박: 현재 고정 질문 형식에서는 두 모델이 ADC 신호 자체를 구분하지 못한다. 따라서 "인식 후 선택 실패"는 성립하지 않는다.
+  - 미검증: 상수 응답이 ADC 인식 부족 때문인지, JPEG에서 정량 신호가 소실된 때문인지, "LOW인가?" 유도 질문의 YES 편향 때문인지는 분리하지 못했다.
+  - 이 진단 범위를 넘어서는 일반화는 하지 않는다.
+- **재사용:**
+  - `m65_run.py`, `msd56_run.py`는 backend 함수 범위로만 사용했다. 공식 chat template·tensor 대조(medgemma/qwen 각 174건), 재개·변조·protocol 연결·GPU 허용 집합 검사를 했다.
+  - GPU 허용 집합은 launch가 `CUDA_VISIBLE_DEVICES`(0,1) 밖의 GPU 7 지정을 거부함을 `dd69_test.py`로 확인했다. 논리/물리 대응은 launch 기록의 GPU uuid로 남겼다.
+  - `hf_cache`는 `HF_HUB_OFFLINE=1`로 읽기만 했고, 수정 여부를 별도로 검사하지는 않았다.
+  - `mt49_*.py`는 미사용이며 보완은 `dd69_fetch.py`로 대체했다. 계획에 적힌 "iter_049 산출물 미덮어쓰기"는 `safe_dest`로 거부함을 확인했다.
+
+# Problems
+
+- **현재 결론을 무효로 만드는 문제:** 없다.
+- **해석 한계(결론 범위):**
+  - N=20, NOT_LOW 5건이다.
+  - 후보 선정과 제외 판정은 캡션과 내가 본 영상에 근거한 수동 판정이다(독립 판독자 없음).
+  - 상수 응답 때문에 모델 간 차이와 CI의 정보량이 거의 없다.
+  - ADC 신호 label은 caption의 서술(예: 18487의 "no significant decreased or increased")에 의존한다. 영상 지각 수준을 직접 확인한 것은 아니다.
+  - 7006과 15611 영상에는 sequence 이름 텍스트가 일부 인쇄되어 있다.
+- **재사용 전 수정이 필요한 것:**
+  - 이번 중단·재개 검사는 기술 요청 14건 규모다.
+  - 비용은 MedGemma 2 worker 동시 실행 하의 요청 latency라 throughput과 같은 수치로 비교하면 안 된다.
+- **추후 개선(선택):**
+  - 본 프롬프트가 YES/LOW 쪽으로 쏠리는 것을 확인했지만, 계획이 금지한 프롬프트 변경은 하지 않았다.
+  - `dd69_run.py`의 `cmd_tech`는 pixel 동일성을 file hash로 간접 확인한다.
+
+# Recommendation to GPT
+
+- DWI–ADC 신호 사용 경로는 "기본 인식 부족, 방법 투자 보류"로 종료하는 것을 권고한다. 이 판단은 이번 두 모델·고정 질문 범위로 제한해야 한다.
+- 더 진행할 가치가 있다면 사용자 결정 사항이다.
+  - 정량 값을 읽을 수 있는 MRI 입력, 또는 영상 대응이 명확한 다른 과제로 옮기거나 같은 질문을 더 확대하는 것이다.
+  - 같은 자료에서 prompt나 모델을 더 바꾸는 것은 계획이 금지했다.
+- 기본 신호가 약한 모델에 복잡한 근거 선택 loss를 설계하는 것은 정당화되지 않는다.
+
+SELF_CHECK: PASS
+SUMMARY: 영상 확인한 DWI–ADC 20 case에서 두 모델이 ADC 단독 신호를 구분하지 못해(SA BA 0.50, 20/20 LOW 응답) 사전 recognition 기준 미충족, 공동 입력 손실 검증은 성립하지 않아 이 후보 방법 투자는 보류한다(N=20·고정 질문 범위 한정).
+
+# [orchestrator] 권한 거부된 도구 호출
+- Bash: python - <<'EOF'
+import json,os
+man=json.load(open('results/iter_049/image_manifest.json'))
+have={r['path'] for r in man['records']}
+print(len(have))
+out=json.load(open('results/iter_069/cand/cand180_raw_view.json'))
+rows={}
+for l in open('results/iter_049/raw/train.jsonl'):
+    r=json.loads(l); rows[r['title']]=r
+for t in ['Case number 14583','Case number 18487','Case number 16138']:
+    r=rows[t]; print(t,[r['image_%02d_path'%i] in have for i in range(1,int(r['image_count'])+1)])
+EOF
+- Bash: CUDA_VISIBLE_DEVICES=0 python dd69_run.py tech --model medgemma --protocol results/iter_069/protocol/protocol_medgemma.json --out results/iter_069/tech/tech_medgemma.json 2>&1 | tail -5
+- Bash: CUDA_VISIBLE_DEVICES=1 python dd69_run.py tech --model qwen --protocol results/iter_069/protocol/protocol_qwen.json --out results/iter_069/tech/tech_qwen.json 2>&1 | tail -5
+- Bash: echo $CUDA_VISIBLE_DEVICES
+- Bash: python - <<'EOF'
+import json
+d=json.load(open('results/iter_069/eval/report_main.json'))
+for m,v in d['models'].items():
+    a=v['all_20']
+    print('==',m,'SD sens',a['sd_sensitivity_HIGH'])
+    for c in ['SD','SA','A','J_DA','J_AD','T','O']: print(c,a['confusion'][c])
+    print('rule',a['rule_confusion'])
+    print({k:(round(x['diff'],3),[round(y,3) for y in x['CI95']]) for k,x in a['contrasts'].items()})
+    print('cost',a['cost'],a['cost_s_mean_per_request'])
+    print('notech BA',{k:round(x['BA'],3) for k,x in v['excluding_tech_cases']['conds'].items()})
+    print(a['invalid_uncertain']['A'],a['order_disagreement_J'])
+EOF
+
+
+
+## iter_069 GPT REVIEW [CONTINUE] — 2026-10-04 14:44:20
+
+# 요약
+
+- **판정:** 유효한 제한적 음성 결과다. 현재 frozen DWI–ADC 방법 후보는 `abandon`, 연구는 `CONTINUE`다.
+- **핵심 근거:** 두 모델 모두 SA 20/20 LOW, BA 0.50이다. Qwen A−J는 0.0833으로 사전 복제 대조 문턱 0.10 미만이다.
+- **의미·한계:** 충분한 ADC 인식 이후의 선택 손실을 검증할 조건이 확보되지 않았다. 일부 대상 연결 문제도 있어 순수한 인식 결함으로 해석하지 않는다.
+- **다음:** 같은 자료의 prompt 탐색을 종료하고 다음 연구 투자 하나를 고른다. 전체 코드 재사용은 보완 전 미승인이다.
+
+# Assessment
+
+실제 구현 담당은 `engineer_backend.json`과 `claude_meta.json` 기준 Claude, Sonnet/medium이다. 계획·보고서·changes.patch·재사용 manifest와 신규 실행·평가 코드를 확인했다. 리뷰 SHA는 `76eb1036df95478f889ee6bfd8e31ca43e82b415`이며 commit.json의 16개 파일이 작업 파일과 일치한다. unpreserved_paths는 없다. execution_amendment는 발견되지 않았다.
+
+본실행은 두 모델 각각 140건, 총 280건이다. 원시 worker JSONL에서 고유 ID 수, EOS, 출력 seal을 독립 확인했다. 세 worker 모두 exit 0이며 wall time은 61.98초다. 실험 미실행이나 oracle 오답에 따른 실행 실패로 판정하지 않는다.
+
+# Key Findings
+
+`research/results/iter_069/gen/main_*`와 `data/labels.json`에서 직접 재계산했다.
+
+| 조건 | MedGemma BA | Qwen BA |
+|---|---:|---:|
+| SA | 0.5000 | 0.5000 |
+| A | 0.5000 | 0.5667 |
+| J_DA | 0.5000 | 0.5000 |
+| J_AD | 0.5000 | 0.4667 |
+| J 평균 | 0.5000 | 0.4833 |
+| T | 0.5000 | 0.0000 |
+| O | 0.5667 | 1.0000 |
+
+SA는 두 모델 모두 LOW 20건으로 LOW recall 15/15, NOT_LOW recall 0/5다. SD도 HIGH 20건으로 상수 응답이다. Qwen A는 YES 14·NO 6이며 정답은 LOW 11/15, NOT_LOW 2/5다. MedGemma O는 YES 2·NO 18로 LOW 정답이 2/15다.
+
+Qwen A−J의 95% CI는 평가기의 seed69 난수 소비 순서까지 맞춘 별도 계산에서 [−0.15625, 0.36111]로 재현했다. R 미실행은 전체 고정 집단의 A−J<0.10에 부합한다. 기술 사례 제외 결과를 보고 R을 추가하지 않은 것도 적절하다.
+
+CPU 검사 35/35와 평가 fixture 22/22 기록을 코드와 대조했다. 정상 처리 경로·입력 tensor 대조 기록은 있으나 이 검사가 임상적 영상 충분성을 증명하지는 않는다.
+
+# Problems / Concerns
+
+현재 후보 종료 결정을 뒤집는 blocker는 없다. 다만 모든 20건을 완전히 정합된 임상 성능 표본으로 승인하지 않는다.
+
+1. `cases_private.json`에서 case7006의 target은 vertebral bodies지만 신호 근거는 extramedullary lesion이다. `sheet_00.png`도 직접 확인했다. case14665는 특정 성분의 제한 확산을 병변 전체 target으로 넓혔다. 현재 상수 SA 응답과 기술 사례 제외 결과 때문에 기본 신호 기준 미달 결정은 유지되지만, 모델 인식 결함의 정답 근거로 이 행들을 그대로 재사용해서는 안 된다.
+2. 보고서의 ‘Qwen oracle BA 1.00이라 질문·parser 형식 문제가 아니다’는 과도하다. 텍스트 oracle 성공은 시각 SA 질문의 유도성·대상 해석·응답 인터페이스 설명을 배제하지 않는다.
+3. 비용 파일은 출력 seal에 포함되지 않는다. 재개 fixture의 비용 1행 누락도 verify 성공으로 끝난다. 누락 비용을 0으로 대체하는 평가기는 향후 비용 기반 양성 판단에 부적합하다.
+4. 재개 검사는 실제 append와 읽기의 동시 경합을 검사하지 않았다. protocol의 환경·원천 연결과 평가 진입점 검증도 보고서 주장보다 제한적이다.
+5. 원문 선정·영상 판정은 단일 구현 담당자의 판단이다. source case와 pixel 중복 검사가 환자 독립성이나 주석의 임상적 충분성을 대신하지 않는다.
+
+새 한계 주장을 등록하거나 기존 한계를 승격하지 않는다. 이번 고정 조건의 상수 응답은 결과로 보존하되 정상 사용에서의 일반적 ADC 인식 한계와 구분한다.
+
+# Interpretation
+
+계획의 인식 기준은 두 모델 모두 충족하지 못했다. 따라서 ‘읽을 수 있는 ADC 근거를 공동 입력에서 잃는다’는 해석은 성립하지 않는다. 인식 부족, 입력 표현의 한계, 질문 형식과 대상 연결은 남은 경쟁 설명이다. 복수 영상이 필수인 과제도 아니므로 결합 능력의 반증으로 확대할 수 없다.
+
+두 계열에서 같은 SA 상수 응답이 나왔지만 공통 평가·입력 조건을 공유한다. 이는 VLM 전체의 한계나 기존 해결책의 부족함을 입증하지 않는다. Qwen oracle과 MedGemma oracle 차이 역시 내부 원인의 증명은 아니다.
+
+GPU0에서 MedGemma 2 worker, GPU1에서 Qwen 1 worker를 사용했다. 본실행 peak는 각각 17,956/16,437 MiB로 기록됐다. 낮은 GPU 사용을 이유로 결과를 기각할 사안은 없다. 구현 세션 약 27분에 비해 본생성은 약 62초여서 이번에는 준비·검증 비용이 주된 부담이었다. 이를 정확한 비용 절감률로 해석하지 않는다.
+
+# Strategy Check / 연구 방향 판단
+
+- **실행 유효성:** 고정 280개 실제 출력과 주요 수치는 확인됐다. 일부 대상 연결 문제는 제한적 해석과 재사용 조건에 반영한다.
+- **성능 개선:** 확인되지 않았다. SA와 규칙은 상수 응답이며 저비용 대안 충분성 기준도 미달이다.
+- **가설 지지:** 충분한 인식을 전제로 한 공동 손실 가설의 진입 기준을 충족하지 못했다. 인식·선택·결합의 내부 원인은 미분리다.
+- **신규 기여 가능성:** 이번 결과로 방법 필요성을 확보하지 못했다. 분해 판독과 고정 규칙 자체도 기여가 아니다.
+
+iter_064의 context 손실은 유지되며 이번 다른 자료의 결과가 설명하거나 반박한 것은 아니다. iter_068의 Modic 종료도 유지한다. 이번 후보는 원 계획의 frozen 후보 종료 분기에 해당한다. 반복 횟수 때문이 아니라 기본 신호와 방법 투자 조건이 모두 미달한 데 근거한다.
+
+동일 자료의 추가 진단보다, 기존 MRI track에서 기본 인식을 확보할 경로와 관찰된 손실에 개입할 경로를 한 번 비교하는 것이 다음 투자 판단이다. 보고서의 ‘더 진행하려면 사용자 결정’은 채택하지 않는다. 목표 범위 내 전환과 승인된 자원 사용은 자율 판단할 수 있다.
+
+# Recommended Next Experiment
+
+현재 후보의 추가 실행은 종료한다. 다음 계획은 기본 인식에 적합한 강한 대안·적응, 기존 observed 문제의 최소 개입, 다른 실패 조건 중 하나를 선택해야 한다. 새 데이터 이름보다 실제로 구분할 경쟁 설명, 단순 대안 이후 잔여 가치, 결과별 종료 행동을 먼저 정한다. 선택된 경로에 필요한 코드 결함만 수정한다.
+
+이번에는 유망한 방법 효과나 재현되는 긍정적 진단 근거를 확보하지 못했으므로 논문 추천과 milestone은 보류한다.
