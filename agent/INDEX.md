@@ -71,6 +71,7 @@
 - iter_063 [CONTINUE] (deep_medium/standard/normal) <MRI 공동·개별 영상 답변 대조: success> 💾62e2a5246320458bc09a0d78b6b24a9e212cb835 MRI QA 10개에서 소견 삭제 후 영상 정답률은 Qwen 10%, MedGemma 15%였다. MedGemma는 사전 문턱을 통과했지만 텍스트 응답 전부가 거절이어서 영상 신호 해석과 방법 투자는 보류한다. → 다음: 현재 key-image QA의 방법 투자를 보류하고, 같은 MRI 근거 사용 질문에서 관측 충분성을 연결하는 한정 설계 보완을 권고한다. 기존 자산의 정답·원천 영상 연결로 단일 관측의 충분성을 확인할 수 있는 대조 하나를 우선 검토한다. 연결이 성립하면 기본 인식과 추가 관측 효과를 구분하는 최소 실제 출력까지 진행하고, 성립하지 않으면 해당 자료 경로를 종료한다. E10의 prompt·parser·표본 확대, 세 번째 모델 및 학습은 자동 연장하지 않는다. MR-RATE도 접근 가능성만으로 채택하지 말고 필요한 정답 연결이 가능한 경우에만 검토한다. 실행기 수정은 실제 채택한 경로에 필요한 범위로 제한한다.
 - iter_064 [CONTINUE] (deep_medium/standard/normal) <MRI 공동·개별 영상 답변 대조: inconclusive> 💾c01661230041a54f50da493c61a098ed2bdbe46f MRI E48에서 MedGemma는 복제 대비 다른 slice 추가 시 BA가 0.771→0.500으로 하락했고 Qwen은 하락하지 않았다. 두 모델 모두 기본 신호 기준 미달로 선택 실패 확정과 방법 투자는 보류한다. → 다음: 현재 명시적 target 과제의 방법 투자를 종료하고, 같은 MRI 근거 사용 질문에서 routing으로 해결되지 않는 실제 과제의 성립 여부를 한정 검토한다. iter_056~064의 결과와 정답 연결 자산을 유지하며 기존 annotation으로 질문에 필요한 근거를 정의할 수 있는지 먼저 판단한다. 성립하면 강한 단순 대안과 비교해 다음 투자 하나를 결정하는 최소 실험을 계획하고, 성립하지 않으면 이 세부 경로를 보류하고 GOAL 안의 다른 질문으로 전환한다. 현재 E48의 prompt·표본·세 번째 모델 확대나 새 학습은 자동 연장하지 않는다. 실행기 수정은 실제 선택된 재사용 경로에만 포함한다.
 - iter_065 [CONTINUE] (deep_high/standard/normal) <MRI 질문별 관측 선택의 투자 가치 검토: inconclusive> 💾ce5f5991ee7274806e9b6ffbfbefa26d7189df62 MRI E48에서 질문별 고정 정책 이득은 MedGemma +2.81 pp, Qwen +1.60 pp로 5 pp 기준 미달이다. VLM 비교는 유효하나 HD 의미·전체 비용 검증이 빠져 복합 결론은 불확정이다. → 다음: 현재 mask 기반 관측 선택 방법 투자는 종료하고, 기존 MRI 관찰에서 다음 투자 하나를 다시 선택한다. 작은 정책 이득과 위치 prior, 큰 형식 실패를 함께 고려해 기존 출력으로 근거가 있는 최소 개입과 다른 MRI 질문으로의 전환을 비교한다. 이번 HD·비용 결함을 고치는 것만으로 현재 선택 방법을 자동 연장하지 않는다. 같은 E48의 prompt·표본·세 번째 모델·학습 확대도 자동 승인하지 않는다. 남은 관찰을 택한다면 기존 방법 이후의 부족함, 이를 구분할 최소 대조, 양성·음성·불확정별 종료 결정을 명시한다. iter_056~065의 결과와 비용을 같은 track에서 이어받고, 새 데이터 확보 자체를 다음 목표로 삼지 않는다.
+- iter_066 [CONTINUE] (deep_high/standard/normal) <MRI 답변 인터페이스와 영상 신호 분리: inconclusive> 💾7bc3601ddfc6f4525a8ad73edf281f4c824b2fc6 MRI E12 12 case에서 공동 입력 BA는 scoring으로 0.083→0.553 회복됐지만 위치 prior 0.766을 넘지 못해 확대를 보류한다. 영상 인식·결합 실패의 원인은 미확정이다. → 다음: 현재 frozen MedGemma의 mask 기반 공동 입력·답변 보정 투자를 보류하고, 같은 MRI 근거 사용 질문에서 판별력 있는 다음 비교 하나를 선택한다. iter_056~066의 결과를 이어받아 단일 관측의 충분성과 복수 관측의 필요성을 기존 정답으로 구분할 수 있는 조건을 우선 검토한다. 성립하면 가장 가까운 단순 대안과 최소 대조를 고정하고 실제 소규모 출력까지 이어가며, 성립하지 않으면 해당 세부 경로를 종료한다. 같은 E48의 답변 문자열·prompt·threshold·추가 모델·학습 확대는 자동으로 이어가지 않는다. 이번 재사용 결함은 다음에 실제 선택한 코드 경로에서만 수정한다.
 
 ## 이전 목표들의 접근법 (참고용, 현재 목표의 재평가 횟수에는 안 들어감)
 
@@ -107,12 +108,13 @@
 - MRI 질문별 sequence 근거 진단 [approach/mri-query-sequence-evidence]: 1회 (iter_060), 유효한 실험 0회, 미분류 0회, 최근 판정: execution_failed, 커밋: adfbb52dd9cd838e203e9baa14a3c8cc184e4153
 - MRI 공동·개별 영상 답변 대조 [approach/mri-multiview-qa-diagnostic]: 4회 (iter_061, iter_062, iter_063, iter_064), 유효한 실험 4회, 미분류 0회, 최근 판정: inconclusive, 커밋: 84f865b7aa2a8e07d2f5f0e10cf6b7c99ec5080b, 05494683bcd332a4529b9886ae0fe7bf57a6ab2a, 62e2a5246320458bc09a0d78b6b24a9e212cb835, c01661230041a54f50da493c61a098ed2bdbe46f
 - MRI 질문별 관측 선택의 투자 가치 검토 [approach/mri-observation-value]: 1회 (iter_065), 유효한 실험 1회, 미분류 0회, 최근 판정: inconclusive, 커밋: ce5f5991ee7274806e9b6ffbfbefa26d7189df62
+- MRI 답변 인터페이스와 영상 신호 분리 [approach/mri-answer-interface]: 1회 (iter_066), 유효한 실험 1회, 미분류 0회, 최근 판정: inconclusive, 커밋: 7bc3601ddfc6f4525a8ad73edf281f4c824b2fc6
 
-현재 연구 브랜치: approach/mri-observation-value (코드 위치: /SSD1_1TB/home/milab/daniel/08_medgemma/research)
+현재 연구 브랜치: approach/mri-answer-interface (코드 위치: /SSD1_1TB/home/milab/daniel/08_medgemma/research)
 
 ### 최근 계획의 대안 순위
 
-1. MRI 질문별 관측 선택의 투자 가치 검토: 기존 다중 sequence와 subtype 정답으로 고정 정책·전문 대안 이후의 정확도·비용 여지를 한정 검증한다.
-2. 현재 mask 기반 QA 경로 보류: 추가 가치가 약할 가능성이 높지만, 대상별 sequence 차이를 직접 비교하지 않은 상태에서 즉시 종료하는 것보다 이번 한정 대조의 정보 가치가 있다.
-3. 명시적 target 방법 개선: routing으로 회피 가능하고 기본 신호 기준도 미달해 추가 prompt·학습 투자의 우선순위가 낮다.
-4. 새 MRI 자료로 전환: 현재 질문을 검증할 자산이 있으므로 MR-RATE 접근 확인이나 다른 benchmark 준비를 이번 실험과 병행하지 않는다.
+1. MRI 답변 인터페이스와 영상 신호 분리: 같은 W/F/J 입력에 기존 scoring 대조를 적용해 큰 생성 오류의 해석과 frozen baseline 유지 여부를 한 번 결정한다.
+2. 다른 MRI 근거 사용 질문으로 전환: 현재 세부 경로를 종료하고 별도 정답 연결이 가능한 질문을 선택한다. 이번 한정 대조 후에도 실용 신호가 없으면 우선한다.
+3. 현재 selector·형식 적응 학습: prior와 기존 scoring 이후의 중요한 부족함이 확보되지 않아 현재는 투자하지 않는다.
+4. HD subtype·전체 비용 보완: 원 복합 결론을 복구할 수 있으나 selector의 작은 이득과 인터페이스 혼입을 해결하지 못해 이번에는 실행하지 않는다.
