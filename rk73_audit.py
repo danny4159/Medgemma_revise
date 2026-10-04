@@ -1,11 +1,14 @@
-"""iter_073: 3DReasonKnee 공개 train/val annotation의 연골 size grade 연결·결측·prior 점검 (CPU, 모델 호출 없음).
+"""iter_073/074: 3DReasonKnee 공개 train/val annotation의 연골 size grade 연결·결측·prior 점검 (CPU, 모델 호출 없음).
 
+iter_074 경계: 통합 원 MOAKS label(data/labels/*)은 test 환자 행을 포함하므로 어떤 진입점에서도 파싱하지 않는다(load_moaks는 항상 거부).
+안전한 train/val 전용 원 label 출처가 확인되기 전까지 원 label 연결(link_original)은 보류한다. 입력은 파싱 전에 고정 manifest hash와 대조한다.
 - test 답변(generate_data/test*.json)은 읽지 않는다. test_split.csv는 ID 열만 있는지 확인한 뒤 환자 교집합에만 쓴다.
 - grade_dict의 초기값 0을 정답으로 쓰지 않는다. null/빈값/'.'/범위 밖 코드는 실제 0과 구별한다.
 - CoT/answer 문자열은 저장하지 않는다.
 """
 import collections, csv, json, os, re, sys, time
 import pandas as pd
+import rk73_fetch as F
 
 ROOT = os.path.dirname(os.path.abspath(__file__))
 RAW = os.path.join(ROOT, 'results/iter_073/raw/data')
@@ -32,9 +35,17 @@ def norm_img(p):
     return '/' + p[i:] if i >= 0 else p
 
 
+class LabelScopeError(RuntimeError):
+    pass
+
+
+class MembershipError(RuntimeError):
+    pass
+
+
 def guard_not_test(path):
-    if os.path.basename(path).lower().startswith('test'):
-        raise ValueError('test 답변 파일은 읽지 않는다: %s' % path)
+    if os.path.basename(path).lower().startswith('test') or F.is_forbidden(path) or '/labels/' in path.replace('\\', '/'):
+        raise ValueError('test 답변/통합 원 label 파일은 읽지 않는다: %s' % path)
 
 
 def grade_status(v):
@@ -76,19 +87,24 @@ def prompt_subregion_ok(prompt, sub):
     return ('cartilage lesions in the %s subregion' % sub.replace('_', ' ')) in prompt
 
 
-def load_split(split):
-    p = os.path.join(RAW, 'split_files/%s_split.csv' % split)
+def load_split(split, raw=None):
+    p = os.path.join(raw or RAW, 'split_files/%s_split.csv' % split)
     d = pd.read_csv(p, dtype=str, keep_default_na=False)
     assert list(d.columns) == ID_COLS, (split, list(d.columns))  # ID 메타데이터만 (test 답변 열 없음)
     d['img'] = d.image_filepath.map(norm_img)
     return d
 
 
-def extract_split(split, split_df):
-    """generate_data/{train,val}.json에서 연골 항목만 추출. 반환: long rows, per-image 통계."""
-    path = os.path.join(RAW, 'generate_data/%s.json' % split)
+def extract_split(split, split_df, raw=None):
+    """generate_data/{train,val}.json에서 연골 항목만 추출. 반환: long rows, per-image 통계. split 밖 영상이 있으면 grade 집계 전에 MembershipError."""
+    if split not in ('train', 'val'):
+        raise ValueError('train/val만 허용: %s' % split)
+    path = os.path.join(raw or RAW, 'generate_data/%s.json' % split)
     guard_not_test(path)
     data = json.load(open(path))
+    foreign = {norm_img(r['image']) for r in data} - set(split_df.img)
+    if foreign:
+        raise MembershipError('%s.json에 split 밖 영상 %d개' % (split, len(foreign)))
     rows, per_img_total, per_img_cart = [], collections.Counter(), collections.Counter()
     seen = collections.Counter()
     prompt_bad = 0
@@ -121,19 +137,15 @@ def extract_split(split, split_df):
     return df, stats
 
 
-def load_moaks():
-    """원 MOAKS 표: {(file_tag, src): DataFrame}. 모든 열은 문자열로 보존."""
-    out = {}
-    for tag in TIME_FILE.values():
-        for src, pat in LABEL_FILES.items():
-            p = os.path.join(RAW, 'labels', pat % tag)
-            if os.path.exists(p):  # FNIH 부분집합은 BICL00/01/03만 존재
-                out[(tag, src)] = pd.read_csv(p, dtype=str, keep_default_na=False)
-    return out
+def load_moaks(*args, **kwargs):
+    """통합 원 MOAKS 표는 test 환자 행을 포함하므로 파일을 열기 전에 항상 거부한다(안전한 train/val 전용 출처 확인 전까지)."""
+    raise LabelScopeError('통합 원 MOAKS label은 test 환자 행을 포함해 읽지 않는다. train/val 전용 출처가 확인되기 전 원 label 연결은 보류.')
 
 
 def moaks_lookup(moaks):
     """(tag, pid, side) -> [(src, version, {sub: (size_raw, depth_raw)}), ...]. 중복 행을 임의로 고르지 않고 모두 보존."""
+    if not all(getattr(d, 'attrs', {}).get('scope') == 'train_val_only' for d in moaks.values()):
+        raise LabelScopeError('train_val_only로 확인되지 않은 label 표는 집계하지 않는다.')
     table = collections.defaultdict(list)
     for (tag, src), d in moaks.items():
         for _, r in d.iterrows():
@@ -204,46 +216,8 @@ def patient_weighted(va, pid_of_img):
     return {'n_patients': int(len(g)), 'accuracy_patient_mean': float(g.hit.mean()), 'mae_patient_mean': float(g.ae.mean())}
 
 
-def main():
-    t0 = time.time()
-    os.makedirs(OUT, exist_ok=True)
-    res = {'revision': json.load(open(os.path.join(OUT, 'source_manifest.json')))['revision']}
-    splits = {s: load_split(s) for s in ('train', 'val', 'test')}
-    allst = pd.read_csv(os.path.join(RAW, 'split_files/all_studies.csv'), dtype=str, keep_default_na=False)
-    allst['img'] = allst.image_filepath.map(norm_img)
-    res['split_files'] = {s: {'rows': len(d), 'patients': d.patient_id.nunique(), 'images': d.img.nunique(),
-                              'dup_image_rows': int(d.img.duplicated().sum()),
-                              'time': d.time.value_counts().to_dict(), 'knee_side': d.knee_side.value_counts().to_dict()}
-                          for s, d in splits.items()}
-    res['all_studies'] = {'rows': len(allst), 'images': allst.img.nunique(),
-                          'covered_by_splits': int(allst.img.isin(set().union(*[set(d.img) for d in splits.values()])).sum())}
-    # 환자/이미지 교집합 (test는 ID만)
-    P = {s: set(d.patient_id) for s, d in splits.items()}
-    I = {s: set(d.img) for s, d in splits.items()}
-    res['overlap'] = {'patients_train_val': len(P['train'] & P['val']), 'patients_train_test': len(P['train'] & P['test']),
-                      'patients_val_test': len(P['val'] & P['test']),
-                      'images_train_val': len(I['train'] & I['val']), 'images_train_test': len(I['train'] & I['test']),
-                      'images_val_test': len(I['val'] & I['test'])}
-    # 같은 환자·시점·무릎의 복수 series
-    for s, d in splits.items():
-        k = d.groupby(['patient_id', 'time', 'knee_side']).size()
-        res['split_files'][s]['patient_time_side_with_multiple_series'] = int((k > 1).sum())
-        res['split_files'][s]['patients_both_knees'] = int((d.groupby('patient_id').knee_side.nunique() > 1).sum())
-
-    longs, jstats = {}, {}
-    for s in ('train', 'val'):
-        df, st = extract_split(s, splits[s])
-        meta = splits[s][['img', 'patient_id', 'time', 'knee_side', 'study_folder', 'series_folder']]
-        df = df.merge(meta, on='img', how='left', validate='many_to_one')
-        df['split'] = s
-        longs[s], jstats[s] = df, st
-    res['json_stats'] = jstats
-
-    moaks = load_moaks()
-    table, mstat = moaks_lookup(moaks)
-    res['moaks_table'] = mstat
-    res['moaks_file_rows'] = {'%s/%s' % k: len(v) for k, v in moaks.items()}
-
+def link_original(longs, table, res):
+    """가정한 방문·부위 mapping으로 배포 label과 원 MOAKS 후보를 연결한다. 안전한 train/val 전용 원 label 출처가 확인될 때만 호출(현재 출처 없음)."""
     # 원 label과 연결: 후보 값 전체를 보존
     agree = {}
     for s, df in longs.items():
@@ -323,6 +297,65 @@ def main():
                     n += 1; ag += int(cands[0] == int(r.size))
             cross[t][tag] = {'n': n, 'agree': ag, 'rate': (ag / n if n else None)}
     res['time_file_cross_check'] = cross
+    return res
+
+
+NEEDED = ['data/split_files/%s' % f for f in ('all_studies.csv', 'train_split.csv', 'val_split.csv', 'test_split.csv')] + \
+    ['data/generate_data/train.json', 'data/generate_data/val.json']
+
+
+def main(argv=None):
+    import argparse
+    ap = argparse.ArgumentParser()
+    ap.add_argument('--raw', default=RAW)
+    ap.add_argument('--out', required=True, help='새 결과 디렉터리(results/iter_074/ 아래, 기존 산출물 덮어쓰기 금지)')
+    ap.add_argument('--manifest', default=F.PINNED_MANIFEST)
+    ap.add_argument('--manifest-sha256', default=F.PINNED_MANIFEST_SHA256)
+    ap.add_argument('--original-label-link', action='store_true', help='현재 항상 거부(안전한 train/val 전용 출처 없음)')
+    a = ap.parse_args(argv)
+    if a.original_label_link:
+        raise LabelScopeError('원 label 연결 요청은 파싱 전에 거부: 안전한 train/val 전용 label 출처가 없다.')
+    out = os.path.abspath(a.out)
+    if '/results/iter_074/' not in out + '/' or os.path.exists(os.path.join(out, 'annotation_audit.json')):
+        raise ValueError('출력은 새 iter_074 경로여야 한다: %s' % out)
+    raw = a.raw
+    prov = F.verify_allowed(os.path.dirname(raw), NEEDED, a.manifest, a.manifest_sha256)  # 파싱 전 고정 manifest 대조; raw = .../raw/data
+    t0 = time.time()
+    os.makedirs(out, exist_ok=True)
+    res = {'revision': F.load_pinned_manifest(a.manifest, a.manifest_sha256)['revision'], 'input_sha256': prov}
+    splits = {s: load_split(s, raw) for s in ('train', 'val', 'test')}
+    allst = pd.read_csv(os.path.join(raw, 'split_files/all_studies.csv'), dtype=str, keep_default_na=False)
+    allst['img'] = allst.image_filepath.map(norm_img)
+    res['split_files'] = {s: {'rows': len(d), 'patients': d.patient_id.nunique(), 'images': d.img.nunique(),
+                              'dup_image_rows': int(d.img.duplicated().sum()),
+                              'time': d.time.value_counts().to_dict(), 'knee_side': d.knee_side.value_counts().to_dict()}
+                          for s, d in splits.items()}
+    res['all_studies'] = {'rows': len(allst), 'images': allst.img.nunique(),
+                          'covered_by_splits': int(allst.img.isin(set().union(*[set(d.img) for d in splits.values()])).sum())}
+    # 환자/이미지 교집합 (test는 ID만)
+    P = {s: set(d.patient_id) for s, d in splits.items()}
+    I = {s: set(d.img) for s, d in splits.items()}
+    res['overlap'] = {'patients_train_val': len(P['train'] & P['val']), 'patients_train_test': len(P['train'] & P['test']),
+                      'patients_val_test': len(P['val'] & P['test']),
+                      'images_train_val': len(I['train'] & I['val']), 'images_train_test': len(I['train'] & I['test']),
+                      'images_val_test': len(I['val'] & I['test'])}
+    # 같은 환자·시점·무릎의 복수 series
+    for s, d in splits.items():
+        k = d.groupby(['patient_id', 'time', 'knee_side']).size()
+        res['split_files'][s]['patient_time_side_with_multiple_series'] = int((k > 1).sum())
+        res['split_files'][s]['patients_both_knees'] = int((d.groupby('patient_id').knee_side.nunique() > 1).sum())
+
+    longs, jstats = {}, {}
+    for s in ('train', 'val'):
+        df, st = extract_split(s, splits[s], raw)
+        meta = splits[s][['img', 'patient_id', 'time', 'knee_side', 'study_folder', 'series_folder']]
+        df = df.merge(meta, on='img', how='left', validate='many_to_one')
+        df['split'] = s
+        longs[s], jstats[s] = df, st
+    res['json_stats'] = jstats
+
+    # 원 label 연결은 보류: 통합 label 파일을 열지 않는다(빈 결과를 검증 완료로 쓰지 않음).
+    res['original_label_linkage'] = {'status': 'deferred_no_safe_train_val_label_source'}
 
     # 분포
     dist = {}
@@ -356,9 +389,9 @@ def main():
     pri['subregion_majority']['by_subregion_accuracy'] = {s_: {'n': int(len(x)), 'accuracy': float((x['size'] == x['pred']).mean())} for s_, x in va2.groupby('subregion')}
     res['train_only_prior'] = pri
     res['wall_s'] = round(time.time() - t0, 1)
-    json.dump(res, open(os.path.join(OUT, 'annotation_audit.json'), 'w'), indent=1, default=str)
+    json.dump(res, open(os.path.join(out, 'annotation_audit.json'), 'w'), indent=1, default=str)
     for s, df in longs.items():
-        df.to_csv(os.path.join(OUT, 'cartilage_long_%s.csv' % s), index=False)
+        df.to_csv(os.path.join(out, 'cartilage_long_%s.csv' % s), index=False)
     print('done', res['wall_s'])
 
 
