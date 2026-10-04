@@ -24362,3 +24362,447 @@ iter_063의 낮은 영상 신호를 MRI 전체의 실패로 일반화하지 않�
 # Recommended Next Experiment
 
 현재 명시적 target 대조의 prompt·표본·모델 확대를 종료한다. 다음 계획은 같은 MRI 근거 사용 질문에서 명시적 index routing으로 끝나지 않는 실제 과제를 기존 annotation으로 정의할 수 있는지 먼저 판단한다. 필요한 관측과 정답 연결, 강한 단순 대안, 결과가 바꿀 투자 결정이 모두 구체화될 때만 최소 실제 출력 실험을 선택한다. 그렇지 않으면 해당 경로를 보류하고 GOAL 범위의 다른 질문으로 전환한다. 현재 코드는 선택된 재사용 경로에 필요한 결함만 수정하며 별도 정비 반복을 만들지 않는다.
+
+
+## iter_065 GPT PLAN [MRI 질문별 관측 선택의 투자 가치 검토 / proceed] — 2026-10-04 01:17:27
+
+# 요약
+
+- **이번에 할 일:** 기존 MSD MRI의 같은 구간에서 전체 병변과 조영증강 병변을 묻고, FLAIR·T1gd·공동 입력을 비교한다.
+- **필요한 이유:** 명시적 target 손실은 routing으로 피할 수 있었다. 이제 질문별 고정 규칙과 전문 모델 이후에도 관측 선택의 정확도·비용 가치가 있는지 판단한다.
+- **확인할 기준:** 답변 정답·입력 연결, 질문별 성능 차이, 강한 고정 정책 및 HD-GLIO 대비 정확도·전체 비용을 확인한다.
+- **주의·다음:** 관측 충분성·결합 능력·신규 기여는 미확정이다. D6→E12→조건부 E48로 진행하고, 단순 대안 이후의 가치가 없으면 현재 mask 기반 방법 투자를 종료한다.
+
+# Current Understanding
+
+iter_064의 MedGemma R−C BA 손실 0.27083은 유효하다. 그러나 두 모델 모두 원 단독 기본 신호 기준을 충족하지 못했고 Qwen에서 같은 손실이 재현되지 않았다. 명시적 target의 추가 prompt·표본·모델·학습은 종료한다. 원 gate와 판정은 변경하지 않는다.
+
+iter_059의 HD-GLIO+OR는 기존 전체 병변 구간 과제에서 U8보다 정확하고 전체 비용도 낮았다. 반면 당시 비교는 네 sequence 전체 volume 대 FLAIR 일부 slice였다. 질문 대상에 따른 sequence 선택의 가치를 직접 검증한 것은 아니다.
+
+MSD의 기존 정답은 전체 병변 W=label∈{1,2,3}, 조영증강 병변 E=label3을 정의할 수 있다. 이는 annotation 유무의 정답이며 임상적으로 정상이라는 판정이나 특정 sequence의 충분성 정답이 아니다.
+
+# Strategy Check / 연구 방향 판단
+
+**상위 질문 → 현재 관찰:** 질문에 필요한 근거를 선택·사용하는 능력을 연구한다. 현재 확인된 것은 모델 특이적인 추가 영상 영향이며, 인식이 충분한 뒤의 선택 실패나 상보적 결합 실패는 아니다.
+
+**남은 경쟁 설명:** 질문마다 유리한 sequence가 달라도 질문별 고정 규칙이면 충분할 수 있다. 희소 slice의 병변 누락과 기본 인식 부족이 모든 정책을 제한할 수도 있다. 네 sequence 전문 모델이 정확도·비용을 모두 해결할 가능성도 높다.
+
+**최소 비교:** 같은 구간·같은 z 위치에서 두 질문×F/T/J를 비교한다. 질문별 고정 정책은 출력 재조합만으로 평가하고 전문 대안을 유지한다. 관측 충분성을 모델 정오답으로 라벨링하지 않는다.
+
+**세 선택의 판단:** 현재 target 방법 개선은 보류한다. 즉시 새 자료로 옮기는 것보다 기존 다중 sequence·subtype 정답을 이용한 한정 비용 비교를 우선한다. mmFormer의 대상별 modality 차이는 이 대조의 근거지만 현재 VLM의 이득을 보장하지 않는다. 이번 대조에서도 가치가 없으면 mask 기반 관측 선택 경로를 보류한다.
+
+**해결된 질문과 비용:** 기존 context 영향·모델 차이·전체 병변 전문 대안 비교는 반복하지 않는다. iter_064 E 생성은 약198초였지만 이번 8/16장 입력의 비용으로 그대로 사용할 수 없다. 현재까지 구현·검증·재작업이 발생했으며 비용 비율은 측정되지 않았다. 이번에는 사용 경로의 필수 수정만 수행한다.
+
+# Hypothesis
+
+H1: 같은 구간에서도 W와 E 질문에서 F/T의 상대 성능이 다르다.
+
+H2: 그 차이는 질문별 고정 정책으로 활용할 수 있으나, J 및 전문 모델과 비교하면 정확도·비용 가치가 사라질 수 있다.
+
+본 실험의 결정은 새로운 관측 선택 학습에 투자할 근거가 남는지다. H1만 성립하거나 oracle 선택만 좋아지는 것으로는 충분하지 않다. J의 이득도 더 많은 정보·token·관측 범위의 효과와 얽혀 있으므로 결합 능력의 증명으로 해석하지 않는다.
+
+# Limitation Evidence / Correct Usage Checks
+
+대상 이력은 observed `mri-explicit-target-context-effect`다. 원 리뷰는 valid_experiment=true, blocking_issues=[]이며 공식 입력·target tensor·정답 연결을 확인했다. 이 한계를 새 subtype 과제나 두 모델의 공통 한계로 확장하지 않는다. 이번 역할은 diagnostic, method_stage=none이다.
+
+- 원본 NIfTI의 네 채널, mask 정수 label, affine·shape·orientation·case 연결을 확인한다.
+- 기존 FLAIR 렌더는 불변 조건에서 재사용한다. T1gd는 channel2를 읽고 해당 volume 전체 min-max를 사용한다. 동일 RGB와 기존 표시 방향을 유지한다.
+- 모델별 공식 chat template·processor를 유지하고 F/T/J의 해당 영상 pixel tensor가 비교 가능한지 검사한다. 실제 token 수·resize를 기록한다.
+- 생성은 기존 greedy 설정과 512 cap, 비EOS 요청만 2048 cap 한 차례 재시도를 유지한다. 형식 오류는 성능 오류로 별도 보고하며 100% 정답·100% 형식 준수를 실행 gate로 삼지 않는다.
+- HD 숫자 label 의미는 과거 sources.json만으로 확정하지 않는다. 공식 배포 metadata 또는 근거 있는 원 출처와 연결한다. 연결 실패 시 subtype 전문 비교가 미완료임을 명시하고 E 확대를 중단한다.
+
+# Contribution Path / Baselines / Reuse
+
+기여는 미확정이다. [HeMIS](https://arxiv.org/abs/1607.05194)와 [mmFormer](https://arxiv.org/html/2206.02425)는 MRI modality 누락을, [SeViLA](https://proceedings.neurips.cc/paper_files/paper/2023/hash/f22a9af8dbb348952b08bd58d4734b50-Abstract-Conference.html)는 질문 조건부 영상 선택을 다룬다. 고정 규칙의 효율이나 MRI 점수 상승 자체를 새 방법으로 주장하지 않는다.
+
+필수 baseline은 F/F, F/T, T/F, T/T, J/J, D에서 선택한 질문·구간 위치별 다수 class, HD-GLIO+규칙이다. 표기에서 첫 항은 W, 둘째 항은 E에 사용할 입력이다. 질문을 구분하지 않는 정책은 F/F와 T/T다.
+
+D6에서 질문 비조건 정책 B와 질문별 정책 Q를 각각 macro BA 최대값으로 선택한다. 동률이면 D 전체 비용, 그다음 사전 사전식 정책 순서로 정한다. E에서는 선택을 바꾸지 않는다. 사전 임상적 규칙 F/T도 별도 고정 baseline으로 보고한다. E에서 가장 잘 나온 정책은 낙관적 참고값으로 표시한다.
+
+HD는 네 sequence 전체 volume을 사용한다. MSD W와 HD 비배경 합집합의 ontology 차이, 특히 necrotic core 처리의 미확인을 명시한다. E 정답과 contrast-enhancing 출력의 대응은 별도 확인한다. 학습 데이터 중복 미확인과 supervision 차이를 유지한다. 전문 모델을 불리하게 만들기 위해 입력을 제한하거나 매 질문마다 전체 segmentation을 다시 계산하지 않는다.
+
+현재 브랜치의 `msd56_data.py`, `msd56_run.py`, `s64_run.py`, `s64_eval.py`, `s64_test.py`를 실제 사용 함수 범위에서 재사용한다. s64의 target 전용 tech 검사를 새 자료에 그대로 통과시켜서는 안 된다. 새 질문·sequence manifest를 연결하는 전용 경로를 추가하되 범용 리팩터링은 하지 않는다. 원 실행기·원 결과의 의미는 유지한다.
+
+현재 기반에 없는 `hdglio59_hd.py`만 명시한 SHA에서 선별 반입한다. 의존 `msd56_data.py`는 현재 존재한다. 새 branch 준비 후 필요한 파일이 없다면 임의 재구현하지 말고 출처·반입 문제로 보고한다.
+
+필수 수정은 평가 진입점의 protocol–requests–labels–manifest–model 연결, 실제 저장 완료까지의 비용 측정, runtime 시험의 상속 GPU 허용 집합 검사다. 원 승인 범위 밖의 실행·cache·재개를 자동 승인된 것으로 취급하지 않는다.
+
+# Proposed Experiment
+
+## 1. 자료와 질문 고정
+
+기존 D6/E48 case와 각 case의 여섯 구간을 유지한다. reserve·미노출 환자를 소비하지 않는다. GT를 사용하지 않고 각 구간에 기존 `equi(n,8)`의 여덟 z 위치를 선택한다.
+
+정답은 구간 전체 mask에서 W 또는 E voxel이 하나라도 있으면 PRESENT다. 별도로 같은 여덟 z에서 해당 label이 관측되는지를 계산한다. 이 coverage는 희소 표집 누락 설명을 위한 평가 변수이며, 입력 선택·모델별 사례 제외·임상적 충분성 판정에 사용하지 않는다.
+
+각 질문은 동일한 문장 틀을 쓴다. 예: `These are ordered axial MRI slices sampled from one fixed brain interval. [sequence/index description] Is [target] present anywhere in this interval? Answer only PRESENT or ABSENT.` W의 target은 `tumor or tumor-associated edema`, E는 `contrast-enhancing tumor`다. sequence 설명은 실제 입력과 일치시키고 GT·mask·HD 예측을 prompt에 넣지 않는다. D 생성 전에 정확한 문자열과 parser를 고정한다.
+
+F=FLAIR 8장, T=T1gd 8장, J=동일 z의 FLAIR/T1gd를 z별로 교차 배치한 16장이다. J에는 각 image의 sequence와 위치 대응을 텍스트로 명시한다. 순서 전수 조합은 실행하지 않는다.
+
+## 2. 동작 확인과 D6
+
+소수 D 입력에서 원본–PNG–processor tensor·mask 정답·HD 출력 연결을 확인한다. 검사 통과 후 D6의 432개 고유 요청을 완료한다. 이는 모델 정답률 gate가 아니다. D는 정책 선택과 처리량 측정에 사용한다.
+
+HD 기존 D/E 예측의 manifest·원본·checkpoint 연결을 확인하고 새 W/E 후처리만 계산한다. 공식 숫자 의미 확인이 실패하면 이를 미확인으로 남기며 결과에 잘 맞는 label permutation을 선택하지 않는다.
+
+## 3. 가능성 탐색 E12
+
+기존 E48을 case ID의 `SHA256('iter065:'+case_id)` 순서로 고정하고 앞 12 case를 E12로 사용한다. 모델 출력·GT 성능을 보고 표본을 고르지 않는다. E12는 72구간, 144개 질문 항목, 두 모델·세 조건으로 864요청이다.
+
+E12 뒤 확대는 다음 규칙을 따른다.
+
+- 한 모델 이상에서 두 질문 각각 F/T/J 중 최고 BA가 0.65 이상이고, Q−B 또는 Q−J의 macro BA 차이가 0.05 이상이면 E48로 확대한다.
+- 위 효과 조건이 미달해도 같은 기본 신호 조건을 충족하며 차이의 paired 95% CI가 0.05를 포함하고, D의 Q 비용이 J보다 최소 20% 낮으면 정밀도 확인을 위해 E48로 확대한다.
+- class가 없어 BA가 정의되지 않으면 현재 E48 annotation 분포만 확인한다. E48에서 정의 가능하면 사전 고정 순서의 나머지를 실행하고, 불가능하면 해당 비교를 미정의로 종료한다.
+- 그 외에는 E12에서 탐색을 종료한다. 이는 현재 선택·입력·모델의 투자 판단이며 MRI 전체의 음성 결론이 아니다.
+
+0.65는 강한 기본 능력의 인증이 아니라 무차별적인 본실행을 피하기 위한 낮은 탐색 신호 기준이다. iter_064의 원 기준을 바꾸지 않는다.
+
+## 4. 조건부 E48 확대
+
+확대하면 모든 나머지 case를 같은 설정으로 완료한다. E48은 288구간·576개 질문 항목이고 총 3,456개 고유 요청이다. E12 출력은 재사용하며 중복 생성하지 않는다. 효과가 나온 질문·구간·모델만 골라 확대하지 않는다.
+
+직접 SFT·selector 학습·세 번째 모델·새 sequence 조합은 이번 범위에 없다. 독립 확인도 이번에 실행하지 않는다. 단계적 선택과 반복 개발 자료라는 사실을 최종 해석에 반영한다.
+
+## 5. 자원·비용·재개
+
+시작 직전 nvidia-smi와 상속된 CUDA_VISIBLE_DEVICES를 확인한다. 메모리가 더 여유로운 허용 GPU부터 배치한다. 기본 후보는 GPU별 모델 한 개이며, MedGemma의 batch 확대 또는 동일 GPU 두 worker 중 유망한 하나를 D에서 비교한다. Qwen도 메모리가 허용하면 batch 확대를 검토한다. 16장 J와 긴 출력의 peak를 포함하고 worker당 최소 2GiB 여유를 둔다.
+
+iter_064의 Qwen/MedGemma 장치 peak 16,311/17,837MiB는 두 장 입력 당시 기록이며 이번 admission 근거로 직접 쓰지 않는다. OOM 시 batch·동시성을 줄인다. 영상 수·해상도·생성 조건을 성능 확인 후 바꾸지 않는다. 단일 요청 자체가 실행 불가하면 해당 조건의 자원 blocker로 보고한다.
+
+처리량 선택은 D에서 전체 요청/분, peak VRAM, 긴 출력 지연, 오류·I/O 경합과 결과 정합성으로 결정한다. E 성능으로 실행 구성을 선택하지 않는다. GPU별 독립 shard와 원자적 claim, worker별 파일, request 완료 검사를 유지한다.
+
+시간 예측은 D 실측의 모델·조건별 요청당 시간과 실제 동시 배치, loading·렌더 비용을 합쳐 E 시작 전에 기록한다. iter_064의 960요청/198.37초를 동일 처리량으로 단순 환산하면 E48은 약12분이지만, 8/16장 입력 때문에 실제 예상값이나 상한으로 사용할 수 없다. 임의 시간 제한은 두지 않는다.
+
+비용의 주 workload는 한 case의 여섯 구간×두 질문=12개 답변이다. HD는 volume을 한 번 처리해 12개 답변에 재사용한다. VLM도 같은 case의 렌더·읽기를 합리적으로 공유한다. D6을 기존 순서의 두 case씩 세 block으로 나누고 Q/J/HD 순서를 순환 배정해 두 GPU에서 균형 있게 측정한다. Q는 모델별로 평가하고 J도 대응 모델을 사용한다.
+
+원본 NIfTI 읽기부터 sequence 준비·추론·후처리·답변 저장 완료까지 잰다. loading 포함과 동일 실행에서 직접 계측한 loading 제외 비용을 구분한다. 한 질문의 비용은 보조로만 보고하며 HD 전체 비용을 질문마다 반복 부과하지 않는다. 이번 질문의 비용에 iter_059 수치를 그대로 대입하지 않는다.
+
+기록은 `results/iter_065/`에 저장한다. 완결 행 단위 결과를 checkpoint로 사용하고, 기존 claim을 지우거나 다른 worker의 파일을 절단하지 않는다. 실패 attempt·부분 결과는 보존한다.
+
+# Implementation Tasks for Claude
+
+1. 지정한 원 리뷰·현재 파일·선별 반입 자산을 확인한다. 실제 사용하는 s64 경로의 세 reuse issue만 우선 수정한다.
+2. 다중 channel 로더, W/E 정답, 고정 z와 coverage, F/T/J 요청 manifest를 추가한다. 원 binary 출력·원 결과를 변경하지 않는다.
+3. HD subtype 숫자 의미와 기존 예측 provenance를 확인하고, 후처리를 독립 재계산한다. 의미 연결 실패를 성능 결과로 해석하지 않는다.
+4. 모델별 공식 입력, 새로운 prompt, 8/16장 token·pixel 대응을 검사한다. 과거 target index용 tech gate를 새 과제의 검증으로 대체하지 않는다.
+5. 실제 평가 진입점에서 request·label·manifest·model 변경 거부와 중복·누락 검사를 수행한다. 저장 경계 중단·동시 worker 재개 검사는 변경된 경로에 집중한다.
+6. D6을 완료하고 정책·처리량·비용 예측을 고정한 뒤 E12와 조건부 E48을 실행한다.
+7. 원시 출력에서 BA·정답 쌍·coverage·비용을 계산하고 별도 코드로 주요 count를 재계산한다. 기존 s64의 case당 양성/음성 한 개 가정을 사용하지 않는다.
+8. 계획 대비 실제 요청·단계·확대 이유, 정확도·비용·기여의 미확정을 보고한다. 사용하지 않은 과거 실행기의 정비는 하지 않는다.
+
+# Evaluation (성공/실패 기준 포함)
+
+**주지표:** 질문별 pooled sensitivity, specificity, BA와 두 질문의 동일 가중 macro BA다. invalid/비EOS 최종 응답은 오답으로 계산하고 별도 비율을 보고한다. GT가 다른 W/E 질문쌍의 두 답변 동시 정확도도 보고해 같은 답 반복을 구분한다.
+
+case 단위 paired bootstrap 10,000회, seed65의 95% CI를 사용한다. slice·질문을 독립 표본으로 세지 않는다. 재표집에서 class가 사라지면 유효 replicate 수와 조건부 CI임을 명시한다. E12의 확대 판단에 사용한 결과를 독립 확인으로 부르지 않는다.
+
+coverage=0인 양성 항목의 FN과 coverage>0의 FN을 분리한다. 전자는 표집 누락과 양립하고 후자도 sequence 충분성·인식·답변 오류가 혼재한다. 양성 coverage>0 집단만의 좋은 결과를 전체 성능으로 대체하지 않는다.
+
+**투자용 최소 가치:** Q−B macro BA≥0.05, 각 질문에서 Q−B≥−0.03, Q−J macro BA≥−0.03, Q/J 전체 비용≤0.80을 요구한다. 5 pp는 추가 경로를 유지할 정확도 가치, 3 pp는 허용할 개발 성능 손실, 20%는 구현·선택 비용을 감수할 처리 비용 여유로 정한 투자 기준이다. 임상 허용 오차나 확증된 non-inferiority margin이 아니다.
+
+HD 대비로도 Q의 각 질문 BA가 0.03보다 크게 낮지 않고 Q/HD 전체 비용≤0.80이어야 저비용 대안 후보로 본다. HD W의 ontology 차이가 결론을 좌우하면 해당 비교는 불확정으로 남긴다. 점추정 통과와 CI가 허용하는 범위를 따로 보고하며 작은 개발 집단으로 동등성을 확정하지 않는다.
+
+**양성:** 위 기준을 충족하면 질문별 고정 정책의 효율 관찰을 보존한다. 이는 새 학습의 필요성을 보여주지 않는다. 다음 리뷰에서 기존 방법 대비 독립 확인의 가치와 남은 방법 문제를 판단한다. 현재 근거가 고정 규칙으로 모두 설명되면 새 방법 투자는 종료한다.
+
+**음성:** 기본 인식 신호 부족, Q−B의 작은 차이, J의 명확한 우세, 또는 HD의 정확도·비용 우위가 확인되면 현재 mask 기반 선택 방법 투자를 종료한다. 어떤 항목이 미달했는지 구분한다.
+
+**불확정:** E48까지의 정밀도·자료 의미 부족은 보류로 끝낸다. 정확도 점추정 기준은 충족하지만 timing만 결정을 막으면 D6 동일 paired block을 한 번 더 측정할 수 있다. 반복 후에도 불확정이면 중단한다. 표본·prompt·세 번째 모델의 자동 확대는 없다.
+
+F/T의 사례별 oracle 선택은 선택 여지의 낙관적 참고치로만 허용한다. selector 계산 비용을 포함하지 않으며 실제 정책 성능이 아니다. Oracle 이득만 남으면 method pilot을 승인하지 않는다.
+
+# Risks / Checks
+
+- 기존 D/E는 반복 사용한 개발 자료다. 환자 독립성·모델 학습 노출은 미확인이다.
+- GT 전체 구간과 희소 입력의 관측 범위가 다르다. coverage를 함께 보고하고 관측 충분성이나 결합 필요성을 주장하지 않는다.
+- F/T/J 비교는 정보·token 수가 다르다. 이번 목적은 운영상 정확도·비용 비교이며 순수 attention 원인 분리가 아니다.
+- HD 출력 ontology와 숫자 label 대응을 구분한다. 검증되지 않은 label 의미를 성능 최대화로 선택하지 않는다.
+- D6 정책 선택의 불확실성은 E bootstrap에 완전히 포함되지 않는다. E의 최고 고정 정책도 보조로 제시해 약한 D 선택만 이긴 결과를 식별한다.
+- 모델 간 입력 해상도·token·크기·학습·비용 차이를 기록한다. 한 모델의 양성을 VLM 전체로 확대하지 않는다.
+- 이번 진단이 성공해도 신규 contribution, 최소 방법 gate, 독립 확인을 대신하지 않는다.
+
+## 대규모 GPU 필요 후보
+
+질문 조건부 3D·multi-sequence encoder와 언어모델의 공동 적응은 장기 후보로 보존한다. 현재 비교에서 고정 정책·전문 모델 이후의 중요한 잔여 문제가 확인되기 전에는 대규모 학습의 필요성이나 우위를 주장하지 않는다.
+
+# 계획의 근거 (GPT 조사 노트)
+
+## 핵심 결정
+
+기존 MRI 자산으로 질문별 관측 선택의 정확도·비용을 한정 검증한다. 관측 충분성의 임상 정답을 새로 만들지는 않는다. 이번 선택은 새로운 방법의 유망성을 인정한 것이 아니라, 고정 규칙과 전문 대안 이후의 투자 여지를 판별하기 위한 것이다.
+
+## 직전 라운드 질문에 대한 답
+
+1. **평가 성립 여부:** 가능하다. 전체 구간의 mask에서 답변 정답을 정의하고 실제 제공 slice에 annotation이 포함됐는지를 별도 계산할 수 있다. 따라서 답변 정확도·비용은 측정할 수 있지만, 특정 sequence의 임상적 필요성이나 시각적 충분성은 판정할 수 없다. `msd56_data.py`의 기존 `load_case`는 FLAIR만 반환하므로 T1gd 연결은 새 검증이 필요하다.
+2. **남은 개선 목표:** 질문별 고정 sequence 선택이 공통 고정 sequence보다 나은지, 그 이득이 J와 HD-GLIO 대비 전체 비용에서도 남는지다. HD는 기존 E48에서 BA 0.950457, D6 전체 비용은 U8의 0.600989배였다. 이는 이미 강한 반대 근거이며 새 비용 우위를 가정할 수 없다. 원 기록은 `iter_059/review.md`에서 확인했다.
+3. **전환 여부:** 현재는 새 자료로 전환하지 않는다. 질문 대상별 modality 차이에 대한 선행 근거와 이미 연결된 정답이 있어 한정 대조가 성립한다. 다만 고정 정책·전문 모델 이후의 가치가 없으면 이 mask 기반 경로를 종료한다. 이후 질문을 지금 임의로 확정하거나 새 benchmark 감사를 함께 발주하지 않는다.
+
+## 새로 확인한 근거
+
+- `iter_057/review.md`에서 U8와 DENSE의 BA는 0.768639/0.776335이고 차이는 불확정이었다. 따라서 slice 수 확대 자체를 유망한 개입으로 재선정하지 않는다.
+- HD-GLIO 공식 문서와 고정 배포 readme는 contrast-enhancing tumor와 non-enhancing T2/FLAIR signal abnormality를 출력 대상으로 명시한다. 네 sequence가 필요하다. 숫자 label 대응과 MSD whole-tumor ontology의 완전한 일치는 별도 확인 대상이다. 기존 `sources.json`의 숫자 대응을 확인된 공식 근거로 반복하지 않는다. [HD-GLIO 공식 저장소](https://github.com/CCI-Bonn/HD-GLIO)
+- mmFormer는 BraTS 2018의 15개 modality 조합을 비교했다. Table 1의 단일 FLAIR/T1c에서 WT Dice는 86.10/72.22, ET Dice는 39.33/72.60이었다. 이는 해당 segmentation 모델·자료에서 대상별 정보 차이가 있음을 보여주는 설계 근거이며, 현재 VLM의 성능 예측이나 필요 sequence 정답은 아니다. [mmFormer 원문](https://arxiv.org/html/2206.02425)
+- HeMIS는 이용 가능한 modality 표현의 집계를 다룬다. [HeMIS](https://arxiv.org/abs/1607.05194)
+- SeViLA는 질문 조건부 keyframe 선택과 답변, 답변 기반 선택 pseudo-label을 이미 제안했다. 따라서 질문별 관측 선택이라는 이름만으로 차별화할 수 없다. [SeViLA 공식 논문 페이지](https://proceedings.neurips.cc/paper_files/paper/2023/hash/f22a9af8dbb348952b08bd58d4734b50-Abstract-Conference.html)
+
+## 재사용·한계
+
+`iter_065/think/round_01.json` 원문, GOAL, iter_057/059/064 리뷰, 관련 CODE_ASSETS·LIMITATIONS와 iter_058/059/064의 원 code_assets를 확인했다. 현재 HEAD는 `c01661230041a54f50da493c61a098ed2bdbe46f`이고 변경은 없다. 현재 브랜치의 s64 실행·평가 경로에는 protocol 연결, GPU 제한 검사, flush 비용 경계의 필수 수정이 남는다. 과거 전체 스냅샷을 승인된 것으로 취급하지 않는다.
+
+이번 라운드는 읽기와 문헌 확인만 수행했다. 신규 GPU 출력·파일 수정·학습은 없다. 문헌은 설계 참고이며 사용자 논문 추천으로 등록하지 않는다.
+
+이전 사고 라운드 노트: agent/runs/iter_065/think/
+
+
+
+## iter_065 CLAUDE IMPLEMENTATION REPORT — 2026-10-04 10:35:07
+
+# Work Performed
+
+**요약**
+
+- **핵심 결과:** MSD MRI의 같은 구간에서 전체 병변(W)과 조영증강 병변(E)을 묻고 FLAIR(F), T1gd(T), 교차 16장(J)을 비교했다. D6 → E12 → E48까지 실행했다. 사전 규칙상 확대가 맞았다.
+- **근거 (E48, 288구간, MedGemma):**
+  - 질문별 고정 정책 Q(W=F, E=T) macro BA는 0.726, 질문 비조건 최선 B(F/F)는 0.698이다. Q−B는 +0.028 [0.004, 0.052]로 사전 기준 0.05에 못 미친다.
+  - HD-GLIO는 macro BA 0.945이고 Q−HD는 −0.219 [−0.257, −0.180]이다.
+  - 비용은 Q가 HD보다 큰 쪽이다. MedGemma는 약 17~23배, Qwen은 약 1.0~1.4배다.
+- **미검증·주의:**
+  - 이 결과는 "MRI 정보 선택 기여" 가설을 지지하지 않는다. 대신 sequence 선호가 질문에 따라 갈린다는 관찰만 남는다.
+  - 기본 인식이 약하다. MedGemma F의 W 민감도는 0.51, E는 0.34이고, Qwen은 거의 ABSENT로 답한다.
+  - E12 확대 후 E36을 합친 E48은 독립 확인이 아니다.
+  - 중단·재개 시험, 처리량 비교, 비용 block 반복은 하지 않아 SELF_CHECK는 FAIL이다.
+- **다음:** 현재 mask 기반 관측 선택 경로는 보류를 권한다. Q−B와 HD 대비 열세 때문이다.
+
+**상세**
+
+- 계획이 "현재 브랜치에 있다"고 한 `msd56_data.py`, `msd56_run.py`, `s64_*.py`가 작업 트리에 없었다. 커밋 c0166123에서 `git show`로 그대로 복구했고, 수정 없이 반입했다.
+- 자료 구성 `m65_data.py`:
+  - 기존 `cases.json`의 D6/E48과 6구간을 유지했다. E12는 `SHA256('iter065:'+case)` 순서의 앞 12 case이고, 나머지 36은 E36이다.
+  - 구간마다 `equi(n,8)`로 8개 z를 고정했다.
+  - F는 FLAIR 채널 0이고 case vmin/vmax로 렌더했다. T는 T1gd 채널 2이고 volume 전체 min-max로 렌더했다. J는 z별 F/T 교차 16장이다.
+  - 정답은 W=label∈{1,2,3} 존재, E=label3 존재다. coverage는 8개 z에 해당 label이 있는지로 따로 저장했다.
+  - 채널 순서와 label 의미는 `dataset.json`(t1gd=2, 3=enhancing tumour)으로 확인했다.
+  - F/T 영상을 직접 열어 같은 기하임을 확인했다.
+- 실행기 `m65_run.py`: s64 실행기를 이 과제용으로 바꾼 것이다.
+  - 새 `tech` 검사를 넣었다. 공식 processor와 tensor 대조, token·grid, prompt 일치와 누출, 같은 png의 tensor 불변, J 교차 순서, W/E 동일 영상 확인이다.
+  - 답변 저장 후 fsync까지의 `read_to_saved_s` 비용 sidecar를 추가했다.
+  - 같은 out_dir에서 GPU별 shard를 돌릴 수 있게 launcher를 고쳤다(worker 번호와 lock 공유).
+- 평가기 `m65_eval.py`:
+  - verify clean과 기록 파일 hash를 확인한다.
+  - 현재 requests/labels/manifest/model로 계산한 protocol digest가 verify·protocol과 같아야 한다.
+  - 정책 선택 규칙은 D에서만 적용한다. B는 {F/F,T/T}, Q는 {F/T,T/F} 중 macro BA 최대이고, 동률이면 D 비용, 그다음 사전식이다.
+  - case 단위 bootstrap은 10,000회, seed65다. 여러 split을 각자 검증한 뒤 합칠 수 있다.
+- HD `m65_hd.py`: `hdglio59_hd.py`(blob 8f2435f)를 기반으로 W=pred>0, E=pred==2를 추가했다. `m65_cost.py`, `m65_test.py`, `m65_verify_eval.py`도 새로 만들었다.
+
+# Files Changed
+
+새 파일 (모두 `research/` 안):
+- `m65_data.py`, `m65_run.py`, `m65_eval.py`, `m65_hd.py`, `m65_cost.py`, `m65_test.py`, `m65_verify_eval.py`
+- 복구한 파일: `msd56_data.py`, `msd56_run.py`, `s64_data.py`, `s64_run.py`, `s64_eval.py`, `s64_test.py`. c0166123의 내용 그대로다.
+- `hdglio59_hd.py`는 이미 untracked 상태였고 수정하지 않았다.
+
+결과는 모두 `results/iter_065/`에 있다: data, protocol, tech, gen, hd, eval, tests.
+
+# Commands / Experiments
+
+- `m65_data.py build --split D|E12|E36`: 성공. 요청은 각각 216, 432, 1296건이다.
+- `m65_test.py`: 21/21 PASS (`tests/cpu_tests.json`). 정답·coverage, J 교차, E12 순서, 요청·정답·manifest·png hash 일치, 변조 거부, 선택 규칙을 포함한다.
+- 두 모델 모두 `lock` → `tech` → `launch` → `verify` 순으로 D, E12, E36을 처리했다.
+- tech 검사 fails 0. 단 Qwen E36에서 1건이 실패했다. byte가 같은 근-빈 slice 2개의 tensor 공유를 오배치로 오판한 검사 과엄격이었다.
+  - 검사를 "내용이 다른 png만 공유 금지"로 고쳤다.
+  - E36을 새 코드 hash로 다시 lock해서 v2로 돌렸다.
+  - 실패한 tech 기록(`tech_qwen_E36.json`)은 보존했다.
+- 각 모델의 생성은 D 216, E12 432, E36 1296건이고 verify는 모두 문제 0, exit code 0이다.
+- 생성 구성은 GPU 0과 1에 모델별 worker 1개씩이다.
+  - MedGemma peak는 약 11.4GB, Qwen은 약 16.9GB이다.
+  - 한 GPU에 MedGemma 2개를 두면 (11.4+2)×2가 24.5GB를 넘어 규칙상 불허라서 1개를 유지했다. 2-worker 처리량 비교는 하지 않았다.
+- HD는 D 3 block(2 case씩), E12, E36에서 실행했다. 모두 rc 0이다.
+- 분석:
+  - `m65_eval.py`는 D, E12, E36, E48을 두 모델에 모두 실행했다.
+  - 독립 재계산은 split별로 BA와 정책 macro가 일치했다(불일치 0).
+  - Q−B CI의 독립 근사도 일치했다.
+  - HD 회귀: 54 case 중 최대 3 voxel 차이이고 shape는 모두 같다.
+
+# Results
+
+HD label 의미: 고정 공식 readme에는 숫자 대응이 없다. D 6 case에서 MSD label과의 Dice로 확인했다 (`data/hd_label_semantics_D.json`).
+- HD 2 ↔ MSD 3(enhancing): Dice 0.24~0.88
+- HD 1 ↔ MSD 1·2: Dice 0.51~0.86
+- HD 1 ↔ MSD 3: Dice 0.01~0.19
+
+이것은 경험적 확인이며 공식 근거는 아니다. 이 대응은 VLM 성능을 보기 전에 정했고, VLM 성능으로 label을 고르지 않았다.
+
+**D6 (36구간)**
+- 선택: MedGemma는 B=F/F, Q=F/T이다. Qwen은 B=T/T, Q=F/T이다.
+- MedGemma의 Q−B는 0.0이다.
+
+**E12 → E48 확대**
+- 확대 규칙 충족: MedGemma의 W 최고 BA 0.725, E 최고 BA 0.710이 모두 0.65 이상이고 Q−J macro가 0.05 이상이다.
+- 주의: Q−J의 대부분은 J의 형식 실패에서 온 값이다. J의 invalid는 E48에서 329/576이다.
+
+**E48 (48 case, 288구간, 576개 질문 항목)**
+
+| 항목 | MedGemma | Qwen |
+|---|---|---|
+| 단독 최고 BA (W / E) | 0.729(F) / 0.723(T) | 0.601(F) / 0.583(T) |
+| Q macro BA / B macro BA | 0.726 / 0.698 | 0.592 / 0.576 |
+| Q−B macro | +0.028 [0.004, 0.052] | +0.016 [−0.003, 0.035] |
+| Q−J macro | +0.370 | +0.044 |
+| Q−HD macro | −0.219 [−0.257, −0.180] | −0.353 [−0.381, −0.325] |
+
+- 질문별 sequence 선호는 방향이 두 모델에서 같다.
+  - MedGemma의 F−T는 W에서 +0.222, E에서 −0.056이다.
+  - Qwen의 F−T는 W에서 +0.032, E에서 −0.080이다.
+  - H1은 방향이 일치하지만, 크기는 MedGemma의 W에서만 크다.
+- HD macro BA는 0.945이다 (W 0.95, E 0.94). HD의 W는 MSD 전체 병변과 ontology가 다를 수 있다.
+- 형식 실패(invalid): MedGemma는 F 39, T 120, J 329이다. Qwen은 0이다.
+- coverage: 양성 FN 대부분이 coverage>0에서 발생했다. MedGemma F의 W FN은 93/189이다. 희소 표집 누락(coverage 0)은 E에서 1건뿐이다. 따라서 주된 원인은 기본 인식 부족이다.
+- W/E 정답이 서로 다른 57구간에서 두 답변이 동시에 맞은 수는 MedGemma F/T 8, Qwen 2로 매우 낮다.
+- 사례별 F/T oracle(낙관적 참고치)의 평균 BA는 MedGemma 0.732, Qwen 0.598로 선택 여지가 작다.
+- 비용 (D6, `eval/D_cost.json`):
+  - loading 제외로 비교하면 MedGemma Q/J는 0.296이고 Q/HD는 22.7배다.
+  - loading 포함으로 비교하면 MedGemma Q/J는 0.303이고 Q/HD는 17.3배다.
+  - Qwen은 loading 제외 시 Q/J 0.61, Q/HD 0.97배이고 loading 포함 시 Q/J 0.75, Q/HD 1.39배다.
+  - HD는 block(24개 답변)당 loading 제외 약 15.3초, loading 포함 약 20.8초다.
+  - 계획의 기준 "Q/J≤0.8"은 충족했다. 그러나 J의 정확도가 낮아 의미가 약하다.
+
+사전 기준 판정(점추정 기준 / CI 포함 시 모호함):
+
+| 기준 | 판정 |
+|---|---|
+| Q−B macro ≥ 0.05 | 미달 (MedGemma 0.028, Qwen 0.016) |
+| 질문별 Q−B ≥ −0.03 | 충족 |
+| Q−J ≥ −0.03 | 충족 (J 형식 실패의 영향) |
+| Q/J 비용 ≤ 0.80 | 충족 |
+| Q−HD 질문별 ≥ −0.03 | 미달 |
+| Q/HD 비용 ≤ 0.80 | 미달 |
+
+결과 파일: `results/iter_065/eval/{D,E12,E36,E48}_{medgemma,qwen}.json`, `D_cost.json`, `hd_regression_vs_iter058.json`, `verify_*_*.json`.
+
+# Goal Progress / Reused Assets
+
+- **목표 진전:** 이번 대조에서는 질문별 고정 정책이 질문 비조건 정책 대비 사전 기준(≥0.05)을 넘지 못했다. HD가 정확도와 비용 모두 앞섰다. 따라서 이 mask 기반 관측 선택 경로에는 새 방법 투자 근거가 없다.
+- 이 판단의 범위는 MSD Task01, 8장 sparse 입력, MedGemma/Qwen 두 모델, 이 프롬프트, 이 비용 측정에 한정한다. MRI 전체나 일반적인 근거 선택·결합 능력에 대한 결론이 아니다.
+- **재사용 검증:**
+  - `hdglio59_hd.py` required_checks:
+    - 구간 연결: `m65_hd.py`가 `meta[cid]["slabs"]`와 일치를 assert한다. 통과했다.
+    - 채널 순서: 기존 기록과 `dataset.json`으로 확인했다.
+    - 회귀: 54 case 최대 3 voxel 차이.
+    - 숫자 label 의미: 경험적 Dice로만 확인했다. 공식 근거는 미확보다.
+    - 비용 측정: HD 이벤트는 `time.time()`을 쓰고 `predict` 앞뒤에서 `torch.cuda.synchronize()`를 호출한다. monotonic clock이 아니다.
+    - 새 출력 경로 사용과 GPU 허용 집합 준수: 확인했다.
+  - s64 필수 수정 세 가지는 새 `m65_run.py`와 `m65_eval.py`에 반영했다. protocol 연결 검증, flush 후 비용 측정, GPU 허용 집합 admission 검사다. 재개 시험은 새 경로에서 다시 하지 않았다.
+
+# Problems
+
+**현재 결론을 무효로 만드는 문제:** 없음.
+
+**재사용 전 필수 수정·한계:**
+- 중단·재개(SIGKILL, torn tail) 시험을 `m65_run.py`에서 새로 실행하지 않았다. s64의 시험 결과를 승계하지 않았다.
+- 비용 측정 한계:
+  - 사전 계획의 Q/J/HD 순환 배치 paired block은 하지 않았다.
+  - VLM 비용은 D 생성 중 연속 측정값에서 block을 재구성했다. 두 GPU에서 동시에 실행됐다.
+  - 반복은 1회뿐이고 CI가 없다.
+- D·E12 protocol의 `m65_run.py` hash가 현재와 다르다. E36 앞에서 `cmd_tech`만 수정했기 때문이다. 평가는 `--allow-run-py-drift`로 그 파일의 hash 차이만 허용했고 나머지는 엄격히 확인했다. 생성 경로가 불변이라는 증거는 편집 이력 기록뿐이고, 자동 검증은 아니다.
+- HD 숫자 label은 공식 문서로 확인하지 못했다. HD의 W는 MSD 전체 병변과 ontology 차이가 있을 수 있다.
+- MedGemma의 verbose 출력(비EOS 후 2048 재시도)이 비용과 invalid의 주원인이다. 계획대로 생성 조건은 바꾸지 않았다.
+
+**추후 개선:** 2-worker 처리량 비교, `m65_eval.py`의 drift 허용을 protocol amendment 기록으로 대체.
+
+# Recommendation to GPT
+
+- 이번 투자 결정은 "mask 기반 질문별 관측 선택 방법을 보류하고 기록을 보존"하는 쪽이다.
+  - 보류 이유는 효과 부족(Q−B 0.028<0.05)과 HD 대비 열세(정확도 −0.219, 비용 17~23배)다.
+  - 이것은 "기준 미달"이지, 평가하지 않은 능력까지 기각하는 판단이 아니다.
+- 보존할 관찰은 sequence 선호가 질문에 따라 갈리는 방향이 두 모델에서 같다는 점이다(W는 FLAIR, E는 T1gd). 효과 크기는 MedGemma의 W에서만 크다.
+- 보류가 아니라 질문 전환을 택한다면 연구 질문을 바꿔야 한다. 기본 인식(민감도 0.34~0.51)과 형식 순응이 병목이므로, 어느 모델로 어떤 과제에서 기본 신호가 충분한지부터 확인하는 것이 순서다.
+- 이 경우 모델 교체는 후보 반복이 아니라 결정을 바꾸는 비교여야 한다.
+- 사용자에게 MR-RATE 접근 권한 확인을 요청할지 여부는 GPT가 판단한다. 나는 채택하지 않았다.
+
+SELF_CHECK: FAIL
+SUMMARY: MSD MRI에서 질문(W/E)×입력(F/T/J)을 D6→E12→E48까지 실행해 평가했고, 질문별 고정 정책 Q의 이득(MedGemma Q−B +0.028)이 사전 기준 0.05에 못 미쳤다. HD-GLIO가 정확도(Q−HD −0.22)와 비용(VLM 17~23배) 모두 앞서 mask 기반 선택 투자는 보류를 권하지만, 새 경로의 재개 시험·처리량 비교·비용 paired 반복은 하지 못했다.
+
+# [orchestrator] 권한 거부된 도구 호출
+- Bash: mkdir -p results/iter_065/gen/E48_view && python -c "
+import json,glob
+# 독립 검증용: E12+E36 라벨과 레코드를 합친 임시 view는 만들지 않고 split별로 검증
+import subprocess
+R='results/iter_065/'
+for m in ('medgemma','qwen'):
+    for sp in ('D','E12','E36'):
+        rep=R+f'eval/{sp}_{m}.json'
+        import os
+        if not os.path.exists(rep): continue
+        r=subprocess.run(['python','m65_verify_eval.py',rep,R+f'gen/{sp}_{m}',R+f'data/labels_{sp}.json',R+f'eval/verify_{sp}_{m}.json'],capture_output=True,text=True)
+        print(m,sp,r.returncode,r.stdout[-250:],r.stderr[-200:])
+"
+
+
+
+## iter_065 GPT REVIEW [CONTINUE] — 2026-10-04 10:42:42
+
+# 요약
+
+- **판정:** `inconclusive`, `valid_experiment=true`. VLM 비교는 유효하지만 계획 전체의 HD·비용 복합 검증은 미완결이다.
+- **핵심 근거:** E48에서 Q−B는 MedGemma +2.81 pp, Qwen +1.60 pp로 사전 5 pp 기준에 못 미쳤다. 원시 응답과 bootstrap을 독립 재계산했다.
+- **의미·한계:** 질문별 sequence 차이는 남지만 새로운 selector의 필요성은 확인되지 않았다. HD 공식 label gate 미충족과 비용 경계 차이로 전문 대안의 이번 복합 우위를 확정하지 않는다.
+- **다음:** 현재 mask 기반 선택 방법 투자는 종료한다. 기존 MRI 관찰과 단순 대안을 종합해 다음 투자 하나를 선택한다.
+
+# Assessment
+
+실제 구현은 `engineer_backend.json`과 `claude_meta.json` 기준 Claude, Sonnet/medium이며 로그 모델은 `claude-sonnet-5-5`다. 리뷰 대상은 `ce5f5991ee7274806e9b6ffbfbefa26d7189df62`이고 unpreserved_paths는 없다. 변경 diff와 현재 소스를 확인했으며 m65 소스 및 데이터 의존 파일의 commit byte 일치를 대조했다.
+
+모델별 D 216건, E12 432건, E36 1296건이 완료됐다. 두 모델 합계 D 432건·E 3456건이며 E12는 E48에 포함된다. verify의 중복·누락 0, launcher exit code 0, 원시 출력 seal을 확인했다. 실험 미실행이나 전체 실행 무효로 분류하지 않는다.
+
+E12 MedGemma의 W/E 최고 BA와 Q−J는 수치상 확대 조건을 충족했다. 그러나 별도의 HD 공식 label 의미 gate는 미충족이었다. 따라서 보고서의 '사전 규칙상 확대가 맞았다'는 표현은 부분적으로만 맞으며, 전체 원 계획 준수로 승인할 수 없다.
+
+# Key Findings
+
+1. **VLM 주수치를 독립 재현했다.** E48은 48 case·288구간·576개 질문 항목이다. MedGemma Q(F/T) macro BA는 0.72610, B(F/F)는 0.69798, 차이는 0.02812이며 95% CI는 [0.00352, 0.05224]다. Qwen Q는 0.59205, B(T/T)는 0.57606, 차이는 0.01599이며 CI는 [−0.00258, 0.03535]다. 원시 응답에서 confusion counts를 다시 만들고 seed65·10,000회 case bootstrap으로 재현했다.
+2. **질문별 차이와 실행 형식이 얽혀 있다.** MedGemma W의 F/T BA는 0.72872/0.50722, E는 0.66725/0.72348이다. E48 invalid는 F 39/576, T 120/576, J 329/576이다. 직접 확인한 원시 응답에는 반복 생성으로 cap에 도달한 출력과 최종 답이 포함돼도 whole-string parser에 맞지 않는 서술형 출력이 있었다. Qwen invalid는 0이다.
+3. **자료 연결을 확인했다.** 현재 requests·labels·manifest·PNG·source hash를 protocol과 대조했다. 격리된 기존 hdglio58 Python으로 원본 NIfTI mask를 읽어 D/E 총 324구간의 W/E 정답과 coverage를 재계산했다. D 대표 F/T 영상도 직접 표시했다. 이는 임상적 충분성 검증은 아니다.
+4. **runner drift의 실제 범위를 확인했다.** 로그의 마지막 tech 수정만 현재 코드에서 역적용하면 D/E12 protocol에 저장된 runner hash와 일치한다. 이번 생성 경로 불변성은 확인됐지만 임의 drift를 허용하는 평가 옵션의 재사용 안전성은 별개다.
+5. **누락된 prior가 해석에 중요하다.** 리뷰에서 D의 질문·위치별 다수 class를 사후 점검했다. 동률을 ABSENT/PRESENT로 각각 처리한 E48 macro BA는 0.73573/0.73223이었다. 두 경우 모두 MedGemma Q 0.72610보다 높았다. 동률 규칙을 사전 고정한 공식 baseline 결과는 아니므로 탐색적 점검으로만 기록한다. 다만 낮은 BA 문턱 통과를 영상 활용 능력의 증거로 해석하기 어렵다는 점은 분명하다.
+
+# Problems / Concerns
+
+**현재 결론을 막는 문제**
+
+- 계획은 HD enhancing label을 공식 자료 또는 metadata로 연결하고 실패하면 E 확대를 중단하도록 했다. 구현은 D GT와의 Dice로 숫자 대응을 정했다. VLM 성능을 보기 전이었다는 설명만으로 원 gate를 충족하지 않는다. 원본 예측에서 numeric 후처리는 재현됐지만 의미 검증을 대신하지 않는다.
+- `m65_cost.py`는 VLM의 PNG 읽기 이후 요청 시간을 합산하고 평균 loading을 더했다. HD는 원본 NIfTI 읽기·채널 분리부터 측정했다. 계획한 순환 paired block도 없다. 따라서 Q/J 0.296이나 Q/HD 17~23배를 사전 정의한 전체 비용 비율로 승인하지 않는다.
+- 필수 위치 prior가 빠졌다. 또한 보고서의 oracle은 case별 BA를 평균하고 F/F와 T/T만 비교한다. pooled macro BA와 집계 단위가 다르고 질문별 선택 상한도 아니므로 '선택 여지가 작다'는 결론을 뒷받침하지 못한다.
+
+**재사용 문제**
+
+답변과 비용 sidecar 사이의 중단은 비용 누락을 남길 수 있다. 새 경로의 중단·동시 재개 검사는 미실행이다. 평가기의 runner drift 허용은 특정 변경으로 제한되지 않았다. Q 후보 집합도 계획의 네 가지 정책과 다르지만 이번 D 선택 결과에는 영향이 없다. 비EOS를 명시적으로 오답 처리하지 않는 코드도 수정해야 한다. 현재 parser-valid 비EOS는 0건이었다.
+
+**자원 운영**
+
+실제 launcher 기록은 두 GPU에 worker를 배정하고 완료를 확인한다. MedGemma D/E12/E36 wall-clock은 각각 약 3033/6319/17355초, Qwen은 약 99/176/510초였다. 이는 학습 효과나 순수 device 시간의 증거가 아니다. batch 비교와 사전 비용 예측은 빠졌지만 낮은 utilization이나 실행 시간 때문에 정확도 결과를 기각하지 않는다.
+
+# Interpretation
+
+현재 실험은 고정 인터페이스에서 질문별 sequence 입력에 따른 답변 성능 차이를 검증했다. 충분한 단독 인식을 전제로 한 근거 선택 실패나 상보적 결합 실패를 검증한 것은 아니다.
+
+coverage>0인 FN이 많다는 사실은 희소 표집으로 annotation을 완전히 놓친 경우가 주된 설명은 아니라는 근거다. 하지만 sequence의 시각적 충분성, 인식, 지시 준수, 형식 오류를 분리하지 못하므로 '주된 원인은 기본 인식 부족'이라는 보고서의 해석은 낮춰야 한다.
+
+MedGemma Q−B의 CI는 5 pp를 포함하므로 의미 있는 효과가 절대로 없다고 말할 수 없다. 그러나 점추정 기준 미달, prior 대비 이득 미확보, 독립 확인 부재를 종합하면 현재 selector 투자를 확대할 근거는 부족하다. 이 판단은 HD 비용 우위의 확정을 필요로 하지 않는다.
+
+기존 `mri-explicit-target-context-effect`는 다른 조건의 관찰이므로 유지한다. 이번 결과로 해당 주장을 해제하거나 일반적인 다중 영상 한계로 승격하지 않는다.
+
+# Strategy Check / 연구 방향 판단
+
+- **실행 유효성:** VLM 비교와 제한된 질문별 sequence 관찰은 유효하다. HD 의미·전체 비용 복합 검증은 미완결이다.
+- **성능 개선:** Q의 B 대비 작은 이득은 재현됐지만 사전 5 pp 기준을 충족하지 못했다. 방법 학습은 실행하지 않았다.
+- **가설 지지:** 두 모델에서 W는 F, E는 T가 유리한 방향은 관찰됐다. 그러나 기본 인식·형식·sequence 충분성의 경쟁 설명은 남는다.
+- **신규 기여 가능성:** 고정 규칙의 차이 자체는 기여가 아니다. 위치 prior와 전문 대안 이후에 남는 중요한 방법 문제가 확보되지 않았다.
+
+iter_059의 전문 대안 관찰과 iter_064의 모델 특이 context 손실은 각각의 원 범위에서 유지한다. 이번 비교는 전자의 모든 입력 차이를 통제하거나 후자의 원인을 설명하지 않는다. 타 계열 Qwen 비교는 수행됐지만 여러 모델의 낮은 성능을 기존 해결책의 부족함으로 동일시하지 않는다.
+
+현재 mask 기반 선택을 개선하는 투자는 종료를 권고한다. HD 비용 재측정만으로는 Q−B 기준 미달과 prior 문제를 해소하지 못하므로 별도 비용 실험을 자동 발주할 가치가 낮다. 다음에는 기존 MRI 관찰에 대한 최소 개입과 다른 MRI 질문으로의 전환을 비교해야 한다. 이번 실측에서는 MedGemma 생성 시간이 컸고, 로그에는 반복 대기·검사·재작업도 남았다. 전체 누적 비용 비율은 확인하지 않았으므로 절감률을 추정하지 않는다.
+
+# Recommended Next Experiment
+
+현재 E48의 prompt·표본·세 번째 모델·학습을 자동 확대하지 않는다. 다음 계획에서 기존 관찰 하나를 선택하고, 단순 대안 이후에 남는 실제 사용 가치와 경쟁 설명을 명시한다. 중요한 잔여 문제가 없다면 현재 세부 경로를 종료하고 MRI 우선 범위에서 다른 질문으로 전환한다. 기존 결과·코드·원 판정은 보존한다.
+
+논문 추천은 보류한다. 이번에는 방법 방향의 긍정적 투자 근거가 확보되지 않았고 복합 비교도 미완결이다.
