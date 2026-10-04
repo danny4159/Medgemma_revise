@@ -27487,3 +27487,383 @@ round_02에서 확인한 후보는 MOAKS 연골 size grade 0–3이다. 생성�
 
 이전 사고 라운드 노트: agent/runs/iter_072/think/
 
+
+
+## iter_073 GPT PLAN [MRI 부위별 판독의 투자 적합성 검토 / proceed] — 2026-10-05 03:31:49
+
+# 요약
+
+- 이번에 할 일: 공개 train/validation annotation의 환자 연결·결측·연골 size grade 분포를 점검하고 자료 도착 후 최소 비교를 준비한다.
+- 필요한 이유: 직접 SFT와 crop은 이미 선행에 있다. 정답 prior와 단순 영역 판독 대안 이후 남는 질문을 구체화해야 한다.
+- 확인할 기준: 출처가 고정된 annotation 연결, 결측을 보존한 집계, 환자 단위 분리, 선행과 구별할 비교 및 자료 인수 기준이다.
+- 주의·다음: 실제 영상 정합·모델 성능은 미검증이다. 준비 결과를 한 번 보고한 뒤 자료 도착을 기다린다.
+
+# Current Understanding
+
+이번은 setup이다. 모델 추론·학습을 발주하지 않는다. 사용자 보완 `20261005_032747_b802ff04`에 따라 iter_072의 전면 작업 보류를 공개 annotation 점검과 조건부 설계 허용으로 변경한다.
+
+기준 기록은 `agent/runs/iter_072/plan.md`이며 SHA256은 `509e169c47901adb58adaddaa24cd0450b6a10f2f0d0c2a19f44a8e5bd6684ac`이다. think/round_01·02의 조사와 최종 GOAL, MRI 우선, 원본 보존은 유지한다. 원본 OAI 영상 확보·계정 확인 요청, 실제 출력·학습은 보류한다. 결측·환자 연결·등급 분포의 실제 계산은 아직 수행되지 않아 이번 작업으로 지정한다.
+
+현재 research HEAD는 `973628fd9852fd558796cffb2dcb60ba24f87bc2`이며 clean 상태다. iter_072 결과 디렉터리와 구현 산출물은 확인되지 않았다. 기존 기록을 덮어쓰지 않고 이번 산출물은 `research/results/iter_073/`에 둔다.
+
+# Strategy Check / 연구 방향 판단
+
+상위 질문은 질문에 필요한 근거를 선택해 판독에 사용하는가이다. iter_071은 두-category 위치 출력의 강한 detector 대안을 확인했지만 부위 내부의 임상 등급 판독을 평가하지 않았다. iter_072는 이를 연골 size grade 후보로 좁혔다.
+
+남은 경쟁 설명은 실제 영상 판독 부족, 부위별 label prior, 영역 지원의 효과와 해상도 변화다. 이번 최소 작업은 공개 정답이 이 설명들을 구분하는 비교를 지탱하는지 확인하는 것이다. 모델의 인식·선택·결합 중 어느 실패도 새로 관찰했다고 말하지 않는다.
+
+현재 방법 개선이나 기존 context 재진단보다 미실행 annotation 점검의 정보 가치가 높다. 자료 없이 GPU를 쓰는 기존 실험 재개는 이번 선택을 바꿀 근거가 없다. 지배 비용은 이번에는 자료 조회·연결 검증이며 실제 전송량과 처리시간을 기록한다. 새 benchmark·범용 framework는 만들지 않는다.
+
+바뀔 결정은 하나다. 자료 도착 후 동일 supervision의 부위별 판독 비교로 진입할 수 있는지, 아니면 정답 연결 보완부터 해야 하는지다. 준비 완료 뒤에는 같은 작업을 자동 반복하지 않는다.
+
+# Hypothesis
+
+후속 가설 후보는 직접 적응 후에도 질문 대상별 size grade 구별에서 부위 prior나 단순 영역 판독으로 설명되지 않는 잔여 문제가 있다는 것이다. 현재는 가설이며 실제 모델 근거가 없다.
+
+이번에는 annotation의 구조가 그 가설 검증을 허용하는지 확인한다. 동일 무릎에서 부위별 등급이 다른 사례의 수와 분포는 후속 대상 구별 대조의 적합성 정보다. 이를 모델 실패나 여러 관측의 결합 필요성으로 해석하지 않는다.
+
+# Limitation Evidence / Correct Usage Checks
+
+`limitation_ids=[]`로 둔다. 기존 MRI context 한계는 다른 과제의 observed 근거이며 이번 method gate로 전용하지 않는다.
+
+size와 depth를 분리하고 grade_dict의 초기값 0을 실제 정상 정답으로 사용하지 않는다. null·빈 문자열·미측정·범위 밖 코드와 실제 0을 구별한다. grade에서 생성된 CoT와 answer 문자열은 추론 입력에 들어갈 수 없다. 공개 box는 주로 예측 해부학 영역이며 수동 병변 oracle가 아니다.
+
+원본 영상 없이 확인할 수 없는 항목은 명시적으로 남긴다: 원본 MOAKS와의 임상 정답 일치, 좌표·orientation 정합, DESS의 관측 충분성, slice 선택 손실, 모델 및 segmentation 학습 노출이다.
+
+# Contribution Path / Baselines / Reuse
+
+가장 가까운 선행은 [3DReasonKnee §4](https://arxiv.org/html/2510.20967v1)의 직접 SFT와 instruction zero-shot crop 비교다. 이 비교의 재현은 새 기여가 아니다. 같은 적응과 영상·등급 supervision에서 단순 영역 판독 이후에도 의미 있는 정확도·효율 문제가 남는지가 후속 투자 조건이다.
+
+이번에는 전체 majority 및 부위별 majority를 train에서만 정한다. 동률은 낮은 grade로 결정한다. validation에 고정 적용해 support, accuracy, class별 recall, macro recall, MAE를 기술적으로 집계한다. class가 없는 경우 recall을 0으로 채우지 않고 미정의로 표시한다. 부위·환자별 가중 방식을 명시하고 pooled 수치만으로 결론내리지 않는다. 이는 label-only 대조이며 모델 관찰이 아니다.
+
+자료 도착 후의 주대조 후보는 직접 grade SFT, 동일 예측 영역을 제공한 grade SFT, 같은 영역·등급으로 학습한 분류기다. 공개 영역의 추가 supervision과 해상도·영상 범위 차이를 드러낸다. 다른 계열 VLM은 Qwen 계열을 우선 비교 후보로 유지하되 이번에 가중치를 받거나 순위표를 만들지 않는다.
+
+iter_071 code_assets 원문을 확인했다. bbox parser·matching은 현재 집계와 맞지 않고 학습·launcher는 needs_fix다. 이번에는 반입·수정하지 않는다. `reuse_assets=[]`는 코드 소실을 뜻하지 않는다. 후속 학습 경로가 확정될 때만 관련 실제 파일·의존성을 검토하고 CE 실패 처리·재개·GPU 배치·provenance 결함을 수정한다.
+
+# Proposed Experiment
+
+## 1. 공개 파일 범위 고정
+
+이전 조사 revision `7a611f92fd3ad3954e8b62feef49ee12bfef725a`에서 필요한 파일의 존재·크기·형식을 먼저 확인한다. 사용 revision, URL, 파일 hash, bytes를 기록한다. revision 변경이 필요하면 차이를 기록하고 혼합하지 않는다.
+
+대상은 questions, question_subregion_mapping, grade_dict, labels mapping, 필요한 CoT mapping, train/val split, 관련 train/val grade annotation이다. 공식 test 답변을 다운로드·파싱하지 않는다. test split은 답변 없는 ID metadata만 환자 교집합 검사에 사용할 수 있으며 식별자만 포함됐는지 먼저 확인한다. all_studies는 필요한 연결 metadata만 사용한다. 영상·mask archive·전체 저장소 snapshot은 받지 않는다.
+
+생성 annotation이 split 혼합 파일이면 개별 train/val 자료 또는 split으로 지정된 원 label 파일을 우선한다. test 답변을 파싱해야만 분리 가능한 구조이면 그 파일 분석을 보류하고 제한을 보고한다.
+
+## 2. 연결·결측·분포 점검
+
+연골 size에 해당하는 질문 집합을 공식 mapping으로 결정한다. 특정 부위의 유리한 분포를 보고 주과제를 사후 선택하지 않는다.
+
+각 항목에 patient_id, time, knee_side, study_folder, series_folder, question_id, subregion, size grade, grade 출처와 결측 상태를 연결한다. ID는 문자열로 보존하고 좌우·시점을 파일명 추정만으로 확정하지 않는다. row와 환자·무릎·study·series 수를 구별한다.
+
+다대다 join, 중복 key, 충돌 grade, orphan 경로, train/validation 환자 교집합을 검사한다. 양쪽 무릎과 모든 시점은 동일 환자 cluster로 묶는다. 정당한 복수 판독이 있으면 임의 평균이나 첫 행 선택을 하지 않는다. 공식 해결 규칙이 없으면 별도 충돌로 보존한다.
+
+원 label과 배포 정답이 둘 다 있으면 연골 size의 일치를 계산한다. 원 label이 없으면 배포 내부 일관성만 검증했다고 쓴다. 결측과 실제 0의 구분 가능성, 부위별 grade 0–3 support, 환자 수, 시점·좌우 편중과 같은 무릎 내 grade 차이를 보고한다. 전체 원자료는 보존하고 분석 제외 사유를 기록한다.
+
+## 3. 조건부 최초 실행 설계
+
+후속 인수 목록은 환자·시점·좌우·DESS series 식별자, 해당 전체 DICOM series 또는 변환 provenance가 있는 NIfTI, 연결 MOAKS 원표, 사용할 경우 mask/box와 좌표 정의다. 연구실 전체 영상이나 모든 OAI 자료를 요청하지 않는다.
+
+환자·시점 선택은 모델 출력과 무관하게 정한다. 주 분석은 환자별 적격한 가장 이른 시점을 우선하고, 좌우는 연결 가능한 범위를 보존하되 환자로 군집화한다. 중복 series는 공식 지정과 acquisition metadata로 해결하고 해결 불가 사례는 제외 사유를 남긴다. 공식 train에서 기술 확인 사례를 고르고 validation은 개발 평가임을 유지한다. 독립 확인용 표본과 규모는 영상 확보 뒤 고정한다.
+
+자료 도착 후 순서는 ID·정답 연결 → DICOM/volume 방향·spacing·좌우와 box overlay → 관측 범위·입력 tensor 검사 → 공식 모델 입력 및 정답 token/mask·gradient·재개 확인 → 실제 기본 출력 → 별도 승인 계획의 직접 적응·모듈형 비교다. 모델 100% oracle 정답은 보편적 gate로 요구하지 않는다.
+
+동작 확인, 가능성 탐색, 규모 확대, 독립 확인은 별도 단계로 문서화한다. 이번에 환자 수·epoch·LR 탐색량·효과 문턱을 임의 확정하지 않는다. 실제 적격 수와 입력 처리량을 얻은 후 실행 전에 고정해야 한다. 유효 관찰 없이 새 loss 학습으로 넘어가지 않는다.
+
+# Implementation Tasks for Claude
+
+1. 기준 계획·round_01/02와 이번 보완을 읽고 유지·변경·미확인 사항을 보고서에 짧게 정리한다.
+2. 공개 파일의 필요한 범위만 확보하고 provenance와 test 답변 차단 경계를 기록한다. 공식 파일 접근에 실패하면 확인한 URL·오류와 필요한 대체 경로만 한정 확인한다.
+3. 이 자료 전용의 작은 annotation 점검 스크립트를 작성한다. 기존 동일 기능이 실제로 있으면 먼저 확인해 재사용하며 범용 로더나 학습기를 새로 만들지 않는다.
+4. null 대 0, 잘못된 grade, 환자 시점·좌우 누수, 중복·충돌 join, test 답변 거부를 작은 fixture로 검증한다. fixture는 코드 검증이며 가짜 환자 성능 실험으로 보고하지 않는다.
+5. `research/results/iter_073/`에 출처 manifest, 연결·결측·분포 집계, train-only prior 결과, 자료 인수 기준과 조건부 비교 설계를 저장한다. 원자료와 제외 목록을 보존한다.
+6. `claude_report.md`에 확인한 사실·미확인 사항·자료 도착 후 최초 행동을 보고하고 종료한다. 원본 영상 접근 질문을 다시 하지 않는다.
+
+# Evaluation (성공/실패 기준 포함)
+
+준비 충족은 출처 고정, 누수 없는 집계, 결측 의미의 명시, 선행과 구별할 질문, 인수 기준과 최초 검증 순서가 연결됐다는 뜻이다. valid model experiment나 method 효과로 보고하지 않는다.
+
+- 양성: 공개 자료가 부위별 grade 비교를 지탱하면 연결 manifest와 비교 설계를 보존한다. 실제 영상 점검 후 출력 diagnostic 계획을 확정할 준비가 된 것이다.
+- 음성: 결측 정상화·환자 중복·정답 충돌이 발견되면 원 자료 결함과 해소 가능 범위를 기록한다. 해당 경로의 학습을 보류하며 모델 한계로 해석하지 않는다.
+- 불확정: 원본 MOAKS 또는 영상 없이는 풀리지 않는 항목만 남기고 종료한다. annotation이 없다는 이유로 다른 dataset을 순회하지 않는다.
+
+주요 count와 train-only prior는 별도 간단 집계로 대조한다. validation 결과에 맞춰 질문·grade 통합·prior 규칙을 바꾸지 않는다. 이번은 준비의 완료 판정이며 논문 기여나 GOAL 완료 판정은 없다.
+
+# Risks / Checks
+
+이번 모델 요청·학습·GPU 사용은 0이다. 실제 blocker는 원본 OAI 영상 부재이며 해결 작업은 사용자 자료 도착 후 실제 경로·입력 검증이다. CPU-only 준비를 반복할 이유로 사용하지 않는다. 파일 수와 크기를 확인해 전송·처리 예상 비용을 기록하고 실제 비용과 구분한다.
+
+후속 GPU 실행에서는 시작 직전 nvidia-smi, 허용 장치의 logical/physical 대응, 작업별 peak와 worker당 2GB 여유를 확인한다. 두 GPU에 독립 작업을 배치하고 작은 batch 확대 또는 GPU당 복수 worker의 처리량·정합성을 실제 입력으로 비교한다. 현재는 메모리·wall-clock을 추정할 근거가 없어 확정하지 않는다. checkpoint와 validation 경계 재개 검증은 실제 선택된 경로에 포함한다.
+
+공개 예측 영역의 정확도·학습 노출과 원본 영상 정합은 metadata로 증명할 수 없다. crop 효과를 순수한 선택 원인으로 단정하지 않는다. 준비 결과를 한 번 보고한 뒤 새 자료 통지·실제 경로가 올 때까지 대기하며 동일 조사·구현을 자동 연장하지 않는다.
+
+## 대규모 GPU 필요 후보
+
+다기관 MRI의 vision encoder–connector–language 공동 적응은 장기 후보로 보존한다. 현재 준비 결과는 그 필요성이나 새 방법의 효과를 입증하지 않는다.
+
+# 계획의 근거 (GPT 조사 노트)
+
+## 확인한 것
+
+- `agent/GOAL.md`, iter_072의 `plan.json`과 think/round_01·02 원문, iter_071 review.md 및 review.json의 code_assets, 관련 LIMITATIONS·CODE_ASSETS 항목을 확인했다.
+- iter_072에는 구현 보고서나 결과 디렉터리가 없었다. 현재 research HEAD는 `973628fd9852fd558796cffb2dcb60ba24f87bc2`이고 작업 트리는 clean이다. tracked 파일에서 OAI/knee 전용 구현은 확인되지 않았다.
+- 이전 계획 `agent/runs/iter_072/plan.md`의 SHA256은 `509e169c47901adb58adaddaa24cd0450b6a10f2f0d0c2a19f44a8e5bd6684ac`이다. 이번 사용자 보완은 그 계획의 작업 전면 보류를 한정 준비 허용으로 바꾼다.
+
+## 선행과의 차이를 좁힌 근거
+
+[3DReasonKnee 원논문 §4](https://arxiv.org/html/2510.20967v1)을 다시 확인했다. 영역 crop 비교는 instruction zero-shot 조건이고 SFT와 동일 모델·적응 조건을 모두 맞춘 대조는 아니다. 논문의 연골 점수는 여러 attribute를 묶은 값이므로 이번 size-only 과제의 기준값으로 사용할 수 없다. 따라서 질문은 'crop이 도움이 되는가'의 반복보다, 동일 적응·supervision 아래 단순 영역 판독 이후 남는 문제로 좁혀야 한다.
+
+[공식 README](https://huggingface.co/datasets/rajpurkarlab/3DReasonKnee/raw/main/README.md)는 split에 patient_id, time, study_folder, series_folder, knee_side, image_filepath, label_filepath가 있음을 설명한다. grade mapping과 생성 annotation 경로도 안내한다. 이는 연결 점검의 출발점이며 실제 파일 완전성이나 환자 분리 검증을 대신하지 않는다. 웹 도구의 data tree 열기는 실패했지만 README와 논문은 열렸다. 이 오류를 annotation 부재로 해석하지 않는다.
+
+## 유지할 한계
+
+iter_072에서 확인한 revision `7a611f92fd3ad3954e8b62feef49ee12bfef725a`를 우선 사용하되 구현 시 실제 파일을 같은 revision으로 고정한다. 원본 MOAKS와 배포 정답의 일치, 결측 처리, 좌표 연결은 아직 미검증이다. 기존 MRI context observed 한계는 이번 무릎 과제의 method 근거가 아니다.
+
+## 재사용 판단
+
+iter_071의 승인 자산은 bbox parser·matching 범위다. 이번 annotation 집계에는 필요하지 않다. 학습·생성·launcher의 needs_fix도 실제 사용할 경로가 아직 없어 이번에 수정하지 않는다. 원문 조사와 출처를 재사용하고 새 소스 반입은 하지 않는다.
+
+## 대규모 GPU 필요 후보
+
+다기관 MRI의 vision encoder–connector–language 공동 적응은 장기 후보로 보존한다. 현재 annotation 점검으로 필요성이나 효과를 주장하지 않는다.
+
+
+
+## iter_073 CLAUDE IMPLEMENTATION REPORT — 2026-10-05 03:40:24
+
+# 요약
+
+- **핵심 결과:** 3DReasonKnee의 공개 train/val annotation만으로 연골 size grade 점검을 끝냈다. 모델 호출, 학습, GPU 사용은 0이다.
+- **근거:** 환자 split은 서로 겹치지 않는다. 배포 size 정답은 원 MOAKS 점수와 약 95% 일치한다. 결측 일부는 0으로 채워져 있다. train-only prior는 val 정확도 0.72~0.73이다.
+- **미검증·주의:** 영상이 없어 원 임상 정답과의 일치, 좌표 정합, 관측 충분성은 미확인이다. 이번 결과는 준비이며 모델 한계 관찰이나 method gate 통과가 아니다.
+- **다음:** 사용자가 OAI 자료를 주면 `handoff_design.md`의 순서대로 진행한다. 그 전에는 같은 점검을 반복하지 않는다.
+
+# Work Performed
+
+- 기준 revision `7a611f92fd3ad3954e8b62feef49ee12bfef725a`에서 필요한 파일만 내려받았다. 질문 mapping, split CSV, MOAKS 원 label CSV, `train.json`, `val.json`이다. 총 약 849MB, SHA256과 URL은 `source_manifest.json`에 있다.
+- 공식 test 답변(`test.json`, `test_balanced.json`)은 받지도 읽지도 않았다. `test_split.csv`는 ID 열만 있음을 확인하고 환자 교집합 검사에만 썼다. 영상과 mask archive도 받지 않았다.
+- 연골 14개 질문의 size와 depth를 환자, 시점, 좌우, 영상에 연결했다. 결측과 실제 0, 범위 밖 코드를 구분해 보존했다. 원 MOAKS 중복 행은 첫 행을 고르지 않고 후보를 모두 남겼다.
+- train-only global majority와 subregion majority(동률은 낮은 grade)를 val에 적용했다.
+- 사용자 지시대로 영상이 없으면 확인할 수 없는 항목은 미확인으로 남겼다.
+
+# Files Changed
+
+- 새 코드: `rk73_fetch.py`, `rk73_audit.py`, `test_rk73.py`. 기존 파일 수정은 없다.
+- `results/iter_073/`: `source_manifest.json`, `annotation_audit.json`, `cartilage_long_train.csv`, `cartilage_long_val.csv`, `tests/fixtures.json`, `handoff_design.md`, `raw/`(내려받은 원자료).
+- `claude_report.md`는 만들지 않았고 이 최종 응답이 보고를 대신한다.
+
+# Commands / Experiments (실제 실행한 명령과 성공/실패)
+
+- `python rk73_fetch.py`: 성공, 20개 파일 다운로드. 처음 heredoc으로 쓰려던 시도는 권한 검사에 막혀 Write 도구로 바꿨다.
+- `python rk73_audit.py`: 성공, 약 16~19초. 첫 실행은 FNIH BICL06 파일이 없어 실패했다. 해당 파일은 원래 없는 것이어서 존재하는 파일만 읽도록 고쳤다. 원 MOAKS 중복 처리도 "첫 행 선택"에서 "후보 전체 보존"으로 고쳐 다시 돌렸다.
+- `python test_rk73.py`: **33/33 통과.**
+  - fixture는 null 대 0, 잘못된 grade, 중복·충돌 join, test 답변 거부, 환자 누수 감지, 동률 규칙, 빈 class의 recall 미정의 처리를 검사한다.
+  - raw JSON/CSV를 audit 코드와 별도 구현으로 다시 집계해 subregion별 count, prior 정확도, 환자 교집합을 대조했다.
+  - fixture는 코드 검증이며 환자 성능이 아니다.
+
+# Results (수치와 결과 파일 경로)
+
+모두 `results/iter_073/annotation_audit.json` 기준이다.
+
+- **split:** train 5,903 영상(2,000명), val 837(267명), test 1,280(399명, ID만). 환자와 영상 교집합은 모두 0이다.
+- **JSON 구조:** 영상당 질문 62개, 연골 14개이며 중복과 prompt-subregion 불일치는 0이다. train 영상 2개(9792220/24M, 9993362/48M)는 JSON에 없어 제외 후보로 기록했다.
+- **결측 치환:** 배포 size는 train/val 모두 100% 정수 0–3이다. 원 MOAKS size가 결측인 31(train)/4(val) 행은 배포에서 0(30/4) 또는 2(1)로 채워졌다. 원 depth의 범위 밖 코드 '5'(train 14행 중 10행)도 0이나 3으로 바뀌어 있다.
+- **원 MOAKS 중복:** 8,046 key 중 2,909개가 여러 행이고 1,160개는 연골 값이 충돌한다. 판독 VERSION이 달라서다.
+- **배포 size와 원 MOAKS 일치:** 단일 후보 행 기준 train 95.2%(76,878/80,755), val 94.7%(10,837/11,446)다.
+  - 불일치는 00M/12M/24M에 몰려 있고 48M은 98.9~99.8% 일치한다.
+  - 무릎 단위로 몰려 있다. val 837 영상 중 136개에 불일치가 있다.
+  - 판독 VERSION별로 다르다(train 단일 행 key 기준 SQ:65는 7.6%, SQ:61은 0.7%).
+  - 원인은 공개 파일만으로 결정되지 않는다.
+- **size 분포 (grade 0/1/2/3):** train 59,994/4,399/16,244/1,977, val 8,476/651/2,381/210. grade 1과 3은 희소하고 subregion별 편차가 크다(예: tibia_lateral_anterior에는 grade 1이 0개).
+- **같은 무릎 내 grade 차이:** train 5,901 영상 중 5,412개(92%)는 14개 subregion 사이에 서로 다른 grade가 있다. subregion을 지정한 질문이 의미를 가지는 label 구조다. 모델의 선택 실패나 결합 필요성의 증거는 아니다.
+- **train-only prior를 val에 적용 (11,718행 풀링):**
+
+| 규칙 | accuracy | MAE | 정의된 class 평균 recall |
+|---|---|---|---|
+| global majority(전부 0) | 0.7233 | 0.516 | 0.25 |
+| subregion majority | 0.7339 | 0.490 | 0.286 |
+
+  환자 단위 평균 accuracy는 각각 0.7305, 0.7371이다. 모델이 이 값과 비슷하면 영상 판독 증거로 보지 않는다.
+- **시점과 MOAKS 파일 대응:** 00M→BICL00, 12M→01, 24M→03, 48M→06 대응은 각 방문에서 대각 일치율이 가장 높다(0.938/0.958/0.944/0.990). 다만 교차 일치율도 0.86~0.93이라 변별력은 약하다.
+- 자료 인수 기준, 선행과 구별할 질문, 최초 실행 순서는 `results/iter_073/handoff_design.md`에 정리했다.
+
+# Goal Progress / Reused Assets (목표 진전·미검증 범위, 재사용 출처·검증)
+
+- **목표 진전:** 공개 annotation은 부위별 size grade 비교를 지탱한다. 같은 무릎 안에서 subregion마다 grade가 다르다. 동시에 두 가지 데이터 결함이 확인됐다. 원 MOAKS 결측이 정답 0으로 치환됐고, 원 label과의 불일치 구조가 해소되지 않았다. 이 때문에 배포 label을 그대로 쓰기 전에 사례 단위 확인이 필요하다.
+- **미검증:** 원 임상 정답과의 일치, 영상-box 좌표와 방향 정합, 관측 충분성, 모델·segmentation 학습 노출, 공식 test 답변(열지 않음)이다.
+- **재사용:** `reuse_assets=[]`였고 코드 반입은 없다. 3DReasonKnee 공식 README 설명과 신규 점검 결과는 일치한다.
+
+# Problems (현재 결론 무효 / 재사용 전 수정 / 추후 개선을 구분)
+
+- **현재 결론 무효:** 없음.
+- **재사용 전 수정 필요:** 원 MOAKS 불일치(방문 및 VERSION 구조)와 결측 치환 행의 처리 규칙을 영상 도착 후 사례 확인으로 확정해야 한다. 규칙은 영상을 보기 전에 정한다.
+- **추후 개선:** 시점-파일 대응은 변별력이 약하다. 코드는 이 자료 전용 점검 스크립트이며 범용 로더가 아니다. 학습·생성 코드(iter_071 계열)의 알려진 needs_fix는 건드리지 않았다. 학습 경로가 확정될 때 수정한다.
+
+# Recommendation to GPT
+
+- 준비 결과를 한 번 보고했고, 후속 작업은 영상 도착 후 `handoff_design.md`의 (라) 순서 1~3부터 시작한다.
+- 자료 도착 전에는 같은 annotation 점검, 새 데이터셋 탐색, 모델 실행을 반복하지 않는다.
+- 배포 label과 원 MOAKS의 불일치가 사례 확인에서도 풀리지 않으면 정답을 원 MOAKS 규칙으로 재구성하거나 해당 부위·방문만 쓴다. 이 경우 학습은 보류한다.
+
+SELF_CHECK: PASS
+SUMMARY: 공개 train/val annotation 점검 완료(환자 교집합 0, 원 MOAKS 결측의 0 치환 확인, 배포 size와 원 MOAKS 일치 약 95%, train-only prior val 정확도 0.72~0.73). 모델·GPU 사용 0이며 영상 정합과 임상 정답 일치는 미검증이다.
+
+# [orchestrator] 권한 거부된 도구 호출
+- Bash: mkdir -p /SSD1_1TB/home/milab/daniel/08_medgemma/research/results/iter_073 && cat > /SSD1_1TB/home/milab/daniel/08_medgemma/research/rk73_fetch.py <<'EOF'
+"""iter_073: 3DReasonKnee 공개 annotation 파일 고정 revision 다운로드 + manifest. test 답변(generate_data/test*.json)은 받지 않는다."""
+import hashlib, json, os, sys, time
+from huggingface_hub import HfApi, hf_hub_download
+
+REPO = 'rajpurkarlab/3DReasonKnee'
+REV = '7a611f92fd3ad3954e8b62feef49ee12bfef725a'
+OUT = 'results/iter_073/raw'
+FILES = [
+    'README.md',
+    'data/question_files/questions.json', 'data/question_files/cot_question_mapping.json',
+    'data/question_files/grade_dict.json', 'data/question_files/labels.json',
+    'data/question_files/question_subregion_mapping.json',
+    'data/split_files/all_studies.csv', 'data/split_files/train_split.csv',
+    'data/split_files/val_split.csv', 'data/split_files/test_split.csv',
+    'data/labels/manual_annotated_kMRI_18M.csv',
+    'data/labels/taxonomymatch_kMRI_FNIH_SQ_MOAKS_BICL00.csv',
+    'data/labels/taxonomymatch_kMRI_FNIH_SQ_MOAKS_BICL01.csv',
+    'data/labels/taxonomymatch_kMRI_FNIH_SQ_MOAKS_BICL03.csv',
+    'data/labels/taxonomymatch_kMRI_SQ_MOAKS_BICL00.csv',
+    'data/labels/taxonomymatch_kMRI_SQ_MOAKS_BICL01.csv',
+    'data/labels/taxonomymatch_kMRI_SQ_MOAKS_BICL03.csv',
+    'data/labels/taxonomymatch_kMRI_SQ_MOAKS_BICL06.csv',
+    'data/generate_data/val.json', 'data/generate_data/train.json',
+]
+FORBIDDEN = ('generate_data/test',)
+
+def sha(p):
+    h = hashlib.sha256()
+    with open(p, 'rb') as f:
+        for b in iter(lambda: f.read(1 << 24), b''):
+            h.update(b)
+    return h.hexdigest()
+
+def main():
+    assert not any(any(x in f for x in FORBIDDEN) for f in FILES)
+    api = HfApi()
+    sizes = {t.path: t.size for p in sorted({os.path.dirname(f) for f in FILES})
+             for t in api.list_repo_tree(REPO, path_in_repo=p, repo_type='dataset', revision=REV)
+             if hasattr(t, 'size')}
+    man = {'repo': REPO, 'revision': REV, 'files': {}}
+    t0 = time.time()
+    for f in FILES:
+        dst = os.path.join(OUT, f)
+        if not (os.path.exists(dst) and os.path.getsize(dst) == sizes[f]):
+            hf_hub_download(REPO, f, repo_type='dataset', revision=REV, local_dir=OUT)
+        assert os.path.getsize(dst) == sizes[f], f
+        man['files'][f] = {'bytes': sizes[f], 'sha256': sha(dst),
+                           'url': f'https://huggingface.co/datasets/{REPO}/resolve/{REV}/{f}'}
+        print(f, sizes[f], flush=True)
+    man['wall_s'] = round(time.time() - t0, 1)
+    man['total_bytes'] = sum(v['bytes'] for v in man['files'].values())
+    man['not_downloaded'] = ['data/generate_data/test.json', 'data/generate_data/test_balanced.json', 'images/masks/OAI/segmentations archives']
+    json.dump(man, open('results/iter_073/source_manifest.json', 'w'), indent=1)
+
+if __name__ == '__main__':
+    main()
+EOF
+cd /SSD1_1TB/home/milab/daniel/08_medgemma/research && python rk73_fetch.py 2>&1 | tail -30
+- Bash: cd /SSD1_1TB/home/milab/daniel/08_medgemma/research/results/iter_073/raw/data && python -c "
+import pandas as pd,glob,collections
+for f in sorted(glob.glob('labels/*.csv')):
+    d=pd.read_csv(f,dtype=str,keep_default_na=False)
+    pre=collections.Counter(c[:3] for c in d.columns if c.startswith('V'))
+    print(f.split('/')[-1],d.shape,dict(pre),'SIDE',dict(d['SIDE'].value_counts()) if 'SIDE' in d else None)
+    if 'V00MCMPM' in d: print('  vals PM',dict(d['V00MCMPM'].value_counts()),'.1',dict(d['V00MCMPM.1'].value_counts()))
+    for p in pre:
+        c=p+'MCMPM'
+        if c in d: print('  ',c,dict(d[c].value_counts()),dict(d[c+'.1'].value_counts()))
+print(pd.read_csv('labels/taxonomymatch_kMRI_SQ_MOAKS_BICL00.csv',dtype=str,keep_default_na=False).iloc[:3,:6])
+"
+for f in splits; do :; done; python -c "
+import pandas as pd
+b='/SSD1_1TB/home/milab/daniel/08_medgemma/research/results/iter_073/raw/data/split_files/'
+for s in ['train','val','test']:
+    d=pd.read_csv(b+s+'_split.csv',dtype=str); print(s,d.shape,d.patient_id.nunique(),d.time.value_counts().to_dict(),d.knee_side.value_counts().to_dict())
+a=pd.read_csv(b+'all_studies.csv',dtype=str);print(a.shape,list(a.columns));print(a.head(2).T)
+"
+- Bash: python -c "
+import pandas as pd, rk73_audit as A, collections
+df=pd.read_csv('results/iter_073/cartilage_long_train.csv',dtype={'patient_id':str,'knee_side':str})
+tab,_=A.moaks_lookup(A.load_moaks())
+u=df[(df.orig_size_status=='unique')&(~df.size_in_cands)]
+print(len(u), u.groupby('time').size().to_dict())
+res=collections.defaultdict(lambda:collections.Counter())
+for r in u.itertuples():
+    for tag in A.TIME_FILE.values():
+        rows=tab.get((tag,r.patient_id,r.knee_side))
+        if rows is None: res[r.time][tag+'_norow']+=1; continue
+        st,c,*_=A.orig_candidates(rows,r.subregion,0)
+        if c and r.size in c: res[r.time][tag+'_match']+=1
+for t in res: print(t,dict(res[t]))
+# disagreement concentrated by patient/knee?
+k=u.groupby(['patient_id','knee_side','time']).size()
+print('knee-visits with disagreements',len(k),'of',df.groupby(['patient_id','knee_side','time']).ngroups, 'rows/knee-visit hist',k.value_counts().sort_index().head(15).to_dict())
+print('VERSION of unique disagreeing orig row', collections.Counter(tab[(A.TIME_FILE[r.time],r.patient_id,r.knee_side)][0][:2] for r in u.itertuples()).most_common(8))
+allv=collections.Counter((tab[(A.TIME_FILE[r.time],r.patient_id,r.knee_side)][0][0],tab[(A.TIME_FILE[r.time],r.patient_id,r.knee_side)][0][1]) for r in df[df.orig_size_status=='unique'].drop_duplicates(['img']).itertuples())
+dv=collections.Counter((tab[(A.TIME_FILE[r.time],r.patient_id,r.knee_side)][0][0],tab[(A.TIME_FILE[r.time],r.patient_id,r.knee_side)][0][1]) for r in u.drop_duplicates(['img']).itertuples())
+print({k:(dv.get(k,0),v) for k,v in allv.most_common(10)})
+"
+
+
+
+## iter_073 GPT REVIEW [CONTINUE] — 2026-10-05 03:44:33
+
+# 요약
+
+- **판정:** improve. annotation 준비는 상당 부분 완료됐지만 test 보호와 정답 해석의 정정이 필요하다. 모델 실험은 미실행이며 valid_experiment=false다.
+- **핵심 근거:** train-only global/subregion prior의 validation 정확도 0.7233/0.7339를 재현했다. 통합 MOAKS CSV에는 test 환자 행 1,957개가 있으며 코드가 전체 연골 집계에 사용했다.
+- **의미·한계:** 높은 prior와 부위별 불균형은 후속 비교 설계에 유용하다. 모델 한계·방법 효과·새 기여의 근거는 아니다.
+- **다음:** 노출 기록과 해석을 한 번 보완하고 자료 대기로 종료한다.
+
+# Assessment
+
+plan.md, plan.json, 보고서, changes.patch, commit.json, reuse_manifest.json, 실제 소스·결과 및 실행 로그의 완료 구간을 검토했다. 구현은 engineer_backend.json과 claude_meta.json 기준 Claude Sonnet, medium이다. 리뷰 대상은 0e5de720949a422d8defabd0112001dbad313235이며 새 소스 3개가 해당 SHA와 일치한다. unpreserved_paths는 없다.
+
+이번 계획은 setup이다. GPU·모델 실행을 하지 않은 것은 계획과 사용자 지시에 부합한다. 기존 종료 실험을 재개하거나 새 framework를 만들지 않은 점도 적절하다. 다만 test 답변을 개발 분석에 열지 않는 조건은 파일명 수준에서만 구현됐다.
+
+# Key Findings
+
+1. source_manifest.json의 20개 파일 hash를 독립 대조해 모두 일치함을 확인했다. 파일 크기 합계는 889,521,433 bytes다. 이는 저장 파일 크기이며 네트워크 재전송을 포함한 실측 전송량으로 해석하지 않는다.
+2. 원 train/val JSON을 별도 streaming 코드로 집계했다. 각각 365,862/51,894 records이며 size grade 0/1/2/3은 train 59,994/4,399/16,244/1,977, val 8,476/651/2,381/210으로 보고와 일치했다.
+3. 연결 CSV를 별도 집계해 global/subregion prior 정확도 0.7233316266/0.7339136371을 재현했다. 후보 값이 유일한 행의 일치도 train 76,878/80,755, val 10,837/11,446으로 재현됐다. 이 계산의 재현과 임상 정답 연결의 타당성은 별개다.
+4. 실행 로그에는 최종 audit 18.9초와 33/33 검사 통과가 남아 있다. fixtures.json도 일치한다. 리뷰에서는 결과를 쓰는 테스트 스크립트를 재실행하지 않았다.
+5. test 환자 ID와 각 MOAKS CSV의 ID만 대조해 test 환자 행이 156+103+103+490+471+362+272=1,957개임을 확인했다. 리뷰에서 이 행의 개별 grade를 추가 분석하지 않았다.
+
+# Problems / Concerns
+
+**현재 주장을 막는 문제:** load_moaks는 전체 CSV를 읽고 moaks_lookup은 모든 행의 연골 값을 추출한다. 따라서 moaks_table의 8,046 key, 중복 2,909개, 충돌 1,160개는 train/val로 제한된 집계가 아니다. test.json을 받지 않았다는 좁은 사실은 맞지만 test 정답을 전혀 분석하지 않았다는 넓은 보장은 틀리다. 원 계획은 split 혼합 정답을 파싱해야만 분리할 수 있으면 분석을 보류하도록 했다.
+
+이 문제는 train/val JSON에서 계산한 prior를 무효화하지 않는다. 모델 학습이나 test 성능 계산이 있었다는 증거도 없다. 다만 test 정답의 집계 노출을 후속 독립 평가 기록에서 숨길 수 없다.
+
+두 번째로 TIME_FILE과 SUBREGION_COL은 코드상 가정이다. 일치율이 높고 대각 대응이 가장 높다는 사실은 공식 방문·열 의미 확인을 대신하지 않는다. VERSION별 원 label 선택도 미확정이다. 그러므로 '결측이 정상으로 치환됐다'보다 '가정한 연결에서 유효 원 후보가 없는데 배포 값이 있다'가 현재 근거에 맞는 표현이다. unique는 원 행 하나가 아니라 후보 값 하나를 뜻한다.
+
+**재사용 문제:** 파일명 기반 test 차단, 크기만 확인하는 fetch 재사용, 실제 로더 경계를 통과하지 않는 누수 fixture를 보완해야 한다. 승인 가능한 계산 함수는 있으나 현재 파일 단위로 분리돼 있지 않아 전체 모듈 승인은 보류한다.
+
+# Interpretation
+
+부위별 grade 차이와 높은 majority prior는 질문·평가 설계에 도움이 된다. 같은 무릎에서 여러 grade가 있다는 사실만으로 모델의 대상 선택 실패나 복수 관측 결합 필요성을 주장할 수 없다. 영상 정합·관측 충분성·실제 모델 신호는 모두 미검증이다.
+
+원 MOAKS와 배포 annotation의 불일치는 정답 provenance 점검의 필요성을 보여준다. 현재 자료만으로 배포 정답의 생성 오류나 임상 오정답을 확정하지 않는다. 공식 test 전체를 영구 폐기할 필요가 입증된 것도 아니지만, 향후 완전 미노출 집단이라고 부를 수는 없다.
+
+# Strategy Check / 연구 방향 판단
+
+- **실행 유효성:** CPU 준비와 수치 집계는 실제 수행됐다. 모델 가설 검증은 없으며 test 보호 조건 일부가 실패했다.
+- **성능 개선:** 모델 비교·개선은 없다. prior는 정답 분포의 기준선이다.
+- **가설 지지:** 인식·선택·결합 중 어느 설명도 구분하지 않았다. 남은 질문은 동일 적응 조건의 직접 SFT·영역 지원 SFT·영역 분류기 이후에도 중요한 문제가 남는가다.
+- **신규 기여 가능성:** 직접 SFT와 crop의 단순 재현을 기여로 보지 않는 조건부 설계는 유지한다. 타 계열 비교는 실제 영상 부재로 시행하지 않았으며 Qwen 후보를 유지한 것은 타당하다.
+
+지배 비용은 annotation 확보와 연결 점검이었다. 이번에 확인한 prior를 다시 계산하거나 기존 MRI 실험을 재개할 투자 가치는 없다. 필요한 선택은 새로운 진단이 아니라 현재 준비의 해석·보호 경계를 한 번 바로잡는 것이다. 그 후에는 사용자 지시대로 자료 대기로 종료한다. 자료가 도착하면 정답 연결과 실제 영상 적합성을 먼저 확인한다.
+
+논문 추천은 보류한다. 이번에는 모델 방향의 유망성을 뒷받침하는 실제 실험이 없었다.
+
+# Recommended Next Experiment
+
+새 실험을 발주하지 않는다. iter_073 계획을 기준으로 노출 기록, 불일치 표현, 실제 split 경계 fixture만 한정 보완한다. 원본 결과·코드는 보존하고 정정을 별도 연결한다. 안전한 train/val 원 label 경로가 없으면 해당 재집계는 보류하며 준비 반복으로 이어가지 않는다.
+
+보완 후 OAI 자료 통지·경로를 기다린다. 도착 후 ID·정답 연결 → 방향·좌우·box overlay → 관측 범위와 공식 입력 → 소수 실제 출력 순서로 진행한다. 표본·학습량·처리량은 그때 실행 전에 고정한다.
