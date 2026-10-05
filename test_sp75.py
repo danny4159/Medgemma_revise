@@ -1,4 +1,5 @@
-"""iter_075 CPU fixture: 입력 연결·allowlist·ROI/표시·parser·metric·교환·prior. 결과: results/iter_075/tests/fixtures_cpu.json (존재하면 중단)."""
+"""iter_075/076 CPU fixture: 입력 연결·allowlist·ROI/표시·parser·metric·교환·prior + (iter_076) 선택·연장·loss gate·평가 입력·tail 복구.
+결과: results/iter_076/tests/fixtures_cpu.json (존재하면 중단). 실패 시 비정상 종료."""
 import json, os, sys
 import numpy as np
 from PIL import Image
@@ -81,9 +82,61 @@ chk('prior_uses_T24_only', pri['global'] == [sum(1 for r in tr if r['grade'] == 
 b1 = M.boot_diff([r for r in inc if r['split'] == 'E24' and r['position_set'] == 'held'], [1] * 47, [3] * 47, n=200)
 b2 = M.boot_diff([r for r in inc if r['split'] == 'E24' and r['position_set'] == 'held'], [1] * 47, [3] * 47, n=200)
 chk('bootstrap_deterministic_seed7501', b1 == b2, b1)
+# ---- iter_076 추가 검사 ----
+import tempfile
+import sp76_select as SEL
+import sp75_train as TR
+import sp75_eval as EV
+import sp75_gen as GN
+chk('pick_lr_lowest_primary', SEL.pick_lr([{'lr': '2e-5', 'primary': 0.9, 'ce': 1.0}, {'lr': '2e-4', 'primary': 0.8, 'ce': 5.0}]) == '2e-4')
+chk('pick_lr_tie_primary_then_ce', SEL.pick_lr([{'lr': '2e-5', 'primary': 0.8, 'ce': 2.0}, {'lr': '2e-4', 'primary': 0.8, 'ce': 1.0}]) == '2e-4')
+chk('pick_lr_full_tie_smaller_lr', SEL.pick_lr([{'lr': '2e-4', 'primary': 0.8, 'ce': 1.0}, {'lr': '2e-5', 'primary': 0.8, 'ce': 1.0}]) == '2e-5')
+chk('ext_ce_exactly_5pct_extends', SEL.needs_extension({'primary': 0.8, 'ce': 2.0}, {'primary': 0.8, 'ce': 1.9})[0])
+chk('ext_ce_4pct_no', not SEL.needs_extension({'primary': 0.8, 'ce': 2.0}, {'primary': 0.8, 'ce': 1.92})[0])
+chk('ext_primary_gain_0.10_extends', SEL.needs_extension({'primary': 0.9, 'ce': 2.0}, {'primary': 0.8, 'ce': 2.5})[0])
+chk('ext_primary_gain_0.09_no', not SEL.needs_extension({'primary': 0.89, 'ce': 2.0}, {'primary': 0.8, 'ce': 2.5})[0])
+chk('final_epoch_prefers_better_primary', SEL.final_epoch({16: {'primary': 0.9, 'ce': 1.0}, 32: {'primary': 0.8, 'ce': 3.0}}) == 32)
+chk('final_epoch_tie_ce_then_earlier', SEL.final_epoch({16: {'primary': 0.8, 'ce': 1.0}, 32: {'primary': 0.8, 'ce': 1.0}}) == 16 and
+    SEL.final_epoch({16: {'primary': 0.8, 'ce': 2.0}, 32: {'primary': 0.8, 'ce': 1.0}}) == 32)
+chk('final_epoch_excludes_epoch8', SEL.final_epoch({8: {'primary': 0.1, 'ce': 0.1}, 16: {'primary': 0.9, 'ce': 1.0}}) == 16)
+g = {'status': 'PASS', 'official_loss': 6.12, 'logits_f32_ce_mean': 6.12, 'loss_sum_over_n': 6.12, 'rel_diff_official_vs_loss_sum': 0.0, 'n_valid_tokens': 2, 'n_valid_independent': 2, 'provenance': {'a': 1}}
+chk('gate_pass_valid', TR.validate_gate(g, {'a': 1}) == [])
+chk('gate_rejects_fail_status', bool(TR.validate_gate(dict(g, status='FAIL'), {'a': 1})))
+chk('gate_rejects_nan', bool(TR.validate_gate(dict(g, loss_sum_over_n=float('nan')), {'a': 1})))
+chk('gate_rejects_rel_gt_1e-6', bool(TR.validate_gate(dict(g, loss_sum_over_n=6.12 * (1 + 2e-6), rel_diff_official_vs_loss_sum=2e-6), {'a': 1})))
+chk('gate_rejects_token_mismatch', bool(TR.validate_gate(dict(g, n_valid_independent=3), {'a': 1})))
+chk('gate_rejects_provenance_change', bool(TR.validate_gate(g, {'a': 2})))
+chk('gate_rejects_inconsistent_stored_rel', bool(TR.validate_gate(dict(g, rel_diff_official_vs_loss_sum=0.5), {'a': 1})))
+chk('eval_constants', (EV.MARGIN, EV.PASS_ABS, EV.H_TOL, EV.C_NOT_WORSE) == (0.20, 1.0, 0.10, 0.10))
+with tempfile.TemporaryDirectory() as td:
+    pj = os.path.join(td, 'p.json')
+    erows = [{'id': 'a', 'patient': '1', 'ordinal': 1, 'position_set': 'supervised'}, {'id': 'b', 'patient': '2', 'ordinal': 3, 'position_set': 'held'}]
+    good = [{'id': 'a', 'patient': '1', 'ordinal': 1, 'position_set': 'supervised', 'pred': 2}, {'id': 'b', 'patient': '2', 'ordinal': 3, 'position_set': 'held', 'pred': 3}]
+
+    def tryload(preds):
+        json.dump({'preds': preds}, open(pj, 'w'))
+        try:
+            EV.load_json_pred(pj, erows)
+            return True
+        except RuntimeError:
+            return False
+    chk('json_pred_ok', tryload(good))
+    chk('json_pred_rejects_duplicate', not tryload(good + [good[0]]))
+    chk('json_pred_rejects_missing', not tryload(good[:1]))
+    chk('json_pred_rejects_extra', not tryload(good + [dict(good[0], id='z')]))
+    chk('json_pred_rejects_bad_grade', not tryload([dict(good[0], pred=7), good[1]]))
+    gp = os.path.join(td, 'w.jsonl')
+    open(gp, 'wb').write(b'{"id": "a"}\n{"id": "b", "te')
+    r1 = GN.repair_tail(gp)
+    chk('gen_repair_torn_tail', r1 is not None and open(gp, 'rb').read() == b'{"id": "a"}\n')
+    open(gp, 'wb').write(b'{"id": "a"}\n{"id": "b"}')
+    chk('gen_complete_last_line_without_newline_kept', GN.repair_tail(gp) is None and open(gp, 'rb').read().endswith(b'}'))
+    open(gp, 'wb').write(b'{"id": "a"}\n')
+    chk('gen_repair_noop_on_clean', GN.repair_tail(gp) is None)
 fails = [k for k, v in res.items() if not v['pass']]
-out = 'results/iter_075/tests/fixtures_cpu.json'
+out = 'results/iter_076/tests/fixtures_cpu.json'
 if os.path.exists(out):
     sys.exit('exists')
 json.dump({'n': len(res), 'n_pass': len(res) - len(fails), 'fails': fails, 'checks': res}, open(out, 'w'), indent=1, default=str)
 print(len(res), 'checks', len(fails), 'fails', fails)
+sys.exit(1 if fails else 0)

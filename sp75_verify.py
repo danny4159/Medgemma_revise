@@ -1,11 +1,14 @@
-"""iter_075 독립 재계산: production metrics/eval을 import하지 않고 원시 출력에서 주지표와 paired bootstrap을 다시 계산한다.
+"""iter_076 독립 재계산: production metrics/eval을 import하지 않고 원시 출력에서 주지표와 paired bootstrap을 다시 계산한다.
 (manifest의 grade와 원시 gen JSONL/예측 JSON만 사용; parser·metric·교환·prior를 별도 구현). 결과는 eval/independent_verify.json (존재하면 중단).
 """
 import glob, hashlib, json, os, re, sys
 import numpy as np
 
-OUT = 'results/iter_075'
-man = json.load(open(f'{OUT}/data/manifest.json'))
+OUT = 'results/iter_076'
+DATA = 'results/iter_075/data'   # 읽기 전용 입력
+if os.path.exists(f'{OUT}/eval/independent_verify.json'):
+    sys.exit('exists')
+man = json.load(open(f'{DATA}/manifest.json'))
 lock = json.load(open(f'{OUT}/eval/eval_lock.json'))
 rep = json.load(open(f'{OUT}/eval/report.json'))
 E = sorted([r for r in man['rows'] if r['split'] == 'E24' and not r['excluded']], key=lambda r: (int(r['patient']), r['ordinal']))
@@ -37,7 +40,9 @@ def vlm_preds(d):
 
 
 def jpreds(p):
-    d = {x['id']: x['pred'] for x in json.load(open(p))['preds']}
+    items = json.load(open(p))['preds']
+    d = {x['id']: x['pred'] for x in items}
+    assert len(d) == len(items) == len(E) and set(d) == {r['id'] for r in E}, f'{p}: duplicate/missing/extra prediction ids'
     return [d[r['id']] for r in E]
 
 
@@ -131,7 +136,35 @@ for key, bt in rep['paired_bootstrap_patient_resampling'].items():
         r = boot(xa, xb, ix)
         res['bootstrap'][f'{key}:{pname}'] = r
         res['max_abs_diff_vs_report'] = max(res['max_abs_diff_vs_report'], abs(r['point'] - bt[pname]['point']), abs(r['ci95'][0] - bt[pname]['ci95'][0]), abs(r['ci95'][1] - bt[pname]['ci95'][1]))
-if os.path.exists(f'{OUT}/eval/independent_verify.json'):
-    sys.exit('exists')
-json.dump(res, open(f'{OUT}/eval/independent_verify.json', 'w'), indent=1)
+# 판정 flags 독립 재계산 (원 계획 경계: <=1.0, >=0.20, H보다 0.10 초과로 나쁨, C가 best VLM보다 0.10 이상 나쁘지 않음)
+flags = rep['predeclared_flags_point_estimates']
+bt = res['bootstrap']
+chk = {}
+for v in ('F_adapted', 'R_adapted'):
+    h = res['systems'][v]['held']
+    chk[v] = {'le_1.0': h <= 1.0,
+              'better_than_prior_ordinal_by_0.20': -bt[f'{v}_minus_prior_ordinal:held']['point'] >= 0.20,
+              'better_than_swap_by_0.20': -bt[f'{v}_minus_swap:held']['point'] >= 0.20,
+              'better_than_C_by_0.20': -bt[f'{v}_minus_C:held']['point'] >= 0.20,
+              'H_better_than_vlm_by_more_than_0.10': (h - res['systems']['H']['held']) > 0.10}
+    chk[v]['all_candidate_conditions_point'] = all(chk[v][k] for k in ('le_1.0', 'better_than_prior_ordinal_by_0.20', 'better_than_swap_by_0.20', 'better_than_C_by_0.20'))
+best = min(('F_adapted', 'R_adapted'), key=lambda v: (res['systems'][v]['held'], v))
+chk['best_vlm'] = best
+chk['C_not_worse_than_best_vlm_by_0.10'] = (res['systems']['C']['held'] - res['systems'][best]['held']) < 0.10
+mism = []
+for v in ('F_adapted', 'R_adapted'):
+    for k, val in chk[v].items():
+        if flags[v][k] != val:
+            mism.append((v, k))
+if flags['best_vlm'] != best or flags['C_not_worse_than_best_vlm_by_0.10'] != chk['C_not_worse_than_best_vlm_by_0.10']:
+    mism.append('best_vlm/C_not_worse')
+res['flags_recomputed'] = chk
+res['flag_mismatches'] = mism
+res['lock_seal_sha256'] = {f: hashlib.sha256(open(f, 'rb').read()).hexdigest() for f in (f'{OUT}/eval/eval_lock.json', f'{OUT}/eval/eval_seal.json', f'{OUT}/eval/report.json', f'{OUT}/eval/per_row.json')}
+res['PASS'] = bool(res['max_abs_diff_vs_report'] < 1e-9 and not mism)
+tmp = f'{OUT}/eval/independent_verify.json.tmp'
+json.dump(res, open(tmp, 'w'), indent=1)
+os.replace(tmp, f'{OUT}/eval/independent_verify.json')
+if not res['PASS']:
+    sys.exit(f'VERIFY FAIL: max diff {res["max_abs_diff_vs_report"]} flag mismatches {mism}')
 print('max abs diff vs report', res['max_abs_diff_vs_report'])

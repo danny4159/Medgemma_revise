@@ -1,11 +1,13 @@
-"""iter_075 E24 개발 평가 (한 번). F/R(미적응·적응), C, H, train-only prior, 예측 교환을 같은 행 집합에서 비교한다.
+"""iter_075/076 E24 개발 평가 (한 번; iter_076에서 결과 경로·잠금/봉인 흐름을 수정). F/R(미적응·적응), C, H, train-only prior, 예측 교환을 같은 행 집합에서 비교한다.
 
 - 평가 행: E24 non-excluded (supervised ordinal 1·3·5, held ordinal 2·4). Primary = held(ordinal 2/4) class-standardized MAE.
 - VLM 예측: 원시 출력 text를 고정 whole-string parser로 다시 해석(EOS 종료 + [1-5] 한 숫자). 비EOS/형식 오류는 invalid(오차 4). 보조: 후보 likelihood argmax.
 - prior: T24 supervised train-only (global 및 ordinal; held ordinal 2/4는 이웃 ordinal 분포 동일 가중 평균). 선택 grade는 median(동률은 낮은 grade).
 - 교환: 같은 ordinal 안에서 환자 ID hash 순 cyclic shift(+1).
 - 환자 단위 paired bootstrap 10,000회 seed 7501 (같은 환자의 모든 위치 함께 재표집).
-- LOCK: 평가 시작 전에 각 시스템의 selection 근거 파일 hash를 eval_lock.json에 기록한다(`lock` 모드). `run` 모드는 lock과 현재 파일이 같을 때만 실행한다.
+- LOCK(첫 E24 출력 전): 코드·선택 근거·checkpoint·manifest·환경 hash를 eval_lock.json에 기록(`lock`). 생성 출력은 lock에 넣지 않는다.
+- SEAL(출력 완료 후): 모든 E24 출력의 완전성(요청 집합·중복·누락) 확인 후 출력 파일 hash를 eval_seal.json에 기록(`seal`).
+- `run`은 lock·seal이 현재 파일과 일치할 때만 실행하고 결과를 새 파일에 원자적으로 쓴다(존재하면 중단).
 """
 import argparse, glob, hashlib, json, os, sys
 
@@ -15,7 +17,7 @@ import sp75_data as D
 import sp75_metrics as M
 import sp75_vlm as V
 
-OUT = 'results/iter_075'
+OUT = 'results/iter_076'
 EVAL = f'{OUT}/eval'
 CODE = ['sp75_eval.py', 'sp75_metrics.py', 'sp75_vlm.py', 'sp75_data.py', 'sp75_gen.py']
 MARGIN = 0.20          # 최소 투자 폭 (MAE grade)
@@ -63,8 +65,17 @@ def load_vlm(dirpath, rows, variant, adapter_expected):
 
 def load_json_pred(path, rows):
     d = json.load(open(path))
+    ids = [p['id'] for p in d['preds']]
+    if len(ids) != len(set(ids)):
+        raise RuntimeError(f'{path}: duplicate prediction ids {sorted({i for i in ids if ids.count(i) > 1})[:3]}')
+    want = [r['id'] for r in rows]
+    if set(ids) != set(want):
+        raise RuntimeError(f'{path}: missing {sorted(set(want) - set(ids))[:3]} extra {sorted(set(ids) - set(want))[:3]}')
     by = {p['id']: p for p in d['preds']}
-    assert [r['id'] for r in rows] == [p['id'] for p in d['preds']] or set(by) == {r['id'] for r in rows}
+    for r in rows:
+        x = by[r['id']]
+        if x['pred'] not in (1, 2, 3, 4, 5) or x['patient'] != r['patient'] or x['ordinal'] != r['ordinal'] or x['position_set'] != r['position_set']:
+            raise RuntimeError(f'{path}: bad prediction row {r["id"]}')
     return [by[r['id']]['pred'] for r in rows], d
 
 
@@ -88,11 +99,27 @@ def report_systems(rows, systems):
     return out
 
 
-def cmd_run(a):
+def verify_lock_seal():
     lock = json.load(open(f'{EVAL}/eval_lock.json'))
     for f, h in lock['files'].items():
         if sha_file(f) != h:
             sys.exit(f'locked file changed: {f}')
+    seal = json.load(open(f'{EVAL}/eval_seal.json'))
+    if seal['lock_sha256'] != sha_file(f'{EVAL}/eval_lock.json'):
+        sys.exit('seal does not match current lock')
+    for f, h in seal['outputs'].items():
+        if sha_file(f) != h:
+            sys.exit(f'sealed E24 output changed: {f}')
+    cur = {f for v in lock['vlm'].values() for f in files_of(v['dir'])}
+    if cur != set(seal['outputs']) - set(lock['json_systems'].values()):
+        sys.exit('E24 output file set differs from seal')
+    return lock
+
+
+def cmd_run(a):
+    if os.path.exists(f'{EVAL}/report.json') or os.path.exists(f'{EVAL}/per_row.json'):
+        sys.exit('report exists; refusing to overwrite')
+    lock = verify_lock_seal()
     man = D.load_manifest()
     rows = sorted([r for r in man['rows'] if r['split'] == 'E24' and not r['excluded']], key=lambda r: (int(r['patient']), r['ordinal']))
     tr = sorted([r for r in man['rows'] if r['split'] == 'T24' and r['position_set'] == 'supervised' and not r['excluded']], key=lambda r: (int(r['patient']), r['ordinal']))
@@ -127,8 +154,10 @@ def cmd_run(a):
                 swapped[n][i] = p
     comps = {}
     vl = [n for n in systems if n.startswith('F_') or n.startswith('R_')]
+    sysh0 = {n: rep['systems'][n]['held']['class_std_mae'] for n in systems}
+    best_vlm0 = min([v for v in ('F_adapted', 'R_adapted') if v in systems], key=lambda v: (sysh0[v], v))
     pairs = [(n, 'prior_ordinal') for n in vl] + [(n, 'prior_global') for n in vl] + [(n, 'C') for n in vl if n in ('F_adapted', 'R_adapted')] + \
-            [(n, 'H') for n in vl if n in ('F_adapted', 'R_adapted')] + [('F_adapted', 'R_adapted'), ('F_adapted', 'F_base'), ('R_adapted', 'R_base'), ('C', 'H'), ('C', 'prior_ordinal'), ('H', 'prior_ordinal')]
+            [(n, 'H') for n in vl if n in ('F_adapted', 'R_adapted')] + [('F_adapted', 'R_adapted'), ('F_adapted', 'F_base'), ('R_adapted', 'R_base'), ('C', 'H'), ('C', 'prior_ordinal'), ('H', 'prior_ordinal'), ('C', best_vlm0), (best_vlm0, 'H')]
     for x, y in pairs:
         if x in systems and y in systems:
             comps[f'{x}_minus_{y}'] = {p: M.boot_diff(rr, sub(systems[x], ix), sub(systems[y], ix)) for p, rr, ix in (('held', held_rows, hi), ('supervised', sup_rows, [i for i in range(len(rows)) if i not in set(hi)]))}
@@ -147,35 +176,73 @@ def cmd_run(a):
                     'better_than_C_by_0.20': -c[f'{v}_minus_C']['held']['point'] >= MARGIN,
                     'H_better_than_vlm_by_more_than_0.10': (sysh[v] - sysh['H']) > H_TOL}
         flags[v]['all_candidate_conditions_point'] = all(flags[v][k] for k in ('le_1.0', 'better_than_prior_ordinal_by_0.20', 'better_than_swap_by_0.20', 'better_than_C_by_0.20'))
-    best_vlm = min([v for v in ('F_adapted', 'R_adapted') if v in systems], key=lambda v: sysh[v])
+    best_vlm = best_vlm0
     flags['best_vlm'] = best_vlm
+    ci = lambda key: comps[key]['held']['ci95']
+    for v in ('F_adapted', 'R_adapted'):
+        if v in flags:
+            flags[v]['ci95_held_vs_prior_ordinal'] = ci(f'{v}_minus_prior_ordinal')
+            flags[v]['ci95_held_vs_C'] = ci(f'{v}_minus_C')
+            flags[v]['ci95_excludes_0_vs_prior_ordinal'] = ci(f'{v}_minus_prior_ordinal')[1] < 0
+            flags[v]['ci95_excludes_0_vs_C'] = ci(f'{v}_minus_C')[1] < 0
+    cb = ci(f'C_minus_{best_vlm}')
+    flags['C_minus_best_vlm_ci95'] = cb
+    flags['C_minus_best_vlm_ci_contains_both_plus_minus_0.20'] = bool(cb[0] < -MARGIN and cb[1] > MARGIN)
     flags['C_basic_signal'] = {'better_than_prior_by_0.20': -comps['C_minus_prior_ordinal']['held']['point'] >= MARGIN,
                                'better_than_swap_by_0.20': -comps['C_minus_swap']['held']['point'] >= MARGIN}
     flags['C_not_worse_than_best_vlm_by_0.10'] = (sysh['C'] - sysh[best_vlm]) < C_NOT_WORSE
     rep['predeclared_flags_point_estimates'] = flags
-    os.makedirs(EVAL, exist_ok=True)
     per = [{'id': r['id'], 'patient': r['patient'], 'ordinal': r['ordinal'], 'position_set': r['position_set'], 'grade': r['grade'],
             **{n: systems[n][i] for n in systems}, **{n + '_swap': swapped[n][i] for n in systems}} for i, r in enumerate(rows)]
-    json.dump(per, open(f'{EVAL}/per_row.json', 'w'))
-    json.dump(rep, open(f'{EVAL}/report.json', 'w'), indent=1)
+    for obj, fn in ((per, 'per_row.json'), (rep, 'report.json')):
+        json.dump(obj, open(f'{EVAL}/{fn}.tmp', 'w'), indent=1)
+        os.replace(f'{EVAL}/{fn}.tmp', f'{EVAL}/{fn}')
     print(json.dumps({'held_primary': sysh, 'flags': flags}, indent=1))
 
 
 def cmd_lock(a):
+    """첫 E24 출력 전: 코드·선택 근거·checkpoint·manifest·환경 hash를 고정. 생성 출력은 포함하지 않는다(별도 seal)."""
     spec = json.load(open(a.spec))
     files = {f: sha_file(f) for f in CODE}
-    for name, v in spec['vlm'].items():
-        for f in files_of(v['dir']):
-            files[f] = sha_file(f)
     for name, p in spec['json_systems'].items():
-        files[p] = sha_file(p)
+        if os.path.exists(p):
+            sys.exit(f'E24 prediction output already exists before lock: {p}')
+    for name, v in spec['vlm'].items():
+        if files_of(v['dir']):
+            sys.exit(f'E24 output already exists before lock: {v["dir"]}')
     for f in spec.get('extra_files', []):
         files[f] = sha_file(f)
-    os.makedirs(EVAL, exist_ok=True)
     if os.path.exists(f'{EVAL}/eval_lock.json'):
         sys.exit('lock exists')
-    json.dump({'vlm': spec['vlm'], 'json_systems': spec['json_systems'], 'files': files}, open(f'{EVAL}/eval_lock.json', 'w'), indent=1)
+    os.makedirs(EVAL, exist_ok=True)
+    tmp = f'{EVAL}/eval_lock.json.tmp'
+    json.dump({'vlm': spec['vlm'], 'json_systems': spec['json_systems'], 'files': files, 'selection': spec.get('selection')}, open(tmp, 'w'), indent=1)
+    os.replace(tmp, f'{EVAL}/eval_lock.json')
     print('locked', len(files))
+
+
+def cmd_seal(a):
+    """E24 출력 완료 후: 요청 집합 완전성·provenance 확인 뒤 출력 파일 hash를 봉인한다."""
+    lock = json.load(open(f'{EVAL}/eval_lock.json'))
+    for f, h in lock['files'].items():
+        if sha_file(f) != h:
+            sys.exit(f'locked file changed: {f}')
+    man = D.load_manifest()
+    rows = sorted([r for r in man['rows'] if r['split'] == 'E24' and not r['excluded']], key=lambda r: (int(r['patient']), r['ordinal']))
+    outputs = {}
+    for name, spec in lock['vlm'].items():
+        load_vlm(spec['dir'], rows, spec['variant'], spec['adapter_digest'])   # 누락/중복/집합 밖/입력 hash/adapter 불일치면 예외
+        for f in files_of(spec['dir']):
+            outputs[f] = sha_file(f)
+    for name, p in lock['json_systems'].items():
+        load_json_pred(p, rows)
+        outputs[p] = sha_file(p)
+    if os.path.exists(f'{EVAL}/eval_seal.json'):
+        sys.exit('seal exists')
+    tmp = f'{EVAL}/eval_seal.json.tmp'
+    json.dump({'lock_sha256': sha_file(f'{EVAL}/eval_lock.json'), 'outputs': outputs, 'n_rows': len(rows)}, open(tmp, 'w'), indent=1)
+    os.replace(tmp, f'{EVAL}/eval_seal.json')
+    print('sealed', len(outputs))
 
 
 if __name__ == '__main__':
@@ -183,5 +250,6 @@ if __name__ == '__main__':
     sp = ap.add_subparsers(dest='c', required=True)
     sp.add_parser('run')
     l = sp.add_parser('lock'); l.add_argument('--spec', required=True)
+    sp.add_parser('seal')
     a = ap.parse_args()
-    {'run': cmd_run, 'lock': cmd_lock}[a.c](a)
+    {'run': cmd_run, 'lock': cmd_lock, 'seal': cmd_seal}[a.c](a)

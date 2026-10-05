@@ -1,4 +1,4 @@
-"""iter_075 비용 측정: V8 supervised 전체 질문 workload(24 target)를 시스템(F,R,C,H)별로 원 T2 읽기부터 답변 저장까지 측정한다.
+"""iter_076(결과 경로) 비용 측정: V8 supervised 전체 질문 workload(24 target)를 시스템(F,R,C,H)별로 원 T2 읽기부터 답변 저장까지 측정한다.
 
 - 시스템마다 별도 subprocess(모델 적재 포함 wall 측정). block 안에서 시스템 순서는 block마다 번갈아(순환) 실행.
 - 포함: zip에서 T2 read, slice 렌더, F 표시/R·C crop 입력 구성(ROI 좌표는 manifest의 GT-anatomy oracle 값을 사용 -> mask 획득 비용은 미측정 oracle 비용),
@@ -10,7 +10,7 @@
 import argparse, json, os, subprocess, sys, time
 
 HERE = os.path.dirname(os.path.abspath(__file__))
-OUT = 'results/iter_075/cost'
+OUT = 'results/iter_076/cost'
 
 
 def worker(a):
@@ -138,6 +138,7 @@ def worker(a):
 def blocks(a):
     systems = ['F', 'R', 'C', 'H']
     ad = json.loads(a.adapters)
+    os.makedirs(f'{OUT}/logs', exist_ok=True)
     ledger = []
     for b in range(1, a.nblocks + 1):
         order = systems[(b - 1) % 4:] + systems[:(b - 1) % 4]   # 순환 시작점으로 시스템 순서 번갈아
@@ -146,7 +147,7 @@ def blocks(a):
             if s in ('F', 'R'):
                 cmd += ['--adapter', ad[s]]
             t0 = time.time()
-            rc = subprocess.call(cmd, stdout=open(f'{OUT}_{s}_block{b}.log', 'w'), stderr=subprocess.STDOUT)
+            rc = subprocess.call(cmd, stdout=open(f'{OUT}/logs/{s}_block{b}.log', 'w'), stderr=subprocess.STDOUT)
             ledger.append({'block': b, 'system': s, 'order_in_block': order.index(s), 'rc': rc, 'wall_s': time.time() - t0})
             if rc != 0:
                 sys.exit(f'worker failed {s} block {b}')

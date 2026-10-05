@@ -2,7 +2,11 @@
 
 g71_train.py의 checkpoint/재개/상태 digest 패턴을 3영상 grade task로 인자화했다. 기준 loss는 공식 forward logits의 float32 CE 합이며
 시작 시 공식 labels loss와 대조한다(허용 오차 확대 없음: 상대 1e-6). 학습 ID는 sp75_data manifest의 T24 supervised(ordinal 1,3,5)만, validation은 V8 supervised만.
-사용: python sp75_train.py --run-dir D --variant F|R --lr 2e-4 --epochs 16 --gpu 0
+사용: python sp75_train.py --run-dir D --variant F|R --lr 2e-4 --epochs 16 --gpu 0 [--deterministic]
+
+iter_076 변경: (1) loss gate는 PASS/FAIL 상태·유한 수치·상대오차·token 수·모델/입력/코드 provenance를 모두 검사하며 실패·손상·불일치 파일은 학습을 차단한다
+(재실행으로 우회 불가). (2) 비LoRA parameter 동결을 객체 단위(수·numel·byte>0, optimizer 미포함, 시작/종료 전체 byte digest 일치)로 검사한다.
+(3) --deterministic: 결정적 kernel(기술 검사용; config digest에 포함).
 """
 import argparse, hashlib, json, math, os, sys, time
 
@@ -30,6 +34,39 @@ def lr_at(step, spe, peak, horizon=HORIZON, warm_frac=0.05):
 
 def file_sha(p):
     return hashlib.sha256(open(p, 'rb').read()).hexdigest()
+
+
+GATE_REL_TOL = 1e-6
+
+
+def gate_provenance(variant, train_rows, tin, code):
+    return {'model_revision': generate.MODEL_REVISION, 'variant': variant, 'train_inputs_digest': tin, 'row_id': train_rows[0]['id'], 'code': code,
+            'prompt_sha256': hashlib.sha256(V.PROMPTS[variant].encode()).hexdigest()}
+
+
+def validate_gate(gate, prov):
+    """loss gate 기록 검증. returns 문제 목록(빈 리스트면 PASS)."""
+    bad = []
+    if not isinstance(gate, dict):
+        return ['gate is not a dict']
+    if gate.get('status') != 'PASS':
+        bad.append(f"status={gate.get('status')!r}")
+    keys = ('official_loss', 'logits_f32_ce_mean', 'loss_sum_over_n')
+    vals = [gate.get(k) for k in keys]
+    if not all(isinstance(v, (int, float)) and math.isfinite(v) for v in vals):
+        bad.append('non-finite or missing loss values')
+    else:
+        rel = abs(vals[0] - vals[2]) / max(abs(vals[0]), 1e-30)
+        if rel > GATE_REL_TOL:
+            bad.append(f'relative diff {rel} > {GATE_REL_TOL}')
+        if abs(gate.get('rel_diff_official_vs_loss_sum', -1) - rel) > 1e-12:
+            bad.append('stored rel_diff inconsistent with stored losses')
+    n1, n2 = gate.get('n_valid_tokens'), gate.get('n_valid_independent')
+    if not (isinstance(n1, int) and n1 > 0 and n1 == n2):
+        bad.append(f'valid token counts {n1} vs {n2}')
+    if gate.get('provenance') != prov:
+        bad.append('provenance (model/inputs/code/prompt) differs from current run')
+    return bad
 
 
 def load_rows(split):
@@ -89,7 +126,10 @@ def main():
     ap.add_argument('--stop-after-epoch-ckpt', type=int, default=None)
     ap.add_argument('--train-split', default='T24')
     ap.add_argument('--val-split', default='V8')
+    ap.add_argument('--deterministic', action='store_true', help='결정적 kernel (기술 검사용)')
     a = ap.parse_args()
+    if a.deterministic:
+        os.environ['CUBLAS_WORKSPACE_CONFIG'] = ':4096:8'
     if a.gpu is not None:
         inh = os.environ.get('CUDA_VISIBLE_DEVICES', '').split(',')
         if a.gpu not in inh:
@@ -113,6 +153,19 @@ def run(a, reclaimed):
     train_rows, val_rows = load_rows(a.train_split), load_rows(a.val_split)
     assert not {r['patient'] for r in train_rows} & {r['patient'] for r in val_rows}
     save_epochs = {int(x) for x in a.save_epochs.split(',')}
+    code = {f: file_sha(f) for f in CODE}
+    tin, vin = inputs_digest(train_rows, a.variant), inputs_digest(val_rows, a.variant)
+    prov = gate_provenance(a.variant, train_rows, tin, code)
+    gate_path = os.path.join(a.run_dir, 'loss_gate.json')
+    if os.path.exists(gate_path):   # 모델 적재 전에 기존 gate를 검증한다. 실패·손상·불일치면 학습하지 않는다.
+        try:
+            problems = validate_gate(json.load(open(gate_path)), prov)
+        except Exception as ex:
+            problems = [f'unreadable gate: {ex!r}']
+        if problems:
+            sys.exit(f'existing loss_gate.json blocks training: {problems}')
+    if a.deterministic:
+        T.set_deterministic(torch)
     T.seed_all(torch, a.seed)
     _, proc, model = generate.load_model()
     names = lora.apply_lora(model, CFG['r'], CFG['alpha'], CFG['dropout'], seed=a.seed)
@@ -121,11 +174,9 @@ def run(a, reclaimed):
     model.config.use_cache = False
     params = list(lora.lora_params(model).values())
     init_digest = lora.state_digest(lora.lora_state_dict(model))
-    tin, vin = inputs_digest(train_rows, a.variant), inputs_digest(val_rows, a.variant)
-    code = {f: file_sha(f) for f in CODE}
     cfg = dict(CFG, lr=a.lr, seed=a.seed, variant=a.variant, microbatch=1, n_train=len(train_rows), n_val=len(val_rows), model_revision=generate.MODEL_REVISION,
                n_lora_targets=len(names), n_trainable=sum(p.numel() for p in params), train_inputs_digest=tin, val_inputs_digest=vin, init='base',
-               init_adapter_digest=init_digest, save_epochs=sorted(save_epochs), code=code, manifest_sha256=file_sha(f'{D.DATA}/manifest.json'))
+               init_adapter_digest=init_digest, save_epochs=sorted(save_epochs), code=code, deterministic=bool(a.deterministic), manifest_sha256=file_sha(f'{D.DATA}/manifest.json'))
     tdig = hashlib.sha256(json.dumps(cfg, sort_keys=True, default=str).encode()).hexdigest()
     cfg_path = os.path.join(a.run_dir, 'train_config.json')
     if os.path.exists(cfg_path):
@@ -133,20 +184,31 @@ def run(a, reclaimed):
             sys.exit('train config (LR/inputs/code/manifest) differs from existing run-dir; refusing to resume')
     else:
         json.dump({'train_digest': tdig, 'config': cfg, 'env': generate.env_info(torch, proc, model)}, open(cfg_path, 'w'), indent=1, default=str)
-    # 공식 loss 대조 gate (이전 CE 실패를 허용 오차로 숨기지 않는다)
-    gate_path = os.path.join(a.run_dir, 'loss_gate.json')
+    # 공식 loss 대조 gate (이전 CE 실패를 허용 오차로 숨기지 않는다). 기록은 원자적으로 저장하고 존재만으로 통과시키지 않는다.
     if not os.path.exists(gate_path):
         ex = V.build_example(proc, V.load_images(train_rows[0]['inputs'][a.variant]), V.PROMPTS[a.variant], str(train_rows[0]['grade']))
         model.eval()
         with torch.no_grad():
             chk = V.check_loss(torch, model, V.to_cuda(V.collate([ex], tok.pad_token_id)))
         model.train()
-        rel = abs(chk['official_loss'] - chk['loss_sum_over_n']) / abs(chk['official_loss'])
-        chk['rel_diff_official_vs_loss_sum'] = rel
-        json.dump(chk, open(gate_path, 'w'))
-        if rel > 1e-6 or chk['n_valid_tokens'] != chk['n_valid_independent']:
+        chk['rel_diff_official_vs_loss_sum'] = abs(chk['official_loss'] - chk['loss_sum_over_n']) / max(abs(chk['official_loss']), 1e-30)
+        chk['provenance'] = prov
+        chk['status'] = 'PASS'
+        chk['status'] = 'PASS' if not validate_gate(dict(chk), prov) else 'FAIL'
+        T.atomic_json(chk, gate_path)
+        if chk['status'] != 'PASS':
             sys.exit(f'official loss gate failed {chk}')
     opt = torch.optim.AdamW(params, lr=a.lr, betas=tuple(CFG['betas']), eps=CFG['eps'], weight_decay=CFG['weight_decay'])
+    split = lora.split_report(model, params)
+    if split['non_lora_requires_grad'] or split['lora_requires_grad_false'] or split['optimizer_contains_non_lora'] or not split['optimizer_lora_covered']:
+        sys.exit(f'freeze check failed: {split}')
+    frz0, n0, b0 = lora.exact_digest(model)
+    fz_path = os.path.join(a.run_dir, 'freeze_start.json')
+    if os.path.exists(fz_path):
+        if json.load(open(fz_path))['non_lora_exact_digest'] != frz0:
+            sys.exit('non-LoRA parameters differ from the digest recorded at run start (frozen base changed across resume)')
+    else:
+        T.atomic_json({'non_lora_exact_digest': frz0, 'n_params': n0, 'n_bytes': b0, 'split': split}, fz_path)
     n_tr = len(train_rows)
     spe = math.ceil(n_tr / CFG['eff_batch'])
     step, epoch0, pos0 = 0, 0, 0
@@ -273,6 +335,10 @@ def run(a, reclaimed):
         if e in save_epochs:
             do_val(e)
         pos0 = 0
+    frz1, n1, b1 = lora.exact_digest(model)
+    if frz1 != frz0:
+        raise RuntimeError('non-LoRA parameters changed during training')
+    T.atomic_json({'non_lora_exact_digest': frz1, 'n_params': n1, 'n_bytes': b1, 'equals_start': True, 'step': step}, os.path.join(a.run_dir, 'freeze_end.json'))
     print('training complete', flush=True)
 
 

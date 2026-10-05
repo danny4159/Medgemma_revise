@@ -83,3 +83,54 @@ def base_digest(model):
         h.update(p.detach().to("cpu").contiguous().view(torch.uint8).numpy().tobytes() if p.dtype != torch.bfloat16
                  else p.detach().to("cpu").contiguous().view(torch.int16).numpy().tobytes())
     return h.hexdigest()
+
+
+def _tensor_bytes(t):
+    t = t.detach().to("cpu").contiguous()
+    if t.dtype == torch.bfloat16:
+        return t.view(torch.int16).numpy().tobytes()
+    return t.view(torch.uint8).numpy().tobytes()
+
+
+def split_report(model, optimizer_params=None):
+    """LoRA / 비LoRA parameter를 객체 단위로 분리해 개수·numel·byte를 센다 (iter_076 동결 검사).
+
+    분리 기준은 'lora_' 이름의 parameter 객체와 나머지이다. 정규화 이름 충돌, 빈 집합(수·numel·byte 0)은 예외.
+    optimizer_params: optimizer에 들어간 parameter 목록(있으면 비LoRA 포함 여부 검사).
+    """
+    lo, non = {}, {}
+    for n, p in model.named_parameters():
+        (lo if "lora_" in n else non)[n] = p
+    norm = [n.replace(".base.", ".") for n in non]
+    if len(set(norm)) != len(norm):
+        raise RuntimeError("normalized non-LoRA parameter names collide")
+    rep = {"n_lora": len(lo), "n_non_lora": len(non), "numel_lora": sum(p.numel() for p in lo.values()), "numel_non_lora": sum(p.numel() for p in non.values()),
+           "bytes_lora": sum(p.numel() * p.element_size() for p in lo.values()), "bytes_non_lora": sum(p.numel() * p.element_size() for p in non.values()),
+           "non_lora_requires_grad": sum(1 for p in non.values() if p.requires_grad), "lora_requires_grad_false": sum(1 for p in lo.values() if not p.requires_grad),
+           "non_lora_dtypes": sorted({str(p.dtype) for p in non.values()}), "lora_dtypes": sorted({str(p.dtype) for p in lo.values()})}
+    for k in ("n_lora", "n_non_lora", "numel_lora", "numel_non_lora", "bytes_lora", "bytes_non_lora"):
+        if rep[k] <= 0:
+            raise RuntimeError(f"empty parameter set: {k}=0")
+    if optimizer_params is not None:
+        ids = {id(p) for p in optimizer_params}
+        rep["optimizer_contains_non_lora"] = sum(1 for p in non.values() if id(p) in ids)
+        rep["optimizer_lora_covered"] = all(id(p) in ids for p in lo.values())
+        rep["optimizer_n_params"] = len(ids)
+    return rep
+
+
+def exact_digest(model, lora=False):
+    """정확한 parameter 이름·dtype·shape·byte 전체의 sha256 (정규화 없음). lora=False면 비LoRA만. 빈 집합이면 예외. returns (hexdigest, n_params, n_bytes)."""
+    h = hashlib.sha256()
+    n_par = n_bytes = 0
+    for n, p in sorted(model.named_parameters(), key=lambda x: x[0]):
+        if ("lora_" in n) != lora:
+            continue
+        b = _tensor_bytes(p)
+        h.update(f"{n}|{p.dtype}|{tuple(p.shape)}|{len(b)}".encode())
+        h.update(b)
+        n_par += 1
+        n_bytes += len(b)
+    if n_par == 0 or n_bytes == 0:
+        raise RuntimeError("exact_digest over an empty parameter set")
+    return h.hexdigest(), n_par, n_bytes

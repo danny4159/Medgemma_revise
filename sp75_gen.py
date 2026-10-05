@@ -35,6 +35,23 @@ def read_jsonl(p):
     return out
 
 
+def repair_tail(path):
+    """강제 중단으로 마지막 줄이 잘렸으면(개행 없는 비정상 JSON) 그 줄만 잘라낸다. 중간 줄 손상은 복구하지 않고 예외."""
+    if not os.path.exists(path):
+        return None
+    data = open(path, 'rb').read()
+    if not data or data.endswith(b'\n'):
+        return None
+    cut = data.rfind(b'\n') + 1
+    try:
+        json.loads(data[cut:].decode())
+        return None
+    except Exception:
+        with open(path, 'r+b') as f:
+            f.truncate(cut)
+        return {'truncated_bytes': len(data) - cut}
+
+
 def select_rows(split, positions):
     man = D.load_manifest()
     rows = [r for r in man['rows'] if r['split'] == split and not r['excluded']]
@@ -89,6 +106,17 @@ def run_one(torch, proc, model, row, variant, eos_ids, cands):
             'peak_mem_gb': torch.cuda.max_memory_allocated() / 2 ** 30}
 
 
+def check_lock(a, adapter_digest):
+    """사전 잠금 확인: 잠긴 모든 파일의 현재 hash 일치, 이 요청(variant, adapter digest, out-dir)이 lock에 등록되어 있어야 한다."""
+    lock = json.load(open(a.lock))
+    for f, h in lock['files'].items():
+        if sha(open(f, 'rb').read()) != h:
+            sys.exit(f'locked file changed: {f}')
+    ok = [n for n, v in lock['vlm'].items() if v['variant'] == a.variant and v['adapter_digest'] == adapter_digest and os.path.normpath(v['dir']) == os.path.normpath(a.out_dir)]
+    if len(ok) != 1:
+        sys.exit(f'request not registered in lock (variant={a.variant} adapter={adapter_digest} out={a.out_dir}): {ok}')
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument('--variant', choices=['F', 'R'], required=True)
@@ -100,7 +128,10 @@ def main():
     ap.add_argument('--gpu', default=None)
     ap.add_argument('--max-requests', type=int, default=None)
     ap.add_argument('--ids', default=None, help='json list of target ids (subset)')
+    ap.add_argument('--lock', default=None, help='E24 split은 필수: 사전 eval_lock.json (코드·checkpoint hash 일치와 이 요청의 variant/adapter/out-dir 등록을 확인)')
     a = ap.parse_args()
+    if a.split == 'E24' and not a.lock:
+        sys.exit('E24 generation requires --lock (pre-registered eval_lock.json)')
     if a.gpu is not None:
         inh = os.environ.get('CUDA_VISIBLE_DEVICES', '').split(',')
         if a.gpu not in inh:
@@ -126,6 +157,8 @@ def work(a, rows, info):
     adapter_digest = None
     if a.adapter != 'none':
         adapter_digest = generate.load_adapter(torch, model, a.adapter)
+    if a.lock:
+        check_lock(a, adapter_digest)
     env = generate.env_info(torch, proc, model)
     prompt_sha = sha(V.PROMPTS[a.variant])
     cfg = {'runner': RUNNER, 'model_revision': generate.MODEL_REVISION, 'max_new_tokens': V.MAX_NEW, 'do_sample': False, 'dtype': env['dtype'],
@@ -165,8 +198,11 @@ def work(a, rows, info):
                 done[r['id']] = r
         return done
 
-    done = validate(read_all())
     out = os.path.join(a.out_dir, f'gen_worker{a.worker}.jsonl')
+    rep_tail = repair_tail(out)
+    if rep_tail:
+        print('repaired torn tail', rep_tail, flush=True)
+    done = validate(read_all())
     claim_dir = os.path.join(a.out_dir, 'claims')
     os.makedirs(claim_dir, exist_ok=True)
     log = open(out + '.log', 'a')
