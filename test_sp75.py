@@ -1,5 +1,5 @@
 """iter_075/076 CPU fixture: 입력 연결·allowlist·ROI/표시·parser·metric·교환·prior + (iter_076) 선택·연장·loss gate·평가 입력·tail 복구.
-결과: results/iter_076/tests/fixtures_cpu.json (존재하면 중단). 실패 시 비정상 종료."""
+결과: results/iter_077/tests/fixtures_cpu.json (존재하면 중단). 실패 시 비정상 종료."""
 import json, os, sys
 import numpy as np
 from PIL import Image
@@ -134,7 +134,7 @@ with tempfile.TemporaryDirectory() as td:
     open(gp, 'wb').write(b'{"id": "a"}\n')
     chk('gen_repair_noop_on_clean', GN.repair_tail(gp) is None)
 fails = [k for k, v in res.items() if not v['pass']]
-out = 'results/iter_076/tests/fixtures_cpu.json'
+out = 'results/iter_077/tests/fixtures_cpu.json'
 if os.path.exists(out):
     sys.exit('exists')
 json.dump({'n': len(res), 'n_pass': len(res) - len(fails), 'fails': fails, 'checks': res}, open(out, 'w'), indent=1, default=str)

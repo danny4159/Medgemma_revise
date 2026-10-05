@@ -17,7 +17,7 @@ import sp75_data as D
 import sp75_metrics as M
 import sp75_vlm as V
 
-OUT = 'results/iter_076'
+OUT = 'results/iter_077'
 EVAL = f'{OUT}/eval'
 CODE = ['sp75_eval.py', 'sp75_metrics.py', 'sp75_vlm.py', 'sp75_data.py', 'sp75_gen.py']
 MARGIN = 0.20          # 최소 투자 폭 (MAE grade)

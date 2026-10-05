@@ -4,6 +4,8 @@ g71_train.py의 checkpoint/재개/상태 digest 패턴을 3영상 grade task로 
 시작 시 공식 labels loss와 대조한다(허용 오차 확대 없음: 상대 1e-6). 학습 ID는 sp75_data manifest의 T24 supervised(ordinal 1,3,5)만, validation은 V8 supervised만.
 사용: python sp75_train.py --run-dir D --variant F|R --lr 2e-4 --epochs 16 --gpu 0 [--deterministic]
 
+iter_077 변경: (4) --deterministic는 use_deterministic_algorithms만 켜고 SDPA backend는 기본값(iter_076의 math-only는 peak 21.3GiB; sp77_sdpa_probe로 반복 bit 일치 확인).
+(5) 재개 시 checkpoint 이후 기록된 step/checkpoint 로그를 train_log.uncommitted.jsonl로 옮겨 보존하고 train_log.jsonl은 committed 상태만 남긴다(중복 step 없음).
 iter_076 변경: (1) loss gate는 PASS/FAIL 상태·유한 수치·상대오차·token 수·모델/입력/코드 provenance를 모두 검사하며 실패·손상·불일치 파일은 학습을 차단한다
 (재실행으로 우회 불가). (2) 비LoRA parameter 동결을 객체 단위(수·numel·byte>0, optimizer 미포함, 시작/종료 전체 byte digest 일치)로 검사한다.
 (3) --deterministic: 결정적 kernel(기술 검사용; config digest에 포함).
@@ -69,6 +71,32 @@ def validate_gate(gate, prov):
     return bad
 
 
+def quarantine_uncommitted(run_dir, ckpt_step, logf):
+    """checkpoint step 이후의 학습 step·checkpoint 로그 행(미커밋 구간)을 보존 파일로 옮기고 train_log.jsonl을 committed 상태로 되돌린다.
+    다른 event(val_ce 등)는 유지한다. checkpoint step에 해당하는 committed 기록이 없으면 중단한다."""
+    path = os.path.join(run_dir, 'train_log.jsonl')
+    logf.flush()
+    lines = [l for l in open(path).read().splitlines() if l.strip()]
+    recs = [json.loads(l) for l in lines]
+    if ckpt_step > 0 and not any(r.get('event') == 'checkpoint' and r.get('step') == ckpt_step for r in recs):
+        raise RuntimeError(f'no committed checkpoint log record for step {ckpt_step}')
+    keep, dropped = [], []
+    for l, r in zip(lines, recs):
+        late = r.get('step', 0) > ckpt_step and ('loss' in r or r.get('event') == 'checkpoint')
+        (dropped if late else keep).append(l)
+    steps = [json.loads(l)['step'] for l in keep if 'loss' in json.loads(l)]
+    if len(steps) != len(set(steps)) or steps != list(range(1, len(steps) + 1)):
+        raise RuntimeError(f'committed log steps not contiguous/unique before resume: {steps}')
+    if dropped:
+        with open(os.path.join(run_dir, 'train_log.uncommitted.jsonl'), 'a') as f:
+            f.write(json.dumps({'event': 'quarantine', 'ts': time.time(), 'ckpt_step': ckpt_step, 'n_rows': len(dropped)}) + '\n')
+            f.write('\n'.join(dropped) + '\n')
+        tmp = path + '.tmp'
+        open(tmp, 'w').write('\n'.join(keep) + ('\n' if keep else ''))
+        os.replace(tmp, path)
+    return len(dropped)
+
+
 def load_rows(split):
     man = D.load_manifest()
     rows = [r for r in man['rows'] if r['split'] == split and r['position_set'] == 'supervised' and not r['excluded']]
@@ -123,6 +151,7 @@ def main():
     ap.add_argument('--workers', type=int, default=2)
     ap.add_argument('--gpu', default=None)
     ap.add_argument('--stop-after-step', type=int, default=None)
+    ap.add_argument('--allow-uncommitted-stop', action='store_true', help='시험 전용: --stop-after-step을 checkpoint 아닌 step에서도 허용(미커밋 로그 구간 재현)')
     ap.add_argument('--stop-after-epoch-ckpt', type=int, default=None)
     ap.add_argument('--train-split', default='T24')
     ap.add_argument('--val-split', default='V8')
@@ -165,7 +194,7 @@ def run(a, reclaimed):
         if problems:
             sys.exit(f'existing loss_gate.json blocks training: {problems}')
     if a.deterministic:
-        T.set_deterministic(torch)
+        T.set_deterministic_algos(torch)
     T.seed_all(torch, a.seed)
     _, proc, model = generate.load_model()
     names = lora.apply_lora(model, CFG['r'], CFG['alpha'], CFG['dropout'], seed=a.seed)
@@ -176,7 +205,7 @@ def run(a, reclaimed):
     init_digest = lora.state_digest(lora.lora_state_dict(model))
     cfg = dict(CFG, lr=a.lr, seed=a.seed, variant=a.variant, microbatch=1, n_train=len(train_rows), n_val=len(val_rows), model_revision=generate.MODEL_REVISION,
                n_lora_targets=len(names), n_trainable=sum(p.numel() for p in params), train_inputs_digest=tin, val_inputs_digest=vin, init='base',
-               init_adapter_digest=init_digest, save_epochs=sorted(save_epochs), code=code, deterministic=bool(a.deterministic), manifest_sha256=file_sha(f'{D.DATA}/manifest.json'))
+               init_adapter_digest=init_digest, save_epochs=sorted(save_epochs), code=code, deterministic=bool(a.deterministic), deterministic_mode='use_deterministic_algorithms+default_sdpa' if a.deterministic else None, manifest_sha256=file_sha(f'{D.DATA}/manifest.json'))
     tdig = hashlib.sha256(json.dumps(cfg, sort_keys=True, default=str).encode()).hexdigest()
     cfg_path = os.path.join(a.run_dir, 'train_config.json')
     if os.path.exists(cfg_path):
@@ -233,10 +262,13 @@ def run(a, reclaimed):
         opt.load_state_dict(blob['optimizer'])
         step, epoch0, pos0 = blob['step'], blob['epoch'], blob['pos_in_epoch']
         T.set_rng_state(torch, blob['rng'])
+        n_q = quarantine_uncommitted(a.run_dir, step, logf)
+        logf.close()
+        logf = open(os.path.join(a.run_dir, 'train_log.jsonl'), 'a')   # closure(log_event)가 같은 변수를 참조
         restored = T.live_digests(torch, model, opt)
         if restored != blob['digests']:
             sys.exit(f'restored state != saved checkpoint {restored} vs {blob["digests"]}')
-        log_event(event='resume', step=step, epoch=epoch0, pos=pos0, restored_equals_saved=True, stale_lock_reclaimed=bool(reclaimed))
+        log_event(event='resume', step=step, epoch=epoch0, pos=pos0, restored_equals_saved=True, stale_lock_reclaimed=bool(reclaimed), quarantined_rows=n_q)
         print(f'resumed step={step} epoch={epoch0} pos={pos0}', flush=True)
     t0 = time.time()
 
@@ -310,7 +342,7 @@ def run(a, reclaimed):
             opt.zero_grad(set_to_none=True)
             step += 1
             logf.write(json.dumps({'step': step, 'epoch': epoch + 1, 'pos': s + 1, 'loss': loss_acc, 'grad_norm': gn, 'lr': lr, 'n_examples': len(grp),
-                                   'elapsed_s': time.time() - t0, 'peak_mem_gb': torch.cuda.max_memory_allocated() / 2 ** 30, 'batch_ids': actual,
+                                   'elapsed_s': time.time() - t0, 'peak_mem_gb': torch.cuda.max_memory_allocated() / 2 ** 30, 'peak_reserved_gb': torch.cuda.max_memory_reserved() / 2 ** 30, 'batch_ids': actual,
                                    'batch_token_sha': th.hexdigest()[:24], 'rng_before': rng_before, 'opt_step_before': opt_before}) + '\n')
             logf.flush()
             saved = False
@@ -318,9 +350,9 @@ def run(a, reclaimed):
                 save_ckpt(epoch, s + 1)
                 saved = True
             if a.stop_after_step is not None and step == a.stop_after_step:
-                if not saved:
+                if not saved and not a.allow_uncommitted_stop:
                     raise RuntimeError('--stop-after-step must coincide with a regular mid-epoch checkpoint step')
-                print('test stop after mid-epoch checkpoint', flush=True)
+                print('test stop after step (checkpoint saved: %s)' % saved, flush=True)
                 os._exit(5)
         del dl, it
         e = epoch + 1

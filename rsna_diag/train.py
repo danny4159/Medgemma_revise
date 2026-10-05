@@ -178,6 +178,13 @@ def set_deterministic(torch):
     torch.backends.cuda.enable_math_sdp(True)
 
 
+def set_deterministic_algos(torch):
+    """iter_077: 결정적 알고리즘만 요구하고 SDPA backend는 기본값 유지 (math-only 대비 peak 약 절반; sp77_sdpa_probe 실측: 반복 gradient bit 일치)."""
+    torch.use_deterministic_algorithms(True)
+    torch.backends.cudnn.benchmark = False
+    torch.backends.cudnn.deterministic = True
+
+
 def save_adapter(torch, model, path, extra):
     st = lora.lora_state_dict(model)
     dg = lora.state_digest(st)

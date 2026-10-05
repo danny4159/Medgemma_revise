@@ -1,13 +1,13 @@
 """iter_076: loss gate 변조·실패·손상 파일이 실제 학습 진입점(sp75_train.py)에서 모델 적재 전에 학습을 차단하는지 검사한다 (CPU, GPU 불필요).
 각 사례: run-dir에 loss_gate.json 변형을 두고 sp75_train.py를 실행 -> 비정상 종료 + 'blocks training' 메시지 + train_log/checkpoint 미생성.
-결과: results/iter_076/tests/gate_tamper.json (존재하면 중단). 하나라도 차단 안 되면 비정상 종료.
+결과: results/iter_077/tests/gate_tamper.json (존재하면 중단). 하나라도 차단 안 되면 비정상 종료.
 """
 import json, os, subprocess, sys
 
 import sp75_train as TR
 
-BASE = 'results/iter_076/tests/gate_tamper'
-OUT = 'results/iter_076/tests/gate_tamper.json'
+BASE = 'results/iter_077/tests/gate_tamper'
+OUT = 'results/iter_077/tests/gate_tamper.json'
 
 
 def main():

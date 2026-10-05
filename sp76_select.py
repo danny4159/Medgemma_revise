@@ -14,7 +14,7 @@ import sp75_data as D
 import sp75_metrics as M
 import sp75_vlm as V
 
-OUT = 'results/iter_076'
+OUT = 'results/iter_077'
 LRS = ('2e-5', '2e-4')
 CE_REL_DROP = 0.05
 PRIMARY_GAIN = 0.10
@@ -137,7 +137,7 @@ def cmd_lock_spec(a):
         f = fin[v]
         vlm[f'{v}_adapted'] = {'variant': v, 'adapter_dir': f['adapter_dir'], 'adapter_digest': f['adapter_digest'], 'dir': f'{OUT}/gen/E24/{v}_adapted'}
         extra += [f"{f['adapter_dir']}/adapter.pt", f"{f['adapter_dir']}/val_ce.json", f"{traj_dir(v, f['lr'])}/train_config.json"]
-    code = ['sp75_pipeline.py', 'sp76_select.py', 'sp76_cpred.py', 'sp75_train.py', 'sp75_c.py', 'sp75_h.py', 'sp67_data.py', 'g71_data.py', 'rsna_diag/generate.py', 'rsna_diag/lora.py']
+    code = ['sp77_pipeline.py', 'sp77_stage.py', 'sp75_verify.py', 'sp76_select.py', 'sp76_cpred.py', 'sp75_train.py', 'sp75_c.py', 'sp75_h.py', 'sp67_data.py', 'g71_data.py', 'rsna_diag/generate.py', 'rsna_diag/lora.py']
     spec = {'vlm': vlm, 'json_systems': {'C': f'{OUT}/pred/pred_C_E24.json', 'H': f'{OUT}/pred/pred_H_E24.json'}, 'extra_files': extra + code,
             'selection': {'final': {v: {k: fin[v][k] for k in ('lr', 'epoch', 'adapter_digest')} for v in fin}, 'C': csel}}
     os.makedirs(f'{OUT}/eval', exist_ok=True)

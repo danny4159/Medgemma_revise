@@ -10,7 +10,7 @@
 import argparse, json, os, subprocess, sys, time
 
 HERE = os.path.dirname(os.path.abspath(__file__))
-OUT = 'results/iter_076/cost'
+OUT = 'results/iter_077/cost'
 
 
 def worker(a):

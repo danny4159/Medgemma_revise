@@ -4,7 +4,7 @@
 import glob, hashlib, json, os, re, sys
 import numpy as np
 
-OUT = 'results/iter_076'
+OUT = 'results/iter_077'
 DATA = 'results/iter_075/data'   # 읽기 전용 입력
 if os.path.exists(f'{OUT}/eval/independent_verify.json'):
     sys.exit('exists')
