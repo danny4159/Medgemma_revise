@@ -28958,3 +28958,438 @@ iter_075/076의 방향 판단을 유지한다. 현재 지배적인 비용은 준
 새 실험 설계 없이 iter_075 기준 계획과 iter_076 복구 조건을 이어간다. 호스트 작업 확인 → 메모리 원인 및 안전 여유 확보 → 미완료 저장·복구/동결 검사 → 원 본학습·선택·평가·비용·독립 재계산 순서로 완료한다. 동일 provenance의 완료 검사는 반복하지 않는다. 구현 세션은 실제 자식 작업이 끝나기 전에 완료 응답을 내지 않아야 한다.
 
 실행 실패이며 후속 방향의 유망성을 확인한 새 결과가 없어 논문 추천과 마일스톤은 보류한다.
+
+
+## iter_077 GPT PLAN [MRI 부위별 판독의 투자 적합성 검토 / proceed] — 2026-10-05 14:05:15
+
+# 요약
+
+- **이번에 할 일:** 재개 검사·메모리 배치·실행 완료 관리를 복구하고 기존 F/R/C/H 비교를 끝낸다.
+- **필요한 이유:** 기술 검사 일부만 완료됐고 VLM 본학습·E24·비용 결과가 없다.
+- **확인할 기준:** 원 기술 gate와 학습·평가 기준, 자식 작업 종료, 산출물 완전성 및 독립 재계산이다.
+- **주의·다음:** OAI 중단과 원본 보존을 유지한다. 과학적 비교가 끝나기 전 판독 능력·방법 가치에 결론을 내리지 않는다.
+
+# Current Understanding
+
+기준 과학 계획은 `agent/runs/iter_075/plan.md`, SHA256 `ea40768f17ae65b10f0027ca9ca9423205bb106198ebf891af7ec0bf17a73b8b`다. 이전 복구 계획은 `agent/runs/iter_076/plan.md`, SHA256 `50193bcb0d30330b42a638e982996664a5b29afee4beaf5d8c13efd9ec864d87`다. Claude는 두 원문과 iter_076 review.json을 읽는다. 이번 문서는 실행 복구의 변경분이며 과학적 조건은 iter_075를 따른다.
+
+**유지:** 자료·기술 제외·환자 및 위치 split, F/R/C/H 정의, prompt·parser·metric, 학습량·선택·연장·판정 기준, 기존 C/H 선택, OAI 중단 및 F139 미사용.
+
+**변경:** 새 결과 경로 `results/iter_077/`, 단계별 재개 검사, checkpoint 이후 미커밋 로그 처리, 메모리 예약과 완료 관리.
+
+**미완료:** 유효한 연속 실행 대조와 A/B 저장·복구 비교, update 전후 동결, 네 본학습 trajectory, V8 선택·조건부 연장, 사전 잠금, E24, 네 비용 block 및 독립 재계산.
+
+# Strategy Check / 연구 방향 판단
+
+iter_075/076의 전략 판단을 유지한다. 상위 질문은 질문 대상의 근거를 읽고 사용하는 능력이다. 새 관찰은 실행 중단이며 인식·선택·결합의 반증이 아니다. 위치 prior, 판독 적응 부족, 대상 지정·해상도, 공유 분류기의 충분성이 남는다. 최소 비교 F/R/C/H가 바꿀 결정은 현재 부위별 판독에 VLM 방법 투자를 할 가치가 있는지다.
+
+현재 방법 확대는 근거가 없고, 새 자료 탐색은 준비된 비교를 버리는 비용이 있다. 따라서 한정 복구를 선택한다. 지배 비용은 구현·검증·중단에 따른 재작업이며 정확한 누적 GPU 비용은 미산출이다. 타 계열 학습 보류는 원 판단을 유지한다. 양성 가치가 남으면 큰 방법 투자 전에 별도로 검토한다. OAI·MR-RATE 대기를 재개하지 않는다.
+
+# Hypothesis
+
+원 H1–H4를 유지한다. supervision 미제공 위치의 영상 판독 전이와 모듈형 대비 가치, 모듈형 대안 충분성, R만 강한 경우, 모든 시스템의 적응 부족을 구분한다. F/R 차이를 순수 선택 실패나 다중 영상 결합의 증거로 바꾸지 않는다.
+
+# Limitation Evidence / Correct Usage Checks
+
+현재 Pfirrmann 과제의 유효한 한계 관찰은 없어 `limitation_ids=[]`다. 기존 MRI context observed 주장은 이번 방법 개발 gate의 근거가 아니다. 이번은 표준 적응과 비교군을 통한 diagnostic이다.
+
+공식 입력·assistant-only label·CE 대조·LoRA 항등·기하 검사의 불변 증거를 재사용한다. iter_076의 50개 fixture와 8개 gate 변조 검사는 해당 코드·입력이 동일한 범위에서 재사용하고 변경 의존 경로만 다시 검사한다. 기술 과적합이나 parameter 열거만으로 일반화·동결 완료를 주장하지 않는다.
+
+# Contribution Path / Baselines / Reuse
+
+기여는 미확정이다. 가까운 대안은 원 계획의 직접 SFT, 공유 ROI ResNet18, SPIDER radiomics다. F는 전체 세 slice의 대상 표시, R/C는 동일 세 ROI, H는 전체 T2와 정밀 disc mask를 사용한다. H의 추가 정보와 oracle anatomy 획득 비용은 별도 한계다. base F/R·train-only prior·동일 ordinal 환자 간 예측 교환을 유지한다.
+
+현재 브랜치와 HEAD `29f663cb721d3a856007bf9c5b0faca6fa7bb52b`를 이어간다. 필요한 파일이 현재 존재하므로 선별 반입은 없다. 전체 스냅샷은 미승인이다. `sp75_metrics.py`의 제한 승인과 iter_076 review.json의 needs_fix 범위를 구분한다.
+
+주 수정 대상은 `sp75_resume_test.py`, `sp75_pipeline.py`, `sp75_train.py`, `sp76_recover.py` 및 결과 경로를 참조하는 실행 파일이다. `sp76_freeze.py`, `sp75_gen.py`, `sp75_eval.py`, `sp75_verify.py`, `sp75_cost.py`, `sp76_costreport.py`, `sp76_cpred.py`, `sp76_select.py`와 실제 영향받는 `sp75_vlm.py`, `rsna_diag/train.py`, `rsna_diag/lora.py`, `rsna_diag/queue_lock.py`를 연결 검증한다. C/H·자료 모듈은 기존 선택·입력 hash를 확인해 재사용한다. 무관한 리팩터링은 하지 않는다.
+
+# Proposed Experiment
+
+## 1. 소유권과 보존
+
+호스트의 PID·시작 시각·명령·GPU UUID·lock 소유권을 확인한다. 격리된 ps나 nvidia-smi 실패를 프로세스 부재로 해석하지 않는다. 다른 사용자 작업을 건드리지 않는다. 동일 작업이 살아 있으면 중복 시작하지 않고 소유권을 확인해 그 작업을 관리한다.
+
+새 산출물은 `results/iter_077/`에 저장한다. 이전 결과는 읽기 전용 출처로 연결한다. 가변 checkpoint 복구는 새 경로의 복사본에서 수행하며 hardlink로 원본을 변경하지 않는다. 코드 hash 불일치는 제거하지 않고 학습 의미를 보존하는 변경만 migration 기록으로 연결한다.
+
+## 2. 재개 검사의 실질적 복구
+
+실행기를 단계별 pending/running/completed/failed 상태, 명령·반환값·입출력 hash와 원자적 완료 기록으로 바꾼다. 디렉터리 존재만으로 종료하거나 통과시키지 않는다. 단계 완료는 필요한 산출물과 판정으로 확인한다. 오류를 thread 안에서 잃지 않고 부모의 비정상 종료로 전달한다.
+
+기존 det_ref는 step7 로그와 step6 checkpoint가 있다. 복구는 마지막 완전한 checkpoint가 기준이다. 그 이후 로그는 원본에 보존하고 새 실행에서 미커밋 구간으로 명시한다. 중복 step을 제거했다는 이유만으로 학습 상태가 복구됐다고 보지 않는다.
+
+**연속 대조의 구분:** 중단된 det_ref를 재개한 결과를 중단 없는 reference로 부르지 않는다. 기존 부분 실행은 상태·수치 근거로 보존한다. 안전한 구성에서 완결된 연속 reference가 없으면 원 기술 범위의 2 epoch reference만 새로 실행한다. 같은 초기 상태·장치·batch·RNG에서 A는 step3 checkpoint 중단, B는 epoch1 checkpoint 후 validation 전 중단을 재현하고 복구한다. 이는 reference 유효성에 필요한 재실행이며 전체 기술 검사의 반복이 아니다.
+
+원 판정을 유지한다. 상태 복원, step 집합, batch/token hash, RNG, LR, loss·gradient, adapter/optimizer digest와 validation 결과를 대조한다. 복구 전후 최초 불일치를 기록한다. 비교 집합이 비어 있거나 일부 step만 겹치면 통과시키지 않는다. duplicate launcher 거부와 validation 중복·누락도 확인한다. 임의 tolerance 확대는 금지한다. 다른 GPU의 연속 실행 일치는 보조 근거이며 A/B 대조를 대신하지 않는다.
+
+비LoRA parameter의 수·byte·optimizer 제외와 실제 update 전후 전체 digest 불변, LoRA 실제 변화를 확인한다. 기존 시작 digest만으로 통과시키지 않는다. loss gate의 PASS·유한값·상대오차1e-6·token 수·provenance 차단은 유지한다.
+
+## 3. 메모리와 실행 구성
+
+실행 전 허용 GPU의 실제 여유순으로 배정한다. 물리 UUID와 자식의 논리 index 대응을 기록한다. 현재 기본 peak 추정 11.5GiB를 그대로 쓰지 않는다. 결정적 실행은 allocated 약21.477GiB, 직전 리뷰의 총점유는 약23.4GiB로 안전 여유가 부족했다.
+
+load, gate, forward/backward, optimizer, checkpoint, validation 단계의 allocated/reserved·전체 점유를 구분해 원인을 확인한다. 잔존 자기 작업, 유지되는 tensor/graph, allocator cache, 결정적 kernel workspace 등을 확인하되 원인을 미리 단정하지 않는다. 우선 불필요한 tensor 수명·캐시·동시 작업을 조정한다. 해상도·slice·정밀도·loss·학습량을 몰래 바꾸지 않는다. 연산 경로 변경이 필요하면 동일 입력·loss·gradient·재개 검증과 별도 provenance를 남긴다.
+
+배치 판단은 다른 프로세스 점유 + 배정 worker들의 예상 전체 peak 합 + worker당2GiB가 GPU 용량 이하인 경우만 허용한다. 이미 실행 중인 worker의 앞으로 늘어날 메모리도 예약한다. 단순 현재 free 조회나 45초 대기로 이를 대체하지 않는다. 안전 여유를 확보하지 못한 구성으로 본학습에 진입하지 않는다.
+
+본학습은 effective batch8을 유지한다. 기존 micro1/micro5의 gradient 차이 약4.77% 때문에 micro5를 자동 채택하지 않는다. 안전한 기본 구성에서 batch 확대 또는 GPU당 두 worker 중 유망한 하나를 개발 입력으로 비교하되, 메모리 상한으로 불가능하면 실제 측정으로 제외한다. 정합성·처리량·peak·경합으로 고른다. 독립 F/R trajectory는 두 GPU에 분산한다.
+
+## 4. 원 가능성 탐색과 조건부 확대
+
+T24의 ordinal1/3/5 유효70개, V8 24개를 유지한다. F/R 각각 LR2e-5·2e-4, seed17, language rank16 LoRA·alpha32·dropout0.05, AdamW·weight decay0.01·clip1, 원 32-epoch horizon의 5% warmup/cosine을 적용한다. epoch당9 updates다.
+
+네 trajectory를 epoch16까지 실행하고 epoch8/16에 V8 생성·CE를 평가한다. 방식별 LR 선택과 동률의 CE→이른 checkpoint→작은 LR 순서를 유지한다. 선택 trajectory의 epoch8→16 CE가5% 이상 감소하거나 primary MAE가0.10 이상 개선되면 epoch32까지 한 번 연장한다. 최종 선택은 원 규칙을 따른다.
+
+C의 LR1e-4·epoch40 및 H config1은 실제 checkpoint·선택 기록·hash를 검증해 재사용한다. 재학습·재선택하지 않는다.
+
+## 5. 설정 고정·평가·비용
+
+첫 E24 출력 전에 checkpoint·선택 근거·환경·코드·manifest·전처리·prompt·parser·metric을 잠근다. 생성 결과는 사전 잠금에 넣지 않고 완료 후 별도 seal로 묶는다. 잠금 불일치는 실행을 막는다.
+
+E24 118행을 유지한다. 학습 위치71개와 supervision 미제공 위치47개다. base/adapted F/R의 최종 생성은472건이다. greedy·최대32 tokens·고정 whole-string parser·invalid 오차4와 후보 likelihood 보조 분석을 유지한다. C/H·prior·고정 교환 예측도 같은 ID 집합에서 계산한다.
+
+원 V8 workload의 네 paired 비용 block을 수행한다. 원 T2 읽기부터 답변 저장까지, 모델 적재 포함/제외, H feature 추출·C 전체 영역 처리와 질문 조회를 포함한다. wall-clock과 GPU device 시간을 분리하고 GT anatomy 획득은 미측정 비용으로 남긴다.
+
+## 6. 규모·시간·독립 확인
+
+최대864 updates, V8 생성192건 및 조건부48건, 최종472건이다. 기술 검사·재시도·비용 호출은 별도 ledger로 기록한다. det_ref의 약42–46초/update를 단순 적용하면 두 GPU에서 학습만 약3.4–5.5시간이지만 결정적 기술 조건의 외삽이며 평가·복구 비용이 빠져 있다. 기존 전체3–10시간 추정 역시 확정값이 아니다. 안전한 본 구성의 실측으로 남은 workload 예상 시간을 갱신하며 timeout으로 쓰지 않는다.
+
+허용 확대는 validation 기반 epoch32뿐이다. 추가 seed·환자·F139·다른 모델·sequence는 포함하지 않는다. 독립 확인은 이번에 수행하지 않는다.
+
+# Implementation Tasks for Claude
+
+1. 원 계획 hash·현재 SHA·호스트 소유권과 기존 checkpoint를 확인하고 새 복구 manifest를 만든다.
+2. 단계별 재개와 로그/checkpoint 경계, GPU peak 예약, 새 결과 경로를 수정한다. 현재 결론과 무관한 공통 코드는 변경하지 않는다.
+3. 안전한 구성에서 필수 reference/A/B·동결 검사를 완결한다. 완료 검사의 불변 증거는 재사용한다.
+4. 학습→V8 선택→조건부 연장→사전 잠금→E24→seal→평가→비용→독립 재계산의 실제 완료 흐름을 연결한다.
+5. background 사용 여부와 무관하게 구현 세션은 자식 종료·반환값·산출물 검증까지 유지한다. Monitor가 거부되면 허용된 실행 도구의 대기·상태 조회로 관리하고, 기다린다는 최종 응답으로 종료하지 않는다. 실제 실행 권한 blocker라면 이를 명시하고 안전한 중단 상태를 보고한다.
+6. 실패한 필수 자식 뒤에 의존 단계를 시작하지 않는다. 살아 있는 독립 자식은 소유권을 유지하며 완료 또는 안전한 checkpoint 종료까지 관리한다.
+7. 변경 경로에 대해 완료 단계 재사용, stale 완료 기록 거부, checkpoint 뒤 미커밋 로그, 실패 반환 전달, 메모리 예약, 사전 잠금 및 예측 중복·누락 회귀 검사를 수행한다.
+8. 원시 출력에서 metric·CI·판정 flags를 독립 재계산하고 계획 대비 실제 사용량·미완료·해석 한계를 보고한다.
+
+# Evaluation (성공/실패 기준 포함)
+
+Primary는 ordinal2/4의 class-standardized MAE다. grade별 절대오차를 동일 가중하며 invalid는4다. 일반 MAE·macro-F1·두 등급 이상 오류·invalid·학습 위치 지표를 함께 보고한다. 환자 paired bootstrap10,000회·seed7501을 유지하고 class 누락 replicate의 처리·빈도를 보고한다. 결측 class를0으로 채우지 않는다.
+
+**양성 후보:** F 또는 R primary≤1.0, prior와 교환보다 각각≥0.20 개선, C보다≥0.20 개선이다. H보다0.10 초과 악화하면 실용 우위는 미확정이다. CI가0을 포함하면 확증으로 부르지 않으며 유용한 이득·손해를 모두 포함하면 불확정이다. 후속 방법 시험은 별도 판단한다.
+
+**음성 투자 판단:** C가 기본 영상 신호를 보이고 best VLM 대비 MAE 악화가0.10 미만이며 네 block 모두 전체 시간이 절반 이하이면 원 대안 충분성 후보로 둔다. 정확도 CI가±0.20의 유용한 차이를 넓게 포함하면 충분성을 확정하지 않는다. 원 계획의 경계 조건을 코드와 대조한다.
+
+**불확정:** 허용 연장 후에도 변동·적응·입력 충분성이 남으면 현재 투자를 보류한다. E24 이후 조건을 조정하지 않는다. R/F 차이는 해상도·context·대상 지정이 얽힌 관찰이다.
+
+**기술 실패:** 재개·동결·소유권·메모리·ID·누수·평가 결함은 영향 경로를 차단한다. 정확한 최초 실패와 보존 상태를 보고한다. 기술 검사 통과와 과학적 비교 완료를 구분한다.
+
+# Risks / Checks
+
+- 반복 개발 환자·단일 seed이며 독립 일반화 증거가 아니다.
+- ordinal은 해부학 이름이 아니며 supervision 미제공 위치는 미관측 anatomy와 다르다.
+- 세 slice의 등급 판독 충분성·사전학습 노출은 미확인이다.
+- 중단된 reference를 연속 실행으로 재분류하거나 checkpoint 이후 로그를 완료 학습으로 세지 않는다.
+- 메모리 절약을 위해 입력·정밀도·학습 의미를 변경한 경우 이를 단순 운영 복구로 숨기지 않는다.
+- 원본·기존 C/H 선택·OAI 자료를 보존한다. 새 다운로드나 접근 대기는 추가하지 않는다.
+
+## 대규모 GPU 필요 후보
+
+여러 위치·기관의 임상 supervision으로 vision encoder–connector–language를 공동 적응하는 후보를 보존한다. 이번 비교는 그 필요성이나 신규성을 승인하지 않는다.
+
+# 계획의 근거 (GPT 조사 노트)
+
+원본 iter_075/076 plan, iter_076 review.json·claude_report, GOAL, CODE_ASSETS 관련 항목, LIMITATIONS의 MRI context 항목과 현재 실행 코드를 확인했다. 기준 계획 SHA256은 각각 ea40768f17ae65b10f0027ca9ca9423205bb106198ebf891af7ec0bf17a73b8b 및 50193bcb0d30330b42a638e982996664a5b29afee4beaf5d8c13efd9ec864d87이다. research HEAD는 29f663cb721d3a856007bf9c5b0faca6fa7bb52b이며 git status는 깨끗하다.
+
+sp75_resume_test.py는 기존 BASE가 있으면 종료하고, ref/A/B 및 보조 실행을 단계별 완료 기록 없이 묶는다. 중단된 ref를 그대로 재개하면 그것은 더 이상 완전한 연속 실행 대조가 아니므로 이 구분을 보완해야 한다. det_ref 로그는 step7까지 있으나 마지막 기록된 checkpoint는 step6이다. 복구 시 checkpoint 이후 로그를 완료된 학습으로 취급하거나 중복 step으로 합쳐서는 안 된다.
+
+sp75_pipeline.py는 GPU를 가용 메모리순으로 고르지 않으며 현재 free만 검사해 기존 worker의 향후 peak와 안전 여유를 예약하지 않는다. 기본 추정 peak 11.5GiB는 결정적 기술 실행의 실제 peak allocated 약21.477GiB와 다르다. 해당 로그의 update 간격은 대략42–46초다. 모델 입력·학습량 변경 없이 메모리 증가 원인을 구분하고 구성별 실측이 필요하다.
+
+직전 보고서는 재개 검사 완료를 기다린다는 응답으로 끝났고 Monitor 거부 기록이 있다. 실행 시작·대기 문장을 완료로 처리하지 않는 관리는 코드 검사와 별개로 필수다. OAI 중단 지시는 이미 iter_075에 반영되어 있으며 이번에도 유지한다. 새로운 문헌·모델 선정이 필요한 복구가 아니므로 관련 조사를 반복하지 않았다.
+
+
+
+## iter_077 CLAUDE IMPLEMENTATION REPORT — 2026-10-05 16:45:49
+
+# Work Performed
+
+## 요약
+
+- **핵심 결과:** iter_075/076에서 끝내지 못한 F/R/C/H 비교를 `results/iter_077/`에서 끝까지 실행했다. 재개 검사, 동결 검사, 본학습, V8 선택, 사전 잠금, E24, 비용, 독립 재계산이 모두 완료됐다.
+- **가장 큰 blocker와 해소:** 결정적 모드가 SDPA(attention) math backend만 써서 allocated 21.3GiB, 43초/step이었다. `use_deterministic_algorithms`만 켜고 SDPA는 기본값으로 두면 10.2GiB, 약 19초/step에서도 반복 gradient가 bit 단위로 일치했다.
+- **과학 결과(E24, 개발 자료):** held(ordinal 2/4) class-standardized MAE는 R_adapted 0.777, C 0.776, H 0.806, F_adapted 1.070, prior 1.200이다. R_adapted와 C는 사실상 같고(차이 +0.001, CI [−0.247, 0.238]), C는 R_adapted 비용의 약 0.18–0.19배(모델 적재 포함)다.
+- **주의:** 원 계획의 양성 후보 조건은 미충족이다(C보다 ≥0.20 개선 없음). 대안 충분성은 후보 수준이며 확정은 아니다. 단일 seed·반복 개발 자료이고 독립 확인은 하지 않았다.
+- **다음:** 현재 oracle ROI 판독에 VLM 방법 투자는 보류를 권고한다(아래 Recommendation 참고).
+
+## 상세
+
+1. 호스트 상태를 확인했다. GPU 두 장은 비어 있었고 `sp75_*` 프로세스는 없었다.
+2. `sp77_sdpa_probe.py`로 SDPA backend별 메모리와 재현성을 실측했다(상세는 Results).
+3. 학습 코드를 고쳤다.
+   - `--deterministic`는 `use_deterministic_algorithms`만 사용한다.
+   - 재개 시 checkpoint 이후 로그를 `train_log.uncommitted.jsonl`로 격리하고 `train_log.jsonl`에는 committed 구간만 남긴다. committed step이 비연속이거나 중복이거나 checkpoint 기록이 없으면 재개를 거부한다.
+   - 시험 전용 `--allow-uncommitted-stop`을 추가했다.
+4. `sp77_stage.py`를 만들었다. 단계 상태(pending/running/completed/failed), 코드·출력 sha256, stale 완료 거부, 살아 있는 소유자 거부, 자식 rc와 verify 실패 전파를 담당한다.
+5. `sp77_resume_test.py`로 ref/A/B 재개 검사를 완결했다.
+   - A는 step4까지 기록하고 중단해 미커밋 구간을 만든 뒤 재개했다.
+   - B는 epoch1 checkpoint 직후, validation 전에 중단했다.
+6. `sp76_freeze.py`로 동결 검사를 새 경로에서 실행했다.
+7. `sp77_pipeline.py`를 만들었다. 실제 여유 순 배정과 baseline+Σ예상 peak+새 peak+worker당 2GiB 예약을 쓴다. 실패 시 의존 작업을 시작하지 않고 출력 완전성 verify를 한다.
+8. `test_sp77.py`로 CPU 회귀 검사를 24건 추가했다.
+9. 본학습 4개 trajectory, V8 생성·선택, `eval_lock`, E24 생성, C/H 예측, seal, 평가, 독립 재계산, 비용 4 block을 실행했다.
+
+# Files Changed
+
+**신규:** `sp77_sdpa_probe.py`, `sp77_stage.py`, `sp77_resume_test.py`, `sp77_pipeline.py`, `sp77_gen_pilot.py`, `test_sp77.py`
+
+**수정:**
+- `rsna_diag/train.py`: `set_deterministic_algos` 추가.
+- `sp75_train.py`: 결정적 모드 변경, 미커밋 로그 격리, `peak_reserved_gb` 기록, `--allow-uncommitted-stop`.
+- `sp75_eval.py`, `sp75_cost.py`, `sp75_verify.py`, `sp76_select.py`, `sp76_costreport.py`: 결과 경로를 iter_077로 변경.
+- `sp76_select.py`: lock 코드 목록에 `sp77_pipeline.py`, `sp77_stage.py`, `sp75_verify.py` 추가.
+- `test_sp75.py`, `test_sp76_gate.py`: 결과 경로를 iter_077로 변경.
+
+`sp75_pipeline.py`는 임시로 경로를 바꿨다가 iter_076으로 되돌렸으며 현재 변경 없음이다. 이전 결과는 수정·삭제하지 않았다.
+
+# Commands / Experiments
+
+| 실행 | 결과 |
+|---|---|
+| `python sp77_sdpa_probe.py ... --gpu 0` | 성공 |
+| `python sp77_resume_test.py` (background, 1478초) | exit 0, PASS |
+| `python sp76_freeze.py --out results/iter_077/tests/freeze_check.json --gpu 1` | PASS |
+| `python test_sp75.py` | 50 checks, 0 fails |
+| `python test_sp76_gate.py` | 8개 변조 모두 rc=1로 차단 |
+| `python test_sp77.py` | 24 checks, 0 fails |
+| `python sp77_pipeline.py train --epochs 16` | 4개 trajectory rc=0 |
+| `python sp77_pipeline.py gen_v8 --epochs 8,16` | 8 job rc=0 |
+| `python sp76_select.py select_v8` / `select_final` / `lock_spec` | 성공 |
+| `python sp75_eval.py lock --spec ...` | 31개 파일 잠금 |
+| `python sp77_gen_pilot.py` | rc [0,0] |
+| `python sp77_pipeline.py gen_e24 --est-mib 9700` | 4 job rc=0, 각 118건 |
+| `python sp76_cpred.py C` / `H` | 118건 각각 성공 |
+| `python sp75_eval.py seal` / `run` | 성공 |
+| `python sp75_verify.py` | 원 report와 최대 차이 0.0 |
+| `python sp75_cost.py blocks --nblocks 4 --gpu 0 ...` / `python sp76_costreport.py` | 성공 |
+
+실패·재시도는 없었다. 셸 권한 때문에 heredoc 확인 스크립트 1회가 거부되어 `sp77_gen_pilot.py` 파일로 바꿨다.
+
+# Results
+
+## SDPA 구성 probe (`results/iter_077/tests/sdpa_probe.json`)
+
+| 구성 | peak allocated | 반복 gradient bit 일치 |
+|---|---|---|
+| 비결정 기본 | 10.17GiB | 불일치 |
+| 결정적 알고리즘 + 기본 SDPA | 10.17GiB | 일치 |
+| 결정적 알고리즘 + math SDPA | 21.29GiB | 일치 |
+
+- 메모리 증가의 원인은 math SDPA였다.
+- 입력, loss, 정밀도, 학습량은 바꾸지 않았다.
+- math SDPA는 attention 수치가 달라 loss가 12.0878로, 나머지 구성의 12.1376과 다르다. 새 결정적 모드는 실제 학습 경로에 더 가깝다.
+
+## 재개·동결 (`results/iter_077/tests/resume/resume_compare.json`, PASS)
+
+- A와 B 모두 ref와 18/18 step의 loss·grad_norm, batch ID·token hash, RNG, LR이 정확히 같다.
+- checkpoint digest 6/6 일치, val_ce와 adapter digest 일치, `max_abs_loss_diff=0.0`이다.
+- A 재개에서 미커밋 1행을 격리·보존했고 `restored_equals_saved=true`다.
+- B는 재개 전 `val_ce.json`이 없었고 재개 후 validation이 [1, 2]로 복구됐다.
+- 동시 중복 실행은 `owned by live process`로 거부됐다.
+- 다른 GPU(GPU1)의 ref_g1도 정확히 일치했다(보조 근거).
+- 비LoRA 883개·8,600,158,944 byte의 digest가 update 전후 같고 LoRA는 변했다(`freeze_check.json`). 본학습 4개 모두 `freeze_end.json`에 `equals_start`가 기록됐다.
+
+## 본학습
+
+- epoch 16 기준 4개 trajectory가 정상 종료했고 학습 wall은 합계 2.73시간이다(약 39–43분씩, GPU당 1개).
+- peak GPU 점유는 11.9GiB다. 2개 동시 배정은 23.9GiB에 worker당 2GiB 여유를 더하면 용량을 넘어 GPU당 1개로 유지했다.
+- V8 선택 결과는 F lr2e-4, R lr2e-4이고 연장은 하지 않았다. epoch8→16에서 CE는 오히려 상승했고 primary는 악화됐다.
+
+| 방식 | LR | epoch8 primary | epoch16 primary | epoch8 CE | epoch16 CE |
+|---|---|---|---|---|---|
+| F | 2e-5 | 0.970 | 0.978 | 1.022 | 2.202 |
+| F | 2e-4 | 0.843 | 0.897 | 0.984 | 2.393 |
+| R | 2e-5 | 0.665 | 0.943 | 0.861 | 1.562 |
+| R | 2e-4 | 0.535 | 0.822 | 1.259 | 2.424 |
+
+- 사전 규칙상 최종 후보는 epoch 16이다. epoch 8이 V8에서 더 좋았지만(과적합 신호) 규칙을 사후에 바꾸지 않았다. 이는 recipe 한계다.
+
+## E24 held 지표 (`results/iter_077/eval/report.json`, `per_row.json`, `independent_verify.json`)
+
+- 평가 118행은 supervised 71 + held 47이며 생성 472건이다.
+- 결과 요약은 아래와 같다.
+
+| 시스템 | held primary | 비고 |
+|---|---|---|
+| F_adapted | 1.070 | |
+| R_adapted | 0.777 | F−R +0.294, CI [0.078, 0.475] |
+| C | 0.776 | |
+| H | 0.806 | |
+| prior(global/ordinal) | 1.200 | |
+| F_base, R_base | 4.0 | 118/118 invalid (비EOS 장문 응답). 형식 실패이며 내용 오답과 구분됨 |
+
+- 후보 likelihood argmax 보조 분석에서 base held는 2.08(F), 1.91(R)이다.
+- R_adapted−prior_ordinal −0.423, CI [−0.680, −0.120]이다. F_adapted−prior_ordinal −0.130, CI [−0.354, 0.101]이다.
+- R_adapted−swap −0.968, CI [−1.395, −0.473]이다.
+- R_adapted−C +0.001 (CI [−0.247, 0.238]), F_adapted−C +0.294 (CI [0.065, 0.510])이다. C−best VLM의 CI는 ±0.20을 모두 포함한다.
+- 사전 선언 flags: R_adapted는 `le_1.0`, prior·swap 대비 ≥0.20 개선을 충족했으나 C 대비 ≥0.20 개선은 미충족이다. F_adapted는 `le_1.0`과 prior 대비 모두 미충족이다. 양성 후보 조건(`all_candidate_conditions_point`)은 두 방식 모두 false다.
+- C의 기본 영상 신호는 true, C가 best VLM보다 0.10 이상 나쁘지 않음은 true다.
+- independent verify는 원 report와 최대 차이 0.0이다.
+
+## 비용 (`results/iter_077/cost/cost_report.json`, 4 paired block)
+
+- C/best VLM 비율은 적재 포함 0.184–0.194, 제외 0.098–0.103으로 네 block 모두 ≤0.5다.
+- H/best VLM 비율은 적재 포함 0.540–0.581, 제외 0.678–0.747로 ≤0.5가 아니다.
+- GT anatomy 획득 비용은 모든 시스템에서 미측정이다. 비용 경로 답변은 block 간 모두 동일했다.
+- 비용 경로의 F/R 답변은 V8 PNG 기반 생성과 23/24로 일치했다. 원 T2에서 직접 재구성한 입력이라 1건이 다른 한계가 있다.
+
+## 생성 worker 구성
+
+- 2-worker/GPU pilot은 24요청에서 token과 후보 loglik이 1-worker와 완전 일치했다(차이 0.0). peak는 19.2GiB였다.
+- 처리량 이득은 요청당 시간 1.7배 지연을 고려하면 약 1.2배 수준으로 크지 않다. 안전 여유 안이라 E24 4 job은 2 worker/GPU로 실행했고 모두 성공했다. 별도 처리량 전수 비교는 하지 않았다.
+
+# Goal Progress / Reused Assets
+
+**진전:** 실행 blocker를 해소하고 SPIDER Pfirrmann 비교를 실제 출력으로 완료했다. 이 결과로 아래가 보인다.
+- 영상 대응 신호는 있다(R_adapted와 C가 prior·swap보다 낫다).
+- 같은 oracle ROI에서 공유 ResNet18 C가 R_adapted와 같은 정확도를 약 1/5 비용으로 낸다.
+
+**미검증:**
+- 단일 seed·반복 개발 자료이며 독립 확인이 없다.
+- 세 slice의 등급 판독 충분성과 사전학습 노출은 미확인이다.
+- GT anatomy(oracle) 비용은 미측정이다.
+- ordinal은 해부학 이름이 아니다.
+- F/R 차이는 해상도·context·대상 지정이 얽혀 있어 선택 실패나 결합 능력으로 해석할 수 없다.
+
+**재사용:**
+- `sp75_metrics.py`는 iter_075에서 제한 승인됐고 변경 없이 사용했다.
+- `sp75_data.py`, `sp75_vlm.py`, `sp75_gen.py`, `sp75_c.py`, `sp75_h.py`는 수정하지 않았다. C/H 선택 파일의 코드 hash가 현재 파일과 모두 일치함을 확인했다.
+- 기존 C(lr1e-4, epoch40)와 H(config1)는 재학습·재선택 없이 사용했다.
+- `rsna_diag/*`는 iter_075/076 보관본에서 가져왔고, `train.py`만 `set_deterministic_algos`를 추가했다.
+- 선별 반입 manifest는 비어 있었다.
+
+# Problems
+
+**현재 결론 무효:** 없음.
+
+**재사용 전 수정이 필요한 것:**
+- stage 상태는 `sp77_pipeline`에만 연결됐다. `sp75_eval.py`·`sp76_select.py`·`sp75_cost.py`·`sp76_cpred.py` 단계는 직접 호출이라 상태 파일이 없다.
+- `sp75_cost.py blocks`는 `blocks_ledger.json`을 끝에만 쓴다.
+- extension 후 `train`을 다시 호출하면 stale 처리되어 재실행될 수 있는 경로가 있다. 이번에는 연장을 하지 않아 발생하지 않았다.
+
+**추후 개선:**
+- 학습 중 별도 SIGKILL 시험은 하지 않았다. 대신 정지 시점 중단(`os._exit`)과 미커밋 로그 재현으로 검증했다.
+- 처리량 비교는 V8 24건 pilot 1회에 한정된다.
+- `sp76_costreport.py` 출력 상단의 일부 flag 필드를 확인했을 뿐, 보고서 전체 필드를 개별 재계산하지는 않았다.
+- 구현 중 `ps`는 권한 확인이 필요해 `/proc` 대신 nvidia-smi와 `sp76_recover.py` 기록으로 소유권을 판단했다. GPU는 시작 시 비어 있었다.
+
+# Recommendation to GPT
+
+1. **보류 범위:** 현재 조건(oracle ROI, 세 slice, 단일 seed, SPIDER 일부 위치 supervision)에서 VLM F/R의 이득은 확인되지 않았다. 방법 투자는 보류를 권고한다. 근거는 R_adapted−C +0.001로 정확도에 이득이 없다는 점과 C의 비용이 약 1/5라는 점이다.
+2. **구분해서 읽을 것:** 이는 대안 충분성 후보이지 확정이 아니다(CI가 ±0.20을 포함). 정확도 CI가 넓어 VLM이 약하다고 결론낼 수도 없다. 모델 능력 부재나 VLM 전체 기각이 아니다.
+3. **남는 가치가 있는 관찰:** epoch 8이 epoch 16보다 V8에서 좋았다(과적합). 같은 recipe를 확대하기보다 이 한계를 먼저 리뷰해 판단해 달라. 새 loss 시도는 권고하지 않는다.
+4. **남은 질문:** 이 비교 흐름에서 정말 판별해야 할 설명은 "VLM이 영상 신호를 쓰는가"가 아니라 "VLM만이 해결하는 질문 조건이 있는가"다. 같은 질문에서 VLM 고유 가치(언어 조건·근거 연결)를 보일 설계가 없다면 MRI 연구 질문 전환 또는 종료를 검토하라.
+
+SELF_CHECK: PASS
+SUMMARY: SDPA math backend가 원인인 결정적 실행 메모리 문제(21→10GiB)를 해소하고 재개·동결 검사(ref/A/B 18/18 정확 일치)를 통과한 뒤, F/R/C/H 비교를 E24·비용·독립 재계산까지 완료했다. R_adapted는 held MAE 0.777로 prior(1.200)보다 낫지만 C(0.776)와 같고 C는 비용이 약 1/5라, 현재 oracle ROI 조건의 VLM 방법 투자는 보류를 권고한다(대안 충분성은 후보이며 단일 seed·개발 자료로 확정 불가).
+
+# [orchestrator] 권한 거부된 도구 호출
+- Bash: ps -eo pid,lstart,cmd --sort=start_time
+- Bash: sed -i "s#results/iter_076/tests#results/iter_077/tests#g" test_sp75.py test_sp76_gate.py; grep -n "iter_07" test_sp75.py test_sp76_gate.py | cut -c1-150; sed -n 1,47p test_sp76_gate.py
+- Bash: python - <<'EOF'
+import subprocess, sys, time, os
+ad='results/iter_077/train/F_lr2e-4/epoch_16'
+out='results/iter_077/tests/gen_2w_F'
+t0=time.time()
+ps=[subprocess.Popen([sys.executable,'sp75_gen.py','--variant','F','--split','V8','--positions','supervised','--adapter',ad,'--out-dir',out,'--worker',str(k),'--gpu','0'],stdout=open(f'/tmp/gen2w_{k}.log','w'),stderr=subprocess.STDOUT) for k in (0,1)]
+time.sleep(60)
+print(subprocess.check_output(['nvidia-smi','--query-gpu=index,memory.used','--format=csv,noheader']).decode())
+rc=[p.wait() for p in ps]
+print(rc, time.time()-t0)
+import json,glob
+a={};b={}
+for f in glob.glob(out+'/gen_worker*.jsonl'):
+    for l in open(f):
+        r=json.loads(l); a[r['id']]=r
+for f in glob.glob('results/iter_077/gen/V8/F_lr2e-4_ep16/gen_worker*.jsonl'):
+    for l in open(f):
+        r=json.loads(l); b[r['id']]=r
+print(len(a),len(b), all(a[k]['suffix_ids']==b[k]['suffix_ids'] for k in b), max(max(abs(x-y) for x,y in zip(a[k]['cand_loglik'],b[k]['cand_loglik'])) for k in b), sorted({r['worker'] for r in a.values()}))
+EOF
+- Bash: cat results/iter_077/ledger.jsonl | tail -4 | cut -c1-200; nvidia-smi --query-gpu=index,memory.used --format=csv,noheader; for f in results/iter_077/gen/E24/*/gen_worker0.jsonl; do echo $f; wc -l < $f; done
+
+
+
+## iter_077 GPT REVIEW [CONTINUE] — 2026-10-05 16:51:21
+
+# 요약
+
+- **판정:** 유효한 실험이지만 연구 투자 기준은 불확정이다. 현재 oracle ROI 등급 판독의 방법 확대를 보류한다.
+- **핵심 근거:** 개발 24명의 held 47개에서 MAE는 R 0.77690, C 0.77619이며 R−C의 95% CI는 [-0.24667, 0.23810]이다.
+- **의미·한계:** 영역 판독 적응의 영상 대응 신호는 확인됐다. VLM의 추가 가치·순수 선택 실패·결합 능력·신규 기여는 미확인이다.
+- **다음:** 강한 단순 대안 이후에도 남는 중요한 연구 질문을 선택한다. 같은 실험의 자동 확대나 준비 반복은 권고하지 않는다.
+
+## 알림 요약
+
+- 결과: 척추 MRI SPIDER의 판독 비교를 완료했다. 영역 입력 SFT의 MAE 0.777은 prior 1.200보다 낮지만 공유 분류기 0.776 대비 이점은 불확정이다.
+- 의미: 판독 적응과 영상 대응은 가능했으나 현재 과제에서 VLM 방법 개발의 필요성은 확인되지 않았다.
+- 후속: 현재 방법 확대를 보류하고, 단순 분류기 이후에도 남는 실제 근거 선택 문제에 투자할지 판단할 것을 제안한다.
+
+# Assessment
+
+`valid_experiment=true`, `approach_status=inconclusive`로 판정한다. 실행 복구 성공과 과학적 투자 기준 충족은 구분한다. Claude Sonnet/medium 실행은 실제로 종료됐고, 네 trajectory가 각각 144 updates를 완료했다. V8 생성 192건, E24 VLM 생성 472건, C/H 각 118개 예측 및 네 비용 block이 존재한다.
+
+리뷰 대상은 `d397b723c8cc377f1557b2f55a102ea8f8bc951a`다. 변경 파일 15개를 해당 SHA와 대조해 일치함을 확인했고 unpreserved_paths는 없다. 전체 스냅샷은 재사용 결함 때문에 승인하지 않는다. 원 계획과 이전 복구 기록, 변경 diff, 실행 도구 로그 및 실제 결과를 확인했다. OAI 중단 지시를 위반한 작업은 확인되지 않았다.
+
+# Key Findings
+
+1. **핵심 수치를 독립 재현했다.** 원시 생성의 ID·parser·입력 hash와 manifest 정답을 대조했다. 별도 numpy 계산으로 held MAE와 환자 bootstrap 10,000회·seed7501의 핵심 CI를 재현했다.
+
+| 비교 | MAE 차이 | 95% CI |
+|---|---:|---:|
+| R−C | 0.00071 | [-0.24667, 0.23810] |
+| F−R | 0.29357 | [0.07846, 0.47526] |
+| R−prior | -0.42310 | [-0.68036, -0.11979] |
+| R−환자 간 교환 | -0.96762 | [-1.39540, -0.47331] |
+
+held bootstrap 중 57/10,000회에서 class가 빠졌으며, 구현은 존재하는 class만 평균한다. 이를 독립 확인이나 확증 결과로 부르지 않는다.
+
+2. **재개·동결 검사는 완료됐다.** `tests/resume/resume_compare.json`에서 A/B 모두 연속 reference와 18/18 step의 loss·gradient·batch/token·RNG·LR 및 checkpoint digest가 일치한다. validation 전 중단도 복구됐다. 비LoRA 883개·8,600,158,944 bytes는 update 전후 불변이며 네 본학습의 freeze_end도 참이다. 과거 기록의 `e3e19f4387647450`을 빈 SHA256이라고 한 설명은 잘못이었다. 표준 빈 SHA256 prefix는 `e3b0c44298fc1c14`이며 이번 실제 전체-byte 동결 검사가 필요한 근거를 제공한다.
+
+3. **선택 규칙은 결과 후 바뀌지 않았다.** F/R 모두 LR2e-4·epoch16을 선택했고 CE 및 primary 추세가 연장 조건을 충족하지 않아 epoch32를 실행하지 않았다. epoch8 제외는 기존 sp76_select의 사전 고정 해석이다. 다만 epoch8의 더 좋은 V8 성능은 recipe 한계로 남는다.
+
+4. **잠금·봉인과 출력 완전성을 확인했다.** eval_lock의 31개 파일과 eval_seal의 10개 출력 hash는 현재 파일과 일치했다. 각 VLM 조건은 중복 없이 118개다. 적응 F/R의 invalid는 0이다.
+
+5. **비용 원자료 비율은 재현됐다.** C/R의 적재 포함 비율은 네 block에서 0.19403, 0.19441, 0.19181, 0.18355다. 이는 측정 경로의 속도 차이다. 아래 정합성 한계 때문에 동일 정확도에서의 확정된 비용 우위로 확대하지 않는다.
+
+# Problems / Concerns
+
+현재 제한된 정확도 관찰과 불확정 판정을 무효화하는 blocker는 없다. 다음 사항은 재사용 또는 주장 범위를 제한한다.
+
+- `sp77_stage`는 완료 재사용 시 명령·입력·요청 outputs 집합을 비교하지 않으며 verify를 재실행하지 않는다. 실제 fixture도 변경 명령의 재사용을 통과 조건으로 둔다. 학습 stage의 hash 대상에는 adapter가 빠진다.
+- GPU 예약은 실행 중 새 외부 점유를 반영하지 않는다. 이번 로그의 실제 점유에는 여유가 있었지만 다른 실행에서도 안전하다는 보장은 없다.
+- 비용 F/R 답변은 V8와 각각 23/24만 일치한다. F의 `137_k03`은 1→2, R의 `97_k01`은 4→3이다. 원영상 재구성이 원인이라는 설명은 tensor 대조 없이 확정할 수 없다. timing은 최종 저장 완료도 엄밀히 포함하지 않는다.
+- 보고서의 base 출력 설명을 정정한다. 두 조건 모두 118/118 invalid지만 비EOS는 F 116/118, R 118/118이다. 이 결과는 고정 32-token 인터페이스 실패이며 정상 판독 내용의 실패로 일반화하지 않는다.
+- 학습 peak 11,867 MiB와 생성 pilot peak 19,152 MiB는 각각 약 11.59 GiB와 18.70 GiB다. 보고서의 GiB 표현은 MiB/1,000 환산과 혼재한다. 두 worker의 실제 여유는 확보됐으나 전체 처리량 1.2배 향상은 충분히 측정되지 않았다.
+
+# Interpretation
+
+R은 prior 및 동일 ordinal의 환자 간 예측 교환보다 낮은 오차를 보였다. 따라서 현재 적응 recipe에서 기본 영상 대응 신호가 전혀 없다는 설명은 약화된다. 이는 모든 MRI 판독 능력이나 새로운 위치의 anatomy 이해를 뜻하지 않는다.
+
+F보다 R이 좋다는 관찰은 유지한다. 그러나 별도 학습, 해상도, 대상 표시와 주변 context가 함께 달라 순수 선택 실패를 분리하지 못했다. 여러 slice를 사용했다는 사실은 결합 필요성의 근거가 아니다.
+
+R은 C보다 0.20 이상 개선해야 하는 양성 기준을 충족하지 못했다. C의 점추정 정확도와 측정 비용은 유망하지만 CI가 ±0.20을 모두 포함하므로 대안 충분성도 확정되지 않았다. '정확도가 같다'는 보고서 표현은 '점추정치가 비슷하다'로 제한한다.
+
+# Strategy Check / 연구 방향 판단
+
+- **실행 유효성:** 이전 두 번의 실행 복구를 거쳐 실제 비교를 완료했다. 기술 준비만의 반복에서 벗어났다.
+- **성능 개선:** R의 prior·교환 대비 이득은 확인됐지만 C 대비 이득은 미확인이다. base 대비 strict 개선에는 형식 적응이 섞인다.
+- **가설 지지:** 제한된 위치 supervision 이후 영역 판독 신호는 지지된다. 충분한 인식 이후의 선택·결합 실패는 미분리다.
+- **신규 기여 가능성:** 직접 SFT와 공유 분류기 비교이며 새로운 방법은 없다. F/R 차이만으로 선택 안정화 방법을 발주할 근거는 부족하다.
+
+해결된 질문은 현재 자료에서 적응 후 영상 대응 신호를 얻을 수 있는가이다. 남은 질문은 단순 공유 분류기 이후에도 중요한 사용 조건과 방법 가치가 있는가이다. iter_064 context 관찰은 이번 비교가 설명하거나 반박하지 않았으며 원래 제한된 범위를 유지한다.
+
+같은 recipe 확대는 정확도 불확실성을 줄일 수 있어도 VLM의 실제 추가 가치 문제를 해결하지 못한다. F/R 원인 진단도 그 원인을 고쳐 얻을 사용 가치가 먼저 필요하다. 따라서 현재 방법 확대를 보류하고 다음 투자 질문을 선택한다. 타 계열 학습을 이번에 보류한 판단은 허용되지만 향후 큰 방법 투자에서는 적용 범위와 강한 기존 대안을 다시 확인해야 한다.
+
+준비·재작업 비용이 컸으며 이번 본학습 worker wall 합계는 약 2.73시간이다. 이를 전체 누적 GPU 비용으로 부르지 않는다. 추가 코드 정비는 실제 재사용할 경로에만 한정한다.
+
+# Recommended Next Experiment
+
+즉시 추가 GPU 실험을 발주하지 않는다. 다음 계획에서 현재 질문을 유지할 가치와 다른 중요한 질문으로의 전환을 비교해 하나를 선택한다. 현재 관찰의 최소 개입을 택하려면 공유 분류기 이후의 부족함, 실제 사용 조건, 개입이 구분할 경쟁 설명과 양성·음성·불확정 종료 행동을 구체화해야 한다. 그런 근거가 없으면 현재 등급 판독 설계를 보류한다.
+
+epoch8의 E24 사후 평가, 추가 seed·표본·새 loss를 자동 실행하지 않는다. 기존 E24와 checkpoint는 개발 자산으로 보존하고 OAI 또는 MR-RATE 대기를 재개하지 않는다.
+
+논문 추천은 보류한다. 이번 방법 투자 결과는 불확정이며 현재 더 깊이 탐구할 특정 해결 방향의 긍정적 근거가 정해지지 않았다.

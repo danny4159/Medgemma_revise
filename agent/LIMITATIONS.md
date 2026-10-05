@@ -242,3 +242,20 @@ PadChest-GR의 새 개발 집단 흉수 양성 29명·보고서상 음성 40명�
 - 미해결: 독립 사례·다른 prompt에서의 재현 및 사전학습 노출은 미확인이다.
 - 미해결: 명시적 index routing으로 피할 수 있는 손실을 넘어 새로운 방법이 필요한 실제 사용 조건은 확보되지 않았다.
 
+## spider-regional-reading-input-gap — observed
+
+SPIDER 반복 개발 E24 24명의 supervision 미제공 ordinal 2/4 47개에서, T24의 ordinal 1/3/5로 적응한 MedGemma 1.5의 전체 영상·대상 표시 F와 oracle ROI R의 class-standardized MAE는 각각 1.07048과 0.77690이었다. F−R은 0.29357, 환자 bootstrap 95% CI [0.07846, 0.47526]이다. 입력별로 별도 학습한 단일 seed·고정 epoch16 비교이며 해상도·context·대상 표시가 얽혀 있다. 순수 선택 실패나 다중 영상 결합의 한계를 입증하지 않는다.
+
+- 적용 목표 시작: iter_003
+- 최신 리뷰: agent/runs/iter_077/review.json
+- 근거: research/results/iter_077/gen/E24/F_adapted/gen_worker0.jsonl 및 R_adapted/gen_worker0.jsonl: 각 118개 출력
+- 근거: research/results/iter_077/eval/report.json, per_row.json: held 47개·24명
+- 근거: 리뷰에서 원시 출력의 parser·정답 연결을 대조하고 별도 numpy 계산으로 MAE와 10,000회 환자 bootstrap CI를 재현했다.
+- 사용·평가 검증: 고정 공식 chat template, 동일 세 sagittal T2 slice, manifest의 입력 pixel hash 연결을 확인했다.
+- 사용·평가 검증: 적응 F/R은 각각 118/118 EOS 종료·형식 유효이며 사전 고정한 32-token cap과 parser를 사용했다.
+- 사용·평가 검증: eval_lock의 31개 파일과 eval_seal의 10개 출력 hash가 현재 파일과 일치했다.
+- 사용·평가 검증: checkpoint 선택은 E24 이전에 고정됐고, T24/V8 supervision은 ordinal 1/3/5로 제한됐다.
+- 미해결: F/R 차이에서 해상도·대상 표시·context 및 별도 적응이 각각 기여한 정도
+- 미해결: R과 공유 ResNet18 C의 정확도 차이: R−C 0.00071, 95% CI [-0.24667, 0.23810]
+- 미해결: 다른 seed·독립 환자·실제 예측 영역에서의 재현성과 방법 개입의 실용 가치
+

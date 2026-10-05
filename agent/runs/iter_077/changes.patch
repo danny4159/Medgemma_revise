@@ -1,0 +1,1037 @@
+diff --git a/rsna_diag/train.py b/rsna_diag/train.py
+index 23f98be..dcd6167 100644
+--- a/rsna_diag/train.py
++++ b/rsna_diag/train.py
+@@ -178,6 +178,13 @@ def set_deterministic(torch):
+     torch.backends.cuda.enable_math_sdp(True)
+ 
+ 
++def set_deterministic_algos(torch):
++    """iter_077: 결정적 알고리즘만 요구하고 SDPA backend는 기본값 유지 (math-only 대비 peak 약 절반; sp77_sdpa_probe 실측: 반복 gradient bit 일치)."""
++    torch.use_deterministic_algorithms(True)
++    torch.backends.cudnn.benchmark = False
++    torch.backends.cudnn.deterministic = True
++
++
+ def save_adapter(torch, model, path, extra):
+     st = lora.lora_state_dict(model)
+     dg = lora.state_digest(st)
+diff --git a/sp75_cost.py b/sp75_cost.py
+index 6d6b6a2..b591325 100644
+--- a/sp75_cost.py
++++ b/sp75_cost.py
+@@ -10,7 +10,7 @@
+ import argparse, json, os, subprocess, sys, time
+ 
+ HERE = os.path.dirname(os.path.abspath(__file__))
+-OUT = 'results/iter_076/cost'
++OUT = 'results/iter_077/cost'
+ 
+ 
+ def worker(a):
+diff --git a/sp75_eval.py b/sp75_eval.py
+index ea3bc6a..e8d9c3a 100644
+--- a/sp75_eval.py
++++ b/sp75_eval.py
+@@ -17,7 +17,7 @@ import sp75_data as D
+ import sp75_metrics as M
+ import sp75_vlm as V
+ 
+-OUT = 'results/iter_076'
++OUT = 'results/iter_077'
+ EVAL = f'{OUT}/eval'
+ CODE = ['sp75_eval.py', 'sp75_metrics.py', 'sp75_vlm.py', 'sp75_data.py', 'sp75_gen.py']
+ MARGIN = 0.20          # 최소 투자 폭 (MAE grade)
+diff --git a/sp75_train.py b/sp75_train.py
+index 28b3034..ff685b3 100644
+--- a/sp75_train.py
++++ b/sp75_train.py
+@@ -4,6 +4,8 @@ g71_train.py의 checkpoint/재개/상태 digest 패턴을 3영상 grade task로
+ 시작 시 공식 labels loss와 대조한다(허용 오차 확대 없음: 상대 1e-6). 학습 ID는 sp75_data manifest의 T24 supervised(ordinal 1,3,5)만, validation은 V8 supervised만.
+ 사용: python sp75_train.py --run-dir D --variant F|R --lr 2e-4 --epochs 16 --gpu 0 [--deterministic]
+ 
++iter_077 변경: (4) --deterministic는 use_deterministic_algorithms만 켜고 SDPA backend는 기본값(iter_076의 math-only는 peak 21.3GiB; sp77_sdpa_probe로 반복 bit 일치 확인).
++(5) 재개 시 checkpoint 이후 기록된 step/checkpoint 로그를 train_log.uncommitted.jsonl로 옮겨 보존하고 train_log.jsonl은 committed 상태만 남긴다(중복 step 없음).
+ iter_076 변경: (1) loss gate는 PASS/FAIL 상태·유한 수치·상대오차·token 수·모델/입력/코드 provenance를 모두 검사하며 실패·손상·불일치 파일은 학습을 차단한다
+ (재실행으로 우회 불가). (2) 비LoRA parameter 동결을 객체 단위(수·numel·byte>0, optimizer 미포함, 시작/종료 전체 byte digest 일치)로 검사한다.
+ (3) --deterministic: 결정적 kernel(기술 검사용; config digest에 포함).
+@@ -69,6 +71,32 @@ def validate_gate(gate, prov):
+     return bad
+ 
+ 
++def quarantine_uncommitted(run_dir, ckpt_step, logf):
++    """checkpoint step 이후의 학습 step·checkpoint 로그 행(미커밋 구간)을 보존 파일로 옮기고 train_log.jsonl을 committed 상태로 되돌린다.
++    다른 event(val_ce 등)는 유지한다. checkpoint step에 해당하는 committed 기록이 없으면 중단한다."""
++    path = os.path.join(run_dir, 'train_log.jsonl')
++    logf.flush()
++    lines = [l for l in open(path).read().splitlines() if l.strip()]
++    recs = [json.loads(l) for l in lines]
++    if ckpt_step > 0 and not any(r.get('event') == 'checkpoint' and r.get('step') == ckpt_step for r in recs):
++        raise RuntimeError(f'no committed checkpoint log record for step {ckpt_step}')
++    keep, dropped = [], []
++    for l, r in zip(lines, recs):
++        late = r.get('step', 0) > ckpt_step and ('loss' in r or r.get('event') == 'checkpoint')
++        (dropped if late else keep).append(l)
++    steps = [json.loads(l)['step'] for l in keep if 'loss' in json.loads(l)]
++    if len(steps) != len(set(steps)) or steps != list(range(1, len(steps) + 1)):
++        raise RuntimeError(f'committed log steps not contiguous/unique before resume: {steps}')
++    if dropped:
++        with open(os.path.join(run_dir, 'train_log.uncommitted.jsonl'), 'a') as f:
++            f.write(json.dumps({'event': 'quarantine', 'ts': time.time(), 'ckpt_step': ckpt_step, 'n_rows': len(dropped)}) + '\n')
++            f.write('\n'.join(dropped) + '\n')
++        tmp = path + '.tmp'
++        open(tmp, 'w').write('\n'.join(keep) + ('\n' if keep else ''))
++        os.replace(tmp, path)
++    return len(dropped)
++
++
+ def load_rows(split):
+     man = D.load_manifest()
+     rows = [r for r in man['rows'] if r['split'] == split and r['position_set'] == 'supervised' and not r['excluded']]
+@@ -123,6 +151,7 @@ def main():
+     ap.add_argument('--workers', type=int, default=2)
+     ap.add_argument('--gpu', default=None)
+     ap.add_argument('--stop-after-step', type=int, default=None)
++    ap.add_argument('--allow-uncommitted-stop', action='store_true', help='시험 전용: --stop-after-step을 checkpoint 아닌 step에서도 허용(미커밋 로그 구간 재현)')
+     ap.add_argument('--stop-after-epoch-ckpt', type=int, default=None)
+     ap.add_argument('--train-split', default='T24')
+     ap.add_argument('--val-split', default='V8')
+@@ -165,7 +194,7 @@ def run(a, reclaimed):
+         if problems:
+             sys.exit(f'existing loss_gate.json blocks training: {problems}')
+     if a.deterministic:
+-        T.set_deterministic(torch)
++        T.set_deterministic_algos(torch)
+     T.seed_all(torch, a.seed)
+     _, proc, model = generate.load_model()
+     names = lora.apply_lora(model, CFG['r'], CFG['alpha'], CFG['dropout'], seed=a.seed)
+@@ -176,7 +205,7 @@ def run(a, reclaimed):
+     init_digest = lora.state_digest(lora.lora_state_dict(model))
+     cfg = dict(CFG, lr=a.lr, seed=a.seed, variant=a.variant, microbatch=1, n_train=len(train_rows), n_val=len(val_rows), model_revision=generate.MODEL_REVISION,
+                n_lora_targets=len(names), n_trainable=sum(p.numel() for p in params), train_inputs_digest=tin, val_inputs_digest=vin, init='base',
+-               init_adapter_digest=init_digest, save_epochs=sorted(save_epochs), code=code, deterministic=bool(a.deterministic), manifest_sha256=file_sha(f'{D.DATA}/manifest.json'))
++               init_adapter_digest=init_digest, save_epochs=sorted(save_epochs), code=code, deterministic=bool(a.deterministic), deterministic_mode='use_deterministic_algorithms+default_sdpa' if a.deterministic else None, manifest_sha256=file_sha(f'{D.DATA}/manifest.json'))
+     tdig = hashlib.sha256(json.dumps(cfg, sort_keys=True, default=str).encode()).hexdigest()
+     cfg_path = os.path.join(a.run_dir, 'train_config.json')
+     if os.path.exists(cfg_path):
+@@ -233,10 +262,13 @@ def run(a, reclaimed):
+         opt.load_state_dict(blob['optimizer'])
+         step, epoch0, pos0 = blob['step'], blob['epoch'], blob['pos_in_epoch']
+         T.set_rng_state(torch, blob['rng'])
++        n_q = quarantine_uncommitted(a.run_dir, step, logf)
++        logf.close()
++        logf = open(os.path.join(a.run_dir, 'train_log.jsonl'), 'a')   # closure(log_event)가 같은 변수를 참조
+         restored = T.live_digests(torch, model, opt)
+         if restored != blob['digests']:
+             sys.exit(f'restored state != saved checkpoint {restored} vs {blob["digests"]}')
+-        log_event(event='resume', step=step, epoch=epoch0, pos=pos0, restored_equals_saved=True, stale_lock_reclaimed=bool(reclaimed))
++        log_event(event='resume', step=step, epoch=epoch0, pos=pos0, restored_equals_saved=True, stale_lock_reclaimed=bool(reclaimed), quarantined_rows=n_q)
+         print(f'resumed step={step} epoch={epoch0} pos={pos0}', flush=True)
+     t0 = time.time()
+ 
+@@ -310,7 +342,7 @@ def run(a, reclaimed):
+             opt.zero_grad(set_to_none=True)
+             step += 1
+             logf.write(json.dumps({'step': step, 'epoch': epoch + 1, 'pos': s + 1, 'loss': loss_acc, 'grad_norm': gn, 'lr': lr, 'n_examples': len(grp),
+-                                   'elapsed_s': time.time() - t0, 'peak_mem_gb': torch.cuda.max_memory_allocated() / 2 ** 30, 'batch_ids': actual,
++                                   'elapsed_s': time.time() - t0, 'peak_mem_gb': torch.cuda.max_memory_allocated() / 2 ** 30, 'peak_reserved_gb': torch.cuda.max_memory_reserved() / 2 ** 30, 'batch_ids': actual,
+                                    'batch_token_sha': th.hexdigest()[:24], 'rng_before': rng_before, 'opt_step_before': opt_before}) + '\n')
+             logf.flush()
+             saved = False
+@@ -318,9 +350,9 @@ def run(a, reclaimed):
+                 save_ckpt(epoch, s + 1)
+                 saved = True
+             if a.stop_after_step is not None and step == a.stop_after_step:
+-                if not saved:
++                if not saved and not a.allow_uncommitted_stop:
+                     raise RuntimeError('--stop-after-step must coincide with a regular mid-epoch checkpoint step')
+-                print('test stop after mid-epoch checkpoint', flush=True)
++                print('test stop after step (checkpoint saved: %s)' % saved, flush=True)
+                 os._exit(5)
+         del dl, it
+         e = epoch + 1
+diff --git a/sp75_verify.py b/sp75_verify.py
+index 4a2ff8a..26132d2 100644
+--- a/sp75_verify.py
++++ b/sp75_verify.py
+@@ -4,7 +4,7 @@
+ import glob, hashlib, json, os, re, sys
+ import numpy as np
+ 
+-OUT = 'results/iter_076'
++OUT = 'results/iter_077'
+ DATA = 'results/iter_075/data'   # 읽기 전용 입력
+ if os.path.exists(f'{OUT}/eval/independent_verify.json'):
+     sys.exit('exists')
+diff --git a/sp76_costreport.py b/sp76_costreport.py
+index 915c0cf..65e7ebe 100644
+--- a/sp76_costreport.py
++++ b/sp76_costreport.py
+@@ -10,7 +10,7 @@ import glob, json, os, sys
+ 
+ import numpy as np
+ 
+-OUT = 'results/iter_076'
++OUT = 'results/iter_077'
+ COST = f'{OUT}/cost'
+ 
+ 
+diff --git a/sp76_select.py b/sp76_select.py
+index 897ea98..5480311 100644
+--- a/sp76_select.py
++++ b/sp76_select.py
+@@ -14,7 +14,7 @@ import sp75_data as D
+ import sp75_metrics as M
+ import sp75_vlm as V
+ 
+-OUT = 'results/iter_076'
++OUT = 'results/iter_077'
+ LRS = ('2e-5', '2e-4')
+ CE_REL_DROP = 0.05
+ PRIMARY_GAIN = 0.10
+@@ -137,7 +137,7 @@ def cmd_lock_spec(a):
+         f = fin[v]
+         vlm[f'{v}_adapted'] = {'variant': v, 'adapter_dir': f['adapter_dir'], 'adapter_digest': f['adapter_digest'], 'dir': f'{OUT}/gen/E24/{v}_adapted'}
+         extra += [f"{f['adapter_dir']}/adapter.pt", f"{f['adapter_dir']}/val_ce.json", f"{traj_dir(v, f['lr'])}/train_config.json"]
+-    code = ['sp75_pipeline.py', 'sp76_select.py', 'sp76_cpred.py', 'sp75_train.py', 'sp75_c.py', 'sp75_h.py', 'sp67_data.py', 'g71_data.py', 'rsna_diag/generate.py', 'rsna_diag/lora.py']
++    code = ['sp77_pipeline.py', 'sp77_stage.py', 'sp75_verify.py', 'sp76_select.py', 'sp76_cpred.py', 'sp75_train.py', 'sp75_c.py', 'sp75_h.py', 'sp67_data.py', 'g71_data.py', 'rsna_diag/generate.py', 'rsna_diag/lora.py']
+     spec = {'vlm': vlm, 'json_systems': {'C': f'{OUT}/pred/pred_C_E24.json', 'H': f'{OUT}/pred/pred_H_E24.json'}, 'extra_files': extra + code,
+             'selection': {'final': {v: {k: fin[v][k] for k in ('lr', 'epoch', 'adapter_digest')} for v in fin}, 'C': csel}}
+     os.makedirs(f'{OUT}/eval', exist_ok=True)
+diff --git a/sp77_gen_pilot.py b/sp77_gen_pilot.py
+new file mode 100644
+index 0000000..1055031
+--- /dev/null
++++ b/sp77_gen_pilot.py
+@@ -0,0 +1,44 @@
++"""iter_077 생성 worker 구성 pilot: 같은 V8 요청(F lr2e-4 epoch16 adapter)을 GPU0에서 worker 2개(claim 분할)로 실행해 기존 1-worker 출력과
++suffix token·후보 log-likelihood가 같은지, 처리 시간·peak 점유를 기록한다. 결과: results/iter_077/tests/gen_2w_F.json (존재하면 중단)."""
++import glob, json, os, subprocess, sys, time
++
++AD = 'results/iter_077/train/F_lr2e-4/epoch_16'
++OUT = 'results/iter_077/tests/gen_2w_F'
++REF = 'results/iter_077/gen/V8/F_lr2e-4_ep16'
++RES = 'results/iter_077/tests/gen_2w_F.json'
++
++
++def load(d):
++    x = {}
++    for f in glob.glob(d + '/gen_worker*.jsonl'):
++        for ln in open(f):
++            if ln.strip():
++                r = json.loads(ln)
++                assert r['id'] not in x
++                x[r['id']] = r
++    return x
++
++
++def main():
++    if os.path.exists(RES):
++        sys.exit('exists')
++    t0 = time.time()
++    ps = [subprocess.Popen([sys.executable, 'sp75_gen.py', '--variant', 'F', '--split', 'V8', '--positions', 'supervised', '--adapter', AD, '--out-dir', OUT, '--worker', str(k), '--gpu', '0'],
++                           stdout=open(f'{OUT}.w{k}.log', 'w'), stderr=subprocess.STDOUT) for k in (0, 1)]
++    peak = 0
++    while any(p.poll() is None for p in ps):
++        used = int(subprocess.check_output(['nvidia-smi', '--query-gpu=memory.used', '--format=csv,noheader,nounits', '-i', '0']).decode().strip())
++        peak = max(peak, used)
++        time.sleep(3)
++    rc = [p.returncode for p in ps]
++    a, b = load(OUT), load(REF)
++    res = {'rc': rc, 'wall_s': time.time() - t0, 'peak_gpu0_used_mib': peak, 'n_new': len(a), 'n_ref': len(b), 'same_id_set': set(a) == set(b),
++           'suffix_ids_equal_all': set(a) == set(b) and all(a[k]['suffix_ids'] == b[k]['suffix_ids'] for k in b),
++           'max_abs_cand_loglik_diff': max(max(abs(x - y) for x, y in zip(a[k]['cand_loglik'], b[k]['cand_loglik'])) for k in b) if set(a) == set(b) else None,
++           'workers_used': sorted({r['worker'] for r in a.values()}), 'ref_runtime_sum_s': sum(r['runtime_s'] for r in b.values()), 'new_runtime_sum_s': sum(r['runtime_s'] for r in a.values())}
++    json.dump(res, open(RES, 'w'), indent=1)
++    print(json.dumps(res, indent=1))
++
++
++if __name__ == '__main__':
++    main()
+diff --git a/sp77_pipeline.py b/sp77_pipeline.py
+new file mode 100644
+index 0000000..be5183c
+--- /dev/null
++++ b/sp77_pipeline.py
+@@ -0,0 +1,204 @@
++"""iter_077 실행 orchestration: iter_076 sp75_pipeline의 후속(결과는 results/iter_077만).
++
++변경: (1) 모든 자식 작업은 sp77_stage.run_stage(상태 파일 pending/running/completed/failed, 코드·출력 hash, stale 완료 거부)로 실행한다.
++(2) GPU 배정은 허용 GPU 중 실제 여유가 큰 순서이며, 메모리 예약: 다른 프로세스 baseline + 이미 배정된 worker들의 예상 peak 합 + 새 worker 예상 peak
++    + (worker 수)×2GiB 가 GPU 용량 이하일 때만 시작한다(현재 free 조회·고정 대기로 대체하지 않는다). nvidia-smi 실패는 '여유 있음'으로 해석하지 않는다.
++(3) 자식 실패 시 새 작업을 더 시작하지 않고, 이미 살아 있는 독립 자식은 끝까지 관리한 뒤 비정상 종료한다. 종료 후 출력 완전성(verify)까지 확인한다.
++단계 CLI: train | gen_v8 | extend | gen_e24 (select/lock/seal/eval 등은 sp76_select.py·sp75_eval.py·sp75_verify.py·sp75_cost.py)
++"""
++import argparse, json, os, sys, threading, time
++
++import sp77_stage as S
++
++OUT = 'results/iter_077'
++STATE = f'{OUT}/state'
++LEDGER = f'{OUT}/ledger.jsonl'
++TRAIN = f'{OUT}/train'
++GEN = f'{OUT}/gen'
++LRS = {'F': ('2e-5', '2e-4'), 'R': ('2e-5', '2e-4')}
++LOCK = f'{OUT}/eval/eval_lock.json'
++MARGIN_MIB = 2048
++CODE = ['sp77_pipeline.py', 'sp77_stage.py', 'sp75_train.py', 'sp75_gen.py', 'sp75_vlm.py', 'sp75_data.py', 'rsna_diag/train.py', 'rsna_diag/lora.py', 'rsna_diag/generate.py', 'rsna_diag/queue_lock.py']
++
++
++def gpus():
++    return os.environ.get('CUDA_VISIBLE_DEVICES', '0,1').split(',')
++
++
++class Reserver:
++    """GPU별 예약. used()는 nvidia-smi 전체 점유(MiB). baseline: 내 worker가 없을 때 관측한 다른 프로세스 점유."""
++
++    def __init__(self, used_fn=None):
++        self.used_fn = used_fn or S.gpu_used
++        self.lock = threading.Lock()
++        self.running = {g: [] for g in gpus()}   # [(name, est_mib)]
++        self.baseline = {}
++
++    def candidates(self):
++        """허용 GPU를 (예약 후) 여유가 큰 순서로 [(gid, free_after_reservation_mib)]."""
++        u = self.used_fn()   # 실패하면 예외 전파
++        out = []
++        for g in gpus():
++            if not self.running[g]:
++                self.baseline[g] = u[g]['used']
++            proj = self.baseline[g] + sum(e for _, e in self.running[g])
++            out.append((g, u[g]['total'] - proj, u[g]['total']))
++        return sorted(out, key=lambda x: -x[1])
++
++    def try_acquire(self, name, est_mib):
++        with self.lock:
++            for g, free, total in self.candidates():
++                if free - est_mib - MARGIN_MIB * (len(self.running[g]) + 1) >= 0:   # baseline+Σ예상peak+새 peak+worker당 2GiB <= 용량
++                    self.running[g].append((name, est_mib))
++                    return g
++            return None
++
++    def release(self, g, name):
++        with self.lock:
++            self.running[g] = [x for x in self.running[g] if x[0] != name]
++
++
++def run_jobs(jobs, tag, reserver=None):
++    """jobs: [{'name','cmd'(--gpu 제외),'log','outputs','est_mib','verify'(optional callable)}]. 실패 시 SystemExit(자식은 끝까지 관리)."""
++    rs = reserver or Reserver()
++    pending, threads, failures, ledger_lock = list(jobs), [], [], threading.Lock()
++
++    def work(j, gid):
++        t0 = time.time()
++        try:
++            st = S.run_stage(STATE, j['name'], j['cmd'] + ['--gpu', gid], j['outputs'], CODE, gpu=gid, log=j['log'], verify=j.get('verify'))
++            rec = {'tag': tag, 'name': j['name'], 'gpu': gid, 'rc': st.get('rc'), 'reused_completed_state': bool(st.get('reused')), 'wall_s': time.time() - t0,
++                   'peak_gpu_used_mib_sampled': st.get('peak_gpu_used_mib'), 'est_mib': j['est_mib'], 'cmd': j['cmd']}
++        except BaseException as e:
++            failures.append((j['name'], repr(e)))
++            rec = {'tag': tag, 'name': j['name'], 'gpu': gid, 'error': repr(e)[:500], 'wall_s': time.time() - t0}
++        finally:
++            rs.release(gid, j['name'])
++        with ledger_lock:
++            os.makedirs(os.path.dirname(LEDGER), exist_ok=True)
++            open(LEDGER, 'a').write(json.dumps(rec) + '\n')
++
++    while pending or any(t.is_alive() for t in threads):
++        if pending and not failures:
++            j = pending[0]
++            if S.completed_valid(STATE, j['name'], CODE):
++                pending.pop(0)
++                st = S.read_state(STATE, j['name'])
++                open(LEDGER, 'a').write(json.dumps({'tag': tag, 'name': j['name'], 'reused_completed_state': True, 'rc': st['rc']}) + '\n')
++                continue
++            g = rs.try_acquire(j['name'], j['est_mib'])
++            if g is not None:
++                pending.pop(0)
++                os.makedirs(os.path.dirname(j['log']), exist_ok=True)
++                th = threading.Thread(target=work, args=(j, g))
++                th.start()
++                threads.append(th)
++                time.sleep(20)   # 새 worker의 점유가 올라온 뒤 다음 판단(예약이 주 근거이며 이 대기는 보조)
++                continue
++        elif pending and failures:
++            pending = []   # 실패한 필수 자식 뒤에 새 작업을 시작하지 않는다
++        time.sleep(5)
++    [t.join() for t in threads]
++    if failures:
++        raise SystemExit(f'jobs failed: {failures}')
++
++
++def traj_dir(v, lr):
++    return f'{TRAIN}/{v}_lr{lr}'
++
++
++def check_trained(v, lr, milestones):
++    d = traj_dir(v, lr)
++    for e in milestones:
++        for f in (f'{d}/epoch_{e:02d}/val_ce.json', f'{d}/epoch_{e:02d}/adapter.pt'):
++            if not os.path.exists(f):
++                raise RuntimeError(f'{f} missing after training')
++    if not os.path.exists(f'{d}/freeze_end.json'):
++        raise RuntimeError(f'{d}: freeze_end.json missing (training did not complete)')
++    n = json.load(open(f'{d}/freeze_end.json'))
++    if not n.get('equals_start'):
++        raise RuntimeError(f'{d}: non-LoRA digest changed')
++
++
++def train_job(v, lr, epochs, est_mib, tag=''):
++    d = traj_dir(v, lr)
++    ms = [e for e in (8, 16, 32) if e <= epochs]
++    return {'name': f'train_{v}_{lr}_to{epochs}', 'log': f'{OUT}/logs/train_{v}_{lr}{tag}.log', 'est_mib': est_mib,
++            'cmd': [sys.executable, 'sp75_train.py', '--run-dir', d, '--variant', v, '--lr', lr, '--epochs', str(epochs), '--workers', '2'],
++            'outputs': [f'{d}/freeze_end.json'] + [f'{d}/epoch_{e:02d}/val_ce.json' for e in ms], 'verify': lambda: check_trained(v, lr, ms)}
++
++
++def gen_cmd(v, split, positions, adapter, out, worker=0, lock=None):
++    c = [sys.executable, 'sp75_gen.py', '--variant', v, '--split', split, '--positions', positions, '--adapter', adapter, '--out-dir', out, '--worker', str(worker)]
++    return c + (['--lock', lock] if lock else [])
++
++
++def expected_count(split):
++    import sp75_data as D
++    return sum(1 for r in D.load_manifest()['rows'] if r['split'] == split and not r['excluded'] and (split != 'V8' or r['position_set'] == 'supervised'))
++
++
++def count_out(d):
++    n, ids = 0, set()
++    for f in os.listdir(d) if os.path.isdir(d) else []:
++        if f.startswith('gen_worker') and f.endswith('.jsonl'):
++            for ln in open(f'{d}/{f}'):
++                if ln.strip():
++                    ids.add(json.loads(ln)['id'])
++                    n += 1
++    return n, len(ids)
++
++
++def gen_job(name, v, split, positions, adapter, out, est_mib, lock=None):
++    n = expected_count(split)
++
++    def verify():
++        tot, uniq = count_out(out)
++        if tot != n or uniq != n:
++            raise RuntimeError(f'{out}: {tot} records / {uniq} unique, expected {n}')
++    return {'name': name, 'log': f'{OUT}/logs/{name}.log', 'est_mib': est_mib, 'cmd': gen_cmd(v, split, positions, adapter, out, lock=lock), 'outputs': [f'{out}/gen_worker0.jsonl'], 'verify': verify}
++
++
++def cmd_train(a):
++    jobs = [train_job(v, lr, a.epochs, a.est_mib) for v in a.variants.split(',') for lr in LRS[v]]
++    run_jobs(jobs, 'train')
++
++
++def cmd_gen_v8(a):
++    jobs = []
++    sel = json.load(open(f'{OUT}/select_v8.json')) if a.only_selected else None
++    for v in a.variants.split(','):
++        for lr in ((sel['selected'][v],) if sel else LRS[v]):
++            for ep in a.epochs.split(','):
++                out = f'{GEN}/V8/{v}_lr{lr}_ep{int(ep):02d}'
++                jobs.append(gen_job(f'genV8_{v}_{lr}_{ep}', v, 'V8', 'supervised', f'{traj_dir(v, lr)}/epoch_{int(ep):02d}', out, a.est_mib))
++    run_jobs(jobs, 'gen_v8')
++
++
++def cmd_extend(a):
++    sel = json.load(open(f'{OUT}/select_v8.json'))
++    jobs = [train_job(v, sel['selected'][v], 32, a.est_mib, tag='_ext') for v in ('F', 'R') if sel['extend'][v]['extend_to_32']]
++    if jobs:
++        run_jobs(jobs, 'extend')
++
++
++def cmd_gen_e24(a):
++    lock = json.load(open(LOCK))
++    jobs = [gen_job(f'genE24_{name}', v['variant'], 'E24', 'all', v.get('adapter_dir') or 'none', v['dir'], a.est_mib, lock=LOCK) for name, v in lock['vlm'].items()]
++    run_jobs(jobs, 'gen_e24')
++
++
++def main():
++    ap = argparse.ArgumentParser()
++    sp = ap.add_subparsers(dest='c', required=True)
++    t = sp.add_parser('train'); t.add_argument('--epochs', type=int, default=16); t.add_argument('--variants', default='F,R'); t.add_argument('--est-mib', type=int, default=12000)
++    g = sp.add_parser('gen_v8'); g.add_argument('--epochs', default='8,16'); g.add_argument('--variants', default='F,R'); g.add_argument('--est-mib', type=int, default=11000); g.add_argument('--only-selected', action='store_true')
++    e = sp.add_parser('extend'); e.add_argument('--est-mib', type=int, default=12000)
++    ge = sp.add_parser('gen_e24'); ge.add_argument('--est-mib', type=int, default=11000)
++    a = ap.parse_args()
++    os.makedirs(f'{OUT}/logs', exist_ok=True)
++    {'train': cmd_train, 'gen_v8': cmd_gen_v8, 'extend': cmd_extend, 'gen_e24': cmd_gen_e24}[a.c](a)
++
++
++if __name__ == '__main__':
++    main()
+diff --git a/sp77_resume_test.py b/sp77_resume_test.py
+new file mode 100644
+index 0000000..451b422
+--- /dev/null
++++ b/sp77_resume_test.py
+@@ -0,0 +1,157 @@
++"""iter_077 학습 재개·단일 소유권·수치 재현 검사 (결과: results/iter_077/tests/resume; 단계 상태: results/iter_077/state).
++
++결정적 설정(--deterministic = use_deterministic_algorithms + 기본 SDPA; sp77_sdpa_probe 근거)에서 같은 장치(GPU0)·같은 초기 상태·batch·RNG로
++ ref   : 중단 없는 연속 2 epoch
++ A     : step4 직후(마지막 checkpoint는 step3: 미커밋 step4 로그 구간) 중단 -> 재개(재개 중 동시 중복 실행은 거부되어야 함)
++ B     : epoch1 checkpoint 직후, validation 전 중단 -> 재개에서 validation 복구
++를 실행하고 step별 loss·grad_norm·batch/token hash·RNG·LR, checkpoint digest, val_ce, adapter digest를 정확 비교한다.
++GPU1 보조: ref_g1 (다른 장치 연속 실행; 정보용, 통과 조건 아님). 임의 tolerance 없음. 비교 집합이 비거나 step 집합이 다르면 FAIL.
++각 단계는 sp77_stage 상태 파일로 기록·재사용되며, 자식 실패/예외는 부모의 비정상 종료로 전달된다.
++"""
++import json, os, subprocess, sys, threading, time
++
++import sp77_stage as S
++
++OUT = 'results/iter_077'
++BASE = f'{OUT}/tests/resume'
++STATE = f'{OUT}/state'
++COMMON = ['--variant', 'F', '--lr', '2e-4', '--seed', '17']
++DET = ['--epochs', '2', '--save-epochs', '1,2', '--deterministic']
++CODE = ['sp75_train.py', 'sp75_vlm.py', 'sp75_data.py', 'rsna_diag/train.py', 'rsna_diag/lora.py', 'rsna_diag/generate.py', 'rsna_diag/queue_lock.py', 'sp77_stage.py', 'sp77_resume_test.py']
++errs = []
++
++
++def cmd(run, gpu, extra):
++    return [sys.executable, 'sp75_train.py', '--run-dir', f'{BASE}/{run}', '--gpu', gpu, *COMMON, *extra]
++
++
++def fin(run):
++    return [f'{BASE}/{run}/epoch_02/val_ce.json', f'{BASE}/{run}/freeze_end.json']
++
++
++def stage(name, run, gpu, extra, outputs, expect_rc=0):
++    return S.run_stage(STATE, name, cmd(run, gpu, extra), outputs, CODE, gpu=gpu, log=f'{BASE}/{name}.out', expect_rc=expect_rc)
++
++
++def guarded(fn):
++    def w(*a):
++        try:
++            fn(*a)
++        except BaseException as e:   # 스레드 안에서 오류를 잃지 않는다
++            errs.append(repr(e))
++    return w
++
++
++def chain0():
++    stage('ref', 'ref', '0', DET, fin('ref'))
++    stage('A_stop', 'A', '0', DET + ['--stop-after-step', '4', '--allow-uncommitted-stop'], [f'{BASE}/A_stop.out'], expect_rc=5)
++    res_err = []
++
++    def resume():
++        try:
++            stage('A_resume', 'A', '0', DET, fin('A'))
++        except BaseException as e:
++            res_err.append(repr(e))
++    t = threading.Thread(target=resume)
++    t.start()
++    for _ in range(300):    # A_resume이 lock을 잡고 'resumed' 로그를 낼 때까지 대기 후 동시 중복 실행을 시도
++        time.sleep(2)
++        if os.path.exists(f'{BASE}/A_resume.out') and 'resumed step=' in open(f'{BASE}/A_resume.out').read():
++            break
++    stage('A_dup_concurrent', 'A', '0', DET, [f'{BASE}/A_dup_concurrent.out'], expect_rc=1)
++    t.join()
++    if res_err:
++        raise RuntimeError(res_err[0])
++    stage('B_stop', 'B', '0', DET + ['--stop-after-epoch-ckpt', '1'], [f'{BASE}/B_stop.out'], expect_rc=3)
++    json.dump({'B_val_before_resume': os.path.exists(f'{BASE}/B/epoch_01/val_ce.json')}, open(f'{BASE}/B_before_resume.json.tmp', 'w'))
++    if not os.path.exists(f'{BASE}/B_before_resume.json'):
++        os.replace(f'{BASE}/B_before_resume.json.tmp', f'{BASE}/B_before_resume.json')
++    stage('B_resume', 'B', '0', DET, fin('B'))
++
++
++def chain1():
++    stage('ref_g1', 'ref_g1', '1', DET, fin('ref_g1'))
++
++
++def events(run):
++    return [json.loads(l) for l in open(f'{BASE}/{run}/train_log.jsonl') if l.strip()]
++
++
++def steps(L):
++    out = {}
++    for r in L:
++        if 'loss' in r:
++            if r['step'] in out:
++                raise RuntimeError('duplicate logged step')
++            out[r['step']] = r
++    return out
++
++
++def val(run, e):
++    return json.load(open(f'{BASE}/{run}/epoch_{e:02d}/val_ce.json'))
++
++
++def compare(a_run, b_run, epochs):
++    La, Lb = events(a_run), events(b_run)
++    sa, sb = steps(La), steps(Lb)
++    common = sorted(set(sa) & set(sb))
++    res = {'n_steps': [len(sa), len(sb)], 'same_step_set': sorted(sa) == sorted(sb), 'n_common': len(common)}
++    first = None
++    for s in common:
++        if (sa[s]['loss'] != sb[s]['loss'] or sa[s]['grad_norm'] != sb[s]['grad_norm']) and first is None:
++            first = {'step': s, 'loss_a': sa[s]['loss'], 'loss_b': sb[s]['loss'], 'abs_diff': abs(sa[s]['loss'] - sb[s]['loss'])}
++    res['first_loss_mismatch'] = first
++    res['max_abs_loss_diff'] = max(abs(sa[s]['loss'] - sb[s]['loss']) for s in common) if common else None
++    res['loss_exact_equal_all'] = bool(common) and all(sa[s]['loss'] == sb[s]['loss'] and sa[s]['grad_norm'] == sb[s]['grad_norm'] for s in common)
++    res['batch_ids_token_sha_equal'] = bool(common) and all(sa[s]['batch_ids'] == sb[s]['batch_ids'] and sa[s]['batch_token_sha'] == sb[s]['batch_token_sha'] for s in common)
++    res['rng_before_equal'] = bool(common) and all(sa[s]['rng_before'] == sb[s]['rng_before'] and sa[s]['opt_step_before'] == sb[s]['opt_step_before'] for s in common)
++    res['lr_equal'] = bool(common) and all(sa[s]['lr'] == sb[s]['lr'] for s in common)
++    ca = {r['step']: r['digests'] for r in La if r.get('event') == 'checkpoint'}
++    cb = {r['step']: r['digests'] for r in Lb if r.get('event') == 'checkpoint'}
++    cc = sorted(set(ca) & set(cb))
++    res['checkpoint_steps_common'] = cc
++    res['checkpoint_digests_equal_common_steps'] = {str(s): ca[s] == cb[s] for s in cc}
++    res['val_ce'] = {str(e): [val(a_run, e)['val_ce'], val(b_run, e)['val_ce']] for e in epochs}
++    res['val_ce_equal'] = all(val(a_run, e)['val_ce'] == val(b_run, e)['val_ce'] for e in epochs)
++    res['adapter_digest_equal'] = all(val(a_run, e)['adapter_digest'] == val(b_run, e)['adapter_digest'] for e in epochs)
++    res['val_tokens_equal'] = all(val(a_run, e)['val_tokens'] == val(b_run, e)['val_tokens'] for e in epochs)
++    res['ok'] = bool(res['same_step_set'] and res['n_common'] == 18 and res['loss_exact_equal_all'] and res['batch_ids_token_sha_equal'] and res['rng_before_equal'] and res['lr_equal']
++                     and len(cc) >= 6 and all(res['checkpoint_digests_equal_common_steps'].values()) and res['val_ce_equal'] and res['adapter_digest_equal'] and res['val_tokens_equal'])
++    return res
++
++
++def main():
++    os.makedirs(BASE, exist_ok=True)
++    t = [threading.Thread(target=guarded(chain0)), threading.Thread(target=guarded(chain1))]
++    t0 = time.time()
++    [x.start() for x in t]
++    [x.join() for x in t]
++    res = {'wall_s': time.time() - t0, 'errors': errs, 'gpu_env': os.environ.get('CUDA_VISIBLE_DEVICES')}
++    ok = {'no_stage_errors': not errs}
++    if not errs:
++        res['A_vs_ref'], res['B_vs_ref'] = compare('A', 'ref', (1, 2)), compare('B', 'ref', (1, 2))
++        res['ref_g1_vs_ref_info_only'] = compare('ref_g1', 'ref', (1, 2))
++        La, Lb = events('A'), events('B')
++        res['A_resume_events'] = [r for r in La if r.get('event') == 'resume']
++        res['B_resume_events'] = [r for r in Lb if r.get('event') == 'resume']
++        res['B_val_events'] = [r.get('epoch') for r in Lb if r.get('event') == 'val_ce']
++        res['B_val_before_resume'] = json.load(open(f'{BASE}/B_before_resume.json'))['B_val_before_resume']
++        res['dup_message_tail'] = open(f'{BASE}/A_dup_concurrent.out').read()[-300:]
++        unc = f'{BASE}/A/train_log.uncommitted.jsonl'
++        res['A_uncommitted_rows_preserved'] = [json.loads(l) for l in open(unc) if l.strip()][:1] if os.path.exists(unc) else None
++        ok['A_vs_ref'], ok['B_vs_ref'] = res['A_vs_ref']['ok'], res['B_vs_ref']['ok']
++        ok['A_restored_equals_saved_and_tail_quarantined'] = len(res['A_resume_events']) == 1 and res['A_resume_events'][0].get('restored_equals_saved') is True and res['A_resume_events'][0].get('quarantined_rows') == 1
++        ok['B_resume_restored'] = len(res['B_resume_events']) == 1 and res['B_resume_events'][0].get('restored_equals_saved') is True
++        ok['B_val_missing_before_resume_and_recovered'] = res['B_val_before_resume'] is False and res['B_val_events'] == [1, 2]
++        ok['dup_rejected_by_lock'] = 'owned by live process' in res['dup_message_tail']
++        res['ref_g1_exact_info'] = res['ref_g1_vs_ref_info_only']['loss_exact_equal_all']
++    res['ok'] = ok
++    res['PASS'] = bool(ok and all(ok.values()))
++    json.dump(res, open(f'{BASE}/resume_compare.json.tmp', 'w'), indent=1)
++    os.replace(f'{BASE}/resume_compare.json.tmp', f'{BASE}/resume_compare.json')
++    print(json.dumps({'PASS': res['PASS'], 'ok': ok, 'errors': errs}, indent=1))
++    sys.exit(0 if res['PASS'] else 1)
++
++
++if __name__ == '__main__':
++    main()
+diff --git a/sp77_sdpa_probe.py b/sp77_sdpa_probe.py
+new file mode 100644
+index 0000000..867c9a5
+--- /dev/null
++++ b/sp77_sdpa_probe.py
+@@ -0,0 +1,90 @@
++"""iter_077 메모리·재현성 probe (학습 의미 변경 없음; 진단 전용, 학습 없음).
++
++iter_076 결정적 실행(set_deterministic: math SDPA만)은 allocated 21.5GiB·43초/step이었다. 어떤 SDPA backend 구성에서
++(a) peak allocated/reserved (b) 같은 입력·초기 상태 두 번의 forward/backward gradient가 bit 단위로 같은지를 측정한다.
++구성: nondet_default(기본), det_math(현 --deterministic), det_flag_only(use_deterministic_algorithms만, SDPA backend 기본), det_efficient(math 끄고 efficient/flash 허용)
++사용: python sp77_sdpa_probe.py --out results/iter_077/tests/sdpa_probe.json --gpu 0
++"""
++import argparse, hashlib, json, os, sys, time
++
++import sp75_data as D
++import sp75_vlm as V
++from rsna_diag import generate, lora
++from rsna_diag import train as T
++
++
++def grad_digest(torch, params):
++    h = hashlib.sha256()
++    for p in params:
++        h.update(p.grad.detach().float().cpu().numpy().tobytes())
++    return h.hexdigest()[:16]
++
++
++def main():
++    ap = argparse.ArgumentParser()
++    ap.add_argument('--out', required=True)
++    ap.add_argument('--gpu', required=True)
++    a = ap.parse_args()
++    inh = os.environ.get('CUDA_VISIBLE_DEVICES', '').split(',')
++    if a.gpu not in inh:
++        sys.exit(f'gpu {a.gpu} not in inherited {inh}')
++    os.environ['CUDA_VISIBLE_DEVICES'] = a.gpu
++    os.environ['CUBLAS_WORKSPACE_CONFIG'] = ':4096:8'
++    if os.path.exists(a.out):
++        sys.exit('exists')
++    import torch
++    T.seed_all(torch, 17)
++    man = D.load_manifest()
++    rows = sorted([r for r in man['rows'] if r['split'] == 'T24' and r['position_set'] == 'supervised' and not r['excluded']], key=lambda r: (int(r['patient']), r['ordinal']))[:2]
++    _, proc, model = generate.load_model()
++    lora.apply_lora(model, 16, 32, 0.0, seed=17)   # dropout 0: 이 probe는 backend 간 수치 재현만 본다
++    params = list(lora.lora_params(model).values())
++    model.gradient_checkpointing_enable(gradient_checkpointing_kwargs={'use_reentrant': False})
++    model.config.use_cache = False
++    model.train()
++    batches = [V.to_cuda(V.collate([V.build_example(proc, V.load_images(r['inputs']['F']), V.PROMPTS['F'], str(r['grade']))], proc.tokenizer.pad_token_id)) for r in rows]
++    res = {'attn_implementation': getattr(model.config, '_attn_implementation', None), 'gpu_logical': a.gpu, 'configs': {}}
++
++    def setcfg(name):
++        be = torch.backends.cuda
++        torch.use_deterministic_algorithms(name.startswith('det'))
++        be.enable_flash_sdp(True); be.enable_mem_efficient_sdp(True); be.enable_math_sdp(True)
++        if name == 'det_math':
++            be.enable_flash_sdp(False); be.enable_mem_efficient_sdp(False)
++        if name == 'det_efficient':
++            be.enable_math_sdp(False)
++
++    for name in ('nondet_default', 'det_flag_only', 'det_efficient', 'det_math'):
++        entry = {}
++        try:
++            setcfg(name)
++            digs, losses, ts = [], [], []
++            torch.cuda.empty_cache()
++            torch.cuda.reset_peak_memory_stats()
++            for rep in range(2):
++                for p in params:
++                    p.grad = None
++                t0 = time.time()
++                tot = 0.0
++                for b in batches:
++                    ls, n = V.loss_sum(torch, model, b)
++                    (ls / (2 * len(batches))).backward()
++                    tot += float(ls) / n
++                torch.cuda.synchronize()
++                ts.append(time.time() - t0)
++                losses.append(tot)
++                digs.append(grad_digest(torch, params))
++            entry = {'grad_digest_rep': digs, 'repeat_bitwise_equal': digs[0] == digs[1], 'losses': losses, 'sec_per_2ex_fwd_bwd': ts,
++                     'peak_allocated_gib': torch.cuda.max_memory_allocated() / 2 ** 30, 'peak_reserved_gib': torch.cuda.max_memory_reserved() / 2 ** 30}
++        except Exception as ex:
++            entry = {'error': repr(ex)[:400]}
++        res['configs'][name] = entry
++        print(name, json.dumps(entry), flush=True)
++    os.makedirs(os.path.dirname(a.out), exist_ok=True)
++    tmp = a.out + '.tmp'
++    json.dump(res, open(tmp, 'w'), indent=1)
++    os.replace(tmp, a.out)
++
++
++if __name__ == '__main__':
++    main()
+diff --git a/sp77_stage.py b/sp77_stage.py
+new file mode 100644
+index 0000000..b91b81e
+--- /dev/null
++++ b/sp77_stage.py
+@@ -0,0 +1,119 @@
++"""iter_077 단계 실행 상태 관리 (pending/running/completed/failed, 원자적 기록, stale 완료 거부, 자식 반환값 전파).
++
++state 파일: <state_dir>/<stage>.json  {status, cmd, rc, code_sha, outputs{path: sha256}, pid, pid_start, ts_start, ts_end, gpu, peak_gpu_used_mib, wall_s}
++- completed 재사용 조건: 기록된 code_sha가 현재 코드와 같고 모든 outputs 파일의 sha256가 기록과 같다. 하나라도 다르면 stale로 보고 재실행한다(기존 파일 덮어쓰기 금지는 호출자가 새 경로 사용).
++- running 상태 기록이 있고 그 pid(+시작 tick)가 살아 있으면 중복 시작하지 않고 예외를 낸다. 죽었으면 failed(stale-running)로 기록 후 재실행한다.
++- 자식 rc != 0 이면 StageFailed를 일으킨다. 호출 측은 이를 잡아 부모 프로세스를 비정상 종료시킨다.
++"""
++import hashlib, json, os, subprocess, threading, time
++
++
++class StageFailed(RuntimeError):
++    pass
++
++
++def sha_file(p):
++    h = hashlib.sha256()
++    with open(p, 'rb') as f:
++        for b in iter(lambda: f.read(1 << 22), b''):
++            h.update(b)
++    return h.hexdigest()
++
++
++def code_sha(files):
++    return {f: sha_file(f) for f in files}
++
++
++def _atomic(obj, path):
++    os.makedirs(os.path.dirname(path), exist_ok=True)
++    tmp = path + f'.tmp{os.getpid()}'
++    json.dump(obj, open(tmp, 'w'), indent=1, default=str)
++    os.replace(tmp, path)
++
++
++def _pid_start(pid):
++    try:
++        return open(f'/proc/{pid}/stat').read().split()[21]
++    except Exception:
++        return None
++
++
++def read_state(state_dir, name):
++    p = os.path.join(state_dir, name + '.json')
++    return json.load(open(p)) if os.path.exists(p) else None
++
++
++def completed_valid(state_dir, name, code_files):
++    st = read_state(state_dir, name)
++    if not st or st.get('status') != 'completed' or st.get('rc') != st.get('expect_rc', 0):
++        return False
++    if st.get('code_sha') != code_sha(code_files):
++        return False
++    for p, h in st.get('outputs', {}).items():
++        if not os.path.exists(p) or sha_file(p) != h:
++            return False
++    return bool(st.get('outputs'))
++
++
++_gpu_lock = threading.Lock()
++
++
++def gpu_used():
++    out = subprocess.check_output(['nvidia-smi', '--query-gpu=index,uuid,memory.used,memory.total', '--format=csv,noheader,nounits']).decode().strip().splitlines()
++    res = {}
++    for ln in out:
++        i, u, used, tot = [x.strip() for x in ln.split(',')]
++        res[i] = {'used': int(used), 'total': int(tot), 'uuid': u}
++    return res
++
++
++def run_stage(state_dir, name, cmd, outputs, code_files, gpu=None, log=None, expect_rc=0, extra=None, verify=None):
++    """cmd 실행. outputs: 완료로 인정하려면 존재해야 하는 파일 목록. expect_rc: 의도적 중단 시험은 비0 코드를 기대할 수 있다.
++    반환: state dict. 실패 시 StageFailed."""
++    if completed_valid(state_dir, name, code_files):
++        st = read_state(state_dir, name)
++        st['reused'] = True
++        return st
++    old = read_state(state_dir, name)
++    if old and old.get('status') == 'running':
++        pid, ps = old.get('pid'), old.get('pid_start')
++        if pid and _pid_start(pid) == ps and ps is not None:
++            raise StageFailed(f'stage {name} owned by live pid {pid}')
++        old['status'], old['note'] = 'failed', 'stale-running (owner not alive)'
++        _atomic(old, os.path.join(state_dir, name + '.stale.json'))
++    st = {'stage': name, 'status': 'running', 'cmd': cmd, 'gpu': gpu, 'code_sha': code_sha(code_files), 'ts_start': time.time(), 'pid': os.getpid(), 'pid_start': _pid_start(os.getpid()),
++          'expect_rc': expect_rc, **(extra or {})}
++    _atomic(st, os.path.join(state_dir, name + '.json'))
++    os.makedirs(os.path.dirname(log), exist_ok=True) if log else None
++    p = subprocess.Popen(cmd, stdout=open(log, 'a') if log else None, stderr=subprocess.STDOUT)
++    peak = 0
++    while p.poll() is None:
++        try:
++            u = gpu_used()
++            if gpu is not None:
++                peak = max(peak, max(v['used'] for k, v in u.items() if v['uuid'] == gpu or k == gpu))
++        except Exception:
++            pass
++        time.sleep(5)
++    st.update({'rc': p.returncode, 'ts_end': time.time(), 'wall_s': time.time() - st['ts_start'], 'peak_gpu_used_mib': peak})
++    missing = [o for o in outputs if not os.path.exists(o)]
++    vprob = None
++    if p.returncode == expect_rc and not missing and verify is not None:
++        try:
++            verify()
++        except BaseException as e:
++            vprob = repr(e)[:400]
++            st['verify_error'] = vprob
++    if p.returncode == expect_rc and not missing and vprob is None:
++        st['status'] = 'completed'
++        st['outputs'] = {o: sha_file(o) for o in outputs}
++        if expect_rc != 0:
++            st['rc_matches_expected_nonzero'] = True
++            st['rc'] = p.returncode
++    else:
++        st['status'] = 'failed'
++        st['missing_outputs'] = missing
++    _atomic(st, os.path.join(state_dir, name + '.json'))
++    if st['status'] != 'completed':
++        raise StageFailed(f'stage {name} rc={p.returncode} (expected {expect_rc}) missing={missing} verify_error={vprob}')
++    return st
+diff --git a/test_sp75.py b/test_sp75.py
+index c245dde..8be455c 100644
+--- a/test_sp75.py
++++ b/test_sp75.py
+@@ -1,5 +1,5 @@
+ """iter_075/076 CPU fixture: 입력 연결·allowlist·ROI/표시·parser·metric·교환·prior + (iter_076) 선택·연장·loss gate·평가 입력·tail 복구.
+-결과: results/iter_076/tests/fixtures_cpu.json (존재하면 중단). 실패 시 비정상 종료."""
++결과: results/iter_077/tests/fixtures_cpu.json (존재하면 중단). 실패 시 비정상 종료."""
+ import json, os, sys
+ import numpy as np
+ from PIL import Image
+@@ -134,7 +134,7 @@ with tempfile.TemporaryDirectory() as td:
+     open(gp, 'wb').write(b'{"id": "a"}\n')
+     chk('gen_repair_noop_on_clean', GN.repair_tail(gp) is None)
+ fails = [k for k, v in res.items() if not v['pass']]
+-out = 'results/iter_076/tests/fixtures_cpu.json'
++out = 'results/iter_077/tests/fixtures_cpu.json'
+ if os.path.exists(out):
+     sys.exit('exists')
+ json.dump({'n': len(res), 'n_pass': len(res) - len(fails), 'fails': fails, 'checks': res}, open(out, 'w'), indent=1, default=str)
+diff --git a/test_sp76_gate.py b/test_sp76_gate.py
+index 5a59070..967a4f6 100644
+--- a/test_sp76_gate.py
++++ b/test_sp76_gate.py
+@@ -1,13 +1,13 @@
+ """iter_076: loss gate 변조·실패·손상 파일이 실제 학습 진입점(sp75_train.py)에서 모델 적재 전에 학습을 차단하는지 검사한다 (CPU, GPU 불필요).
+ 각 사례: run-dir에 loss_gate.json 변형을 두고 sp75_train.py를 실행 -> 비정상 종료 + 'blocks training' 메시지 + train_log/checkpoint 미생성.
+-결과: results/iter_076/tests/gate_tamper.json (존재하면 중단). 하나라도 차단 안 되면 비정상 종료.
++결과: results/iter_077/tests/gate_tamper.json (존재하면 중단). 하나라도 차단 안 되면 비정상 종료.
+ """
+ import json, os, subprocess, sys
+ 
+ import sp75_train as TR
+ 
+-BASE = 'results/iter_076/tests/gate_tamper'
+-OUT = 'results/iter_076/tests/gate_tamper.json'
++BASE = 'results/iter_077/tests/gate_tamper'
++OUT = 'results/iter_077/tests/gate_tamper.json'
+ 
+ 
+ def main():
+diff --git a/test_sp77.py b/test_sp77.py
+new file mode 100644
+index 0000000..47939ca
+--- /dev/null
++++ b/test_sp77.py
+@@ -0,0 +1,146 @@
++"""iter_077 CPU 회귀 검사: 단계 상태 재사용/stale 거부/실패 전파/소유권, GPU 메모리 예약, checkpoint 뒤 미커밋 로그, 생성 출력 중복·누락 검사.
++결과: results/iter_077/tests/fixtures_sp77.json (존재하면 중단). 하나라도 실패하면 비정상 종료. GPU 불사용."""
++import json, os, sys, tempfile, time
++
++import sp75_train as TR
++import sp77_pipeline as P
++import sp77_stage as S
++
++OUT = 'results/iter_077/tests/fixtures_sp77.json'
++if os.path.exists(OUT):
++    sys.exit('exists')
++res, fails = {}, []
++
++
++def chk(name, cond, info=None):
++    res[name] = {'ok': bool(cond), 'info': info}
++    if not cond:
++        fails.append(name)
++
++
++def raises(fn, exc=Exception):
++    try:
++        fn()
++    except exc as e:
++        return repr(e)[:160]
++    return None
++
++
++td = tempfile.TemporaryDirectory()
++d = td.name
++code = [os.path.join(d, 'code.py')]
++open(code[0], 'w').write('x=1\n')
++out1 = os.path.join(d, 'out1.txt')
++cmd_ok = [sys.executable, '-c', f"open({out1!r},'w').write('v1')"]
++st = S.run_stage(d + '/state', 'ok', cmd_ok, [out1], code)
++chk('stage_completed_records_hashes', st['status'] == 'completed' and st['outputs'][out1] == S.sha_file(out1))
++st2 = S.run_stage(d + '/state', 'ok', [sys.executable, '-c', 'import sys; sys.exit(9)'], [out1], code)
++chk('completed_stage_reused_not_rerun', st2.get('reused') is True and st2['rc'] == 0)
++open(out1, 'w').write('tampered')
++chk('stale_when_output_changed', S.completed_valid(d + '/state', 'ok', code) is False)
++open(out1, 'w').write('v1')
++chk('valid_again_when_restored', S.completed_valid(d + '/state', 'ok', code) is True)
++open(code[0], 'w').write('x=2\n')
++chk('stale_when_code_changed', S.completed_valid(d + '/state', 'ok', code) is False)
++e = raises(lambda: S.run_stage(d + '/state', 'bad', [sys.executable, '-c', 'import sys; sys.exit(3)'], [out1], code), S.StageFailed)
++chk('child_rc_propagates_as_failure', e is not None and S.read_state(d + '/state', 'bad')['status'] == 'failed' and S.read_state(d + '/state', 'bad')['rc'] == 3, e)
++e = raises(lambda: S.run_stage(d + '/state', 'nofile', [sys.executable, '-c', 'pass'], [os.path.join(d, 'never.txt')], code), S.StageFailed)
++chk('missing_output_fails_even_with_rc0', e is not None and S.read_state(d + '/state', 'nofile')['status'] == 'failed', e)
++e = raises(lambda: S.run_stage(d + '/state', 'vfail', cmd_ok, [out1], code, verify=lambda: (_ for _ in ()).throw(RuntimeError('incomplete'))), S.StageFailed)
++chk('verify_failure_blocks_completion', e is not None and S.read_state(d + '/state', 'vfail')['status'] == 'failed' and 'incomplete' in e, e)
++exp = S.run_stage(d + '/state', 'expect5', [sys.executable, '-c', 'import sys; sys.exit(5)'], [d + '/state/expect5.marker'] if False else [out1], code, expect_rc=5)
++chk('expected_nonzero_rc_stage_completed', exp['status'] == 'completed' and exp['rc'] == 5 and S.completed_valid(d + '/state', 'expect5', code))
++# 소유권: 현재(살아 있는) pid가 running으로 기록된 단계는 중복 시작을 거부한다
++S._atomic({'status': 'running', 'pid': os.getpid(), 'pid_start': S._pid_start(os.getpid())}, d + '/state/owned.json')
++e = raises(lambda: S.run_stage(d + '/state', 'owned', cmd_ok, [out1], code), S.StageFailed)
++chk('live_owner_refused', e is not None and 'live pid' in e, e)
++S._atomic({'status': 'running', 'pid': 2 ** 22 - 3, 'pid_start': '1'}, d + '/state/dead.json')
++st3 = S.run_stage(d + '/state', 'dead', cmd_ok, [out1], code)
++chk('dead_owner_rerun_and_stale_preserved', st3['status'] == 'completed' and os.path.exists(d + '/state/dead.stale.json'))
++
++# ---- Reserver ----
++TOT = 24576
++
++
++def fake(used):
++    return lambda: {g: {'used': used[g], 'total': TOT, 'uuid': 'u' + g} for g in used}
++
++
++used = {'0': 100, '1': 100}
++os.environ['CUDA_VISIBLE_DEVICES'] = '0,1'
++r = P.Reserver(fake(used))
++g1 = r.try_acquire('t1', 11947)
++g2 = r.try_acquire('t2', 11947)
++g3 = r.try_acquire('t3', 11947)
++chk('train_one_per_gpu_by_reservation', {g1, g2} == {'0', '1'} and g3 is None, [g1, g2, g3])
++r.release(g1, 't1')
++used2 = dict(used)
++chk('slot_reusable_after_release', r.try_acquire('t3', 11947) == g1)
++r2 = P.Reserver(fake({'0': 14000, '1': 100}))
++chk('other_process_usage_counted_and_least_loaded_first', r2.try_acquire('a', 11947) == '1' and r2.try_acquire('b', 11947) is None)
++r3 = P.Reserver(fake({'0': 100, '1': 20000}))
++chk('too_little_free_refused', r3.try_acquire('x', 11947) == '0' and r3.try_acquire('y', 11947) is None)
++r4 = P.Reserver(fake({'0': 100, '1': 100}))
++acc = [r4.try_acquire(f'g{i}', 8000) for i in range(5)]
++chk('two_small_workers_per_gpu_when_margin_allows', acc[:4].count('0') == 2 and acc[:4].count('1') == 2 and acc[4] is None, acc)
++
++
++def boom():
++    raise RuntimeError('nvidia-smi failed')
++
++
++r5 = P.Reserver(boom)
++chk('smi_failure_is_not_free', raises(lambda: r5.try_acquire('z', 1000)) is not None)
++
++# ---- run_jobs 실패 전파 및 후속 작업 비시작 ----
++P.STATE, P.LEDGER = d + '/pstate', d + '/ledger.jsonl'
++mark2 = os.path.join(d, 'second_started')
++jobs = [{'name': 'j_fail', 'cmd': [sys.executable, '-c', 'import sys; sys.exit(7)', ], 'log': d + '/l1.log', 'outputs': [out1], 'est_mib': 20000},
++        {'name': 'j_after', 'cmd': [sys.executable, '-c', f"open({mark2!r},'w').write('x')"], 'log': d + '/l2.log', 'outputs': [mark2], 'est_mib': 20000}]
++rsv = P.Reserver(fake({'0': 100}))
++os.environ['CUDA_VISIBLE_DEVICES'] = '0'
++rsv = P.Reserver(fake({'0': 100}))
++e = raises(lambda: P.run_jobs(jobs, 'test', rsv), SystemExit)
++chk('run_jobs_failure_raises_and_blocks_dependents', e is not None and not os.path.exists(mark2) and S.read_state(d + '/pstate', 'j_fail')['status'] == 'failed', e)
++os.environ['CUDA_VISIBLE_DEVICES'] = '0,1'
++# 의도: j_after는 같은 GPU 예약 때문에 j_fail 종료 뒤에야 후보가 되지만 실패 후에는 시작하지 않는다.
++
++# ---- 미커밋 로그 ----
++rd = os.path.join(d, 'run')
++os.makedirs(rd)
++rows = [{'step': i, 'loss': 1.0} for i in (1, 2, 3)] + [{'event': 'checkpoint', 'step': 3}] + [{'step': 4, 'loss': 1.0}, {'step': 5, 'loss': 1.0}, {'event': 'checkpoint', 'step': 5}]
++open(rd + '/train_log.jsonl', 'w').write('\n'.join(json.dumps(x) for x in rows) + '\n')
++lf = open(rd + '/train_log.jsonl', 'a')
++n = TR.quarantine_uncommitted(rd, 3, lf)
++kept = [json.loads(l) for l in open(rd + '/train_log.jsonl')]
++unc = [json.loads(l) for l in open(rd + '/train_log.uncommitted.jsonl')]
++chk('uncommitted_tail_quarantined_and_preserved', n == 3 and [x.get('step') for x in kept if 'loss' in x] == [1, 2, 3] and len(unc) == 4 and unc[0]['event'] == 'quarantine' and sum('loss' in x for x in unc) == 2)
++rd2 = os.path.join(d, 'run2')
++os.makedirs(rd2)
++open(rd2 + '/train_log.jsonl', 'w').write('\n'.join(json.dumps(x) for x in [{'step': 1, 'loss': 1.0}, {'step': 2, 'loss': 1.0}]) + '\n')
++e = raises(lambda: TR.quarantine_uncommitted(rd2, 2, open(rd2 + '/train_log.jsonl', 'a')))
++chk('missing_checkpoint_log_record_refuses_resume', e is not None and 'no committed checkpoint' in e, e)
++rd3 = os.path.join(d, 'run3')
++os.makedirs(rd3)
++open(rd3 + '/train_log.jsonl', 'w').write('\n'.join(json.dumps(x) for x in [{'step': 1, 'loss': 1.0}, {'step': 1, 'loss': 1.0}, {'event': 'checkpoint', 'step': 1}]) + '\n')
++e = raises(lambda: TR.quarantine_uncommitted(rd3, 1, open(rd3 + '/train_log.jsonl', 'a')))
++chk('duplicate_committed_step_refuses_resume', e is not None and 'not contiguous' in e, e)
++
++# ---- 생성 출력 완전성 검사 (gen_job.verify) ----
++gd = os.path.join(d, 'gen')
++os.makedirs(gd)
++import sp75_data as D
++ids = [r['id'] for r in D.load_manifest()['rows'] if r['split'] == 'V8' and not r['excluded'] and r['position_set'] == 'supervised']
++job = P.gen_job('x', 'F', 'V8', 'supervised', 'none', gd, 1000)
++open(gd + '/gen_worker0.jsonl', 'w').write('\n'.join(json.dumps({'id': i}) for i in ids[:-1]) + '\n')
++chk('gen_missing_request_detected', raises(job['verify']) is not None)
++open(gd + '/gen_worker0.jsonl', 'w').write('\n'.join(json.dumps({'id': i}) for i in ids + [ids[0]]) + '\n')
++chk('gen_duplicate_request_detected', raises(job['verify']) is not None)
++open(gd + '/gen_worker0.jsonl', 'w').write('\n'.join(json.dumps({'id': i}) for i in ids) + '\n')
++chk('gen_complete_passes', raises(job['verify']) is None and len(ids) == 24)
++
++td.cleanup()
++os.makedirs(os.path.dirname(OUT), exist_ok=True)
++json.dump({'n_checks': len(res), 'n_fail': len(fails), 'fails': fails, 'checks': res}, open(OUT, 'w'), indent=1)
++print(len(res), 'checks', len(fails), 'fails', fails)
++sys.exit(1 if fails else 0)

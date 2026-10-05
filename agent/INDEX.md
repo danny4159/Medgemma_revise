@@ -82,6 +82,7 @@
 - iter_074 [사용자 보완으로 전환 → iter_075] 기존 기록 보존, 성공·실패 판정 아님 (리뷰 후 처리)
 - iter_075 [CONTINUE] (deep_high/standard/normal) <MRI 부위별 판독의 투자 적합성 검토: execution_failed> 💾31f4bb49b6169d78b0bfaedb95fff0fb27e392ac SPIDER 자료 준비와 C/H 선택은 끝났지만, 재개 검사 도중 세션이 종료돼 VLM 본학습·E24 비교는 미실행이다. 위치 전이와 VLM 투자 가치는 아직 판단할 수 없다. → 다음: 한정 실행 복구를 권고한다. 과학적 음성 결과가 없으므로 자료나 연구 질문을 바꾸지 않고 iter_075의 미완료 비교를 끝낸다. 기준 plan.md의 SHA256은 ea40768f17ae65b10f0027ca9ca9423205bb106198ebf891af7ec0bf17a73b8b다. 기존 manifest·split·prompt·parser·학습량·확대 및 판정 기준과 C/H 선택을 유지한다. 먼저 실제 잔존 프로세스와 checkpoint 상태를 확인해 중복 실행을 막고, base 동결 검사·loss gate 재사용·재개 검사를 수정한다. ref/A 차이는 중단 전부터 발생했으므로 결정적 기술 대조로 복구 오류와 수치 비결정성을 구분한다. 완료된 검사는 재사용하고 미완료 validation/B만 보완한다. 통과 후 두 GPU의 안전한 배치를 확정해 네 VLM trajectory, 사전 V8 선택·조건부 연장, 설정 고정, E24 및 네 비용 block, 독립 재계산까지 수행한다. background 작업 완료와 반환값을 확인하기 전에 구현 세션을 종료하지 않는다. 기존 원본을 덮어쓰지 말고 복구 변경과 결과를 별도 연결하며, 이번 결과로 OAI·MR-RATE 대기나 신규 frozen 후보 탐색을 재개하지 않는다.
 - iter_076 [CONTINUE] (normal/standard/normal) <MRI 부위별 판독의 투자 적합성 검토: execution_failed> 💾29f663cb721d3a856007bf9c5b0faca6fa7bb52b 기술 검사 50건과 gate 차단 8건은 통과했지만, 재개 검사 중 세션이 종료돼 본실험은 미실행이다. 메모리 여유와 완료 흐름을 복구해야 하며 MRI 판독 가설은 아직 미판정이다. → 다음: 한정 실행 복구를 계속하되, 반복된 세션 조기 종료와 메모리 문제를 먼저 해결하고 기존 F/R/C/H 비교를 끝낸다. iter_075 plan.md(SHA256 ea40768f17ae65b10f0027ca9ca9423205bb106198ebf891af7ec0bf17a73b8b)와 iter_076의 과학적 조건·C/H 선택·평가 기준을 유지한다. 호스트에서 잔존 PID·GPU·lock 소유권을 먼저 확인하고 중복 실행을 막는다. 현재 checkpoint와 로그를 보존하며 재개 검사 실행기를 단계별 복구 가능하게 수정한다. 결정적 검사에서 발생한 총점유·allocator OOM 경고의 원인을 확인하고 worker당 2GiB 여유를 확보한다. 동일 코드·입력의 완료 검사는 재사용하고 저장·복구 A/B 및 동결 종료 검사만 보완한다. 통과 후 네 trajectory·V8 선택과 조건부 연장·사전 잠금·E24·네 비용 block·독립 재계산까지 실제 완료한다. 구현 세션은 자식의 종료와 산출물 완전성을 확인할 때까지 유지하며, 실제 장애면 정확한 중단 원인과 checkpoint 상태를 보고한다. 새 자료·frozen 모델 탐색이나 OAI 대기를 재개하지 않는다.
+- iter_077 [CONTINUE] (normal/standard/normal) <MRI 부위별 판독의 투자 적합성 검토: inconclusive> 💾d397b723c8cc377f1557b2f55a102ea8f8bc951a SPIDER 개발 24명에서 영역 판독 SFT의 MAE는 0.777로 prior 1.200보다 낮았지만 공유 분류기 0.776 대비 이점은 불확정이다. 현재 방법 확대는 보류하며 선택·결합 원인은 미확인이다. → 다음: 현재 oracle ROI 등급 판독의 방법 확대를 보류하고, 강한 단순 대안 이후에도 중요한 잔여 가치가 있는 다음 연구 투자 하나를 선택한다. 같은 research_track에서 이번 영상 대응 신호와 F/R 입력 차이, iter_064의 제한된 context 관찰을 이어받되 서로 다른 실패를 동일 원인으로 묶지 않는다. 현재 비교의 추가 seed·epoch8 E24 평가·표본 확대·새 loss는 자동 발주하지 않는다. 후속 최소 개입을 선택하려면 공유 분류기로 충분하지 않은 실제 사용 조건, 경쟁 설명, 판단을 바꿀 최소 비교와 종료점을 먼저 명시한다. 그런 조건이 없으면 현재 판독 설계를 보류한 채 GOAL 안의 다른 중요한 질문을 선택한다. 비용 정합성 수정은 그 결과가 다음 투자 선택을 바꿀 때만 한정 수행한다. OAI 확보·MR-RATE 접근 대기를 재개하지 않는다.
 
 ## 이전 목표들의 접근법 (참고용, 현재 목표의 재평가 횟수에는 안 들어감)
 
@@ -123,12 +124,12 @@
 - MRI 확산 신호와 판단 연결 검토 [approach/mri-diffusion-evidence]: 1회 (iter_069), 유효한 실험 1회, 미분류 0회, 최근 판정: abandon, 커밋: 76eb1036df95478f889ee6bfd8e31ca43e82b415
 - MRI 전문 모델의 근거 인식 적합성 검토 [approach/mri-specialist-evidence]: 1회 (iter_070), 유효한 실험 1회, 미분류 0회, 최근 판정: abandon, 커밋: 02a8adade58f7cea84638f9e96bf963a0fb64d55
 - MRI grounding 적응 전이 대조 [approach/mri-grounding-transfer]: 1회 (iter_071), 유효한 실험 1회, 미분류 0회, 최근 판정: abandon, 커밋: 973628fd9852fd558796cffb2dcb60ba24f87bc2
-- MRI 부위별 판독의 투자 적합성 검토 [approach/mri-regional-reading]: 5회 (iter_072, iter_073, iter_074, iter_075, iter_076), 유효한 실험 0회, 미분류 0회, 최근 판정: execution_failed, 커밋: 0e5de720949a422d8defabd0112001dbad313235, 5f2affbdd1d63328d6dbe1220725b41d04ded4d6, 31f4bb49b6169d78b0bfaedb95fff0fb27e392ac, 29f663cb721d3a856007bf9c5b0faca6fa7bb52b
+- MRI 부위별 판독의 투자 적합성 검토 [approach/mri-regional-reading]: 6회 (iter_072, iter_073, iter_074, iter_075, iter_076, iter_077), 유효한 실험 1회, 미분류 0회, 최근 판정: inconclusive, 커밋: 0e5de720949a422d8defabd0112001dbad313235, 5f2affbdd1d63328d6dbe1220725b41d04ded4d6, 31f4bb49b6169d78b0bfaedb95fff0fb27e392ac, 29f663cb721d3a856007bf9c5b0faca6fa7bb52b, d397b723c8cc377f1557b2f55a102ea8f8bc951a
 
 현재 연구 브랜치: approach/mri-regional-reading (코드 위치: /SSD1_1TB/home/milab/daniel/08_medgemma/research)
 
 ### 최근 계획의 대안 순위
 
-1. MRI 부위별 판독의 투자 적합성 검토: 기존 비교를 한정 복구해 VLM 추가 투자 판단을 완료한다.
-2. 현재 판독 비교 보류: 과학적 음성 근거가 없고 준비 자산이 있어 지금 종료할 정보상 이점이 작다.
-3. 새 MRI 자료·모델 탐색: 현재 경쟁 설명을 해결하지 못하고 확보·검증 비용을 다시 발생시키므로 보류한다.
+1. MRI 부위별 판독의 투자 적합성 검토: 한정 실행 복구 후 준비된 F/R/C/H 비교를 완결한다.
+2. 현재 판독 투자 보류: 복구가 실제로 불가능하거나 비용 대비 판단 가치가 사라졌다는 구체적 근거가 있을 때 선택한다.
+3. 새 MRI 자료·모델 탐색: 현재 비교의 과학적 결과가 없어 지금은 우선하지 않는다.
