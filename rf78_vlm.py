@@ -16,6 +16,17 @@ QUESTION = ('What is the Pfirrmann grade (1 = bright homogeneous disc with clear
             '5 = dark collapsed disc without distinction) of the target intervertebral disc? Answer with a single digit from 1 to 5.')
 MAX_NEW = V.MAX_NEW
 MAX_NEW_TOKENS = MAX_NEW
+ADVICE = ('An automated image classifier estimated Pfirrmann grade {c} for this target disc. '
+          'This estimate may be correct or incorrect. Use the MRI to determine the final grade.')
+
+
+def audit_prompt(cond, grade):
+    if cond not in ('A', 'T', 'X') or grade not in range(1, 6):
+        raise ValueError('invalid audit condition/automated grade')
+    tail = V.PROMPT_R
+    if cond == 'T':
+        tail = 'No MRI images are available in this condition. What is' + V.PROMPT_R.split('What is', 1)[1]
+    return ADVICE.format(c=grade) + '\n\n' + tail
 
 
 def ref_line(j, g, shown):
@@ -28,6 +39,10 @@ def prompt_digest():
 
 def blocks(cond, ref_imgs, ref_grades, tgt_imgs):
     """chat content block 목록과 영상 역할 목록 [(role, j)] 반환. ref_imgs: [[3 PIL] x3] 또는 None."""
+    if cond in ('A', 'T', 'X'):
+        ims = [] if cond == 'T' else tgt_imgs
+        return ([{'type': 'image', 'image': im} for im in ims] +
+                [{'type': 'text', 'text': audit_prompt(cond, ref_grades)}]), [('target', k) for k in range(len(ims))]
     if cond == 'Q':
         return [{'type': 'image', 'image': im} for im in tgt_imgs] + [{'type': 'text', 'text': V.PROMPT_R}], [('target', k) for k in range(3)]
     c = [{'type': 'text', 'text': HEADER + '\n\n'}]
@@ -50,7 +65,8 @@ def build_inputs(proc, cond, ref_imgs, ref_grades, tgt_imgs):
     content, roles = blocks(cond, ref_imgs, ref_grades, tgt_imgs)
     inp = proc.apply_chat_template([{'role': 'user', 'content': content}], add_generation_prompt=True, tokenize=True, return_dict=True, return_tensors='pt')
     n_img = sum(1 for b in content if b['type'] == 'image')
-    if inp['pixel_values'].shape[0] != n_img:
+    actual = int(inp['pixel_values'].shape[0]) if 'pixel_values' in inp else 0
+    if actual != n_img:
         raise RuntimeError(f"pixel_values images {inp['pixel_values'].shape[0]} != {n_img}")
     return inp, roles
 

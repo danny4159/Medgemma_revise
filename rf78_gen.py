@@ -35,6 +35,9 @@ def load_imgs(entries):
 
 
 def make_inputs(proc, cond, req):
+    if cond in ('A', 'T', 'X'):
+        imgs = [] if cond == 'T' else load_imgs(req['images'])
+        return RV.build_inputs(proc, cond, None, req['automated_grade'], imgs)
     tgt = load_imgs(req['query_images'])
     refs = None
     grades = None
@@ -62,7 +65,7 @@ def run_one(torch, proc, model, req, cond, eos_ids):
     text = proc.tokenizer.decode(ids, skip_special_tokens=True)
     raw = proc.tokenizer.decode(ids, skip_special_tokens=False)
     return {'suffix_ids': ids, 'text': text, 'raw': raw, 'ended_eos': bool(ended), 'n_new': len(ids), 'parsed': V.parse(text) if ended else None,
-            'parse_valid': bool(ended and V.parse(text) is not None), 'n_input_tokens': n_in, 'n_images': int(x['pixel_values'].shape[0]),
+            'parse_valid': bool(ended and V.parse(text) is not None), 'n_input_tokens': n_in, 'n_images': int(x['pixel_values'].shape[0]) if 'pixel_values' in x else 0,
             'runtime_s': dt, 'prep_s': t0 - t_in, 'peak_mem_alloc_gb': torch.cuda.max_memory_allocated() / 2 ** 30, 'peak_mem_reserved_gb': torch.cuda.max_memory_reserved() / 2 ** 30}
 
 
