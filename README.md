@@ -329,3 +329,10 @@ GPT 사용량은 `plan_usage.json`, `review_usage.json`에 남긴다. 기존 텍
 conda Python·GPU 범위·모델 등급·구독 로그인은 유지하며, 전역 PATH 수정이나 자동 설치는 하지 않는다.
 실제 연구 루프 시작 전 `codex --version`을 검사하므로 리뷰 단계까지 진행한 후에야 실행 경로
 문제를 발견하지 않도록 한다. `--status`, `--usage`, `--prepare-only`는 이 점검을 실행하지 않는다.
+
+## 별도 문헌·산업 수요 탐색기
+
+의료 데이터 특성에서 출발하는 연구 분야·핵심 문제 탐색은
+[discovery/README.md](discovery/README.md)를 참조한다. `discovery_orchestrator.py`는
+gpt-6-astra/high로 문헌 조사·후보 심사만 수행하며 기존 실험 GOAL·Telegram·상태와 독립이다.
+기본 실행은 상태 조회이고 `--run`으로만 탐색을 시작한다.
