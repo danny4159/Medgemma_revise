@@ -29393,3 +29393,472 @@ R은 C보다 0.20 이상 개선해야 하는 양성 기준을 충족하지 못�
 epoch8의 E24 사후 평가, 추가 seed·표본·새 loss를 자동 실행하지 않는다. 기존 E24와 checkpoint는 개발 자산으로 보존하고 OAI 또는 MR-RATE 대기를 재개하지 않는다.
 
 논문 추천은 보류한다. 이번 방법 투자 결과는 불확정이며 현재 더 깊이 탐구할 특정 해결 방향의 긍정적 근거가 정해지지 않았다.
+
+
+## iter_078 GPT PLAN [MRI 참고 사례의 영상 근거 사용 진단 / proceed] — 2026-10-05 17:06:57
+
+# 요약
+
+- **이번에 할 일:** 기존 척추 MRI 판독 모델에 유사 사례를 제공하고, 참고 영상이 등급 정보만 제공하는 것보다 도움이 되는지 비교한다.
+- **필요한 이유:** 영역 판독 적응은 가능했지만 공유 분류기 대비 추가 가치는 미확인이다. 같은 단일 판독을 더 학습하는 대신 참고 사례 활용의 가치를 검증한다.
+- **확인할 기준:** 참고 영상의 추가 정확도, 강한 단순 대안 대비 이득, 중대 오류와 실제 추론 비용이다.
+- **주의·다음:** 표준 retrieval의 적용은 신규 기여가 아니다. 이득이 등급 정보나 분류기로 설명되면 현재 추가 방법 투자를 종료한다.
+
+## 알림 맥락
+
+- 연구: MRI 근거 선택·사용
+- 데이터: 척추 sagittal T2 MRI와 부위별 등급 정답인 SPIDER
+- 모델: 기존 MedGemma 1.5 영역 판독 SFT와 공유 ResNet18, 신규 학습 없음
+- 과제: 대상 추간판 영상과 참고 사례를 받아 대상의 Pfirrmann grade 1–5 출력
+- 가설: 참고 영상의 내용이 검색된 등급 목록 이상의 판독 정보를 제공할 수 있다
+- 질문: 비슷한 MRI 사례를 보여주면 모델이 그 영상을 활용하는가, 등급만 따라가는가?
+- 변경: 구체화
+- 연결: 영역 판독 적응의 영상 대응은 확인했지만 분류기 대비 이득은 미확인이라, 같은 자료에서 참고 사례 활용의 추가 가치를 검사한다
+- 작업: 대상 단독·등급만 제공·가까운 영상 제공·같은 등급의 먼 영상 제공을 비교해 후속 투자 여부를 정한다
+
+# Current Understanding
+
+iter_077의 원 리뷰를 유지한다. E24 held 47개에서 R/C의 class-standardized MAE는 0.77690/0.77619이며 차이의 95% CI는 [-0.24667, 0.23810]이다. R은 prior와 환자 간 예측 교환보다 좋았지만, 공유 분류기 이후의 VLM 추가 가치는 미확인이다.
+
+F−R 0.29357의 차이는 해상도·대상 표시·context·별도 적응이 얽힌 관찰이다. 이번 실험은 그 차이의 원인을 분해하지 않는다. iter_064의 context 손실도 다른 과제에서의 제한된 관찰이며 두 현상을 동일 원인으로 묶지 않는다.
+
+**유지:** GOAL, MRI 우선, 기존 개발 환자와 oracle anatomy, 원 grade·입력·checkpoint·판정·독립 reserve 보존.
+
+**보류:** 단일 ROI 판독의 추가 epoch·seed·표본 확대, F의 새 loss, epoch8 E24 사후 평가, OAI와 MR-RATE 확보.
+
+**변경:** 불필요한 영상을 제거하는 문제에서, 유용할 수 있는 참고 사례 영상이 실제 추가 정보를 주는지로 비교를 좁힌다. 새 결과는 `results/iter_078/`에 저장한다.
+
+# Strategy Check / 연구 방향 판단
+
+**상위 질문:** VLM이 질문에 필요한 영상 근거를 선택하고 사용하는가?
+
+**현재 관찰:** 적응 R에는 기본 영상 대응 신호가 있다. 고정 분류기보다 좋은 단일 판독기는 아직 확보하지 못했다.
+
+**남은 경쟁 설명:** 참고 사례를 붙여 얻는 이득은 실제 영상 비교, 검색된 grade의 통계, 기존 C 표현의 분류 능력 또는 prompt 변화로 설명될 수 있다.
+
+**최소 비교:** 대상 단독 Q, 참고 등급만 제공 L, 가까운 참고 영상과 등급 I, 동일한 등급 목록을 가진 먼 참고 영상 D와 C/kNN/단순 결합을 비교한다.
+
+**바뀔 결정 하나:** 참고 영상 활용을 후속 적응 연구의 대상으로 삼을 만큼 추가 가치가 있는가?
+
+현재 방법의 추가 학습은 정확도 불확실성을 줄여도 추가 가치 문제를 해결하지 못한다. F/R 원인 진단은 사용 가치가 먼저 필요하다. 새 MRI 자료로 이동하면 자료 연결 비용이 다시 발생한다. 따라서 이미 판독 신호와 강한 비교군이 있는 자료에서 이 한정 비교를 선택한다.
+
+실제 사용과의 연결은 판독 대상과 유사한 과거 사례를 함께 검토하는 지원 방식이다. 이번은 그 제한된 연구 대리 과제이며 병원 배포, 기관별 적응 또는 임상 의사결정의 개선을 주장하지 않는다. 단일 관측만으로 정답이 정의되므로 복수 영상의 필수 결합 능력도 주장하지 않는다.
+
+타 계열 비교는 이번에 보류한다. iter_064의 Qwen 결과는 일반적 context 결함 주장을 지지하지 않았고, 현재 grade 과제에는 같은 적응 예산의 Qwen checkpoint가 없다. 먼저 참고 영상의 추가 가치부터 선별한다. 큰 방법 투자나 광범위한 주장 전에 타 계열 또는 독립 근거를 확보해야 하며, 이를 최소 pilot의 새 hard gate로 만들지는 않는다.
+
+지배 비용은 이전까지 자료 연결·검증·실행 복구였다. 이번에는 새 학습과 대규모 자료 준비를 피하고, 기존 생성·분류 경로에서 필요한 부분만 확장한다. 정확한 누적 GPU 비용이나 비용 절감률은 주장하지 않는다.
+
+# Hypothesis
+
+- **H1:** 가까운 참고 영상 I는 등급 목록 L 및 동일 등급의 먼 영상 D보다 대상 판독을 개선한다. 같은 label prior로 설명되지 않는 참고 영상 정보가 있는 경우다.
+- **H2:** I의 이득은 L 또는 C/kNN·단순 결합으로 설명된다. 현재 참고 영상 활용의 새 방법 투자는 불필요하다.
+- **H3:** 참고 영상은 오히려 대상 판독을 방해한다. 유용한 시각적 참고 정보가 확인되지 않으면 손실만을 이유로 새 안정화 방법을 만들지 않는다.
+- **H4:** 현재 입력·적응·표본에서는 차이가 불확정이다. 정해진 개발 비교 뒤 현재 후보를 보류한다.
+
+# Limitation Evidence / Correct Usage Checks
+
+연결할 observed 주장은 `spider-regional-reading-input-gap`과 `mri-explicit-target-context-effect`다. 각각 iter_077과 iter_064의 valid review 및 usage checks를 확인했다. 이들은 이번 질문의 출발 근거이며 retrieval 실패나 방법 필요성의 증거는 아니다. 이번 역할은 diagnostic, method_stage는 none이다.
+
+원 자료의 `Pfirrman grade` 1–5, 환자·ordinal·mask 연결, 세 중앙 sagittal T2 slice와 crop을 그대로 사용한다. ordinal을 L1–S1으로 번역하지 않는다. anatomy는 위치 지원용 oracle이며 grade로 만든 설명이나 대상의 정답을 추론 입력에 넣지 않는다.
+
+기존 hash가 유지되는 자료 기하 검증은 재사용한다. 새로 검사할 것은 참고 사례의 환자·영상·grade·역할 연결과 대상 tensor 불변성이다. 참고 영상 I/D에서 대상의 원래 세 crop은 해상도·정규화·pixel tensor를 유지한다. 12장의 영상 전체를 하나의 축소 montage로 바꾸지 않는다.
+
+공식 chat template, 고정 revision, bf16과 greedy 생성, 최대 32 new tokens, 기존 whole-string grade parser 및 non-EOS invalid 처리를 유지한다. 모델의 오답을 기술 실패로 분류하지 않으며 100% 정답을 실행 gate로 요구하지 않는다.
+
+# Contribution Path / Baselines / Reuse
+
+## 선행과 주장 경계
+
+[RAD-SRAC](https://openreview.net/pdf/4fb3d7ed879649daa61e21d54a686a04203ca009.pdf)은 의료 영상의 검색 예시 제공을 이미 다룬다. [공식 코드](https://github.com/TheLion-ai/RAD-SRAC)도 확인했다. 이번은 해당 논문의 MedImageInsight·데이터·발표 점수 재현이 아니라, task-adapted C를 고정한 통제 비교다.
+
+[MMed-RAG](https://arxiv.org/html/2410.13085v2)은 검색 보고서 선택과 검색 후 alignment 문제 및 preference adaptation을 다룬다. 따라서 검색 문맥의 손실이나 단순 DPO 적용을 신규성으로 주장하지 않는다. 이번의 가치가 확인되더라도 후속에는 이 가까운 해법과의 비교가 필요하다.
+
+기여 후보는 아직 확정하지 않는다. 이번 진단은 참고 영상의 실제 추가 정보가 존재하는지와 이를 단순한 label aggregation으로 대체할 수 있는지를 구분한다.
+
+## 강한 비교군
+
+- Q: iter_077에서 선택한 영역 입력 직접 SFT R의 대상 단독 출력.
+- C: 같은 T24 grade로 적응한 공유 ResNet18의 기존 argmax와 posterior median.
+- kNN: C의 고정 512차원 평균 feature를 사용하는 k={1,3,5}의 균등 grade 분포.
+- C–kNN: 두 grade 분포의 혼합계수 {0,0.25,0.5,0.75,1}. posterior median으로 등급을 결정한다.
+- 단순 결합: Q, 기존 C argmax, k=3 kNN median 예측 세 개의 median. Q가 invalid이면 C와 kNN의 낮은 median을 사용한다.
+- L: 검색된 grade 세 개만 제공하는 VLM 대조.
+
+C–kNN의 최대 15개 규칙과 기타 후보는 V8 primary 최소, 일반 MAE 최소, VLM 호출 없는 후보, 작은 k, 작은 혼합계수의 순서로 고정한다. 최종 강한 대조 M은 V8에서만 선택하며 E24에서 재선택하지 않는다. 각 후보의 개별 결과도 보존한다.
+
+Q와 C는 이미 같은 70개 임상 grade를 학습했다. 참고 은행은 그 grade를 다시 제공하는 것이며 annotation budget이 늘어난 것은 아니다. C feature를 쓰는 I에는 검색기의 학습 비용도 포함된다. H의 기존 결과는 배경 정보로 보존하되 새 inference 조건에 맞지 않는 비용으로 우열을 주장하지 않는다.
+
+## 재사용 범위
+
+현재 HEAD `d397b723c8cc377f1557b2f55a102ea8f8bc951a`에서 JSON reuse_assets의 15개 파일을 선별 반입한다. 파일 blob과 현재 내용은 확인했다. 전체 snapshot은 재사용 미승인이다.
+
+기존 `sp75_data.py`, `sp75_c.py`, `sp75_metrics.py`의 선택 당시 hash는 유지한다. 새 wrapper에서 검증된 입력과 feature를 읽는다. `sp75_gen.py`의 loading·queue·원시 출력 패턴과 `sp75_vlm.py`의 이미지 로딩·parser를 연결하되 새 참고 요청의 provenance를 추가한다. 과거 임상 자료를 다시 렌더하거나 전체 학습기를 복구하지 않는다.
+
+`sp77_stage.py`, `sp77_pipeline.py`, 과거 cost 실행기는 사용하지 않는다. 완료 상태 재사용·GPU 예약·timing의 알려진 결함을 새 경로에 복사하지 않는다. 이 실험에 필요 없는 범용 정비는 하지 않는다.
+
+# Proposed Experiment
+
+## 1. 자료와 검색 은행 고정
+
+- 원 manifest: `results/iter_075/data/manifest.json`.
+- 검색 은행: T24의 supervision 위치 1/3/5 유효 70개.
+- 개발: V8의 기존 24개.
+- 최종 개발 비교: E24의 supervision 미제공 위치 2/4 유효 47개.
+- F139, T24/V8의 미사용 위치 grade, 다른 환자는 열지 않는다.
+
+E24는 반복 사용한 개발 집단이며 독립 test가 아니다. E24의 학습 위치 71개는 이번 비교에 추가하지 않는다.
+
+C checkpoint `results/iter_075/C/lr0.0001/epoch_40.pt`와 selection을 고정한다. 세 crop의 penultimate feature를 평균하고 L2 정규화한다. cosine similarity 내림차순, 동률은 patient 숫자와 ordinal 순으로 정렬한다. 서로 다른 T24 환자의 상위 3개 사례를 I의 참고 사례로 고른다. 검색과 정렬은 query grade를 받지 않는 함수로 구현한다.
+
+D는 I의 각 참고 grade를 그대로 유지하면서 같은 grade의 다른 T24 환자 사례 중 query와 cosine similarity가 가장 낮은 사례를 고른다. D 내부에서도 환자를 중복하지 않고 해당 위치의 I 환자를 제외한다. 동률 규칙은 같다. 순서대로 결정하며 선택 알고리즘을 모델 출력 전에 고정한다. T24의 grade별 환자가 최소 5명임을 확인했으므로 3개 참고 사례 구성은 가능하다. I/D의 실제 유사도·환자·중복 여부를 저장한다.
+
+대상 grade는 별도 평가 파일로 분리한다. 생성기는 대상 ID·영상·참고 grade만 읽는다. T24 환자와 V8/E24 환자의 교집합, 정확한 영상 중복, 참고 ID와 grade 연결을 검사한다.
+
+## 2. 네 입력 조건
+
+Q는 기존 PROMPT_R와 대상 세 crop을 유지한다.
+
+L/I/D는 같은 공통 지시를 사용한다. 참고 사례는 다른 환자의 예시이며 최종 답변은 대상 환자에 대해서만 하도록 명시한다. 기존 Pfirrmann 설명과 한 자리 출력 지시는 동일하게 유지한다.
+
+- L: 참고 사례 1–3의 grade 목록을 제시하고 대상 세 crop만 입력한다.
+- I: 각 참고 사례의 세 crop과 grade를 순서대로 제시한 뒤 대상 세 crop을 입력한다. 총 12영상이다.
+- D: I와 같은 grade 목록·문구·영상 수·역할 순서를 사용하고 참고 영상만 앞 절의 먼 사례로 바꾼다.
+
+실제 환자 ID, ordinal, similarity 숫자는 모델에 제공하지 않는다. 참고 사례 1–3과 대상이라는 역할만 제공한다. I/D에서 대상은 마지막 세 이미지이며 실제 content block과 processor 출력의 대응을 검사한다.
+
+Q와 참고 조건의 차이에는 prompt 변화가 포함된다. 참고 영상 내용에 대한 핵심 해석은 I−L과 특히 같은 형식·영상 수의 I−D에 둔다. I−D도 순수한 내부 attention 원인의 증명은 아니다.
+
+## 3. 동작 확인과 가능성 탐색
+
+V8에서 patient·ordinal 순의 첫 4개를 기술 입력으로 사용한다. Q를 기존 원시 출력과 재현 대조하고, I/D의 12영상 및 L의 3영상 연결, 대상 pixel tensor 불변성, EOS·raw 출력·메모리를 확인한다. 정답률은 기술 gate가 아니다.
+
+기존 Q 71건은 모델·adapter·입력·prompt·generation 설정·원시 출력 seal이 동일하고 기술 재현이 일치하면 재사용한다. 불일치가 있으면 최초 차이를 확인하고 원인을 기록한다. 필요하면 새 고정 경로에서 Q 71건을 모두 다시 생성하며, 유리한 출력만 골라 교체하지 않는다.
+
+V8 24개에서 L/I/D 72건을 생성한다. Q를 포함한 단순 대조 M을 V8에서 고정한다. VLM prompt·참고 수·checkpoint·검색기는 성능을 보고 바꾸지 않는다.
+
+I와 D가 모두 24개 중 유효 출력 12개 미만이면 현재 참고 인터페이스의 적용 부적합으로 E24 확대를 보류한다. 이를 기술 오류나 일반 MRI 능력의 실패로 부르지 않는다. 그 외에는 V8의 작은 효과 부호나 CI만으로 종료하지 않고 사전 고정한 E24 held 비교로 진행한다. 8명의 validation만으로 유용한 참고 효과를 기각하기 어렵고, E24의 추가 141요청은 이 판단에 필요한 작은 전체 탐색 범위이기 때문이다.
+
+## 4. 최종 개발 비교와 확대 경계
+
+E24 출력 전 검색 은행·reference map·Q 출처·M 선택·checkpoint·prompt·parser·metric·코드·환경을 잠근다. E24 held 47개에 L/I/D 141건을 생성한다. 기술 제외를 결과에 따라 추가하거나 다른 환자로 채우지 않는다.
+
+이번에 허용된 규모 확대는 V8에서 E24 held 47개로 진행하는 것뿐이다. 새 학습·seed·reference 수·검색기·모델·독립 reserve는 추가하지 않는다. 독립 확인은 이번에 수행하지 않는다.
+
+## 5. GPU 배치·시간·재개
+
+실행 직전 `nvidia-smi`로 허용 GPU의 UUID·여유를 확인하고 여유가 큰 장치부터 쓴다. 상속된 허용 집합을 보존한다. 두 GPU에 독립 query shard 또는 조건을 배정한다.
+
+12영상 I/D의 실제 peak를 먼저 측정한다. 기존 3영상·두 worker의 전체 peak 19,152 MiB를 새 조건에 복사하지 않는다. 기본 batch1에서 유망한 batch 확대 또는 GPU당 두 worker 중 하나를 고정 V8 12요청으로 비교한다. 비교할 두 구성의 전체 wall-clock 경계를 같게 하고 출력 token·요청 집합·처리량·전체 GPU peak·긴 입력 지연·경합을 기록한다.
+
+배치는 외부 점유 + 실행 worker의 남은 예상 peak + 신규 worker peak + worker당 2GiB 여유가 장치 용량 안에 있을 때만 허용한다. 새 외부 점유를 매 배정 시 다시 확인한다. 두 worker가 불가능하거나 느리면 한 worker를 쓰고 실측 근거를 남긴다.
+
+초기 실행 시간은 약 0.5–2시간의 불확실한 준비용 추정이다. 이전 24요청 94.97초와 입력 수 증가를 참고했으나, 새 경로는 후보별 likelihood 5회 forward를 하지 않으므로 직접 비례 추정할 수 없다. 기술 실행 후 조건별 sec/request와 적재 시간, 남은 요청 수 및 병렬 구성으로 다시 산출한다. 이 추정은 timeout이 아니다.
+
+학습 checkpoint는 새로 만들지 않는다. 대신 고정 checkpoint hash, feature cache, reference map, protocol lock, worker별 append·fsync 출력과 완료 seal을 재개 기준으로 둔다. request ID에는 query/ref pixel hash·참고 grade·순서·역할·모델/adapter·prompt·실행 설정을 모두 포함한다. 고유 claim, worker lock, 중복·누락·변조 거부와 중단 재개를 실제 검사한다. 완료 디렉터리의 존재만으로 재사용하지 않는다.
+
+## 6. 필요한 경우의 비용 측정
+
+E24 정확도 후보 기준을 충족할 때만 V8 24개 workload에서 I, Q, 선택 대조 M의 네 paired block을 측정한다. 순서는 사전에 교대 배정한다. M에 Q가 포함되면 해당 VLM 호출도 M 비용에 포함한다.
+
+측정 경계는 이미 제공된 oracle ROI PNG 읽기부터 feature 추출·검색·추론·최종 답변 저장 및 fsync 완료까지다. 모델 적재 포함/제외와 reference 은행 구축의 일회성 비용을 따로 보고한다. 이를 원 MRI부터의 전체 임상 비용이라고 부르지 않는다. GT anatomy 획득 비용은 미측정이다.
+
+생성과 비용은 같은 이미지 로더·processor·model 설정을 사용한다. 비용 경로의 답변이 본평가 V8와 다르면 tensor·token·설정을 대조하고 정확도–비용 결합 주장을 보류한다. 예전 비용 경로의 불일치를 이번 실험과 무관하게 전수 수정하지 않는다.
+
+# Implementation Tasks for Claude
+
+1. reuse manifest와 관련 원 리뷰를 읽고 지정 파일·의존성·기존 환경을 확인한다. 원 결과와 기본 환경·hf_cache는 변경하지 않는다.
+2. 기존 manifest·R adapter·C checkpoint를 잠금과 연결하고 query 정답을 분리한 입력 manifest를 만든다. C와 R을 재학습하지 않는다.
+3. C feature 추출, 고정 top3 및 동일-grade 먼 사례 선택, Q/L/I/D 요청을 구현한다. feature·reference cache는 입력과 checkpoint hash로 검증한다.
+4. 기존 생성 경로를 확장하거나 얇은 wrapper로 연결한다. 사용하지 않는 학습·stage·cost 실행기를 새로 정비하지 않는다.
+5. query grade 비접근, 환자 분리, 참조 교체 후 grade 목록 보존, 대상 tensor 불변성, 중복·변조 거부와 실제 중단 재개를 검사한다.
+6. V8 실제 출력·M 선택·진행 조건을 기록하고 E24 전 설정을 잠근다. 조건을 충족하면 E24와 필요한 비용 측정을 실제 완료한다.
+7. raw 출력에서 지표·환자 CI·회복/손실 사례를 별도 코드로 재계산한다. 모든 자식의 종료 코드와 산출물 완전성을 확인한 뒤 보고서를 작성한다.
+8. 보고서에서 실행 유효성, 참고 영상의 추가 정보, 단순 대안 대비 성능, 비용, 신규 기여의 미확정을 구분한다.
+
+# Evaluation (성공/실패 기준 포함)
+
+Primary는 E24 held 47개의 class-standardized MAE다. 기존 invalid 오차 4와 present-class 평균을 유지한다. 일반 MAE, grade별 오차, 두 등급 이상 오류율, invalid, Q 대비 회복·손실을 함께 보고한다. 환자 paired bootstrap 10,000회·seed7501을 사용하고 class 누락 replicate 빈도를 보고한다.
+
+주대조는 I−L, I−D, I−M이다. Q 대비 변화도 필수다. 참고 grade가 대상 grade와 일치하는지에 따른 분석은 출력 후 설명용으로만 수행하며 대상 선정·검색·성공 판정에 사용하지 않는다. 개별 성공 사례만으로 시각적 reasoning을 주장하지 않는다.
+
+**양성 투자 후보:** I가 M보다 MAE를 0.15 이상, L과 D보다 각각 0.10 이상 낮추고, 두 등급 이상 오류율이 M보다 5pp 넘게 증가하지 않아야 한다. 0.15는 class 균형 기준으로 100개당 약 15건의 한 등급 오류 감소에 해당하는 연구상 최소 이득이며 임상적 최소 중요 차이는 아니다. 정확도 후보이면 비용을 측정하고, I/Q의 적재 제외 전체 workload 시간 비율이 네 block 모두 3 이하인지 확인한다. 이는 추가 참고 처리 비용을 허용하는 연구상 기준이며 M 대비 비용도 반드시 별도로 제시한다.
+
+CI는 모든 주대조에 제시한다. 점기준 통과만으로 확증하지 않으며 모든 CI 유의성을 작은 탐색의 실행 gate로 요구하지 않는다. CI가 유용한 이득과 손해를 함께 넓게 포함하면 후속 투자 판정은 불확정이다.
+
+**설명별 다음 행동:**
+
+- I가 L·D·M을 넘으면 참고 영상의 추가 가치 후보를 보존한다. 남은 실패가 중요하면 표준 RAG 적응과의 최소 비교를, 이미 충분하면 기존 해법 채택 또는 독립 확인을 검토한다. 새 방법 개발을 자동 승인하지 않는다.
+- I와 L이 비슷하면 영상 추가 이득이 미확인이다. 검색된 grade 정보의 효과로 범위를 제한하고 현재 영상 활용 방법 투자를 종료한다.
+- I와 D가 비슷하지만 L보다 좋으면 일반적인 class 예시 효과 후보다. query-specific 유사 영상 활용의 근거로 바꾸지 않는다.
+- C/kNN·단순 결합이 충분하면 그 대안을 보존하고 추가 VLM 방법 투자를 종료한다.
+- I가 악화되면 context 손실은 기록하되 유용한 참고 정보의 회복 가능성이 없는 상태에서 새 loss를 발주하지 않는다.
+- 정해진 E24까지도 불확정이면 현재 후보를 보류한다. E24 이후 참고 수·prompt·검색기·checkpoint를 변경하지 않는다.
+
+기술 결함은 영향받은 비교를 차단하고 별도 복구 기록을 남긴다. 과거 판정이나 limitation 상태는 이번 실행 중 변경하지 않는다.
+
+# Risks / Checks
+
+- 이번은 반복 개발 자료와 단일 적응 seed다. 독립 일반화 근거가 아니다.
+- 세 중앙 crop의 임상 판독 충분성과 사전학습 노출은 여전히 미확인이다.
+- C가 학습한 feature로 검색하므로 retrieval 이득을 VLM 단독 능력으로 주장하지 않는다. 같은 검색 정보를 사용하는 대조가 필수다.
+- D는 같은 grade 안에서 영상 유사성을 낮춘 진단 대조다. 병변 제거·정답 변경·정상 합성을 하지 않는다.
+- Q와 참고 조건은 형식이 다르다. 실제 영상 내용의 해석은 동일 형식의 I/D와 등급-only L을 함께 사용한다.
+- 참고 사례는 대상 환자의 추가 관측이 아니다. 참고 영상의 도움을 임상적으로 필수인 다중 sequence 결합으로 부르지 않는다.
+- 이전 cost 출력의 불일치 설명은 미입증이다. 이번 비용 경로도 답변 정합성을 먼저 확인한다.
+- OAI·MR-RATE 대기, 새로운 정답표 개방, F139 소비와 광범위한 모델 순회를 재개하지 않는다.
+
+## 대규모 GPU 필요 후보
+
+대상·참고 사례의 역할을 유지하는 다기관·다과제 retrieval-conditioned vision–language 공동 적응을 장기 후보로 기록한다. 현재는 그 필요성·효과·기존 RAG 적응 대비 신규성이 확인되지 않았다.
+
+# 계획의 근거 (GPT 조사 노트)
+
+## 확인한 사실
+
+- `agent/runs/iter_077/review.md`, review.json, iter_075/077 계획, iter_064 review.md, LIMITATIONS 및 CODE_ASSETS의 관련 원문을 확인했다. iter_077 review.md SHA256은 `7a4dd701000d762b7df0e6853c4788c6d212e594bcda9db4bfc6d94dc2570757`이다.
+- iter_077의 held 47개에서 R/C MAE는 0.77690/0.77619이며 차이 CI는 [-0.24667, 0.23810]이다. R의 prior·환자 간 교환 대비 영상 대응 신호는 유지되지만, F/R 차이는 해상도·대상 표시·context·별도 학습을 분리하지 못했다.
+- iter_064에서는 MedGemma의 context 손실과 Qwen의 비재현이 관찰됐다. 원 리뷰는 명시적 index routing 이후의 방법 투자를 종료했다. 이를 재개하거나 두 MRI 관찰을 동일 원인으로 합치지 않는다.
+- 현재 research HEAD는 `d397b723c8cc377f1557b2f55a102ea8f8bc951a`이고 작업 트리는 깨끗하다. 선별할 15개 파일의 실제 blob과 현재 파일이 일치한다. 자동 새 브랜치 기반 후보에는 이 파일들이 없어 명시적 반입이 필요하다.
+- 기존 manifest에서 T24 유효 70개와 grade별 개수 1:9, 2:15, 3:28, 4:12, 5:6을 확인했다. 각 grade의 환자는 5/10/17/8/6명이다. 같은 등급의 다른 참고 사례 대조를 만들 수 있으며, 추가 grade 개방은 필요하지 않다.
+- R adapter는 `results/iter_077/train/R_lr2e-4/epoch_16/adapter.pt`에 있고 config는 별도 JSON이 아니라 checkpoint 안에 저장된다. C는 `results/iter_075/C/lr0.0001/epoch_40.pt`다. R state digest는 기존 eval_lock에서 `72417dc383a99d36b797f77d12d050124749abf370b220c70108cc51b88cfc2c`로 연결된다.
+
+## 가까운 선행과 의미
+
+[RAD-SRAC 원문](https://openreview.net/pdf/4fb3d7ed879649daa61e21d54a686a04203ca009.pdf)은 의료 영상 검색과 labeled image 예시를 이용한 분류를 이미 다룬다. [공식 코드](https://github.com/TheLion-ai/RAD-SRAC)는 별도 encoder와 참고 영상 수를 설정할 수 있다. 이번의 고정 task-adapted C 검색기는 논문의 MedImageInsight 재현이 아니며, 같은 supervision의 통제된 비교다. 단순 영상 RAG를 신규 방법으로 주장할 수 없다.
+
+[MMed-RAG §3](https://arxiv.org/html/2410.13085v2)은 검색 보고서의 선택과 검색 후 alignment 문제 및 preference adaptation을 다룬다. 따라서 참고 문맥의 손실 관찰만으로 미해결 문제나 새 DPO의 필요성을 선언하지 않는다. 이번은 참고 영상과 등급 목록을 분리해 후속 투자 가치를 먼저 판단한다.
+
+[SPIDER 공식 배포](https://zenodo.org/records/10159290)와 [MedGemma 공식 model card](https://huggingface.co/google/medgemma-1.5-4b-it)를 확인했다. 실제 입력·grade 연결은 검증된 로컬 manifest와 원 리뷰를 재사용한다. 새 데이터 확보·모델 다운로드는 필요하지 않다.
+
+## 전략 선택
+
+현재 단일 부위 판독의 추가 epoch·seed는 VLM의 추가 가치 문제를 해결하지 못한다. F/R 차이 분해 역시 사용 가치가 먼저 필요하다. 반면 참고 사례 활용은 기존 적응 모델과 분류기를 모두 재사용하면서 영상 활용과 등급 prior를 직접 구분할 수 있다. 중요한 실패가 관찰됐다고 가정하지 않고 알려진 baseline의 진단 비교로 시행한다. OAI와 MR-RATE 대기는 재개하지 않는다.
+
+## 비용과 한계
+
+이전 3영상 생성 pilot은 두 worker·24요청 wall 94.97초, GPU 전체 peak 19,152 MiB였다. 새 12영상 요청이나 전체 workload의 처리량 근거는 아니다. 입력 수가 늘어난 이번 경로에서 다시 측정한다. 기존 cost 경로의 답변 불일치와 timing 결함은 일반 정비로 확대하지 않고, 이번 정확도 후보가 비용 비교를 필요로 할 때 동일 입력 경로에서 측정한다.
+
+이번 비교는 반복 사용한 개발 환자·oracle ROI·하나의 적응 checkpoint에 한정한다. 타 계열에서 같은 임상 등급 적응을 마친 비교군은 없으므로 이번에 추가 학습하지 않는다. 긍정적 결과도 MedGemma 특이 후보이며 큰 투자 전 타 계열 또는 독립 근거가 필요하다.
+
+## 대규모 GPU 필요 후보
+
+대상과 참고 사례의 역할을 유지하는 다기관·다과제 retrieval-conditioned vision–language 공동 적응을 장기 후보로 보존한다. 현재 결과는 그 필요성이나 신규성을 입증하지 않는다.
+
+
+
+## iter_078 CLAUDE IMPLEMENTATION REPORT — 2026-10-05 17:24:24
+
+# 요약
+
+- **핵심 결과:** 참고 사례 영상 I(근접 영상+등급)은 E24 held 47개에서 대상 단독 Q, 등급만 준 L, 먼 영상 D, 단순 대안 M보다 낫지 않았다. 사전 정한 정확도 후보 기준을 하나도 넘지 못했다.
+- **근거:** class-standardized MAE는 Q 0.7769, L 0.8748, I 0.8262, D 0.7962, M(C argmax) 0.7762다. I−M +0.050 [−0.073, 0.156], I−L −0.049 [−0.195, 0.062], I−D +0.030 [−0.069, 0.143]이고, 독립 재계산과 최대 차이는 0.0이다.
+- **미검증·주의:** 반복 사용한 개발 환자 24명, 단일 checkpoint, oracle ROI 조건이다. 어느 비교도 CI가 0을 포함해 "참고 영상이 해롭다"와 "무관하다"를 구분하지 못한다. V8에서는 I가 가장 좋았지만(0.702) E24에서 뒤집혔다. 비용 측정은 정확도 후보 기준 미충족으로 하지 않았다.
+- **다음:** 사전 계획의 "I와 L이 비슷하면 현재 영상 활용 방법 투자 종료"에 해당한다. 이 한정 범위의 투자는 종료하고, 새 loss나 참고 수·검색기 순회는 하지 않는 것을 권고한다.
+
+# Work Performed
+
+1. 반입 15개 파일의 `git hash-object`가 reuse_manifest의 blob과 모두 일치함을 확인했다. C selection에 기록된 `sp75_c/data/metrics` hash도 현재 파일과 일치한다.
+2. `rf78_ref.py`에서 C(iter_075 epoch40) 세 crop 평균 penultimate feature(L2 정규화)를 T24 70 / V8 24 / E24 held 47개에 대해 추출했다. E24 47개의 C 예측은 iter_077 저장값과 47/47 일치했고 확률 최대 차이는 9.8e-5다.
+3. 검색과 참고 구성: top3 서로 다른 환자(I), 같은 grade에서 I_j 환자와 D 내 중복 환자를 제외한 최저 cosine(D). `retrieve`는 query feature와 T24 bank만 받는다. 요청 파일에는 query grade가 없고, grade는 labels 파일에만 있다.
+4. `rf78_vlm.py`와 `rf78_gen.py`에서 Q/L/I/D 입력과 생성 worker를 구현했다. 공식 chat template, bf16, greedy, 최대 32 token, 기존 whole-string parser를 유지했다. 대상 영상은 항상 마지막 3장이다.
+5. request_id에는 query/ref pixel hash, ref id, ref grade, 순서, 조건, adapter digest, prompt digest, 실행 config를 모두 넣었다.
+6. 기술 검사, CPU 검사, 실제 worker 재개·변조 검사를 수행했다. V8 생성과 M 선택을 거쳐 E24 잠금과 E24 생성·평가·독립 검증까지 진행했다.
+
+# Files Changed
+
+신규 코드는 `rf78_ref.py`, `rf78_vlm.py`, `rf78_gen.py`, `rf78_launch.py`, `rf78_tech.py`, `rf78_test.py`, `rf78_lock.py`, `rf78_eval.py`, `rf78_verify.py`다. 반입한 `sp75_*`, `g71_data.py`, `sp67_data.py`, `rsna_diag/*`는 수정하지 않았다. 결과는 모두 `results/iter_078/`에 저장했다.
+
+# Commands / Experiments
+
+모두 성공했다.
+
+- `python rf78_ref.py features --gpu 0` → 141개 feature, `python rf78_ref.py build` → V8 24 / E24 47 요청.
+- `python rf78_tech.py 0`: 프롬프트의 텍스트 블록이 개행 없이 붙어 있어 개행을 추가한 뒤 재실행했다. 최초 `tech.json`(개행 없음, 폐기)과 최종 `tech_v2.json`을 둘 다 보존했다.
+- `python rf78_test.py cpu`, `python rf78_test.py proc 1`.
+- 처리량 비교: `rf78_launch.py` cfgA(GPU당 1 worker)는 12개 I 요청을 32.5초에 처리했다. cfgB(GPU당 2 worker)는 사전 admission에서 거부됐다(필요 25,027 MiB > 여유 24,489 MiB).
+- V8 본생성: `--tag V8_main`, L/I/D 72건, wall 121초.
+- `python rf78_eval.py v8` → M 선택 → `python rf78_lock.py` → E24 생성(`--tag E24_main`, 141건, wall 190초) → `python rf78_eval.py e24 --lock ...` → `python rf78_verify.py E24` 및 `V8`.
+
+# Results
+
+**실행 무결성**
+- Q 재현: V8 첫 4건에서 input_ids, pixel_values, suffix token, 입력 토큰 수가 iter_077 저장 출력과 모두 일치한다(`tests/tech_v2.json`).
+- 입력 구조: I/D는 12영상, L은 3영상이다. 마지막 3장의 pixel tensor는 Q와 동일하고, 각 참고 블록은 단독 구성 tensor와 같다. adapter digest는 72417dc3…과 일치한다.
+- CPU 검사(`cpu_tests.json`): all_pass.
+  - 확인한 항목: query grade 비포함, T24와 query 환자 분리, 참고 영상이 query 영상과 중복되지 않음, D가 I의 grade 순서를 유지하며 환자가 서로 다름, request_id 8종 민감도.
+  - D의 참고 환자가 I의 다른 슬롯 환자와 겹친 요청은 V8 9/24, E24 12/47이다. 계획 규칙(해당 위치의 I 환자만 제외)을 그대로 따른 결과다.
+- 실제 worker 검사(`proc_tests.json`): 3건 후 중단, torn tail 복구, 재개해 6건이 되었고 token이 cfgA와 일치한다. 참고 pixel, grade, request_id 변조, 중복, 집합 밖 id는 모두 rc=1로 거부됐고 출력 파일은 변하지 않았다.
+- 완전성: 조건별 V8 24건, E24 47건이 모두 고유하고 EOS로 끝났으며 parse 유효 100%다. 모든 자식 종료 코드는 0이다.
+- 독립 재계산(`independent_verify_E24.json`, `_V8.json`): production 평가기를 쓰지 않고 계산해 최대 차이 0.0이다.
+
+**V8 24개 (개발)**
+- primary: Q 0.822, L 0.785, I 0.702, D 0.752.
+- M은 V8에서만 선택해 C_argmax(0.6917)다. 동률 후보가 많아 사전 고정한 순서(VLM 호출 없음, 작은 k, 작은 λ)로 정해졌다.
+- 진행 규칙(I와 D 모두 유효 12개 미만이면 보류)에는 해당하지 않아 E24로 진행했다.
+
+**E24 held 47개, 24명 (개발)**
+
+| | Q | L | I | D | M |
+|---|---|---|---|---|---|
+| class-std MAE | 0.7769 | 0.8748 | 0.8262 | 0.7962 | 0.7762 |
+| MAE | 0.723 | 0.851 | 0.809 | 0.787 | 0.745 |
+| 두 등급 이상 오류율 | 0.106 | 0.128 | 0.149 | 0.106 | 0.149 |
+
+- 쌍별 비교(차이와 95% CI):
+  - I−L −0.0486 [−0.1945, 0.0617]
+  - I−D +0.0300 [−0.0686, 0.1432]
+  - I−M +0.0500 [−0.0730, 0.1557]
+  - I−Q +0.0493 [−0.1567, 0.2244]
+  - 환자 bootstrap은 seed 7501, 10,000회이며, 비교마다 class 누락 replicate가 57회 있었다.
+- Q 대비 I는 회복 5건, 악화 7건, 불변 35건이다. L은 회복 3·악화 8, D는 회복 4·악화 7이다.
+- 기준 판정(`criteria`): I−M ≤ −0.15, I−L ≤ −0.10, I−D ≤ −0.10은 모두 미충족이고 오류율 조건만 충족해 `accuracy_candidate=false`다.
+- 사후 설명용 분석: 참고 grade 3개가 모두 대상과 일치한 21건에서 I의 MAE는 0.190, D는 0.286, L은 0.381이다. 일치가 없는 24건에서는 1.333, 1.292, 1.250으로 세 조건이 비슷하다. 이는 출력 후 설명용이며 성공 판정에 쓰지 않았다.
+
+산출물: `results/iter_078/eval/report_V8.json`, `report_E24.json`, `select_M.json`, `eval_lock_E24.json`, `independent_verify_{V8,E24}.json`, `gen/V8_main`, `gen/E24_main`.
+
+# Goal Progress / Reused Assets
+
+- **목표 진전:** 이 개발 자료에서 참고 영상의 추가 정보는 확인되지 않았다. 이득의 방향도 L과 D 사이에서 일정하지 않고, 불확정이다. "일반적으로 참고 영상이 무관하다"는 결론은 아니다.
+- **재사용:** 반입 15개 파일을 사용했고 sp77 stage/pipeline과 cost 실행기는 쓰지 않았다. `sp75_data/c/vlm/gen/metrics`는 원 리뷰의 제한 범위에서 썼고, Q 71건은 재생성 없이 iter_077 원시 출력을 그대로 읽어 재사용했다. 재사용 근거는 모델·adapter·pixel hash·V8 4건 token 일치다.
+- **batch/worker:** batch 확대는 시도하지 않았다. GPU당 2 worker는 시작 전 admission 규칙으로 거부됐으며, 근거는 실측 peak 10.2 GiB(nvidia-smi 10,465 MiB)다. 실제 구성은 GPU당 1 worker, 총 2 worker다.
+- **실제 사용량:** 새 학습·다운로드는 없다. V8 72건, E24 141건, 기술·처리량·재개 검사 소량을 생성했다. 비용 측정 block은 실행하지 않았다.
+- **미검증:** 독립 확인, 다른 seed·참고 수·검색기, 타 계열 모델, 임상적 판독 충분성, 비용 비교.
+
+# Problems
+
+- **현재 결론 무효:** 없음.
+- **재사용 전 수정이 필요한 것:**
+  - `rf78_eval.py`의 M 후보 중 combo는 `rf78_verify.py`에서 재구현하지 않았다. 이번 M은 C_argmax라서 영향이 없다.
+  - `rf78_launch.py`의 GPU 물리 인덱스 매핑은 상속 집합이 0,1일 때만 검증했다.
+- **추후 개선:**
+  - `tech.json`(개행 없는 구 프롬프트)은 폐기본으로 남아 있고 최종은 `tech_v2.json`이다.
+  - 일부 개발 메모에는 임시 `ids6.json`이 있다.
+  - V8의 I 이득은 24개 표본에서 나왔으며, E24에서 뒤집혔으므로 해석에 쓰지 않는다.
+
+# Recommendation to GPT
+
+계획의 사전 규칙대로 "참고 영상 활용을 방법 투자 대상으로 삼을 만큼의 추가 가치는 없다"로 이 한정 범위를 종료할 것을 권고한다. I는 L·D·M·Q 중 어느 것보다도 낫지 않았다. 새 loss, 참고 수·검색기 변경, 이 자료의 확대는 정당화되지 않는다. 같은 research_track에서는 다른 질문으로 전환하되, "I−L −0.05 [−0.19, 0.06]"을 영상 효과의 증거로 쓰지 않도록 리뷰에서 구분해 주길 바란다.
+
+SELF_CHECK: PASS
+SUMMARY: 척추 MRI에서 유사 참고 영상(I)은 E24 held 47개에서 등급만 준 L, 먼 영상 D, 단순 대안 M 대비 MAE 이득이 없었고(I 0.826 vs M 0.776, 모든 CI가 0 포함), 정확도 후보 기준 미충족으로 현재 참고영상 활용의 추가 투자를 종료하는 근거가 됐다.
+
+# [orchestrator] 권한 거부된 도구 호출
+- Bash: python rf78_ref.py build 2>&1 | tail -5; python - <<'E'
+import json,numpy as np
+ft=json.load(open('results/iter_078/features.json'))
+p=json.load(open('results/iter_077/pred/pred_C_E24.json'))
+print(p.keys() if isinstance(p,dict) else type(p))
+preds=p['preds'] if 'preds' in p else p
+m=0;md=0;n=0
+for r in preds:
+    i=r['id']
+    if i in ft['items']:
+        n+=1; m+= r['pred']==ft['items'][i]['pred']; md=max(md,np.abs(np.array(r['probs'])-np.array(ft['items'][i]['probs'])).max())
+print(n,m,md)
+for sp in ('V8','E24'):
+    d=json.load(open(f'results/iter_078/data/refs_{sp}.json'))['requests']
+    lab=json.load(open(f'results/iter_078/data/labels_{sp}.json'))['labels']
+    import collections
+    ov=sum(len({x['patient'] for x in r['I']}&{x['patient'] for x in r['D']})>0 for r in d)
+    same_all=sum([x['ref_id'] for x in r['I']]==[x['ref_id'] for x in r['D']] for r in d)
+    gm=np.mean([sum(x['grade']==lab[r['id']]['grade'] for x in r['I'])/3 for r in d])
+    print(sp,len(d),'I∩D patient overlap',ov,'same',same_all,'frac I grade==query',gm, 'cos I',np.mean([x['cosine'] for r in d for x in r['I']]),'cos D',np.mean([x['cosine'] for r in d for x in r['D']]))
+E
+
+
+
+## iter_078 GPT REVIEW [CONTINUE] — 2026-10-05 17:29:11
+
+# 요약
+
+- **판정:** valid_experiment=true, approach_status=inconclusive. 현재 참고영상 방법 투자는 보류한다.
+- **핵심 근거:** E24 24명·47개 부위에서 class-standardized MAE는 참고영상 I 0.8262, 등급만 제공 L 0.8748, 먼 영상 D 0.7962, 분류기 M 0.7762였다. 정확도 후보 기준은 미충족이다.
+- **의미·한계:** 참고영상의 추가 가치는 확보하지 못했다. 효과 부재, 등급 정보만으로의 완전한 설명, MRI 결합 능력의 한계를 확정하지 않는다.
+- **다음:** 현재 후보의 자동 확대를 중단하고, 기존 관찰과 강한 대안 이후에도 남는 중요한 연구 질문 하나를 선택한다.
+
+## 알림 요약
+
+- 결과: 척추 MRI 개발 24명·47개 부위에서 참고영상의 MAE 0.826은 공유 분류기 0.776보다 높았고 사전 투자 기준을 충족하지 못했다.
+- 의미: 실제 비교는 유효하지만 참고영상의 효과와 원인은 불확정이다. 다른 환자의 참고 사례를 활용하는 과제이며 필수적인 다중 관측 결합을 검증한 것은 아니다.
+- 후속: 현재 참고영상 방법 투자를 보류하고, 강한 단순 대안 이후에도 중요한 가치가 남는 질문을 다음 계획에서 선택할 것을 권고한다.
+
+# Assessment
+
+Claude Sonnet/medium 구현임을 engineer_backend.json과 claude_meta.json에서 확인했다. 계획·보고서·changes.patch·관련 소스·실제 도구 로그와 결과를 검토했다. execution_amendment는 없다.
+
+리뷰 대상 SHA는 b5426526827d986e9962f5439d5191bfbd064634다. 저장 대상 24개 파일은 해당 SHA와 현재 내용이 모두 일치하며 unpreserved_paths는 없다. 선별 반입 15개 파일의 blob도 reuse_manifest와 일치한다. 전체 스냅샷은 아래 재사용 결함 때문에 승인하지 않지만, 유효한 비교 결과와 일부 모듈은 보존 가치가 있다.
+
+V8의 신규 72건과 E24의 신규 141건은 모두 고유하며 EOS 종료·parser 유효다. 기존 Q 71건의 재사용 근거도 확인했다. 모든 본생성 자식의 종료 코드는 0이다. 실험 미실행이나 실행 실패로 판정할 근거는 없다.
+
+# Key Findings
+
+리뷰에서 production 평가기를 호출하지 않고 원시 응답·labels·features로 지표를 독립 재계산했다.
+
+| 조건 | E24 class-standardized MAE | 일반 MAE | 두 등급 이상 오류 |
+|---|---:|---:|---:|
+| 대상 단독 Q | 0.77690 | 0.72340 | 5/47 |
+| 참고 등급만 L | 0.87476 | 0.85106 | 6/47 |
+| 가까운 참고영상 I | 0.82619 | 0.80851 | 7/47 |
+| 같은 등급의 먼 영상 D | 0.79619 | 0.78723 | 5/47 |
+| V8 선택 분류기 M | 0.77619 | 0.74468 | 7/47 |
+
+환자 paired bootstrap 10,000회·seed7501도 독립 재현했다.
+
+- I−L: -0.04857, 95% CI [-0.19455, 0.06167].
+- I−D: +0.03000, 95% CI [-0.06857, 0.14319].
+- I−M: +0.05000, 95% CI [-0.07301, 0.15569].
+- I−Q: +0.04929, 95% CI [-0.15667, 0.22435].
+
+class 누락 replicate는 57/10,000회였으며 계획대로 해당 replicate의 present class 평균을 사용했다. I−M≤-0.15, I−L≤-0.10, I−D≤-0.10은 모두 미충족이다. 중대 오류 조건만 충족했다. 따라서 비용 block을 실행하지 않은 것은 계획에 부합한다.
+
+V8에서는 I 0.70167이 Q 0.82167보다 낮았지만 선택 대안 C 0.69167보다 낮지는 않았다. E24에서 그 개선 방향이 유지되지 않았다. V8 결과만으로 유망성을 선언하거나 E24 이후 조건을 조정하지 않은 점은 적절하다.
+
+# Problems / Concerns
+
+## 현재 결과의 무결성
+
+현재 결론을 무효화하는 blocker는 발견하지 않았다. 사전 잠금 31개 파일의 SHA256과 V8/E24 출력 seal이 모두 일치한다. 도구 로그에서도 V8 평가와 M 선택 후 잠금을 만들고 E24 생성을 실행한 순서를 확인했다.
+
+71개 요청의 query 정답을 원 manifest와 대조했고, T24 전용 검색 및 환자 분리, 가까운·먼 참고 선택을 독립 재계산했다. 연결된 423개 고유 영상 파일의 hash 불일치는 0이었다. query grade는 생성 요청에 포함되지 않는다. 대상과 참고의 영상·등급 대응 검사 및 Q 4건의 입력 tensor·suffix 재현은 tech_v2.json과 실제 실행 로그로 확인했다. 새 출력은 모두 32-token cap 안에서 EOS로 끝났다.
+
+## 재사용 전 수정
+
+rf78_eval.py는 Q invalid일 때 Combo에 C posterior median을 사용한다. 계획은 C argmax와 kNN 예측의 낮은 median이다. rf78_verify.py에는 Combo 독립 계산도 없다. 이번에는 Q가 모두 유효하고 M=C_argmax이므로 주수치와 판정에 영향은 없다.
+
+rf78_launch.py는 최초 admission만 수행하고 다음 조건의 worker 배정 직전 메모리를 재확인하지 않는다. 여유 메모리순 배정도 구현하지 않았다. 현재 두 장의 실행은 GPU별 peak 10,465/10,393 MiB로 충분한 여유가 있었으므로 실험을 무효화하지 않는다. 다음 재사용 전에 수정할 운영 문제다.
+
+GPU당 두 worker는 필요 25,027 MiB가 여유 24,489 MiB를 넘어 시작 전에 거부됐다. 이는 안전한 보류이며 처리량 실패 실험이 아니다. 현재 두 worker 전체 wall은 V8 121.06초, E24 190.02초다. 대안 구성 대비 속도 우위나 전체 연구 비용 절감률은 주장할 수 없다.
+
+## 보고 해석 정정
+
+보고서의 'I는 L보다도 낫지 않았다'는 표현은 수치와 맞지 않는다. I는 L보다 점추정치가 0.04857 낮지만 요구한 0.10 이득에 못 미치며 CI가 0을 포함한다. '추가 가치 미확보'가 적절하다. 반대로 모든 CI가 0을 포함한다는 사실만으로 모든 비교가 똑같이 무정보인 것도 아니다. I−M 구간은 이번에 요구한 0.15 이득을 포함하지 않는다.
+
+# Interpretation
+
+H1의 참고영상 추가 가치 후보는 확보되지 않았다. H2의 등급 정보 또는 단순 대안만으로 효과가 완전히 설명된다는 주장도 확정되지 않았다. H3의 참고영상 유발 손실은 점추정치 방향으로만 남으며 일반적인 해로움으로 해석할 수 없다. 원 계획의 H4에 따라 현재 후보를 보류하는 것이 맞다.
+
+기존 적응 R의 영상 대응 신호는 유지된다. 이번 비교는 참고 사례의 인식, 역할 선택, 정보 활용 중 어느 단계가 부족한지 분리하지 못한다. 참고 사례는 다른 환자의 영상이며 대상의 정답을 위해 필수인 추가 sequence가 아니다. 따라서 영상 수가 늘었다는 이유로 결합 능력의 한계를 등록하지 않는다. 기존 두 MRI limitation도 이번 결과로 설명·기각·승격하지 않는다.
+
+# Strategy Check / 연구 방향 판단
+
+**실행 유효성:** 고정 자료·입력·정답 연결과 실제 생성 비교를 완료했다. 새로운 기술 blocker는 없다.
+
+**성능 개선:** E24에서 단순 대안 대비 개선은 없고, 사전 정확도 후보 기준은 미달했다. I−L의 작은 개선 방향은 불확정이다.
+
+**가설 지지:** 현재 checkpoint·검색기·참고 수에서 후속 적응 투자를 뒷받침할 추가 가치를 확보하지 못했다. 영상 무사용이나 label-only 설명의 완전한 증명은 아니다.
+
+**신규 기여 가능성:** 표준 retrieval 활용 자체는 신규성이 아니다. 현재 결과에는 기존 해결책 이후의 중요한 잔여 문제와 회복 가능성을 연결하는 근거가 부족하다. 새로운 loss나 대규모 적응으로 확대할 이유가 없다.
+
+iter_077의 전체 영상·영역 입력 차이는 이번에 설명하지 않았으며 관찰로 유지한다. iter_064의 context 손실과 타 계열 비재현도 다른 조건의 관찰로 유지한다. 둘을 이번 불확정 결과와 합쳐 공통 내부 원인을 주장하지 않는다. 현재 과제의 타 계열 적응 checkpoint가 없고 추가 가치 선별이 목적이었으므로 이번 타 계열 학습 보류는 적절하다. 여러 기본 모델의 실패나 기존 해결책 전반의 부족함을 확인한 실험은 아니다.
+
+현재 설계의 추가 학습은 유용한 참고 신호가 확보되지 않은 상태에서 비용을 늘린다. 표본 확대나 다른 검색기로의 변경도 이번 비교의 단순 연장이 아니라 새 가설과 투자 근거가 필요하다. 따라서 현 후보를 보류하고 다음 연구 투자 하나를 선택하는 편이 타당하다. OAI·MR-RATE 대기를 재개하지 않은 사용자 지시도 준수했다.
+
+이전 기록에서는 자료 연결·실행 복구가 큰 부담이었다. 이번에는 기존 자산을 재사용해 실제 출력 비교까지 완료했다. 다만 전체 준비·감사·GPU 비용의 누적 비율은 측정되지 않았으므로 절감률을 만들지 않는다. 횟수가 아니라 이번 비교의 정보와 남은 가치로 보류를 결정한다.
+
+논문 추천은 보류한다. 이번 방향의 실제 개선이나 재현되는 유망한 효과가 확보되지 않았기 때문이다.
+
+# Recommended Next Experiment
+
+현재 SPIDER 참고영상 후보는 추가 실행 없이 보류한다. 다음 계획은 기존 MRI 관찰을 유지하면서, 강한 단순 대안 이후에도 실제 사용 가치가 남는 질문 하나를 선택해야 한다. 같은 자료의 참고 수·prompt·검색기·seed 순회, 새 loss, 비용 측정만을 자동 후속으로 발주하지 않는다.
+
+최소 방법 시험을 선택하려면 중요한 사용 조건, 남은 경쟁 설명, 가까운 기존 방법과 구별할 비교, 양성·음성·불확정에 따라 달라질 투자 결정과 종료점을 구체화한다. 그런 조건이 없으면 현재 판독·참고영상 설계를 보류한 채 GOAL 범위 안에서 질문을 전환한다. 이전 유효 관찰과 코드·원본은 보존하며 새 자료 확보 자체를 진전으로 삼지 않는다.
