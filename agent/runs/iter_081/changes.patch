@@ -1,0 +1,1094 @@
+diff --git a/a81_checks.py b/a81_checks.py
+new file mode 100644
+index 0000000..7e73d33
+--- /dev/null
++++ b/a81_checks.py
+@@ -0,0 +1,96 @@
++"""기술 실행의 실제 출력·봉인·재개·처리량 근거를 연결한다."""
++import argparse
++from pathlib import Path
++import numpy as np
++import a81_common as C
++import a81_run as R
++
++
++def old_sources():
++    files = {}
++    vp='results/iter_078/eval/report_V8.json'; v=C.read(vp)
++    q='results/iter_077/gen/V8/R_lr2e-4_ep16/gen_worker0.jsonl'
++    assert C.sha(q)==v['sources']['Q_src_sha256']['gen_worker0.jsonl']
++    ep='results/iter_077/eval/eval_seal.json'; e=C.read(ep)
++    for p,h in e['outputs'].items():
++        if '/R_adapted/' in p:
++            assert C.sha(p)==h; files[p]=h
++    for p in (vp,ep,q): files[p]=C.sha(p)
++    assert C.sha('results/iter_078/features.json')==v['sources']['features']
++    C.save(C.ROOT/'tests/old_source_seals.json', {'passed':True,'files':files})
++
++
++def compare(name, left, right):
++    proto=C.ROOT/'protocol_tech.json'
++    a=R.verify(proto,left); b=R.verify(proto,right)
++    assert set(a)==set(b)
++    mismatch=[k for k in a if a[k]['suffix_ids']!=b[k]['suffix_ids']]
++    result={'passed':not mismatch,'n':len(a),'mismatch':mismatch,
++            'files':{str(p):C.sha(p) for d in (left,right) for p in Path(d).glob('worker*/records/*.json')}}
++    C.save(C.ROOT/f'tests/{name}.json', result)
++    assert result['passed'],result
++    print(name,len(a),'PASS')
++
++
++def finalize(use4=False):
++    root=C.ROOT/'tests'
++    files={}
++    for name in ('cpu','proc','old_source_seals','resume_compare','worker_lock','launcher_lock','selection_verify'):
++        p=root/f'{name}.json'; d=C.read(p); assert d['passed']; files[str(p)]=C.sha(p)
++        if 'files' in d: C.check_hashes(d['files']); files.update(d['files'])
++    tech=list((root/'tech_w2').glob('worker*/tech_*.json'))
++    assert len(tech)==2 and all(C.read(p)['passed'] and len(C.read(p)['checks'])==16 for p in tech)
++    for p in tech: files[str(p)]=C.sha(p)
++    pending=C.read(root/'pending_preserved_before.json')
++    assert C.sha(pending['path'])==pending['sha256']
++    files[str(root/'pending_preserved_before.json')]=C.sha(root/'pending_preserved_before.json')
++    if use4:
++        p=root/'concurrency_compare.json'; assert C.read(p)['passed']; files[str(p)]=C.sha(p)
++    runs={}
++    for name in ['tech_w2']+(['tech_w4'] if use4 else []):
++        d=root/name; launches=list(d.glob('launch_*.json')); assert len(launches)==1
++        l=C.read(launches[0]); assert not any(l['exit_codes'])
++        rec=R.verify(C.ROOT/'protocol_tech.json',d)
++        times=[r['runtime_s'] for r in rec.values()]
++        runs[name]={'n':len(rec),'wall_s':l['wall_s'],'req_per_min_including_load':len(rec)/l['wall_s']*60,
++                    'peak_used_mib':l['peak_used_mib'],'max_reserved_gib':max(r['peak_mem_reserved_gb'] for r in rec.values()),
++                    'p95_generation_s':float(np.percentile(times,95)), 'longest_output_tokens':max(r['n_new'] for r in rec.values()),
++                    'oom':False, 'exit_codes':l['exit_codes']}
++        files[str(launches[0])]=C.sha(launches[0])
++    chosen=4 if use4 and runs['tech_w4']['wall_s']<runs['tech_w2']['wall_s'] else 2
++    C.save(C.ROOT/'resource_decision.json',{'runs':runs,'workers':chosen,'batch':1,
++           'note':'정답 점수는 구성 선택에 미사용. 동일 16 요청·tensor 기술 검사 포함 wall. 작은 pilot의 적재/CPU 경합 포함; 비용 우위 일반화 금지.',
++           'estimated_E24_wall_s':runs[f'tech_w{chosen}']['wall_s']*141/16})
++    files[str(C.ROOT/'resource_decision.json')]=C.sha(C.ROOT/'resource_decision.json')
++    C.save(root/'technical_gate.json',{'passed':True,'files':files,'selected_workers':chosen})
++    print('technical gate PASS; workers',chosen)
++
++
++def selection_verify():
++    rows=C.read(C.ROOT/'data/baseline_V8.json'); saved=C.read(C.ROOT/'selection.json')
++    candidates={}
++    for name in ['Q','C_argmax','C_median']+[f'gate_{t}' for t in [.2,.4,.6,.8,1.01]]:
++        preds=[]; calls=0; tau=float(name[5:]) if name.startswith('gate_') else -1
++        for r in rows:
++            if name=='Q': val=r['Q']; calls+=1
++            elif name=='C_argmax': val=r['C']
++            elif name=='C_median': val=next(i+1 for i in range(5) if sum(r['probs'][:i+1]) >= .5)
++            else:
++                use=max(r['probs'])<tau; calls+=use
++                val=r['Q'] if use and r['Q'] is not None else r['C']
++            preds.append(val)
++        errors=[4 if p is None else abs(p-r['grade']) for r,p in zip(rows,preds)]
++        class_mean=np.mean([np.mean([e for r,e in zip(rows,errors) if r['grade']==g]) for g in range(1,6) if any(r['grade']==g for r in rows)])
++        candidates[name]=(float(class_mean),float(np.mean(errors)),int(calls),tau)
++        assert preds==saved['candidates'][name]['pred']
++    chosen=min(candidates,key=candidates.get)
++    assert chosen==saved['name']
++    C.save(C.ROOT/'tests/selection_verify.json',{'passed':True,'chosen':chosen,'scores':candidates,'selection_sha256':C.sha(C.ROOT/'selection.json')})
++
++
++if __name__=='__main__':
++    p=argparse.ArgumentParser(); p.add_argument('mode',choices=['sources','compare','finalize','selection']); p.add_argument('--name'); p.add_argument('--left'); p.add_argument('--right'); p.add_argument('--use4',action='store_true'); a=p.parse_args()
++    if a.mode=='sources': old_sources()
++    elif a.mode=='compare': compare(a.name,a.left,a.right)
++    elif a.mode=='selection': selection_verify()
++    else: finalize(a.use4)
+diff --git a/a81_common.py b/a81_common.py
+new file mode 100644
+index 0000000..76cb923
+--- /dev/null
++++ b/a81_common.py
+@@ -0,0 +1,73 @@
++"""iter_081 고정 실험의 불변 입력·원자적 출력·출처 검사."""
++import hashlib
++import json
++import os
++from pathlib import Path
++
++ROOT = Path('results/iter_081')
++ADAPTER = 'results/iter_077/train/R_lr2e-4/epoch_16'
++ADAPTER_DIGEST = '72417dc383a99d36b797f77d12d050124749abf370b220c70108cc51b88cfc2c'
++CONFIG = {'model_revision': '91850547d9f0b2fdd21aa7c5f4f3d1a8a52c243b', 'adapter_digest': ADAPTER_DIGEST,
++          'dtype': 'bfloat16', 'do_sample': False, 'max_new_tokens': 32, 'batch': 1, 'seed': 0,
++          'parser': 'sp75_vlm.parse; non-EOS invalid'}
++
++
++def digest(obj):
++    return hashlib.sha256(json.dumps(obj, sort_keys=True, separators=(',', ':')).encode()).hexdigest()
++
++
++def sha(path):
++    h = hashlib.sha256()
++    with open(path, 'rb') as f:
++        for b in iter(lambda: f.read(1048576), b''):
++            h.update(b)
++    return h.hexdigest()
++
++
++def read(path):
++    return json.loads(Path(path).read_text())
++
++
++def save(path, data):
++    """기존 산출물은 덮어쓰지 않는다. link의 EEXIST로 경합도 거부한다."""
++    p = Path(path)
++    p.parent.mkdir(parents=True, exist_ok=True)
++    tmp = p.with_name(p.name + f'.{os.getpid()}.pending')
++    with open(tmp, 'x') as f:
++        json.dump(data, f, indent=2, ensure_ascii=False, allow_nan=False)
++        f.flush()
++        os.fsync(f.fileno())
++    os.link(tmp, p)
++    tmp.unlink()
++
++
++def check_hashes(files):
++    for p, h in files.items():
++        if sha(p) != h:
++            raise ValueError(f'provenance mismatch: {p}')
++
++
++def request_key(r):
++    return digest({'request': r, 'config': CONFIG})
++
++
++def check_request(r):
++    fields = {'id', 'patient', 'ordinal', 'split', 'cond', 'automated_grade', 'donor', 'images', 'prompt'}
++    if set(r) != fields:
++        raise ValueError('request allowlist / GT leakage')
++    if r['cond'] not in ('Q', 'A', 'T', 'X') or r['automated_grade'] not in range(1, 6):
++        raise ValueError('condition/grade')
++    if len(r['images']) != (0 if r['cond'] == 'T' else 3):
++        raise ValueError('image count')
++    for e in r['images']:
++        if set(e) != {'path', 'file_sha256', 'pixel_sha256_padded'}:
++            raise ValueError('image allowlist')
++        if sha(e['path']) != e['file_sha256']:
++            raise ValueError('image hash')
++
++
++def code_files():
++    return sorted(set([str(p) for p in Path('.').glob('a81_*.py')] +
++                      ['rf78_gen.py', 'rf78_vlm.py', 'rf78_launch.py', 'sp75_gen.py', 'sp75_vlm.py',
++                       'sp75_data.py', 'sp75_metrics.py', 'sp67_data.py', 'g71_data.py'] +
++                      [str(p) for p in Path('rsna_diag').glob('*.py')]))
+diff --git a/a81_eval.py b/a81_eval.py
+new file mode 100644
+index 0000000..01bd906
+--- /dev/null
++++ b/a81_eval.py
+@@ -0,0 +1,93 @@
++"""iter_081 고정 대안 선택, paired 분석 및 원 계획 판정."""
++import argparse
++import numpy as np
++import a81_common as C
++import a81_run as R
++import sp75_metrics as M
++
++
++def candidates(rows):
++    q = [r['Q'] for r in rows]; c = [r['C'] for r in rows]
++    med = [int(np.searchsorted(np.cumsum(r['probs']), .5) + 1) for r in rows]
++    out = {'Q': {'pred': q, 'calls': len(q), 'tau': -1},
++           'C_argmax': {'pred': c, 'calls': 0, 'tau': -1},
++           'C_median': {'pred': med, 'calls': 0, 'tau': -1}}
++    for tau in [.2, .4, .6, .8, 1.01]:
++        use = [max(r['probs']) < tau for r in rows]
++        pred = [r['Q'] if u and r['Q'] is not None else r['C'] for r, u in zip(rows, use)]
++        out[f'gate_{tau}'] = {'pred': pred, 'calls': sum(use), 'tau': tau}
++    return out
++
++
++def select():
++    rows = C.read(C.ROOT / 'data/baseline_V8.json')
++    cs = candidates(rows); true = [r['grade'] for r in rows]
++    for v in cs.values():
++        v['metrics'] = M.summary(true, v['pred'])
++    # 완전 동률이면 위의 고정 후보 나열 순서. 결과를 보고 tie rule을 바꾸지 않는다.
++    name = min(cs, key=lambda k: (cs[k]['metrics']['class_std_mae'], cs[k]['metrics']['mae'], cs[k]['calls'], cs[k]['tau']))
++    out = {'name': name, 'candidates': cs, 'source_sha256': C.sha(C.ROOT / 'data/baseline_V8.json'),
++           'rule': 'class_std_mae,mae,vlm_calls,tau; final exact tie fixed enumeration'}
++    C.save(C.ROOT / 'selection.json', out)
++    return out
++
++
++def evaluate(split, protocol, out, dest):
++    done = R.verify(protocol, out)
++    rows = C.read(C.ROOT / f'data/baseline_{split}.json')
++    sel = C.read(C.ROOT / 'selection.json')
++    assert sel['source_sha256'] == C.sha(C.ROOT / 'data/baseline_V8.json')
++    pred = {'Q': [r['Q'] for r in rows], 'C_argmax': [r['C'] for r in rows], 'M': candidates(rows)[sel['name']]['pred']}
++    for cond in ('A', 'T', 'X'):
++        rr = {x['request']['id']: x for x in done.values() if x['request']['cond'] == cond}
++        assert set(rr) == {r['id'] for r in rows}
++        pred[cond] = [rr[r['id']]['parsed'] for r in rows]
++    true = [r['grade'] for r in rows]
++    systems = {k: M.summary(true, v) for k, v in pred.items()}
++    for k, v in systems.items():
++        v['err_ge2_n'] = int(sum(M.abs_err(true, pred[k]) >= 2))
++        v['invalid_n'] = sum(x is None for x in pred[k])
++        v['matches_C_n'] = sum(a == b for a, b in zip(pred[k], pred['C_argmax']))
++    paired = {f'A-{k}': M.boot_diff(rows, pred['A'], pred[k]) for k in ('M', 'T', 'X', 'Q', 'C_argmax')}
++    err = {k: M.abs_err(true, v) for k, v in pred.items()}
++    correction, damage, toward, disagreements = [], [], [], []
++    for i, r in enumerate(rows):
++        if err['A'][i] < err['C_argmax'][i]:
++            correction.append(r['id'])
++        if err['C_argmax'][i] == 0 and err['A'][i] > 0:
++            damage.append(r['id'])
++        q, a, c = pred['Q'][i], pred['A'][i], pred['C_argmax'][i]
++        if q != c:
++            disagreements.append({'id': r['id'], 'patient': r['patient'], 'grade': true[i], 'Q': q, 'C': c, 'A': a,
++                                  'Q_error': float(err['Q'][i]), 'C_error': float(err['C_argmax'][i]), 'A_error': float(err['A'][i])})
++        if q is not None and a is not None and err['Q'][i] < err['C_argmax'][i] and err['A'][i] > err['Q'][i] and abs(a-c) < abs(q-c):
++            toward.append(r['id'])
++    pats = {r['id']: r['patient'] for r in rows}
++    nc = len({pats[i] for i in correction}); nt = len({pats[i] for i in toward})
++    visual = all(paired['A-'+k]['point'] < 0 and paired['A-'+k]['ci95'][1] < 0 for k in ('T', 'X'))
++    minimum = paired['A-M']['point'] <= -.1
++    positive = minimum and paired['A-M']['ci95'][1] < 0 and visual and systems['A']['err_ge2_n'] <= systems['M']['err_ge2_n']
++    pilot = not positive and visual and nc >= 2 and nt >= 2
++    verdict = 'positive_exploratory' if positive else ('method_pilot_candidate' if pilot else ('negative' if not visual and not minimum else 'inconclusive'))
++    report = {'split': split, 'n': len(rows), 'n_patients': len({r['patient'] for r in rows}), 'repeated_development': True,
++              'M': sel['name'], 'systems': systems, 'paired': paired, 'predictions': pred, 'ids': [r['id'] for r in rows],
++              'posthoc_transitions': {'C_error_reduced_ids': correction, 'C_error_reduced_patients': nc,
++                  'C_correct_damaged_ids': damage, 'C_wrong_n': int(sum(err['C_argmax'] > 0)),
++                  'C_wrong_made_exact_n': int(sum((err['C_argmax'] > 0) & (err['A'] == 0))),
++                  'Q_better_moved_toward_C_ids': toward, 'Q_better_moved_toward_C_patients': nt,
++                  'Q_C_disagreement': disagreements, 'A_X_changed_n': sum(a != x for a,x in zip(pred['A'], pred['X']))},
++              'criteria': {'visual_contribution': visual, 'minimum_gain_vs_M': minimum, 'positive': positive, 'pilot_candidate': pilot, 'verdict': verdict},
++              'proceed_E24': systems['A']['n'] - systems['A']['invalid_n'] >= 12 if split == 'V8' else None,
++              'provenance': {'protocol': str(protocol), 'protocol_sha256': C.sha(protocol), 'out': str(out),
++                  'baseline_sha256': C.sha(C.ROOT / f'data/baseline_{split}.json'), 'selection_sha256': C.sha(C.ROOT / 'selection.json')}}
++    C.save(dest, report)
++    print({'split': split, 'M': sel['name'], 'systems': {k:v['class_std_mae'] for k,v in systems.items()}, 'criteria': report['criteria']})
++    return report
++
++
++if __name__ == '__main__':
++    ap = argparse.ArgumentParser(); ap.add_argument('mode', choices=['select', 'eval'])
++    ap.add_argument('--split'); ap.add_argument('--protocol'); ap.add_argument('--out'); ap.add_argument('--dest')
++    a = ap.parse_args()
++    if a.mode == 'select': print(select()['name'])
++    else: evaluate(a.split, a.protocol, a.out, a.dest)
+diff --git a/a81_final.py b/a81_final.py
+new file mode 100644
+index 0000000..2ba2f18
+--- /dev/null
++++ b/a81_final.py
+@@ -0,0 +1,63 @@
++"""실제 출력·독립 계산·잠금 근거를 마지막으로 봉인한다."""
++from pathlib import Path
++import os
++import numpy as np
++import a81_common as C
++import a81_run as R
++
++
++def finish():
++    files={}; stages={}; supplement={}
++    os.environ['HF_HUB_OFFLINE']='1'
++    os.environ.setdefault('HF_HOME','/SSD1_1TB/home/milab/daniel/08_medgemma/hf_cache')
++    from transformers import AutoTokenizer
++    tok=AutoTokenizer.from_pretrained('google/medgemma-1.5-4b-it',revision=C.CONFIG['model_revision'],local_files_only=True)
++    for split in ('V8','E24'):
++        proto=C.ROOT/f'protocol_{split}.json'; out=C.ROOT/f'gen/{split}'
++        done=R.verify(proto,out)
++        report_path=C.ROOT/f'eval/{split}.json'; verify_path=C.ROOT/f'eval/{split}_independent.json'
++        report=C.read(report_path); ver=C.read(verify_path)
++        assert ver['passed'] and ver['report_sha256']==C.sha(report_path)
++        assert report['provenance']['protocol_sha256']==C.sha(proto)
++        assert report['provenance']['baseline_sha256']==C.sha(C.ROOT/f'data/baseline_{split}.json')
++        assert report['provenance']['selection_sha256']==C.sha(C.ROOT/'selection.json')
++        completions=list(out.glob('completion_*.json')); assert len(completions)==1
++        complete=C.read(completions[0]); assert complete['passed'] and complete['n']==len(done)
++        assert complete['protocol_digest']==C.digest(C.read(proto))
++        C.check_hashes(complete['files']); files.update(complete['files'])
++        assert C.sha(complete['launch_file'])==complete['launch_sha256']
++        launch=C.read(complete['launch_file']); assert not any(launch['exit_codes'])
++        assert launch['workers']==C.read(C.ROOT/'resource_decision.json')['workers']
++        for rec in done.values():
++            env=C.read(rec['env_path'])['env']; eos=env['eos_token_id']; eos=eos if isinstance(eos,list) else [eos]
++            assert rec['ended_eos']==bool(rec['suffix_ids'] and rec['suffix_ids'][-1] in eos)
++            assert rec['text']==tok.decode(rec['suffix_ids'],skip_special_tokens=True)
++            assert rec['raw']==tok.decode(rec['suffix_ids'],skip_special_tokens=False)
++            assert len(rec['suffix_ids'])<=32
++            assert C.sha(rec['env_path'])==rec['env_digest']
++        n=len(done)
++        stages[split]={'requests':n,'eos':sum(r['ended_eos'] for r in done.values()),
++                       'valid':sum(r['parse_valid'] for r in done.values()),
++                       'tokens':sum(r['n_new'] for r in done.values()),'launcher_wall_s':launch['wall_s'],
++                       'req_per_min_including_load':n/launch['wall_s']*60,'peak_used_mib':launch['peak_used_mib'],
++                       'generation_sum_s':sum(r['runtime_s'] for r in done.values()),
++                       'p95_generation_s':float(np.percentile([r['runtime_s'] for r in done.values()],95)),
++                       'max_new_tokens_observed':max(r['n_new'] for r in done.values()),'exit_codes':launch['exit_codes']}
++        rows=C.read(C.ROOT/f'data/baseline_{split}.json')
++        # 원 계획에 명시된 Q/C 최소오차 oracle: 실용 비교군으로 선택하지 않는다.
++        ee=np.array([min(4 if r['Q'] is None else abs(r['Q']-r['grade']),abs(r['C']-r['grade'])) for r in rows])
++        yy=np.array([r['grade'] for r in rows])
++        supplement[split]={'posthoc_Q_C_oracle_class_std_mae':float(np.mean([ee[yy==g].mean() for g in sorted(set(yy))])),
++                            'C_correct_n':sum(r['C']==r['grade'] for r in rows),
++                            'note':'정답으로 선택한 사후 진단 상한; 실제 방법이나 독립 확인 아님.'}
++        for p in [proto,report_path,verify_path,completions[0],Path(complete['launch_file']),C.ROOT/f'{split}_host_resources.json']:
++            files[str(p)]=C.sha(p)
++    for p in C.code_files()+[str(C.ROOT/'selection.json'),str(C.ROOT/'tests/technical_gate.json'),str(C.ROOT/'data/source_audit.json')]:
++        files[p]=C.sha(p)
++    C.save(C.ROOT/'completion.json',{'passed':True,'backend':'codex','stages':stages,'supplement':supplement,'files':files,
++                                    'cost_scope':'신규 213 호출의 launcher wall은 적재부터 자식 종료까지. Q/C cached; 온라인 C/Q 전체 비용과 비교하지 않음.',
++                                    'independent_confirmation':False})
++    print(stages)
++
++
++if __name__=='__main__': finish()
+diff --git a/a81_launch.py b/a81_launch.py
+new file mode 100644
+index 0000000..68f8d19
+--- /dev/null
++++ b/a81_launch.py
+@@ -0,0 +1,102 @@
++"""고정 a81 실행: 실제 시작 직전 GPU 여유 확인, 예약, 자식 수명 관리."""
++import argparse
++import os
++import signal
++import subprocess
++import sys
++import time
++from pathlib import Path
++import a81_common as C
++import a81_run as R
++from rf78_launch import smi
++from rsna_diag import queue_lock
++
++
++def launch(protocol, out, workers=2, est_gb=9.8, tech=False, kill_after=None):
++    p, reqs = R.load_protocol(protocol)
++    allowed = os.environ.get('CUDA_VISIBLE_DEVICES', '').split(',')
++    initial = smi()
++    if not allowed or any(g not in initial for g in allowed):
++        raise ValueError('physical GPU mapping not supported/allowed')
++    out = Path(out); out.mkdir(parents=True, exist_ok=True)
++    lk, _, _ = queue_lock.try_lock(str(out / 'launcher.lock'), queue_lock.my_info(worker='launcher'))
++    if lk is None:
++        raise ValueError('launcher already owned')
++    procs = []; logs = []; events = []; peak = {}; attempt = f'{time.time_ns()}'
++    before = time.monotonic(); killed = False
++    old_handlers = {}
++    def stop(sig, frame):
++        raise KeyboardInterrupt(f'signal {sig}')
++    for sig in (signal.SIGTERM, signal.SIGINT):
++        old_handlers[sig] = signal.signal(sig, stop)
++    try:
++        R.records(out, p, reqs)
++        # 각 장치별 최초 점유+새 예약과 시작 직전 실제 점유 중 큰 값으로 admission.
++        reserved = {g: 0 for g in allowed}
++        need = (est_gb + 2) * 1024
++        for w in range(workers):
++            now = smi()
++            remaining = {g: now[g]['total_mib'] - max(now[g]['used_mib'], initial[g]['used_mib'] + reserved[g]) for g in allowed}
++            g = max(allowed, key=lambda x: remaining[x])
++            if remaining[g] < need:
++                raise RuntimeError(f'admission failed need={need} remaining={remaining}')
++            reserved[g] += need
++            events.append({'worker': w, 'physical_gpu': g, 'logical_gpu': 0, 'smi': now, 'remaining_before': remaining, 'need_mib': need})
++            cmd = [sys.executable, 'a81_run.py', '--protocol', str(protocol), '--out', str(out), '--worker', str(w), '--gpu', g]
++            if tech:
++                cmd.append('--tech')
++            lf = open(out / f'worker{w}_{attempt}.log', 'xb'); logs.append(lf)
++            procs.append(subprocess.Popen(cmd, stdout=lf, stderr=subprocess.STDOUT, env=dict(os.environ)))
++        while any(x.poll() is None for x in procs):
++            now = smi()
++            for g, v in now.items():
++                peak[g] = max(peak.get(g, 0), v['used_mib'])
++            if kill_after is not None and not killed and len(list(out.glob('worker*/records/*.json'))) >= kill_after:
++                for x in procs:
++                    if x.poll() is None:
++                        x.kill()
++                killed = True
++            if any(x.poll() not in (None, 0) for x in procs) and not killed:
++                for x in procs:
++                    if x.poll() is None:
++                        x.terminate()
++            time.sleep(0.5)
++        codes = [x.wait() for x in procs]
++        result = {'protocol': str(protocol), 'protocol_digest': C.digest(p), 'workers': workers, 'events': events,
++                  'exit_codes': codes, 'wall_s': time.monotonic() - before, 'peak_used_mib': peak, 'killed_for_test': killed}
++        C.save(out / f'launch_{attempt}.json', result)
++        if any(codes) and not killed:
++            raise RuntimeError(f'child failure: {codes}; logs: {out}')
++        if not killed:
++            done = R.verify(protocol, out)
++            files = {str(f): C.sha(f) for f in sorted(out.glob('worker*/records/*.json'))}
++            for x in done.values():
++                assert C.sha(x['env_path']) == x['env_digest']
++                files[x['env_path']] = x['env_digest']
++            C.save(out / f'completion_{attempt}.json', {'passed': True, 'n': len(done), 'protocol_digest': C.digest(p), 'files': files,
++                                                      'launch_file': str(out / f'launch_{attempt}.json'), 'launch_sha256': C.sha(out / f'launch_{attempt}.json')})
++        print(result, flush=True)
++        return result
++    finally:
++        for x in procs:
++            if x.poll() is None:
++                x.terminate()
++        for x in procs:
++            try:
++                x.wait(timeout=30)
++            except subprocess.TimeoutExpired:
++                x.kill(); x.wait()
++        for f in logs:
++            f.close()
++        for sig, handler in old_handlers.items():
++            signal.signal(sig, handler)
++        lk.release()
++
++
++if __name__ == '__main__':
++    ap = argparse.ArgumentParser()
++    ap.add_argument('--protocol', required=True); ap.add_argument('--out', required=True)
++    ap.add_argument('--workers', type=int, default=2); ap.add_argument('--est-gb', type=float, default=9.8)
++    ap.add_argument('--tech', action='store_true'); ap.add_argument('--kill-after', type=int)
++    a = ap.parse_args()
++    launch(a.protocol, a.out, a.workers, a.est_gb, a.tech, a.kill_after)
+diff --git a/a81_monitor.py b/a81_monitor.py
+new file mode 100644
+index 0000000..6924b25
+--- /dev/null
++++ b/a81_monitor.py
+@@ -0,0 +1,42 @@
++"""a81 실행 자식의 CPU/RAM/I/O 표본과 종료를 보존하는 단순 wrapper."""
++import argparse
++import os
++import subprocess
++import sys
++import time
++import psutil
++import a81_common as C
++
++
++def run(dest, command):
++    p=subprocess.Popen(command)
++    samples=[]
++    try:
++        while p.poll() is None:
++            rows=[]
++            try: children=[psutil.Process(p.pid)]+psutil.Process(p.pid).children(recursive=True)
++            except psutil.Error: children=[]
++            for proc in children:
++                try:
++                    rows.append({'pid':proc.pid,'rss_bytes':proc.memory_info().rss,
++                                 'cpu_s':sum(proc.cpu_times()[:2]),'io':proc.io_counters()._asdict()})
++                except psutil.Error: pass
++            samples.append({'time':time.time(),'host_cpu_percent':psutil.cpu_percent(),
++                            'available_ram_bytes':psutil.virtual_memory().available,'children':rows})
++            time.sleep(1)
++        rc=p.wait()
++        C.save(dest,{'command':command,'returncode':rc,'samples':samples,
++                    'peak_total_rss_bytes':max((sum(r['rss_bytes'] for r in s['children']) for s in samples),default=0),
++                    'note':'1초 표본; page cache와 I/O 누적량은 경합의 인과 증명이 아님.'})
++        return rc
++    finally:
++        if p.poll() is None:
++            p.terminate()
++            try: p.wait(timeout=40)
++            except subprocess.TimeoutExpired: p.kill(); p.wait()
++
++
++if __name__=='__main__':
++    ap=argparse.ArgumentParser(); ap.add_argument('--dest',required=True); ap.add_argument('command',nargs=argparse.REMAINDER)
++    a=ap.parse_args(); cmd=a.command[1:] if a.command[:1]==['--'] else a.command
++    sys.exit(run(a.dest,cmd))
+diff --git a/a81_prepare.py b/a81_prepare.py
+new file mode 100644
+index 0000000..42e7fb8
+--- /dev/null
++++ b/a81_prepare.py
+@@ -0,0 +1,108 @@
++"""기존 검증 자산의 관련 범위만 읽고 A/T/X 요청과 별도 평가 GT를 고정한다."""
++import json
++import subprocess
++from pathlib import Path
++import numpy as np
++import a81_common as C
++import rf78_vlm as R
++import sp75_vlm as V
++import sp75_gen as G
++
++
++def prepare():
++    assert C.sha('../agent/runs/iter_080/plan.md') == 'a5f5ad6689d7d9d19dddaa265c1e5bcb47d8b5d57f3e409fbcf0c7cc5293d4d3'
++    old = C.read('../agent/runs/iter_080/reuse_manifest.json')
++    # 수정 전 반입 상태는 git HEAD의 blob으로 확인한다.
++    origin = 'b5426526827d986e9962f5439d5191bfbd064634'
++    blobs = {}
++    for p in ['rf78_gen.py', 'rf78_vlm.py', 'rf78_launch.py', 'sp75_gen.py', 'sp75_vlm.py', 'sp75_metrics.py',
++              'sp75_data.py', 'g71_data.py', 'sp67_data.py', 'rsna_diag/__init__.py', 'rsna_diag/generate.py',
++              'rsna_diag/lora.py', 'rsna_diag/queue_lock.py', 'rsna_diag/geometry.py', 'rsna_diag/prompts.py',
++              'rsna_diag/mi19_mha.py', 'rsna_diag/mi19_render.py']:
++        a = subprocess.check_output(['git', 'rev-parse', 'HEAD:' + p], text=True).strip()
++        b = subprocess.check_output(['git', 'rev-parse', origin + ':' + p], text=True).strip()
++        assert a == b, p
++        blobs[p] = a
++    man_path = 'results/iter_075/data/manifest.json'
++    feat_path = 'results/iter_078/features.json'
++    man, feat = C.read(man_path), C.read(feat_path)
++    assert feat['manifest_sha256'] == C.sha(man_path)
++    assert C.sha(feat['checkpoint']) == feat['checkpoint_sha256']
++    src = {p: C.sha(p) for p in [man_path, feat_path, feat['checkpoint'], C.ADAPTER + '/adapter.pt',
++                                '../agent/runs/iter_080/plan.md', '../agent/runs/iter_081/plan.md']}
++    counts = {}
++    patient_sets = {}
++    for split, n in [('V8', 24), ('E24', 47)]:
++        refpath = f'results/iter_078/data/refs_{split}.json'
++        lp = f'results/iter_078/data/labels_{split}.json'
++        refs = C.read(refpath)
++        assert refs['manifest_sha256'] == C.sha(man_path)
++        assert refs['features_sha256'] == C.sha(feat_path)
++        src.update({p: C.sha(p) for p in [refpath, lp]})
++        queries = refs['requests']
++        assert len(queries) == n and len({r['id'] for r in queries}) == n
++        queries.sort(key=lambda r: (int(r['patient']), r['ordinal']))
++        ids = {r['id'] for r in queries}
++        # 허용한 ID 외 grade는 조회/출력하지 않는다.
++        mr = {r['id']: r for r in man['rows'] if r['id'] in ids}
++        labels = C.read(lp)['labels']
++        assert set(labels) == ids
++        qpath = ('results/iter_077/gen/V8/R_lr2e-4_ep16' if split == 'V8' else 'results/iter_077/gen/E24/R_adapted')
++        rawpath = qpath + '/gen_worker0.jsonl'
++        envpath = qpath + '/gen_worker0.env.json'
++        env = C.read(envpath)
++        assert env['adapter_digest'] == C.ADAPTER_DIGEST
++        assert env['env']['model_revision'] == C.CONFIG['model_revision']
++        assert env['config']['max_new_tokens'] == 32
++        raw = [r for r in G.read_jsonl(rawpath) if r['id'] in ids]
++        assert len(raw) == n and {r['id'] for r in raw} == ids
++        qmap = {r['id']: r for r in raw}
++        src.update({p: C.sha(p) for p in [rawpath, envpath]})
++        donors = {}
++        for ordinal in sorted({r['ordinal'] for r in queries}):
++            group = [r for r in queries if r['ordinal'] == ordinal]
++            assert len(group) >= 2
++            for i, r in enumerate(group):
++                donors[r['id']] = group[(i + 1) % len(group)]
++        requests, baseline = [], []
++        for q in queries:
++            rid = q['id']; row = mr[rid]; f = feat['items'][rid]; qr = qmap[rid]
++            assert not row['excluded'] and row['split'] == split
++            assert row['position_set'] == ('supervised' if split == 'V8' else 'held')
++            assert labels[rid] == {k: row[k] for k in ('grade', 'patient', 'ordinal')}
++            assert all(f[k] == q[k] == row[k] for k in ('patient', 'ordinal', 'split'))
++            imgs = [{k: e[k] for k in ('path', 'file_sha256', 'pixel_sha256_padded')} for e in row['inputs']['R']]
++            assert imgs == q['query_images']
++            assert f['input_file_sha256'] == [e['file_sha256'] for e in imgs]
++            assert qr['input_pixel_sha256'] == [e['pixel_sha256_padded'] for e in imgs]
++            assert qr['input_file_sha256'] == [e['file_sha256'] for e in imgs]
++            assert qr['adapter_digest'] == C.ADAPTER_DIGEST and qr['config_digest'] == env['config_digest']
++            assert qr['request_id'] == G.request_id(C.ADAPTER_DIGEST, 'R', rid, G.sha(V.PROMPT_R), env['config_digest'])
++            assert qr['parsed'] == (V.parse(qr['text']) if qr['ended_eos'] else None)
++            assert len(f['probs']) == 5 and np.isfinite(f['probs']).all() and abs(sum(f['probs']) - 1) < 1e-5
++            assert f['pred'] == int(np.argmax(f['probs']) + 1)
++            V.load_images(imgs)
++            baseline.append({'id': rid, **labels[rid], 'probs': f['probs'], 'C': f['pred'], 'Q': qr['parsed'],
++                             'Q_suffix_ids': qr['suffix_ids'], 'Q_source': rawpath, 'Q_request_id': qr['request_id']})
++            for cond in ('Q', 'A', 'T', 'X'):
++                donor = donors[rid]
++                images = [] if cond == 'T' else (donor['query_images'] if cond == 'X' else imgs)
++                r = {k: q[k] for k in ('id', 'patient', 'ordinal', 'split')}
++                r.update(cond=cond, automated_grade=f['pred'], donor=donor['id'] if cond == 'X' else None,
++                         images=images, prompt=V.PROMPT_R if cond == 'Q' else R.audit_prompt(cond, f['pred']))
++                C.check_request(r)
++                requests.append(r)
++        C.save(C.ROOT / f'data/requests_{split}.json', requests)
++        C.save(C.ROOT / f'data/baseline_{split}.json', baseline)
++        patient_sets[split] = sorted({r['patient'] for r in queries}, key=int)
++        counts[split] = {'items': n, 'patients': len(patient_sets[split]), 'unavailable_donors': 0}
++    assert not set(patient_sets['V8']) & set(patient_sets['E24'])
++    C.save(C.ROOT / 'data/tech_ids.json', [r['id'] for r in C.read(C.ROOT / 'data/baseline_V8.json')[:4]])
++    C.save(C.ROOT / 'data/source_audit.json', {'passed': True, 'source_files': src, 'inherited_blobs': blobs,
++                                            'counts': counts, 'patient_sets': patient_sets,
++                                            'note': '기존 고정 자료의 연결 재검사; 새 독립 평가 아님. 범위 밖 grade 미조회.'})
++    print(counts)
++
++
++if __name__ == '__main__':
++    prepare()
+diff --git a/a81_protocol.py b/a81_protocol.py
+new file mode 100644
+index 0000000..fe0f033
+--- /dev/null
++++ b/a81_protocol.py
+@@ -0,0 +1,42 @@
++"""실행 전 입력·checkpoint·관련 code·gate 잠금."""
++import argparse
++import sys
++import importlib.metadata
++from pathlib import Path
++import a81_common as C
++
++
++def make(name, split, conds, tech=False):
++    source = C.read(C.ROOT / 'data/source_audit.json')
++    C.check_hashes(source['source_files'])
++    rp = C.ROOT / f'data/requests_{split}.json'
++    ids = C.read(C.ROOT / 'data/tech_ids.json') if tech else None
++    req = [r for r in C.read(rp) if r['cond'] in conds and (ids is None or r['id'] in ids)]
++    files = {p: C.sha(p) for p in C.code_files()}
++    files.update(source['source_files'])
++    for p in [rp, C.ROOT / f'data/baseline_{split}.json', C.ROOT / 'data/source_audit.json']:
++        files[str(p)] = C.sha(p)
++    if not tech:
++        gate = C.read(C.ROOT / 'tests/technical_gate.json')
++        assert gate['passed']
++        for p, h in gate['files'].items():
++            assert C.sha(p) == h
++            files[p] = h
++        files[str(C.ROOT / 'tests/technical_gate.json')] = C.sha(C.ROOT / 'tests/technical_gate.json')
++        files[str(C.ROOT / 'selection.json')] = C.sha(C.ROOT / 'selection.json')
++    if split == 'E24':
++        v = C.read(C.ROOT / 'eval/V8.json')
++        assert v['proceed_E24']
++        files[str(C.ROOT / 'eval/V8.json')] = C.sha(C.ROOT / 'eval/V8.json')
++    env = {k: importlib.metadata.version(k) for k in ['torch', 'transformers', 'numpy', 'Pillow']}
++    out = C.ROOT / f'protocol_{name}.json'
++    C.save(out, {'files': files, 'config': C.CONFIG, 'requests_path': str(rp), 'conds': conds, 'ids': ids,
++                 'request_keys': [C.request_key(r) for r in req], 'split': split,
++                 'environment': env, 'python': sys.executable, 'technical': tech})
++    print(str(out), len(req))
++
++
++if __name__ == '__main__':
++    ap = argparse.ArgumentParser(); ap.add_argument('name'); ap.add_argument('--split', default='V8')
++    ap.add_argument('--conds', default='Q,A,T,X'); ap.add_argument('--tech', action='store_true')
++    a = ap.parse_args(); make(a.name, a.split, a.conds.split(','), a.tech)
+diff --git a/a81_run.py b/a81_run.py
+new file mode 100644
+index 0000000..7eca5b4
+--- /dev/null
++++ b/a81_run.py
+@@ -0,0 +1,154 @@
++"""iter_081 고정 요청 실행. 기존 rf78의 실제 생성 함수를 재사용한다.
++
++worker별 원자적 request JSON을 저장해 부분 JSONL의 동시 읽기를 제거한다.
++claim은 flock이며 삭제하지 않는다. pending 파일은 완료로 세지 않고 보존한다.
++"""
++import argparse
++import os
++import time
++import sys
++import importlib.metadata
++from pathlib import Path
++import a81_common as C
++import rf78_gen as G
++import sp75_vlm as V
++from rsna_diag import generate, queue_lock
++
++
++def load_protocol(path):
++    p = C.read(path)
++    C.check_hashes(p['files'])
++    if p['config'] != C.CONFIG:
++        raise ValueError('config mismatch')
++    if p['python'] != sys.executable or any(importlib.metadata.version(k) != v for k,v in p['environment'].items()):
++        raise ValueError('runtime environment mismatch')
++    reqs = C.read(p['requests_path'])
++    selected = [r for r in reqs if r['cond'] in p['conds'] and (p['ids'] is None or r['id'] in p['ids'])]
++    keys = [C.request_key(r) for r in selected]
++    if keys != p['request_keys'] or len(set(keys)) != len(keys):
++        raise ValueError('request digest/set mismatch')
++    for r in selected:
++        C.check_request(r)
++    return p, selected
++
++
++def records(out, p, reqs):
++    by = {C.request_key(r): r for r in reqs}
++    done = {}
++    for f in sorted(Path(out).glob('worker*/records/*.json')):
++        x = C.read(f); key = x.get('request_key')
++        if key not in by or key in done:
++            raise ValueError('unexpected/duplicate request record')
++        r = by[key]
++        if x.get('request') != r or x.get('protocol_digest') != C.digest(p):
++            raise ValueError('request/protocol mismatch')
++        if x.get('adapter_digest') != C.ADAPTER_DIGEST or x.get('config') != C.CONFIG:
++            raise ValueError('adapter/config mismatch')
++        if x['parsed'] != (V.parse(x['text']) if x['ended_eos'] else None):
++            raise ValueError('parser mismatch')
++        if x['n_images'] != len(r['images']) or x['n_new'] != len(x['suffix_ids']):
++            raise ValueError('image/token count mismatch')
++        if x['runtime_s'] < 0 or not x.get('env_digest'):
++            raise ValueError('timing/environment missing')
++        done[key] = x
++    return done
++
++
++def verify(protocol, out, complete=True):
++    p, reqs = load_protocol(protocol)
++    done = records(out, p, reqs)
++    if complete and set(done) != set(p['request_keys']):
++        raise ValueError(f'missing outputs {len(done)}/{len(reqs)}')
++    return done
++
++
++def inputs(proc, r):
++    if r['cond'] == 'Q':
++        return V.build_gen_inputs(proc, V.load_images(r['images']), V.PROMPT_R)
++    return G.make_inputs(proc, r['cond'], r)[0]
++
++
++def tech_check(torch, proc, reqs):
++    checks = []
++    qs = {r['id']: r for r in reqs if r['cond'] == 'Q'}
++    for r in reqs:
++        im = V.load_images(r['images'])
++        official = proc.apply_chat_template([{'role': 'user', 'content':
++                    [{'type': 'image', 'image': x} for x in im] + [{'type': 'text', 'text': r['prompt']}]}],
++                    tokenize=True, add_generation_prompt=True, return_dict=True, return_tensors='pt')
++        actual = inputs(proc, r)
++        assert set(official) == set(actual)
++        assert all(torch.equal(official[k], actual[k]) for k in actual)
++        n = actual['pixel_values'].shape[0] if 'pixel_values' in actual else 0
++        assert n == (0 if r['cond'] == 'T' else 3)
++        if r['cond'] == 'A' and r['id'] in qs:
++            assert torch.equal(actual['pixel_values'], inputs(proc, qs[r['id']])['pixel_values'])
++        checks.append({'id': r['id'], 'cond': r['cond'], 'keys': list(actual), 'images': n, 'equal': True})
++    return checks
++
++
++def worker(a):
++    allowed = os.environ.get('CUDA_VISIBLE_DEVICES', '').split(',')
++    if a.gpu not in allowed:
++        raise ValueError('GPU outside inherited set')
++    os.environ['CUDA_VISIBLE_DEVICES'] = a.gpu
++    os.environ['HF_HUB_OFFLINE'] = '1'
++    os.environ['TOKENIZERS_PARALLELISM'] = 'false'
++    p, reqs = load_protocol(a.protocol)
++    root = Path(a.out); root.mkdir(parents=True, exist_ok=True)
++    (root / 'claims').mkdir(exist_ok=True)
++    info = queue_lock.my_info(worker=a.worker)
++    lock, _, _ = queue_lock.try_lock(str(root / f'worker{a.worker}.lock'), info)
++    if lock is None:
++        raise ValueError('worker already owned')
++    try:
++        start = time.monotonic()
++        torch, proc, model = generate.load_model()
++        dg = generate.load_adapter(torch, model, C.ADAPTER)
++        assert dg == C.ADAPTER_DIGEST
++        env = generate.env_info(torch, proc, model)
++        assert env['model_revision'] == C.CONFIG['model_revision']
++        ep = root / f'worker{a.worker}' / f'env_{os.getpid()}.json'
++        C.save(ep, {'env': env, 'logical_gpu': 0, 'physical_gpu': a.gpu, 'protocol_digest': C.digest(p)})
++        ed = C.sha(ep)
++        if a.tech:
++            C.save(root / f'worker{a.worker}/tech_{os.getpid()}.json', {'passed': True, 'checks': tech_check(torch, proc, reqs)})
++        eos = env['eos_token_id']; eos = set(eos if isinstance(eos, list) else [eos])
++        n = 0
++        for r in reqs:
++            if a.limit is not None and n >= a.limit:
++                break
++            key = C.request_key(r)
++            cl, _, _ = queue_lock.try_lock(str(root / 'claims' / (key + '.lock')), info)
++            if cl is None:
++                continue
++            try:
++                if key in records(root, p, reqs):
++                    continue
++                C.check_request(r)
++                if r['cond'] == 'Q':
++                    # 기존 Q 생성 함수와 동일 입력 경로.
++                    rr = {'query_images': r['images']}
++                else:
++                    rr = r
++                x = G.run_one(torch, proc, model, rr, r['cond'], eos)
++                x.update(request_key=key, request=r, protocol_digest=C.digest(p), config=C.CONFIG,
++                         adapter_digest=dg, env_digest=ed, env_path=str(ep), worker=a.worker,
++                         physical_gpu=a.gpu, logical_gpu=0, saved_at=time.time())
++                C.save(root / f'worker{a.worker}/records/{key}.json', x)
++                n += 1
++                print(f'{n} {r["id"]} {r["cond"]} saved', flush=True)
++            finally:
++                cl.release()
++        C.save(root / f'worker{a.worker}/attempt_{os.getpid()}.json',
++               {'new': n, 'wall_including_load_s': time.monotonic() - start, 'protocol_digest': C.digest(p), 'normal_exit': True})
++    finally:
++        lock.release()
++
++
++if __name__ == '__main__':
++    ap = argparse.ArgumentParser()
++    ap.add_argument('--protocol', required=True); ap.add_argument('--out', required=True)
++    ap.add_argument('--worker', type=int, required=True); ap.add_argument('--gpu', required=True)
++    ap.add_argument('--limit', type=int); ap.add_argument('--tech', action='store_true')
++    worker(ap.parse_args())
+diff --git a/a81_tests.py b/a81_tests.py
+new file mode 100644
+index 0000000..b033e26
+--- /dev/null
++++ b/a81_tests.py
+@@ -0,0 +1,96 @@
++"""고정 조건·metric·gate 및 실제 실행 경로의 변조 거부 fixture."""
++import argparse
++import copy
++from pathlib import Path
++import numpy as np
++import a81_common as C
++import a81_eval as E
++import a81_run as R
++import rf78_vlm as V
++import sp75_vlm as S
++import sp75_metrics as M
++
++
++def cpu(dest):
++    checks = {}
++    for split in ('V8','E24'):
++        req = C.read(C.ROOT / f'data/requests_{split}.json')
++        for r in req: C.check_request(r)
++        by = {(r['id'],r['cond']): r for r in req}
++        base = C.read(C.ROOT / f'data/baseline_{split}.json')
++        for b in base:
++            a,t,x,q = [by[b['id'], c] for c in ('A','T','X','Q')]
++            assert a['prompt'] == x['prompt']
++            assert a['automated_grade'] == t['automated_grade'] == x['automated_grade'] == b['C']
++            assert t['images'] == [] and 'These are three' not in t['prompt']
++            assert a['images'] == q['images']
++            donors = sorted([r for r in base if r['ordinal'] == b['ordinal']], key=lambda r:int(r['patient']))
++            j = next(i for i,r in enumerate(donors) if r['id'] == b['id'])
++            donor = donors[(j+1)%len(donors)]
++            assert x['donor'] == donor['id'] and donor['patient'] != b['patient']
++            assert x['images'] == by[donor['id'],'A']['images']
++        checks[f'{split}_all_requests_donor_gt_separation'] = True
++    checks['parser'] = all(S.parse(s) == y for s,y in [('1',1),(' 5. ',5),('1 or 2',None),('0',None),('55',None)])
++    checks['invalid_error4'] = M.abs_err([1,5],[None,3]).tolist() == [4,2]
++    rows = [{'Q':None,'C':2,'probs':[.1,.4,.3,.1,.1]}, {'Q':4,'C':2,'probs':[.1,.4,.3,.1,.1]}]
++    cs=E.candidates(rows)
++    checks['strict_threshold_equal'] = cs['gate_0.4']['pred'] == [2,2]
++    checks['fallback_argmax'] = cs['gate_0.6']['pred'] == [2,4]
++    checks['median'] = cs['C_median']['pred'] == [2,2]
++    checks['gate_calls_include_invalid'] = cs['gate_0.6']['calls'] == 2
++    r=C.read(C.ROOT / 'data/requests_V8.json')[0]
++    for field,value in [('automated_grade', 1 if r['automated_grade'] != 1 else 2), ('donor','different'), ('prompt','different')]:
++        changed=copy.deepcopy(r); changed[field]=value
++        checks[f'digest_{field}'] = C.request_key(changed) != C.request_key(r)
++    bad=copy.deepcopy(r); bad['grade']=3
++    try: C.check_request(bad)
++    except ValueError as e: checks['GT_rejected'] = 'allowlist' in str(e)
++    else: checks['GT_rejected'] = False
++    C.save(dest, {'passed':all(checks.values()), 'checks':checks})
++    assert all(checks.values()), checks
++    print('CPU',len(checks),'PASS')
++
++
++def proc(protocol, source, dest):
++    p,reqs=R.load_protocol(protocol); done=R.verify(protocol, source)
++    root=Path(dest).parent/'tamper_cases'; checks={}
++    first=next(iter(done.values()))
++    variants={'config': lambda x:x['config'].update(max_new_tokens=99),
++              'adapter':lambda x:x.update(adapter_digest='wrong'),
++              'request':lambda x:x['request'].update(automated_grade=0),
++              'protocol':lambda x:x.update(protocol_digest='wrong')}
++    for name, mutate in variants.items():
++        d=root/name; x=copy.deepcopy(first); mutate(x)
++        C.save(d/'worker0/records/one.json',x)
++        try: R.records(d,p,reqs)
++        except ValueError: checks[name]=True
++        else: checks[name]=False
++    d=root/'duplicate'
++    for k in ('one','two'): C.save(d/f'worker0/records/{k}.json',first)
++    try: R.records(d,p,reqs)
++    except ValueError as e: checks['duplicate']='duplicate' in str(e)
++    else: checks['duplicate']=False
++    d=root/'missing'; C.save(d/'worker0/records/one.json',first)
++    try: R.verify(protocol,d)
++    except ValueError as e: checks['missing']='missing outputs' in str(e)
++    else: checks['missing']=False
++    bad=copy.deepcopy(p); bad['config']['batch']=2; bp=root/'wrong_protocol.json'; C.save(bp,bad)
++    try: R.load_protocol(bp)
++    except ValueError as e: checks['protocol_config']='config mismatch' in str(e)
++    else: checks['protocol_config']=False
++    bad=copy.deepcopy(p); bad['request_keys'][0]='wrong'; bp=root/'wrong_requests.json'; C.save(bp,bad)
++    try: R.load_protocol(bp)
++    except ValueError as e: checks['protocol_requests']='request digest' in str(e)
++    else: checks['protocol_requests']=False
++    checks['Q_suffix'] = all(x['suffix_ids'] == next(b['Q_suffix_ids'] for b in C.read(C.ROOT/'data/baseline_V8.json') if b['id']==x['request']['id'])
++                             for x in done.values() if x['request']['cond']=='Q')
++    C.save(dest, {'passed':all(checks.values()), 'checks':checks})
++    assert all(checks.values()), checks
++    print('PROC',len(checks),'PASS')
++
++
++if __name__ == '__main__':
++    ap=argparse.ArgumentParser(); ap.add_argument('mode',choices=['cpu','proc']); ap.add_argument('--dest',required=True)
++    ap.add_argument('--protocol'); ap.add_argument('--source'); a=ap.parse_args()
++    if a.mode=='cpu': cpu(a.dest)
++    else: proc(a.protocol,a.source,a.dest)
+diff --git a/a81_verify.py b/a81_verify.py
+new file mode 100644
+index 0000000..b534f63
+--- /dev/null
++++ b/a81_verify.py
+@@ -0,0 +1,93 @@
++"""production metric을 사용하지 않는 raw 출력·환자 bootstrap 재계산."""
++import argparse
++import json
++import re
++from pathlib import Path
++import numpy as np
++import a81_common as C
++
++
++def verify(report_path, dest):
++    report = C.read(report_path); split = report['split']
++    rows = C.read(C.ROOT / f'data/baseline_{split}.json')
++    ids = [r['id'] for r in rows]
++    assert ids == report['ids']
++    outputs = {c: {} for c in ('A', 'T', 'X')}
++    for p in Path(report['provenance']['out']).glob('worker*/records/*.json'):
++        r = C.read(p); cond = r['request']['cond']; rid = r['request']['id']
++        assert rid not in outputs[cond]
++        t = r['text'].strip()
++        m = re.fullmatch(r'([1-5])\s*\.?', t)
++        outputs[cond][rid] = int(m[1]) if r['ended_eos'] and m else None
++    for v in outputs.values(): assert set(v) == set(ids)
++    predictions = {c: [outputs[c][i] for i in ids] for c in outputs}
++    qraw = {}
++    for p in {r['Q_source'] for r in rows}:
++        for line in Path(p).read_text().splitlines():
++            r = json.loads(line)
++            if r['id'] not in ids: continue
++            assert r['id'] not in qraw
++            m = re.fullmatch(r'([1-5])\s*\.?', r['text'].strip())
++            qraw[r['id']] = int(m[1]) if m and r['ended_eos'] else None
++    predictions['Q'] = [qraw[i] for i in ids]
++    feat = C.read('results/iter_078/features.json')['items']
++    predictions['C_argmax'] = [int(np.asarray(feat[i]['probs']).argmax()) + 1 for i in ids]
++    chosen = report['M']
++    if chosen == 'Q': predictions['M'] = predictions['Q']
++    elif chosen == 'C_argmax': predictions['M'] = predictions['C_argmax']
++    elif chosen == 'C_median':
++        predictions['M'] = [next(j+1 for j in range(5) if sum(feat[i]['probs'][:j+1]) >= .5) for i in ids]
++    else:
++        tau = float(chosen.split('_')[1])
++        predictions['M'] = [q if max(feat[i]['probs']) < tau and q is not None else c
++                            for i,q,c in zip(ids,predictions['Q'],predictions['C_argmax'])]
++    assert predictions == report['predictions']
++    y = np.array([r['grade'] for r in rows]); classes = sorted(set(y.tolist()))
++    errs = {k: np.array([4 if p is None else abs(int(t)-p) for t,p in zip(y, ps)], float) for k,ps in predictions.items()}
++    def metric(e, ix):
++        return np.mean([e[ix][y[ix] == g].mean() for g in classes if np.any(y[ix] == g)])
++    checks = []
++    for k,e in errs.items():
++        s = report['systems'][k]
++        checks.extend([abs(metric(e, np.arange(len(y))) - s['class_std_mae']) < 1e-12,
++                       abs(e.mean()-s['mae']) < 1e-12, int(sum(e >= 2)) == s['err_ge2_n'],
++                       sum(p is None for p in predictions[k]) == s['invalid_n'],
++                       sum(a == c for a,c in zip(predictions[k], predictions['C_argmax'])) == s['matches_C_n']])
++    pats = sorted({r['patient'] for r in rows}, key=int)
++    inds = [np.array([i for i,r in enumerate(rows) if r['patient'] == p]) for p in pats]
++    rng = np.random.default_rng(7501); diffs = {k: [] for k in ('M','T','X','Q','C_argmax')}; missing = 0
++    for _ in range(10000):
++        ix = np.concatenate([inds[i] for i in rng.integers(0, len(pats), len(pats))])
++        missing += len(set(y[ix])) < len(classes)
++        a = metric(errs['A'], ix)
++        for k in diffs: diffs[k].append(a - metric(errs[k], ix))
++    for k, vals in diffs.items():
++        stored = report['paired']['A-'+k]
++        checks.append(np.allclose(np.percentile(vals, [2.5,97.5]), stored['ci95'], atol=1e-12, rtol=0))
++        checks.append(missing == stored['n_missing_class_replicates'])
++    cor = [r['id'] for i,r in enumerate(rows) if errs['A'][i] < errs['C_argmax'][i]]
++    damaged = [r['id'] for i,r in enumerate(rows) if errs['C_argmax'][i] == 0 and errs['A'][i] > 0]
++    toward = []
++    for i,r in enumerate(rows):
++        q,a,c = (predictions[k][i] for k in ('Q','A','C_argmax'))
++        if q is not None and a is not None and abs(q-y[i]) < abs(c-y[i]) and abs(a-y[i]) > abs(q-y[i]) and abs(a-c) < abs(q-c): toward.append(r['id'])
++    tr = report['posthoc_transitions']
++    checks.extend([cor == tr['C_error_reduced_ids'], damaged == tr['C_correct_damaged_ids'], toward == tr['Q_better_moved_toward_C_ids']])
++    visual = all(np.percentile(diffs[k], 97.5) < 0 for k in ('T','X'))
++    min_gain = report['systems']['A']['class_std_mae'] - report['systems']['M']['class_std_mae'] <= -.1
++    positive = min_gain and np.percentile(diffs['M'],97.5) < 0 and visual and sum(errs['A'] >= 2) <= sum(errs['M'] >= 2)
++    pid = {r['id']:r['patient'] for r in rows}
++    pilot = not positive and visual and len({pid[i] for i in cor}) >= 2 and len({pid[i] for i in toward}) >= 2
++    verdict = 'positive_exploratory' if positive else ('method_pilot_candidate' if pilot else ('negative' if not visual and not min_gain else 'inconclusive'))
++    checks.append(verdict == report['criteria']['verdict'])
++    result = {'passed': bool(all(checks)), 'checks': len(checks), 'failures': sum(not bool(x) for x in checks),
++              'report_sha256': C.sha(report_path), 'missing_class_replicates': int(missing), 'verdict': verdict,
++              'sources': {str(p):C.sha(p) for p in [Path(report_path), C.ROOT / f'data/baseline_{split}.json']},
++              'raw_files': {str(p):C.sha(p) for p in Path(report['provenance']['out']).glob('worker*/records/*.json')}}
++    C.save(dest, result)
++    assert result['passed'], result
++    print(result['passed'], result['checks'], result['verdict'])
++
++
++if __name__ == '__main__':
++    p=argparse.ArgumentParser(); p.add_argument('report'); p.add_argument('dest'); a=p.parse_args(); verify(a.report,a.dest)
+diff --git a/rf78_gen.py b/rf78_gen.py
+index b1b8375..80ec822 100644
+--- a/rf78_gen.py
++++ b/rf78_gen.py
+@@ -35,6 +35,9 @@ def load_imgs(entries):
+ 
+ 
+ def make_inputs(proc, cond, req):
++    if cond in ('A', 'T', 'X'):
++        imgs = [] if cond == 'T' else load_imgs(req['images'])
++        return RV.build_inputs(proc, cond, None, req['automated_grade'], imgs)
+     tgt = load_imgs(req['query_images'])
+     refs = None
+     grades = None
+@@ -62,7 +65,7 @@ def run_one(torch, proc, model, req, cond, eos_ids):
+     text = proc.tokenizer.decode(ids, skip_special_tokens=True)
+     raw = proc.tokenizer.decode(ids, skip_special_tokens=False)
+     return {'suffix_ids': ids, 'text': text, 'raw': raw, 'ended_eos': bool(ended), 'n_new': len(ids), 'parsed': V.parse(text) if ended else None,
+-            'parse_valid': bool(ended and V.parse(text) is not None), 'n_input_tokens': n_in, 'n_images': int(x['pixel_values'].shape[0]),
++            'parse_valid': bool(ended and V.parse(text) is not None), 'n_input_tokens': n_in, 'n_images': int(x['pixel_values'].shape[0]) if 'pixel_values' in x else 0,
+             'runtime_s': dt, 'prep_s': t0 - t_in, 'peak_mem_alloc_gb': torch.cuda.max_memory_allocated() / 2 ** 30, 'peak_mem_reserved_gb': torch.cuda.max_memory_reserved() / 2 ** 30}
+ 
+ 
+diff --git a/rf78_vlm.py b/rf78_vlm.py
+index e924f08..6572c4d 100644
+--- a/rf78_vlm.py
++++ b/rf78_vlm.py
+@@ -16,6 +16,17 @@ QUESTION = ('What is the Pfirrmann grade (1 = bright homogeneous disc with clear
+             '5 = dark collapsed disc without distinction) of the target intervertebral disc? Answer with a single digit from 1 to 5.')
+ MAX_NEW = V.MAX_NEW
+ MAX_NEW_TOKENS = MAX_NEW
++ADVICE = ('An automated image classifier estimated Pfirrmann grade {c} for this target disc. '
++          'This estimate may be correct or incorrect. Use the MRI to determine the final grade.')
++
++
++def audit_prompt(cond, grade):
++    if cond not in ('A', 'T', 'X') or grade not in range(1, 6):
++        raise ValueError('invalid audit condition/automated grade')
++    tail = V.PROMPT_R
++    if cond == 'T':
++        tail = 'No MRI images are available in this condition. What is' + V.PROMPT_R.split('What is', 1)[1]
++    return ADVICE.format(c=grade) + '\n\n' + tail
+ 
+ 
+ def ref_line(j, g, shown):
+@@ -28,6 +39,10 @@ def prompt_digest():
+ 
+ def blocks(cond, ref_imgs, ref_grades, tgt_imgs):
+     """chat content block 목록과 영상 역할 목록 [(role, j)] 반환. ref_imgs: [[3 PIL] x3] 또는 None."""
++    if cond in ('A', 'T', 'X'):
++        ims = [] if cond == 'T' else tgt_imgs
++        return ([{'type': 'image', 'image': im} for im in ims] +
++                [{'type': 'text', 'text': audit_prompt(cond, ref_grades)}]), [('target', k) for k in range(len(ims))]
+     if cond == 'Q':
+         return [{'type': 'image', 'image': im} for im in tgt_imgs] + [{'type': 'text', 'text': V.PROMPT_R}], [('target', k) for k in range(3)]
+     c = [{'type': 'text', 'text': HEADER + '\n\n'}]
+@@ -50,7 +65,8 @@ def build_inputs(proc, cond, ref_imgs, ref_grades, tgt_imgs):
+     content, roles = blocks(cond, ref_imgs, ref_grades, tgt_imgs)
+     inp = proc.apply_chat_template([{'role': 'user', 'content': content}], add_generation_prompt=True, tokenize=True, return_dict=True, return_tensors='pt')
+     n_img = sum(1 for b in content if b['type'] == 'image')
+-    if inp['pixel_values'].shape[0] != n_img:
++    actual = int(inp['pixel_values'].shape[0]) if 'pixel_values' in inp else 0
++    if actual != n_img:
+         raise RuntimeError(f"pixel_values images {inp['pixel_values'].shape[0]} != {n_img}")
+     return inp, roles
+ 

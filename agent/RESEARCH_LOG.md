@@ -30436,3 +30436,323 @@ C가 맞을 때의 A 훼손, C가 틀릴 때의 A 교정, Q/C 불일치에서의
 
 현재 자료에서 교정 가능한 오류의 상보성이 제한적으로 존재한다. 그러나 47개 중 Q가 더 나은 경우가 6개뿐이므로 큰 학습 투자에는 부족하다. 한 번의 고정 출력 비교로 영상 교정 가능성과 단순 gate 충분성을 함께 확인하는 것이 새 자료 준비나 참고영상 튜닝보다 판단 가치가 높다. 이번은 diagnostic이며 신규 한계 등록이나 방법 pilot 진입은 후속 리뷰의 실제 출력 근거에 달려 있다.
 
+
+
+## iter_081 GPT PLAN [MRI 자동 등급의 영상 검증 / proceed] — 2026-10-05 21:51:48
+
+# 요약
+
+- **이번에 할 일:** iter_080의 미완료 MRI 자동 등급 검증을 Codex로 인계한다.
+- **필요한 이유:** Claude 사용량 제한으로 중단됐으며, 비교 결과는 아직 없다. 기존 17개 반입 파일은 보존돼 있다.
+- **확인할 기준:** 원 V8/E24·A/T/X·Q/C/gate와 정확도·영상 기여·종료 기준을 그대로 적용한다.
+- **주의·다음:** 새 과학적 시도나 실패가 아니다. 결과는 `results/iter_081/`에 기록하고 full review에서 후속 투자 선택을 한다.
+
+## 알림 맥락
+
+- 연구: MRI 근거 선택·사용
+- 데이터: 척추 sagittal T2 MRI와 부위별 등급 정답인 SPIDER
+- 모델: 기존 MedGemma 1.5 영역 판독 SFT와 공유 ResNet18, 신규 학습 없음
+- 과제: 대상 MRI와 자동 분류기의 등급을 받아 최종 Pfirrmann grade 1–5 출력
+- 가설: 자동 판정 오류를 영상으로 교정할 수 있지만 판정 복사나 단순 gate로 설명될 수도 있다
+- 질문: 자동 판독 결과가 틀렸을 때 VLM은 MRI를 보고 고칠 수 있는가?
+- 변경: 실행 복구
+- 연결: 같은 연구 질문 유지 · Claude 사용량 제한으로 중단된 구현을 Codex가 인계한다
+- 작업: 기존 조건을 구현·검증하고 실제 출력 비교를 완료해 후속 투자 판단에 필요한 근거를 얻는다
+
+# Current Understanding
+
+기준 문서는 `agent/runs/iter_080/plan.md`, SHA256 `a5f5ad6689d7d9d19dddaa265c1e5bcb47d8b5d57f3e409fbcf0c7cc5293d4d3`다. 구현자는 원문 전체와 이번 amendment를 함께 읽는다. 원문의 과학적 조건은 모두 유지하며, 이번 문서의 변경은 담당·결과 경로·현재 코드 상태에 한정한다.
+
+현재 HEAD와 중단 보존 SHA는 `be903b89e6b71b5a1cf3cbc35cebd05f03f2ff13`이다. `checkpoint.json`은 interrupted/unreviewed이며 보존 제외 파일은 없다. 현재 17개 파일은 iter_078 출처 blob과 모두 일치한다. 따라서 반입은 완료됐지만 iter_080용 조건 구현과 재사용 검증은 완료되지 않았다. `results/iter_080`은 존재하지 않는다. 원 세션·계획·중단 ref는 보존한다.
+
+**유지:** GOAL, 동일 approach/track, SPIDER 분할·grade 의미·oracle anatomy·세 crop·checkpoint·prompt·parser·평가·종료 기준.
+
+**변경:** 구현 담당을 Codex로 바꾸고 신규 산출물을 `research/results/iter_081/`에 저장한다. 자동 Claude 복귀 예약은 만들지 않는다. 공통 보고 파일명은 기존 호환 형식을 쓴다.
+
+**미완료:** A/T/X 요청 구성, launcher 수정, 기술·재개 검사, V8 생성·M 선택, 조건부 E24 생성, 독립 평가와 보고다. 결과 부재를 모델 실패로 해석하지 않는다.
+
+# Strategy Check / 연구 방향 판단
+
+이번은 원 전략의 실행 인계다. 사용자 보완에 따라 연구 방향 재선정은 하지 않는다. iter_080의 선택은 기존 Q/C의 제한적 오류 상보성 → 복사·prior·실제 교정·단순 gate 충분성이라는 경쟁 설명 → A/T/X와 M 비교 → 자동 등급 검증의 투자 가치 판단이다.
+
+iter_077의 영역 판독 신호와 분류기 대비 불확정, iter_078의 참고영상 추가 가치 미확보 때문에 재학습·참고 수·검색기 순회를 피하고 기존 실제 오류 검증을 선택한 판단을 유지한다. 이 과제는 iter_064 context 효과나 iter_077 F/R 차이의 직접 원인 분해가 아니다. iter_080에서 선택한 자동 판정 검증 후보를 그대로 잇는 것이며 코드 인계를 설명 진전으로 세지 않는다.
+
+이번 리뷰에서 iter_064·077·078·079 원문과 이번 실제 결과를 연결해 관찰 유지/설명 진전/미검증/투자 보류를 구분한다. MRI 근거 사용 묶음의 **집중 / 한정 보완 / 투자 보류·전환** 중 하나를 실제로 선택한다. 인계 시점에 이 결정을 미리 내리거나 원 기준을 완화하지 않는다.
+
+# Hypothesis
+
+원 H1–H4를 유지한다. 실제 영상이 자동 판정 오류의 일부를 교정할 수 있는지, 판정 복사·영상 없는 prior인지, Q/C confidence gate로 충분한지, 현재 표본에서 불확정인지 구분한다. 다중 영상 결합이나 순수 내부 원인을 증명하는 실험은 아니다.
+
+# Limitation Evidence / Correct Usage Checks
+
+대상은 observed `spider-regional-reading-input-gap`이다. iter_077 유효 리뷰에는 blocking issue가 없고 공식 template·입력 hash·정답 연결·EOS/parser·checkpoint 선택 검증이 있다. F/R MAE 차이 0.29357은 별도 적응·해상도·context 등이 섞인 관찰이며 자동 조언 수용 실패의 근거로 전용하지 않는다. 이번은 diagnostic, method_stage=none을 유지한다.
+
+고정 모델 revision과 R adapter, bf16·greedy·32 new tokens·whole-string grade parser를 유지한다. 비EOS 및 형식 오류는 invalid, 절대오차4로 처리한다. 모델 오답이나 자동 등급 복사를 기술 실패로 처리하지 않는다. 원 Pfirrman grade 1–5와 환자·ordinal 연결을 유지하며 ordinal을 임상 level로 바꾸지 않는다.
+
+# Contribution Path / Baselines / Reuse
+
+원 계획의 가까운 선행과 신규성 미확정 판단을 계승한다. 이번 인계를 위해 문헌 전수 조사를 반복하지 않는다. 직접 SFT Q와 동일 T24 supervision의 공유 분류기 C가 강한 대조다. 기존 자동 판정 제공 방식의 효과만으로 새 contribution을 선언하지 않는다.
+
+같은 branch를 유지하므로 `reuse_iteration=0`, `reuse_assets=[]`다. 이미 있는 파일을 다시 반입하지 않는다. 현재 17개 파일은 `rf78_gen.py`, `rf78_vlm.py`, `rf78_launch.py`, `sp75_gen.py`, `sp75_vlm.py`, `sp75_metrics.py`, `sp75_data.py`, `g71_data.py`, `sp67_data.py`, `rsna_diag/__init__.py`, `rsna_diag/generate.py`, `rsna_diag/lora.py`, `rsna_diag/queue_lock.py`, `rsna_diag/geometry.py`, `rsna_diag/prompts.py`, `rsna_diag/mi19_mha.py`, `rsna_diag/mi19_render.py`다. 출처는 `b5426526827d986e9962f5439d5191bfbd064634`, 보존은 현재 HEAD에 연결한다.
+
+iter_078 review.json의 승인은 고정 입력·Q/L/I/D 경로에 한정된다. 새 A/T/X는 실제 검증한다. `sp75_metrics.py`의 invalid=4·present-class 평균·환자 bootstrap 정의를 재사용한다. `rf78_eval.py`의 Combo, `sp77_stage`와 기존 비용 실행기는 사용하지 않는다. `generate.py` standalone main의 미반입 의존 경로를 호출하지 않는다.
+
+# Proposed Experiment
+
+## 입력과 범위
+
+- manifest: `results/iter_075/data/manifest.json`.
+- adapter: `results/iter_077/train/R_lr2e-4/epoch_16`.
+- C probabilities/predictions: `results/iter_078/features.json`.
+- query 연결: `results/iter_078/data/refs_V8.json`, `refs_E24.json`의 query 부분.
+- 기존 Q: iter_077/078의 검증된 대상 단독 원시 출력.
+- V8 8명·24개, E24 24명·held ordinal 2/4 47개만 사용한다. T24 추가 grade·E24 supervised 71개·F139는 열지 않는다.
+
+기존 파일 존재는 확인했지만 새 실행 시 provenance·hash·ID 연결은 필요한 범위에서 검증한다. GT는 평가 파일로 분리하고 생성 요청에 넣지 않는다. 과거 산출물은 덮어쓰지 않는다.
+
+## 조건과 baseline 고정
+
+A는 원 PROMPT_R 앞에 원 계획의 문구 `An automated image classifier estimated Pfirrmann grade {c} for this target disc. This estimate may be correct or incorrect. Use the MRI to determine the final grade.`를 넣고 대상 세 crop을 제공한다. confidence·GT·환자 ID는 제공하지 않는다.
+
+T는 같은 자동 등급과 grade 설명을 사용하되 이미지를 제거하고 `No MRI images are available in this condition.`을 명시한다. X는 A의 텍스트·자동 등급을 유지하고 영상만 split 내 동일 ordinal의 다른 환자로 교환한다. 숫자 patient ID순 다음 환자로 순환 배정하며 grade·모델 출력은 donor 선택에 쓰지 않는다. 구성 불가 행은 원 계획대로 사전 보고하고 공통 비교 집합을 표시한다.
+
+V8에서 M 후보는 Q, C argmax, C posterior median, 그리고 C max probability가 τ 미만이면 Q를 사용하는 gate다. τ={0.2,0.4,0.6,0.8,1.01}, Q invalid이면 C argmax를 쓴다. posterior median은 누적확률이 처음 0.5 이상인 grade다. 선택 순서는 class-standardized MAE → 일반 MAE → VLM 호출 수 → 작은 τ다. A/T/X 결과로 후보나 threshold를 바꾸지 않는다. 기존 C_argmax도 별도 보고한다.
+
+## 단계와 종료
+
+1. **동작 확인:** V8 patient·ordinal순 첫 4개로 Q tensor·suffix 재현, A/X 세 영상과 동일 자동 등급, T 무영상, GT 차단·donor 연결·재개를 검사한다. 정답률 gate는 추가하지 않는다.
+2. **가능성 탐색:** V8의 A/T/X 72건을 생성하고 기존 Q/C로 M을 고정한다. A의 유효 grade가 12/24 미만이면 원 계획의 인터페이스 부적합으로 종료한다. 그 외에는 작은 V8 효과 부호로 중단하지 않는다.
+3. **규모 확대:** prompt·parser·donor·M·checkpoint·입력·코드·환경을 잠근 뒤 E24 A/T/X 141건을 생성한다. 기존 Q/C는 provenance가 일치할 때만 재사용한다.
+4. **독립 확인:** 이번에는 없다. E24는 반복 개발 자료다. 학습·추가 seed·새 모델·표본 확대를 하지 않는다.
+
+## GPU·비용·재개
+
+구현 단계는 승인된 Codex danger-full-access에서 GPU 0,1을 사용한다. shell login을 끄고 실제 Python 경로를 기록한다. 각 worker 배정 직전 허용 GPU의 UUID·여유 메모리를 다시 읽고 여유순으로 배정한다. 동시 시작 예약량을 포함해 다른 프로세스 점유와 각 worker peak+2 GiB 여유를 확보한다.
+
+iter_078 peak 10,465/10,393 MiB는 참고값이다. 개발 입력에서 이번 A/T/X peak를 측정한다. 안전하면 GPU당 worker 1개와 2개 구성을 짧게 비교한다. 안전하지 않으면 batch 확대 후보 하나를 검토하거나 비교 비용이 남은 작업의 예상 절약보다 큰 근거를 남긴다. 처리량·긴 출력 지연·OOM·전체 메모리·출력 정합성으로 선택하며 정답 점수로 실행 구성을 선택하지 않는다.
+
+과거 V8/E24 생성 wall 121.06/190.02초를 이번 확정 시간으로 환산하지 않는다. 초기 예상은 적재·검증 포함 수십 분 단위이며 V8 실측 후 남은 141건의 wall-clock을 갱신한다. 임의 timeout을 추가하지 않는다.
+
+request digest에 조건·자동 등급·donor·pixel·checkpoint·prompt·generation 설정을 포함한다. worker별 원시 token·EOS·parser·시간·입력 hash를 원자적으로 보존한다. 중복·누락·변조 거부·중단 재개를 기술 요청에서 확인한다. 기존 claim을 지우지 않는다. 모든 자식 종료와 출력 seal을 확인한 뒤 보고한다. cached Q/C 재사용 비용과 온라인 재실행 비용을 구분한다.
+
+# Implementation Tasks for Claude
+
+이 절의 실제 담당은 **Codex**다.
+
+1. 기준 plan SHA와 현재 보존 파일·의존성, 기존 결과 provenance를 확인하고 새 결과 경로만 만든다. 이미 완료된 반입을 반복하지 않는다.
+2. 기존 생성·저장 패턴에 A/T/X와 새 request manifest를 구현한다. 원 prompt·parser·조건을 변경하지 않는다.
+3. launcher의 배정 직전 재확인·여유순 배정·허용 GPU 매핑을 수정한다. 현재 코드의 무조건적인 `pixel_values` 접근은 T에서 이미지 없는 processor 출력을 정상 처리하도록 수정하고 `n_images=0`을 검증한다. 가짜 영상으로 대체하지 않는다.
+4. C 예측과 GT 분리, donor 독립성, T 무영상, invalid 처리, gate threshold·동률·fallback, 요청 digest 변조·중복·재개 fixture를 실행한다. Q와 A/X 입력 경로의 회귀 검사를 함께 한다.
+5. V8 기술 확인·72건·M 고정 후 protocol을 잠그고 원 gate에 따라 E24 141건을 완료한다.
+6. production 평가와 독립 계산으로 지표·오류 전환·bootstrap을 대조한다. 완료량·미완료·사용량·환경·실제 backend와 후속 판단 한계를 보고한다. 코드 커밋은 orchestrator가 관리한다.
+
+# Evaluation (성공/실패 기준 포함)
+
+원 기준을 그대로 적용한다. 주지표는 class-standardized MAE다. 일반 MAE, 두 등급 이상 오류, invalid, 자동 등급 일치율을 함께 보고한다. paired patient bootstrap 10,000회·seed7501을 사용하며 class 누락 replicate는 present-class 평균과 누락 횟수를 보고한다.
+
+주비교는 A−M, A−T, A−X다. 영상 기여는 A−T와 A−X가 모두 개선 방향이고 각각 95% CI 상한<0일 때 지지한다. 최소 가치 있는 차이는 MAE 0.10이며 임상 MCID가 아니다.
+
+- **양성 탐색:** A−M≤−0.10, CI 상한<0, 영상 기여 충족, A의 두 등급 이상 오류가 M보다 많지 않으면 기존 방식의 유망성을 보존한다. 신규 기여나 자동 확대 승인은 아니다.
+- **method pilot 검토 후보:** 위 실용 기준은 미달하지만 영상 기여를 충족하고, C 오차를 A가 줄인 환자≥2명이며 Q가 C보다 좋은 항목에서 A가 C 쪽으로 이동해 Q보다 오차를 키운 환자≥2명이면 교정과 과도한 수용 공존을 보고한다. 단순 M 이후의 잔여 가치는 full review에서 판단한다.
+- **음성:** 영상 교정 근거와 M 대비 최소 이득이 없으면 현재 자동 등급 검증 후보 투자를 종료한다. 복사 일치율만으로 내부 기전을 확정하지 않는다.
+- **불확정:** 나머지는 후보 보류다. 결과를 본 뒤 사례·문구를 추가하지 않는다.
+
+C 정답일 때의 훼손, C 오답일 때의 교정, Q/C 불일치에서의 이동을 모두 보고한다. 하위집단은 기존 출력으로 정의한 사후 개발 분석임을 표시한다. 원 실험 판정과 이후 연구 묶음 투자 선택을 분리한다. 리뷰는 사용자 보완에 따라 관찰 하나와 최소 개입에 집중할지, 새 근거가 있는 한정 보완을 할지, 범위를 명시해 보류·전환할지 결정한다.
+
+# Risks / Checks
+
+E24 반복 노출, 제한된 14개 Q/C 불일치, GT anatomy 지원, 세 crop의 임상 충분성 미확인, grade-only 적응과 조언 prompt 사이의 분포 차이를 유지한다. T의 prompt 차이와 X의 임의 donor 교환은 순수 원인 증명을 제한한다. X에 원 대상 정답을 연결한 결과를 donor의 임상 판독 정확도로 해석하지 않는다.
+
+새 실행의 필수 검증 전에는 중단 checkpoint를 승인본으로 취급하지 않는다. 누락 자산이나 provenance 불일치는 필요한 경로에서 해결하며 무관한 범용 정비로 확대하지 않는다. 원 기록·결과·HF 캐시·기본 환경·다른 사용자 프로세스를 변경하지 않는다.
+
+## 대규모 GPU 필요 후보
+
+원 계획의 다기관 MRI·다양한 자동 도구 신뢰도 변화에 대한 multimodal post-training 후보를 보존한다. 이번에는 잔여 문제와 독립 자료 근거가 부족하므로 실행하지 않는다.
+
+# 계획의 근거 (GPT 조사 노트)
+
+원 계획 agent/runs/iter_080/plan.md를 전부 확인했고 SHA256 a5f5ad6689d7d9d19dddaa265c1e5bcb47d8b5d57f3e409fbcf0c7cc5293d4d3가 사용자 지정값과 일치했다. 현재 research HEAD는 be903b89e6b71b5a1cf3cbc35cebd05f03f2ff13이며 working tree 변경은 없다. checkpoint.json은 interrupted/unreviewed이고 unpreserved_paths는 없다. 반입 17개 실제 파일의 git blob이 iter_080/reuse_manifest.json의 iter_078 출처 blob과 모두 일치한다. results/iter_080은 없으며 원 manifest·R adapter·features·V8/E24 refs 경로는 존재한다. claude_stream.jsonl에서 사용량 제한 종료와 당시 결과 부재를 확인했다.
+
+iter_077/078 review.md와 review.json/code_assets, LIMITATIONS의 SPIDER 항목을 확인했다. 기존 metrics와 고정 입력 경로의 제한된 승인은 유지되지만 launcher는 worker 배정 직전 메모리 재확인·여유순 배정 수정이 필요하다. 실제 rf78_vlm.build_inputs와 rf78_gen.run_one은 pixel_values를 무조건 참조하므로 무영상 T를 구현할 때 이미지 없는 정상 processor 출력 처리가 필요하다. 이는 새 과학적 변경이 아니라 원 설계 실행에 필요한 수정이다. Combo evaluator와 sp77_stage·과거 비용 실행기는 사용하지 않는다. 새로운 문헌 조사·실험·파일 수정은 수행하지 않았다.
+
+
+
+## iter_081 CODEX IMPLEMENTATION REPORT — 2026-10-05 22:07:29
+
+# 요약
+
+- **핵심 결과:** 원 계획의 V8 72건·E24 141건을 완료했다. 자동 등급에 영상을 추가한 이득은 불확정이며 사전 양성·method pilot 기준은 미충족이다.
+- **근거:** E24의 A−M MAE 차이는 −0.0433, 95% CI [−0.1958, 0.0873]이다.
+- **미검증·주의:** 반복 개발 자료의 결과다. 영상 무사용이나 MRI/VLM 전체의 한계로 일반화할 수 없다.
+- **다음:** 현재 자동 등급 검증 후보의 추가 실행은 종료하고 독립 GPT 리뷰에 투자 판단을 넘긴다.
+
+# Work Performed
+
+iter_080의 가설·표본·checkpoint·판정 기준을 유지해 구현과 실제 GPU 실험을 완료했다.
+
+- A: 대상 영상＋자동 등급, T: 무영상＋자동 등급, X: 환자 교환 영상＋동일 자동 등급을 구현했다.
+- 정답을 생성 요청과 분리하고 donor·영상·기존 Q/C 출력의 연결을 검증했다.
+- 시작 직전 GPU 메모리 검사, 원자적 출력 저장, 중복 방지와 강제 중단·재개를 구현·검증했다.
+- V8에서 M=C argmax를 고정한 뒤 E24를 실행했다. 추가 학습은 없었다.
+
+# Files Changed
+
+- `rf78_vlm.py`, `rf78_gen.py`: A/T/X 입력과 무영상 처리.
+- `a81_common.py`, `a81_prepare.py`, `a81_protocol.py`: 자료 연결·요청·출처 잠금.
+- `a81_run.py`, `a81_launch.py`, `a81_monitor.py`: 생성·GPU 배정·자원 기록.
+- `a81_tests.py`, `a81_checks.py`: 기술·재개·변조 검사.
+- `a81_eval.py`, `a81_verify.py`, `a81_final.py`: 평가·독립 재계산·최종 봉인.
+
+기존 결과와 `agent/`, `legacy/`, `hf_cache/`는 변경하지 않았다. Git 커밋·브랜치 변경은 하지 않았다.
+
+# Commands / Experiments (실제 실행한 명령과 성공/실패)
+
+주요 실행 명령은 다음과 같다.
+
+- `python a81_prepare.py` — 자료·기존 출력 연결 통과.
+- `python a81_tests.py cpu --dest results/iter_081/tests/cpu.json` — 12/12 통과.
+- `python a81_eval.py select` — M=C argmax 선택.
+- `python a81_launch.py --protocol results/iter_081/protocol_tech.json ...` — 2/4 worker 비교 및 강제 중단·재개 완료.
+- `python a81_tests.py proc ...` — Q 재현·변조·중복·누락 검사 9/9 통과.
+- `python a81_monitor.py ... -- python a81_launch.py ...` — V8/E24 각각 4 worker 정상 종료.
+- `python a81_eval.py eval ...`, `python a81_verify.py ...` — 두 단계 평가와 독립 검사 각각 44/44 통과.
+- `python a81_final.py`, `git diff --check` — 통과.
+
+초기 보조 자원 조회는 기존 zombie 프로세스 조회 예외로 실패했다. 자식 프로세스만 관측하고 예외를 처리하는 wrapper로 교체해 본실험 자원 기록을 완료했다.
+
+# Results (수치와 결과 파일 경로)
+
+E24는 24명·47개 부위다. MAE는 낮을수록 좋다.
+
+| 조건 | Class-standardized MAE | 일반 MAE | ≥2등급 오류 |
+|---|---:|---:|---:|
+| 대상 단독 Q | 0.77690 | 0.72340 | 5/47 |
+| 분류기 M=C argmax | 0.77619 | 0.74468 | 7/47 |
+| 대상 영상＋자동 등급 A | 0.73286 | 0.70213 | 5/47 |
+| 무영상 T | 0.77619 | 0.74468 | 7/47 |
+| 교환 영상 X | 1.56952 | 1.51064 | 21/47 |
+
+환자 bootstrap 10,000회·seed7501 결과:
+
+- **A−M 및 A−T:** −0.04333, 95% CI [−0.19584, 0.08730].
+- **A−X:** −0.83667, 95% CI [−1.21818, −0.46350].
+- Class 누락 replicate는 57/10,000회이며 present-class 평균을 적용했다.
+- C 오차를 줄인 항목은 5개·5명, 완전 교정은 C 오답 23개 중 2개였다.
+- C 정답 24개 중 4개를 훼손했다. Q가 더 정확한 항목에서 C 쪽으로 이동하며 악화된 환자는 2명이었다.
+- T는 C와 47/47 일치했다. A는 C와 38/47 일치했고 A/X 답변은 32/47에서 달랐다.
+
+신규 본출력 **213/213건이 EOS 종료·형식 유효**였다. 누락·중복은 없었다.
+
+4 worker를 채택했다. 기술 요청 16건의 wall-clock은 33.88→25.96초로 줄었고 token은 모두 일치했다. 본실험 wall은 V8 33.47초, E24 49.26초였다. GPU 전체 peak는 18,312/18,229 MiB였으며 OOM은 없었다.
+
+주요 산출물:
+
+- [E24 평가](results/iter_081/eval/E24.json)
+- [독립 재계산](results/iter_081/eval/E24_independent.json)
+- [기술 검증](results/iter_081/tests/technical_gate.json)
+- [최종 완료·출처 봉인](results/iter_081/completion.json)
+
+# Goal Progress / Reused Assets (목표 진전·미검증 범위, 재사용 출처·검증)
+
+iter_078 출처의 17개 반입 blob과 iter_077 R adapter, 고정 SPIDER 입력, 기존 Q/C 출력을 검증해 재사용했다. 기술 Q 4건의 기존 token 재현, 16건의 동시성·재개 출력 일치를 확인했다. 최종 봉인의 264개 파일 hash도 일치했다.
+
+영상 교환에 따른 차이는 확인됐지만, 무영상 대비 정확도 이득과 단순 대안 이후의 실용 가치는 확보하지 못했다. 독립 환자·다른 seed·모델 일반화 및 신규 방법 효과는 검증하지 않았다.
+
+# Problems (현재 결론 무효 / 재사용 전 수정 / 추후 개선을 구분)
+
+- **현재 결론 무효:** 발견하지 않았다. 실행 중인 실험 자식 프로세스도 없다.
+- **재사용 전 수정:** 이번 승인은 고정 iter_081 경로에 한정한다. 기존 `rf78_launch.py`의 과거 CLI 전체를 수정·검증한 것은 아니다.
+- **추후 개선·해석 한계:** 반복 개발 자료, oracle anatomy, 단일 checkpoint 조건이다. 관측 출력은 최대 2 token이므로 긴 출력 처리량은 검증하지 않았다. Cached Q/C를 사용했으므로 온라인 전체 시스템 비용 우위는 주장하지 않는다.
+
+# Recommendation to GPT
+
+원 계획상 현재 후보는 **음성 종료 기준**에 해당한다. A−M 최소 개선폭 0.10과 A−T의 CI 기준을 충족하지 못했으며, method pilot 조건도 미충족이다.
+
+다만 A−X 차이와 일부 오류 교정은 보존해야 한다. 이를 영상 무사용이나 연구 가치 전체의 부정으로 확대하지 말고, full review에서 기존 MRI 관찰들과 연결해 **집중 / 한정 보완 / 투자 보류·전환** 중 다음 투자를 선택해 달라. 이번 인계는 새 과학적 시도나 실패로 세지 않는다.
+
+SELF_CHECK: PASS
+SUMMARY: V8/E24 신규 213건과 필수 검증을 완료했으며, E24 A−M MAE −0.0433은 불확정으로 사전 양성·method pilot 기준에 미달했다.
+
+
+## iter_081 GPT REVIEW [CONTINUE] — 2026-10-05 22:12:05
+
+# 요약
+
+- **판정:** valid_experiment=true, approach_status=abandon. 원 계획의 음성 종료 조건에 따라 현재 자동 등급 제공 설계의 투자를 종료한다.
+- **핵심 근거:** E24 24명·47개에서 영상+자동 등급 A와 분류기 M의 MAE 차이는 −0.04333, 95% CI [−0.19584, 0.08730]이다.
+- **의미·한계:** 영상 교환의 영향은 확인됐지만 무영상 대비 유용한 교정과 단순 대안 이후의 실용 가치는 불확정이다. 효과 부재나 MRI 전체의 실패는 아니다.
+- **다음:** 현재 MRI 판독·참고영상·교정 후보 묶음의 투자를 보류하고, 기존 출력으로 오류 식별의 추가 정보가 있는지 검토하는 별도 후보로 전환할 것을 권고한다.
+
+## 알림 요약
+
+- 결과: 척추 MRI 24명·47개 부위에서 영상+자동 등급 MAE는 0.733, 분류기는 0.776으로 사전 투자 기준에 미달했다. 신규 213개 출력은 모두 완료됐다.
+- 의미: 실제 영상은 교환 영상보다 유리했지만, 자동 등급만 제공한 조건보다 정확하다는 근거는 부족하다. 영상 무사용이나 일반적인 결합 실패를 입증하지 않았다.
+- 후속: 현재 교정 후보는 종료하고, 모델 간 불일치가 단순 confidence보다 검토할 오류를 잘 찾는지 한정 검토하는 새 질문을 제안한다.
+
+# Assessment
+
+구현 담당은 engineer_backend.json과 claude_meta.json상 Codex, gpt-6-astra/low이며 danger-full-access에서 실행했다. 계획·구조화된 계획·보고서·diff·관련 소스·실제 도구 로그와 산출물을 확인했다. 리뷰에서는 파일 수정이나 모델 실험을 수행하지 않았다.
+
+iter_080 기준 계획의 가설·자료·checkpoint·표본·prompt·평가 기준을 유지했다. Claude 사용량 제한에 따른 인계 자체는 별도 과학적 실패나 새 시도로 세지 않는다. 이번에는 그 미완료 비교가 실제로 완료됐다.
+
+리뷰 SHA는 6139c4ea9165ca9dba28687d54f956dbaaa3fa26이다. 변경 소스 13개가 해당 SHA와 일치하며 unpreserved_paths는 없다. 원시 출력은 V8 72개, E24 141개이고 본실험 자식의 종료 코드는 모두 0이다. 실행 실패로 판정할 근거는 없다.
+
+# Key Findings
+
+리뷰에서 production 평가기를 호출하지 않고 원시 응답의 whole-string parser·EOS와 manifest 정답을 연결해 지표를 재계산했다. 환자 bootstrap 10,000회·seed7501도 독립 재현했다.
+
+| E24 조건 | Class-standardized MAE | 일반 MAE | 두 등급 이상 오류 |
+|---|---:|---:|---:|
+| 대상 단독 Q | 0.77690 | 0.72340 | 5/47 |
+| 분류기 M=C argmax | 0.77619 | 0.74468 | 7/47 |
+| 대상 영상+자동 등급 A | 0.73286 | 0.70213 | 5/47 |
+| 무영상 T | 0.77619 | 0.74468 | 7/47 |
+| 교환 영상 X | 1.56952 | 1.51064 | 21/47 |
+
+A−M과 A−T는 모두 −0.04333 [−0.19584, 0.08730]이다. A−X는 −0.83667 [−1.21818, −0.46350]이다. class 누락 replicate는 57/10,000회이며 계획대로 존재하는 class만 평균했다.
+
+C의 오차를 A가 줄인 항목은 5개·5명이고, C 오답 23개 중 완전히 고친 것은 2개다. C 정답 24개 중 4개는 훼손됐다. Q가 더 정확한 항목에서 C 쪽으로 이동하며 악화된 환자는 2명이다. T는 C와 47/47, A는 C와 38/47 일치했다. 이 하위집단은 사후 개발 분석이다.
+
+V8에서는 A 0.84000, C/T 0.69167이며 A−C의 CI는 [0.05714, 0.27184]였다. E24의 작은 개선 방향을 안정된 효과로 볼 수 없는 추가 이유다. 다만 원 확대 조건은 A valid≥12/24였으므로 V8의 성능 부호와 무관하게 E24를 완료한 것은 계획 준수다.
+
+# Problems / Concerns
+
+현재 결론을 무효화하는 blocker는 발견하지 않았다. completion.json 264개, V8/E24 protocol 94/96개, technical_gate.json 51개 파일의 hash를 직접 대조해 불일치가 없었다. 변경 코드와 실행 시 봉인 코드도 연결된다.
+
+정답은 평가 자료로 분리됐고 생성 텍스트에는 자동 예측만 사용됐다. A/X는 같은 자동 등급과 문구를 사용하며 X donor는 동일 ordinal에서 숫자 환자 ID순 순환 배정이다. T는 실제 무영상 경로다. 기술 검사에는 공식 template tensor 대조, 기존 Q 4건 suffix 재현, invalid=4, gate threshold·fallback, 요청 변조·중복·누락 검사가 포함된다. 신규 출력 213개는 모두 EOS 종료·형식 유효다.
+
+재사용 문제는 두 가지다. a81_prepare.py는 원 반입본과 현재 HEAD를 비교하므로 이번 수정 커밋 이후 준비를 다시 실행하면 실패한다. 보존된 before_sha를 사용해야 한다. 또한 기존 rf78_launch.py 전체 CLI는 수정되지 않았다. 이번에는 해당 파일의 smi 함수와 새 a81_launch.py를 사용했으므로 현재 실행에는 영향이 없다.
+
+GPU 운영은 적절했다. 기술 16건에서 2 worker 대비 4 worker wall은 33.88→25.96초였고 suffix가 일치했다. 실제 배정 직전 여유 메모리와 예약량을 확인했으며 worker당 2 GiB 여유를 포함했다. 본실험 wall은 V8 33.47초, E24 49.26초이고 GPU 전체 peak는 18,312/18,229 MiB였다. OOM과 미종료 실험 자식은 보고되지 않았고 종료 로그와 일치한다. 다만 긴 출력과 전체 온라인 시스템 비용은 검증하지 않았다.
+
+# Interpretation
+
+사전 양성 기준의 A−M≤−0.10과 CI 상한<0은 미충족이다. 영상 기여에 필요한 A−T와 A−X 중 A−T가 미충족이다. 두 등급 이상 오류 보존과 교정·악화 환자 수 조건은 충족했지만, 이것만으로 method pilot 후보가 되지는 않는다. 따라서 원 계획의 음성 종료 분기를 유지한다.
+
+여기서 음성은 투자 기준 미달이라는 뜻이다. A−M 구간에는 의미 있는 개선과 악화가 모두 포함돼 정확한 효과 부재나 C의 확정된 충분성을 주장할 수 없다. A−X 차이와 32/47개의 답변 변화는 모든 조건에서 자동 등급을 그대로 복사한다는 설명을 약화한다. 그러나 무영상 대비 순이득, 순수 내부 원인 또는 유용한 정보의 부재는 확정하지 않는다. X는 원 대상 정답으로 채점한 교환 대조이며 donor 판독 정확도가 아니다.
+
+# Strategy Check / 연구 방향 판단
+
+**실행 유효성:** 고정 비교와 새 실제 출력 검증을 완료했다. **성능 개선:** A의 작은 점추정 개선은 불확정이다. **가설 지지:** 영상에 반응한다는 근거는 있지만 유용한 교정의 복합 기준은 미달이다. **신규 기여 가능성:** 기존 자동 판정 제공 방식의 진단이며 새 방법이나 강한 대안 이후의 충분한 잔여 가치를 입증하지 않았다.
+
+관련 원문을 연결하면 다음과 같다.
+
+- iter_064의 MedGemma context 손실과 Qwen 비재현은 관찰로 유지한다. 이번은 다른 과제라 원인을 설명하지 않았고, 명시적 target routing 이후의 방법 투자는 계속 보류한다.
+- iter_077의 F/R 차이 0.29357과 R의 영상 대응 신호는 유지한다. 해상도·context·별도 적응의 기여는 여전히 미분리다. 이번 결과가 F/R 원인 진단의 사용 가치를 새로 확보한 것은 아니다.
+- iter_078의 참고영상 추가 가치 불확정은 유지한다. 자동 등급 제공은 별도 개입이며 검색·참고영상 실패를 해결했다고 볼 수 없다.
+- iter_079는 자료 부적합으로 모델 가설이 미검증이었다. 이번은 SPIDER에서 실제 자동 등급 검증을 완료했지만 LUMIERE의 longitudinal 질문을 검증한 것은 아니다.
+- iter_080/081에서는 자동 등급 복사만으로 모든 출력을 설명하기 어렵다는 진전이 있다. 그러나 유용한 교정은 확보하지 못해 현재 후보 투자를 종료한다.
+
+연구 묶음의 선택은 **투자 보류·전환**이다. 현재 판독·참고영상·자동 교정 설계의 추가 학습, prompt 순회, 표본·seed 확대를 발주하지 않는다. 단순 대안의 완전한 충분성이 증명돼서가 아니라, 남은 불확실성을 줄이는 것이 새로운 방법 투자로 연결될 구체적 근거가 부족하기 때문이다. 재개에는 독립적인 유용한 교정 근거나 단순 대안이 놓치는 중요한 조건을 겨냥한 개입 근거가 필요하다.
+
+다음 후보는 자동 답변 교정에서 **검토할 오류의 식별**로 질문을 바꾼다. 기존 Q/C의 오류 상보성이 confidence에 없는 정보를 주는지는 이번 실험에서 검사하지 않았다. 실제 자동 정답을 바꾸지 못해도 같은 검토량에서 중대 오류를 더 찾는 것은 별도 사용 가치가 될 수 있으나, 아직 가설이다. iter_029에서는 RSNA entropy AUROC 0.8225가 재질의 0.8154보다 높았으므로, 단순 confidence를 약하게 만들거나 불일치만으로 유망성을 선언하지 않는다. 이 전환은 같은 현상의 원인 규명이 아닌 새 후보 탐색으로 기록해야 한다.
+
+준비·재작업이 누적된 이력을 고려하면 새 자료 확보나 재학습보다 기존 출력의 한정 판별 검토가 저비용이다. 이번 본생성 wall 합은 약 82.7초지만 전체 준비·감사 비용 비율은 측정되지 않았으므로 비용 절감률을 주장하지 않는다. 타 계열 적응은 이번 범위에서 보류한 것이 적절하며, 모델 계열 전체의 한계는 미검증이다.
+
+논문 추천은 보류한다. 현재 교정 방향은 투자 종료 대상이며 새 오류 식별 후보의 긍정적 실험 근거도 아직 없다.
+
+# Recommended Next Experiment
+
+다음 계획에서는 기존 V8/E24의 Q/C 출력과 C 확률만으로, Q/C 불일치가 max probability·entropy·margin을 넘어 같은 검토량에서 오류를 포착할 수 있는지 판단하는 최소 설계를 정한다. 이는 반복 개발 분석이고 독립 확인이 아니다. 중대 오류 수가 적으므로 효과 부호만으로 확대하지 말고 검토량·동률 처리·정밀도·최소 가치·종료 행동을 사전에 고정해야 한다.
+
+추가 정보가 없으면 새 후보를 종료한다. 중요한 잔여 오류와 추가 정보가 확인될 때만 실제 VLM 검토나 최소 개입의 필요성을 별도 판단한다. 코드 정비는 선택된 경로에 한정하며 현재 자동 교정 실험의 재실행이나 reserve 개방은 권고하지 않는다.
