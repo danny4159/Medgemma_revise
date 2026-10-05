@@ -291,3 +291,4 @@
 - iter_079: 커밋 `8cc502ddc7bdc54d2a659bd205306b746b549b29` (재사용 미승인: 리뷰 확인 필요), 리뷰: `agent/runs/iter_079/review.md`
   - 모듈 lm79_gate.py: needs_fix — 현재 CSV의 집계 기록으로는 유용하다. 다만 readme·reference 관련 판정이 하드코딩되어 있고 음성 정규식은 L. 등의 표기를 포괄하지 않으므로 일반적인 정답 적합성 판정기로 재사용할 수 없다. 수동 의미 검토와 자동 집계를 구분해야 한다.; 검증: 리뷰 대상 SHA 8cc502ddc7bdc54d2a659bd205306b746b549b29의 파일과 작업 파일이 일치했다.; 원 CSV에서 616행·91환자, new 포함 112행, 연속 행 new 포함 38건, SD/PR/CR 중 new 미포함 119행을 독립 재계산했다.; 원 rationale 전체의 고유 문구와 공식 readme PDF의 텍스트를 검토했다.
   - 모듈 sp67_run.py, m65_run.py, msd56_run.py: needs_fix — 선별 반입과 blob 보존은 확인했지만 이번에 실행하지 않았다. reuse_manifest의 공식 unpatched 대조·새 입력 연결·동시 재개·GPU admission 검증이 미수행이므로 기존 미승인 상태를 유지한다.; 검증: commit.json의 SHA에 있는 세 파일과 작업 파일의 byte 일치를 확인했다.; reuse_manifest.json의 출처 blob 및 미완료 required_checks를 보고서·변경 diff와 대조했다.
+- iter_080: 커밋 `be903b89e6b71b5a1cf3cbc35cebd05f03f2ff13` (재사용 미승인: 리뷰 확인 필요), 리뷰: `agent/runs/iter_080/review.md`
