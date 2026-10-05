@@ -15,6 +15,88 @@ ROOT = Path(__file__).resolve().parents[1]
 
 
 class ResearchStrategyTests(unittest.TestCase):
+    def test_observation_convergence_guidance_and_live_reload(self):
+        policy = (ROOT / "agent/RESEARCH_POLICY.md").read_text()
+        for text in ("관찰 계승과 수렴 점검", "새 후보 탐색", "매 리뷰", "추가 모델 호출",
+                     "반복 횟수만으로 종료", "next_task 권고", "판별력이 있는 확대"):
+            self.assertIn(text, policy)
+        focus = (ROOT / "agent/RESEARCH_FOCUS.md").read_text()
+        for text in ("iter_080 이후의 실제 투자 선택", "저장된 계획·세션·표본·비교군·평가 기준은 유지",
+                     "iter_080 리뷰의 후속 권고", "iter_064", "iter_079", "집중 / 한정 보완 / 투자 보류·전환"):
+            self.assertIn(text, focus)
+        for role in ("gpt_plan", "gpt_review"):
+            prompt = (ROOT / f"agent/prompts/{role}.md").read_text()
+            self.assertIn("관찰 계승과 수렴 점검", prompt)
+            self.assertIn("iter_080 이후의 실제 투자 선택", prompt)
+        args = argparse.Namespace(gpus="0,1", claude_timeout=0)
+        with tempfile.TemporaryDirectory() as directory, patch.object(loop, "AGENT_DIR", Path(directory)):
+            focus_path = Path(directory) / "RESEARCH_FOCUS.md"
+            focus_path.write_text("이전 전략", encoding="utf-8")
+            self.assertNotIn("iter_080 이후의 실제 투자 선택", loop.resource_context(args))
+            focus_path.write_text(focus, encoding="utf-8")
+            self.assertIn("iter_080 이후의 실제 투자 선택", loop.resource_context(args))
+
+    def test_cross_model_scope_and_dataset_guardrails(self):
+        focus = (ROOT / "agent/RESEARCH_FOCUS.md").read_text()
+        for text in ("모델 간 비교와 기존 해결책 — iter_062 이후", "첫 후속 계획",
+                     "다른 계열 모델 하나", "모델 간 재현과 기존 해결책의 효과 검증은 별개",
+                     "MedGemma 오답만", "새 hard gate", "MR-RATE", "전량 다운로드하지 않는다",
+                     "모델 예측 해부학 구획", "SeriesNumber만으로", "metadata HEAD는 403",
+                     "접근 대기만으로", "공식 test를 반복 개발에 쓰지 않는다"):
+            self.assertIn(text, focus)
+        plan = (ROOT / "agent/prompts/gpt_plan.md").read_text()
+        review = (ROOT / "agent/prompts/gpt_review.md").read_text()
+        self.assertIn("중요한 관찰의 범위 확인용", plan)
+        self.assertIn("모델 특이/공통 현상 후보/미검증", review)
+
+    def test_next_call_reloads_cross_model_guidance(self):
+        args = argparse.Namespace(gpus="0,1", claude_timeout=0)
+        with tempfile.TemporaryDirectory() as directory, patch.object(loop, "AGENT_DIR", Path(directory)):
+            focus_path = Path(directory) / "RESEARCH_FOCUS.md"
+            focus_path.write_text("이전 전략", encoding="utf-8")
+            self.assertNotIn("모델 간 비교와 기존 해결책", loop.resource_context(args))
+            focus_path.write_text((ROOT / "agent/RESEARCH_FOCUS.md").read_text(), encoding="utf-8")
+            context = loop.resource_context(args)
+            self.assertIn("모델 간 비교와 기존 해결책", context)
+            self.assertIn("현재 iter_061의 실행", context)
+            self.assertIn("MR-RATE", context)
+
+    def test_hypothesis_first_starts_after_active_iteration(self):
+        focus = (ROOT / "agent/RESEARCH_FOCUS.md").read_text()
+        for text in ("iter_062 이후", "현재 iter_061의 실행", "중단·재시작·superseded 처리하지 않는다",
+                     "상위 질문 → 현재 관찰 → 경쟁 설명", "인식·선택·결합", "복수 영상의 필요성",
+                     "모델의 정오답만으로", "method pilot", "추가 모델 호출/새 기계 판독 필드"):
+            self.assertIn(text, focus)
+        plan = (ROOT / "agent/prompts/gpt_plan.md").read_text()
+        review = (ROOT / "agent/prompts/gpt_review.md").read_text()
+        self.assertIn("경쟁 가설을 먼저 고르고 데이터/과제를 선택", plan)
+        self.assertIn("새 요구를 소급 blocker로 추가하지 않는다", review)
+        context = loop.resource_context(argparse.Namespace(gpus="0,1", claude_timeout=0))
+        self.assertIn("iter_062 이후", context)
+        self.assertIn("현재 iter_061의 실행", context)
+
+    def test_mri_focus_delivered_to_both_engineer_backends(self):
+        for backend in ("claude", "codex"):
+            args = argparse.Namespace(engineer=backend, gpus="0,1", claude_timeout=0)
+            context = loop.resource_context(args)
+            for text in ("MRI 우선, 모델은 검증 후 선택", "탐색의 정보 축적과 단계별 검증",
+                         "아직 확인되지 않았다", "method_stage=pilot", "100% oracle", "최종 GOAL"):
+                self.assertIn(text, context)
+        # 현재 전략 파일이 없는 이전 작업 폴더도 호환된다.
+        with tempfile.TemporaryDirectory() as directory, patch.object(loop, "AGENT_DIR", Path(directory)):
+            context = loop.resource_context(argparse.Namespace(gpus="0,1", claude_timeout=0))
+            self.assertIn("별도 초점 없음", context)
+
+    def test_exploration_rules_reach_all_roles_without_weakening_gates(self):
+        for name in ("gpt_plan", "gpt_review", "claude_engineer"):
+            prompt = (ROOT / f"agent/prompts/{name}.md").read_text()
+            self.assertIn("RESEARCH_FOCUS.md", prompt)
+            self.assertIn("탐색의 정보 축적과", prompt)
+        focus = (ROOT / "agent/RESEARCH_FOCUS.md").read_text()
+        for text in ("정답 있는 성능 평가가 아니다", "임상 협력자", "부족하면", "전문 모델",
+                     "공개 또는 이미 접근 승인된 자료", "보존", "85는", "기계적 method gate"):
+            self.assertIn(text, focus)
+
     def test_shared_policies_survive_research_branch_changes(self):
         policy = (ROOT / "agent/RESEARCH_POLICY.md").read_text()
         self.assertIn("research/ 브랜치 전환·복귀로 공통 정책을 되돌리거나", policy)
@@ -112,6 +194,10 @@ class ResearchStrategyTests(unittest.TestCase):
                 prompt = call.call_args.args[1]
                 self.assertIn("# Strategy Check / 연구 방향 판단", prompt)
                 self.assertIn(expected, prompt)
+                if stage == loop.step_plan:
+                    self.assertIn("method pilot은 현재 목표의 유효 리뷰", prompt)
+                    self.assertIn("method full/confirmatory는 validated", prompt)
+                    self.assertNotIn("방법 개발은 현재 목표에서 validated인 한계 주장과 연결해야 한다", prompt)
 
     def test_schemas_remain_valid_with_existing_verdicts(self):
         schemas = {}

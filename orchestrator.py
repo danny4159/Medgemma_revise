@@ -108,7 +108,7 @@ import research_history as history
 import gpt_usage
 import gpt_context
 import planning_effort
-from presentation import notice, iteration_result
+from presentation import notice, iteration_result, plan_ready, stage_notice, context_fields, transition_text
 
 PROJECT_DIR = Path(__file__).resolve().parent
 AGENT_DIR = PROJECT_DIR / "agent"
@@ -499,9 +499,37 @@ def split_reply(reply):
     return cmd, rest.strip()
 
 
+def agent_node_bin(env):
+    """비로그인 실행의 PATH 누락을 보완한다. 설치·업데이트·전역 환경 수정은 하지 않는다."""
+    existing = shutil.which("codex", path=env.get("PATH", ""))
+    if existing:
+        # npm launcher와 같은 설치의 node를 우선해 오래된 /usr/bin/node 실행을 피한다.
+        sibling = Path(existing).parent
+        return sibling if os.access(sibling / "node", os.X_OK) else None
+    candidates = []
+    if env.get("NVM_BIN"):
+        candidates.append(Path(env["NVM_BIN"]))
+    nvm = Path(env.get("NVM_DIR") or Path.home() / ".nvm")
+    versions = nvm / "versions" / "node"
+    if versions.is_dir():
+        def version_key(path):
+            return tuple(int(x) for x in re.findall(r"\d+", path.parent.name))
+        candidates.extend(sorted(versions.glob("v*/bin"), key=version_key, reverse=True))
+    for candidate in candidates:
+        if all((candidate / name).is_file() and os.access(candidate / name, os.X_OK)
+               for name in ("codex", "node")):
+            return candidate
+    return None
+
+
 def agent_env(gpus):
     env = os.environ.copy()
-    env["PATH"] = f"{CONDA_ENV / 'bin'}{os.pathsep}{env.get('PATH', '')}"
+    node_bin = agent_node_bin(env)
+    paths = [str(CONDA_ENV / "bin")]
+    if node_bin is not None:
+        paths.append(str(node_bin))
+    paths.append(env.get("PATH", ""))
+    env["PATH"] = os.pathsep.join(paths)
     env["CONDA_PREFIX"] = str(CONDA_ENV)
     env["CONDA_DEFAULT_ENV"] = "medgemma"
     env["PYTHONNOUSERSITE"] = "1"
@@ -511,6 +539,35 @@ def agent_env(gpus):
     # API 키가 있으면 Claude Code가 구독 대신 API 과금으로 동작한다.
     env.pop("ANTHROPIC_API_KEY", None)
     return env
+
+
+def validate_codex_runtime(args):
+    """수 시간의 구현 뒤가 아니라 실제 루프 시작 전에 CLI 기동 가능 여부를 확인한다."""
+    env = agent_env(args.gpus)
+    executable = shutil.which("codex", path=env["PATH"])
+    if not executable:
+        raise AgentError("Codex CLI를 찾을 수 없습니다. PATH 또는 NVM_BIN/NVM_DIR을 확인하세요. 설치를 자동 변경하지 않습니다.")
+    try:
+        result = subprocess.run([executable, "--version"], env=env, cwd=PROJECT_DIR,
+                                capture_output=True, text=True, timeout=15)
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        raise AgentError(f"Codex CLI 사전 점검 실패: {executable}: {exc}") from exc
+    if result.returncode:
+        raise AgentError(f"Codex CLI 사전 점검 실패: {executable}: "
+                         + (result.stderr or result.stdout)[-1500:])
+    print(f"Codex 실행 확인: {executable} ({result.stdout.strip()})", flush=True)
+
+
+def stream_timeout_error(cmd, log_path, timeout, tail):
+    """읽기 전용 Codex의 마지막 재연결 오류만 한정 재시도한다. 단순 장시간 사고는 제외한다."""
+    message = f"{cmd[0]} 시간 초과 ({timeout}s). 로그: {log_path}"
+    readonly = any(cmd[i:i + 2] in (["-s", "read-only"], ["--sandbox", "read-only"])
+                   for i in range(len(cmd) - 1))
+    last_line = next((line.strip() for line in reversed(tail) if line.strip()), "")
+    if (Path(cmd[0]).name == "codex" and "exec" in cmd and readonly
+            and re.fullmatch(r"ERROR: Reconnecting\.\.\. \d+/\d+", last_line)):
+        return RetryableError(f"Codex 재연결 중 {message}", last_line)
+    return AgentError(message)
 
 
 def run_streaming(cmd, log_path, timeout, env, on_line, cwd=PROJECT_DIR, *, stdin_text=None):
@@ -588,7 +645,7 @@ def run_streaming(cmd, log_path, timeout, env, on_line, cwd=PROJECT_DIR, *, stdi
     if STATE["stop_now"]:
         raise StopRequested("즉시 정지 요청")
     if timed_out.is_set():
-        raise AgentError(f"{cmd[0]} 시간 초과 ({timeout}s). 로그: {log_path}")
+        raise stream_timeout_error(cmd, log_path, timeout, tail)
     if proc.returncode != 0:
         raise failure_error(f"{cmd[0]} 종료 코드 {proc.returncode}. 로그: {log_path}", "".join(tail))
 
@@ -643,18 +700,47 @@ def started_engineer(n):
     return None
 
 
+def scheduled_engineer(selection, timestamp=None):
+    """저장된 일회성 복귀 시각을 평가한다. 실행 중인 반복에는 적용하지 않는다."""
+    deadline = selection.get("return_at")
+    if deadline and (time.time() if timestamp is None else timestamp) >= datetime.datetime.fromisoformat(deadline).timestamp():
+        return selection["return_backend"]
+    return selection["backend"]
+
+
+def select_iteration_engineer(args, n):
+    """계획 시작 경계에서 선택을 고정한다. 마감이 지나도 같은 반복은 담당을 유지한다."""
+    selection = load_json(AGENT_DIR / "engineer_selection.json") or {}
+    if not selection.get("return_at"):
+        return
+    path = iter_dir(n) / "engineer_choice.json"
+    choice = load_json(path)
+    backend = started_engineer(n) or (choice or {}).get("backend") or scheduled_engineer(selection)
+    if choice is None:
+        save_atomic(path, json.dumps({"backend": backend, "time": now(),
+                                     "schedule": selection}, ensure_ascii=False, indent=2))
+        record_event(n, "engineer_selection", backend=backend, return_at=selection["return_at"])
+    if args.engineer != backend:
+        print(f"구현 담당 예약 전환: iter_{n:03d}부터 {backend}")
+        notify(f"🔄 구현 담당 전환 | iter_{n:03d}부터 {backend}\n이전 반복은 기존 담당으로 마쳤으며, 목표·검증 기준은 유지합니다.")
+    args.engineer = backend
+
+
 def configure_engineer(args):
     """lock 안에서 호출. 생략 시 서버의 선택을 유지하고, 중간 세션 교체는 거부한다."""
     selection = AGENT_DIR / "engineer_selection.json"
     requested = getattr(args, "engineer", None)
     saved = load_json(selection) or {"backend": "claude"}
+    return_at = getattr(args, "engineer_return_at", None)
+    if return_at and not requested:
+        raise AgentError("--engineer-return-at은 --engineer와 함께 지정하세요.")
     n = current_iteration()
     active = started_engineer(n) if not is_done(n) else None
     if requested and active and requested != active and not (iter_dir(n) / "claude_report.md").exists():
         raise AgentError(f"iter_{n:03d} 구현은 {active} 세션으로 이미 시작했습니다. "
                          "같은 담당으로 완료하거나 --replan에 인계 지시를 적어 새 반복에서 변경하세요.")
     unfinished = active if not (iter_dir(n) / "claude_report.md").exists() else None
-    args.engineer = requested or unfinished or saved["backend"]
+    args.engineer = requested or unfinished or scheduled_engineer(saved)
     sandbox_request = getattr(args, "codex_engineer_sandbox", None)
     args.codex_engineer_sandbox = sandbox_request or saved.get("codex_engineer_sandbox", "workspace-write")
     if args.engineer not in ("claude", "codex"):
@@ -662,8 +748,12 @@ def configure_engineer(args):
     if args.codex_engineer_sandbox not in ("workspace-write", "danger-full-access"):
         raise AgentError("지원하지 않는 Codex 구현 권한 설정입니다.")
     if requested or sandbox_request:
-        save_atomic(selection, json.dumps({"backend": requested or saved["backend"],
-                    "codex_engineer_sandbox": args.codex_engineer_sandbox}, indent=2))
+        updated = {} if requested else dict(saved)
+        updated.update(backend=requested or saved["backend"],
+                       codex_engineer_sandbox=args.codex_engineer_sandbox)
+        if return_at:
+            updated.update(return_at=return_at, return_backend=args.engineer_return_to)
+        save_atomic(selection, json.dumps(updated, indent=2))
 
 
 def bind_engineer(args, n):
@@ -699,6 +789,7 @@ def resource_context(args):
     return (
         f"=== 현재 사용자 자원 정책 (이전 계획의 임의 시간 상한보다 우선) ===\n{policy}\n\n"
         f"=== 현재 연구 운영 정책 (이전 자동 포기·코드 폐기 규칙보다 우선) ===\n{research_policy}\n\n"
+        f"=== 현재 연구 우선순위 (최종 목표·과거 판정은 유지) ===\n{read(AGENT_DIR / 'RESEARCH_FOCUS.md', '별도 초점 없음')}\n\n"
         f"=== 현재 {label} 구현 사용량 정책 (필수 검증·GPU 활용 유지) ===\n{usage_policy}\n\n"
         f"=== 사람이 읽는 설명·보고서의 표현 기준 (실행·검증 기준은 유지) ===\n{read(REPORTING_STYLE_FILE)}\n\n"
         f"=== 현재 실행 설정 ===\nCUDA_VISIBLE_DEVICES: {visible}\n"
@@ -1369,7 +1460,7 @@ def code_version():
     dirty = git("status", "--porcelain", "--", "orchestrator.py", "notifier.py", "presentation.py", "claude_usage.py", "gpt_usage.py", "gpt_context.py", "research_history.py", "agent/prompts",
                 "agent/tiers.json", "agent/claude_settings.json", "agent/RESOURCE_POLICY.md",
                 "codex_engineer.py", "agent/CODEX_ENGINEER_POLICY.md",
-                "agent/RESEARCH_POLICY.md", "agent/CLAUDE_USAGE_POLICY.md", "agent/GPT_USAGE_POLICY.md", "agent/REPORTING_STYLE.md")[1].strip()
+                "agent/RESEARCH_POLICY.md", "agent/RESEARCH_FOCUS.md", "agent/CLAUDE_USAGE_POLICY.md", "agent/GPT_USAGE_POLICY.md", "agent/REPORTING_STYLE.md")[1].strip()
     return f"{sha}+수정" if dirty else sha
 
 
@@ -1673,7 +1764,8 @@ iter_{n:03d}
 
 === 한계 주장·사용법 검증·미해결 질문 ===
 {context['limitations']}
-방법 개발은 현재 목표에서 validated인 한계 주장과 연결해야 한다. 후보만 있으면 먼저 diagnostic을 설계한다.
+method pilot은 현재 목표의 유효 리뷰·사용법 검사·blocking 없는 observed/validated 근거로 가능하다.
+method full/confirmatory는 validated 근거가 필요하다. candidate뿐이면 먼저 실제 출력 diagnostic을 설계한다.
 
 === 규칙 ===
 같은 접근법의 유효한 실험 {MAX_ATTEMPTS}회부터 방향 재평가 (자동 포기 아님).
@@ -1810,11 +1902,8 @@ def step_checkpoint(args, n):
         print(f"\n자동 진행 ({mode}): {approach} {attempt}번째 시도")
         note = ("\n원래는 물어볼 지점이었지만 사람 부재 시간이라 1순위로 진행:\n"
                 + "\n".join(f"• {c}" for c in concerns)) if away else ""
-        notify(notice(f"▶ iter_{n:03d} | 계획대로 자동 진행", [
-            ("할 일", plan.get("plan_summary") or approach),
-            ("다음", f"{engineer_label(args)} 구현·실험 후 계획된 검증을 진행합니다."),
-            ("주의", note),
-        ], reference=f"agent/runs/iter_{n:03d}/plan.md"))
+        notify(plan_ready(n, plan, load_plan(n - 1) if n > 1 else None,
+                          engineer=engineer_label(args), caution=note))
         record_event(n, "decision", by="auto", mode=mode, result="1순위로 진행",
                      concerns=concerns if away else [])
         return "go"
@@ -1852,6 +1941,8 @@ def step_checkpoint(args, n):
 
         reasons = "\n".join(f"• {c}" for c in concerns) or "(수동 확인 모드)"
         telegram_text = notice(f"🙋 iter_{n:03d} | 계획 확인 필요", [
+            *context_fields(plan),
+            ("이전과의 연결", transition_text(n, plan, load_plan(n - 1) if n > 1 else None)),
             ("제안", plan.get("plan_summary") or approach),
             ("확인할 내용", reasons),
             ("대안 (1번이 현재 제안)", alt_text),
@@ -2459,9 +2550,10 @@ def handle_needs_human(review, n):
     print("q            : 종료")
 
     telegram_text = notice(f"🙋 iter_{n:03d} | 사용자 결정 필요", [
+        *context_fields(load_plan(n)),
         ("질문", review["reason"]),
         ("현재 결과", review["one_line_summary"]),
-        ("GPT 제안", review["next_task"]),
+        ("선택할 후속 방향", review["next_task"]),
     ], reference=f"agent/runs/iter_{n:03d}/review.md", actions=(
         "ok → GPT 제안대로 계속\n"
         "f 지시내용 → 지시 반영해서 계속\n"
@@ -2512,10 +2604,24 @@ def nonnegative_iterations(value):
     return count
 
 
+def engineer_return_time(value):
+    try:
+        parsed = datetime.datetime.fromisoformat(value)
+        if parsed.tzinfo is None:
+            raise ValueError("timezone required")
+    except ValueError:
+        raise argparse.ArgumentTypeError("복귀 시각은 날짜·시간대 포함 ISO 형식이어야 합니다: 2026-10-03T04:30:00+09:00")
+    return parsed.isoformat()
+
+
 def parse_args():
     p = argparse.ArgumentParser(description="GPT 계획/리뷰 ↔ Claude 또는 Codex 구현 자동 연구 루프")
     p.add_argument("--engineer", choices=["claude", "codex"],
                    help="구현·실험 담당 선택. 선택은 저장되며 생략 시 유지 (초기값 claude)")
+    p.add_argument("--engineer-return-at", type=engineer_return_time,
+                   help="이 시각 이후 시작하는 반복부터 복귀 (시간대 포함 ISO 날짜). 진행 중 반복은 유지")
+    p.add_argument("--engineer-return-to", choices=["claude", "codex"], default="claude",
+                   help="예약 복귀 담당 (기본 claude)")
     p.add_argument("--codex-engineer-sandbox", choices=["workspace-write", "danger-full-access"],
                    help="Codex 구현 권한 (선택 저장). 초기 workspace-write. 이 서버 GPU 실행은 명시적 danger-full-access 필요")
     p.add_argument("--max-iters", type=nonnegative_iterations, default=0,
@@ -2547,6 +2653,8 @@ def parse_args():
     p.add_argument("--status", action="store_true", help="현재 단계·보완 대기 여부만 표시. 실행 안 함")
     p.add_argument("--usage", action="store_true", help="GPT·Claude 로컬 로그 사용량 조회. 모델·실험·알림 실행 안 함")
     args = p.parse_args()
+    if args.engineer_return_at and not args.engineer:
+        p.error("--engineer-return-at은 --engineer와 함께 지정하세요.")
     if (args.prepare_only or args.replan) and (args.reset or args.goal):
         p.error("보완 재개는 --reset/--goal과 함께 쓸 수 없습니다. 기존 목표와 기록을 보존합니다.")
     if args.status and (args.replan or args.prepare_only or args.reset or args.goal):
@@ -2647,6 +2755,9 @@ def status_text():
         return "시작 준비 중입니다."
     minutes = int((datetime.datetime.now() - STATE["since"]).total_seconds() // 60)
     text = f"iter_{STATE['n']:03d} · {STATE['stage']} 진행 중 ({minutes}분째)"
+    for label, value in context_fields(load_plan(STATE["n"])):
+        if value:
+            text += f"\n{label}: {value}"
     if STATE["limit_wait"]:
         what, since = STATE["limit_wait"]
         waited = int((datetime.datetime.now() - since).total_seconds() // 60)
@@ -2694,7 +2805,11 @@ def main():
         n = current_iteration()
         print(f"현재: iter_{n:03d} / {stage_of(n)}")
         selection = load_json(AGENT_DIR / "engineer_selection.json") or {"backend": "claude"}
-        print(f"구현 담당: {started_engineer(n) or selection['backend']} / 다음 선택: {selection['backend']}")
+        choice = load_json(iter_dir(n) / "engineer_choice.json") or {}
+        next_backend = scheduled_engineer(selection)
+        print(f"구현 담당: {started_engineer(n) or choice.get('backend') or next_backend} / 다음 선택: {next_backend}")
+        if selection.get("return_at"):
+            print(f"예약 복귀: {selection['return_at']} 이후 시작하는 반복부터 {selection['return_backend']}")
         print(f"Codex 구현 권한: {selection.get('codex_engineer_sandbox', 'workspace-write')}")
         print(f"보완 지시 대기: {'있음' if RESUME_FILE.exists() or pending_interventions() else '없음'}")
         print(f"지시 파일: {RESUME_FILE}")
@@ -2714,6 +2829,7 @@ def main():
             print(f"준비 완료: iter_{current_iteration():03d}, 실험·에이전트·알림 미실행. "
                   + ("새 보완 지시를 적용했습니다." if target else "새 보완 지시가 없습니다."))
             return
+        validate_codex_runtime(args)
         run_loop(args)
 
 
@@ -2755,13 +2871,13 @@ def run_loop(args):
 
     away_text = (f"\n{args.no_ask_until:%m-%d %H:%M}까지는 묻지 않고 진행합니다 (그 후 원래 규칙)."
                  if args.no_ask_until else "")
-    notify(notice(f"▶ iter_{current_iteration():03d} | 연구 루프 시작", [
-        ("현재", f"{stage_of(n)} 단계부터 이어갑니다. 구현 담당: {engineer_label(args)}."),
-        ("구현 권한", args.codex_engineer_sandbox if engineer_backend(args) == "codex" else ""),
-        ("진행 범위", f"최대 {args.max_iters}회 반복" if args.max_iters
-         else "반복 횟수 제한 없이 자동 진행 · 사용자 결정이 필요하면 질문합니다."),
-        ("사용자 확인", away_text),
-    ], reference="agent/GOAL.md"))
+    startup_caution = (f"최대 {args.max_iters}회 반복." if args.max_iters
+                       else "반복 횟수 제한 없이 진행하며, 사용자 결정이 필요하면 질문합니다.")
+    if engineer_backend(args) == "codex":
+        startup_caution += f" 구현 권한: {args.codex_engineer_sandbox}."
+    notify(stage_notice(n, stage_of(n), load_plan(n), load_plan(n - 1) if n > 1 else None,
+                        load_review(n - 1) if n > 1 else None, resuming=True,
+                        caution=startup_caution + away_text))
 
     first = current_iteration()
     events_file = iter_dir(first) / "events.jsonl"
@@ -2783,9 +2899,14 @@ def run_loop(args):
         d = iter_dir(n)
         d.mkdir(parents=True, exist_ok=True)
 
+        select_iteration_engineer(args, n)
+
         check_stop()
         if not (d / "plan.md").exists():
             set_stage(n, "GPT 계획")
+            if n != first:
+                notify(stage_notice(n, "GPT 계획", previous=load_plan(n - 1),
+                                    previous_review=load_review(n - 1)))
             step_plan(args, goal_for(n), n)
         if RESUME_FILE.exists() or pending_interventions():
             continue
@@ -2812,6 +2933,7 @@ def run_loop(args):
             if needs_review:
                 print(f"\nGPT 리뷰 진행: {reason}")
                 set_stage(n, "GPT 리뷰")
+                notify(stage_notice(n, "GPT 리뷰", load_plan(n)))
                 step_review(args, goal_for(n), n)
             else:
                 step_skip_review(n, reason)
@@ -2834,19 +2956,20 @@ def run_loop(args):
             set_post_flag(n, "milestone")
         if "notified" not in flags:
             if review["verdict"] == "CONTINUE" and review.get("skipped"):
-                notify(iteration_result(n, review))
+                notify(iteration_result(n, review, load_plan(n)))
             elif review["verdict"] == "CONTINUE":
-                notify(iteration_result(n, review))
+                notify(iteration_result(n, review, load_plan(n)))
             elif review["verdict"] == "DONE":
-                notify(iteration_result(n, review))
+                notify(iteration_result(n, review, load_plan(n)))
             set_post_flag(n, "notified")
 
         if review["verdict"] == "NEEDS_HUMAN" and human_away(args):
             record_event(n, "needs_human", question=review["reason"], reply="(사람 부재, 자동)",
                          result="GPT 제안대로 계속")
             rebuild_index()
-            notify(notice(f"▶ iter_{n:03d} | 설정된 부재 시간에 따라 자동 진행", [
-                ("원래 확인할 질문", review["reason"]), ("진행할 일", review["next_task"]),
+            notify(notice(f"▶ iter_{n:03d} | 사용자 부재 설정으로 후속 계획 검토", [
+                *context_fields(load_plan(n)),
+                ("원래 확인할 질문", review["reason"]), ("검토할 후속 방향", review["next_task"]),
                 ("주의", "사용자가 승인한 답변이 아니라, 기존 부재 시간 설정에 따른 자동 결정입니다."),
             ], reference=f"agent/runs/iter_{n:03d}/review.md"))
         elif review["verdict"] == "NEEDS_HUMAN":

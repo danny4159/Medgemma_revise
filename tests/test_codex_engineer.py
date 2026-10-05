@@ -153,6 +153,52 @@ class EngineerTests(unittest.TestCase):
             with self.assertRaises(loop.AgentError):
                 loop.bind_engineer(self.args, 1)
 
+    def test_timed_selection_persists_and_switches_only_new_iterations(self):
+        with patch.object(loop, "AGENT_DIR", self.root), patch.object(loop, "RUNS_DIR", self.root / "runs"), \
+                patch.object(loop, "current_iteration", return_value=1), patch.object(loop, "notify"):
+            self.args.engineer_return_at = "2026-10-03T04:30:00+09:00"
+            self.args.engineer_return_to = "claude"
+            loop.configure_engineer(self.args)
+            config = loop.load_json(self.root / "engineer_selection.json")
+            deadline = loop.datetime.datetime.fromisoformat(config["return_at"]).timestamp()
+            self.assertEqual(loop.scheduled_engineer(config, deadline - 1), "codex")
+            self.assertEqual(loop.scheduled_engineer(config, deadline), "claude")
+            with patch.object(loop.time, "time", return_value=deadline - 1):
+                loop.select_iteration_engineer(self.args, 1)
+            # 계획 중 마감이 지나도 담당 유지 (아직 구현 세션이 없어도 고정).
+            with patch.object(loop.time, "time", return_value=deadline + 1):
+                loop.select_iteration_engineer(self.args, 1)
+                self.assertEqual(self.args.engineer, "codex")
+                loop.select_iteration_engineer(self.args, 2)
+                self.assertEqual(self.args.engineer, "claude")
+                resumed = argparse.Namespace(engineer=None, codex_engineer_sandbox=None)
+                loop.configure_engineer(resumed)
+                loop.select_iteration_engineer(resumed, 1)
+                self.assertEqual(resumed.engineer, "codex")
+            # 명시적 영구 선택은 예약을 해제한다.
+            self.args.engineer_return_at = None
+            self.args.engineer = "claude"
+            loop.configure_engineer(self.args)
+            self.assertNotIn("return_at", loop.load_json(self.root / "engineer_selection.json"))
+
+    def test_timed_selection_preserves_started_backend(self):
+        with patch.object(loop, "AGENT_DIR", self.root), patch.object(loop, "RUNS_DIR", self.root / "runs"), \
+                patch.object(loop, "notify"):
+            loop.save(self.root / "engineer_selection.json", json.dumps({
+                "backend": "codex", "return_at": "2000-01-01T00:00:00+09:00", "return_backend": "claude"}))
+            loop.bind_engineer(self.args, 1)
+            loop.select_iteration_engineer(self.args, 1)
+            self.assertEqual(self.args.engineer, "codex")
+
+    def test_return_time_requires_timezone_and_explicit_backend(self):
+        with self.assertRaises(argparse.ArgumentTypeError):
+            loop.engineer_return_time("04:30")
+        with self.assertRaises(argparse.ArgumentTypeError):
+            loop.engineer_return_time("2026-10-03T04:30:00")
+        with patch.object(sys, "argv", ["orchestrator.py", "--engineer-return-at", "2026-10-03T04:30:00+09:00"]):
+            with self.assertRaises(SystemExit):
+                loop.parse_args()
+
     def test_prepare_only_saves_selection_without_starting_loop(self):
         with patch.object(loop, "AGENT_DIR", self.root), patch.object(loop, "RUNS_DIR", self.root / "runs"), \
                 patch.object(loop, "current_iteration", return_value=1), \

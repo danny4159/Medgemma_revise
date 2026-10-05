@@ -28,7 +28,26 @@ python legacy/run_medgemma.py
 - 모델 크기: 약 4B 파라미터, bf16 기준 GPU 메모리 약 8~10GB 필요
 - 서버 GPU: RTX 3090 24GB x2 (인덱스 0, 1) — 충분히 여유 있음
 
+## 현재 연구 우선순위
+
+최종 목표는 `agent/GOAL.md`, 현재 MRI 우선 전략은 `agent/RESEARCH_FOCUS.md`에 있다.
+2026-10-03 보완부터 자료·모델 적합성 확인 → 현상 탐색 → 최소 개입 → 독립 확인을 구분한다.
+MedGemma는 초기 baseline이며 MRI 과제의 기본 능력이 부족하면 적절한 다른 모델을 비교한다.
+공통 기준은 `agent/RESEARCH_POLICY.md`이며 GPT 계획·리뷰와 Claude/Codex 구현 호출에 전달된다.
+전환 원문·이력은 `agent/interventions/`, 기존 결과는 각 `agent/runs/iter_NNN/`에 보존한다.
+
 ## 구현 담당 선택: Claude / Codex
+
+일시적으로 Codex를 사용한 뒤 정해진 시각 이후 **시작하는 반복부터** Claude로 복귀할 수 있다.
+이미 시작한 반복은 중간에 교체하지 않는다. 예약은 재시작해도 유지된다.
+
+```bash
+python orchestrator.py --engineer codex --codex-engineer-sandbox danger-full-access --gpus 0,1 --engineer-return-at '2026-10-03T04:30:00+09:00' --engineer-return-to claude
+```
+
+날짜·시간대를 명시한다. 예약 없이 `--engineer claude` 또는 `--engineer codex`를 새로 지정하면
+이전 예약을 해제하고 해당 담당을 유지한다. 진행 중 세션 교체 제한은 그대로 적용한다.
+반복별 `engineer_choice.json`은 계획 시작 때 선택한 담당과 예약의 원본을 보존한다.
 
 GPT 계획·리뷰는 유지하고, 구현·GPU 실험·자체 검증 담당 전체를 선택할 수 있다.
 
@@ -269,6 +288,11 @@ result 없이 끊긴 호출에는 미집계 사용량이 있을 수 있다. Clau
 구조화된 구독 거절 근거가 없는 월간 지출 한도는 자동 재시도하지 않고 중단·알림한다.
 경고만으로 월간 지출 한도를 무시하지 않으며, 지출 한도 인상·유료 overage 전환은 하지 않는다.
 
+읽기 전용 GPT 계획·리뷰가 마지막 `ERROR: Reconnecting... N/M` 상태에서 시간 초과되면
+기존 1·5·15분 간격으로 최대 3회 재시도한다. 단순 장시간 사고의 timeout이나 구현 실행에는
+이 예외를 적용하지 않는다. 30분 기본 제한·모델 등급은 유지하며, 로그와 완료된 사고 라운드는
+보존한다. 미완료 호출은 새 세션으로 재시도하므로 그 호출의 일부 조사는 반복될 수 있다.
+
 기존 계획·CLI 등급 지정·일반 재개 동작은 보존한다. 새 기준은 다음 새 계획부터 적용된다.
 준비된 iter_009는 계획 전이므로 별도 reset/replan 없이 평소 명령으로 실행하면 새 기준을 사용한다.
 
@@ -297,3 +321,11 @@ GPT 사용량은 `plan_usage.json`, `review_usage.json`에 남긴다. 기존 텍
 구분한다. pilot도 사용법 검증·이전 full review·현재 결론의 무결성이 필요하며 자동 확대하지 않는다.
 새 필드는 과거 계획에 소급 요구하지 않는다. 실행 중 iter_039의 실험·판정 기준은 유지한다.
 상세 기준은 `agent/RESEARCH_POLICY.md`를 따른다. 기계 검사는 신규성·과학적 타당성을 보장하지 않는다.
+
+## 비로그인 실행에서 Codex를 찾지 못할 때
+
+오케스트레이터는 기존 PATH의 Codex를 우선한다. 없으면 `NVM_BIN`, `NVM_DIR` 또는 사용자
+`.nvm/versions/node/*/bin`에서 Codex와 Node가 함께 설치된 경로를 찾아 자식 PATH에 추가한다.
+conda Python·GPU 범위·모델 등급·구독 로그인은 유지하며, 전역 PATH 수정이나 자동 설치는 하지 않는다.
+실제 연구 루프 시작 전 `codex --version`을 검사하므로 리뷰 단계까지 진행한 후에야 실행 경로
+문제를 발견하지 않도록 한다. `--status`, `--usage`, `--prepare-only`는 이 점검을 실행하지 않는다.

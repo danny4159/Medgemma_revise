@@ -19,6 +19,9 @@
   재시도하고 기존 코드·부분 결과·checkpoint를 재사용한다. 자동 유료 API 전환은 하지 않는다.
 - 진행 중인 구현의 backend는 고정한다. 다른 backend로 바꾸려면 현재 반복을 끝낸 뒤 선택하거나,
   정상 중단 후 --replan에 보존·인계 지시를 명시해 새 반복으로 전환한다. 원본을 삭제하지 않는다.
+- `--engineer-return-at`과 `--engineer-return-to`로 한시적 담당 선택을 저장할 수 있다.
+  예약 시각 이후 새로 시작하는 반복부터 복귀하며, 계획을 이미 시작한 반복도 기존 선택을 유지한다.
+  시간 경과만으로 실행 중인 구현·실험을 종료하지 않는다. GPT 계획/리뷰·모델 등급은 바꾸지 않는다.
 - 이전 기록·리뷰·자동화와의 호환을 위해 claude_report.md, claude_meta.json,
   claude_result.raw.json 및 claude_tier 필드명은 공통 구현 산출물로 유지한다.
   실제 담당은 engineer_backend.json 및 meta의 backend에 기록한다. 파일명으로 모델을 추정하지 않는다.

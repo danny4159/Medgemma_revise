@@ -214,7 +214,7 @@ class ControlTests(unittest.TestCase):
             stack.enter_context(patch.object(loop, "Human"))
             stack.enter_context(patch.object(loop, "load_goal", return_value=("기존 목표", False)))
             stack.enter_context(patch.object(loop, "code_version", return_value="test"))
-            for name in ("ensure_research_repo", "set_stage", "check_stop", "handle_paper",
+            for name in ("validate_codex_runtime", "ensure_research_repo", "set_stage", "check_stop", "handle_paper",
                          "step_commit", "handle_milestone", "commit_records"):
                 stack.enter_context(patch.object(loop, name))
             stack.enter_context(patch.object(loop, "step_checkpoint", return_value="go"))

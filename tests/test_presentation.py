@@ -7,10 +7,93 @@ import unittest
 from unittest.mock import patch
 
 import orchestrator as loop
-from presentation import STATUS_LABELS, excerpt, iteration_result, notice, result_highlight, units
+from presentation import (STATUS_LABELS, excerpt, iteration_result, notice, result_highlight, units,
+                          summary_section, research_context, plan_ready, stage_notice, transition_text)
 
 
 class PresentationTests(unittest.TestCase):
+    def context_plan(self, dataset="척추 MRI(SPIDER)", change="이어감"):
+        return {"plan_markdown": f"""# 요약
+
+## 알림 맥락
+- 연구: 디스크 판독의 위치 전이
+- 데이터: {dataset}
+- 모델: MedGemma 1.5 · LoRA 학습
+- 과제: 디스크 손상 등급을 답하기
+- 가설: 일부 위치에서 배운 판독이 다른 위치에도 전이될 수 있다
+- 질문: 배우지 않은 위치에서도 손상 등급을 판독하는가?
+- 변경: {change}
+- 연결: 기존 질문은 유지하고 실행 문제만 복구한다.
+- 작업: 저장 후 재개가 정확한지 확인한 뒤 본학습 비교를 끝낸다.
+
+## 상세
+- 데이터: 여기에 쓴 값은 알림 필드가 아님
+""", "research_question": "상세 연구 질문", "plan_summary": "상세 작업", "continuation_reason": ""}
+
+    def test_context_section_is_scoped_and_display_only(self):
+        plan = self.context_plan()
+        before = copy.deepcopy(plan)
+        self.assertEqual(research_context(plan)["데이터"], "척추 MRI(SPIDER)")
+        self.assertEqual(summary_section("## Other\n- 연구: 무관", "알림 맥락"), {})
+        plan_ready(77, plan, engineer="Claude")
+        self.assertEqual(plan, before)
+
+    def test_dataset_change_is_visible_with_previous_iteration(self):
+        old = self.context_plan("무릎 MRI(OAI)")
+        new = self.context_plan(change="방향 전환")
+        result = plan_ready(75, new, old, engineer="Claude")
+        self.assertIn("🔀", result)
+        self.assertIn("무릎 MRI(OAI) → 척추 MRI(SPIDER)", result)
+        self.assertIn("iter_074 → iter_075", result)
+        self.assertIn("배우지 않은 위치", result)
+        self.assertNotIn("계획대로 자동 진행", result)
+        self.assertIn("실제 학습 시작·완료를 뜻하지 않습니다", result)
+
+    def test_recovery_is_not_presented_as_new_direction_or_result(self):
+        result = plan_ready(77, self.context_plan(change="실행 복구"), self.context_plan())
+        self.assertIn("🔧", result)
+        self.assertIn("실행 복구", result)
+        self.assertNotIn("방향 전환", result)
+        self.assertNotIn("💡", result)
+        self.assertNotIn("데이터:", transition_text(77, self.context_plan(), self.context_plan()))
+
+    def test_legacy_plan_does_not_invent_dataset_or_hypothesis(self):
+        result = plan_ready(9, {"plan_summary": "저장 상태 확인", "research_question": "위치 판독 가능성"})
+        self.assertIn("저장 상태 확인", result)
+        self.assertIn("위치 판독 가능성", result)
+        self.assertNotIn("SPIDER", result)
+        self.assertNotIn("방향 전환", result)
+
+    def test_plan_and_review_stages_are_not_experiment_completion(self):
+        planning = stage_notice(78, "GPT 계획", previous=self.context_plan(),
+                                previous_review={"one_line_summary": "재개 검사가 실패했다"})
+        self.assertIn("직전 연구의 질문", planning)
+        self.assertIn("새 과제는 아직 확정 전", planning)
+        self.assertIn("재개 검사가 실패했다", planning)
+        reviewing = stage_notice(77, "GPT 리뷰", self.context_plan())
+        self.assertIn("결과 검증 중", reviewing)
+        self.assertIn("최종 판정 전", reviewing)
+
+    def test_execution_failure_keeps_context_and_is_not_negative_hypothesis(self):
+        review = {"approach_status": "execution_failed", "valid_experiment": False,
+                  "one_line_summary": "내부 요약", "next_task": "원래 계획",
+                  "review_markdown": """## 알림 요약
+- 결과: 일반 분류기는 학습했지만 VLM 학습은 실행 오류로 미완료다.
+- 의미: 위치 전이가 가능한지는 아직 모른다.
+- 후속: 재개 오류를 고친 뒤 같은 비교를 끝낼 것을 제안한다.
+"""}
+        before = copy.deepcopy(review)
+        result = iteration_result(77, review, self.context_plan())
+        for expected in ("⚠️", "가설 판단 전", "척추 MRI", "위치 전이", "다음 계획에 제안", "재개 오류"):
+            self.assertIn(expected, result)
+        self.assertNotIn("💡", result)
+        self.assertEqual(review, before)
+
+    def test_setup_success_is_not_reported_as_scientific_result(self):
+        result = iteration_result(74, {"approach_status": "success", "valid_experiment": False})
+        self.assertIn("준비·코드 검증 결과", result)
+        self.assertNotIn("중요한 결과", result)
+
     def test_short_notice_preserves_numbers_and_caveats(self):
         evidence = "baseline 0.71 → 0.73, n=40. 작은 표본이라 개선 확정 불가."
         result = notice("결과", [("근거", evidence), ("다음", "독립 평가")],
