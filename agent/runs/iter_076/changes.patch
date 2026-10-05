@@ -1,0 +1,1612 @@
+diff --git a/rsna_diag/lora.py b/rsna_diag/lora.py
+index c596bdd..12e2604 100644
+--- a/rsna_diag/lora.py
++++ b/rsna_diag/lora.py
+@@ -83,3 +83,54 @@ def base_digest(model):
+         h.update(p.detach().to("cpu").contiguous().view(torch.uint8).numpy().tobytes() if p.dtype != torch.bfloat16
+                  else p.detach().to("cpu").contiguous().view(torch.int16).numpy().tobytes())
+     return h.hexdigest()
++
++
++def _tensor_bytes(t):
++    t = t.detach().to("cpu").contiguous()
++    if t.dtype == torch.bfloat16:
++        return t.view(torch.int16).numpy().tobytes()
++    return t.view(torch.uint8).numpy().tobytes()
++
++
++def split_report(model, optimizer_params=None):
++    """LoRA / 비LoRA parameter를 객체 단위로 분리해 개수·numel·byte를 센다 (iter_076 동결 검사).
++
++    분리 기준은 'lora_' 이름의 parameter 객체와 나머지이다. 정규화 이름 충돌, 빈 집합(수·numel·byte 0)은 예외.
++    optimizer_params: optimizer에 들어간 parameter 목록(있으면 비LoRA 포함 여부 검사).
++    """
++    lo, non = {}, {}
++    for n, p in model.named_parameters():
++        (lo if "lora_" in n else non)[n] = p
++    norm = [n.replace(".base.", ".") for n in non]
++    if len(set(norm)) != len(norm):
++        raise RuntimeError("normalized non-LoRA parameter names collide")
++    rep = {"n_lora": len(lo), "n_non_lora": len(non), "numel_lora": sum(p.numel() for p in lo.values()), "numel_non_lora": sum(p.numel() for p in non.values()),
++           "bytes_lora": sum(p.numel() * p.element_size() for p in lo.values()), "bytes_non_lora": sum(p.numel() * p.element_size() for p in non.values()),
++           "non_lora_requires_grad": sum(1 for p in non.values() if p.requires_grad), "lora_requires_grad_false": sum(1 for p in lo.values() if not p.requires_grad),
++           "non_lora_dtypes": sorted({str(p.dtype) for p in non.values()}), "lora_dtypes": sorted({str(p.dtype) for p in lo.values()})}
++    for k in ("n_lora", "n_non_lora", "numel_lora", "numel_non_lora", "bytes_lora", "bytes_non_lora"):
++        if rep[k] <= 0:
++            raise RuntimeError(f"empty parameter set: {k}=0")
++    if optimizer_params is not None:
++        ids = {id(p) for p in optimizer_params}
++        rep["optimizer_contains_non_lora"] = sum(1 for p in non.values() if id(p) in ids)
++        rep["optimizer_lora_covered"] = all(id(p) in ids for p in lo.values())
++        rep["optimizer_n_params"] = len(ids)
++    return rep
++
++
++def exact_digest(model, lora=False):
++    """정확한 parameter 이름·dtype·shape·byte 전체의 sha256 (정규화 없음). lora=False면 비LoRA만. 빈 집합이면 예외. returns (hexdigest, n_params, n_bytes)."""
++    h = hashlib.sha256()
++    n_par = n_bytes = 0
++    for n, p in sorted(model.named_parameters(), key=lambda x: x[0]):
++        if ("lora_" in n) != lora:
++            continue
++        b = _tensor_bytes(p)
++        h.update(f"{n}|{p.dtype}|{tuple(p.shape)}|{len(b)}".encode())
++        h.update(b)
++        n_par += 1
++        n_bytes += len(b)
++    if n_par == 0 or n_bytes == 0:
++        raise RuntimeError("exact_digest over an empty parameter set")
++    return h.hexdigest(), n_par, n_bytes
+diff --git a/sp75_cost.py b/sp75_cost.py
+index f2b6ae8..6d6b6a2 100644
+--- a/sp75_cost.py
++++ b/sp75_cost.py
+@@ -1,4 +1,4 @@
+-"""iter_075 비용 측정: V8 supervised 전체 질문 workload(24 target)를 시스템(F,R,C,H)별로 원 T2 읽기부터 답변 저장까지 측정한다.
++"""iter_076(결과 경로) 비용 측정: V8 supervised 전체 질문 workload(24 target)를 시스템(F,R,C,H)별로 원 T2 읽기부터 답변 저장까지 측정한다.
+ 
+ - 시스템마다 별도 subprocess(모델 적재 포함 wall 측정). block 안에서 시스템 순서는 block마다 번갈아(순환) 실행.
+ - 포함: zip에서 T2 read, slice 렌더, F 표시/R·C crop 입력 구성(ROI 좌표는 manifest의 GT-anatomy oracle 값을 사용 -> mask 획득 비용은 미측정 oracle 비용),
+@@ -10,7 +10,7 @@
+ import argparse, json, os, subprocess, sys, time
+ 
+ HERE = os.path.dirname(os.path.abspath(__file__))
+-OUT = 'results/iter_075/cost'
++OUT = 'results/iter_076/cost'
+ 
+ 
+ def worker(a):
+@@ -138,6 +138,7 @@ def worker(a):
+ def blocks(a):
+     systems = ['F', 'R', 'C', 'H']
+     ad = json.loads(a.adapters)
++    os.makedirs(f'{OUT}/logs', exist_ok=True)
+     ledger = []
+     for b in range(1, a.nblocks + 1):
+         order = systems[(b - 1) % 4:] + systems[:(b - 1) % 4]   # 순환 시작점으로 시스템 순서 번갈아
+@@ -146,7 +147,7 @@ def blocks(a):
+             if s in ('F', 'R'):
+                 cmd += ['--adapter', ad[s]]
+             t0 = time.time()
+-            rc = subprocess.call(cmd, stdout=open(f'{OUT}_{s}_block{b}.log', 'w'), stderr=subprocess.STDOUT)
++            rc = subprocess.call(cmd, stdout=open(f'{OUT}/logs/{s}_block{b}.log', 'w'), stderr=subprocess.STDOUT)
+             ledger.append({'block': b, 'system': s, 'order_in_block': order.index(s), 'rc': rc, 'wall_s': time.time() - t0})
+             if rc != 0:
+                 sys.exit(f'worker failed {s} block {b}')
+diff --git a/sp75_eval.py b/sp75_eval.py
+index 82740d3..ea3bc6a 100644
+--- a/sp75_eval.py
++++ b/sp75_eval.py
+@@ -1,11 +1,13 @@
+-"""iter_075 E24 개발 평가 (한 번). F/R(미적응·적응), C, H, train-only prior, 예측 교환을 같은 행 집합에서 비교한다.
++"""iter_075/076 E24 개발 평가 (한 번; iter_076에서 결과 경로·잠금/봉인 흐름을 수정). F/R(미적응·적응), C, H, train-only prior, 예측 교환을 같은 행 집합에서 비교한다.
+ 
+ - 평가 행: E24 non-excluded (supervised ordinal 1·3·5, held ordinal 2·4). Primary = held(ordinal 2/4) class-standardized MAE.
+ - VLM 예측: 원시 출력 text를 고정 whole-string parser로 다시 해석(EOS 종료 + [1-5] 한 숫자). 비EOS/형식 오류는 invalid(오차 4). 보조: 후보 likelihood argmax.
+ - prior: T24 supervised train-only (global 및 ordinal; held ordinal 2/4는 이웃 ordinal 분포 동일 가중 평균). 선택 grade는 median(동률은 낮은 grade).
+ - 교환: 같은 ordinal 안에서 환자 ID hash 순 cyclic shift(+1).
+ - 환자 단위 paired bootstrap 10,000회 seed 7501 (같은 환자의 모든 위치 함께 재표집).
+-- LOCK: 평가 시작 전에 각 시스템의 selection 근거 파일 hash를 eval_lock.json에 기록한다(`lock` 모드). `run` 모드는 lock과 현재 파일이 같을 때만 실행한다.
++- LOCK(첫 E24 출력 전): 코드·선택 근거·checkpoint·manifest·환경 hash를 eval_lock.json에 기록(`lock`). 생성 출력은 lock에 넣지 않는다.
++- SEAL(출력 완료 후): 모든 E24 출력의 완전성(요청 집합·중복·누락) 확인 후 출력 파일 hash를 eval_seal.json에 기록(`seal`).
++- `run`은 lock·seal이 현재 파일과 일치할 때만 실행하고 결과를 새 파일에 원자적으로 쓴다(존재하면 중단).
+ """
+ import argparse, glob, hashlib, json, os, sys
+ 
+@@ -15,7 +17,7 @@ import sp75_data as D
+ import sp75_metrics as M
+ import sp75_vlm as V
+ 
+-OUT = 'results/iter_075'
++OUT = 'results/iter_076'
+ EVAL = f'{OUT}/eval'
+ CODE = ['sp75_eval.py', 'sp75_metrics.py', 'sp75_vlm.py', 'sp75_data.py', 'sp75_gen.py']
+ MARGIN = 0.20          # 최소 투자 폭 (MAE grade)
+@@ -63,8 +65,17 @@ def load_vlm(dirpath, rows, variant, adapter_expected):
+ 
+ def load_json_pred(path, rows):
+     d = json.load(open(path))
++    ids = [p['id'] for p in d['preds']]
++    if len(ids) != len(set(ids)):
++        raise RuntimeError(f'{path}: duplicate prediction ids {sorted({i for i in ids if ids.count(i) > 1})[:3]}')
++    want = [r['id'] for r in rows]
++    if set(ids) != set(want):
++        raise RuntimeError(f'{path}: missing {sorted(set(want) - set(ids))[:3]} extra {sorted(set(ids) - set(want))[:3]}')
+     by = {p['id']: p for p in d['preds']}
+-    assert [r['id'] for r in rows] == [p['id'] for p in d['preds']] or set(by) == {r['id'] for r in rows}
++    for r in rows:
++        x = by[r['id']]
++        if x['pred'] not in (1, 2, 3, 4, 5) or x['patient'] != r['patient'] or x['ordinal'] != r['ordinal'] or x['position_set'] != r['position_set']:
++            raise RuntimeError(f'{path}: bad prediction row {r["id"]}')
+     return [by[r['id']]['pred'] for r in rows], d
+ 
+ 
+@@ -88,11 +99,27 @@ def report_systems(rows, systems):
+     return out
+ 
+ 
+-def cmd_run(a):
++def verify_lock_seal():
+     lock = json.load(open(f'{EVAL}/eval_lock.json'))
+     for f, h in lock['files'].items():
+         if sha_file(f) != h:
+             sys.exit(f'locked file changed: {f}')
++    seal = json.load(open(f'{EVAL}/eval_seal.json'))
++    if seal['lock_sha256'] != sha_file(f'{EVAL}/eval_lock.json'):
++        sys.exit('seal does not match current lock')
++    for f, h in seal['outputs'].items():
++        if sha_file(f) != h:
++            sys.exit(f'sealed E24 output changed: {f}')
++    cur = {f for v in lock['vlm'].values() for f in files_of(v['dir'])}
++    if cur != set(seal['outputs']) - set(lock['json_systems'].values()):
++        sys.exit('E24 output file set differs from seal')
++    return lock
++
++
++def cmd_run(a):
++    if os.path.exists(f'{EVAL}/report.json') or os.path.exists(f'{EVAL}/per_row.json'):
++        sys.exit('report exists; refusing to overwrite')
++    lock = verify_lock_seal()
+     man = D.load_manifest()
+     rows = sorted([r for r in man['rows'] if r['split'] == 'E24' and not r['excluded']], key=lambda r: (int(r['patient']), r['ordinal']))
+     tr = sorted([r for r in man['rows'] if r['split'] == 'T24' and r['position_set'] == 'supervised' and not r['excluded']], key=lambda r: (int(r['patient']), r['ordinal']))
+@@ -127,8 +154,10 @@ def cmd_run(a):
+                 swapped[n][i] = p
+     comps = {}
+     vl = [n for n in systems if n.startswith('F_') or n.startswith('R_')]
++    sysh0 = {n: rep['systems'][n]['held']['class_std_mae'] for n in systems}
++    best_vlm0 = min([v for v in ('F_adapted', 'R_adapted') if v in systems], key=lambda v: (sysh0[v], v))
+     pairs = [(n, 'prior_ordinal') for n in vl] + [(n, 'prior_global') for n in vl] + [(n, 'C') for n in vl if n in ('F_adapted', 'R_adapted')] + \
+-            [(n, 'H') for n in vl if n in ('F_adapted', 'R_adapted')] + [('F_adapted', 'R_adapted'), ('F_adapted', 'F_base'), ('R_adapted', 'R_base'), ('C', 'H'), ('C', 'prior_ordinal'), ('H', 'prior_ordinal')]
++            [(n, 'H') for n in vl if n in ('F_adapted', 'R_adapted')] + [('F_adapted', 'R_adapted'), ('F_adapted', 'F_base'), ('R_adapted', 'R_base'), ('C', 'H'), ('C', 'prior_ordinal'), ('H', 'prior_ordinal'), ('C', best_vlm0), (best_vlm0, 'H')]
+     for x, y in pairs:
+         if x in systems and y in systems:
+             comps[f'{x}_minus_{y}'] = {p: M.boot_diff(rr, sub(systems[x], ix), sub(systems[y], ix)) for p, rr, ix in (('held', held_rows, hi), ('supervised', sup_rows, [i for i in range(len(rows)) if i not in set(hi)]))}
+@@ -147,41 +176,80 @@ def cmd_run(a):
+                     'better_than_C_by_0.20': -c[f'{v}_minus_C']['held']['point'] >= MARGIN,
+                     'H_better_than_vlm_by_more_than_0.10': (sysh[v] - sysh['H']) > H_TOL}
+         flags[v]['all_candidate_conditions_point'] = all(flags[v][k] for k in ('le_1.0', 'better_than_prior_ordinal_by_0.20', 'better_than_swap_by_0.20', 'better_than_C_by_0.20'))
+-    best_vlm = min([v for v in ('F_adapted', 'R_adapted') if v in systems], key=lambda v: sysh[v])
++    best_vlm = best_vlm0
+     flags['best_vlm'] = best_vlm
++    ci = lambda key: comps[key]['held']['ci95']
++    for v in ('F_adapted', 'R_adapted'):
++        if v in flags:
++            flags[v]['ci95_held_vs_prior_ordinal'] = ci(f'{v}_minus_prior_ordinal')
++            flags[v]['ci95_held_vs_C'] = ci(f'{v}_minus_C')
++            flags[v]['ci95_excludes_0_vs_prior_ordinal'] = ci(f'{v}_minus_prior_ordinal')[1] < 0
++            flags[v]['ci95_excludes_0_vs_C'] = ci(f'{v}_minus_C')[1] < 0
++    cb = ci(f'C_minus_{best_vlm}')
++    flags['C_minus_best_vlm_ci95'] = cb
++    flags['C_minus_best_vlm_ci_contains_both_plus_minus_0.20'] = bool(cb[0] < -MARGIN and cb[1] > MARGIN)
+     flags['C_basic_signal'] = {'better_than_prior_by_0.20': -comps['C_minus_prior_ordinal']['held']['point'] >= MARGIN,
+                                'better_than_swap_by_0.20': -comps['C_minus_swap']['held']['point'] >= MARGIN}
+     flags['C_not_worse_than_best_vlm_by_0.10'] = (sysh['C'] - sysh[best_vlm]) < C_NOT_WORSE
+     rep['predeclared_flags_point_estimates'] = flags
+-    os.makedirs(EVAL, exist_ok=True)
+     per = [{'id': r['id'], 'patient': r['patient'], 'ordinal': r['ordinal'], 'position_set': r['position_set'], 'grade': r['grade'],
+             **{n: systems[n][i] for n in systems}, **{n + '_swap': swapped[n][i] for n in systems}} for i, r in enumerate(rows)]
+-    json.dump(per, open(f'{EVAL}/per_row.json', 'w'))
+-    json.dump(rep, open(f'{EVAL}/report.json', 'w'), indent=1)
++    for obj, fn in ((per, 'per_row.json'), (rep, 'report.json')):
++        json.dump(obj, open(f'{EVAL}/{fn}.tmp', 'w'), indent=1)
++        os.replace(f'{EVAL}/{fn}.tmp', f'{EVAL}/{fn}')
+     print(json.dumps({'held_primary': sysh, 'flags': flags}, indent=1))
+ 
+ 
+ def cmd_lock(a):
++    """첫 E24 출력 전: 코드·선택 근거·checkpoint·manifest·환경 hash를 고정. 생성 출력은 포함하지 않는다(별도 seal)."""
+     spec = json.load(open(a.spec))
+     files = {f: sha_file(f) for f in CODE}
+-    for name, v in spec['vlm'].items():
+-        for f in files_of(v['dir']):
+-            files[f] = sha_file(f)
+     for name, p in spec['json_systems'].items():
+-        files[p] = sha_file(p)
++        if os.path.exists(p):
++            sys.exit(f'E24 prediction output already exists before lock: {p}')
++    for name, v in spec['vlm'].items():
++        if files_of(v['dir']):
++            sys.exit(f'E24 output already exists before lock: {v["dir"]}')
+     for f in spec.get('extra_files', []):
+         files[f] = sha_file(f)
+-    os.makedirs(EVAL, exist_ok=True)
+     if os.path.exists(f'{EVAL}/eval_lock.json'):
+         sys.exit('lock exists')
+-    json.dump({'vlm': spec['vlm'], 'json_systems': spec['json_systems'], 'files': files}, open(f'{EVAL}/eval_lock.json', 'w'), indent=1)
++    os.makedirs(EVAL, exist_ok=True)
++    tmp = f'{EVAL}/eval_lock.json.tmp'
++    json.dump({'vlm': spec['vlm'], 'json_systems': spec['json_systems'], 'files': files, 'selection': spec.get('selection')}, open(tmp, 'w'), indent=1)
++    os.replace(tmp, f'{EVAL}/eval_lock.json')
+     print('locked', len(files))
+ 
+ 
++def cmd_seal(a):
++    """E24 출력 완료 후: 요청 집합 완전성·provenance 확인 뒤 출력 파일 hash를 봉인한다."""
++    lock = json.load(open(f'{EVAL}/eval_lock.json'))
++    for f, h in lock['files'].items():
++        if sha_file(f) != h:
++            sys.exit(f'locked file changed: {f}')
++    man = D.load_manifest()
++    rows = sorted([r for r in man['rows'] if r['split'] == 'E24' and not r['excluded']], key=lambda r: (int(r['patient']), r['ordinal']))
++    outputs = {}
++    for name, spec in lock['vlm'].items():
++        load_vlm(spec['dir'], rows, spec['variant'], spec['adapter_digest'])   # 누락/중복/집합 밖/입력 hash/adapter 불일치면 예외
++        for f in files_of(spec['dir']):
++            outputs[f] = sha_file(f)
++    for name, p in lock['json_systems'].items():
++        load_json_pred(p, rows)
++        outputs[p] = sha_file(p)
++    if os.path.exists(f'{EVAL}/eval_seal.json'):
++        sys.exit('seal exists')
++    tmp = f'{EVAL}/eval_seal.json.tmp'
++    json.dump({'lock_sha256': sha_file(f'{EVAL}/eval_lock.json'), 'outputs': outputs, 'n_rows': len(rows)}, open(tmp, 'w'), indent=1)
++    os.replace(tmp, f'{EVAL}/eval_seal.json')
++    print('sealed', len(outputs))
++
++
+ if __name__ == '__main__':
+     ap = argparse.ArgumentParser()
+     sp = ap.add_subparsers(dest='c', required=True)
+     sp.add_parser('run')
+     l = sp.add_parser('lock'); l.add_argument('--spec', required=True)
++    sp.add_parser('seal')
+     a = ap.parse_args()
+-    {'run': cmd_run, 'lock': cmd_lock}[a.c](a)
++    {'run': cmd_run, 'lock': cmd_lock, 'seal': cmd_seal}[a.c](a)
+diff --git a/sp75_gen.py b/sp75_gen.py
+index 6930892..13fde0e 100644
+--- a/sp75_gen.py
++++ b/sp75_gen.py
+@@ -35,6 +35,23 @@ def read_jsonl(p):
+     return out
+ 
+ 
++def repair_tail(path):
++    """강제 중단으로 마지막 줄이 잘렸으면(개행 없는 비정상 JSON) 그 줄만 잘라낸다. 중간 줄 손상은 복구하지 않고 예외."""
++    if not os.path.exists(path):
++        return None
++    data = open(path, 'rb').read()
++    if not data or data.endswith(b'\n'):
++        return None
++    cut = data.rfind(b'\n') + 1
++    try:
++        json.loads(data[cut:].decode())
++        return None
++    except Exception:
++        with open(path, 'r+b') as f:
++            f.truncate(cut)
++        return {'truncated_bytes': len(data) - cut}
++
++
+ def select_rows(split, positions):
+     man = D.load_manifest()
+     rows = [r for r in man['rows'] if r['split'] == split and not r['excluded']]
+@@ -89,6 +106,17 @@ def run_one(torch, proc, model, row, variant, eos_ids, cands):
+             'peak_mem_gb': torch.cuda.max_memory_allocated() / 2 ** 30}
+ 
+ 
++def check_lock(a, adapter_digest):
++    """사전 잠금 확인: 잠긴 모든 파일의 현재 hash 일치, 이 요청(variant, adapter digest, out-dir)이 lock에 등록되어 있어야 한다."""
++    lock = json.load(open(a.lock))
++    for f, h in lock['files'].items():
++        if sha(open(f, 'rb').read()) != h:
++            sys.exit(f'locked file changed: {f}')
++    ok = [n for n, v in lock['vlm'].items() if v['variant'] == a.variant and v['adapter_digest'] == adapter_digest and os.path.normpath(v['dir']) == os.path.normpath(a.out_dir)]
++    if len(ok) != 1:
++        sys.exit(f'request not registered in lock (variant={a.variant} adapter={adapter_digest} out={a.out_dir}): {ok}')
++
++
+ def main():
+     ap = argparse.ArgumentParser()
+     ap.add_argument('--variant', choices=['F', 'R'], required=True)
+@@ -100,7 +128,10 @@ def main():
+     ap.add_argument('--gpu', default=None)
+     ap.add_argument('--max-requests', type=int, default=None)
+     ap.add_argument('--ids', default=None, help='json list of target ids (subset)')
++    ap.add_argument('--lock', default=None, help='E24 split은 필수: 사전 eval_lock.json (코드·checkpoint hash 일치와 이 요청의 variant/adapter/out-dir 등록을 확인)')
+     a = ap.parse_args()
++    if a.split == 'E24' and not a.lock:
++        sys.exit('E24 generation requires --lock (pre-registered eval_lock.json)')
+     if a.gpu is not None:
+         inh = os.environ.get('CUDA_VISIBLE_DEVICES', '').split(',')
+         if a.gpu not in inh:
+@@ -126,6 +157,8 @@ def work(a, rows, info):
+     adapter_digest = None
+     if a.adapter != 'none':
+         adapter_digest = generate.load_adapter(torch, model, a.adapter)
++    if a.lock:
++        check_lock(a, adapter_digest)
+     env = generate.env_info(torch, proc, model)
+     prompt_sha = sha(V.PROMPTS[a.variant])
+     cfg = {'runner': RUNNER, 'model_revision': generate.MODEL_REVISION, 'max_new_tokens': V.MAX_NEW, 'do_sample': False, 'dtype': env['dtype'],
+@@ -165,8 +198,11 @@ def work(a, rows, info):
+                 done[r['id']] = r
+         return done
+ 
+-    done = validate(read_all())
+     out = os.path.join(a.out_dir, f'gen_worker{a.worker}.jsonl')
++    rep_tail = repair_tail(out)
++    if rep_tail:
++        print('repaired torn tail', rep_tail, flush=True)
++    done = validate(read_all())
+     claim_dir = os.path.join(a.out_dir, 'claims')
+     os.makedirs(claim_dir, exist_ok=True)
+     log = open(out + '.log', 'a')
+diff --git a/sp75_pipeline.py b/sp75_pipeline.py
+index a524d49..6f212b0 100644
+--- a/sp75_pipeline.py
++++ b/sp75_pipeline.py
+@@ -1,57 +1,72 @@
+-"""iter_075 실행 orchestration: 학습(4 trajectory) -> V8 생성 -> 선택/연장 -> E24 생성. 단계별 CLI. 모든 작업은 results/iter_075 아래에만 쓴다.
+-
+-GPU 배정은 상속된 CUDA_VISIBLE_DEVICES 안에서만 한다. 작업 시작 직전 nvidia-smi 여유 메모리가 (예상 peak + 2GiB)보다 작으면 대기한다.
+-ledger: results/iter_075/ledger.jsonl (모든 subprocess의 명령·GPU·wall·rc를 append).
++"""iter_076 실행 orchestration (원 iter_075 파이프라인의 완료 흐름 연결판).
++
++단계 CLI (각 단계는 이전 단계 산출물·상태를 검증하고, 모든 새 결과는 results/iter_076 아래에만 쓴다):
++  train     : F/R x LR{2e-5,2e-4} 네 trajectory를 --epochs(기본16)까지 학습 (epoch8·16에서 V8 val CE)
++  gen_v8    : milestone adapter의 V8 supervised 24요청 생성 (--epochs 8,16 | 32 --variants F,R)
++  select_v8 : (sp76_select.py) LR 선택 + 연장 여부 결정
++  extend    : 연장 대상 trajectory를 32 epoch까지 학습 -> gen_v8 --epochs 32 -> select_final
++  lock      : 첫 E24 출력 전에 F/R/C/H 선택·코드·입력 hash를 eval_lock.json에 고정
++  gen_e24   : base/adapted F/R E24 118요청 생성 + C/H 예측 (lock 필수)
++  seal / eval / verify / cost : 평가 흐름 (sp75_eval.py, sp75_verify.py, sp75_cost.py)
++GPU 배정은 상속된 CUDA_VISIBLE_DEVICES 안에서만, 시작 직전 nvidia-smi 여유가 (예상 peak + worker당 2GiB)보다 작으면 대기한다.
++이미 실행 중인 같은 run-dir은 train.lock/worker lock이 거부한다. 모든 subprocess는 ledger(JSONL)에 명령·GPU·rc·wall·peak 점유를 남긴다.
++자식이 비정상 종료하거나 출력이 불완전하면 비정상 종료한다.
+ """
+ import argparse, json, os, subprocess, sys, time
+ 
+-OUT = 'results/iter_075'
++OUT = 'results/iter_076'
+ LEDGER = f'{OUT}/ledger.jsonl'
+ TRAIN = f'{OUT}/train'
+ GEN = f'{OUT}/gen'
+ LRS = {'F': ('2e-5', '2e-4'), 'R': ('2e-5', '2e-4')}
++LOCK = f'{OUT}/eval/eval_lock.json'
+ 
+ 
+ def gpus():
+     return os.environ.get('CUDA_VISIBLE_DEVICES', '0,1').split(',')
+ 
+ 
+-def free_mib():
++def gpu_state():
+     out = subprocess.check_output(['nvidia-smi', '--query-gpu=index,uuid,memory.used,memory.total', '--format=csv,noheader,nounits']).decode().strip().splitlines()
+     res = {}
+     for ln in out:
+         i, u, used, tot = [x.strip() for x in ln.split(',')]
+-        res[i] = (int(tot) - int(used), u)
++        res[i] = {'free': int(tot) - int(used), 'used': int(used), 'uuid': u}
+     return res
+ 
+ 
+ def run_jobs(jobs, per_gpu, peak_gb, tag):
+-    """jobs: [{'name','cmd'(list without --gpu),'gpu_ok'}]. 각 GPU에 최대 per_gpu개 동시, 메모리 여유 확인."""
++    """jobs: [{'name','cmd'(--gpu 제외),'log'}]. 각 GPU에 최대 per_gpu개 동시, 메모리 여유 확인. 실패하면 SystemExit."""
+     g = gpus()
+     running, pending, results = {}, list(jobs), []
++    peaks = {}
+     while pending or running:
+         for k, (p, j, gid, t0) in list(running.items()):
+             rc = p.poll()
+             if rc is not None:
+-                rec = {'tag': tag, 'name': j['name'], 'cmd': j['cmd'], 'gpu': gid, 'rc': rc, 'wall_s': time.time() - t0, 'ts_end': time.time()}
++                rec = {'tag': tag, 'name': j['name'], 'cmd': j['cmd'], 'gpu': gid, 'gpu_uuid': gpu_state().get(gid, {}).get('uuid'), 'rc': rc, 'wall_s': time.time() - t0,
++                       'ts_end': time.time(), 'peak_gpu_used_mib_sampled': peaks.get(k), 'per_gpu': per_gpu, 'est_peak_gb': peak_gb}
+                 open(LEDGER, 'a').write(json.dumps(rec) + '\n')
+                 results.append(rec)
+                 del running[k]
++        st = gpu_state()
++        for k, (p, j, gid, t0) in running.items():
++            peaks[k] = max(peaks.get(k, 0), st[gid]['used'])
+         for gid in g:
+             if not pending:
+                 break
+             n_on = sum(1 for (_, _, gg, _) in running.values() if gg == gid)
+             if n_on >= per_gpu:
+                 continue
+-            fm = free_mib().get(gid, (0, None))[0]
+-            if fm < (peak_gb + 2) * 1024:
++            if st[gid]['free'] < (peak_gb + 2) * 1024:
+                 continue
+             j = pending.pop(0)
+             os.makedirs(os.path.dirname(j['log']), exist_ok=True)
+             p = subprocess.Popen(j['cmd'] + ['--gpu', gid], stdout=open(j['log'], 'a'), stderr=subprocess.STDOUT)
+             running[j['name']] = (p, j, gid, time.time())
+-            time.sleep(25)  # 메모리 점유가 올라올 시간을 준다
+-        time.sleep(5)
++            time.sleep(45)   # 메모리 점유가 올라올 시간을 준다 (다음 시작 판단 전)
++            st = gpu_state()
++        time.sleep(10)
+     bad = [r for r in results if r['rc'] != 0]
+     if bad:
+         raise SystemExit(f'jobs failed: {[(r["name"], r["rc"]) for r in bad]}')
+@@ -62,38 +77,120 @@ def traj_dir(v, lr):
+     return f'{TRAIN}/{v}_lr{lr}'
+ 
+ 
++def check_trained(v, lr, epochs, milestones):
++    d = traj_dir(v, lr)
++    for e in milestones:
++        if not os.path.exists(f'{d}/epoch_{e:02d}/val_ce.json') or not os.path.exists(f'{d}/epoch_{e:02d}/adapter.pt'):
++            raise SystemExit(f'{d}: epoch {e} adapter/val_ce missing after training')
++    if not os.path.exists(f'{d}/freeze_end.json'):
++        raise SystemExit(f'{d}: freeze_end.json missing (training did not complete)')
++
++
+ def cmd_train(a):
+     jobs = []
+-    for v in ('F', 'R'):
++    for v in a.variants.split(','):
+         for lr in LRS[v]:
+-            jobs.append({'name': f'train_{v}_{lr}', 'log': f'{OUT}/logs/train_{v}_{lr}.log',
++            jobs.append({'name': f'train_{v}_{lr}_to{a.epochs}', 'log': f'{OUT}/logs/train_{v}_{lr}.log',
+                          'cmd': [sys.executable, 'sp75_train.py', '--run-dir', traj_dir(v, lr), '--variant', v, '--lr', lr, '--epochs', str(a.epochs), '--workers', '2']})
+-    run_jobs(jobs, per_gpu=1, peak_gb=11.5, tag='train')
++    run_jobs(jobs, per_gpu=a.per_gpu, peak_gb=a.peak_gb, tag='train')
++    for v in a.variants.split(','):
++        for lr in LRS[v]:
++            check_trained(v, lr, a.epochs, [e for e in (8, 16, 32) if e <= a.epochs])
++
++
++def gen_cmd(v, split, positions, adapter, out, worker=0, lock=None):
++    c = [sys.executable, 'sp75_gen.py', '--variant', v, '--split', split, '--positions', positions, '--adapter', adapter, '--out-dir', out, '--worker', str(worker)]
++    return c + (['--lock', lock] if lock else [])
++
++
++def expected_count(split):
++    import sp75_data as D
++    return sum(1 for r in D.load_manifest()['rows'] if r['split'] == split and not r['excluded'] and (split != 'V8' or r['position_set'] == 'supervised'))
+ 
+ 
+-def gen_cmd(v, split, positions, adapter, out, worker=0):
+-    return [sys.executable, 'sp75_gen.py', '--variant', v, '--split', split, '--positions', positions, '--adapter', adapter, '--out-dir', out, '--worker', str(worker)]
++def count_out(d):
++    n, ids = 0, set()
++    for f in os.listdir(d) if os.path.isdir(d) else []:
++        if f.startswith('gen_worker') and f.endswith('.jsonl'):
++            for ln in open(f'{d}/{f}'):
++                if ln.strip():
++                    ids.add(json.loads(ln)['id'])
++                    n += 1
++    return n, len(ids)
+ 
+ 
+ def cmd_gen_v8(a):
+-    jobs = []
+-    for v in ('F', 'R'):
+-        for lr in LRS[v]:
++    jobs, outs = [], []
++    sel = None
++    for v in a.variants.split(','):
++        lrs = LRS[v]
++        if a.only_selected:
++            sel = json.load(open(f'{OUT}/select_v8.json'))
++            lrs = (sel['selected'][v],)
++        for lr in lrs:
+             for ep in a.epochs.split(','):
+                 ad = f'{traj_dir(v, lr)}/epoch_{int(ep):02d}'
+                 out = f'{GEN}/V8/{v}_lr{lr}_ep{int(ep):02d}'
++                outs.append(out)
+                 jobs.append({'name': f'genV8_{v}_{lr}_{ep}', 'log': f'{OUT}/logs/genV8_{v}_{lr}_{ep}.log', 'cmd': gen_cmd(v, 'V8', 'supervised', ad, out)})
+     run_jobs(jobs, per_gpu=a.per_gpu, peak_gb=a.peak_gb, tag='gen_v8')
++    n = expected_count('V8')
++    for o in outs:
++        tot, uniq = count_out(o)
++        if tot != n or uniq != n:
++            raise SystemExit(f'{o}: {tot} records / {uniq} unique, expected {n}')
++
++
++def cmd_extend(a):
++    sel = json.load(open(f'{OUT}/select_v8.json'))
++    jobs = []
++    for v in ('F', 'R'):
++        if sel['extend'][v]['extend_to_32']:
++            lr = sel['selected'][v]
++            jobs.append({'name': f'train_{v}_{lr}_to32', 'log': f'{OUT}/logs/train_{v}_{lr}_ext.log',
++                         'cmd': [sys.executable, 'sp75_train.py', '--run-dir', traj_dir(v, lr), '--variant', v, '--lr', lr, '--epochs', '32', '--workers', '2']})
++    if jobs:
++        run_jobs(jobs, per_gpu=1, peak_gb=a.peak_gb, tag='extend')
++        for v in ('F', 'R'):
++            if sel['extend'][v]['extend_to_32']:
++                check_trained(v, sel['selected'][v], 32, [32])
++
++
++def cmd_gen_e24(a):
++    lock = json.load(open(LOCK))
++    jobs = []
++    for name, v in lock['vlm'].items():
++        ad = v.get('adapter_dir') or 'none'
++        jobs.append({'name': f'genE24_{name}', 'log': f'{OUT}/logs/genE24_{name}.log', 'cmd': gen_cmd(v['variant'], 'E24', 'all', ad, v['dir'], lock=LOCK)})
++    for s in ('C', 'H'):
++        pass   # C/H 예측은 별도 CPU/GPU 소형 작업: 아래에서 순차 실행
++    run_jobs(jobs, per_gpu=a.per_gpu, peak_gb=a.peak_gb, tag='gen_e24')
++    n = expected_count('E24')
++    for name, v in lock['vlm'].items():
++        tot, uniq = count_out(v['dir'])
++        if tot != n or uniq != n:
++            raise SystemExit(f'{v["dir"]}: {tot}/{uniq}, expected {n}')
++    g = gpus()[0]
++    for s in ('C', 'H'):
++        t0 = time.time()
++        rc = subprocess.call([sys.executable, 'sp76_cpred.py', s, '--out', f'{OUT}/pred', '--lock', LOCK, '--gpu', g], stdout=open(f'{OUT}/logs/pred_{s}.log', 'a'), stderr=subprocess.STDOUT)
++        open(LEDGER, 'a').write(json.dumps({'tag': 'pred', 'name': f'pred_{s}', 'gpu': g, 'rc': rc, 'wall_s': time.time() - t0}) + '\n')
++        if rc != 0:
++            raise SystemExit(f'pred {s} failed rc={rc}')
+ 
+ 
+ def main():
+     ap = argparse.ArgumentParser()
+     sp = ap.add_subparsers(dest='c', required=True)
+-    t = sp.add_parser('train'); t.add_argument('--epochs', type=int, default=16)
+-    g = sp.add_parser('gen_v8'); g.add_argument('--epochs', default='8,16'); g.add_argument('--per-gpu', type=int, default=1); g.add_argument('--peak-gb', type=float, default=10.0)
++    t = sp.add_parser('train'); t.add_argument('--epochs', type=int, default=16); t.add_argument('--variants', default='F,R'); t.add_argument('--per-gpu', type=int, default=1)
++    t.add_argument('--peak-gb', type=float, default=11.5)
++    g = sp.add_parser('gen_v8'); g.add_argument('--epochs', default='8,16'); g.add_argument('--variants', default='F,R'); g.add_argument('--per-gpu', type=int, default=2)
++    g.add_argument('--peak-gb', type=float, default=10.0); g.add_argument('--only-selected', action='store_true')
++    e = sp.add_parser('extend'); e.add_argument('--peak-gb', type=float, default=11.5)
++    ge = sp.add_parser('gen_e24'); ge.add_argument('--per-gpu', type=int, default=2); ge.add_argument('--peak-gb', type=float, default=10.0)
+     a = ap.parse_args()
+-    os.makedirs(OUT, exist_ok=True)
+-    {'train': cmd_train, 'gen_v8': cmd_gen_v8}[a.c](a)
++    os.makedirs(f'{OUT}/logs', exist_ok=True)
++    {'train': cmd_train, 'gen_v8': cmd_gen_v8, 'extend': cmd_extend, 'gen_e24': cmd_gen_e24}[a.c](a)
+ 
+ 
+ if __name__ == '__main__':
+diff --git a/sp75_resume_test.py b/sp75_resume_test.py
+index 1fcbbd1..8f106e4 100644
+--- a/sp75_resume_test.py
++++ b/sp75_resume_test.py
+@@ -1,59 +1,128 @@
+-"""iter_075 학습 재개·단일 소유권 검사. 기준 run(ref)과 (A) epoch 중간 step 중단 후 재개, (B) epoch checkpoint 저장 직후(validation 전) 중단 후 재개를 비교한다.
+-동시 실행 거부(같은 run-dir 두 번째 프로세스)도 확인한다. 결과: results/iter_075/tests/resume/ (존재하면 중단)."""
+-import json, os, subprocess, sys, time
++"""iter_076 학습 재개·단일 소유권·수치 재현 검사 (원 iter_075 resume 검사의 보완판; 새 결과 경로 results/iter_076/tests/resume, 존재하면 중단).
+ 
+-BASE = 'results/iter_075/tests/resume'
+-COMMON = ['--variant', 'F', '--lr', '2e-4', '--epochs', '2', '--save-epochs', '1,2', '--seed', '17']
++같은 장치·동일 초기 checkpoint(base 초기화, seed17)·같은 batch/RNG에서 연속 실행과 저장-복구 실행을 대조한다.
++GPU0 체인(결정적 kernel): det_ref(연속) -> det_A(epoch 중간 step3 중단 후 재개 + 동시 중복 실행 거부) -> det_B(epoch checkpoint 직후, validation 전 중단 후 재개)
++GPU1 체인(동시): det_ref_g1(결정적, 장치 교차 대조) -> nd_ref1, nd_ref2(비결정 기본 설정, 1 epoch, 연속 반복 간 차이 측정)
++판정: 결정적 경로에서 A/B가 ref와 step별 loss·batch·RNG·checkpoint digest(adapter/optimizer/rng)·val_ce·adapter digest가 정확히 같아야 PASS.
++비결정 반복의 차이는 별도 기록하며 허용오차를 넓혀 통과시키지 않는다. FAIL이면 비정상 종료 코드.
++"""
++import json, os, subprocess, sys, threading, time
+ 
++BASE = 'results/iter_076/tests/resume'
++COMMON = ['--variant', 'F', '--lr', '2e-4', '--seed', '17']
++DET = ['--epochs', '2', '--save-epochs', '1,2', '--deterministic']
++ND = ['--epochs', '1', '--save-epochs', '1']
+ 
+-def cmd(run, gpu, extra=()):
++
++def cmd(run, gpu, extra):
+     return [sys.executable, 'sp75_train.py', '--run-dir', f'{BASE}/{run}', '--gpu', gpu, *COMMON, *extra]
+ 
+ 
+-def log(run):
++def call(run, gpu, extra, tag):
++    return subprocess.call(cmd(run, gpu, extra), stdout=open(f'{BASE}/{run}.{tag}.out', 'w'), stderr=subprocess.STDOUT)
++
++
++def events(run):
+     return [json.loads(l) for l in open(f'{BASE}/{run}/train_log.jsonl')]
+ 
+ 
++def steps(L):
++    out = {}
++    for r in L:
++        if 'loss' in r:
++            if r['step'] in out:
++                raise RuntimeError('duplicate logged step')   # 중복 step 허용 안 함
++            out[r['step']] = r
++    return out
++
++
++def ckpts(L):
++    return {r['step']: r['digests'] for r in L if r.get('event') == 'checkpoint'}
++
++
++def val(run, e):
++    return json.load(open(f'{BASE}/{run}/epoch_{e:02d}/val_ce.json'))
++
++
++def compare(a_run, b_run, epochs):
++    """a_run vs b_run: step별 loss/batch/RNG, checkpoint digest, val_ce, adapter digest 정확 일치 여부와 최초 불일치."""
++    La, Lb = events(a_run), events(b_run)
++    sa, sb = steps(La), steps(Lb)
++    res = {'n_steps': [len(sa), len(sb)], 'same_step_set': sorted(sa) == sorted(sb)}
++    first = None
++    for s in sorted(set(sa) & set(sb)):
++        if sa[s]['loss'] != sb[s]['loss'] and first is None:
++            first = {'step': s, 'loss_a': sa[s]['loss'], 'loss_b': sb[s]['loss'], 'abs_diff': abs(sa[s]['loss'] - sb[s]['loss']), 'grad_norm_a': sa[s]['grad_norm'], 'grad_norm_b': sb[s]['grad_norm']}
++    res['first_loss_mismatch'] = first
++    res['max_abs_loss_diff'] = max(abs(sa[s]['loss'] - sb[s]['loss']) for s in set(sa) & set(sb))
++    res['loss_exact_equal_all'] = all(sa[s]['loss'] == sb[s]['loss'] and sa[s]['grad_norm'] == sb[s]['grad_norm'] for s in set(sa) & set(sb))
++    res['batch_ids_token_sha_equal'] = all(sa[s]['batch_ids'] == sb[s]['batch_ids'] and sa[s]['batch_token_sha'] == sb[s]['batch_token_sha'] for s in set(sa) & set(sb))
++    res['rng_before_equal'] = all(sa[s]['rng_before'] == sb[s]['rng_before'] and sa[s]['opt_step_before'] == sb[s]['opt_step_before'] for s in set(sa) & set(sb))
++    res['lr_equal'] = all(sa[s]['lr'] == sb[s]['lr'] for s in set(sa) & set(sb))
++    ca, cb = ckpts(La), ckpts(Lb)
++    res['checkpoint_digests_equal_common_steps'] = {str(s): ca[s] == cb[s] for s in sorted(set(ca) & set(cb))}
++    res['val_ce'] = {str(e): [val(a_run, e)['val_ce'], val(b_run, e)['val_ce']] for e in epochs}
++    res['val_ce_equal'] = all(val(a_run, e)['val_ce'] == val(b_run, e)['val_ce'] for e in epochs)
++    res['adapter_digest_equal'] = all(val(a_run, e)['adapter_digest'] == val(b_run, e)['adapter_digest'] for e in epochs)
++    return res
++
++
++def chain0(res):
++    res['rc']['det_ref'] = call('det_ref', '0', DET, 'run')
++    # A: epoch 중간 checkpoint(step3) 직후 중단 -> 재개, 재개 중 동시 중복 실행은 거부되어야 함
++    res['rc']['det_A_stop'] = call('det_A', '0', DET + ['--stop-after-step', '3'], 'stop')
++    p = subprocess.Popen(cmd('det_A', '0', DET), stdout=open(f'{BASE}/det_A.resume.out', 'w'), stderr=subprocess.STDOUT)
++    time.sleep(40)
++    res['rc']['det_A_dup_concurrent'] = call('det_A', '0', DET, 'dup')
++    res['rc']['det_A_resume'] = p.wait()
++    # B: epoch checkpoint 저장 직후(validation 전) 중단 -> 재개에서 validation 복구
++    res['rc']['det_B_stop'] = call('det_B', '0', DET + ['--stop-after-epoch-ckpt', '1'], 'stop')
++    res['B_val_before_resume'] = os.path.exists(f'{BASE}/det_B/epoch_01/val_ce.json')
++    res['rc']['det_B_resume'] = call('det_B', '0', DET, 'resume')
++
++
++def chain1(res):
++    res['rc']['det_ref_g1'] = call('det_ref_g1', '1', DET, 'run')
++    res['rc']['nd_ref1'] = call('nd_ref1', '1', ND, 'run')
++    res['rc']['nd_ref2'] = call('nd_ref2', '1', ND, 'run')
++
++
+ def main():
+     if os.path.exists(BASE):
+         sys.exit('exists')
+     os.makedirs(BASE)
+-    res = {'rc': {}}
+-    # phase 1: ref(GPU0) || A 중단(GPU1)
+-    p_ref = subprocess.Popen(cmd('ref', '0'), stdout=open(f'{BASE}/ref.out', 'w'), stderr=subprocess.STDOUT)
+-    p_a = subprocess.Popen(cmd('A', '1', ['--stop-after-step', '3']), stdout=open(f'{BASE}/A1.out', 'w'), stderr=subprocess.STDOUT)
+-    res['rc']['A_stop'] = p_a.wait()
+-    # A 재개 (GPU1) 와 동시에 같은 run-dir에 두 번째 프로세스 -> 거부되어야 함
+-    p_a2 = subprocess.Popen(cmd('A', '1'), stdout=open(f'{BASE}/A2.out', 'w'), stderr=subprocess.STDOUT)
+-    time.sleep(20)
+-    p_dup = subprocess.Popen(cmd('A', '1'), stdout=open(f'{BASE}/A_dup.out', 'w'), stderr=subprocess.STDOUT)
+-    res['rc']['A_dup_concurrent'] = p_dup.wait()
+-    res['rc']['A_resume'] = p_a2.wait()
+-    res['rc']['ref'] = p_ref.wait()
+-    # phase 2: B 중단(epoch ckpt 직후) 후 재개 (GPU0)
+-    res['rc']['B_stop'] = subprocess.call(cmd('B', '0', ['--stop-after-epoch-ckpt', '1']), stdout=open(f'{BASE}/B1.out', 'w'), stderr=subprocess.STDOUT)
+-    res['B_val_before_resume'] = os.path.exists(f'{BASE}/B/epoch_01/val_ce.json')
+-    res['rc']['B_resume'] = subprocess.call(cmd('B', '0'), stdout=open(f'{BASE}/B2.out', 'w'), stderr=subprocess.STDOUT)
+-    # 비교
+-    lr, la, lb = log('ref'), log('A'), log('B')
+-    st = lambda L: {r['step']: r for r in L if 'loss' in r}
+-    sr, sa, sb = st(lr), st(la), st(lb)
+-    res['steps'] = {'ref': len(sr), 'A': len(sa), 'B': len(sb)}
+-    res['A_dup_steps_logged'] = len([r for r in la if 'loss' in r]) - len(sa)
+-    res['A_resume_events'] = [r for r in la if r.get('event') == 'resume']
+-    res['B_resume_events'] = [r for r in lb if r.get('event') == 'resume']
+-    res['max_abs_loss_diff_A_vs_ref'] = max(abs(sa[s]['loss'] - sr[s]['loss']) for s in sr)
+-    res['max_abs_loss_diff_B_vs_ref'] = max(abs(sb[s]['loss'] - sr[s]['loss']) for s in sr)
+-    res['batch_ids_equal_A'] = all(sa[s]['batch_ids'] == sr[s]['batch_ids'] and sa[s]['batch_token_sha'] == sr[s]['batch_token_sha'] for s in sr)
+-    res['batch_ids_equal_B'] = all(sb[s]['batch_ids'] == sr[s]['batch_ids'] and sb[s]['batch_token_sha'] == sr[s]['batch_token_sha'] for s in sr)
+-    res['rng_before_equal_A'] = all(sa[s]['rng_before'] == sr[s]['rng_before'] for s in sr)
+-    res['rng_before_equal_B'] = all(sb[s]['rng_before'] == sr[s]['rng_before'] for s in sr)
+-    ad = lambda r, e: json.load(open(f'{BASE}/{r}/epoch_{e:02d}/val_ce.json'))
+-    res['val_ce'] = {r: {e: ad(r, e)['val_ce'] for e in (1, 2)} for r in ('ref', 'A', 'B')}
+-    res['adapter_digest'] = {r: {e: ad(r, e)['adapter_digest'][:16] for e in (1, 2)} for r in ('ref', 'A', 'B')}
+-    res['dup_message'] = open(f'{BASE}/A_dup.out').read()[-200:]
++    res = {'rc': {}, 'gpu_env': os.environ.get('CUDA_VISIBLE_DEVICES')}
++    t = [threading.Thread(target=chain0, args=(res,)), threading.Thread(target=chain1, args=(res,))]
++    t0 = time.time()
++    [x.start() for x in t]
++    [x.join() for x in t]
++    res['wall_s'] = time.time() - t0
++    ok = {}
++    ok['all_rc_expected'] = all(res['rc'][k] == 0 for k in ('det_ref', 'det_A_resume', 'det_B_resume', 'det_ref_g1', 'nd_ref1', 'nd_ref2')) and \
++        res['rc']['det_A_stop'] == 5 and res['rc']['det_B_stop'] == 3 and res['rc']['det_A_dup_concurrent'] != 0
++    if ok['all_rc_expected']:
++        res['A_vs_ref'] = compare('det_A', 'det_ref', (1, 2))
++        res['B_vs_ref'] = compare('det_B', 'det_ref', (1, 2))
++        res['ref_g1_vs_ref'] = compare('det_ref_g1', 'det_ref', (1, 2))
++        res['nondet_repeat_nd1_vs_nd2'] = compare('nd_ref1', 'nd_ref2', (1,))
++        La = events('det_A')
++        Lb = events('det_B')
++        res['A_resume_events'] = [r for r in La if r.get('event') == 'resume']
++        res['B_resume_events'] = [r for r in Lb if r.get('event') == 'resume']
++        res['B_val_events'] = [r.get('epoch') for r in Lb if r.get('event') == 'val_ce']
++        res['dup_message'] = open(f'{BASE}/det_A.dup.out').read()[-300:]
++        for k in ('A_vs_ref', 'B_vs_ref'):
++            r = res[k]
++            ok[k] = bool(r['same_step_set'] and r['loss_exact_equal_all'] and r['batch_ids_token_sha_equal'] and r['rng_before_equal'] and r['lr_equal']
++                         and all(r['checkpoint_digests_equal_common_steps'].values()) and r['val_ce_equal'] and r['adapter_digest_equal'])
++        ok['resume_restored_equals_saved'] = all(e.get('restored_equals_saved') for e in res['A_resume_events'] + res['B_resume_events']) and len(res['A_resume_events']) == 1 and len(res['B_resume_events']) == 1
++        ok['B_val_missing_before_resume_and_recovered'] = (res['B_val_before_resume'] is False) and res['B_val_events'] == [1, 2]
++        ok['det_g1_vs_g0_info_only'] = res['ref_g1_vs_ref']['loss_exact_equal_all']   # 정보용(통과 조건 아님)
++    res['PASS'] = bool(ok.get('all_rc_expected') and ok.get('A_vs_ref') and ok.get('B_vs_ref') and ok.get('resume_restored_equals_saved') and ok.get('B_val_missing_before_resume_and_recovered'))
++    res['ok'] = ok
+     json.dump(res, open(f'{BASE}/resume_compare.json', 'w'), indent=1)
+-    print(json.dumps(res, indent=1))
++    print(json.dumps({'PASS': res['PASS'], 'ok': ok, 'rc': res['rc']}, indent=1))
++    sys.exit(0 if res['PASS'] else 1)
+ 
+ 
+ if __name__ == '__main__':
+diff --git a/sp75_train.py b/sp75_train.py
+index b28d325..28b3034 100644
+--- a/sp75_train.py
++++ b/sp75_train.py
+@@ -2,7 +2,11 @@
+ 
+ g71_train.py의 checkpoint/재개/상태 digest 패턴을 3영상 grade task로 인자화했다. 기준 loss는 공식 forward logits의 float32 CE 합이며
+ 시작 시 공식 labels loss와 대조한다(허용 오차 확대 없음: 상대 1e-6). 학습 ID는 sp75_data manifest의 T24 supervised(ordinal 1,3,5)만, validation은 V8 supervised만.
+-사용: python sp75_train.py --run-dir D --variant F|R --lr 2e-4 --epochs 16 --gpu 0
++사용: python sp75_train.py --run-dir D --variant F|R --lr 2e-4 --epochs 16 --gpu 0 [--deterministic]
++
++iter_076 변경: (1) loss gate는 PASS/FAIL 상태·유한 수치·상대오차·token 수·모델/입력/코드 provenance를 모두 검사하며 실패·손상·불일치 파일은 학습을 차단한다
++(재실행으로 우회 불가). (2) 비LoRA parameter 동결을 객체 단위(수·numel·byte>0, optimizer 미포함, 시작/종료 전체 byte digest 일치)로 검사한다.
++(3) --deterministic: 결정적 kernel(기술 검사용; config digest에 포함).
+ """
+ import argparse, hashlib, json, math, os, sys, time
+ 
+@@ -32,6 +36,39 @@ def file_sha(p):
+     return hashlib.sha256(open(p, 'rb').read()).hexdigest()
+ 
+ 
++GATE_REL_TOL = 1e-6
++
++
++def gate_provenance(variant, train_rows, tin, code):
++    return {'model_revision': generate.MODEL_REVISION, 'variant': variant, 'train_inputs_digest': tin, 'row_id': train_rows[0]['id'], 'code': code,
++            'prompt_sha256': hashlib.sha256(V.PROMPTS[variant].encode()).hexdigest()}
++
++
++def validate_gate(gate, prov):
++    """loss gate 기록 검증. returns 문제 목록(빈 리스트면 PASS)."""
++    bad = []
++    if not isinstance(gate, dict):
++        return ['gate is not a dict']
++    if gate.get('status') != 'PASS':
++        bad.append(f"status={gate.get('status')!r}")
++    keys = ('official_loss', 'logits_f32_ce_mean', 'loss_sum_over_n')
++    vals = [gate.get(k) for k in keys]
++    if not all(isinstance(v, (int, float)) and math.isfinite(v) for v in vals):
++        bad.append('non-finite or missing loss values')
++    else:
++        rel = abs(vals[0] - vals[2]) / max(abs(vals[0]), 1e-30)
++        if rel > GATE_REL_TOL:
++            bad.append(f'relative diff {rel} > {GATE_REL_TOL}')
++        if abs(gate.get('rel_diff_official_vs_loss_sum', -1) - rel) > 1e-12:
++            bad.append('stored rel_diff inconsistent with stored losses')
++    n1, n2 = gate.get('n_valid_tokens'), gate.get('n_valid_independent')
++    if not (isinstance(n1, int) and n1 > 0 and n1 == n2):
++        bad.append(f'valid token counts {n1} vs {n2}')
++    if gate.get('provenance') != prov:
++        bad.append('provenance (model/inputs/code/prompt) differs from current run')
++    return bad
++
++
+ def load_rows(split):
+     man = D.load_manifest()
+     rows = [r for r in man['rows'] if r['split'] == split and r['position_set'] == 'supervised' and not r['excluded']]
+@@ -89,7 +126,10 @@ def main():
+     ap.add_argument('--stop-after-epoch-ckpt', type=int, default=None)
+     ap.add_argument('--train-split', default='T24')
+     ap.add_argument('--val-split', default='V8')
++    ap.add_argument('--deterministic', action='store_true', help='결정적 kernel (기술 검사용)')
+     a = ap.parse_args()
++    if a.deterministic:
++        os.environ['CUBLAS_WORKSPACE_CONFIG'] = ':4096:8'
+     if a.gpu is not None:
+         inh = os.environ.get('CUDA_VISIBLE_DEVICES', '').split(',')
+         if a.gpu not in inh:
+@@ -113,6 +153,19 @@ def run(a, reclaimed):
+     train_rows, val_rows = load_rows(a.train_split), load_rows(a.val_split)
+     assert not {r['patient'] for r in train_rows} & {r['patient'] for r in val_rows}
+     save_epochs = {int(x) for x in a.save_epochs.split(',')}
++    code = {f: file_sha(f) for f in CODE}
++    tin, vin = inputs_digest(train_rows, a.variant), inputs_digest(val_rows, a.variant)
++    prov = gate_provenance(a.variant, train_rows, tin, code)
++    gate_path = os.path.join(a.run_dir, 'loss_gate.json')
++    if os.path.exists(gate_path):   # 모델 적재 전에 기존 gate를 검증한다. 실패·손상·불일치면 학습하지 않는다.
++        try:
++            problems = validate_gate(json.load(open(gate_path)), prov)
++        except Exception as ex:
++            problems = [f'unreadable gate: {ex!r}']
++        if problems:
++            sys.exit(f'existing loss_gate.json blocks training: {problems}')
++    if a.deterministic:
++        T.set_deterministic(torch)
+     T.seed_all(torch, a.seed)
+     _, proc, model = generate.load_model()
+     names = lora.apply_lora(model, CFG['r'], CFG['alpha'], CFG['dropout'], seed=a.seed)
+@@ -121,11 +174,9 @@ def run(a, reclaimed):
+     model.config.use_cache = False
+     params = list(lora.lora_params(model).values())
+     init_digest = lora.state_digest(lora.lora_state_dict(model))
+-    tin, vin = inputs_digest(train_rows, a.variant), inputs_digest(val_rows, a.variant)
+-    code = {f: file_sha(f) for f in CODE}
+     cfg = dict(CFG, lr=a.lr, seed=a.seed, variant=a.variant, microbatch=1, n_train=len(train_rows), n_val=len(val_rows), model_revision=generate.MODEL_REVISION,
+                n_lora_targets=len(names), n_trainable=sum(p.numel() for p in params), train_inputs_digest=tin, val_inputs_digest=vin, init='base',
+-               init_adapter_digest=init_digest, save_epochs=sorted(save_epochs), code=code, manifest_sha256=file_sha(f'{D.DATA}/manifest.json'))
++               init_adapter_digest=init_digest, save_epochs=sorted(save_epochs), code=code, deterministic=bool(a.deterministic), manifest_sha256=file_sha(f'{D.DATA}/manifest.json'))
+     tdig = hashlib.sha256(json.dumps(cfg, sort_keys=True, default=str).encode()).hexdigest()
+     cfg_path = os.path.join(a.run_dir, 'train_config.json')
+     if os.path.exists(cfg_path):
+@@ -133,20 +184,31 @@ def run(a, reclaimed):
+             sys.exit('train config (LR/inputs/code/manifest) differs from existing run-dir; refusing to resume')
+     else:
+         json.dump({'train_digest': tdig, 'config': cfg, 'env': generate.env_info(torch, proc, model)}, open(cfg_path, 'w'), indent=1, default=str)
+-    # 공식 loss 대조 gate (이전 CE 실패를 허용 오차로 숨기지 않는다)
+-    gate_path = os.path.join(a.run_dir, 'loss_gate.json')
++    # 공식 loss 대조 gate (이전 CE 실패를 허용 오차로 숨기지 않는다). 기록은 원자적으로 저장하고 존재만으로 통과시키지 않는다.
+     if not os.path.exists(gate_path):
+         ex = V.build_example(proc, V.load_images(train_rows[0]['inputs'][a.variant]), V.PROMPTS[a.variant], str(train_rows[0]['grade']))
+         model.eval()
+         with torch.no_grad():
+             chk = V.check_loss(torch, model, V.to_cuda(V.collate([ex], tok.pad_token_id)))
+         model.train()
+-        rel = abs(chk['official_loss'] - chk['loss_sum_over_n']) / abs(chk['official_loss'])
+-        chk['rel_diff_official_vs_loss_sum'] = rel
+-        json.dump(chk, open(gate_path, 'w'))
+-        if rel > 1e-6 or chk['n_valid_tokens'] != chk['n_valid_independent']:
++        chk['rel_diff_official_vs_loss_sum'] = abs(chk['official_loss'] - chk['loss_sum_over_n']) / max(abs(chk['official_loss']), 1e-30)
++        chk['provenance'] = prov
++        chk['status'] = 'PASS'
++        chk['status'] = 'PASS' if not validate_gate(dict(chk), prov) else 'FAIL'
++        T.atomic_json(chk, gate_path)
++        if chk['status'] != 'PASS':
+             sys.exit(f'official loss gate failed {chk}')
+     opt = torch.optim.AdamW(params, lr=a.lr, betas=tuple(CFG['betas']), eps=CFG['eps'], weight_decay=CFG['weight_decay'])
++    split = lora.split_report(model, params)
++    if split['non_lora_requires_grad'] or split['lora_requires_grad_false'] or split['optimizer_contains_non_lora'] or not split['optimizer_lora_covered']:
++        sys.exit(f'freeze check failed: {split}')
++    frz0, n0, b0 = lora.exact_digest(model)
++    fz_path = os.path.join(a.run_dir, 'freeze_start.json')
++    if os.path.exists(fz_path):
++        if json.load(open(fz_path))['non_lora_exact_digest'] != frz0:
++            sys.exit('non-LoRA parameters differ from the digest recorded at run start (frozen base changed across resume)')
++    else:
++        T.atomic_json({'non_lora_exact_digest': frz0, 'n_params': n0, 'n_bytes': b0, 'split': split}, fz_path)
+     n_tr = len(train_rows)
+     spe = math.ceil(n_tr / CFG['eff_batch'])
+     step, epoch0, pos0 = 0, 0, 0
+@@ -273,6 +335,10 @@ def run(a, reclaimed):
+         if e in save_epochs:
+             do_val(e)
+         pos0 = 0
++    frz1, n1, b1 = lora.exact_digest(model)
++    if frz1 != frz0:
++        raise RuntimeError('non-LoRA parameters changed during training')
++    T.atomic_json({'non_lora_exact_digest': frz1, 'n_params': n1, 'n_bytes': b1, 'equals_start': True, 'step': step}, os.path.join(a.run_dir, 'freeze_end.json'))
+     print('training complete', flush=True)
+ 
+ 
+diff --git a/sp75_verify.py b/sp75_verify.py
+index 032e9b3..4a2ff8a 100644
+--- a/sp75_verify.py
++++ b/sp75_verify.py
+@@ -1,11 +1,14 @@
+-"""iter_075 독립 재계산: production metrics/eval을 import하지 않고 원시 출력에서 주지표와 paired bootstrap을 다시 계산한다.
++"""iter_076 독립 재계산: production metrics/eval을 import하지 않고 원시 출력에서 주지표와 paired bootstrap을 다시 계산한다.
+ (manifest의 grade와 원시 gen JSONL/예측 JSON만 사용; parser·metric·교환·prior를 별도 구현). 결과는 eval/independent_verify.json (존재하면 중단).
+ """
+ import glob, hashlib, json, os, re, sys
+ import numpy as np
+ 
+-OUT = 'results/iter_075'
+-man = json.load(open(f'{OUT}/data/manifest.json'))
++OUT = 'results/iter_076'
++DATA = 'results/iter_075/data'   # 읽기 전용 입력
++if os.path.exists(f'{OUT}/eval/independent_verify.json'):
++    sys.exit('exists')
++man = json.load(open(f'{DATA}/manifest.json'))
+ lock = json.load(open(f'{OUT}/eval/eval_lock.json'))
+ rep = json.load(open(f'{OUT}/eval/report.json'))
+ E = sorted([r for r in man['rows'] if r['split'] == 'E24' and not r['excluded']], key=lambda r: (int(r['patient']), r['ordinal']))
+@@ -37,7 +40,9 @@ def vlm_preds(d):
+ 
+ 
+ def jpreds(p):
+-    d = {x['id']: x['pred'] for x in json.load(open(p))['preds']}
++    items = json.load(open(p))['preds']
++    d = {x['id']: x['pred'] for x in items}
++    assert len(d) == len(items) == len(E) and set(d) == {r['id'] for r in E}, f'{p}: duplicate/missing/extra prediction ids'
+     return [d[r['id']] for r in E]
+ 
+ 
+@@ -131,7 +136,35 @@ for key, bt in rep['paired_bootstrap_patient_resampling'].items():
+         r = boot(xa, xb, ix)
+         res['bootstrap'][f'{key}:{pname}'] = r
+         res['max_abs_diff_vs_report'] = max(res['max_abs_diff_vs_report'], abs(r['point'] - bt[pname]['point']), abs(r['ci95'][0] - bt[pname]['ci95'][0]), abs(r['ci95'][1] - bt[pname]['ci95'][1]))
+-if os.path.exists(f'{OUT}/eval/independent_verify.json'):
+-    sys.exit('exists')
+-json.dump(res, open(f'{OUT}/eval/independent_verify.json', 'w'), indent=1)
++# 판정 flags 독립 재계산 (원 계획 경계: <=1.0, >=0.20, H보다 0.10 초과로 나쁨, C가 best VLM보다 0.10 이상 나쁘지 않음)
++flags = rep['predeclared_flags_point_estimates']
++bt = res['bootstrap']
++chk = {}
++for v in ('F_adapted', 'R_adapted'):
++    h = res['systems'][v]['held']
++    chk[v] = {'le_1.0': h <= 1.0,
++              'better_than_prior_ordinal_by_0.20': -bt[f'{v}_minus_prior_ordinal:held']['point'] >= 0.20,
++              'better_than_swap_by_0.20': -bt[f'{v}_minus_swap:held']['point'] >= 0.20,
++              'better_than_C_by_0.20': -bt[f'{v}_minus_C:held']['point'] >= 0.20,
++              'H_better_than_vlm_by_more_than_0.10': (h - res['systems']['H']['held']) > 0.10}
++    chk[v]['all_candidate_conditions_point'] = all(chk[v][k] for k in ('le_1.0', 'better_than_prior_ordinal_by_0.20', 'better_than_swap_by_0.20', 'better_than_C_by_0.20'))
++best = min(('F_adapted', 'R_adapted'), key=lambda v: (res['systems'][v]['held'], v))
++chk['best_vlm'] = best
++chk['C_not_worse_than_best_vlm_by_0.10'] = (res['systems']['C']['held'] - res['systems'][best]['held']) < 0.10
++mism = []
++for v in ('F_adapted', 'R_adapted'):
++    for k, val in chk[v].items():
++        if flags[v][k] != val:
++            mism.append((v, k))
++if flags['best_vlm'] != best or flags['C_not_worse_than_best_vlm_by_0.10'] != chk['C_not_worse_than_best_vlm_by_0.10']:
++    mism.append('best_vlm/C_not_worse')
++res['flags_recomputed'] = chk
++res['flag_mismatches'] = mism
++res['lock_seal_sha256'] = {f: hashlib.sha256(open(f, 'rb').read()).hexdigest() for f in (f'{OUT}/eval/eval_lock.json', f'{OUT}/eval/eval_seal.json', f'{OUT}/eval/report.json', f'{OUT}/eval/per_row.json')}
++res['PASS'] = bool(res['max_abs_diff_vs_report'] < 1e-9 and not mism)
++tmp = f'{OUT}/eval/independent_verify.json.tmp'
++json.dump(res, open(tmp, 'w'), indent=1)
++os.replace(tmp, f'{OUT}/eval/independent_verify.json')
++if not res['PASS']:
++    sys.exit(f'VERIFY FAIL: max diff {res["max_abs_diff_vs_report"]} flag mismatches {mism}')
+ print('max abs diff vs report', res['max_abs_diff_vs_report'])
+diff --git a/sp76_costreport.py b/sp76_costreport.py
+new file mode 100644
+index 0000000..915c0cf
+--- /dev/null
++++ b/sp76_costreport.py
+@@ -0,0 +1,77 @@
++"""iter_076 비용 보고: results/iter_076/cost/{F,R,C,H}_block{1..4}.json (+blocks_ledger.json)에서 paired block 비율을 계산한다.
++
++- 전체 시간 = 원 T2 읽기부터 답변 저장까지 + 모델/RF 적재 포함(wall_incl_load_s) / 적재 제외(process_s)를 모두 보고. VLM best는 eval report의 held primary가 더 좋은 적응 VLM.
++- 원 계획 음성 투자 판단의 비용 조건: 네 block 모두 (C 전체 시간 / best VLM 전체 시간) <= 0.5 (적재 포함 기준을 정식 flag로, 제외 기준은 보조).
++- 정합성: 같은 시스템의 block 간 답변 동일 여부, F/R 답변이 V8 생성 출력(같은 adapter)과 일치하는지.
++- GPU device-seconds: F/R/C는 GPU 1장 점유(wall x 1), H는 CPU 작업(GPU 0)으로 표기. GT anatomy(mask) 획득 비용은 미측정 oracle 비용.
++결과: results/iter_076/cost/cost_report.json (존재하면 중단).
++"""
++import glob, json, os, sys
++
++import numpy as np
++
++OUT = 'results/iter_076'
++COST = f'{OUT}/cost'
++
++
++def main():
++    dst = f'{COST}/cost_report.json'
++    if os.path.exists(dst):
++        sys.exit('exists')
++    blk = {s: {} for s in 'FRCH'}
++    for f in sorted(glob.glob(f'{COST}/*_block*.json')):
++        d = json.load(open(f))
++        if 'system' in d:
++            blk[d['system']][d['block']] = d
++    nb = sorted(set(blk['F']) & set(blk['R']) & set(blk['C']) & set(blk['H']))
++    if len(nb) != 4:
++        sys.exit(f'need 4 complete blocks, have {nb}')
++    ledger = json.load(open(f'{COST}/blocks_ledger.json'))
++    if any(x['rc'] != 0 for x in ledger):
++        sys.exit('a cost worker failed')
++    rep = json.load(open(f'{OUT}/eval/report.json'))
++    held = {n: rep['systems'][n]['held']['class_std_mae'] for n in ('F_adapted', 'R_adapted')}
++    best = min(held, key=lambda n: (held[n], n))
++    bv = best[0]
++    res = {'best_vlm': best, 'held_primary': held, 'blocks': {}, 'n_requests': {s: blk[s][nb[0]]['n_requests'] for s in 'FRCH'}}
++    for b in nb:
++        r = {}
++        for s in 'FRCH':
++            d = blk[s][b]
++            r[s] = {'wall_incl_load_s': d['wall_incl_load_s'], 'process_s': d['process_s'], 'load_s': d['load_s'], 'per_request_s_mean': d['per_request_s_mean'],
++                    'gpu_device_seconds_incl_load': d['wall_incl_load_s'] if s != 'H' else 0.0, 'gpu_device_seconds_excl_load': d['process_s'] if s != 'H' else 0.0}
++        for s in 'CH':
++            r[f'{s}_over_bestVLM_incl_load'] = r[s]['wall_incl_load_s'] / r[bv]['wall_incl_load_s']
++            r[f'{s}_over_bestVLM_excl_load'] = r[s]['process_s'] / r[bv]['process_s']
++        res['blocks'][str(b)] = r
++    res['flags'] = {'C_le_half_of_bestVLM_all4_blocks_incl_load': all(res['blocks'][str(b)]['C_over_bestVLM_incl_load'] <= 0.5 for b in nb),
++                    'C_le_half_of_bestVLM_all4_blocks_excl_load': all(res['blocks'][str(b)]['C_over_bestVLM_excl_load'] <= 0.5 for b in nb),
++                    'H_le_half_of_bestVLM_all4_blocks_incl_load': all(res['blocks'][str(b)]['H_over_bestVLM_incl_load'] <= 0.5 for b in nb),
++                    'H_le_half_of_bestVLM_all4_blocks_excl_load': all(res['blocks'][str(b)]['H_over_bestVLM_excl_load'] <= 0.5 for b in nb)}
++    res['ratio_ranges'] = {k: [min(res['blocks'][str(b)][k] for b in nb), max(res['blocks'][str(b)][k] for b in nb)] for k in
++                           ('C_over_bestVLM_incl_load', 'C_over_bestVLM_excl_load', 'H_over_bestVLM_incl_load', 'H_over_bestVLM_excl_load')}
++    # 정합성
++    res['answers_identical_across_blocks'] = {s: all(blk[s][b]['answers'] == blk[s][nb[0]]['answers'] for b in nb) for s in 'FRCH'}
++    sel = json.load(open(f'{OUT}/select_final.json'))['final']
++    agree = {}
++    for v in 'FR':
++        gdir = f"{OUT}/gen/V8/{v}_lr{sel[v]['lr']}_ep{sel[v]['epoch']:02d}"
++        recs = {}
++        for f in glob.glob(f'{gdir}/gen_worker*.jsonl'):
++            for ln in open(f):
++                if ln.strip():
++                    x = json.loads(ln)
++                    recs[x['id']] = x['parsed']
++        ans = blk[v][nb[0]]['answers']
++        agree[v] = {'n': len(ans), 'n_equal_to_v8_generation_same_adapter': sum(1 for k, a in ans.items() if recs.get(k) == a)}
++    res['f_r_answers_vs_v8_generation'] = agree
++    res['notes'] = ['GT anatomy(mask) 획득 비용은 모든 시스템에서 미측정(oracle 영역 사용)', 'H는 원 volume의 image+mask read, PyRadiomics, RF predict를 포함하며 RF 학습/적재는 load로 분리',
++                    'GPU device-seconds는 점유 GPU 1장 x wall 기준이며 H는 CPU 작업']
++    tmp = dst + '.tmp'
++    json.dump(res, open(tmp, 'w'), indent=1)
++    os.replace(tmp, dst)
++    print(json.dumps({'flags': res['flags'], 'ratio_ranges': res['ratio_ranges'], 'agree': agree, 'identical': res['answers_identical_across_blocks']}, indent=1))
++
++
++if __name__ == '__main__':
++    main()
+diff --git a/sp76_cpred.py b/sp76_cpred.py
+new file mode 100644
+index 0000000..4d1cc3b
+--- /dev/null
++++ b/sp76_cpred.py
+@@ -0,0 +1,98 @@
++"""iter_076: iter_075에서 선택·고정한 C(ResNet18)/H(radiomics RF)의 E24 예측을 새 결과 경로에 생성한다. 선택·학습은 재실행하지 않는다.
++
++sp75_c.py / sp75_h.py는 수정하지 않고 import해서 같은 함수를 쓴다(선택 파일의 code hash가 현재 파일과 같을 때만 실행 = 읽기 전용 재사용).
++사용: python sp76_cpred.py C|H --out results/iter_076/pred --lock results/iter_076/eval/eval_lock.json [--gpu 0]
++E24 예측은 사전 eval_lock이 있을 때만 생성한다. 출력이 존재하면 중단.
++"""
++import argparse, hashlib, json, os, sys, time
++
++SEL_DIR = {'C': 'results/iter_075/C', 'H': 'results/iter_075/H'}
++
++
++def sha_file(p):
++    return hashlib.sha256(open(p, 'rb').read()).hexdigest()
++
++
++def check_lock(path):
++    lock = json.load(open(path))
++    for f, h in lock['files'].items():
++        if sha_file(f) != h:
++            sys.exit(f'locked file changed: {f}')
++    return lock
++
++
++def main():
++    ap = argparse.ArgumentParser()
++    ap.add_argument('system', choices=['C', 'H'])
++    ap.add_argument('--out', required=True)
++    ap.add_argument('--lock', required=True)
++    ap.add_argument('--split', default='E24')
++    ap.add_argument('--gpu', default=None)
++    a = ap.parse_args()
++    lock = check_lock(a.lock)
++    if a.gpu is not None:
++        inh = os.environ.get('CUDA_VISIBLE_DEVICES', '').split(',')
++        if a.gpu not in inh:
++            sys.exit(f'gpu {a.gpu} not in inherited {inh}')
++        os.environ['CUDA_VISIBLE_DEVICES'] = a.gpu
++    out_path = f'{a.out}/pred_{a.system}_{a.split}.json'
++    if lock['json_systems'].get(a.system) != out_path:
++        sys.exit(f'{out_path} not registered in lock')
++    if os.path.exists(out_path):
++        sys.exit('prediction exists')
++    os.makedirs(a.out, exist_ok=True)
++    sel_dir = SEL_DIR[a.system]
++    sel = json.load(open(f'{sel_dir}/selection.json'))
++    for f, h in sel['code'].items():
++        if sha_file(f) != h:
++            sys.exit(f'code changed since selection: {f}')
++    t0 = time.time()
++    import numpy as np
++    import sp75_data as D
++    if sel['manifest_sha256'] != sha_file(f'{D.DATA}/manifest.json'):
++        sys.exit('manifest changed since selection')
++    rows_all = D.load_manifest()['rows']
++    D.load_split()
++    rows = sorted([r for r in rows_all if r['split'] == a.split and not r['excluded']], key=lambda r: (int(r['patient']), r['ordinal']))
++    if a.system == 'C':
++        import torch
++        import sp75_c as C
++        s = sel['selected']
++        ck = f"{sel_dir}/lr{s['lr']}/epoch_{s['epoch']:02d}.pt"
++        C.check_rows(rows)
++        net = C.Net(torch)
++        blob = torch.load(ck, map_location='cpu', weights_only=True)
++        net.trunk.load_state_dict(blob['trunk'])
++        net.head.load_state_dict(blob['head'])
++        for m in net.modules():
++            m.cuda()
++        tens = [C.row_tensor(r) for r in rows]
++        pr = C.evaluate(torch, net, rows, tens)
++        meta = {'checkpoint': ck, 'checkpoint_sha256': sha_file(ck)}
++    else:
++        import sp75_h as H
++        from sklearn.ensemble import RandomForestClassifier
++        s = sel['selected']
++        tr = sorted([r for r in rows_all if r['split'] == 'T24' and r['position_set'] == 'supervised' and not r['excluded']], key=lambda r: (int(r['patient']), r['ordinal']))
++        cache = json.load(open(f'{sel_dir}/features_T24_V8.json'))
++        Xtr, names = H.matrix(tr, cache)
++        med, keep = H.prep_fit(Xtr)
++        rf = RandomForestClassifier(n_estimators=500, random_state=17, n_jobs=4, **s['cfg']).fit(H.prep_apply(Xtr, med, keep), np.array([r['grade'] for r in tr]))
++        ec = H.feats_for(rows, H.extractor(), f'{a.out}/features_{a.split}.json')
++        X, _ = H.matrix(rows, ec, names)
++        p_ = rf.predict_proba(H.prep_apply(X, med, keep))
++        pr = np.zeros((len(rows), 5))
++        for j, c in enumerate(list(rf.classes_)):
++            pr[:, c - 1] = p_[:, j]
++        meta = {'features_T24_V8_sha256': sha_file(f'{sel_dir}/features_T24_V8.json')}
++    preds = [{'id': r['id'], 'patient': r['patient'], 'ordinal': r['ordinal'], 'position_set': r['position_set'], 'probs': [float(x) for x in pr[i]],
++              'pred': int(np.argmax(pr[i])) + 1} for i, r in enumerate(rows)]
++    tmp = out_path + '.tmp'
++    json.dump({'system': a.system, 'selected': s, 'selection_sha256': sha_file(f'{sel_dir}/selection.json'), 'split': a.split, 'n': len(preds), 'preds': preds,
++               'elapsed_s': time.time() - t0, **meta}, open(tmp, 'w'), indent=1)
++    os.replace(tmp, out_path)
++    print('wrote', len(preds), out_path)
++
++
++if __name__ == '__main__':
++    main()
+diff --git a/sp76_freeze.py b/sp76_freeze.py
+new file mode 100644
+index 0000000..68490ce
+--- /dev/null
++++ b/sp76_freeze.py
+@@ -0,0 +1,90 @@
++"""iter_076 동결 검사 (GPU 1장): LoRA parameter 객체와 비LoRA parameter를 정확히 분리하고 실제 update 전후 전체 byte digest를 비교한다.
++
++PASS 조건(모두): 이름 정규화 충돌 없음, 비LoRA/LoRA parameter 수·numel·byte > 0, 비LoRA requires_grad=0, optimizer가 LoRA 전체만 포함(비LoRA 0),
++3회 실제 optimizer update 후 비LoRA exact digest 불변 + LoRA digest 변화 + LoRA parameter 일부 값 변화, 이전 base_digest(정규화 이름) 도 불변.
++또 iter_075 tech_F.json의 base_frozen digest(e3e19f4387647450)가 표준 빈 입력 SHA256(e3b0c44298fc1c14...)이 아님을 대조하고 현재 정확한 parameter 집합·byte 수를 기록한다.
++결과 파일이 존재하면 중단. 실패(FAIL)이면 비정상 종료.
++사용: python sp76_freeze.py --out results/iter_076/tests/freeze_check.json --gpu 0
++"""
++import argparse, hashlib, json, os, sys
++
++import sp75_data as D
++import sp75_vlm as V
++from rsna_diag import generate, lora
++from rsna_diag import train as T
++
++
++def main():
++    ap = argparse.ArgumentParser()
++    ap.add_argument('--out', required=True)
++    ap.add_argument('--gpu', default=None)
++    a = ap.parse_args()
++    if a.gpu is not None:
++        inh = os.environ.get('CUDA_VISIBLE_DEVICES', '').split(',')
++        if a.gpu not in inh:
++            sys.exit(f'gpu {a.gpu} not in inherited {inh}')
++        os.environ['CUDA_VISIBLE_DEVICES'] = a.gpu
++    if os.path.exists(a.out):
++        sys.exit('exists')
++    import torch
++    T.seed_all(torch, 17)
++    man = D.load_manifest()
++    rows = sorted([r for r in man['rows'] if r['split'] == 'T24' and r['position_set'] == 'supervised' and not r['excluded']], key=lambda r: (int(r['patient']), r['ordinal']))[:2]
++    _, proc, model = generate.load_model()
++    res = {'empty_sha256': hashlib.sha256(b'').hexdigest()}
++    base_pre = lora.base_digest(model)
++    res['iter075_style_base_digest_prefix'] = base_pre[:16]
++    res['iter075_digest_equals_empty_input_sha256'] = base_pre == res['empty_sha256']
++    res['iter075_recorded_digest_prefix_e3e19f4387647450_matches_now'] = base_pre[:16] == 'e3e19f4387647450'
++    names = lora.apply_lora(model, 16, 32, 0.0, seed=17)
++    params = list(lora.lora_params(model).values())
++    opt = torch.optim.AdamW(params, lr=2e-4, weight_decay=0.01)
++    res['split'] = lora.split_report(model, params)
++    res['n_lora_targets'] = len(names)
++    n0, c0, b0 = lora.exact_digest(model)
++    l0, lc0, lb0 = lora.exact_digest(model, lora=True)
++    res['non_lora'] = {'digest_before': n0[:16], 'n_params': c0, 'n_bytes': b0}
++    res['lora_before'] = {'digest': l0[:16], 'n_params': lc0, 'n_bytes': lb0}
++    snap0 = lora.lora_state_dict(model)
++    model.gradient_checkpointing_enable(gradient_checkpointing_kwargs={'use_reentrant': False})
++    model.config.use_cache = False
++    model.train()
++    losses = []
++    for it in range(3):
++        for r in rows:
++            ex = V.build_example(proc, V.load_images(r['inputs']['F']), V.PROMPTS['F'], str(r['grade']))
++            ls, n = V.loss_sum(torch, model, V.to_cuda(V.collate([ex], proc.tokenizer.pad_token_id)))
++            (ls / (2 * len(rows))).backward()
++            losses.append(float(ls) / n)
++        gn = float(torch.nn.utils.clip_grad_norm_(params, 1.0))
++        assert gn == gn and gn < float('inf')
++        opt.step()
++        opt.zero_grad(set_to_none=True)
++    n1, c1, b1 = lora.exact_digest(model)
++    l1, _, _ = lora.exact_digest(model, lora=True)
++    snap1 = lora.lora_state_dict(model)
++    res['non_lora']['digest_after'] = n1[:16]
++    res['non_lora']['unchanged'] = n1 == n0 and (c1, b1) == (c0, b0)
++    res['lora_after'] = {'digest': l1[:16], 'changed': l1 != l0, 'n_tensors_changed': sum(1 for k in snap0 if not torch.equal(snap0[k], snap1[k]))}
++    base_post = lora.base_digest(model)
++    res['iter075_style_base_digest_unchanged_after_lora_and_updates'] = base_pre == base_post
++    res['losses'] = losses
++    sp = res['split']
++    res['checks'] = {'counts_positive': all(sp[k] > 0 for k in ('n_lora', 'n_non_lora', 'numel_lora', 'numel_non_lora', 'bytes_lora', 'bytes_non_lora')),
++                     'non_lora_requires_grad_zero': sp['non_lora_requires_grad'] == 0 and sp['lora_requires_grad_false'] == 0,
++                     'optimizer_only_lora': sp['optimizer_contains_non_lora'] == 0 and sp['optimizer_lora_covered'] and sp['optimizer_n_params'] == sp['n_lora'],
++                     'non_lora_exact_digest_unchanged': res['non_lora']['unchanged'], 'lora_changed': res['lora_after']['changed'] and res['lora_after']['n_tensors_changed'] > 0,
++                     'iter075_style_digest_unchanged': res['iter075_style_base_digest_unchanged_after_lora_and_updates'],
++                     'finite_losses': all(x == x and abs(x) < 1e6 for x in losses)}
++    res['PASS'] = all(res['checks'].values())
++    os.makedirs(os.path.dirname(a.out), exist_ok=True)
++    tmp = a.out + '.tmp'
++    json.dump(res, open(tmp, 'w'), indent=1)
++    os.replace(tmp, a.out)
++    print(json.dumps({'PASS': res['PASS'], 'checks': res['checks'], 'split': sp, 'non_lora': res['non_lora'], 'e3e19f_vs_empty': [res['iter075_digest_equals_empty_input_sha256'],
++                                                                                                                                res['iter075_recorded_digest_prefix_e3e19f4387647450_matches_now']]}, indent=1))
++    sys.exit(0 if res['PASS'] else 1)
++
++
++if __name__ == '__main__':
++    main()
+diff --git a/sp76_recover.py b/sp76_recover.py
+new file mode 100644
+index 0000000..e0366ad
+--- /dev/null
++++ b/sp76_recover.py
+@@ -0,0 +1,63 @@
++"""iter_076 복구 manifest: 기준 계획 hash, 코드 HEAD, 호스트 프로세스·GPU 상태, iter_075 보존 산출물의 sha256과 lock 소유권을 기록한다.
++원본(iter_075)은 읽기만 한다. 결과: results/iter_076/recovery_manifest.json (존재하면 중단).
++"""
++import hashlib, json, os, subprocess, sys, time
++
++OUT = 'results/iter_076/recovery_manifest.json'
++BASE_PLAN = '../agent/runs/iter_075/plan.md'
++BASE_PLAN_SHA = 'ea40768f17ae65b10f0027ca9ca9423205bb106198ebf891af7ec0bf17a73b8b'
++
++
++def sha(p):
++    h = hashlib.sha256()
++    with open(p, 'rb') as f:
++        for b in iter(lambda: f.read(1 << 22), b''):
++            h.update(b)
++    return h.hexdigest()
++
++
++def procs():
++    out = []
++    for p in os.listdir('/proc'):
++        if p.isdigit():
++            try:
++                cmd = open(f'/proc/{p}/cmdline', 'rb').read().replace(b'\0', b' ').decode()[:200]
++                st = open(f'/proc/{p}/stat').read().split()
++            except Exception:
++                continue
++            if any(k in cmd for k in ('sp75_', 'sp76_', 'rsna_diag')):
++                out.append({'pid': int(p), 'cmd': cmd, 'start_ticks': st[21]})
++    return out
++
++
++def main():
++    if os.path.exists(OUT):
++        sys.exit('exists')
++    res = {'ts': time.time(), 'base_plan': BASE_PLAN, 'base_plan_sha256_expected': BASE_PLAN_SHA, 'base_plan_sha256_actual': sha(BASE_PLAN)}
++    res['base_plan_matches'] = res['base_plan_sha256_actual'] == BASE_PLAN_SHA
++    res['git_head'] = subprocess.check_output(['git', 'rev-parse', 'HEAD']).decode().strip()
++    res['git_status_short'] = subprocess.check_output(['git', 'status', '--short']).decode().splitlines()
++    res['host_related_processes'] = procs()
++    res['nvidia_compute_apps'] = subprocess.run(['nvidia-smi', '--query-compute-apps=pid,used_memory,gpu_uuid', '--format=csv,noheader'], capture_output=True, text=True).stdout.strip().splitlines()
++    res['nvidia_gpus'] = subprocess.run(['nvidia-smi', '--query-gpu=index,uuid,memory.used,memory.total', '--format=csv,noheader'], capture_output=True, text=True).stdout.strip().splitlines()
++    res['cuda_visible_devices'] = os.environ.get('CUDA_VISIBLE_DEVICES')
++    keep = {}
++    base = 'results/iter_075'
++    for root, _, files in os.walk(base):
++        for f in files:
++            p = os.path.join(root, f)
++            if f.endswith('.lock'):
++                keep[p] = {'lock_file_present': True, 'content': open(p).read()[:300]}
++            elif any(x in p for x in ('/tests/resume/', '/tests/tech_', '/C/selection', '/H/selection', '/data/manifest', 'env_record', 'fixtures_cpu')) and os.path.getsize(p) < (2 << 30):
++                keep[p] = {'sha256': sha(p), 'bytes': os.path.getsize(p)}
++    res['iter_075_preserved_files'] = keep
++    res['iter_075_missing_expected'] = [p for p in ('results/iter_075/tests/resume/ref/epoch_02/val_ce.json', 'results/iter_075/tests/resume/A/epoch_02/val_ce.json',
++                                                    'results/iter_075/tests/resume/B') if not os.path.exists(p)]
++    res['decision'] = ('iter_075 ref/A 2-epoch 검사 trajectory는 코드 변경(train_digest에 code hash 포함)과 step2부터의 수치 차이 때문에 재개 대상으로 사용하지 않고 원본 그대로 보존한다. '
++                       '재개 검사는 새 코드·결정적 설정으로 results/iter_076/tests/resume에서 처음부터 수행한다.')
++    json.dump(res, open(OUT, 'w'), indent=1)
++    print(json.dumps({k: res[k] for k in ('base_plan_matches', 'git_head', 'host_related_processes', 'nvidia_compute_apps', 'iter_075_missing_expected')}, indent=1))
++
++
++if __name__ == '__main__':
++    main()
+diff --git a/sp76_select.py b/sp76_select.py
+new file mode 100644
+index 0000000..897ea98
+--- /dev/null
++++ b/sp76_select.py
+@@ -0,0 +1,152 @@
++"""iter_076 V8 기반 선택·연장·최종 checkpoint 규칙 (원 iter_075 계획 규칙을 결과 전에 코드로 고정).
++
++규칙(원 계획 그대로):
++- epoch16에서 방식(F/R)별로 V8 primary(class-standardized MAE)가 가장 좋은 LR 하나를 선택. 동률은 V8 CE, 더 이른 checkpoint, 작은 LR 순.
++- 선택 trajectory의 epoch8->16에서 V8 CE가 5% 이상 감소(상대)하거나 primary MAE가 0.10 이상 개선되면 epoch32까지 한 번 연장하고 epoch32만 추가 평가.
++- 최종 checkpoint(사전 고정 해석): 선택 LR trajectory에서 평가된 epoch {16, 32(연장 시)} 중 V8 primary 최소, 동률은 V8 CE, 더 이른 epoch. epoch8은 추세 확인용이며 최종 후보가 아니다.
++E24는 어떤 규칙에도 사용하지 않는다. 결과 파일은 존재하면 중단(원자적 저장).
++"""
++import argparse, glob, json, os, sys
++
++import numpy as np
++
++import sp75_data as D
++import sp75_metrics as M
++import sp75_vlm as V
++
++OUT = 'results/iter_076'
++LRS = ('2e-5', '2e-4')
++CE_REL_DROP = 0.05
++PRIMARY_GAIN = 0.10
++EPS = 1e-12
++
++
++def traj_dir(v, lr):
++    return f'{OUT}/train/{v}_lr{lr}'
++
++
++def gen_dir(v, lr, ep):
++    return f'{OUT}/gen/V8/{v}_lr{lr}_ep{ep:02d}'
++
++
++def pick_lr(cands):
++    """cands: [{'lr': '2e-5', 'primary': x, 'ce': y}] (epoch16). 최소 primary -> 최소 CE -> 작은 LR."""
++    return sorted(cands, key=lambda c: (round(c['primary'], 12), round(c['ce'], 12), float(c['lr'])))[0]['lr']
++
++
++def needs_extension(m8, m16):
++    """m8/m16: {'primary','ce'}. CE 상대 감소 >= 5% 또는 primary 개선 >= 0.10 (경계 포함)."""
++    ce_drop = (m8['ce'] - m16['ce']) / m8['ce']
++    gain = m8['primary'] - m16['primary']
++    return bool(ce_drop >= CE_REL_DROP - EPS or gain >= PRIMARY_GAIN - EPS), {'ce_rel_drop_8_to_16': ce_drop, 'primary_gain_8_to_16': gain}
++
++
++def final_epoch(evals):
++    """evals: {epoch: {'primary','ce'}} (16, 선택적으로 32). 최소 primary -> 최소 CE -> 이른 epoch."""
++    cand = {e: m for e, m in evals.items() if e >= 16}
++    return sorted(cand, key=lambda e: (round(cand[e]['primary'], 12), round(cand[e]['ce'], 12), e))[0]
++
++
++def v8_rows():
++    man = D.load_manifest()
++    return sorted([r for r in man['rows'] if r['split'] == 'V8' and r['position_set'] == 'supervised' and not r['excluded']], key=lambda r: (int(r['patient']), r['ordinal']))
++
++
++def metrics(v, lr, ep, rows=None):
++    """한 (방식, LR, epoch)의 V8 지표. 생성 출력 완전성·provenance(adapter digest·입력 hash)와 val_ce.json의 train_digest를 확인한다."""
++    import torch  # adapter 로드용
++    rows = rows or v8_rows()
++    edir = f'{traj_dir(v, lr)}/epoch_{ep:02d}'
++    ad = torch.load(f'{edir}/adapter.pt', map_location='cpu', weights_only=True)
++    vc = json.load(open(f'{edir}/val_ce.json'))
++    cfg = json.load(open(f'{traj_dir(v, lr)}/train_config.json'))
++    if vc['adapter_digest'] != ad['digest'] or vc['train_digest'] != cfg['train_digest'] or ad['train_digest'] != cfg['train_digest']:
++        raise RuntimeError(f'{edir}: adapter/val_ce/train_config provenance mismatch')
++    recs = {}
++    for f in sorted(glob.glob(f'{gen_dir(v, lr, ep)}/gen_worker*.jsonl')):
++        for ln in open(f):
++            if ln.strip():
++                r = json.loads(ln)
++                if r['id'] in recs:
++                    raise RuntimeError(f'duplicate {r["id"]}')
++                recs[r['id']] = r
++    want = [r['id'] for r in rows]
++    if set(recs) != set(want):
++        raise RuntimeError(f'{gen_dir(v, lr, ep)}: id set differs (missing {sorted(set(want) - set(recs))[:3]})')
++    pred = []
++    for r in rows:
++        x = recs[r['id']]
++        if x['variant'] != v or x['adapter_digest'] != ad['digest'] or x['input_pixel_sha256'] != [e['pixel_sha256_padded'] for e in r['inputs'][v]]:
++            raise RuntimeError(f'provenance mismatch {r["id"]}')
++        pred.append(V.parse(x['text']) if x['ended_eos'] else None)
++    g = [r['grade'] for r in rows]
++    cs, nc = M.class_std_mae(g, pred)
++    if nc != 5:
++        raise RuntimeError('V8 class missing')
++    return {'variant': v, 'lr': lr, 'epoch': ep, 'primary': cs, 'ce': vc['val_ce'], 'mae': float(M.abs_err(g, pred).mean()), 'n_invalid': sum(p is None for p in pred),
++            'adapter_digest': ad['digest'], 'n': len(rows)}
++
++
++def atomic_write(obj, path):
++    if os.path.exists(path):
++        sys.exit(f'{path} exists')
++    tmp = path + '.tmp'
++    json.dump(obj, open(tmp, 'w'), indent=1)
++    os.replace(tmp, path)
++
++
++def cmd_select_v8(a):
++    rows = v8_rows()
++    res = {'milestones': {}, 'selected': {}, 'extend': {}}
++    for v in ('F', 'R'):
++        ms = {lr: {ep: metrics(v, lr, ep, rows) for ep in (8, 16)} for lr in LRS}
++        res['milestones'][v] = ms
++        lr = pick_lr([{'lr': lr, 'primary': ms[lr][16]['primary'], 'ce': ms[lr][16]['ce']} for lr in LRS])
++        ext, info = needs_extension(ms[lr][8], ms[lr][16])
++        res['selected'][v] = lr
++        res['extend'][v] = {'extend_to_32': ext, **info}
++    atomic_write(res, f'{OUT}/select_v8.json')
++    print(json.dumps({'selected': res['selected'], 'extend': res['extend']}, indent=1))
++
++
++def cmd_select_final(a):
++    s8 = json.load(open(f'{OUT}/select_v8.json'))
++    rows = v8_rows()
++    res = {'final': {}}
++    for v in ('F', 'R'):
++        lr = s8['selected'][v]
++        ev = {16: s8['milestones'][v][lr]['16']}
++        if s8['extend'][v]['extend_to_32']:
++            ev[32] = metrics(v, lr, 32, rows)
++        ep = final_epoch({e: m for e, m in ev.items()})
++        res['final'][v] = {'lr': lr, 'epoch': ep, 'adapter_dir': f'{traj_dir(v, lr)}/epoch_{ep:02d}', 'adapter_digest': ev[ep]['adapter_digest'], 'evaluated': {str(e): m for e, m in ev.items()}}
++    atomic_write(res, f'{OUT}/select_final.json')
++    print(json.dumps({k: {x: y for x, y in v.items() if x != 'evaluated'} for k, v in res['final'].items()}, indent=1))
++
++
++def cmd_lock_spec(a):
++    """eval lock 명세 작성: 최종 F/R adapter, base F/R, C/H 선택 근거. (실제 lock은 sp75_eval.py lock --spec)."""
++    fin = json.load(open(f'{OUT}/select_final.json'))['final']
++    csel = json.load(open('results/iter_075/C/selection.json'))['selected']
++    vlm = {'F_base': {'variant': 'F', 'adapter_dir': None, 'adapter_digest': None, 'dir': f'{OUT}/gen/E24/F_base'},
++           'R_base': {'variant': 'R', 'adapter_dir': None, 'adapter_digest': None, 'dir': f'{OUT}/gen/E24/R_base'}}
++    extra = [f'{OUT}/select_v8.json', f'{OUT}/select_final.json', 'results/iter_075/data/manifest.json', 'results/iter_075/env_record.json', 'results/iter_075/C/selection.json',
++             'results/iter_075/H/selection.json', 'results/iter_075/H/features_T24_V8.json',
++             f"results/iter_075/C/lr{csel['lr']}/epoch_{csel['epoch']:02d}.pt"]
++    for v in ('F', 'R'):
++        f = fin[v]
++        vlm[f'{v}_adapted'] = {'variant': v, 'adapter_dir': f['adapter_dir'], 'adapter_digest': f['adapter_digest'], 'dir': f'{OUT}/gen/E24/{v}_adapted'}
++        extra += [f"{f['adapter_dir']}/adapter.pt", f"{f['adapter_dir']}/val_ce.json", f"{traj_dir(v, f['lr'])}/train_config.json"]
++    code = ['sp75_pipeline.py', 'sp76_select.py', 'sp76_cpred.py', 'sp75_train.py', 'sp75_c.py', 'sp75_h.py', 'sp67_data.py', 'g71_data.py', 'rsna_diag/generate.py', 'rsna_diag/lora.py']
++    spec = {'vlm': vlm, 'json_systems': {'C': f'{OUT}/pred/pred_C_E24.json', 'H': f'{OUT}/pred/pred_H_E24.json'}, 'extra_files': extra + code,
++            'selection': {'final': {v: {k: fin[v][k] for k in ('lr', 'epoch', 'adapter_digest')} for v in fin}, 'C': csel}}
++    os.makedirs(f'{OUT}/eval', exist_ok=True)
++    atomic_write(spec, f'{OUT}/eval/lock_spec.json')
++    print('wrote lock spec')
++
++
++if __name__ == '__main__':
++    ap = argparse.ArgumentParser()
++    ap.add_argument('c', choices=['select_v8', 'select_final', 'lock_spec'])
++    a = ap.parse_args()
++    {'select_v8': cmd_select_v8, 'select_final': cmd_select_final, 'lock_spec': cmd_lock_spec}[a.c](a)
+diff --git a/test_sp75.py b/test_sp75.py
+index 6eb4ad6..c245dde 100644
+--- a/test_sp75.py
++++ b/test_sp75.py
+@@ -1,4 +1,5 @@
+-"""iter_075 CPU fixture: 입력 연결·allowlist·ROI/표시·parser·metric·교환·prior. 결과: results/iter_075/tests/fixtures_cpu.json (존재하면 중단)."""
++"""iter_075/076 CPU fixture: 입력 연결·allowlist·ROI/표시·parser·metric·교환·prior + (iter_076) 선택·연장·loss gate·평가 입력·tail 복구.
++결과: results/iter_076/tests/fixtures_cpu.json (존재하면 중단). 실패 시 비정상 종료."""
+ import json, os, sys
+ import numpy as np
+ from PIL import Image
+@@ -81,9 +82,61 @@ chk('prior_uses_T24_only', pri['global'] == [sum(1 for r in tr if r['grade'] ==
+ b1 = M.boot_diff([r for r in inc if r['split'] == 'E24' and r['position_set'] == 'held'], [1] * 47, [3] * 47, n=200)
+ b2 = M.boot_diff([r for r in inc if r['split'] == 'E24' and r['position_set'] == 'held'], [1] * 47, [3] * 47, n=200)
+ chk('bootstrap_deterministic_seed7501', b1 == b2, b1)
++# ---- iter_076 추가 검사 ----
++import tempfile
++import sp76_select as SEL
++import sp75_train as TR
++import sp75_eval as EV
++import sp75_gen as GN
++chk('pick_lr_lowest_primary', SEL.pick_lr([{'lr': '2e-5', 'primary': 0.9, 'ce': 1.0}, {'lr': '2e-4', 'primary': 0.8, 'ce': 5.0}]) == '2e-4')
++chk('pick_lr_tie_primary_then_ce', SEL.pick_lr([{'lr': '2e-5', 'primary': 0.8, 'ce': 2.0}, {'lr': '2e-4', 'primary': 0.8, 'ce': 1.0}]) == '2e-4')
++chk('pick_lr_full_tie_smaller_lr', SEL.pick_lr([{'lr': '2e-4', 'primary': 0.8, 'ce': 1.0}, {'lr': '2e-5', 'primary': 0.8, 'ce': 1.0}]) == '2e-5')
++chk('ext_ce_exactly_5pct_extends', SEL.needs_extension({'primary': 0.8, 'ce': 2.0}, {'primary': 0.8, 'ce': 1.9})[0])
++chk('ext_ce_4pct_no', not SEL.needs_extension({'primary': 0.8, 'ce': 2.0}, {'primary': 0.8, 'ce': 1.92})[0])
++chk('ext_primary_gain_0.10_extends', SEL.needs_extension({'primary': 0.9, 'ce': 2.0}, {'primary': 0.8, 'ce': 2.5})[0])
++chk('ext_primary_gain_0.09_no', not SEL.needs_extension({'primary': 0.89, 'ce': 2.0}, {'primary': 0.8, 'ce': 2.5})[0])
++chk('final_epoch_prefers_better_primary', SEL.final_epoch({16: {'primary': 0.9, 'ce': 1.0}, 32: {'primary': 0.8, 'ce': 3.0}}) == 32)
++chk('final_epoch_tie_ce_then_earlier', SEL.final_epoch({16: {'primary': 0.8, 'ce': 1.0}, 32: {'primary': 0.8, 'ce': 1.0}}) == 16 and
++    SEL.final_epoch({16: {'primary': 0.8, 'ce': 2.0}, 32: {'primary': 0.8, 'ce': 1.0}}) == 32)
++chk('final_epoch_excludes_epoch8', SEL.final_epoch({8: {'primary': 0.1, 'ce': 0.1}, 16: {'primary': 0.9, 'ce': 1.0}}) == 16)
++g = {'status': 'PASS', 'official_loss': 6.12, 'logits_f32_ce_mean': 6.12, 'loss_sum_over_n': 6.12, 'rel_diff_official_vs_loss_sum': 0.0, 'n_valid_tokens': 2, 'n_valid_independent': 2, 'provenance': {'a': 1}}
++chk('gate_pass_valid', TR.validate_gate(g, {'a': 1}) == [])
++chk('gate_rejects_fail_status', bool(TR.validate_gate(dict(g, status='FAIL'), {'a': 1})))
++chk('gate_rejects_nan', bool(TR.validate_gate(dict(g, loss_sum_over_n=float('nan')), {'a': 1})))
++chk('gate_rejects_rel_gt_1e-6', bool(TR.validate_gate(dict(g, loss_sum_over_n=6.12 * (1 + 2e-6), rel_diff_official_vs_loss_sum=2e-6), {'a': 1})))
++chk('gate_rejects_token_mismatch', bool(TR.validate_gate(dict(g, n_valid_independent=3), {'a': 1})))
++chk('gate_rejects_provenance_change', bool(TR.validate_gate(g, {'a': 2})))
++chk('gate_rejects_inconsistent_stored_rel', bool(TR.validate_gate(dict(g, rel_diff_official_vs_loss_sum=0.5), {'a': 1})))
++chk('eval_constants', (EV.MARGIN, EV.PASS_ABS, EV.H_TOL, EV.C_NOT_WORSE) == (0.20, 1.0, 0.10, 0.10))
++with tempfile.TemporaryDirectory() as td:
++    pj = os.path.join(td, 'p.json')
++    erows = [{'id': 'a', 'patient': '1', 'ordinal': 1, 'position_set': 'supervised'}, {'id': 'b', 'patient': '2', 'ordinal': 3, 'position_set': 'held'}]
++    good = [{'id': 'a', 'patient': '1', 'ordinal': 1, 'position_set': 'supervised', 'pred': 2}, {'id': 'b', 'patient': '2', 'ordinal': 3, 'position_set': 'held', 'pred': 3}]
++
++    def tryload(preds):
++        json.dump({'preds': preds}, open(pj, 'w'))
++        try:
++            EV.load_json_pred(pj, erows)
++            return True
++        except RuntimeError:
++            return False
++    chk('json_pred_ok', tryload(good))
++    chk('json_pred_rejects_duplicate', not tryload(good + [good[0]]))
++    chk('json_pred_rejects_missing', not tryload(good[:1]))
++    chk('json_pred_rejects_extra', not tryload(good + [dict(good[0], id='z')]))
++    chk('json_pred_rejects_bad_grade', not tryload([dict(good[0], pred=7), good[1]]))
++    gp = os.path.join(td, 'w.jsonl')
++    open(gp, 'wb').write(b'{"id": "a"}\n{"id": "b", "te')
++    r1 = GN.repair_tail(gp)
++    chk('gen_repair_torn_tail', r1 is not None and open(gp, 'rb').read() == b'{"id": "a"}\n')
++    open(gp, 'wb').write(b'{"id": "a"}\n{"id": "b"}')
++    chk('gen_complete_last_line_without_newline_kept', GN.repair_tail(gp) is None and open(gp, 'rb').read().endswith(b'}'))
++    open(gp, 'wb').write(b'{"id": "a"}\n')
++    chk('gen_repair_noop_on_clean', GN.repair_tail(gp) is None)
+ fails = [k for k, v in res.items() if not v['pass']]
+-out = 'results/iter_075/tests/fixtures_cpu.json'
++out = 'results/iter_076/tests/fixtures_cpu.json'
+ if os.path.exists(out):
+     sys.exit('exists')
+ json.dump({'n': len(res), 'n_pass': len(res) - len(fails), 'fails': fails, 'checks': res}, open(out, 'w'), indent=1, default=str)
+ print(len(res), 'checks', len(fails), 'fails', fails)
++sys.exit(1 if fails else 0)
+diff --git a/test_sp76_gate.py b/test_sp76_gate.py
+new file mode 100644
+index 0000000..5a59070
+--- /dev/null
++++ b/test_sp76_gate.py
+@@ -0,0 +1,47 @@
++"""iter_076: loss gate 변조·실패·손상 파일이 실제 학습 진입점(sp75_train.py)에서 모델 적재 전에 학습을 차단하는지 검사한다 (CPU, GPU 불필요).
++각 사례: run-dir에 loss_gate.json 변형을 두고 sp75_train.py를 실행 -> 비정상 종료 + 'blocks training' 메시지 + train_log/checkpoint 미생성.
++결과: results/iter_076/tests/gate_tamper.json (존재하면 중단). 하나라도 차단 안 되면 비정상 종료.
++"""
++import json, os, subprocess, sys
++
++import sp75_train as TR
++
++BASE = 'results/iter_076/tests/gate_tamper'
++OUT = 'results/iter_076/tests/gate_tamper.json'
++
++
++def main():
++    if os.path.exists(OUT) or os.path.exists(BASE):
++        sys.exit('exists')
++    rows = TR.load_rows('T24')
++    tin = TR.inputs_digest(rows, 'F')
++    code = {f: TR.file_sha(f) for f in TR.CODE}
++    prov = TR.gate_provenance('F', rows, tin, code)
++    good = {'status': 'PASS', 'official_loss': 6.12, 'logits_f32_ce_mean': 6.12, 'loss_sum_over_n': 6.12, 'rel_diff_official_vs_loss_sum': 0.0, 'n_valid_tokens': 2,
++            'n_valid_independent': 2, 'provenance': prov}
++    cases = {'fail_status': dict(good, status='FAIL'), 'nan_loss': dict(good, loss_sum_over_n=float('nan')),
++             'rel_diff_2e-6': dict(good, loss_sum_over_n=6.12 * (1 + 2e-6), rel_diff_official_vs_loss_sum=2e-6),
++             'token_mismatch': dict(good, n_valid_independent=3), 'other_code_hash': dict(good, provenance=dict(prov, code=dict(code, **{'sp75_vlm.py': '0' * 64}))),
++             'other_inputs': dict(good, provenance=dict(prov, train_inputs_digest='0' * 64)), 'missing_provenance': {k: v for k, v in good.items() if k != 'provenance'}}
++    res = {}
++    for name, g in cases.items():
++        d = f'{BASE}/{name}'
++        os.makedirs(d)
++        json.dump(g, open(f'{d}/loss_gate.json', 'w'))
++        r = subprocess.run([sys.executable, 'sp75_train.py', '--run-dir', d, '--variant', 'F', '--lr', '2e-4', '--epochs', '1'], capture_output=True, text=True)
++        msg = (r.stdout + r.stderr)[-300:]
++        res[name] = {'rc': r.returncode, 'blocked_with_message': 'blocks training' in msg, 'no_train_log': not os.path.exists(f'{d}/train_log.jsonl'), 'no_ckpt': not os.path.exists(f'{d}/ckpt_latest.pt'), 'msg_tail': msg}
++    d = f'{BASE}/corrupt_json'
++    os.makedirs(d)
++    open(f'{d}/loss_gate.json', 'w').write('{"status": "PASS", "official_')
++    r = subprocess.run([sys.executable, 'sp75_train.py', '--run-dir', d, '--variant', 'F', '--lr', '2e-4', '--epochs', '1'], capture_output=True, text=True)
++    msg = (r.stdout + r.stderr)[-300:]
++    res['corrupt_json'] = {'rc': r.returncode, 'blocked_with_message': 'blocks training' in msg, 'no_train_log': not os.path.exists(f'{d}/train_log.jsonl'), 'no_ckpt': not os.path.exists(f'{d}/ckpt_latest.pt'), 'msg_tail': msg}
++    res['PASS'] = all(v['rc'] != 0 and v['blocked_with_message'] and v['no_train_log'] and v['no_ckpt'] for v in res.values() if isinstance(v, dict))
++    json.dump(res, open(OUT, 'w'), indent=1)
++    print(json.dumps({k: (v['rc'], v['blocked_with_message']) for k, v in res.items() if isinstance(v, dict)}), res['PASS'])
++    sys.exit(0 if res['PASS'] else 1)
++
++
++if __name__ == '__main__':
++    main()
