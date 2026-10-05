@@ -1,0 +1,671 @@
+diff --git a/review82_analysis.py b/review82_analysis.py
+new file mode 100644
+index 0000000..b9801a5
+--- /dev/null
++++ b/review82_analysis.py
+@@ -0,0 +1,286 @@
++"""iter_082: 고정 저장 출력의 오류 검토 순위 분석. GPU 호출 없음."""
++import hashlib
++import json
++import math
++import os
++from pathlib import Path
++import re
++import sys
++import time
++import numpy as np
++from sp75_metrics import class_std_mae
++
++ROOT = Path('results/iter_082/verified')
++NAMES = ['posterior_ge2', 'expected_abs', 'entropy', 'one_minus_max', 'one_minus_margin']
++RULES = dict(seed=8201, n_boot=10000, rates=[0.25, 0.1, 0.5], rounding=12,
++             salt='iter082-review-v1|', patient_order='numeric', occurrence='draw index after ID hash',
++             auroc='lexicographic risk, half credit for equal risk; excludes hash',
++             average_precision='threshold-grouped noninterpolated AP; excludes hash')
++
++def sha(p):
++    return hashlib.sha256(Path(p).read_bytes()).hexdigest()
++
++def read(p):
++    return json.loads(Path(p).read_text())
++
++def save(p, obj):
++    p = Path(p)
++    p.parent.mkdir(parents=True, exist_ok=True)
++    data = (json.dumps(obj, ensure_ascii=False, indent=2, allow_nan=False)+'\n').encode()
++    # hard-link publication is atomic and refuses concurrent/existing output.
++    tmp = p.with_name(p.name+f'.{os.getpid()}.tmp')
++    with tmp.open('xb') as f:
++        f.write(data)
++        f.flush()
++        os.fsync(f.fileno())
++    try:
++        os.link(tmp, p)
++    finally:
++        tmp.unlink()
++
++def scores(r):
++    p = np.asarray(r['probs'], float)
++    assert p.shape == (5,) and np.isfinite(p).all() and (p >= 0).all() and abs(p.sum()-1) <= 1e-5
++    c = int(np.argmax(p))+1
++    assert c == r['C']
++    dist = np.abs(np.arange(1, 6)-c)
++    top = sorted(p, reverse=True)
++    vals = [sum(p[dist >= 2]), sum(p*dist), -sum(x*math.log(x) for x in p if x > 0), 1-top[0], 1-(top[0]-top[1])]
++    return dict(zip(NAMES, [round(float(x), 12) for x in vals]))
++
++def risk(r, name, baseline):
++    s = scores(r)
++    if name == 'D':
++        return (abs(r['Q']-r['C']), s[baseline])
++    if name == 'Db':
++        return (int(r['Q'] != r['C']), s[baseline])
++    return (s[name],)
++
++def key(r, name, baseline):
++    return (*(-x for x in risk(r, name, baseline)), hashlib.sha256((RULES['salt']+r['id']).encode()).hexdigest(), r.get('occurrence', 0))
++
++def rank(rows, name, baseline):
++    return sorted(rows, key=lambda r: key(r, name, baseline))
++
++def error(r):
++    return abs(r['C']-r['grade'])
++
++def select(rows, split):
++    assert split == 'V8', 'selection must use V8 only'
++    vals = {}
++    for n in NAMES:
++        top = rank(rows, n, n)[:math.ceil(.25*len(rows))]
++        vals[n] = [sum(error(r)>=2 for r in top), sum(error(r)>0 for r in top), sum(error(r) for r in top)]
++    return max(NAMES, key=lambda n: tuple(vals[n])), vals
++
++def capture(rows, name, baseline, rate=.25):
++    rr = rank(rows, name, baseline)
++    k = math.ceil(rate*len(rows))
++    top = rr[:k]
++    return sum(error(r)>=2 for r in top)
++
++def table(rows, name, baseline, rate):
++    rr = rank(rows, name, baseline)
++    k = math.ceil(rate*len(rows))
++    top, rest = rr[:k], rr[k:]
++    boundary = risk(rr[k-1], name, baseline)
++    strict = [r for r in rr if risk(r,name,baseline)>boundary]
++    tied = [r for r in rr if risk(r,name,baseline)==boundary]
++    slots = k-len(strict)
++    out = dict(n=len(rows), k=k, ids=[r['id'] for r in top], patients=sorted({r['patient'] for r in top},key=int),
++               unreviewed_mae=float(np.mean([error(r) for r in rest])) if rest else None,
++               q_wrong_c_correct_ids=[r['id'] for r in top if r['Q']!=r['grade'] and r['C']==r['grade']],
++               boundary_tie_ids=[r['id'] for r in tied], boundary_slots=slots)
++    for label, threshold in [('e2',2),('e1',1)]:
++        total = sum(error(r)>=threshold for r in rows)
++        got = sum(error(r)>=threshold for r in top)
++        fixed = sum(error(r)>=threshold for r in strict)
++        t = sum(error(r)>=threshold for r in tied)
++        out[label] = dict(total=total, captured=got, precision=got/k, recall=got/total if total else None,
++                          missed=total-got, tie_min=fixed+max(0,slots-(len(tied)-t)), tie_max=fixed+min(slots,t))
++    out['groups'] = {field:{str(v):dict(total=sum(r[field]==v for r in rows), reviewed=sum(r[field]==v for r in top),
++                                      e2_captured=sum(r[field]==v and error(r)>=2 for r in top))
++                            for v in sorted({r[field] for r in rows})} for field in ['grade','ordinal']}
++    return out
++
++def discrimination(rows, name, baseline, threshold):
++    pos = [r for r in rows if error(r)>=threshold]
++    neg = [r for r in rows if error(r)<threshold]
++    if not pos or not neg:
++        return dict(auroc=None, average_precision=None, reason='single event class')
++    auc = sum((risk(a,name,baseline)>risk(b,name,baseline))+.5*(risk(a,name,baseline)==risk(b,name,baseline)) for a in pos for b in neg)/(len(pos)*len(neg))
++    groups = sorted({risk(r,name,baseline) for r in rows}, reverse=True)
++    tp = n = 0
++    ap = 0.
++    for g in groups:
++        batch = [r for r in rows if risk(r,name,baseline)==g]
++        plus = sum(error(r)>=threshold for r in batch)
++        tp += plus
++        n += len(batch)
++        ap += plus/len(pos)*tp/n
++    return dict(auroc=auc, average_precision=ap)
++
++def load_inputs():
++    source = read('results/iter_081/data/source_audit.json')
++    completion = read('results/iter_081/completion.json')
++    assert source['passed'] and completion['passed']
++    paths = ['results/iter_075/data/manifest.json','results/iter_078/features.json','results/iter_081/data/source_audit.json']
++    seals = [completion['files'],source['source_files']]
++    for split in ['V8','E24']:
++        pp = f'results/iter_081/protocol_{split}.json'
++        assert sha(pp)==completion['files'][pp]
++        paths.append(pp)
++        proto = read(pp)
++        seals.append(proto['files'])
++        paths.extend([f'results/iter_081/data/baseline_{split}.json',f'results/iter_078/data/labels_{split}.json'])
++    expected = {}
++    for p in paths:
++        values = {s[p] for s in seals if p in s}
++        assert len(values)==1, ('missing/conflicting preserved hash',p)
++        expected[p]=values.pop()
++        assert sha(p)==expected[p], p
++    manifest = read(paths[0])['rows']
++    features = read(paths[1])['items']
++    result = {}
++    for split,n,npats,ords in [('V8',24,8,[1,3,5]),('E24',47,24,[2,4])]:
++        rows=read(f'results/iter_081/data/baseline_{split}.json')
++        assert len(rows)==n and len({r['id'] for r in rows})==n and len({r['patient'] for r in rows})==npats
++        eligible = [r for r in manifest if r['split']==split and r['ordinal'] in ords and r['excluded'] is None]
++        assert {r['id'] for r in eligible}=={r['id'] for r in rows}
++        labels=read(f'results/iter_078/data/labels_{split}.json')['labels']
++        assert set(labels)=={r['id'] for r in rows}
++        rawpath=rows[0]['Q_source']
++        envpath=rawpath.replace('.jsonl','.env.json')
++        for p in [rawpath,envpath]:
++            assert sha(p)==source['source_files'][p]
++            expected[p]=sha(p)
++        env=read(envpath)
++        raw={}
++        allowed={r['id'] for r in rows}
++        for line in Path(rawpath).read_text().splitlines():
++            r=json.loads(line)
++            if r['id'] in allowed:
++                assert r['id'] not in raw
++                raw[r['id']]=r
++        assert set(raw)==allowed
++        for r in rows:
++            m=next(x for x in eligible if x['id']==r['id'])
++            f=features[r['id']]
++            q=raw[r['id']]
++            for field in ['grade','patient','ordinal']:
++                assert r[field]==m[field]==labels[r['id']][field]
++            assert f['probs']==r['probs'] and f['pred']==r['C']
++            assert f['patient']==r['patient'] and f['ordinal']==r['ordinal'] and f['split']==split
++            scores(r)
++            assert q['ended_eos'] and re.fullmatch(r'[1-5]\.?',q['text'].strip())
++            assert int(q['text'].strip()[0])==r['Q']==q['parsed'] and q['parse_valid']
++            assert q['suffix_ids']==r['Q_suffix_ids'] and q['request_id']==r['Q_request_id']
++            assert q['suffix_ids'][-1] in env['env']['eos_token_id'] and q['n_new']<=32
++            assert q['config_digest']==env['config_digest'] and q['adapter_digest']==env['adapter_digest']
++            assert q['patient']==r['patient'] and q['ordinal']==r['ordinal'] and q['split']==split
++            assert q['input_file_sha256']==f['input_file_sha256']==[x['file_sha256'] for x in m['inputs']['R']]
++            assert q['input_pixel_sha256']==[x['pixel_sha256_padded'] for x in m['inputs']['R']]
++        result[split]=rows
++    assert not {r['patient'] for r in result['V8']} & {r['patient'] for r in result['E24']}
++    blob=hashlib.sha1(b'blob '+str(Path('sp75_metrics.py').stat().st_size).encode()+b'\0'+Path('sp75_metrics.py').read_bytes()).hexdigest()
++    assert blob=='7d7b1c9f1027c05f94c923d5cc38aec58f276f51'
++    regression={s:{model:class_std_mae([r['grade'] for r in rr],[r[model] for r in rr])[0] for model in ['Q','C']} for s,rr in result.items()}
++    assert sum(error(r)>=2 for r in result['E24'])==7
++    assert abs(regression['E24']['Q']-.776904761904762)<1e-10
++    assert abs(regression['E24']['C']-.7761904761904762)<1e-10
++    expected['results/iter_081/completion.json']=sha('results/iter_081/completion.json')
++    return result, expected, regression
++
++def bootstrap(rows, baseline, n=10000, progress=False):
++    rng=np.random.default_rng(8201)
++    pids=sorted({r['patient'] for r in rows},key=int)
++    by={p:[r for r in rows if r['patient']==p] for p in pids}
++    # Cache label-independent keys, preserving occurrence as final tie-break.
++    bk={r['id']:key(r,baseline,baseline)[:-1] for r in rows}
++    dk={r['id']:key(r,'D',baseline)[:-1] for r in rows}
++    samples=[]
++    started=time.monotonic()
++    timing={}
++    for i in range(n):
++        chosen=rng.integers(0,len(pids),len(pids))
++        rr=[(r,occ) for occ,idx in enumerate(chosen) for r in by[pids[idx]]]
++        k=math.ceil(.25*len(rr))
++        b=sorted(rr,key=lambda x:(*bk[x[0]['id']],x[1]))[:k]
++        d=sorted(rr,key=lambda x:(*dk[x[0]['id']],x[1]))[:k]
++        delta=sum(error(r)>=2 for r,o in d)-sum(error(r)>=2 for r,o in b)
++        total=sum(error(r)>=2 for r,o in rr)
++        samples.append(dict(n=len(rr),k=k,events=total,count_diff=delta,recall_diff=delta/total if total else None))
++        if i==199:
++            elapsed=time.monotonic()-started
++            timing=dict(first200_s=elapsed,remaining_estimate_s=elapsed/200*(n-200))
++            if progress:
++                print(json.dumps(timing),flush=True)
++    count=[x['count_diff'] for x in samples]
++    recall=[x['recall_diff'] for x in samples if x['recall_diff'] is not None]
++    return dict(samples=samples,count_ci95=np.percentile(count,[2.5,97.5]).tolist(),
++                recall_ci95=np.percentile(recall,[2.5,97.5]).tolist() if recall else None,
++                undefined_recall=n-len(recall),timing={**timing,'total_s':time.monotonic()-started})
++
++def main():
++    started=time.monotonic()
++    inputs, hashes, regression=load_inputs()
++    files=['review82_analysis.py','review82_verify.py','test_review82.py','sp75_metrics.py','../agent/runs/iter_082/plan.md','../agent/runs/iter_082/plan.json']
++    protocol=dict(inputs=hashes,code={p:sha(p) for p in files},rules=RULES,python=sys.executable,numpy=np.__version__,new_model_calls=0)
++    # Completed phases may only be reused with exact input/code/rule identity.
++    if (ROOT/'completion.json').exists():
++        assert read(ROOT/'protocol.json')==protocol
++        for p,h in read(ROOT/'completion.json')['files'].items():
++            assert sha(p)==h
++        print('완료 산출물 재검증 통과'); return
++    if (ROOT/'protocol.json').exists():
++        assert read(ROOT/'protocol.json')==protocol
++    else:
++        save(ROOT/'protocol.json',protocol)
++    baseline, selection_scores=select(inputs['V8'],'V8')
++    selection=dict(split='V8',baseline=baseline,scores=selection_scores,protocol_sha256=sha(ROOT/'protocol.json'))
++    if (ROOT/'selection.json').exists():
++        assert read(ROOT/'selection.json')==selection
++    else:
++        save(ROOT/'selection.json',selection)
++    # A partial analysis is never silently overwritten; use preserved phase artifacts for inspection.
++    out={}
++    ranklists={}
++    for split,rows in inputs.items():
++        out[split]={}
++        ranklists[split]={}
++        for name in NAMES+['D','Db']:
++            ranklists[split][name]=[dict(id=r['id'],patient=r['patient'],risk=list(risk(r,name,baseline))) for r in rank(rows,name,baseline)]
++            out[split][name]={'budgets':{str(rate):table(rows,name,baseline,rate) for rate in RULES['rates']},
++                              'discrimination':{e:discrimination(rows,name,baseline,t) for e,t in [('e2',2),('e1',1)]}}
++    rows=inputs['E24']
++    boot=bootstrap(rows,baseline,progress=True)
++    loo=[]
++    for p in sorted({r['patient'] for r in rows},key=int):
++        subset=[r for r in rows if r['patient']!=p]
++        loo.append(dict(removed=p,n=len(subset),k=math.ceil(.25*len(subset)),diff=capture(subset,'D',baseline)-capture(subset,baseline,baseline)))
++    tb=out['E24'][baseline]['budgets']['0.25']; td=out['E24']['D']['budgets']['0.25']
++    extra=[r for r in rows if r['id'] in set(td['ids'])-set(tb['ids']) and error(r)>=2]
++    lost=[r for r in rows if r['id'] in set(tb['ids'])-set(td['ids']) and error(r)>=2]
++    diff=td['e2']['captured']-tb['e2']['captured']
++    checks=dict(at_least_two=diff>=2,additional_two_patients=len({r['patient'] for r in extra})>=2,
++                beats_all_c=all(td['e2']['captured']>out['E24'][n]['budgets']['0.25']['e2']['captured'] for n in NAMES),
++                loo_nonnegative=all(x['diff']>=0 for x in loo),tie_robust=td['e2']['tie_min']-tb['e2']['tie_max']>0)
++    decision='positive' if all(checks.values()) else ('negative' if diff<=0 else 'inconclusive')
++    event_differences={}
++    for event,threshold in [('e2',2),('e1',1)]:
++        left=[r for r in rows if r['id'] in set(td['ids'])-set(tb['ids']) and error(r)>=threshold]
++        right=[r for r in rows if r['id'] in set(tb['ids'])-set(td['ids']) and error(r)>=threshold]
++        event_differences[event]=dict(net=len(left)-len(right),d_only_ids=[r['id'] for r in left],b_only_ids=[r['id'] for r in right],d_only_patients=sorted({r['patient'] for r in left},key=int),b_only_patients=sorted({r['patient'] for r in right},key=int))
++    report=dict(event_differences=event_differences,baseline=baseline,regression=regression,tables=out,leave_one_patient_out=loo,
++                count_diff=diff,recall_diff=diff/7,checks=checks,decision=decision,
++                d_only_e2=extra,b_only_e2=lost,comparisons={n:td['e2']['captured']-out['E24'][n]['budgets']['0.25']['e2']['captured'] for n in NAMES},
++                posthoc_best_c_capture=max(out['E24'][n]['budgets']['0.25']['e2']['captured'] for n in NAMES),
++                count_ci95=boot['count_ci95'],recall_ci95=boot['recall_ci95'],undefined_recall=boot['undefined_recall'],
++                bootstrap_timing=boot['timing'],analysis_wall_s=time.monotonic()-started,
++                limitation='반복 개발 자료·oracle ROI·단일 checkpoint; 독립 확인과 온라인 비용 및 VLM 고유 효용 미검증')
++    for name,obj in [('ranks.json',ranklists),('bootstrap.json',boot),('report.json',report)]:
++        save(ROOT/name,obj)
++    print(json.dumps({k:report[k] for k in ['baseline','count_diff','count_ci95','decision','checks']},ensure_ascii=False))
++
++if __name__=='__main__':
++    main()
+diff --git a/review82_verify.py b/review82_verify.py
+new file mode 100644
+index 0000000..d28b9cb
+--- /dev/null
++++ b/review82_verify.py
+@@ -0,0 +1,176 @@
++"""Production 순위/선택/통계를 호출하지 않는 독립 재계산 및 완료 봉인."""
++import hashlib
++import json
++import math
++from pathlib import Path
++import re
++import time
++import numpy as np
++
++BASE=Path('results/iter_082/verified')
++NAMES=['posterior_ge2','expected_abs','entropy','one_minus_max','one_minus_margin']
++
++def load(p):
++    return json.loads(Path(p).read_text())
++
++def digest(p):
++    return hashlib.sha256(Path(p).read_bytes()).hexdigest()
++
++def independent_scores(r):
++    probs=r['probs']; c=probs.index(max(probs))+1
++    ordered=sorted(probs)
++    return [round(v,12) for v in [sum(v for i,v in enumerate(probs,1) if abs(i-c)>=2),
++           sum(v*abs(i-c) for i,v in enumerate(probs,1)),sum(-v*np.log(v) for v in probs if v),
++           1-max(probs),1-ordered[-1]+ordered[-2]]]
++
++def order(rows, method, selected):
++    def sortkey(r):
++        s=independent_scores(r)
++        tail=s[selected]
++        if method=='D': v=[abs(r['Q']-r['C']),tail]
++        elif method=='Db': v=[int(r['Q']!=r['C']),tail]
++        else: v=[s[NAMES.index(method)]]
++        return tuple(-x for x in v)+(hashlib.sha256(('iter082-review-v1|'+r['id']).encode()).hexdigest(),r.get('occurrence',0))
++    return sorted(rows,key=sortkey)
++
++def major(r): return abs(r['C']-r['grade'])>=2
++
++def main():
++    start=time.monotonic()
++    protocol=load(BASE/'protocol.json')
++    for group in ['inputs','code']:
++        for p,h in protocol[group].items(): assert digest(p)==h,p
++    report=load(BASE/'report.json'); ranks=load(BASE/'ranks.json'); sel=load(BASE/'selection.json')
++    assert sel['protocol_sha256']==digest(BASE/'protocol.json')
++    manifest=load('results/iter_075/data/manifest.json')['rows']
++    features=load('results/iter_078/features.json')['items']
++    data={}; regress={}
++    for split,n in [('V8',24),('E24',47)]:
++        baseline=load(f'results/iter_081/data/baseline_{split}.json')
++        ids={r['id'] for r in baseline}; assert len(ids)==n
++        wanted=[r for r in manifest if r['id'] in ids]; assert len(wanted)==n
++        rawfile=baseline[0]['Q_source']; raw={}
++        for line in Path(rawfile).read_text().splitlines():
++            q=json.loads(line)
++            if q['id'] in ids:
++                assert q['id'] not in raw
++                raw[q['id']]=q
++        records=[]
++        for m in wanted:
++            q=raw[m['id']]; f=features[m['id']]
++            match=re.fullmatch(r'\s*([1-5])\.?\s*',q['text'])
++            assert match and q['ended_eos']
++            r={k:m[k] for k in ['id','patient','ordinal','grade']}
++            r.update(Q=int(match[1]),C=f['probs'].index(max(f['probs']))+1,probs=f['probs'])
++            old=next(b for b in baseline if b['id']==m['id'])
++            assert all(old[k]==v for k,v in r.items())
++            assert old['Q_suffix_ids']==q['suffix_ids'] and old['Q_request_id']==q['request_id']
++            records.append(r)
++        data[split]=records
++        regress[split]={}
++        for model in ['Q','C']:
++            vals=[np.mean([abs(r[model]-g) for r in records if r['grade']==g]) for g in range(1,6) if any(r['grade']==g for r in records)]
++            regress[split][model]=float(np.mean(vals))
++            assert abs(regress[split][model]-report['regression'][split][model])<1e-12
++    v=data['V8']; candidate=[]
++    for name in NAMES:
++        top=order(v,name,0)[:6]
++        candidate.append((sum(major(r) for r in top),sum(r['C']!=r['grade'] for r in top),sum(abs(r['C']-r['grade']) for r in top)))
++    selected=max(range(5),key=lambda i:candidate[i])
++    assert NAMES[selected]==sel['baseline']==report['baseline']
++    assert {name:list(candidate[i]) for i,name in enumerate(NAMES)}==sel['scores']
++    checked=0
++    for split,rows in data.items():
++        for name in NAMES+['D','Db']:
++            ranked=order(rows,name,selected)
++            assert [r['id'] for r in ranked]==[r['id'] for r in ranks[split][name]]
++            for rate in [.25,.1,.5]:
++                k=math.ceil(len(rows)*rate); top=ranked[:k]; t=report['tables'][split][name]['budgets'][str(rate)]
++                assert [r['id'] for r in top]==t['ids'] and k==t['k']
++                for event,threshold in [('e2',2),('e1',1)]:
++                    total=sum(abs(r['C']-r['grade'])>=threshold for r in rows)
++                    count=sum(abs(r['C']-r['grade'])>=threshold for r in top)
++                    assert count==t[event]['captured'] and total==t[event]['total']
++                    assert count/k==t[event]['precision'] and (count/total if total else None)==t[event]['recall']
++                    score_by_id={x['id']:tuple(x['risk']) for x in ranks[split][name]}
++                    edge=score_by_id[top[-1]['id']]
++                    above=[r for r in rows if score_by_id[r['id']]>edge]
++                    tied=[r for r in rows if score_by_id[r['id']]==edge]
++                    needed=k-len(above)
++                    fixed=sum(abs(r['C']-r['grade'])>=threshold for r in above)
++                    flags=sorted(int(abs(r['C']-r['grade'])>=threshold) for r in tied)
++                    assert fixed+sum(flags[:needed])==t[event]['tie_min']
++                    assert fixed+sum(flags[-needed:])==t[event]['tie_max']
++                checked+=1
++            # AUROC by all ordered positive/negative pairs; AP by grouped recall increments.
++            values={x['id']:tuple(x['risk']) for x in ranks[split][name]}
++            for event,threshold in [('e2',2),('e1',1)]:
++                positive=[r for r in rows if abs(r['C']-r['grade'])>=threshold]
++                negative=[r for r in rows if abs(r['C']-r['grade'])<threshold]
++                expected=report['tables'][split][name]['discrimination'][event]
++                auc=np.mean([1. if values[a['id']]>values[b['id']] else .5 if values[a['id']]==values[b['id']] else 0. for a in positive for b in negative])
++                previous_recall=0.; ap=0.
++                for value in sorted(set(values.values()),reverse=True):
++                    included=[r for r in rows if values[r['id']]>=value]
++                    tp=sum(abs(r['C']-r['grade'])>=threshold for r in included)
++                    recall=tp/len(positive)
++                    ap+=(recall-previous_recall)*tp/len(included)
++                    previous_recall=recall
++                assert abs(auc-expected['auroc'])<1e-12 and abs(ap-expected['average_precision'])<1e-12
++
++    e=data['E24']; assert sum(major(r) for r in e)==7
++    # Integer positions represent the fixed risk ordering; this differs from the production key-sort bootstrap.
++    b_order={r['id']:i for i,r in enumerate(order(e,NAMES[selected],selected))}
++    d_order={r['id']:i for i,r in enumerate(order(e,'D',selected))}
++    patients=sorted({r['patient'] for r in e},key=int)
++    groups=[[r for r in e if r['patient']==p] for p in patients]
++    rng=np.random.default_rng(8201); deltas=[]; recalls=[]; samples=[]
++    for iteration in range(10000):
++        draw=rng.integers(0,len(patients),size=len(patients))
++        expanded=[(r,occ) for occ,j in enumerate(draw) for r in groups[j]]
++        k=(len(expanded)+3)//4
++        bt=sorted(expanded,key=lambda x:(b_order[x[0]['id']],x[1]))[:k]
++        dt=sorted(expanded,key=lambda x:(d_order[x[0]['id']],x[1]))[:k]
++        delta=int(sum(major(r) for r,o in dt)-sum(major(r) for r,o in bt))
++        count=sum(major(r) for r,o in expanded)
++        deltas.append(delta)
++        if count: recalls.append(delta/count)
++        samples.append(dict(n=len(expanded),k=k,events=count,count_diff=delta,recall_diff=delta/count if count else None))
++    stored=load(BASE/'bootstrap.json')
++    assert samples==stored['samples']
++    for field,values in [('count_ci95',deltas),('recall_ci95',recalls)]:
++        ci=np.quantile(values,[.025,.975]).tolist() if values else None
++        assert ci==report[field]==stored[field]
++    assert 10000-len(recalls)==stored['undefined_recall']==report['undefined_recall']
++    for row in report['leave_one_patient_out']:
++        subset=[r for r in e if r['patient']!=row['removed']]; k=math.ceil(len(subset)/4)
++        diff=sum(major(r) for r in order(subset,'D',selected)[:k])-sum(major(r) for r in order(subset,NAMES[selected],selected)[:k])
++        assert diff==row['diff'] and len(subset)==row['n'] and k==row['k']
++    assert len(report['leave_one_patient_out'])==24
++    bt=order(e,NAMES[selected],selected)[:12]; dt=order(e,'D',selected)[:12]
++    bonly={r['id'] for r in bt}-{r['id'] for r in dt}
++    donly={r['id'] for r in dt}-{r['id'] for r in bt}
++    for event,threshold in [('e2',2),('e1',1)]:
++        detail=report['event_differences'][event]
++        di={r['id'] for r in e if r['id'] in donly and abs(r['C']-r['grade'])>=threshold}
++        bi={r['id'] for r in e if r['id'] in bonly and abs(r['C']-r['grade'])>=threshold}
++        assert di==set(detail['d_only_ids']) and bi==set(detail['b_only_ids']) and len(di)-len(bi)==detail['net']
++    delta=sum(major(r) for r in dt)-sum(major(r) for r in bt)
++    assert delta==report['count_diff']
++    additional={r['patient'] for r in e if r['id'] in donly and major(r)}
++    robust=report['tables']['E24']['D']['budgets']['0.25']['e2']['tie_min']>report['tables']['E24'][NAMES[selected]]['budgets']['0.25']['e2']['tie_max']
++    positive=delta>=2 and len(additional)>=2 and all(sum(major(r) for r in dt)>sum(major(r) for r in order(e,name,selected)[:12]) for name in NAMES) and all(x['diff']>=0 for x in report['leave_one_patient_out']) and robust
++    assert report['decision']==('positive' if positive else 'negative' if delta<=0 else 'inconclusive')
++    # Output publication helpers do not perform any ranking or numerical evaluation.
++    from review82_analysis import save
++    result=dict(passed=True,source_linked_rows=71,checked_budget_tables=checked,bootstrap_replicates_equal=10000,
++                regression=regress,count_ci95=report['count_ci95'],recall_ci95=report['recall_ci95'],wall_s=time.monotonic()-start,
++                inputs={str(p):digest(p) for p in [BASE/'protocol.json',BASE/'selection.json',BASE/'report.json',BASE/'ranks.json',BASE/'bootstrap.json']})
++    save(BASE/'verification.json',result)
++    tests=load(BASE/'tests.json'); assert tests['passed']
++    for p,h in tests['code'].items(): assert digest(p)==h
++    files={str(p):digest(p) for p in BASE.glob('*.json')}
++    save(BASE/'completion.json',dict(passed=True,files=files,scope='V8 24 / E24 47; bootstrap 10000; 신규 모델 호출 0; 독립 확인 없음'))
++    print(json.dumps({k:v for k,v in result.items() if k!='inputs'},ensure_ascii=False))
++
++if __name__=='__main__': main()
+diff --git a/sp75_metrics.py b/sp75_metrics.py
+new file mode 100644
+index 0000000..7d7b1c9
+--- /dev/null
++++ b/sp75_metrics.py
+@@ -0,0 +1,133 @@
++"""iter_075 지표: class-standardized MAE(primary), MAE, macro-F1, confusion, >=2등급 오류율, invalid 비율, prior, 예측 교환, 환자 단위 paired bootstrap.
++
++모든 함수는 numpy만 사용한다(독립 재계산 스크립트와 구분되는 production 구현). 예측 None(invalid)은 최대 오차 4로 처리한다(primary/MAE),
++confusion/F1에서는 별도 invalid 열로 둔다. 결측 class는 0으로 대체하지 않고 산출에서 제외하며 개수를 보고한다.
++"""
++import hashlib
++
++import numpy as np
++
++INVALID_ERR = 4.0
++BOOT_SEED = 7501
++BOOT_N = 10000
++
++
++def abs_err(true, pred):
++    t = np.asarray(true, float)
++    p = np.array([np.nan if x is None else x for x in pred], float)
++    e = np.abs(t - p)
++    e[np.isnan(p)] = INVALID_ERR
++    return e
++
++
++def class_std_mae(true, pred):
++    """returns (value or nan, n_classes_present). 각 실제 grade 1..5의 평균 절대오차를 동일 가중 평균 (없는 class 제외)."""
++    t = np.asarray(true)
++    e = abs_err(true, pred)
++    vals = [e[t == g].mean() for g in range(1, 6) if (t == g).any()]
++    if not vals:
++        return float('nan'), 0
++    return float(np.mean(vals)), len(vals)
++
++
++def summary(true, pred):
++    t = np.asarray(true)
++    e = abs_err(true, pred)
++    inval = np.array([p is None for p in pred])
++    cm = np.zeros((5, 6), int)  # 열 0-4: 예측 1..5, 열 5: invalid
++    for ti, p in zip(t, pred):
++        cm[ti - 1, 5 if p is None else p - 1] += 1
++    f1s = []
++    for g in range(1, 6):
++        tp = cm[g - 1, g - 1]
++        fp = cm[:, g - 1].sum() - tp
++        fn = cm[g - 1].sum() - tp
++        f1s.append(0.0 if (2 * tp + fp + fn) == 0 else 2 * tp / (2 * tp + fp + fn))
++    present = [g for g in range(1, 6) if (t == g).any()]
++    cs, nc = class_std_mae(true, pred)
++    return {'n': int(len(t)), 'class_std_mae': cs, 'n_classes_present': nc, 'mae': float(e.mean()), 'macro_f1_present': float(np.mean([f1s[g - 1] for g in present])),
++            'err_ge2_rate': float((e >= 2).mean()), 'invalid_rate': float(inval.mean()), 'confusion_rows_true1to5_cols_pred1to5_invalid': cm.tolist(),
++            'per_class_mae': {str(g): float(e[t == g].mean()) for g in present}}
++
++
++def patient_hash(pid, salt='iter075-swap'):
++    return hashlib.sha256(f'{salt}|{pid}'.encode()).hexdigest()
++
++
++def swap_predictions(rows, preds):
++    """같은 ordinal 안에서 환자 ID hash 순으로 정렬한 뒤 cyclic shift(+1)로 예측을 다른 환자에게 배정(고정 derangement). 행 순서는 유지.
++    rows: [{'patient','ordinal'}], preds 같은 길이. ordinal 내 표본이 1이면 교환 불가 -> ValueError."""
++    out = [None] * len(rows)
++    by = {}
++    for i, r in enumerate(rows):
++        by.setdefault(r['ordinal'], []).append(i)
++    for k, idx in by.items():
++        if len(idx) < 2:
++            raise ValueError(f'ordinal {k} has <2 rows')
++        idx = sorted(idx, key=lambda i: (patient_hash(rows[i]['patient']), rows[i]['patient']))
++        for j, i in enumerate(idx):
++            out[i] = preds[idx[(j + 1) % len(idx)]]
++    assert all(out[i] is not preds[i] or True for i in range(len(rows)))
++    return out
++
++
++def prior_predictions(train_rows, eval_rows):
++    """train-only prior. train_rows: 학습 supervised rows(grade, ordinal). 반환 (global_pred list, ordinal_pred list)."""
++    tg = np.array([r['grade'] for r in train_rows])
++    gd = np.array([(tg == g).mean() for g in range(1, 6)])
++    od = {}
++    for k in {r['ordinal'] for r in train_rows}:
++        sub = np.array([r['grade'] for r in train_rows if r['ordinal'] == k])
++        od[k] = np.array([(sub == g).mean() for g in range(1, 6)])
++    od_all = dict(od)
++    od_all[2] = (od[1] + od[3]) / 2.0
++    od_all[4] = (od[3] + od[5]) / 2.0
++
++    def med(dist):
++        cdf = np.cumsum(dist)
++        return int(np.argmax(cdf >= 0.5 - 1e-12) + 1)  # 기대 절대오차를 최소화하는 median, 동률은 낮은 grade
++
++    gp = [med(gd)] * len(eval_rows)
++    op = [med(od_all[r['ordinal']]) for r in eval_rows]
++    return gp, op, {'global': gd.tolist(), 'ordinal': {str(k): v.tolist() for k, v in sorted(od_all.items())}}
++
++
++def boot_diff(rows, pred_a, pred_b, n=BOOT_N, seed=BOOT_SEED, metric=lambda t, p: class_std_mae(t, p)[0]):
++    """환자 단위 paired bootstrap: metric(a) - metric(b) (a가 좋으면 음수). 같은 환자의 모든 행을 함께 재표집.
++    returns {'point','ci95','n_missing_class_replicates','n'}. class가 빠진 replicate는 present class만으로 계산하고 개수를 센다."""
++    rng = np.random.default_rng(seed)
++    pids = sorted({r['patient'] for r in rows}, key=int)
++    idx_of = {p: [i for i, r in enumerate(rows) if r['patient'] == p] for p in pids}
++    t = np.array([r['grade'] for r in rows])
++    full_classes = len(set(t.tolist()))
++    pa = np.array([np.nan if x is None else x for x in pred_a], float)
++    pb = np.array([np.nan if x is None else x for x in pred_b], float)
++
++    def m(ix, pr):
++        return metric(t[ix], [None if np.isnan(v) else int(v) for v in pr[ix]])
++
++    point = m(np.arange(len(rows)), pa) - m(np.arange(len(rows)), pb)
++    diffs, miss = [], 0
++    for _ in range(n):
++        ch = rng.integers(0, len(pids), len(pids))
++        ix = np.array([i for c in ch for i in idx_of[pids[c]]])
++        if len(set(t[ix].tolist())) < full_classes:
++            miss += 1
++        diffs.append(m(ix, pa) - m(ix, pb))
++    d = np.array(diffs)
++    return {'point': float(point), 'ci95': [float(np.nanpercentile(d, 2.5)), float(np.nanpercentile(d, 97.5))], 'n_missing_class_replicates': miss, 'n_boot': n, 'n': len(rows), 'n_patients': len(pids)}
++
++
++def boot_single(rows, pred, n=BOOT_N, seed=BOOT_SEED):
++    rng = np.random.default_rng(seed)
++    pids = sorted({r['patient'] for r in rows}, key=int)
++    idx_of = {p: [i for i, r in enumerate(rows) if r['patient'] == p] for p in pids}
++    t = np.array([r['grade'] for r in rows])
++    pr = np.array([np.nan if x is None else x for x in pred], float)
++    vals = []
++    for _ in range(n):
++        ch = rng.integers(0, len(pids), len(pids))
++        ix = np.array([i for c in ch for i in idx_of[pids[c]]])
++        vals.append(class_std_mae(t[ix], [None if np.isnan(v) else int(v) for v in pr[ix]])[0])
++    v = np.array(vals)
++    return {'ci95': [float(np.nanpercentile(v, 2.5)), float(np.nanpercentile(v, 97.5))]}
+diff --git a/test_review82.py b/test_review82.py
+new file mode 100644
+index 0000000..23e4544
+--- /dev/null
++++ b/test_review82.py
+@@ -0,0 +1,52 @@
++"""순위·표본·저장 실패 경로를 포함한 iter_082 fixture."""
++import copy
++from pathlib import Path
++import tempfile
++import numpy as np
++import review82_analysis as a
++from sp75_metrics import abs_err,class_std_mae
++
++
++def main():
++    checks={}
++    def check(name,condition):
++        checks[name]=bool(condition)
++        assert condition,name
++    def rejected(fn):
++        try: fn()
++        except (AssertionError,FileExistsError): return True
++        return False
++    def row(i,p,c=1,q=1,g=1,patient=None):
++        return dict(id=str(i),patient=str(patient or i),probs=p,C=c,Q=q,grade=g,ordinal=1)
++    certain=row(1,[1,0,0,0,0]); uncertain=row(2,[.2]*5,q=5,g=5)
++    check('zero_probability_finite',all(np.isfinite(list(a.scores(certain).values()))))
++    check('risk_direction',all(a.scores(uncertain)[n]>a.scores(certain)[n] for n in a.NAMES))
++    check('argmax_tie_first',a.scores(row(3,[.5,.5,0,0,0]))['one_minus_max']==.5)
++    check('argmax_mismatch_rejected',rejected(lambda:a.scores(row(3,[.5,.5,0,0,0],c=2))))
++    check('invalid_probability_rejected',rejected(lambda:a.scores(row(3,[1.1,-.1,0,0,0]))))
++    rr=[row(i,[1,0,0,0,0],g=5 if i<2 else 1) for i in range(1,6)]
++    t=a.table(rr,'entropy','entropy',.25)
++    check('ceil_5',t['k']==2)
++    check('ceil_47',a.table([row(i,[1,0,0,0,0]) for i in range(47)],'entropy','entropy',.25)['k']==12)
++    check('boundary_ties',t['e2']['tie_min']==0 and t['e2']['tie_max']==1)
++    mutated=copy.deepcopy(rr)
++    for r in mutated: r['grade']=6-r['grade']
++    check('rank_label_independent',a.rank(rr,'D','entropy')==sorted(rr,key=lambda r:a.key(r,'D','entropy')) and [r['id'] for r in a.rank(rr,'D','entropy')]==[r['id'] for r in a.rank(mutated,'D','entropy')])
++    check('E_selection_rejected',rejected(lambda:a.select(rr,'E24')))
++    check('zero_event_recall',a.table([certain],'D','entropy',.25)['e2']['recall'] is None)
++    check('single_class_metrics',a.discrimination([certain],'D','entropy',2)['auroc'] is None)
++    check('perfect_auc_ap',a.discrimination([certain,uncertain],'D','entropy',2)==dict(auroc=1.,average_precision=1.))
++    check('invalid_four',abs_err([1],[None])[0]==4)
++    check('present_class_mean',class_std_mae([1,1,5],[1,3,1])==(2.5,2))
++    copies=[dict(certain,occurrence=2),dict(certain,occurrence=1)]
++    check('occurrence_final_key',[r['occurrence'] for r in a.rank(copies,'D','entropy')]==[1,2])
++    boot=a.bootstrap([certain,dict(certain,id='other',ordinal=3)],'entropy',n=10)
++    check('patient_cluster_duplicates',all(s['n']==2 and s['k']==1 for s in boot['samples']) and boot['undefined_recall']==10)
++    with tempfile.TemporaryDirectory(dir='results') as d:
++        p=Path(d)/'saved.json'; a.save(p,dict(ok=1))
++        check('overwrite_rejected',rejected(lambda:a.save(p,dict(ok=2))))
++        check('original_preserved',a.read(p)==dict(ok=1))
++    a.save(a.ROOT/'tests.json',dict(passed=all(checks.values()),checks=checks,code={p:a.sha(p) for p in ['review82_analysis.py','review82_verify.py','test_review82.py','sp75_metrics.py']}))
++    print(f'{len(checks)}/{len(checks)} PASS')
++
++if __name__=='__main__': main()
