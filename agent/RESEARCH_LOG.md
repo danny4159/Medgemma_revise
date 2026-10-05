@@ -28150,3 +28150,333 @@ GPU·모델 요청이 없는 것은 계획과 사용자 대기 지시에 부합�
 # Recommended Next Experiment
 
 지금 새 실험을 발주하지 않는다. 사용자 자료 통지와 실제 경로가 확인되면 `research/results/iter_074/handoff_design_v2.md`와 기존 인수 설계를 사용한다. ID·정답 의미, 방향·좌우·box 정합, 관측 충분성·공식 입력을 확인한 뒤 소수 실제 출력으로 모델 적합성을 판단한다. 이후에만 강한 대조와 필요한 규모를 확정한다. 공식 test를 완전 미노출 집단으로 간주하지 않는다.
+
+
+## iter_075 GPT PLAN [MRI 부위별 판독의 투자 적합성 검토 / proceed] — 2026-10-05 13:15:54
+
+# 요약
+
+- **이번에 할 일:** SPIDER에서 일부 위치의 임상 등급만 학습한 뒤 다른 위치의 판독으로 전이되는지 비교한다.
+- **필요한 이유:** 기존 frozen Modic와 bbox 실험은 부위 내부 판독의 적응·전이를 평가하지 않았다. 공유 영역 분류기 이후에도 VLM 가치가 남는지 확인해야 한다.
+- **확인할 기준:** 같은 등급 예산의 정확도·위치 전이·영상 기여·전체 비용이다. 표준 SFT와 oracle crop 자체를 새 방법으로 취급하지 않는다.
+- **주의·다음:** 기존 개발 환자만 사용한다. OAI와 F139는 추가 사용하지 않으며, 정해진 평가 후 계속 또는 보류를 결정한다.
+
+# Current Understanding
+
+iter_075 round_01과 이번 조사 원문을 기준으로 한다. 사용자 보완 `20261005_130040_ae162aa3`에 따라 OAI 대기 조건을 해제한다. OAI 영상 확보·annotation 추가 조사·학습 준비를 재개하지 않는다. `results/oai_intake_20261005_9HEIpm/README.md`와 ZIP, iter_073/074 정정 및 test 노출 기록은 보존한다.
+
+iter_071의 두-category bbox 과제에서는 detector가 충분했고 RSNA 초기값 이득이 없었다. iter_067/068의 frozen Modic와 고정 보정도 후속 투자 기준을 충족하지 못했다. 이 결과는 임상 등급의 표준 적응과 다른 대상 위치 전이를 반증하지 않았다. 반대로 학습하면 유망할 것이라는 근거도 아니다.
+
+이번은 알려진 baseline을 학습해 투자 가치를 선별하는 diagnostic이다. 새로운 loss·architecture·학습 방법은 없다. 최종 GOAL은 유지한다.
+
+# Strategy Check / 연구 방향 판단
+
+**상위 질문 → 현재 관찰:** 질문이 지정한 영상 근거를 읽고 사용하는 능력이 관심이다. 기존에는 기본 인식 부족과 대상 선택을 충분히 분리하지 못했고, 위치 출력에는 강한 단순 대안이 있었다.
+
+**남은 설명 → 최소 비교:** 일부 위치의 등급 supervision으로 다른 위치도 판독하는 공유 능력이 있는지, 위치 prior 또는 영역 분류로 충분한지 비교한다. 전체 영상의 대상 지정 SFT F, crop SFT R, 공유 crop 분류기 C, radiomics H를 같은 임상 등급으로 학습한다.
+
+**바뀔 결정 하나:** 현재 부위별 판독에서 VLM 방법 개발에 추가 투자할 가치가 있는가?
+
+기존 context/bbox 개선은 새로운 잔여 가치가 없어 보류한다. 부위별 판독을 즉시 종료하는 선택도 가능하지만, 임상의 등급과 기존 영상으로 판독 적응을 한 번 직접 비교하는 정보 가치가 더 높다고 판단한다. 데이터 이동 자체나 언어 인터페이스 자체가 이유는 아니다.
+
+실제 사용과의 연결은 일부 대상에만 임상 등급 supervision이 있는 상황에서 다른 질문 대상도 처리하는 능력이다. 이번 ordinal 분리는 그 제한된 대리 실험이며 실제 기관의 annotation 정책을 재현했다고 주장하지 않는다. 모든 위치가 영상에는 보일 수 있으므로 '보지 못한 anatomy'가 아니라 '등급 supervision을 주지 않은 위치'라고 부른다.
+
+이번에는 타 계열 VLM 학습을 추가하지 않는다. 우선 판독 supervision과 강한 전문 대안을 비교해야 한다. 긍정적 가치가 남으면 큰 방법 투자 전에 다른 계열 또는 독립 자료의 확인을 검토한다. MedGemma 특이 결과를 VLM 전체로 일반화하지 않는다.
+
+# Hypothesis
+
+H1: F 또는 R은 학습 위치뿐 아니라 등급 supervision을 주지 않은 위치에서도 영상에 연결된 판독을 보이고, 같은 등급 예산의 모듈형 대조보다 유용한 이점을 보인다.
+
+H2: 공유 영역 분류기 또는 radiomics가 판독·전이를 충분히 설명한다. VLM의 별도 가치가 없으면 현재 방법 투자를 보류한다.
+
+H3: crop 판독은 되지만 F만 약하다. 이는 대상 지정·해상도·context 관련 후보이며 순수 선택 실패의 증명은 아니다. R의 모듈형 대비 가치가 없으면 이 차이만으로 새 방법을 발주하지 않는다.
+
+H4: 모든 학습 시스템이 약하다. 현재 입력·정답 충분성·표본·recipe를 분리하지 못한 것으로 기록한다. 복잡한 loss나 다음 frozen 모델로 자동 이동하지 않는다.
+
+# Limitation Evidence / Correct Usage Checks
+
+이번 과제에 관해 실제 유효한 모델 한계는 아직 없다. `limitation_ids=[]`를 유지한다. `mri-explicit-target-context-effect`는 연구 이력이며 Pfirrmann 방법 개발의 근거가 아니다. 기존 observed/validated 상태를 변경하지 않는다.
+
+[SPIDER 배포](https://zenodo.org/records/10159290)와 [저자 원문](https://d-nb.info/1328551350/34)의 IVD별 임상 등급·ordinal 의미를 사용한다. CSV의 `Pfirrman grade` 1–5를 그대로 보존하고 결측을 1 또는 정상으로 치환하지 않는다. mask 200+k와 CSV IVD label k를 연결하되 실제 영상·header·overlay를 확인한다. ordinal을 L1–S1으로 번역하지 않는다.
+
+GT anatomy는 모든 시스템의 위치 지원용 oracle다. 임상 grade와 등급으로 만든 설명은 추론 입력에 넣지 않는다. 세 중앙 sagittal slice가 모든 등급에 충분하다는 보장은 없으며, 이 제한은 해석에 남긴다. 모델 오답이나 100% oracle 정답 미달을 기술 실패로 취급하지 않는다.
+
+# Contribution Path / Baselines / Reuse
+
+기여는 미확정이다. [SPIDER radiomics 연구](https://www.nature.com/articles/s41598-026-56056-w_reference.pdf)는 중요한 전문 대안이다. 이번 실험은 그 전체 multi-sequence pipeline이나 발표 점수의 재현이 아니다. 특정 새 과제의 VLM 점수만 올리는 것으로 확대하지 않는다.
+
+## 비교군
+
+- **F:** MedGemma 1.5 base에서 시작한 직접 LoRA SFT. 전체 세 slice에 질문 대상 disc의 바깥쪽 box를 표시하고 해당 등급을 묻는다.
+- **R:** 같은 base·등급·학습 기회의 crop 직접 SFT. F와 동일한 세 slice에서 대상 ROI를 제공한다. crop에 의한 해상도·context 변화는 개입 묶음으로 해석한다.
+- **C:** R과 동일한 세 crop을 사용하는 공유 ResNet18. ImageNet 초기값에서 적응하고, 세 영상 feature 평균에 공통 5-class head를 연결한다. ordinal별 head를 만들지 않는다. 질문은 해당 ROI의 결과를 조회한다.
+- **H:** 원 regular T2 volume의 disc mask에서 radiomics를 추출한 RandomForest. 같은 등급 72개만 학습하되 전체 volume·정밀 mask라는 추가 정보가 있는 oracle 대안으로 표시한다. H의 우위를 동일 픽셀 조건의 구조 우위로 해석하지 않는다.
+- **보조:** 미적응 F/R, train-only global/ordinal prior, 동일 ordinal의 다른 환자 예측 교환.
+
+C는 약한 frozen feature 대조로 제한하지 않는다. H는 설치되지 않았다는 이유로 제외하지 않는다. 어느 비교군이 기술적으로 미완료이면 그 비교를 요구하는 투자 기준은 미판정으로 남긴다.
+
+## 재사용
+
+JSON의 reuse_assets에 지정한 iter_071 SHA의 21개 파일을 반입한다. 현재 브랜치에는 없음을 확인했다. 기존 `g71_train.py`의 학습·상태 저장 패턴, `rsna_diag`의 공식 입력/LoRA, `g71_data.py`와 `sp67_data.py`의 단일 T2 경로를 연결한다. 불필요한 과거 bbox 평가기 실행·전체 리팩터링은 하지 않는다.
+
+전체 스냅샷 재사용은 미승인이다. 현재 경로에서 CE 검사, validation 재개, 실행 소유권, provenance, GPU 여유를 보완한다. 기존 source adapter와 detector checkpoint는 이번에 사용하지 않는다.
+
+# Proposed Experiment
+
+## 1. 자료 연결과 사전 고정
+
+`results/iter_021/source/`의 검증된 images.zip·masks.zip·grading CSV를 사용한다. `results/iter_071/data/split_lock.json`의 T24/V8/E24 환자를 그대로 유지한다. 새 결과는 `results/iter_075/`에만 저장한다.
+
+- 학습: T24의 ordinal 1·3·5, 기술 제외 전 72개.
+- validation: V8의 ordinal 1·3·5, 24개.
+- 최종 개발 평가: E24 ordinal 1·3·5의 72개와 ordinal 2·4의 48개.
+- T24/V8의 ordinal 2·4 grade는 학습·loss·선택·threshold에 사용하지 않는다. F139 및 개발 56명 밖의 환자는 접근 allowlist에서 차단한다.
+
+위치 집합은 하부와 상부를 통째로 나눌 때의 극단적인 위치 이동을 줄이기 위해 interleaved로 고정한다. 계획 중 기존 개발 집단의 grade 분포를 확인했으며 이를 독립 확인으로 부르지 않는다. 모델 결과를 보고 위치 집합을 바꾸지 않는다.
+
+Patient×IVD 중복·결측·범위·mask 대응을 점검한다. 원 archive checksum 기록과 크기·선택 member hash를 연결하고 불변성 근거가 없을 때만 전체 hash를 다시 계산한다. F139의 grade 분포를 집계하지 않는다. 통합 CSV는 환자 ID 필터 뒤에 허용 환자의 grade만 해석·저장한다.
+
+regular T2와 기존 중앙 j−1,j,j+1 선택을 유지한다. volume min-max, 동일 RGB 채널, 물리 종횡비를 사용한다. slice 선택은 grade·모델 출력과 무관하다. 중앙 slice에서 대상 mask가 없거나 연결이 모호하면 사전 기술 제외로 기록하며 다른 환자로 채우지 않는다. class support가 사라지면 5등급 비교의 미성립 범위를 보고한다.
+
+F의 표시 box와 R의 crop은 선택된 세 slice의 해당 anatomy bbox union을 기준으로 각 방향 25% 여백을 둔다. F에는 ROI 바깥 경계만 표시하고 내부를 가리지 않는다. R은 같은 ROI를 세 slice에 공통 적용한다. clipping·pixel 크기·실제 processor 해상도를 저장한다. 출력의 차이를 순수 선택 효과로 해석하지 않는다.
+
+기존 56명 단일 T2 기하 검증은 hash·경로가 같으면 재사용한다. 새 ROI와 표시 경로는 T24의 RAI/ASL 대표 사례, 각 ordinal의 overlay 및 좌표 왕복으로 확인한다. 기존 sp67의 sequence 중심 비교는 사용하지 않는다.
+
+## 2. 동작 확인
+
+T24 안에서 grade 1–5를 포함하는 최소 사례를 환자 ID·ordinal 순으로 골라 입력·label mask·gradient·checkpoint·복구를 확인한다. 이 표본의 overfit는 일반화 근거가 아니다.
+
+고정 답변은 문자열 1–5다. 공식 chat template를 사용하고 3영상 순서·pixel tensor와 학습/생성 prefix를 대조한다. greedy 생성, 최대 32 new tokens, 고정 whole-string parser를 사용한다. 양끝 공백과 단일 종료 마침표만 허용하며 설명·복수 숫자는 invalid다. 개발 출력 후 parser를 유리하게 바꾸지 않는다.
+
+보조로 공식 forward의 다섯 grade 후보 likelihood를 저장한다. 이는 형식과 판독을 구분하기 위한 분석이며 생성 primary를 사후 대체하지 않는다. 후보 token 수가 다르면 전체 후보 sequence log-likelihood로 고정한다.
+
+공식 model loss를 기준으로 같은 logits의 float32 CE와 유효 token 수를 독립 대조한다. 이전 custom CE의 실패를 허용 오차만 넓혀 통과시키지 않는다. LoRA 초기 항등, base 동결, 유한 loss/gradient, 실제 parameter update와 재개를 검사한다.
+
+## 3. 가능성 탐색: T24 표준 적응
+
+T8의 학습 위치는 24개·5등급이며 grade5가 2개뿐이다. 따라서 T8을 별도 성능 gate로 반복하지 않고, 동작 확인 뒤 T24 72개로 시작한다. 이는 최초 가능성 탐색이며 full 방법 개발이 아니다.
+
+**F/R:** target seed17, base 초기화, language-layer rank16 LoRA, alpha32, dropout0.05, AdamW, weight decay0.01, gradient clip1, effective batch8. LR은 2e-5와 2e-4 두 개다. 두 방식의 annotation 노출·batch 순서·업데이트 기회를 맞춘다. microbatch는 실측으로 정한다.
+
+총 32 epoch horizon의 5% warmup+cosine schedule을 처음부터 고정한다. 네 trajectory를 8·16 epoch까지 수행하고 각 milestone에서 V8의 24개 생성과 CE를 평가한다. 매 epoch 생성하지 않는다. 기술적으로 유효하면 작은 V8의 무개선만으로 epoch8에서 종료하지 않는다.
+
+epoch16에서 방식별로 V8 primary가 가장 좋은 LR 하나를 선택한다. 동률은 CE, 더 이른 checkpoint, 작은 LR 순이다. 해당 trajectory의 epoch8→16에서 V8 CE가 5% 이상 감소하거나 primary MAE가 0.10 이상 개선됐으면 32 epoch까지 연장하고 epoch32만 추가 평가한다. 이는 수렴 불확실성을 한 번 더 확인하는 범위다. E24 결과는 연장에 사용하지 않는다.
+
+**C:** 공식 ImageNet ResNet18 초기값을 고정한다. 세 crop을 각각 처리해 feature를 평균하고 공통 5-class CE로 적응한다. LR 1e-4/1e-3, AdamW, weight decay1e-4, batch8, seed17, 최대64 epoch, 8 epoch 간격 V8 평가를 사용한다. 최근 세 milestone에서 V8 CE와 primary 모두 개선되지 않으면 종료한다. 전체 crop을 보존한 resize/pad와 ImageNet normalization을 사용하고 임의 central crop으로 병변을 자르지 않는다. label-preserving augmentation은 사전 고정한 작은 평행 이동과 scale jitter만 쓰며 모든 설정을 기록한다.
+
+**H:** PyRadiomics의 원영상 shape·first-order·texture를 사용한다. resampling과 binning 설정은 T24 입력의 기술 검증 후 출력 전에 고정하고 manifest에 저장한다. wavelet·다중 sequence·등급에 따른 feature 선택은 추가하지 않는다. train-only 결측 처리 뒤 RandomForest 500 trees, max_depth {5,None}, min_samples_leaf {1,3}, class_weight {None,balanced}의 8개 설정을 V8에서 고른다. 논문 최고 성능의 완전 재현으로 보고하지 않는다.
+
+훈련에는 ordinal 1·3·5 grade만 사용한다. 임상 grade 없이 anatomy annotation을 제공하는 비용·정보도 별도로 계산한다. 동등한 grade 개수를 총 annotation 비용의 동등성으로 바꾸지 않는다.
+
+## 4. 설정 고정과 개발 평가
+
+F/R/C/H의 checkpoint·전처리·parser·metric·입력·코드 SHA를 고정한 후 E24를 한 번 평가한다. F/R은 선택된 checkpoint와 미적응 모델을 같은 입력으로 비교한다. E24는 과거 사용 이력이 있는 개발 환자이며 새 독립 test가 아니다.
+
+학습 위치 72개와 supervision 미제공 위치 48개를 각각 보고한다. raw grade 분포가 다르므로 위치 간 단순 정확도 차이로 전이 실패를 확정하지 않는다. class별 오차와 class-standardized 지표를 함께 사용한다.
+
+각 ordinal에서 환자 ID hash 순의 고정 cyclic derangement로 저장 예측을 다른 환자에게 배정한다. 동일 평가 행에서 실제 대응과 교환 대응을 비교한다. 이는 추가 모델 호출이 없고, 내부 영상 사용의 완전한 인과 증명은 아니다.
+
+train-only prior는 global grade 분포와 ordinal별 분포를 저장한다. supervision이 없는 ordinal2/4는 양옆 학습 ordinal 분포의 동일 가중 평균을 사용한다. 선택 grade는 기대 절대오차를 최소화하는 median이며 동률은 낮은 grade다. E24 grade로 보정하지 않는다.
+
+## 5. 규모 확대와 독립 확인
+
+이번에 허용하는 확대는 위 validation 기반 epoch32 연장뿐이다. 추가 환자·F139·다중 seed·다른 VLM·새 sequence는 포함하지 않는다. T24가 작다는 이유만으로 모든 baseline이 약한 결과를 방법 전체의 실패로 해석하지 않는다.
+
+긍정적 가치가 남으면 다음 리뷰에서 별도 최소 방법 시험 또는 타 계열/독립 집단 확인의 우선순위를 정한다. 이번 결과만으로 full 방법 개발이나 논문 기여를 승인하지 않는다.
+
+## 6. GPU·시간·재개
+
+실행 직전에 nvidia-smi로 허용 GPU0/1의 UUID·여유 메모리를 확인한다. 두 VLM trajectory 또는 VLM과 C를 독립 배정한다. 같은 GPU의 복수 worker는 허용하되 실제 동시 peak와 다른 점유에 worker당 2GiB 여유를 더한 조건을 만족해야 한다.
+
+T24 기술 입력에서 microbatch1과 유망한 batch 확대를 먼저 비교한다. 독립 작업과 메모리 여유가 있으면 GPU당 두 worker도 후보로 비교한다. 학습 정합성·처리량·peak VRAM·긴 입력 지연·CPU/I/O 경합으로 고른다. 한 worker를 유지하면 메모리나 실측 처리량 근거를 남긴다.
+
+기술 제외가 없으면 VLM 최대 updates는 4×16×9 + 2×16×9 = 864다. 최종 E24 생성은 base F/R와 적응 F/R 합계480건이다. validation·기술 검사·재시도는 별도 ledger에 합산한다. CNN·radiomics 비용도 포함한다.
+
+초기 추정은 GPU 실험 약3–10시간 wall-clock이다. 기존 단일 영상 학습 기록을 참고한 불확실한 범위이며 새 3영상 경로의 실측치가 아니다. 기술 실행에서 update/s·request/s와 병렬 효율을 측정한 뒤 남은 updates·요청 수로 예상 시간을 갱신한다. 이 범위를 timeout으로 사용하지 않는다.
+
+checkpoint에는 optimizer·RNG·batch 순서·epoch·validation 상태를 저장한다. 고유 요청 ID·원자적 claim·worker별 출력·seal을 사용하고, 동시 launcher 및 validation 전 중단을 실제 검사한다. 현재 입력/config/checkpoint hash와 다른 완료 출력은 거부한다. 손상·OOM은 영향 경로를 복구하고 기준을 바꾸지 않는다.
+
+비용은 원 T2 읽기부터 답변 저장까지, 모델 적재 포함/제외를 모두 보고한다. V8에서 고정된 전체 질문 workload를 시스템별 네 paired block으로 번갈아 측정한다. H/C의 preprocessing·feature 추출·모든 대상 결과·질문 조회를 포함한다. GT anatomy 획득 비용은 미측정 oracle 비용으로 명시한다.
+
+# Implementation Tasks for Claude
+
+1. reuse manifest와 관련 review를 확인하고 필요한 코드만 반입·연결한다. 과거 결과·hf_cache·기본 환경을 변경하지 않는다.
+2. iter_075의 allowlist·환자 split·supervision 위치·원본 hash·clinical label 연결을 고정한다. 신규 ROI/표시 검증과 실제 작은 입력을 같은 단계에서 수행한다.
+3. 기존 학습 wrapper를 3영상 grade task로 인자화한다. source adapter·bbox target·과거 결과 경로는 호출하지 않는다.
+4. 공식 loss·입력·gradient·중단 재개와 provenance 결함을 선택한 실행 경로에서 수정한다. 무관한 과거 실행기 정비는 하지 않는다.
+5. C/H에 필요한 패키지는 충돌 시 results/environments 아래 격리한다. 실제 Python·버전·가중치 revision·설치 명령과 import/GPU/작은 입력 검사를 남긴다.
+6. T24/V8 baseline 적응과 사전 연장 분기를 실행한다. 완료·선택 기록을 고정한 후 E24를 평가한다.
+7. 원시 응답·확률·grade·환자별 오차·bootstrap·전체 비용을 저장하고 별도 구현으로 주지표를 재계산한다.
+8. 보고서에 모델 기본 판독, 위치 전이, 모듈형 상대 가치, 입력·oracle·노출 한계와 종료 결정을 구분한다. 준비 완료를 유효한 모델 실험으로 보고하지 않는다.
+
+# Evaluation (성공/실패 기준 포함)
+
+## 지표
+
+Primary는 ordinal2/4의 class-standardized MAE다. 각 실제 grade 1–5에서 절대 등급 오차를 평균한 뒤 다섯 class를 동일 가중 평균한다. invalid 생성은 최대 오차4로 처리한다. 일반 MAE·macro-F1·grade별 confusion·두 등급 이상 오류율·invalid 비율과 학습 위치 지표를 함께 보고한다. 결측 class가 발생하면 임의로 0을 넣지 않고 산출 불가 범위를 명시한다.
+
+환자 단위 paired bootstrap 10,000회, seed7501로 차이의95% CI를 계산한다. 같은 환자의 위치들은 함께 재표집한다. class가 빠지는 replicate 수를 보고한다. 탐색 CI이며 여러 비교를 확증적 검정으로 포장하지 않는다.
+
+최소 투자 폭은 **MAE 0.20 grade 개선**으로 둔다. 48개 held-position 항목에서 단순 MAE 기준 약10 grade-distance units에 해당하는 크기이며 임상 허용 오차 기준은 아니다. 단순 양의 차이나 CI 상한만으로 연장하지 않기 위한 이번 진단의 기준이다.
+
+## 양성 후보
+
+F 또는 R에서 supervision 미제공 위치의 class-standardized MAE가1.0 이하이고, train-only prior와 동일 행의 예측 교환보다 각각0.20 이상 좋아야 한다. 동시에 같은 영상 crop을 사용하는 C보다0.20 이상 좋아야 한다. H보다0.10을 넘게 나쁘면 더 풍부한 전문 관측을 감수할 대안이 남으므로 VLM의 실용 우위는 미확정이다. 두 등급 이상 오류율과 비용도 함께 검토한다.
+
+이 조건은 후속 검토 후보를 정하는 탐색 기준이다. CI가0을 포함하면 효과 확증으로 부르지 않으며, CI가 유용한 이득과 손해를 모두 포함하면 투자 판단은 불확정으로 남긴다. 양성 후보가 생겨도 표준 crop/SFT의 효과를 새 방법으로 발표하지 않는다.
+
+R만 강하고 F가 약하면 대상 지정·해상도·context가 얽힌 관찰로 보존한다. R이 모듈형보다 유용하지 않으면 이 차이만으로 선택 안정화 방법을 발주하지 않는다. 새로운 method pilot은 해당 리뷰의 실제 observed 근거와 잔여 가치에 대해 별도 계획한다.
+
+## 음성 투자 판단
+
+C가 기본 영상 신호를 보이고 best VLM보다 MAE가0.10 이상 나쁘지 않으며 네 비용 block에서 모두 전체 시간이 절반 이하이면 현재 oracle 영역 조건의 모듈형 대안 충분성 후보로 판단한다. 정확도 CI가±0.20의 유용한 차이를 넓게 포함하면 충분성을 확정하지 않는다. 그 경우에도 VLM 방법 확대는 자동 승인하지 않는다.
+
+H만 강하면 현재 세 slice 입력의 부족 또는 형상 정보 차이가 경쟁 설명으로 남는다. 이를 VLM 인식·선택의 근본 한계로 기록하지 않는다. oracle anatomy가 있으므로 실제 예측 영역을 쓰는 end-to-end 충분성도 미검증이다.
+
+## 기본 적응 부족·불확정·기술 오류
+
+모든 시스템이 prior·교환보다 의미 있게 좋지 않거나 허용한 학습 이후에도 불안정하면 현재 판독 적응 경로의 근거 부족으로 종료한다. 짧은 학습의 음성 결과를 MRI 전체로 확대하지 않는다.
+
+표본 변동·수렴·입력 충분성이 남으면 이번 투자를 보류한다. E24를 보고 LR·prompt·parser·위치 집합·환자를 추가하지 않는다. 추가 확인은 어떤 경쟁 설명이 남았고 결과가 투자 결정을 바꿀지 별도 근거가 있을 때만 계획한다.
+
+ID·grade·기하·loss·입력·평가·누수 결함은 기술 실패다. 영향받은 경로만 수정·재검증하며 기존 결과와 정정 이력을 보존한다. 정확한 입력에서의 모델 오답은 기술 실패가 아니다.
+
+# Risks / Checks
+
+- ordinal은 실제 해부학 이름이 아니며, 이번 전이는 위치 제한 supervision에 한정된다.
+- E24와 grade 분포는 개발 자료다. F139를 독립 확인용으로 자동 개방하지 않는다.
+- 세 중앙 slice의 임상 충분성은 보장되지 않는다. H는 전체 volume과 mask를 사용하므로 공정성 표에 정보 차이를 명시한다.
+- crop의 확대·context 제거·target 안내가 동시에 바뀐다. F/R 차이를 하나의 내부 원인으로 단정하지 않는다.
+- 공유 C가 모든 영역을 계산한 뒤 조회하는 방식을 허용한다. VLM에 유리하도록 모듈형 입력이나 도구 사용을 막지 않는다.
+- 사전학습의 SPIDER 노출은 알려지지 않았다. 환자 분리만으로 foundation-model contamination 부재를 주장하지 않는다.
+- 모델 출력과 비용의 provenance를 함께 고정한다. 검증 실패를 성공으로 표시하지 않는다.
+- OAI·MR-RATE·과거 종료 실험을 자동 재개하지 않는다. 최종 GOAL과 원본 기록을 보존한다.
+
+## 대규모 GPU 필요 후보
+
+위치·기관을 가로질러 영역별 임상 판독 supervision을 공유하는 vision encoder–connector–language 공동 적응을 장기 후보로 기록한다. 이번 경량 baseline 비교는 그 필요성이나 신규성을 미리 승인하지 않는다.
+
+# 계획의 근거 (GPT 조사 노트)
+
+# 결정과 직전 질문의 답
+
+SPIDER 후보를 한정 diagnostic으로 채택한다. 선택한 질문은 일부 위치에서 학습한 임상 판독의 다른 대상 위치 전이다. 자료가 있다는 사실이 아니라, 기존 frozen·bbox 비교가 답하지 못한 판독 적응을 강한 공유 분류기와 같은 등급 예산으로 직접 판정할 수 있다는 점이 이유다. 새로운 방법은 발주하지 않는다.
+
+1. **구별할 조건:** 전체 영상의 대상 지정 직접 SFT, crop 직접 SFT, 공유 영역 분류기가 동일한 위치 제한 supervision을 받을 때 다른 위치에서도 판독하는가를 비교한다. 등급 분류에 언어를 붙였다는 이유로 가치를 인정하지 않는다. 모듈형 대안 이후 남는 정확도·비용 이점이 없으면 현재 방법 투자를 보류한다.
+2. **현재 자료로 가능한가:** 기존 T24/V8/E24 분리를 그대로 사용한다. 공식 ordinal은 해부학적 L1–S1 이름이 아니다. F139를 쓰지 않아도 grade supervision을 줄 위치와 평가할 위치를 나눌 수 있다. 다만 이는 위치별 supervision 전이이며 새로운 해부학·기관 일반화 또는 결합 능력의 증명이 아니다.
+3. **서로 다른 종료가 가능한가:** 모듈형 모델은 충분하지만 VLM 이점이 없는 경우와 모든 시스템의 판독이 부족한 경우를 구분한다. 전자는 현재 VLM 투자 보류, 후자는 입력·표본·recipe 범위의 근거 부족이다. 어느 경우도 새 frozen 후보를 자동 발주하지 않는다.
+
+# 이번에 확인한 근거
+
+`round_01.json`, GOAL, iter_067 plan·review의 관련 부분, iter_071 review·plan·code_assets, iter_072 plan, iter_074 review, LIMITATIONS와 CODE_ASSETS의 관련 원문을 읽었다. iter_064 원 review.json은 valid_experiment=true, blocking_issues=[]지만 해당 context 관찰을 새 Pfirrmann 과제의 observed 한계로 전용하지 않는다. 따라서 이번 limitation_ids는 비운다.
+
+현재 research HEAD는 `5f2affbdd1d63328d6dbe1220725b41d04ded4d6`이다. 필요한 21개 보관 파일은 현재 브랜치에 없으며 iter_071 전체 SHA에서 존재와 import 의존성을 확인했다. 재사용 승인은 별개이며 새 경로에서 필요한 결함만 수정한다.
+
+`research/results/iter_071/data/split_lock.json`의 환자 분리를 확인했다. grading CSV는 D/E 환자를 선별한 뒤 Pfirrmann 값만 집계했다. F139의 등급 분포와 영상은 분석하지 않았다. 기술 연결 검사 전 개수는 다음과 같다.
+
+- T24 ordinal 1·3·5: 72개, grade 1/2/3/4/5 = 9/15/28/13/7.
+- V8 같은 위치: 24개, 8/4/6/1/5.
+- E24 같은 위치: 72개, 14/20/17/9/12.
+- E24 ordinal 2·4: 48개, 11/10/12/7/8.
+- 기존 T8의 학습 위치는 24개뿐이고 grade5는 2개다. 이번 5등급 질문에서는 T8을 별도 성능 선별 단계로 반복하기보다 동작 확인 후 T24로 시작한다. T24도 작은 탐색이며 독립 확증은 아니다.
+
+# 공식 자료와 가까운 선행
+
+[SPIDER 공식 배포](https://zenodo.org/records/10159290)는 IVD별 Pfirrmann 1–5 등급을 제공한다. [저자 원문](https://d-nb.info/1328551350/34)은 임상의 등급과 검토·수정된 segmentation의 생성 경로를 설명하며 ordinal을 실제 해부학 이름으로 해석하지 말라고 명시한다. 현재 실제 영상–등급 연결과 세 slice의 관측 충분성까지 검증된 것은 아니다.
+
+[SPIDER radiomics 연구 원문](https://www.nature.com/articles/s41598-026-56056-w_reference.pdf)을 추가 확인했다. 전체 3D disc mask의 radiomics와 midsagittal frozen ResNet feature를 사용했고, radiomics의 중요한 기여를 보고했다. 따라서 약한 frozen CNN만 비교하거나 VLM을 적용한 것 자체를 기여로 삼지 않는다. 이번에는 같은 등급 예산의 적응 CNN과 radiomics 대안을 실행한다. 논문의 전처리·전체 multi-sequence pipeline을 완전히 재현한다고 주장하지 않는다.
+
+[torchvision ResNet18 문서](https://docs.pytorch.org/vision/stable/models/generated/torchvision.models.resnet18.html)와 [PyRadiomics 설정 문서](https://pyradiomics.readthedocs.io/en/latest/customization.html)를 확인했다. 실제 설치 버전·가중치 출처는 구현에서 고정한다.
+
+# 유지·보류·변경
+
+OAI 대기·다운로드·annotation 추가 분석을 종료한다. iter_073/074의 정정과 OAI 인수 ZIP은 보존한다. MR-RATE 접근 문제를 재조사하거나 자동 전환하지 않는다. 기존 MRI context·bbox 종료 판단은 유지한다. 이번에 바꾸는 것은 공개 등급으로 표준 판독 적응과 위치 전이를 직접 비교한다는 점이다.
+
+# 비용과 주장 경계
+
+iter_071의 단일 영상 학습은 trajectory당 약 25–26분과 추가 연장 약 17–19분을 기록했다. 이는 이번 3영상 학습 속도가 아니다. 초기 시간 범위는 계획 추정이며 실제 입력의 처리량으로 갱신한다. 정확한 누적 구현/GPU 비용 비중은 기록에서 산출되지 않아 만들지 않는다.
+
+이번 결과는 연구 투자 판단용이다. 임상 배치, annotation 절감률, 신규 방법, 타 모델 공통 한계를 확증하지 않는다. 논문 추천은 아직 보류한다.
+
+# 대규모 GPU 필요 후보
+
+영역별 임상 supervision을 여러 위치·기관에 공유하도록 vision encoder–connector–language를 공동 적응하는 후보를 보존한다. 현재 경량 적응과 모듈형 대조보다 필요하거나 우수하다는 근거는 아직 없다.
+
+이전 사고 라운드 노트: agent/runs/iter_075/think/
+
+
+
+## iter_075 CLAUDE IMPLEMENTATION REPORT — 2026-10-05 13:43:09
+
+현재 상태: 자료 연결·CPU 검사(24/24), 공식 loss 대조, LoRA 항등/동결/update 검사, 단일 소유권 거부, C(ResNet18)와 H(radiomics+RF)의 V8 선택까지 끝났다. 재개 검사(B 시나리오)가 끝나면 4개 trajectory 본학습을 시작한다. 완료 알림을 기다린다.
+
+# [orchestrator] 권한 거부된 도구 호출
+- Bash: python -c "
+import torch,torchvision,sklearn,transformers,numpy;print(torch.__version__,torchvision.__version__,sklearn.__version__,transformers.__version__)
+try:
+    import radiomics;print('radiomics',radiomics.__version__)
+except Exception as e:print('no radiomics',e)
+"; ls results/environments; ls ~/.cache/torch/hub/checkpoints 2>/dev/null
+- Bash: env PYTHONPATH=results/environments/ch75/buildtools python -m pip install --target results/environments/ch75/site --no-build-isolation --no-deps pyradiomics 2>&1 | tail -12
+- Bash: CUDA_VISIBLE_DEVICES=0 python sp75_tech.py --out results/iter_075/tests/tech_F.json --variant F 2>&1 | tail -80
+- Bash: tail -c 200 results/iter_075/tests/resume/ref.out; echo ---; tail -c 200 results/iter_075/tests/resume/A2.out; ps aux | grep "sp75_train" | grep -v grep | awk '{print $12,$13,$14,$15,$16}'; wc -l results/iter_075/tests/resume/ref/train_log.jsonl results/iter_075/tests/resume/A/train_log.jsonl
+
+
+
+## iter_075 GPT REVIEW [CONTINUE] — 2026-10-05 13:46:32
+
+# 요약
+
+- **판정:** execution_failed, valid_experiment=false. 본 가설 실험은 미실행이다.
+- **핵심 근거:** 자료·기술 검사와 C/H 선택은 존재하지만, 재개 검사 작업이 세션 종료 후 killed됐고 VLM 본학습·E24 결과가 없다.
+- **의미·한계:** 실행 준비의 진전은 있으나 판독 전이와 모듈형 대안 충분성은 미검증이다.
+- **다음:** 기존 계획을 유지한 한정 실행 복구 후 예정 비교를 끝낸다.
+
+# Assessment
+
+실제 구현 담당은 engineer_backend.json과 claude_meta.json에서 Claude, claude-sonnet-5-5, medium으로 확인했다. 구현 보고서는 완료 보고가 아니라 재개 검사 중간 상태다. claude_stream.jsonl 마지막 result 뒤에 sp75_resume_test.py와 완료 대기 작업의 killed/stopped 기록이 있다. SDK의 success는 연구 실험 성공을 뜻하지 않는다.
+
+리뷰 대상은 31f4bb49b6169d78b0bfaedb95fff0fb27e392ac이다. changes.patch와 소스를 확인했고, commit.json의 35개 파일을 해당 SHA의 blob과 직접 대조해 모두 일치함을 확인했다. unpreserved_paths는 없다. 변경 목록의 대량 환경 파일은 이 35개 소스 checkpoint에 포함되지 않았다.
+
+# Key Findings
+
+1. manifest 독립 집계에서 기술 제외 후 T24 70개, V8 24개, E24 학습 위치 71개·등급 supervision 미제공 위치 47개다. CPU fixture 기록은 24/24 통과다.
+2. tech_F/R.json은 공식 chat template의 세 영상 입력, assistant-only label, 공식 loss와 float32 CE 일치, LoRA 초기 항등 및 update를 기록한다. 각 기술 표본 5개에서 30-step 과적합 후 생성 정답은 5/5다. 일반화 근거는 아니다.
+3. C의 선택은 LR 0.0001·epoch40, V8 primary 0.691667이다. H는 config1, V8 primary 0.353333이다. 선택 파일과 코드 hash를 확인했다. 이는 모델 선택용 기록이며 E24 성능이나 H 우위의 검증으로 해석하지 않는다.
+4. ref와 A의 원시 학습 로그를 독립 비교했다. 각각 18개 step이 있고 batch ID·RNG 기록은 같지만 최대 loss 차이는 0.0390846이다. 차이는 중단 전 step2부터 나타난다. A의 epoch2 validation과 B 시나리오, resume_compare.json은 확인되지 않았다.
+5. 최종 모델 원시 예측이 없어 primary 성능의 독립 재계산은 불가능하다. 대신 지표 코드에 수작업 기대값을 넣어 class-standardized MAE=1.6, MAE=10/6, invalid 오차4 처리를 확인했다.
+
+# Problems / Concerns
+
+현재 결론을 막는 핵심은 실행 미완료다. 본학습과 최종 비교가 없으므로 H1–H4 및 투자 기준을 판정할 수 없다.
+
+재사용 전에는 다음을 고쳐야 한다. base_frozen의 hash가 빈 입력 SHA256이므로 실제 동결 검증 증거가 아니다. loss gate는 실패 파일도 재실행 시 존재만으로 건너뛴다. 재개 검사 실행기는 기존 디렉터리를 거부해 현재 보존 상태에서 그대로 이어갈 수 없고, 비교 결과에 명시적 실패 판정도 없다. 재개 수치 차이는 비결정적 연산 가능성을 포함해 확인해야 하며 복구 오류로 미리 단정하지 않는다.
+
+GPU 기술 측정은 micro1 약 10.1GiB, micro5 약 17.3GiB와 처리 시간을 제공한다. 그러나 gradient 차이가 약 4.8%이고 본실행 배치의 최종 선택 근거가 없다. 본실행 직전 총점유·안전 여유와 처리량을 기준으로 확정하면 된다. 낮은 utilization을 이번 실패 사유로 삼지 않는다.
+
+선택 잠금과 출력 봉인도 구분해야 한다. 현재 평가 lock은 생성된 예측 파일을 포함하므로 E24 출력 전 설정 고정의 증거를 대신하지 못한다. 관련 경로만 보완하고 기존 C/H 선택을 결과에 맞춰 바꾸지 않는다.
+
+# Interpretation
+
+공식 입력과 학습 경로가 소수 기술 사례에서 작동한다는 준비 근거는 있다. 정상 입력에서 모델이 실패했다는 관찰, 일부 위치에서 다른 위치로의 판독 전이, F/R 차이, 모듈형 대안의 충분성은 아직 없다. 인식·선택·결합 중 어느 설명도 이번 결과로 구분되지 않았다.
+
+OAI 확보 중단과 MR-RATE 자동 전환 금지 지시는 현재 산출물·실행 경로에서 준수됐다. 기존 무릎 자료나 MRI 능력의 과학적 실패로 기록하지 않는다. limitation 상태는 갱신하지 않는다.
+
+# Strategy Check / 연구 방향 판단
+
+- **실행 유효성:** 준비와 기술 학습은 실행됐으나 계획한 가설 검증은 미완료다.
+- **성능 개선:** 기술 표본 과적합만 확인됐다. 개발 평가에서의 개선은 미검증이다.
+- **가설 지지:** 위치 prior, 기본 판독 부족, 대상 지정·해상도, 공유 분류기의 충분성은 모두 남아 있다.
+- **신규 기여 가능성:** 표준 적응 비교조차 완료하지 않았으므로 판단하지 않는다.
+
+원 계획의 타 계열 학습 보류는 유지한다. 현재 필요한 정보는 새 모델 순위가 아니라 동일 등급 예산의 F/R/C/H 비교다. 준비·검증·중단 재작업이 이번 반복의 주요 작업이었으며 정확한 누적 비용 비율은 산출하지 않았다.
+
+새 자료 탐색보다 현재 실행 복구의 정보 가치가 높다. 선택할 다음 투자는 하나다: 기존 비교를 완료하고 원 계획의 양성·음성·불확정 분기로 종료한다. 방법 개발이나 추가 표본 확대를 자동 승인하지 않는다.
+
+논문 추천은 보류한다. 이번에는 방향의 유망성을 뒷받침하는 유효한 비교 결과가 없다.
+
+# Recommended Next Experiment
+
+iter_075/plan.md를 기준으로 유지·수정·미완료·회귀 검증을 구분한 복구 계획을 작성한다. 기존 source와 결과를 보존하고 실제 잔존 작업의 소유권부터 확인한다. 동결·loss gate·재개 검사를 한정 수정한 뒤 기존 자료와 C/H 선택을 재사용한다.
+
+검사 통과 후 사전 설정 그대로 VLM 네 trajectory와 V8 선택·조건부 연장을 실행하고, E24 이전에 설정을 고정한다. 최종 비교와 비용 측정 및 독립 재계산까지 완료한 뒤 보고한다. 종료점은 원 계획의 제한된 전이 가치 보존, 모듈형 대안 이후 투자 보류, 현재 입력·적응 조건의 근거 부족 중 하나이며 새 데이터·prompt·seed 탐색으로 자동 연장하지 않는다.

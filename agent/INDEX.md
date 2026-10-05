@@ -79,7 +79,8 @@
 - iter_071 [CONTINUE] (deep_high/standard/normal) <MRI grounding 적응 전이 대조: abandon> 💾973628fd9852fd558796cffb2dcb60ba24f87bc2 SPIDER E24에서 RSNA 초기화 R의 F1@0.5는 0.130으로 직접 SFT D(0.158)를 개선하지 못했고 detector는 0.817이었다. 현재 두-category VLM 투자는 종료하되 MRI 전이·학습 전체는 미판정이다. → 다음: 현재 두-category MRI grounding 투자를 종료하고, 강한 단순 대안 이후에도 중요한 문제가 남는 다음 연구 투자 하나를 선택한다. 이번 결과를 근거로 T24·추가 seed·source 교체를 자동 실행하지 않는다. 기존 언어 조건부 grounding 관찰과 MRI context 관찰에서 최소 개입의 가치가 남는지, 또는 해당 연구 묶음을 보류할지 비교한다. 선택한 과제는 실제 사용 가치, detector+규칙 또는 직접 SFT가 해결하지 못한 조건, 양성·음성·불확정에 따른 종료 행동을 명시해야 한다. 새로운 frozen 모델·자료 확보 자체를 연구 질문으로 삼지 않는다. 코드 수정은 선택된 재사용 경로에 필요한 항목만 수행한다.
 - iter_072 [사용자 보완으로 전환 → iter_073] 기존 기록 보존, 성공·실패 판정 아님 (계획 확인)
 - iter_073 [CONTINUE] (deep_medium/standard/normal) <MRI 부위별 판독의 투자 적합성 검토: improve> 💾0e5de720949a422d8defabd0112001dbad313235 train/val prior 정확도 0.7233/0.7339는 재현됐다. 다만 통합 MOAKS 집계에 test 환자 행이 포함돼 보호 완료 주장을 정정해야 한다. 모델 실험은 미실행이다. → 다음: 한정 보완으로 test label 노출 기록과 annotation 해석을 정정한 뒤 OAI 자료를 기다린다. 기준은 iter_073/plan.md이며 train/val 분포·prior·조건부 비교 설계는 유지한다. 전체 label 집계의 노출 범위를 기존 파일·코드로 기록하고 test 정답을 더 분석하지 않는다. 결측 치환과 원 임상 정답 일치 표현을 가정한 mapping 아래 관찰로 낮추고, split 경계를 검증하는 최소 fixture만 보완한다. 원본 결과는 보존하고 정정 산출물을 별도로 연결한다. 실제로 안전한 train/val 전용 출처가 없으면 원 label 재집계는 보류한다. 이 보완 후 동일 조사·새 자료 탐색·GPU 실험을 자동 연장하지 않고, 사용자 자료 통지와 실제 경로가 확인될 때 최초 입력 점검 계획을 확정한다.
-- iter_074 [NEEDS_HUMAN] (normal/standard/normal) <MRI 부위별 판독의 투자 적합성 검토: success> 💾5f2affbdd1d63328d6dbe1220725b41d04ded4d6 정정·차단 보완을 완료했고 fixture 63/63, 허용 파일 12개와 기존 산출물 26개의 hash를 확인했다. 모델 실험은 미실행이며 OAI 자료 도착까지 대기한다. → 다음: 한정 보완을 종료하고 사용자 OAI 자료 통지와 실제 경로를 기다린다. 같은 조사·fixture·새 데이터 탐색을 자동 반복하지 않는다. 자료가 도착하면 handoff_design_v2.md를 기준으로 ID·정답 의미 연결, 방향·좌우·box overlay, 관측 범위·공식 입력, 소수 실제 출력 순서의 별도 계획을 확정한다. 표본·epoch·처리량은 실제 입력 점검 후 정하며 기존 test 노출을 독립 확인 설계에 반영한다.
+- iter_074 [사용자 보완으로 전환 → iter_075] 기존 기록 보존, 성공·실패 판정 아님 (리뷰 후 처리)
+- iter_075 [CONTINUE] (deep_high/standard/normal) <MRI 부위별 판독의 투자 적합성 검토: execution_failed> 💾31f4bb49b6169d78b0bfaedb95fff0fb27e392ac SPIDER 자료 준비와 C/H 선택은 끝났지만, 재개 검사 도중 세션이 종료돼 VLM 본학습·E24 비교는 미실행이다. 위치 전이와 VLM 투자 가치는 아직 판단할 수 없다. → 다음: 한정 실행 복구를 권고한다. 과학적 음성 결과가 없으므로 자료나 연구 질문을 바꾸지 않고 iter_075의 미완료 비교를 끝낸다. 기준 plan.md의 SHA256은 ea40768f17ae65b10f0027ca9ca9423205bb106198ebf891af7ec0bf17a73b8b다. 기존 manifest·split·prompt·parser·학습량·확대 및 판정 기준과 C/H 선택을 유지한다. 먼저 실제 잔존 프로세스와 checkpoint 상태를 확인해 중복 실행을 막고, base 동결 검사·loss gate 재사용·재개 검사를 수정한다. ref/A 차이는 중단 전부터 발생했으므로 결정적 기술 대조로 복구 오류와 수치 비결정성을 구분한다. 완료된 검사는 재사용하고 미완료 validation/B만 보완한다. 통과 후 두 GPU의 안전한 배치를 확정해 네 VLM trajectory, 사전 V8 선택·조건부 연장, 설정 고정, E24 및 네 비용 block, 독립 재계산까지 수행한다. background 작업 완료와 반환값을 확인하기 전에 구현 세션을 종료하지 않는다. 기존 원본을 덮어쓰지 말고 복구 변경과 결과를 별도 연결하며, 이번 결과로 OAI·MR-RATE 대기나 신규 frozen 후보 탐색을 재개하지 않는다.
 
 ## 이전 목표들의 접근법 (참고용, 현재 목표의 재평가 횟수에는 안 들어감)
 
@@ -121,12 +122,12 @@
 - MRI 확산 신호와 판단 연결 검토 [approach/mri-diffusion-evidence]: 1회 (iter_069), 유효한 실험 1회, 미분류 0회, 최근 판정: abandon, 커밋: 76eb1036df95478f889ee6bfd8e31ca43e82b415
 - MRI 전문 모델의 근거 인식 적합성 검토 [approach/mri-specialist-evidence]: 1회 (iter_070), 유효한 실험 1회, 미분류 0회, 최근 판정: abandon, 커밋: 02a8adade58f7cea84638f9e96bf963a0fb64d55
 - MRI grounding 적응 전이 대조 [approach/mri-grounding-transfer]: 1회 (iter_071), 유효한 실험 1회, 미분류 0회, 최근 판정: abandon, 커밋: 973628fd9852fd558796cffb2dcb60ba24f87bc2
-- MRI 부위별 판독의 투자 적합성 검토 [approach/mri-regional-reading]: 3회 (iter_072, iter_073, iter_074), 유효한 실험 0회, 미분류 0회, 최근 판정: success, 커밋: 0e5de720949a422d8defabd0112001dbad313235, 5f2affbdd1d63328d6dbe1220725b41d04ded4d6
+- MRI 부위별 판독의 투자 적합성 검토 [approach/mri-regional-reading]: 4회 (iter_072, iter_073, iter_074, iter_075), 유효한 실험 0회, 미분류 0회, 최근 판정: execution_failed, 커밋: 0e5de720949a422d8defabd0112001dbad313235, 5f2affbdd1d63328d6dbe1220725b41d04ded4d6, 31f4bb49b6169d78b0bfaedb95fff0fb27e392ac
 
 현재 연구 브랜치: approach/mri-regional-reading (코드 위치: /SSD1_1TB/home/milab/daniel/08_medgemma/research)
 
 ### 최근 계획의 대안 순위
 
-1. MRI 부위별 판독의 투자 적합성 검토: 기존 준비의 노출·해석·재사용 경계를 한 번 보완한 뒤 자료를 기다린다.
-2. 문서 정정만 수행: 노출 기록은 바로잡지만 실제 로더의 반복 노출 위험이 남아 차선이다.
-3. 새 모델 또는 자료 탐색: 현재 정정에 필요하지 않고 사용자 자료 대기 지시와 맞지 않아 보류한다.
+1. MRI 부위별 판독의 투자 적합성 검토: 기존 SPIDER에서 위치 제한 supervision의 판독 전이와 모듈형 대비 가치를 실제 학습으로 판단한다.
+2. 현재 부위별 판독 경로 보류: 비교 이후에도 VLM의 별도 정확도·비용 가치가 없으면 관찰과 baseline을 보존하고 방법 투자를 중단한다.
+3. 기존 context·grounding 방법 개선: routing과 detector 이후 새로운 잔여 가치 근거가 없어 현재 재개하지 않는다.
