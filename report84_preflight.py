@@ -42,15 +42,21 @@ def rows(p):
 def main():
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument('--out', required=True)
+    ap.add_argument('--iteration', type=int, choices=[84,85], default=84)
     args = ap.parse_args()
     out = Path(args.out).resolve()
-    out.relative_to(ROOT / 'results' / 'iter_084')
+    out.relative_to(ROOT / 'results' / f'iter_{args.iteration:03d}')
     out.mkdir(parents=True, exist_ok=False)
+    # HF 보조 Xet/PyTorch/pip 캐시도 이번 결과 경로에 한정한다.
+    for key, name in {'HF_HOME': 'hf', 'HF_HUB_CACHE': 'hf/hub', 'HF_XET_CACHE': 'hf/xet', 'XDG_CACHE_HOME': 'xdg', 'TORCH_HOME': 'torch', 'PIP_CACHE_DIR': 'pip', 'TMPDIR': 'tmp'}.items():
+        cache = out / 'runtime_cache' / name
+        cache.mkdir(parents=True, exist_ok=True)
+        os.environ[key] = str(cache)
     start = time.time()
     save(out / 'execution.json', {'argv': sys.argv, 'python': sys.executable,
          'cuda_visible_devices': os.environ.get('CUDA_VISIBLE_DEVICES'),
          'start_unix': start, 'source_sha256': sha(__file__),
-         'plan_sha256': sha(UP / 'agent/runs/iter_084/plan.json')})
+         'plan_sha256': sha(UP / f'agent/runs/iter_{args.iteration:03d}/plan.json')})
     blockers = []
     try:
         import requests
@@ -185,7 +191,7 @@ def main():
              'torch_cuda_available': torch.cuda.is_available(), 'torch_cuda_count': torch.cuda.device_count(),
              'disk_free_bytes': shutil.disk_usage(ROOT).free, 'nvidia_smi_rc': gpu.returncode,
              'installation_performed': False,
-             'installation_deferred_reason': 'gated base 접근 문제 확인; 패키지 미설치를 비교군 제외 근거로 삼지 않음'})
+             'installation_deferred_reason': ('접근 실패; 오류 기록 참조' if blockers else '접근 확인; 설치 및 실제 로딩은 별도 단계')})
     except Exception as e:
         import traceback
         (out / 'error.txt').write_text(traceback.format_exc())
@@ -194,7 +200,7 @@ def main():
     save(out / 'completion.json', {'stage': 'preflight_only', 'blockers': blockers,
          'asset_access_ready': not blockers, 'experiment_complete': False,
          'gpu_generation_count': 0, 'wall_s': time.time() - start, 'files_sha256': files,
-         'next': 'base 접근 인증 해결 후 공식 로딩·D8 검사부터 원 계획을 계속한다. 성능 판정 없음.'})
+         'next': ('접근 오류 해결 필요; 성능 판정 없음.' if blockers else '접근 확인; 공식 로딩·D8와 전체 비교는 미완료.')})
     print(json.dumps({'stage': 'preflight_only', 'blockers': blockers, 'out': str(out)}, ensure_ascii=False))
     return 2 if blockers else 0
 
