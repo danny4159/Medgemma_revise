@@ -1,0 +1,386 @@
+diff --git a/report84_preflight.py b/report84_preflight.py
+index 726653c..f2a06e7 100644
+--- a/report84_preflight.py
++++ b/report84_preflight.py
+@@ -42,15 +42,21 @@ def rows(p):
+ def main():
+     ap = argparse.ArgumentParser(description=__doc__)
+     ap.add_argument('--out', required=True)
++    ap.add_argument('--iteration', type=int, choices=[84,85], default=84)
+     args = ap.parse_args()
+     out = Path(args.out).resolve()
+-    out.relative_to(ROOT / 'results' / 'iter_084')
++    out.relative_to(ROOT / 'results' / f'iter_{args.iteration:03d}')
+     out.mkdir(parents=True, exist_ok=False)
++    # HF 보조 Xet/PyTorch/pip 캐시도 이번 결과 경로에 한정한다.
++    for key, name in {'HF_HOME': 'hf', 'HF_HUB_CACHE': 'hf/hub', 'HF_XET_CACHE': 'hf/xet', 'XDG_CACHE_HOME': 'xdg', 'TORCH_HOME': 'torch', 'PIP_CACHE_DIR': 'pip', 'TMPDIR': 'tmp'}.items():
++        cache = out / 'runtime_cache' / name
++        cache.mkdir(parents=True, exist_ok=True)
++        os.environ[key] = str(cache)
+     start = time.time()
+     save(out / 'execution.json', {'argv': sys.argv, 'python': sys.executable,
+          'cuda_visible_devices': os.environ.get('CUDA_VISIBLE_DEVICES'),
+          'start_unix': start, 'source_sha256': sha(__file__),
+-         'plan_sha256': sha(UP / 'agent/runs/iter_084/plan.json')})
++         'plan_sha256': sha(UP / f'agent/runs/iter_{args.iteration:03d}/plan.json')})
+     blockers = []
+     try:
+         import requests
+@@ -185,7 +191,7 @@ def main():
+              'torch_cuda_available': torch.cuda.is_available(), 'torch_cuda_count': torch.cuda.device_count(),
+              'disk_free_bytes': shutil.disk_usage(ROOT).free, 'nvidia_smi_rc': gpu.returncode,
+              'installation_performed': False,
+-             'installation_deferred_reason': 'gated base 접근 문제 확인; 패키지 미설치를 비교군 제외 근거로 삼지 않음'})
++             'installation_deferred_reason': ('접근 실패; 오류 기록 참조' if blockers else '접근 확인; 설치 및 실제 로딩은 별도 단계')})
+     except Exception as e:
+         import traceback
+         (out / 'error.txt').write_text(traceback.format_exc())
+@@ -194,7 +200,7 @@ def main():
+     save(out / 'completion.json', {'stage': 'preflight_only', 'blockers': blockers,
+          'asset_access_ready': not blockers, 'experiment_complete': False,
+          'gpu_generation_count': 0, 'wall_s': time.time() - start, 'files_sha256': files,
+-         'next': 'base 접근 인증 해결 후 공식 로딩·D8 검사부터 원 계획을 계속한다. 성능 판정 없음.'})
++         'next': ('접근 오류 해결 필요; 성능 판정 없음.' if blockers else '접근 확인; 공식 로딩·D8와 전체 비교는 미완료.')})
+     print(json.dumps({'stage': 'preflight_only', 'blockers': blockers, 'out': str(out)}, ensure_ascii=False))
+     return 2 if blockers else 0
+ 
+diff --git a/report85_cure_check.py b/report85_cure_check.py
+new file mode 100644
+index 0000000..212750d
+--- /dev/null
++++ b/report85_cure_check.py
+@@ -0,0 +1,55 @@
++"""CURE PEFT 저장 모듈과 공식 notebook 직접 생성 대조. 별도 단회 검사."""
++import json
++import os
++from pathlib import Path
++import sys
++from report84_preflight import ROOT, BASE_REV, ADAPTER_REV, sha, save
++
++
++def main():
++    gpu=sys.argv[1]
++    assert gpu in os.environ['CUDA_VISIBLE_DEVICES'].split(',')
++    os.environ['CUDA_VISIBLE_DEVICES']=gpu
++    os.environ['HF_HUB_OFFLINE']='1'
++    out=ROOT/'results/iter_085/cure_check'
++    out.mkdir(exist_ok=False)
++    import torch
++    from transformers import AutoModelForImageTextToText,AutoProcessor,BitsAndBytesConfig
++    from peft import PeftModel,get_peft_model_state_dict
++    from safetensors.torch import load_file
++    torch.set_num_threads(4); torch.manual_seed(17)
++    base=ROOT/'results/iter_085/models/models--google--medgemma-4b-it/snapshots'/BASE_REV
++    adapter=ROOT/'results/iter_085/models/models--pamessina--medgemma-4b-it-cure/snapshots'/ADAPTER_REV
++    quant=BitsAndBytesConfig(load_in_4bit=True,bnb_4bit_use_double_quant=True,bnb_4bit_quant_type='nf4',bnb_4bit_compute_dtype=torch.bfloat16,bnb_4bit_quant_storage=torch.bfloat16)
++    model=AutoModelForImageTextToText.from_pretrained(str(base),local_files_only=True,quantization_config=quant,torch_dtype=torch.bfloat16,device_map={'':0},attn_implementation='sdpa')
++    model=PeftModel.from_pretrained(model,str(adapter),local_files_only=True)
++    model.eval()
++    expected=load_file(str(adapter/'adapter_model.safetensors'))
++    actual=get_peft_model_state_dict(model)
++    assert set(expected)==set(actual), 'PEFT key mismatch'
++    bad=[k for k in expected if expected[k].shape!=actual[k].shape or not torch.equal(expected[k].float(),actual[k].detach().cpu().float())]
++    assert not bad, bad[:5]
++    saved=[k for k in expected if 'embed_tokens' in k or 'lm_head' in k]
++    assert len(saved)>=2
++    del expected,actual
++    proc=AutoProcessor.from_pretrained(str(base),local_files_only=True)
++    proc.tokenizer.padding_side='left'
++    sys.path.insert(0,str(ROOT/'results/iter_085/official/minimal'))
++    from vlm_research_kit.data.transforms_factory import create_image_transforms
++    trans=create_image_transforms(use_model_specific_transforms=True,model_name='pil_with_augmentations',bbox_format='cxcywh',image_size=[448,448],is_train=False,augmenter_override_params={'apply_clahe':True,'clahe_clip_limit':[3.,3.]})
++    raw=json.loads((ROOT/'results/iter_085/D8/raw_manifest.json').read_text())[0]
++    assert sha(raw['raw_path'])==raw['sha256']
++    im=trans(raw['raw_path'])['pixel_values']
++    messages=[{'role':'user','content':[{'type':'image','image':im},{'type':'text','text':'Generate a grounded report.'}]}]
++    inp=proc.apply_chat_template(messages,add_generation_prompt=True,tokenize=True,return_dict=True,return_tensors='pt',padding=True).to(model.device)
++    with torch.inference_mode():
++        ids=model.generate(**inp,max_new_tokens=1024,do_sample=False)[0,inp['input_ids'].shape[1]:].tolist()
++    ref=json.loads((ROOT/'results/iter_085/D8/C/outputs.jsonl').read_text().splitlines()[0])
++    result={'strict_keys_shapes_values':True,'saved_modules':saved,'source_sha256':sha(__file__),'adapter_sha256':sha(adapter/'adapter_model.safetensors'),'official_suffix_ids':ids,'wrapper_suffix_ids':ref['attempts'][0]['suffix_ids'],'token_equal':ids==ref['attempts'][0]['suffix_ids'],'official_input_ids_equal':inp['input_ids'][0].tolist()==ref['input_ids'],'pass':ids==ref['attempts'][0]['suffix_ids'] and inp['input_ids'][0].tolist()==ref['input_ids']}
++    save(out/'result.json',result)
++    print(json.dumps({k:v for k,v in result.items() if not k.endswith('ids')},ensure_ascii=False))
++    return 0 if result['pass'] else 1
++
++
++if __name__=='__main__':
++    raise SystemExit(main())
+diff --git a/report85_d8.py b/report85_d8.py
+new file mode 100644
+index 0000000..d9e6dec
+--- /dev/null
++++ b/report85_d8.py
+@@ -0,0 +1,157 @@
++"""iter_085 D8 실제 입력 검사·생성. 본평가 진입 허가는 별도다."""
++import argparse
++import fcntl
++import hashlib
++import json
++import os
++from pathlib import Path
++import sys
++import time
++
++from report84_preflight import ROOT, UP, sha, save, BASE_REV, ADAPTER_REV
++
++
++def main():
++    p = argparse.ArgumentParser()
++    p.add_argument('--system', choices=['M15', 'B0', 'M1', 'M1G', 'C'], required=True)
++    p.add_argument('--gpu', required=True)
++    p.add_argument('--out', required=True)
++    p.add_argument('--resume', action='store_true')
++    a = p.parse_args()
++    allowed = os.environ['CUDA_VISIBLE_DEVICES'].split(',')
++    assert a.gpu in allowed
++    os.environ['CUDA_VISIBLE_DEVICES'] = a.gpu
++    os.environ['TOKENIZERS_PARALLELISM'] = 'false'
++    os.environ['HF_HUB_OFFLINE'] = '1'
++    out = Path(a.out).resolve()
++    out.relative_to(ROOT/'results/iter_085')
++    out.mkdir(parents=True, exist_ok=a.resume)
++    lock = (out/'worker.lock').open('a')
++    fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
++    from pg43_run import repair_tail, read_records
++    # 종료된 자기 shard만 복구한다. 다른 worker의 claim이나 출력은 변경하지 않는다.
++    repair_tail(str(out/'outputs.jsonl'))
++    import numpy as np
++    import torch
++    from transformers import AutoProcessor, AutoModelForImageTextToText, BitsAndBytesConfig
++    from rsna_diag import generate as G, lora
++    torch.set_num_threads(4)
++    torch.manual_seed(17)
++    dpath = ROOT/'results/iter_085/D8/inputs.json'
++    rows = json.loads(dpath.read_text())
++    for row in rows:
++        assert sha(row['image']) == row['file_sha256']
++    rawpath = ROOT/'results/iter_085/D8/raw_manifest.json'
++    raw = {r['ImageID']: r for r in json.loads(rawpath.read_text())}
++    is15 = a.system in ['M15', 'B0']
++    base = (UP/'hf_cache/hub/models--google--medgemma-1.5-4b-it/snapshots'/G.MODEL_REVISION if is15
++            else ROOT/'results/iter_085/models/models--google--medgemma-4b-it/snapshots'/BASE_REV)
++    processor = AutoProcessor.from_pretrained(str(base), local_files_only=True)
++    processor.tokenizer.padding_side = 'left'
++    if is15:
++        processor.image_processor.do_pan_and_scan = False
++    kw = dict(torch_dtype=torch.bfloat16, device_map={'': 0}, local_files_only=True, attn_implementation='sdpa')
++    if a.system in ['M1G', 'C']:
++        kw['quantization_config'] = BitsAndBytesConfig(load_in_4bit=True, bnb_4bit_use_double_quant=True,
++            bnb_4bit_quant_type='nf4', bnb_4bit_compute_dtype=torch.bfloat16, bnb_4bit_quant_storage=torch.bfloat16)
++    start = time.monotonic()
++    model = AutoModelForImageTextToText.from_pretrained(str(base), **kw)
++    adapter_digest = None
++    if a.system == 'B0':
++        ap = ROOT/'results/iter_012/train/lr2e-4_s17/epoch_05/adapter.pt'
++        blob = torch.load(ap, map_location='cpu', weights_only=True)
++        cfg = blob['config']
++        lora.apply_lora(model, cfg['r'], cfg['alpha'], 0.)
++        own = {n: v for n, v in model.named_parameters() if 'lora_' in n}
++        assert set(own) == set(blob['state'])
++        assert all(own[n].shape == v.shape for n,v in blob['state'].items())
++        lora.load_lora_state(model, blob['state'])
++        adapter_digest = lora.state_digest(lora.lora_state_dict(model))
++        assert adapter_digest == 'e13f3c4461b826a060c90dfe4e4ee4c2ebac36a08f84be1a45a37495816cec11'
++    elif a.system == 'C':
++        from peft import PeftModel
++        ap = ROOT/'results/iter_085/models/models--pamessina--medgemma-4b-it-cure/snapshots'/ADAPTER_REV
++        model = PeftModel.from_pretrained(model, str(ap), local_files_only=True)
++        assert set(model.peft_config['default'].modules_to_save) == {'lm_head','embed_tokens'}
++        adapter_digest = sha(ap/'adapter_model.safetensors')
++    model.eval()
++    assert not any(m.training for m in model.modules())
++    transform = None
++    if a.system in ['M1G', 'C']:
++        sys.path.insert(0,str(ROOT/'results/iter_085/official/minimal'))
++        from vlm_research_kit.data.transforms_factory import create_image_transforms
++        transform = create_image_transforms(use_model_specific_transforms=True, model_name='pil_with_augmentations',
++            bbox_format='cxcywh', image_size=[448,448], is_train=False,
++            augmenter_override_params={'apply_clahe':True,'clahe_clip_limit':[3.,3.]})
++    manual = json.loads((ROOT/'results/manual_rsna_report_transfer_20261006/protocol.json').read_text())
++    prompts = [('R', manual['prompt']), ('S',manual['prompt']+' Systematically review the lungs, pleura, cardiomediastinal silhouette, bones, and visible devices. Mention an abnormality only when supported by this image, and distinguish definite from uncertain findings.')] if is15 else [('R','Describe this X-ray')] if a.system=='M1' else [('G','Generate a grounded report.')]
++    if a.system=='C':
++        import ast
++        src = ROOT/'results/iter_084/preflight_01/official/vlm_research_kit/data/datasets/chest_imagenome_dataset.py'
++        locations = next(ast.literal_eval(n.value) for n in ast.parse(src.read_text()).body if isinstance(n,ast.Assign) and any(isinstance(t,ast.Name) and t.id=='SUPPORTED_LOCATE_AND_DESCRIBE_LOCATIONS' for t in n.targets))
++        assert len(locations)==29
++        prompts += [(loc, f'Locate and describe the {loc}.') for loc in sorted(locations)]
++    protocol = {'system':a.system,'base':str(base),'adapter_digest':adapter_digest,'seed':17,'caps':[1024,2048,4096],
++        'prompts':prompts,'input_sha256':sha(dpath),'raw_sha256':sha(rawpath),'gpu':a.gpu,'logical_gpu':0,
++        'python':sys.executable,'source_sha256':{str(ROOT/f):sha(ROOT/f) for f in ['report85_d8.py','rsna_diag/generate.py','rsna_diag/lora.py','rsna_diag/geometry.py']},
++        'torch':torch.__version__,'scope':'D8 기술·규약 개발; 본평가 gate 아님'}
++    if (out/'protocol.json').exists():
++        assert a.resume and json.loads((out/'protocol.json').read_text()) == json.loads(json.dumps(protocol)), 'resume protocol mismatch'
++    else:
++        save(out/'protocol.json',protocol)
++    pdig=sha(out/'protocol.json')
++    existing=read_records(str(out/'outputs.jsonl'))
++    expected={r['ImageID']+'|'+a.system+'|'+n for r in rows for n,_ in prompts}
++    assert len(existing)==len({r['id'] for r in existing}), 'duplicate output'
++    for rec in existing:
++        assert rec['id'] in expected and rec['protocol_digest']==pdig
++        assert rec['record_digest']==hashlib.sha256(json.dumps({k:v for k,v in rec.items() if k!='record_digest'},sort_keys=True).encode()).hexdigest(), 'record changed'
++    done={r['id'] for r in existing}
++    checks=[{'id':r['id'],'official_tensor_equal':True,'eos':r['attempts'][-1]['ended_eos']} for r in existing]
++    eos=model.generation_config.eos_token_id
++    eos=[eos] if isinstance(eos,int) else eos
++    events=(out/'attempts.jsonl').open('a',buffering=1)
++    events.write(json.dumps({'event':'start','pid':os.getpid(),'time':time.time(),'loading_s':time.monotonic()-start,'existing_n':len(existing)})+'\n')
++    with (out/'outputs.jsonl').open('a',buffering=1) as f:
++        for row in rows:
++            assert sha(row['image'])==row['file_sha256']
++            if transform:
++                rr=raw[row['ImageID']]; assert sha(rr['raw_path'])==rr['sha256']
++                im=transform(rr['raw_path'])['pixel_values']
++                assert np.array_equal(np.asarray(im),np.asarray(transform(rr['raw_path'])['pixel_values']))
++            else:
++                im,_,_=G.load_image(row['image'])
++            for name,prompt in prompts:
++                rid=row['ImageID']+'|'+a.system+'|'+name
++                if rid in done:
++                    continue
++                events.write(json.dumps({'event':'request_start','id':rid,'time':time.time()})+'\n')
++                inp=G.build_inputs(processor,im,prompt)
++                official=processor.apply_chat_template([{'role':'user','content':[{'type':'image','image':im},{'type':'text','text':prompt}]}],add_generation_prompt=True,tokenize=True,return_dict=True,return_tensors='pt',padding=True)
++                assert set(inp)==set(official)
++                assert all(torch.equal(inp[k],official[k]) for k in inp)
++                attempts=[]
++                for cap in [1024,2048,4096]:
++                    result=G.generate(torch,processor,model,inp,cap,eos); attempts.append(result)
++                    if result['ended_eos']: break
++                rec={'id':row['ImageID']+'|'+a.system+'|'+name,'ImageID':row['ImageID'],'condition':name,
++                    'protocol_digest':sha(out/'protocol.json'),'image_sha256':row['file_sha256'],
++                    'text':processor.decode(result['suffix_ids'],skip_special_tokens=True),'attempts':attempts,
++                    'input_ids':inp['input_ids'][0].tolist(),'pixel_sha256':hashlib.sha256(np.asarray(im).tobytes()).hexdigest()}
++                rec['record_digest']=hashlib.sha256(json.dumps(rec,sort_keys=True).encode()).hexdigest()
++                f.write(json.dumps(rec,ensure_ascii=False)+'\n'); f.flush(); os.fsync(f.fileno())
++                events.write(json.dumps({'event':'request_saved','id':rid,'time':time.time()})+'\n')
++                checks.append({'id':rec['id'],'official_tensor_equal':True,'eos':result['ended_eos']})
++                print(json.dumps({'done':len(checks),'total':len(rows)*len(prompts),'system':a.system,'tokens':result['n_new'],'seconds':result['runtime_s']}),flush=True)
++    assert len(checks)==len({c['id'] for c in checks})==len(rows)*len(prompts)
++    events.write(json.dumps({'event':'end','pid':os.getpid(),'time':time.time()})+'\n'); events.close()
++    if (out/'completion.json').exists():
++        old=json.loads((out/'completion.json').read_text())
++        assert all(sha(out/n)==h for n,h in old['files'].items())
++    else:
++        save(out/'checks.json',checks)
++        save(out/'completion.json',{'n':len(checks),'wall_s_current_attempt':time.monotonic()-start,'files':{n:sha(out/n) for n in ['protocol.json','outputs.jsonl','checks.json']},'experiment_complete':False,'cost_scope':'current attempt only; all start/save/end events in attempts.jsonl; interrupted in-flight cost not used for system comparison'})
++
++
++if __name__=='__main__':
++    main()
+diff --git a/report85_launch.py b/report85_launch.py
+new file mode 100644
+index 0000000..0e36754
+--- /dev/null
++++ b/report85_launch.py
+@@ -0,0 +1,67 @@
++"""iter_085 보조 캐시까지 격리하는 관리형 실행 진입점.
++
++기본 환경이나 기존 HF cache를 수정하지 않는다. 인증 파일 경로는 상속한다.
++모델·검사 script는 기존 잠긴 버전을 그대로 사용하며 자식 종료를 수집한다.
++"""
++import argparse
++import json
++import os
++from pathlib import Path
++import subprocess
++import sys
++import time
++from report84_preflight import ROOT, sha, save
++
++
++def isolated_env():
++    env=os.environ.copy()
++    cache=ROOT/'results/iter_085/runtime_cache'
++    for key, name in {'HF_HOME':'hf','HF_HUB_CACHE':'hf/hub','HF_XET_CACHE':'hf/xet',
++            'XDG_CACHE_HOME':'xdg','TORCH_HOME':'torch','TORCHINDUCTOR_CACHE_DIR':'inductor',
++            'TRITON_CACHE_DIR':'triton','CUDA_CACHE_PATH':'cuda','MPLCONFIGDIR':'matplotlib',
++            'PIP_CACHE_DIR':'pip','TMPDIR':'tmp'}.items():
++        p=cache/name; p.mkdir(parents=True,exist_ok=True); env[key]=str(p)
++    env['HF_HUB_OFFLINE']='1'
++    env['TOKENIZERS_PARALLELISM']='false'
++    env['NO_ALBUMENTATIONS_UPDATE']='1'
++    return env
++
++
++def main():
++    p=argparse.ArgumentParser()
++    p.add_argument('--check-env',action='store_true')
++    p.add_argument('--system',choices=['M15','B0','M1','M1G','C'])
++    p.add_argument('--gpu')
++    p.add_argument('--out')
++    p.add_argument('--resume',action='store_true')
++    a=p.parse_args()
++    env=isolated_env()
++    logs=ROOT/'results/iter_085/launches'; logs.mkdir(exist_ok=True)
++    attempt=logs/str(time.time_ns()); attempt.mkdir()
++    py=str(ROOT/'results/environments/cure085/bin/python') if a.system in ['M1G','C'] else sys.executable
++    if a.check_env:
++        cmd=[py,'-c',"import json,os,huggingface_hub.constants as c; from pathlib import Path; root=Path('results/iter_085/runtime_cache').resolve(); paths={'HF_HOME':c.HF_HOME,'HF_HUB_CACHE':c.HF_HUB_CACHE,'HF_XET_CACHE':c.HF_XET_CACHE}; assert all(Path(v).is_relative_to(root) for v in paths.values()); print(json.dumps({'paths':paths,'token_path_inherited':bool(os.environ.get('HF_TOKEN_PATH')),'pass':True}))"]
++    else:
++        assert a.system and a.gpu and a.out
++        assert a.gpu in env['CUDA_VISIBLE_DEVICES'].split(',')
++        Path(a.out).resolve().relative_to(ROOT/'results/iter_085')
++        smi=subprocess.check_output(['nvidia-smi','--query-gpu=index,memory.free','--format=csv,noheader,nounits'],text=True)
++        free={x.split(',')[0].strip():int(x.split(',')[1]) for x in smi.splitlines()}
++        assert free[a.gpu]>=12288, '측정 peak 10GiB + worker 여유 2GiB 미확보'
++        cmd=[py,str(ROOT/'report85_d8.py'),'--system',a.system,'--gpu',a.gpu,'--out',a.out]+(['--resume'] if a.resume else [])
++    save(attempt/'launch.json',{'command':cmd,'source_sha256':sha(__file__),'runner_sha256':sha(ROOT/'report85_d8.py'),'credential_values_recorded':False})
++    start=time.monotonic()
++    with (attempt/'stdout.log').open('x') as stdout,(attempt/'stderr.log').open('x') as stderr:
++        child=subprocess.Popen(cmd,cwd=ROOT,env=env,stdout=stdout,stderr=stderr)
++        try:
++            rc=child.wait()
++        finally:
++            if child.poll() is None:
++                child.terminate(); child.wait()
++    save(attempt/'exit.json',{'returncode':rc,'wall_s':time.monotonic()-start,'stdout_sha256':sha(attempt/'stdout.log'),'stderr_sha256':sha(attempt/'stderr.log')})
++    print(json.dumps({'returncode':rc,'logs':str(attempt)}))
++    return rc
++
++
++if __name__=='__main__':
++    raise SystemExit(main())
+diff --git a/test_report85.py b/test_report85.py
+new file mode 100644
+index 0000000..c276a63
+--- /dev/null
++++ b/test_report85.py
+@@ -0,0 +1,37 @@
++"""새 결과 경로·허용 GPU·완료 산출물 무결성의 실제 CLI 회귀 검사."""
++import json
++import os
++from pathlib import Path
++import subprocess
++import sys
++from report84_preflight import ROOT, sha, save
++
++
++def main():
++    out = ROOT/'results/iter_085/tests'
++    out.mkdir(exist_ok=False)
++    checks = []
++    old = ROOT/'results/iter_085/D8/M15/completion.json'
++    before = sha(old)
++    for name,args,expected in [
++        ('gpu_outside_allowed',['--gpu','999','--out',str(out/'forbidden_gpu')],'AssertionError'),
++        ('existing_output',['--gpu','0','--out',str(old.parent)],'FileExistsError'),
++        ('outside_result',['--gpu','0','--out',str(ROOT/'outside_iter085')],'ValueError'),
++    ]:
++        cmd=[sys.executable,str(ROOT/'report85_d8.py'),'--system','M15']+args
++        r=subprocess.run(cmd,capture_output=True,text=True)
++        checks.append({'name':name,'pass':r.returncode!=0 and expected in r.stderr,'returncode':r.returncode,'expected_exception':expected})
++    checks.append({'name':'existing_completion_preserved','pass':sha(old)==before})
++    for name in ['M15','B0','M15_concurrent_a','M15_concurrent_b']:
++        d=old.parent.parent/name
++        c=json.loads((d/'completion.json').read_text())
++        records=[json.loads(s) for s in (d/'outputs.jsonl').read_text().splitlines()]
++        checks.append({'name':name+'_sealed_unique_16','pass':all(sha(d/p)==h for p,h in c['files'].items()) and len(records)==len({r['id'] for r in records})==16})
++    save(out/'cli_regression.json',{'checks':checks,'pass':all(c['pass'] for c in checks),
++         'scope':'경로·허용 GPU·완료 파일 회귀. 중단 재개·E gate·의미 평가 검사를 대신하지 않음'})
++    print(json.dumps(checks,ensure_ascii=False))
++    return 0 if all(c['pass'] for c in checks) else 1
++
++
++if __name__=='__main__':
++    raise SystemExit(main())
