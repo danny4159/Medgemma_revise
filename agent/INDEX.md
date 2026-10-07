@@ -95,6 +95,7 @@
 - iter_087 [사용자 보완으로 전환 → iter_088] 기존 기록 보존, 성공·실패 판정 아님 (Claude 구현)
 - iter_088 [CONTINUE] (deep_medium/standard/normal) <위치 학습의 판독 누락·언급 성향 분리: inconclusive> 💾faee416633f87d281656c00982b973757c36817b E96 재평가에서 CURE recall 이득은 +15.3pp였으나 의미 민감도에서 불확정이었다. 영역 결합은 +6.1pp 회복에 모순 +47.9pp가 동반돼 현재 확대를 보류한다. → 다음: 현재 C-H 결합 방식과 E192 확대 투자를 보류하고, C-G 이후에도 위치 학습 연구에 남는 구체적 가치를 다음 전략 계획에서 선택한다. 같은 grounding-report-transfer 이력과 iter_084–088의 원문을 이어받아, 동일 자료·노출·학습 예산의 report-only/위치 포함 학습 비교가 중요한 결정을 바꿀 수 있는지와 해당 방법 투자 보류를 비교한다. 통제 비교를 택하려면 실제 정답·독립 평가 가능성, 강한 단순 대조, 최소 개입의 목적과 양성·음성·불확정 종료 행동을 명시한다. 현재 C-H 오류만으로 새 결합 방법을 정당화하거나 같은 E96의 의미 판정을 다시 반복하지 않는다. RSNA grounding 성과와 CURE 회복 신호는 보존하며, 새 학습·새 자료 생성은 별도 계획의 진입 근거가 갖춰진 뒤 진행한다.
 - iter_089 [CONTINUE] (deep_high/heavy/normal) <위치 학습의 판독 누락·언급 성향 분리: execution_failed> 💾ee00917e09032fddb27118b8f7404a2d0f76d734 D8 검사에서 현재 소견을 지우는 필터와 입력 길이별 수치 차이를 확인해 본학습을 중단했다. 동일 shape 대조는 통과했지만 위치 학습의 판독 효과는 미검증이다. → 다음: 같은 R/G 질문의 한정 실행 보완을 권고한다. target 구성 오류와 수치 대조를 해결하면 원래 통제 학습이 여전히 중요한 판단을 제공한다. 기준은 agent/runs/iter_089/plan.md(SHA256 ea51ef5365e4887cba9243fafcc8b366ced3669c12391de05a4347dc66cc91af)로 유지한다. temporal 규칙만 별도 amendment로 수정하고 기존 ID를 우선 보존하되 적격성·층 변화가 불가피하면 성능을 보기 전에 변경 이유와 재선정 규칙을 고정한다. 동일 shape 통과를 길이 변경 대조 통과로 대신하지 말고 수치 원인을 한정 검사한다. 이후 재개·validation 상태·누수·생성 provenance·처리량 검사를 마치면 원 계획의 epoch2와 조건부 epoch6/12, 잠금 후 E128 평가까지 진행한다. 해결되지 않으면 정확한 잔여 blocker에서 종료하며 C-H·E192 확대, 새 loss·모델 순회, E96 재평가는 추가하지 않는다.
+- iter_090 [진행 중]
 
 ## 이전 목표들의 접근법 (참고용, 현재 목표의 재평가 횟수에는 안 들어감)
 
@@ -142,13 +143,12 @@
 - MRI 자동 등급의 영상 검증 [approach/mri-grade-evidence-audit]: 2회 (iter_080, iter_081), 유효한 실험 1회, 미분류 0회, 최근 판정: abandon, 커밋: 6139c4ea9165ca9dba28687d54f956dbaaa3fa26
 - MRI 오류 검토 순위의 추가 정보 진단 [approach/mri-error-review-ranking]: 1회 (iter_082), 유효한 실험 1회, 미분류 0회, 최근 판정: abandon, 커밋: ee8078ab0acba94f0d84d3ab2997e76eeb117bb9
 - MRI 질문별 국소·주변 근거 대조 [approach/mri-local-context-evidence]: 1회 (iter_083), 유효한 실험 0회, 미분류 0회, 최근 판정: execution_failed, 커밋: 60b471e524aa59709473c8663db6d8f1c36d8870
-- 위치 학습의 판독 누락·언급 성향 분리 [approach/grounding-report-transfer]: 6회 (iter_084, iter_085, iter_086, iter_087, iter_088, iter_089), 유효한 실험 2회, 미분류 0회, 최근 판정: execution_failed, 커밋: 7748fdcffdc0e5f44bf090a6563f6e6dd3490274, 1fad82e7d39c3468ffbbe27a5f94eaf6d32e0415, 544d73cc0b870f19f1c1fe96dbc5a6ca4f8c06d3, faee416633f87d281656c00982b973757c36817b, ee00917e09032fddb27118b8f7404a2d0f76d734
+- 위치 학습의 판독 누락·언급 성향 분리 [approach/grounding-report-transfer]: 7회 (iter_084, iter_085, iter_086, iter_087, iter_088, iter_089, iter_090), 유효한 실험 2회, 미분류 0회, 최근 판정: execution_failed, 커밋: 7748fdcffdc0e5f44bf090a6563f6e6dd3490274, 1fad82e7d39c3468ffbbe27a5f94eaf6d32e0415, 544d73cc0b870f19f1c1fe96dbc5a6ca4f8c06d3, faee416633f87d281656c00982b973757c36817b, ee00917e09032fddb27118b8f7404a2d0f76d734
 
 현재 연구 브랜치: approach/grounding-report-transfer (코드 위치: /SSD1_1TB/home/milab/daniel/08_medgemma/research)
 
 ### 최근 계획의 대안 순위
 
-1. 위치 학습의 판독 누락·언급 성향 분리: 동일 base·판독 supervision의 R/G 통제 학습으로 기존 시스템 비교의 혼입을 줄인다.
-2. 현재 위치 보조 학습 투자 보류: 자료·평가 의미 또는 학습 경로가 성립하지 않으면 관찰을 보존하고 현재 후보에 추가 비용을 쓰지 않는다.
-3. C-H 결합 방식 개선: C-G 선택으로 큰 충돌을 피할 수 있어 현재는 새 결합 방법의 투자 근거가 부족하다.
-4. 다른 의료 영상 질문 탐색: 현재 남은 학습 조건 혼입을 해소하지 못하고 자료·평가 준비 비용을 다시 유발하므로 우선하지 않는다.
+1. 위치 학습의 판독 누락·언급 성향 분리: target·수치 경로를 한정 복구해 원래 통제 비교를 수행한다.
+2. 현재 R/G 실행 경로 보류: 수치 동등성이나 자료 의미를 복구하지 못하면 정확한 blocker와 재개 조건을 보존한다.
+3. 새 방법·모델·자료 전환: 현재 실행 실패가 과학적 선택을 반박하지 않았으므로 이번에는 선택하지 않는다.
