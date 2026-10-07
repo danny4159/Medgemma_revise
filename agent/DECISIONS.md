@@ -2486,3 +2486,26 @@ Claude 계정의 /usage 또는 Settings > Usage에서 제한을 확인한 뒤 �
   - 다음: 같은 R/G 질문의 한정 실행 보완을 권고한다. 학습 상태가 보존됐으므로 대기 수명 관리를 바로잡고 원 비교를 마치는 것이 우선이다. 기준은 agent/runs/iter_091/plan.md와 상속된 iter_090 계획·amendment·stage_decision_rules로 유지한다. 동일 Claude 세션을 가능하면 재사용하고 supervisor가 pending인 동안 최종 응답으로 종료하지 않는다. 실제 소유 프로세스와 lock을 확인한 뒤, R checkpoint305와 G checkpoint285의 hash/config를 검증하여 기존 자동 resume로 이어간다. LR2e-4 두 조건은 checkpoint128을 유지한다. 완료된 57 updates와 G epoch4 validation을 반복하지 않는다. epoch6 완료·고정 조건의 epoch12·선택 잠금·E128 평가·독립 집계까지 원 기준으로 마친다. 운영 연결을 수정해야 한다면 연구 trainer/config digest와 분리하고, pending→완료·오류 처리만 회귀 검증한다. 새로운 문헌·모델·loss·표본 확대는 추가하지 않는다.
 - 📁 원본: `agent/runs/iter_091/`
 
+## iter_092 — 위치 학습의 판독 누락·언급 성향 분리 (9번째 시도) · 2026-10-07 18:49
+
+- 🧭 **계획** (GPT normal): 최신 R305/G285 checkpoint에서 R/G 비교를 재개하고, pending 중 구현 세션이 종료되지 않도록 완료 대기를 보완한다. 원 epoch6/12·E128 평가를 마쳐 위치 보조 학습의 판독 효과를 판단한다.
+  - 대안: 1) 위치 학습의 판독 누락·언급 성향 분리: 완료 대기 연결을 보완하고 보존된 학습에서 원 비교를 마친다. · 2) 현재 실행 보류: checkpoint는 보존되지만 새 과학적 판단 없이 통제 비교가 미완료로 남으므로 우선하지 않는다.
+  - 1순위 선택 근거: 직전 리뷰의 한정 복구 권고를 유지한다. 최신 checkpoint가 보존됐고 문제는 완료 전 세션 종료로 특정됐으므로 기존 권한과 설계 안에서 진행할 수 있다.
+- ▶ **결정**: 자동 진행 (smart) — 1순위로 진행
+- 💾 **개발 이력 체크포인트** `93193abc4d04c44cf40b2695376d520209fa1745`: implementation_finished (검증 승인 아님)
+- 🔧 **Claude** (standard): 보존된 R/G를 epoch6까지 재개·완료하고 E128 평가까지 마쳤다. epoch4→6 NLL 상승으로 epoch12는 실행하지 않았고, G−R strict recall은 +0.5pp(CI [0,1.6], 추가 회복 1명)로 원 기준 미충족이다. 다만 E 판정 512건 중 약 80%가 내 규칙표 자동 판정이고 선택 epoch1의 R/G가 일반 정상문으로 수렴해, 독립 평가자 검증은 없다. [자체 검증 FAIL, 파일 740개 변경]
+  - 브랜치 `approach/grounding-report-transfer`에서 계속
+  - ⚠ 권한 거부 5건
+- 🔍 **리뷰** (GPT normal): [CONTINUE / inconclusive] 흉부 X-ray 판독에서 위치 보조 학습의 recall 이득은 +0.53pp·추가 회복 1명으로 기준 미달이었다. R/G 모두 base보다 낮아 위치 학습 전체의 효과는 아직 판단할 수 없다.
+  - 접근법 판단: 실제 비교는 유효하고 원 양성 기준은 미달했지만, 선택된 report-only baseline의 극히 낮은 recall 때문에 위치 보조 CE의 일반적 투자 가치는 불확정이다.
+  - 목표 진전: 실행 복구는 완료됐고 실제 판독 512건과 보조 grounding 64건을 확보했다. 확정 양성 reference가 있는 비정상 94명의 strict recall은 R 1.152%, G 1.684%로, G−R +0.532pp와 추가 회복 1명은 사전 양성 기준에 미달한다. 보조 grounding F1@0.3은 R 0, G 0.25로 위치 출력 학습과 판독 개선을 분리해 관찰했다. 다만 R/G가 base의 recall 7.837%보다 낮아 강한 판독 baseline 이후의 잔여 문제나 새로운 방법의 필요성은 확인하지 못했다.
+  - 판정 범위: PadChest-GR T512/V64/V32, MedGemma 1.5, seed17, 두 LR, 사전 NLL 선택으로 정한 LR2e-4·epoch1의 R/G 비교에 한정한다. 판독 baseline 자체가 약하므로 충분히 작동하는 report-only SFT 이후 위치 보조 학습의 효과, 다른 recipe·seed·기관과 일반적 위치–판독 전이는 미판정이다.
+  - 재사용 전 수정: report92_autojudge.py는 일반 'No significant findings'를 대응 음성 atom이 없으면 unknown으로 처리하지만 'Normal chest X-ray'와 구체적 부정문에는 다른 모순 규칙을 적용한다. 참고 시스템의 모순 감소·복합 우위 주장을 재사용하기 전 범위와 의미 동등성을 검토해야 한다.
+  - 재사용 전 수정: 'no acute cardiopulmonary process'를 reference의 급성 여부 확인 없이 infiltrate·effusion 등의 존재로 반박하는 규칙과, substring으로 위치·속성 일치를 판정하는 규칙은 한정 회귀 사례로 검증해야 한다.
+  - 재사용 전 수정: 보고서의 recall 분모를 비정상 층 96명과 실제 적격 94명으로 구분하고, 430/512 자동 판정 비율을 84.0%로 정정해야 한다.
+  - 재사용 전 수정: report92_e_recheck_notes.py의 일괄 retain 문구만으로 사례별 의미 재점검 또는 독립 평가를 입증하지 않는다. 다음 평가에서는 판단 근거가 필요한 사례에 실제 검토 기록을 연결해야 한다.
+  - 추후 개선: 단일 seed, assistant 의미 평가, foundation/CURE 학습 노출과 외부 임상 일반화의 불확실성은 유지한다.
+  - 추후 개선: 정답 문장을 제공한 보조 grounding 성능을 자유 판독의 영상 인식이나 근거 활용 능력으로 해석하지 않는다.
+  - 다음: 같은 질문의 한정 보완을 권고한다. 새 학습보다 저장된 train/validation 근거로 판독 baseline의 정상문 편중과 선택 규칙의 영향을 먼저 구분하는 편이 판단 가치가 높다. iter_092와 상속된 iter_090 계획·amendment·stage_decision_rules 및 원 E 판정은 보존한다. 기존 target 구성, 소견별 노출, epoch별 NLL과 저장 V32 실제 출력을 연결하고, 정상문·구체적 부정의 의미 규칙을 제한된 대조 사례로 점검한다. E128에서 유리한 epoch를 고르거나 같은 E를 독립 확인으로 다시 사용하지 않는다. 종료 시 validation 근거가 지지하는 구체적인 baseline 보완 하나가 있으면 별도 사전 계획으로 제안하고, 없으면 현재 recipe의 추가 seed·epoch·위치 loss 투자를 보류한다. 평가 정정이 필요하면 기존 출력만 별도 결과 경로에서 재집계하며 원 결과를 덮어쓰지 않는다.
+- 📁 원본: `agent/runs/iter_092/`
+
