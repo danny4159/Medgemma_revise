@@ -1,0 +1,812 @@
+diff --git a/report93_analyze.py b/report93_analyze.py
+new file mode 100644
+index 0000000..d58aaca
+--- /dev/null
++++ b/report93_analyze.py
+@@ -0,0 +1,479 @@
++"""iter_093: 저장된 T512/V64 target, 네 trajectory의 V64 환자별 NLL, 동일 V32 생성·판정의 연결 분석.
++신규 학습·생성·GPU 없음. 결과는 results/iter_093/ 새 경로에만 쓴다(기존 파일 덮어쓰기 거부)."""
++import hashlib, json, re, sys, time
++from collections import Counter, defaultdict
++from pathlib import Path
++import numpy as np
++import report93_fixtures as FX
++import report93_sens as SENS
++
++ROOT = Path(__file__).resolve().parent
++I90 = ROOT / 'results/iter_090'
++REC = I90 / 'recovery'
++OUT = ROOT / 'results/iter_093/main'  # results/iter_093/*.json(root)은 개발 중 1회 실행본으로 보존
++EPOCHS = (1, 2, 4, 6)
++LRS = ('0.0001', '0.0002')
++MODES = ('R', 'G')
++SEED = 9301
++NB = 10000
++
++
++def sha(p):
++    return hashlib.sha256(Path(p).read_bytes()).hexdigest()
++
++
++def jl(p):
++    return json.loads(Path(p).read_text())
++
++
++def save(name, obj):
++    p = OUT / name
++    assert not p.exists(), f'refuse overwrite {p}'
++    p.parent.mkdir(parents=True, exist_ok=True)
++    tmp = p.with_suffix(p.suffix + '.tmp')
++    tmp.write_text(json.dumps(obj, indent=1, ensure_ascii=False))
++    tmp.rename(p)
++
++
++# ---------------------------------------------------------------- 1. 입력 고정
++def inputs():
++    T = jl(I90 / 'data/T512/manifest.json')
++    V = jl(I90 / 'data/V64/manifest.json')
++    V32 = jl(I90 / 'data/V32/manifest.json')
++    traj = {}
++    for m in MODES:
++        for lr in LRS:
++            run = REC / f'train/{m}_lr{lr}'
++            cfg = jl(run / 'config.json')
++            assert cfg['val_sha'] == sha(I90 / 'data/V64/manifest.json'), 'val_sha mismatch'
++            assert cfg['train_sha'] == sha(I90 / 'data/T512/manifest.json'), 'train_sha mismatch'
++            assert cfg['patient_ids'] == sorted(r['PatientID'] for r in T), 'train id mismatch'
++            assert cfg['mode'] == m and str(cfg['lr']) == str(float(lr)), (cfg['mode'], cfg['lr'])
++            vals = {}
++            for e in EPOCHS:
++                v = jl(run / f'validation_{e:02d}.json')
++                assert v['n'] == 64 and len(v['per_patient']) == 64 and v['epoch'] == e and v['state_preserved'] is True
++                assert abs(float(np.mean(v['per_patient'])) - v['report_nll']) < 1e-9
++                vals[e] = v
++            traj[(m, lr)] = dict(cfg=cfg, val=vals)
++    return T, V, V32, traj
++
++
++def input_manifest(T, V, V32, traj):
++    files = {}
++    def add(p):
++        files[str(Path(p).resolve().relative_to(ROOT))] = sha(p)
++    for n in ('T512', 'V64', 'V32'):
++        add(I90 / f'data/{n}/manifest.json')
++    for p in ('semantic/V32_reference_v3.json', 'data/selection_lock.json'):
++        add(I90 / p)
++    for p in ('stage_decision_rules.json', 'selection/final.json', 'decisions/expand_epoch6.json',
++              'decisions/expand_epoch6_semantic_confirmation.json', 'decisions/grounding_evidence_check.json'):
++        add(REC / p)
++    for (m, lr), t in traj.items():
++        run = REC / f'train/{m}_lr{lr}'
++        add(run / 'config.json')
++        for e in EPOCHS:
++            add(run / f'validation_{e:02d}.json')
++        add(run / 'complete_06.json')
++        add(run / 'verified_06.json')
++    for e in (2, 6):
++        add(REC / f'semantic/epoch{e}/eval/per_output.json')
++        add(REC / f'semantic/epoch{e}/eval/report.json')
++        for m in MODES:
++            for lr in LRS:
++                add(REC / f'validation/epoch{e}/{m}_lr{lr}_report/worker_0.jsonl')
++    add(REC / 'validation/epoch2/base_report/worker_0.jsonl')
++    for p in ('report90_select.py', 'report90_recovery_train.py', 'report90_train.py', 'report89_model.py', 'report93_fixtures.py', 'report93_sens.py'):
++        add(ROOT / p)
++    return files
++
++
++# ---------------------------------------------------------------- 2. target 구성
++GENERIC = [r'no (other )?(significant|relevant) (radiological )?findings', r'no findings( of pathological significance)?', r'within normal limits',
++           r'no radiological changes', r'no (other )?findings', r'no other significant radiological findings',
++           r'no (other )?relevant radiological (findings|alterations)', r"no pathological findings for the patient's age"]
++UNCERT = re.compile(r'\b(possible|probable|probably|suggest\w*|may|might|could|doubtful|cannot be excluded|apparent|suspicious|likely|questionable|compatible)\b', re.I)
++NEG = re.compile(r'\b(no|not|without|free|absence)\b', re.I)
++
++
++def retained_sentences(row):
++    ex = set()
++    for item in row['excluded_sentences']:
++        ex.add(item[0] if isinstance(item, (list, tuple)) else item)
++    return [s for s in row['findings'] if s['source_index'] not in ex]
++
++
++def classify_patient(row):
++    sents = retained_sentences(row)
++    ab = [s for s in sents if s['abnormal']]
++    nm = [s for s in sents if not s['abnormal']]
++    if not ab:
++        c = 'normal_only'
++    elif not nm:
++        c = 'abnormal_only'
++    else:
++        c = 'abnormal_plus_normal'
++    return c, sents, ab, nm
++
++
++def is_generic(s):
++    t = s.lower().rstrip('. ').strip()
++    return any(re.fullmatch(g, t) for g in GENERIC)
++
++
++def target_composition(rows):
++    out = dict(n=len(rows), patient_class=Counter(), stratum=Counter(), generic_normal_sentence=0, specific_normal_sentence=0,
++               abnormal_sentence=0, abnormal_with_uncertain=0, abnormal_with_location=0, abnormal_with_box=0,
++               words_abnormal=0, words_normal=0, report_match_fail=0, excluded_sentences=0, patients_with_exclusion=0)
++    phr = Counter()
++    label_pat = defaultdict(set)
++    per = {}
++    for r in rows:
++        c, sents, ab, nm = classify_patient(r)
++        out['patient_class'][c] += 1
++        out['stratum'][r['stratum']] += 1
++        gen = sum(is_generic(s['sentence_en']) for s in nm)
++        out['generic_normal_sentence'] += gen
++        out['specific_normal_sentence'] += len(nm) - gen
++        out['abnormal_sentence'] += len(ab)
++        out['abnormal_with_uncertain'] += sum(bool(UNCERT.search(s['sentence_en'])) for s in ab)
++        out['abnormal_with_location'] += sum(bool(s['locations']) for s in ab)
++        out['abnormal_with_box'] += sum(bool(s['boxes']) for s in ab)
++        out['words_abnormal'] += sum(len(s['sentence_en'].split()) for s in ab)
++        out['words_normal'] += sum(len(s['sentence_en'].split()) for s in nm)
++        ex = r['excluded_sentences']
++        out['excluded_sentences'] += len(ex)
++        out['patients_with_exclusion'] += bool(ex)
++        if ' '.join(s['sentence_en'] for s in sents).strip() != r['report'].strip():
++            out['report_match_fail'] += 1
++        for s in nm:
++            phr[s['sentence_en'].strip().lower()] += 1
++        for s in ab:
++            for lab in s['labels']:
++                label_pat[lab].add(r['PatientID'])
++        per[r['PatientID']] = dict(cls=c, n_abnormal=len(ab), n_normal=len(nm), n_generic=gen)
++    out['patient_class'] = dict(out['patient_class'])
++    out['stratum'] = dict(out['stratum'])
++    out['top_normal_phrases'] = phr.most_common(12)
++    out['n_distinct_normal_phrases'] = len(phr)
++    lp = sorted(((k, len(v)) for k, v in label_pat.items()), key=lambda x: -x[1])
++    out['label_patient_exposure_top15'] = lp[:15]
++    out['n_distinct_labels'] = len(lp)
++    out['labels_seen_in_le2_patients'] = sum(1 for _, n in lp if n <= 2)
++    out['word_share_normal'] = out['words_normal'] / max(1, out['words_normal'] + out['words_abnormal'])
++    return out, per
++
++
++# ---------------------------------------------------------------- 3. NLL
++def nll_tables(V, traj, vpc):
++    vid = [r['PatientID'] for r in V]
++    grp = np.array([vpc[p]['cls'] == 'normal_only' for p in vid])
++    arr = {k: np.array([t['val'][e]['per_patient'] for e in EPOCHS]) for k, t in traj.items()}  # [epoch, patient]
++    tab = {}
++    for (m, lr), a in arr.items():
++        tab[f'{m}_lr{lr}'] = dict(
++            overall={str(e): float(a[i].mean()) for i, e in enumerate(EPOCHS)},
++            normal_only={str(e): float(a[i][grp].mean()) for i, e in enumerate(EPOCHS)},
++            abnormal_containing={str(e): float(a[i][~grp].mean()) for i, e in enumerate(EPOCHS)},
++            stored_report_nll={str(e): traj[(m, lr)]['val'][e]['report_nll'] for e in EPOCHS})
++    # 선택 재현: 모드별 epoch6 NLL 최소 LR(동률 낮은 LR) -> 공통 epoch NLL 합 최소(동률 이른 epoch)
++    sel = {}
++    for m in MODES:
++        sel[m] = min(LRS, key=lambda lr: (traj[(m, lr)]['val'][6]['report_nll'], float(lr)))
++    common = min(EPOCHS, key=lambda e: (sum(traj[(m, sel[m])]['val'][e]['report_nll'] for m in MODES), e))
++    final = jl(REC / 'selection/final.json')
++    reproduced = dict(lr=sel, common_epoch=common,
++                      matches_final=all(str(final['selected'][m]['lr']) == str(float(sel[m])) for m in MODES) and final['common_epoch'] == common)
++    # 사후 민감도(선택 파일은 바꾸지 않음): 모든 LR x epoch 중 모드별 NLL 최소, 군별 최소
++    alt = {}
++    for m in MODES:
++        best = min(((lr, e) for lr in LRS for e in EPOCHS), key=lambda x: (traj[(m, x[0])]['val'][x[1]]['report_nll'], x[1], float(x[0])))
++        alt[m] = dict(global_min_overall=best)
++        for name, mask in (('normal_only', grp), ('abnormal_containing', ~grp)):
++            b = min(((lr, e) for lr in LRS for e in EPOCHS), key=lambda x: (arr[(m, x[0])][EPOCHS.index(x[1])][mask].mean(), x[1], float(x[0])))
++            alt[m][f'min_{name}'] = b
++    # 군 분해: epoch1→6 변화
++    dec = {}
++    for (m, lr), a in arr.items():
++        d = a[3] - a[0]
++        dec[f'{m}_lr{lr}'] = dict(delta_6_minus_1_normal_only=float(d[grp].mean()), delta_6_minus_1_abnormal=float(d[~grp].mean()),
++                                  n_normal_only=int(grp.sum()), n_abnormal=int((~grp).sum()))
++    return tab, reproduced, alt, dec, arr
++
++
++# ---------------------------------------------------------------- 4. V32 생성
++def v32_outputs():
++    po = {}
++    for e in (2, 6):
++        for x in jl(REC / f'semantic/epoch{e}/eval/per_output.json'):
++            if x['condition'] == 'base_report' and e == 6:
++                raise AssertionError('base at epoch6 unexpected')
++            key = ('base' if x['condition'] == 'base_report' else x['condition'].replace('_report', ''), 0 if x['condition'] == 'base_report' else e)
++            assert (key, x['image_id']) not in po
++            po[(key, x['image_id'])] = x
++    return po
++
++
++def raw_text():
++    txt = {}
++    spec = [(('base', 0), REC / 'validation/epoch2/base_report')]
++    for e in (2, 6):
++        for m in MODES:
++            for lr in LRS:
++                spec.append(((f'{m}_lr{lr}', e), REC / f'validation/epoch{e}/{m}_lr{lr}_report'))
++    for key, d in spec:
++        for line in (d / 'worker_0.jsonl').read_text().splitlines():
++            r = json.loads(line)
++            iid = r['id'].split('|')[0]
++            assert (key, iid) not in txt
++            txt[(key, iid)] = r
++    return txt
++
++
++def patient_view(po, txt, ref_rows, V32):
++    ids = [r['ImageID'] for r in V32]
++    ref = {r['id']: r for r in ref_rows}
++    keys = sorted({k for k, _ in po})
++    out = {}
++    for k in keys:
++        rows = []
++        for iid in ids:
++            x = po[(k, iid)]
++            r = ref[iid]
++            pos_def = [a['id'] for a in r['atoms'] if a['polarity'] == 'positive' and a['certainty'] == 'definite']
++            strict = sorted({m['ref'] for m in x['matches'] if m['status'] == 'strict'})
++            typeo = sorted({m['ref'] for m in x['matches'] if m['status'] in ('strict', 'type_only')})
++            pos_claims = [c for c in x['claims'] if c['polarity'] == 'positive']
++            t = txt[(k, iid)]
++            rows.append(dict(image_id=iid, patient=x['patient'], abnormal=x['abnormal'], positive_n=x['positive_n'], pos_def_ref=pos_def,
++                             strict_atoms=strict, type_atoms=typeo, strict_recall=x['strict_recall'], type_recall=x['type_recall'],
++                             n_pos_claims=len(pos_claims), n_neg_claims=len(x['claims']) - len(pos_claims),
++                             normal_only_output=(len(pos_claims) == 0), non_eos=x['non_eos'], contradiction=x['contradiction'],
++                             ended_eos=bool(t['attempts'][-1]['ended_eos']) if isinstance(t['attempts'], list) else None,
++                             text_words=len(t['text'].split())))
++        out[k] = rows
++    return out
++
++
++def recall_of(rows):
++    el = [r for r in rows if r['positive_n']]
++    return float(np.mean([r['strict_recall'] for r in el])) if el else float('nan')
++
++
++def boot(d, rng):
++    d = np.asarray(d, float)
++    n = len(d)
++    bs = np.array([d[rng.integers(0, n, n)].mean() for _ in range(NB)])
++    loo = [float(np.delete(d, i).mean()) for i in range(n)]
++    return dict(mean=float(d.mean()), ci95=[float(np.percentile(bs, 2.5)), float(np.percentile(bs, 97.5))], n=n,
++                loo_min=min(loo), loo_max=max(loo), n_up=int((d > 0).sum()), n_down=int((d < 0).sum()), n_zero=int((d == 0).sum()))
++
++
++def rank(x):
++    x = np.asarray(x, float)
++    o = np.argsort(x, kind='mergesort')
++    r = np.empty(len(x))
++    i = 0
++    while i < len(x):
++        j = i
++        while j + 1 < len(x) and x[o[j + 1]] == x[o[i]]:
++            j += 1
++        r[o[i:j + 1]] = (i + j) / 2 + 1
++        i = j + 1
++    return r
++
++
++def spearman(a, b):
++    if len(a) < 3 or np.std(a) == 0 or np.std(b) == 0:
++        return None
++    return float(np.corrcoef(rank(a), rank(b))[0, 1])
++
++
++def generation_stats(view, arr, V, V32):
++    vidx = {r['ImageID']: i for i, r in enumerate(V)}
++    ids = [r['ImageID'] for r in V32]
++    pi = [vidx[i] for i in ids]
++    rng = np.random.default_rng(SEED)
++    conds = {}
++    for k, rows in view.items():
++        el = [r for r in rows if r['positive_n']]
++        conds[f'{k[0]}@{k[1]}'] = dict(n=len(rows), abnormal_n=sum(r['abnormal'] for r in rows), recall_eligible_n=len(el),
++                                        strict_recall=recall_of(rows), type_recall=float(np.mean([r['type_recall'] for r in el])),
++                                        normal_only_output=sum(r['normal_only_output'] for r in rows),
++                                        normal_only_output_in_abnormal=sum(r['normal_only_output'] for r in rows if r['abnormal']),
++                                        non_eos=sum(r['non_eos'] for r in rows), patient_contradiction=sum(r['contradiction'] for r in rows),
++                                        mean_words=float(np.mean([r['text_words'] for r in rows])))
++    # paired contrasts on recall-eligible patients (patient-level strict_recall)
++    def vec(k):
++        return np.array([r['strict_recall'] if r['positive_n'] else np.nan for r in view[k]])
++    contr = {}
++    def contrast(name, a, b):
++        da, db = vec(a), vec(b)
++        m = ~np.isnan(da)
++        contr[name] = boot((da - db)[m], rng)
++        e_a = np.array([r['strict_atoms'] for r in view[a]], dtype=object)
++        e_b = np.array([r['strict_atoms'] for r in view[b]], dtype=object)
++        gained = sum(len(set(x) - set(y)) for x, y in zip(e_a, e_b))
++        lost = sum(len(set(y) - set(x)) for x, y in zip(e_a, e_b))
++        contr[name]['strict_atoms_gained'] = gained
++        contr[name]['strict_atoms_lost'] = lost
++        contr[name]['patients_with_gain'] = sum(bool(set(x) - set(y)) for x, y in zip(e_a, e_b))
++        contr[name]['patients_with_loss'] = sum(bool(set(y) - set(x)) for x, y in zip(e_a, e_b))
++    for lr in LRS:
++        for e in (2, 6):
++            contrast(f'G-R lr{lr} epoch{e}', (f'G_lr{lr}', e), (f'R_lr{lr}', e))
++        for m in MODES:
++            contrast(f'{m} lr{lr} epoch6-epoch2', (f'{m}_lr{lr}', 6), (f'{m}_lr{lr}', 2))
++            contrast(f'{m} lr{lr} epoch2-base', (f'{m}_lr{lr}', 2), ('base', 0))
++            contrast(f'{m} lr{lr} epoch6-base(epoch2 base)', (f'{m}_lr{lr}', 6), ('base', 0))
++    # NLL 변화와 생성 변화 연결 (epoch2 -> epoch6)
++    link = {}
++    for m in MODES:
++        for lr in LRS:
++            a = arr[(m, lr)]  # [epoch, patient]
++            dn = a[3][pi] - a[1][pi]  # epoch6 - epoch2 NLL, V32 환자
++            ds = vec((f'{m}_lr{lr}', 6)) - vec((f'{m}_lr{lr}', 2))
++            msk = ~np.isnan(ds)
++            link[f'{m}_lr{lr}'] = dict(n=int(msk.sum()), spearman_dNLL_vs_dRecall=spearman(dn[msk], ds[msk]),
++                                       mean_dNLL_eligible=float(dn[msk].mean()), mean_dRecall=float(ds[msk].mean()),
++                                       frac_nll_up=float((dn[msk] > 0).mean()), frac_recall_up=float((ds[msk] > 0).mean()),
++                                       frac_recall_down=float((ds[msk] < 0).mean()),
++                                       nll_mean_V32_epoch1=float(a[0][pi].mean()), nll_mean_V32_epoch2=float(a[1][pi].mean()),
++                                       nll_mean_V32_epoch6=float(a[3][pi].mean()))
++    # NLL 순서 vs 회복 순서: 한 trajectory의 epoch2 대 epoch6
++    order = {}
++    for m in MODES:
++        for lr in LRS:
++            n2 = float(arr[(m, lr)][1].mean()); n6 = float(arr[(m, lr)][3].mean())
++            order[f'{m}_lr{lr}'] = dict(nll_epoch2=n2, nll_epoch6=n6, lower_nll_epoch=2 if n2 < n6 else 6,
++                                        recall_epoch2=recall_of(view[(f'{m}_lr{lr}', 2)]), recall_epoch6=recall_of(view[(f'{m}_lr{lr}', 6)]),
++                                        higher_recall_epoch=(2 if recall_of(view[(f'{m}_lr{lr}', 2)]) > recall_of(view[(f'{m}_lr{lr}', 6)])
++                                                             else 6 if recall_of(view[(f'{m}_lr{lr}', 2)]) < recall_of(view[(f'{m}_lr{lr}', 6)]) else 'tie'))
++    return conds, contr, link, order
++
++
++# ---------------------------------------------------------------- 5. 의미 민감도
++GROUP_OF = {'chest abnormality': 'generic_normal', 'pulmonary opacity': 'generic_normal', 'mediastinal abnormality': 'generic_normal',
++            'osseous abnormality': 'generic_normal', 'significant abnormality': 'generic_normal',
++            'acute cardiopulmonary process': 'acute_negation', 'pleural effusion': 'specific_negation', 'pneumothorax': 'specific_negation',
++            'infiltrate/consolidation': 'specific_negation', 'consolidation': 'specific_negation', 'pulmonary nodule/mass': 'specific_negation',
++            'jugular catheter route': 'location_attribute', 'pacemaker type': 'location_attribute', 'humeral prosthesis laterality': 'location_attribute'}
++LOC_FINDING = {'jugular catheter route': 'central venous catheter', 'pacemaker type': 'pacemaker', 'humeral prosthesis laterality': 'humeral prosthesis'}
++
++
++def sens_claims(po, ref_rows):
++    ref = {r['id']: r for r in ref_rows}
++    rows = []
++    for (k, iid), x in po.items():
++        atoms = [dict(finding=a['finding'], polarity=a['polarity'], certainty=a['certainty'], location=a['location'], attributes=a['attributes'], id=a['id'])
++                 for a in ref[iid]['atoms']]
++        stated = [c['finding'] for c in x['claims'] if c['polarity'] == 'positive']
++        for c in x['claims']:
++            g = GROUP_OF.get(c['finding'])
++            if not g:
++                continue
++            # 보수 규칙은 negative 일반/구체 문장과 위치·속성 claim에만 적용; 'other' 문장은 other_scope
++            grp = 'other_scope' if (g == 'generic_normal' and 'other' in c['quote'].lower()) else g
++            if g == 'location_attribute' and c['polarity'] != 'positive':
++                continue
++            if g != 'location_attribute' and c['polarity'] != 'negative':
++                continue
++            f = LOC_FINDING.get(c['finding'], c['finding'])
++            if g == 'specific_negation' and f == 'consolidation':
++                f = 'infiltrate/consolidation'
++            new = SENS.judge(grp, c['quote'], f, atoms, stated)
++            new = dict(supported='supported', contradicted='contradicted', undecidable='unknown')[new]
++            rows.append(dict(cond=f'{k[0]}@{k[1]}', image_id=iid, patient=x['patient'], group=grp, finding=c['finding'], quote=c['quote'],
++                             original=c['status'], conservative=new, changed=(c['status'] != new),
++                             ref_atoms=[f"{a['id']}:{a['finding']}:{a['polarity']}:{a['certainty']}:{a['location']}" for a in atoms], original_refs=c['refs'],
++                             anchor_ok=(c['quote'] == c['anchor']['quote'])))
++    return rows
++
++
++def sens_summary(rows, po):
++    cond = defaultdict(lambda: dict(claims=0, changed=0, orig_contra_claims=0, cons_contra_claims=0, orig_contra_patients=set(), cons_contra_patients=set()))
++    for r in rows:
++        d = cond[r['cond']]
++        d['claims'] += 1
++        d['changed'] += r['changed']
++        if r['original'] == 'contradicted':
++            d['orig_contra_claims'] += 1; d['orig_contra_patients'].add(r['image_id'])
++        if r['conservative'] == 'contradicted':
++            d['cons_contra_claims'] += 1; d['cons_contra_patients'].add(r['image_id'])
++    out = {}
++    for c, d in cond.items():
++        out[c] = dict(reevaluated_claims=d['claims'], status_changed=d['changed'], original_contradicted_claims=d['orig_contra_claims'],
++                      conservative_contradicted_claims=d['cons_contra_claims'], original_contradicted_patients=len(d['orig_contra_patients']),
++                      conservative_contradicted_patients=len(d['cons_contra_patients']))
++    # 원 per_output 환자 수준 contradiction과 대조(재평가 범위 밖 claim은 원 판정 유지)
++    full = {}
++    for (k, iid), x in po.items():
++        c = f'{k[0]}@{k[1]}'
++        full.setdefault(c, dict(orig=0, cons=0))
++        orig_c = any(cl['status'] == 'contradicted' for cl in x['claims'])
++        full[c]['orig'] += orig_c
++        re_rows = [r for r in rows if r['cond'] == c and r['image_id'] == iid]
++        changed = {(r['quote'], r['finding'], r['original']): r['conservative'] for r in re_rows}
++        cons = False
++        for cl in x['claims']:
++            st = changed.get((cl['quote'], cl['finding'], cl['status']), cl['status'])
++            cons |= (st == 'contradicted')
++        full[c]['cons'] += cons
++    return out, full
++
++
++# ---------------------------------------------------------------- main
++def main():
++    t0 = time.time()
++    assert not (OUT / 'summary.json').exists(), 'iter_093 summary already exists'
++    T, V, V32, traj = inputs()
++    files = input_manifest(T, V, V32, traj)
++    save('input_manifest.json', dict(files=files, n_files=len(files), v32_in_v64=all(r['ImageID'] in {v['ImageID'] for v in V} for r in V32)))
++    tcomp, tper = target_composition(T)
++    vcomp, vper = target_composition(V)
++    v32comp, _ = target_composition(V32)
++    # T512/V64 환자 중복 없음 확인
++    assert not ({r['PatientID'] for r in T} & {r['PatientID'] for r in V})
++    save('target_composition.json', dict(T512=tcomp, V64=vcomp, V32=v32comp))
++    tab, repro, alt, dec, arr = nll_tables(V, traj, vper)
++    save('nll_trajectories.json', dict(per_trajectory=tab, selection_reproduction=repro, post_hoc_sensitivity=alt, group_decomposition=dec,
++                                      note='sequence-mean NLL per patient; token-level contributions not stored'))
++    save('nll_per_patient.json', dict(order='V64 manifest order', patient_ids=[r['PatientID'] for r in V], image_ids=[r['ImageID'] for r in V],
++                                      patient_class=[vper[r['PatientID']]['cls'] for r in V],
++                                      values={f'{m}_lr{lr}': {str(e): list(map(float, traj[(m, lr)]['val'][e]['per_patient'])) for e in EPOCHS}
++                                              for (m, lr) in traj}))
++    ref_rows = jl(I90 / 'semantic/V32_reference_v3.json')['rows']
++    po = v32_outputs()
++    txt = raw_text()
++    assert len(po) == 32 * 9 and len(txt) == 32 * 9
++    view = patient_view(po, txt, ref_rows, V32)
++    # 평가기 recall 재현: 저장 report.json
++    for e in (2, 6):
++        rep = jl(REC / f'semantic/epoch{e}/eval/report.json')['conditions']
++        for cond, d in rep.items():
++            key = ('base', 0) if cond == 'base_report' else (cond.replace('_report', ''), e)
++            assert abs(recall_of(view[key]) - d['strict_recall']) < 1e-9, (key, recall_of(view[key]), d['strict_recall'])
++    conds, contr, link, order = generation_stats(view, arr, V, V32)
++    save('v32_generation.json', dict(conditions=conds, paired_contrasts=contr, nll_vs_generation=link, nll_order_vs_recall_order=order,
++                                     epoch1_v32_generation='missing (not generated; not filled)',
++                                     denominators=dict(all=32, abnormal=21, recall_eligible=20)))
++    save('v32_patient_view.json', {f'{k[0]}@{k[1]}': rows for k, rows in view.items()})
++    # 의미 민감도: fixture 먼저
++    fx = []
++    for f in FX.FIXTURES:
++        got = SENS.judge(f['group'], f['quote'], f['finding'], f['refs'], f.get('stated_findings', ()))
++        fx.append(dict(id=f['id'], group=f['group'], quote=f['quote'], expected=f['expected'], got=got, ok=got == f['expected'], why=f['why']))
++    assert all(x['ok'] for x in fx), [x for x in fx if not x['ok']]
++    srows = sens_claims(po, ref_rows)
++    ssum, sfull = sens_summary(srows, po)
++    save('semantic_sensitivity.json', dict(fixtures=fx, fixtures_sha=sha(ROOT / 'report93_fixtures.py'),
++                                           fixtures_by_group=dict(Counter(x['group'] for x in fx)),
++                                           claim_review=srows, claim_summary=ssum, patient_level_contradiction_original_vs_conservative=sfull,
++                                           anchor_failures=sum(not r['anchor_ok'] for r in srows)))
++    save('summary.json', dict(seconds=time.time() - t0, n_input_files=len(files), selection_reproduced=repro, gpu_use=0, new_generation_requests=0))
++    print(json.dumps(dict(seconds=time.time() - t0, repro=repro), default=str))
++
++
++if __name__ == '__main__':
++    main()
+diff --git a/report93_fixtures.py b/report93_fixtures.py
+new file mode 100644
+index 0000000..08bdbb8
+--- /dev/null
++++ b/report93_fixtures.py
+@@ -0,0 +1,58 @@
++"""iter_093 의미 민감도 규칙의 사전 고정 fixture (구현 전에 정답·근거를 고정한다).
++각 항목은 출력 문장 하나와 reference atom 일부로 expected(supported/contradicted/undecidable)와 이유를 갖는다.
++다섯 규칙군: generic_normal / other_scope / acute_negation / specific_negation / location_attribute."""
++
++def atom(finding, polarity='positive', certainty='definite', location='', attributes=''):
++    return dict(finding=finding, polarity=polarity, certainty=certainty, location=location, attributes=attributes)
++
++FIXTURES = [
++    # 1 일반 정상문: reference의 명시적 무소견 atom만 지지; 중요 소견은 반박; 만성/부수 소견은 중요도 범위 모호
++    dict(id='G1_support', group='generic_normal', quote='No significant findings.', finding='significant abnormality',
++         refs=[atom('no significant finding', 'negative')], expected='supported',
++         why='reference가 무소견을 명시'),
++    dict(id='G1_contra', group='generic_normal', quote='Normal chest X-ray.', finding='chest abnormality',
++         refs=[atom('pleural effusion', location='left posterior costophrenic angle', attributes='small')], expected='contradicted',
++         why='확정 흉막삼출은 중요 소견이며 전체 정상 주장과 양립 불가'),
++    dict(id='G1_undec', group='generic_normal', quote='Normal chest X-ray.', finding='chest abnormality',
++         refs=[atom('scoliosis', location='dorsolumbar', attributes='right convexity'), atom('no significant finding', 'negative')],
++         expected='undecidable', why='구조적 척추 변형만 있고 reference도 other 무소견이므로 중요도 범위가 모호'),
++    # 2 other 범위: other는 이미 기술된 소견을 제외한 나머지만 주장
++    dict(id='G2_support', group='other_scope', quote='No other significant findings.', finding='significant abnormality', stated_findings=['hilar prominence'],
++         refs=[atom('hilar prominence', location='left'), atom('other relevant finding', 'negative', location='outside described findings')],
++         expected='supported', why='reference도 기술 소견 밖 other relevant finding을 음성으로 명시'),
++    dict(id='G2_contra', group='other_scope', quote='No other findings.', finding='significant abnormality', stated_findings=['cardiomegaly'],
++         refs=[atom('cardiomegaly'), atom('pulmonary nodule', location='right lower lobe')], expected='contradicted',
++         why='출력이 기술한 소견 밖에 확정 결절이 있다'),
++    dict(id='G2_undec', group='other_scope', quote='No other significant findings.', finding='significant abnormality', stated_findings=['cardiomegaly'],
++         refs=[atom('cardiomegaly')], expected='undecidable', why='reference에 other 음성도 추가 양성도 없다'),
++    # 3 급성 부정: 급성 가능 소견만 반박, 만성 소견은 반박 불가
++    dict(id='G3_support', group='acute_negation', quote='No acute cardiopulmonary process.', finding='acute cardiopulmonary process',
++         refs=[atom('chronic pulmonary change', location='lung parenchyma', attributes='chronic'), atom('no significant finding', 'negative')],
++         expected='supported', why='만성 변화만 있으며 급성 소견이 reference에 없고 무소견 문장이 있다'),
++    dict(id='G3_contra', group='acute_negation', quote='No acute cardiopulmonary process.', finding='acute cardiopulmonary process',
++         refs=[atom('alveolar infiltrate', location='perihilar')], expected='contradicted', why='확정 폐포 침윤은 급성 가능 소견'),
++    dict(id='G3_undec', group='acute_negation', quote='No acute cardiopulmonary process.', finding='acute cardiopulmonary process',
++         refs=[atom('interstitial infiltrate', certainty='possible', location='right lung base')], expected='undecidable',
++         why='가능 소견만 있고 급성 여부 근거 없음'),
++    # 4 구체적 부정: 같은 소견의 확정 양성만 반박, 같은 소견 음성은 지지, 미언급은 판단불가
++    dict(id='G4_support', group='specific_negation', quote='There is no pleural effusion.', finding='pleural effusion',
++         refs=[atom('pleural effusion', 'negative', location='costophrenic sinuses')], expected='supported', why='같은 소견의 명시 음성'),
++    dict(id='G4_contra', group='specific_negation', quote='No definitive images of pulmonary nodules or masses are observed.', finding='pulmonary nodule/mass',
++         refs=[atom('pulmonary nodule', location='right lower lobe', attributes='2cm')], expected='contradicted', why='같은 소견의 확정 양성'),
++    dict(id='G4_undec', group='specific_negation', quote='There is no pneumothorax.', finding='pneumothorax',
++         refs=[atom('pleural effusion', location='left')], expected='undecidable', why='reference가 기흉을 언급하지 않는다(미표기는 음성이 아님)'),
++    # 5 위치·속성: 명시 laterality/site/type이 충돌하면 반박, 같으면 지지, reference에 값이 없으면 판단불가; substring 일치 금지
++    dict(id='G5_support', group='location_attribute', quote='Right humeral prosthesis.', finding='humeral prosthesis',
++         refs=[atom('metallic prosthesis', location='right humerus')], expected='supported', why='laterality와 부위 일치'),
++    dict(id='G5_contra', group='location_attribute', quote='Left humeral head prosthesis.', finding='humeral prosthesis',
++         refs=[atom('metallic prosthesis', location='right humerus')], expected='contradicted', why='명시 laterality 충돌'),
++    dict(id='G5_undec', group='location_attribute', quote='Left pleural effusion.', finding='pleural effusion',
++         refs=[atom('pleural effusion')], expected='undecidable', why='reference에 laterality 정보 없음'),
++    dict(id='G5_contra_site', group='location_attribute', quote='Central route through the right jugular.', finding='central venous catheter',
++         refs=[atom('central venous catheter', location='subclavian vein')], expected='contradicted', why='명시 삽입 경로 충돌'),
++    dict(id='G5_contra_type', group='location_attribute', quote='Biventricular pacemaker.', finding='pacemaker',
++         refs=[atom('pacemaker', attributes='dual chamber')], expected='contradicted', why='명시 유형 충돌(biventricular≠dual chamber)'),
++    dict(id='G5_trap_substring', group='location_attribute', quote='Pleural effusion in the left lower lobe.', finding='pleural effusion',
++         refs=[atom('pleural effusion', location='right lower lobe')], expected='contradicted',
++         why='left/right 단어 일부 겹침이 있어도 laterality는 충돌(공통 token lower lobe로 승인하면 오류)'),
++]
+diff --git a/report93_sens.py b/report93_sens.py
+new file mode 100644
+index 0000000..2f93a53
+--- /dev/null
++++ b/report93_sens.py
+@@ -0,0 +1,98 @@
++"""iter_093 보수적 의미 민감도 규칙. report93_fixtures.py의 사전 고정 정답으로만 검증한 한정 규칙이며 범용 평가기가 아니다.
++출력: supported / contradicted / undecidable. 미표기를 음성으로, 단어 부분 일치를 위치 일치로 쓰지 않는다."""
++import re
++
++MINOR = ('scoliosis', 'gynecomastia', 'metallic', 'prosthesis', 'pacemaker', 'osteosynthesis', 'sternotomy', 'catheter', 'tube')
++PULM = ('infiltrate', 'consolidation', 'alveolar', 'atelectasis', 'nodule', 'mass', 'fibrosis', 'fibrotic', 'chronic pulmonary', 'neoplasm', 'ground glass', 'bulla', 'cavit')
++MED = ('mediastinal', 'aortic', 'goiter', 'hilar', 'hilum', 'tracheal')
++BONE = ('scoliosis', 'fracture', 'kyphosis', 'spondylosis', 'osteopenia', 'vertebral', 'degenerative')
++ACUTE = ('infiltrate', 'alveolar', 'consolidation', 'pleural effusion', 'pneumothorax', 'edema')
++FAMILY = {'pleural effusion': ('pleural effusion',), 'pneumothorax': ('pneumothorax',), 'pulmonary nodule/mass': ('nodule', 'mass'),
++          'infiltrate/consolidation': ('infiltrate', 'consolidation', 'alveolar'), 'humeral prosthesis': ('prosthesis',),
++          'central venous catheter': ('catheter',), 'pacemaker': ('pacemaker',)}
++SITES = ('jugular', 'subclavian', 'femoral')
++TYPES = (('biventricular', 'biventricular'), ('dual', 'dual'), ('bicameral', 'dual'), ('single', 'single'), ('monochamber', 'single'))
++
++
++def text(a):
++    return (a['finding'] + ' ' + a.get('location', '') + ' ' + a.get('attributes', '')).lower()
++
++
++def has(refs, words, positive=True, definite=True):
++    return [a for a in refs if (a['polarity'] == 'positive') == positive and (a['certainty'] == 'definite' or not definite)
++            and any(w in a['finding'].lower() for w in words)]
++
++
++def positives(refs, definite=True):
++    return [a for a in refs if a['polarity'] == 'positive' and (a['certainty'] == 'definite' or not definite)]
++
++
++def nsf(refs):
++    return [a for a in refs if a['polarity'] == 'negative' and a['finding'] in ('no significant finding', 'other relevant finding')]
++
++
++def sides(s):
++    return {w for w in ('left', 'right', 'bilateral') if re.search(r'\b' + w + r'\b', s.lower())}
++
++
++def kinds(s, table):
++    s = s.lower()
++    return {v for k, v in table if re.search(r'\b' + k + r'\b', s)}
++
++
++def judge(group, quote, finding, refs, stated=()):
++    q = quote.lower()
++    if group in ('generic_normal', 'other_scope'):
++        pos = positives(refs)
++        if group == 'other_scope':
++            cand = [a for a in pos if not any(w in a['finding'].lower() or a['finding'].lower() in w for w in stated)]
++            if cand:
++                return 'contradicted'
++            return 'supported' if nsf(refs) else 'undecidable'
++        if finding == 'chest abnormality':
++            major = [a for a in pos if not any(m in a['finding'].lower() for m in MINOR)]
++        elif finding == 'pulmonary opacity':
++            major = [a for a in pos if any(m in text(a) for m in PULM)]
++        elif finding == 'mediastinal abnormality':
++            major = [a for a in pos if any(m in text(a) for m in MED)]
++        elif finding == 'osseous abnormality':
++            major = [a for a in pos if any(m in a['finding'].lower() for m in BONE)]
++        else:
++            major = [a for a in pos if not any(m in a['finding'].lower() for m in MINOR)]
++        if major:
++            return 'contradicted'
++        if pos:
++            return 'undecidable'
++        return 'supported' if nsf(refs) else 'undecidable'
++    if group == 'acute_negation':
++        if has(refs, ACUTE):
++            return 'contradicted'
++        if has(refs, ACUTE, definite=False):
++            return 'undecidable'
++        return 'supported' if nsf(refs) else 'undecidable'
++    if group == 'specific_negation':
++        fam = FAMILY[finding]
++        if has(refs, fam):
++            return 'contradicted'
++        if has(refs, fam, positive=False):
++            return 'supported'
++        return 'undecidable'
++    if group == 'location_attribute':
++        fam = FAMILY[finding]
++        match = [a for a in refs if a['polarity'] == 'positive' and any(w in a['finding'].lower() for w in fam)]
++        if not match:
++            return 'undecidable'
++        a = match[0]
++        rt = (a.get('location', '') + ' ' + a.get('attributes', '')).lower()
++        agree = conflict = False
++        for o, r in ((sides(q), sides(rt)), (kinds(q, tuple((s, s) for s in SITES)), kinds(rt, tuple((s, s) for s in SITES))),
++                     (kinds(q, TYPES), kinds(rt, TYPES))):
++            if o and r:
++                if o == r:
++                    agree = True
++                else:
++                    conflict = True
++        if conflict:
++            return 'contradicted'
++        return 'supported' if agree else 'undecidable'
++    raise ValueError(group)
+diff --git a/report93_verify.py b/report93_verify.py
+new file mode 100644
+index 0000000..8d0b0fd
+--- /dev/null
++++ b/report93_verify.py
+@@ -0,0 +1,153 @@
++"""iter_093 독립 verifier: report93_analyze.py 코드를 import하지 않고 원 JSON에서 핵심 수치를 다시 계산해 대조한다."""
++import hashlib, json, re, sys
++from pathlib import Path
++import numpy as np
++
++ROOT = Path(__file__).resolve().parent
++R90 = ROOT / 'results/iter_090'
++REC = R90 / 'recovery'
++MAIN = ROOT / 'results/iter_093/main'
++checks = []
++
++
++def chk(name, ok, detail=''):
++    checks.append(dict(name=name, ok=bool(ok), detail=str(detail)))
++
++
++def L(p):
++    return json.loads(Path(p).read_text())
++
++
++T = L(R90 / 'data/T512/manifest.json')
++V = L(R90 / 'data/V64/manifest.json')
++tc = L(MAIN / 'target_composition.json')
++
++# 1. 입력 manifest hash 재계산
++im = L(MAIN / 'input_manifest.json')
++bad = [k for k, h in im['files'].items() if hashlib.sha256((ROOT / k).read_bytes()).hexdigest() != h]
++chk('input_manifest_hashes', not bad and im['n_files'] == len(im['files']), bad[:3])
++
++# 2. target 구성: 독립 분류 (excluded index를 source_index로 제거)
++def comp(rows):
++    cls = dict(normal_only=0, abnormal_only=0, abnormal_plus_normal=0)
++    ab_s = nm_s = 0
++    for r in rows:
++        ex = {e[0] for e in r['excluded_sentences']}
++        keep = [s for s in r['findings'] if s['source_index'] not in ex]
++        a = sum(1 for s in keep if s['abnormal']); n = len(keep) - a
++        ab_s += a; nm_s += n
++        cls['normal_only' if a == 0 else 'abnormal_only' if n == 0 else 'abnormal_plus_normal'] += 1
++    return cls, ab_s, nm_s
++for name, rows in (('T512', T), ('V64', V)):
++    cls, a, n = comp(rows)
++    d = tc[name]
++    chk(f'target_{name}', cls == d['patient_class'] and a == d['abnormal_sentence'] and n == d['generic_normal_sentence'] + d['specific_normal_sentence'], (cls, a, n))
++chk('T_V_patient_disjoint', not ({r['PatientID'] for r in T} & {r['PatientID'] for r in V}))
++
++# 3. NLL: 평균 재현, 선택 재현, V64 순서 연결
++nll = L(MAIN / 'nll_per_patient.json')
++chk('nll_order_is_manifest', nll['image_ids'] == [r['ImageID'] for r in V] and nll['patient_ids'] == [r['PatientID'] for r in V])
++vsha = hashlib.sha256((R90 / 'data/V64/manifest.json').read_bytes()).hexdigest()
++tab = L(MAIN / 'nll_trajectories.json')
++mean_ok = True
++sel = {}
++for m in 'RG':
++    for lr in ('0.0001', '0.0002'):
++        run = REC / f'train/{m}_lr{lr}'
++        mean_ok &= L(run / 'config.json')['val_sha'] == vsha
++        for e in (1, 2, 4, 6):
++            v = L(run / f'validation_{e:02d}.json')
++            a = nll['values'][f'{m}_lr{lr}'][str(e)]
++            mean_ok &= a == v['per_patient'] and abs(np.mean(a) - v['report_nll']) < 1e-9
++            mean_ok &= abs(tab['per_trajectory'][f'{m}_lr{lr}']['overall'][str(e)] - v['report_nll']) < 1e-9
++            sel[(m, lr, e)] = v['report_nll']
++chk('nll_means_and_val_sha', mean_ok)
++lrs = {m: sorted(('0.0001', '0.0002'), key=lambda lr: (sel[(m, lr, 6)], float(lr)))[0] for m in 'RG'}
++ce = sorted((1, 2, 4, 6), key=lambda e: (sum(sel[(m, lrs[m], e)] for m in 'RG'), e))[0]
++fin = L(REC / 'selection/final.json')
++chk('selection_reproduced', all(float(fin['selected'][m]['lr']) == float(lrs[m]) for m in 'RG') and fin['common_epoch'] == ce, (lrs, ce))
++# 정상 전용 군 NLL 재계산 (R lr0.0002)
++isn = [all(not s['abnormal'] for s in r['findings'] if s['source_index'] not in {e[0] for e in r['excluded_sentences']}) for r in V]
++a = np.array(nll['values']['R_lr0.0002']['1'])
++chk('group_nll_R2e4_e1', abs(a[isn].mean() - tab['per_trajectory']['R_lr0.0002']['normal_only']['1']) < 1e-9)
++
++# 4. V32 recall: reference 확정 양성 atom 대비 strict match로 재계산
++ref = {r['id']: r for r in L(R90 / 'semantic/V32_reference_v3.json')['rows']}
++gen = L(MAIN / 'v32_generation.json')
++view = L(MAIN / 'v32_patient_view.json')
++specs = [('base@0', REC / 'semantic/epoch2/eval/per_output.json', 'base_report')]
++for e in (2, 6):
++    for m in 'RG':
++        for lr in ('0.0001', '0.0002'):
++            specs.append((f'{m}_lr{lr}@{e}', REC / f'semantic/epoch{e}/eval/per_output.json', f'{m}_lr{lr}_report'))
++ok_rec = True; per_rec = {}
++for key, p, cond in specs:
++    out = [x for x in L(p) if x['condition'] == cond]
++    ids = [x['image_id'] for x in out]
++    ok_rec &= len(out) == 32 and len(set(ids)) == 32
++    vals = []
++    for x in out:
++        pos = [a['id'] for a in ref[x['image_id']]['atoms'] if a['polarity'] == 'positive' and a['certainty'] == 'definite']
++        if not pos:
++            continue
++        s = {m['ref'] for m in x['matches'] if m['status'] == 'strict'}
++        vals.append(len(s & set(pos)) / len(pos))
++    per_rec[key] = float(np.mean(vals))
++    ok_rec &= len(vals) == 20 and abs(per_rec[key] - gen['conditions'][key]['strict_recall']) < 1e-9
++chk('v32_strict_recall_independent', ok_rec, per_rec)
++
++# 5. 정상문만 출력: 원문 텍스트 기반 독립 정의와 claim 기반 정의의 일치율
++NORM = re.compile(r'^(no |normal|within normal|the lungs are clear|the heart size is normal|the mediastin|the visualized osseous|chest without|there is no)', re.I)
++agree = tot = 0
++for key, p, cond in specs:
++    e = 0 if key.startswith('base') else int(key.split('@')[1])
++    d = REC / ('validation/epoch2/base_report' if key.startswith('base') else f'validation/epoch{e}/{cond}')
++    txt = {json.loads(l)['id'].split('|')[0]: json.loads(l)['text'] for l in (d / 'worker_0.jsonl').read_text().splitlines()}
++    for row in view[key]:
++        t = txt[row['image_id']]
++        pieces = [s.strip() for s in re.split(r'(?<=\.)\s+|\n', re.sub(r'[\[\]]|FINDINGS:|IMPRESSION:', '', t)) if re.search(r'[A-Za-z]{3}', s)]
++        text_normal = all(NORM.match(s) for s in pieces) if pieces else True
++        tot += 1; agree += (text_normal == row['normal_only_output'])
++chk('normal_only_text_vs_claim_agreement', agree / tot >= 0.9, f'{agree}/{tot}')
++
++# 6. 쌍별 bootstrap 독립 재계산 (다른 seed, 근사 허용)
++rng = np.random.default_rng(777)
++def vec(key):
++    return np.array([r['strict_recall'] for r in view[key] if r['positive_n']])
++for name, a, b in (('G lr0.0001 epoch6-epoch2', 'G_lr0.0001@6', 'G_lr0.0001@2'), ('R lr0.0001 epoch6-epoch2', 'R_lr0.0001@6', 'R_lr0.0001@2'),
++                   ('G-R lr0.0001 epoch2', 'G_lr0.0001@2', 'R_lr0.0001@2')):
++    d = vec(a) - vec(b)
++    bs = np.sort([d[rng.integers(0, 20, 20)].mean() for _ in range(10000)])
++    c = gen['paired_contrasts'][name]
++    chk(f'bootstrap_{name}', abs(d.mean() - c['mean']) < 1e-9 and abs(bs[249] - c['ci95'][0]) < 0.03 and abs(bs[9749] - c['ci95'][1]) < 0.03, (d.mean(), bs[249], bs[9749], c['ci95']))
++    loo = [np.delete(d, i).mean() for i in range(20)]
++    chk(f'loo_{name}', abs(min(loo) - c['loo_min']) < 1e-9 and abs(max(loo) - c['loo_max']) < 1e-9)
++
++# 7. 의미 민감도: fixture 독립 재실행, claim anchor 원문 확인
++sys.path.insert(0, str(ROOT))
++import report93_fixtures as FX, report93_sens as S
++sem = L(MAIN / 'semantic_sensitivity.json')
++chk('fixtures_count_groups', len(FX.FIXTURES) >= 15 and set(f['group'] for f in FX.FIXTURES) == {'generic_normal', 'other_scope', 'acute_negation', 'specific_negation', 'location_attribute'}
++    and all(any(f['group'] == g and f['expected'] == ex for f in FX.FIXTURES) for g in ('generic_normal', 'other_scope', 'acute_negation', 'specific_negation')
++            for ex in ('supported', 'contradicted', 'undecidable')))
++chk('fixtures_pass', all(S.judge(f['group'], f['quote'], f['finding'], f['refs'], f.get('stated_findings', ())) == f['expected'] for f in FX.FIXTURES))
++chk('fixtures_sha_frozen', sem['fixtures_sha'] == hashlib.sha256((ROOT / 'report93_fixtures.py').read_bytes()).hexdigest())
++anchor_ok = True
++for r in sem['claim_review']:
++    key = r['cond']
++    e = 0 if key.startswith('base') else int(key.split('@')[1])
++    cond = 'base_report' if key.startswith('base') else key.split('@')[0] + '_report'
++    d = REC / ('validation/epoch2/base_report' if key.startswith('base') else f'validation/epoch{e}/{cond}')
++    for l in (d / 'worker_0.jsonl').read_text().splitlines():
++        j = json.loads(l)
++        if j['id'].split('|')[0] == r['image_id']:
++            anchor_ok &= r['quote'] in j['text']
++chk('claim_quotes_in_raw_text', anchor_ok and sem['anchor_failures'] == 0)
++chk('claim_review_not_bulk_retain', len({(r['original'], r['conservative']) for r in sem['claim_review']}) >= 4)
++
++bad = [c for c in checks if not c['ok']]
++Path(MAIN / 'verify.json').write_text(json.dumps(dict(passed=not bad, n=len(checks), n_failed=len(bad), checks=checks), indent=1, ensure_ascii=False))
++print(len(checks), 'checks', len(bad), 'failed')
++for c in bad:
++    print('FAIL', c)
++sys.exit(1 if bad else 0)
