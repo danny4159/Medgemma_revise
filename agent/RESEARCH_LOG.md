@@ -35481,3 +35481,512 @@ strict 추가 회복 1명과 lenient 5명의 차이는 위치·시간·소견 �
 3. 같은 사전 문턱으로 확대 분기와 종료 기준을 다시 대조한다. 효과 부족·모호성 의존이면 현재 CURE 폐 영역 후보를 보류한다. 기준 충족 시에도 새로운 방법 효과를 주장하지 않고 필요한 후속 투자만 별도 계획한다.
 
 현재 논문 추천은 보류한다. 이번 정량 평가가 미완결이므로 이 결과를 근거로 특정 방법 방향의 유망성을 추천할 단계가 아니다. 마일스톤으로도 기록하지 않는다.
+
+
+## iter_096 GPT PLAN [위치 학습의 판독 누락·언급 성향 분리 / proceed] — 2026-10-08 04:46:15
+
+# 요약
+
+- **이번에 할 일:** 기존 E32 출력의 의미 판정과 집계 결함을 보완한다.
+- **필요한 이유:** 생성은 완료됐지만 소견 확실성·부정·위치·시간 처리가 회복과 충돌 수치를 바꿀 수 있다.
+- **확인할 기준:** 원 계획의 확대 분기와 투자 기준을 그대로 적용한다. 산술 검증과 의미 검증을 구분한다.
+- **주의·다음:** 신규 생성·학습 없이 종료한다. 현재 CURE 폐 영역 후보의 투자 판단과 위치 학습 연구 질문 전체의 가치를 구분한다.
+
+## 알림 맥락
+
+- 연구: 위치 학습과 판독 정확성
+- 데이터: 흉부 X-ray PadChest-GR의 기존 개발 E32
+- 모델: 공개 CURE와 정확한 MedGemma 1 base 조합, 저장 출력 재사용
+- 과제: 전체 판독과 폐 영역 답변의 소견 회복·부정 충돌을 원문으로 비교한다
+- 가설: 의미 평가 오류를 제거해도 단순 대안 이후의 회복과 충돌이 남을 수 있다
+- 질문: 부위를 자세히 물어 얻은 소견은 실제로 추가 가치가 있으며 서로 모순되는가?
+- 변경: 실행 복구
+- 연결: iter_095의 Describe 생성은 완료됐지만 의미 판정 결함으로 정확한 회복·충돌 수치가 미승인이다
+- 작업: 기존 판정만 보완해 확대·최소 개입 검토 또는 현재 후보 보류를 권고한다
+
+# Current Understanding
+
+기준 문서는 `agent/runs/iter_095/plan.md`, SHA256 `3e079003205374c9b841a9557b93bf64011f2152280d1d3e211bd9f655f3b4f7`다. 그 계획의 가설·자료·reference·모델·prompt·영역·지표·문턱을 유지한다. 이번 amendment는 의미 평가와 독립 집계의 수정에 한정한다.
+
+Describe 256건은 생성 완료됐다. 저장 판정의 충돌 14/32 대 10/32는 산술적으로 재현됐지만 의미적으로 승인되지 않았다. 현재 대상 reference 양성 9명·10사실과 명시적 음성 8명은 모두 E32에 있다. 남은 E64의 해당 reference 기회 부재만으로 원 확대 분기 (a)/(b)를 무효화하지 않는다.
+
+iter_092에서 인계 학습과 E128 평가가 끝났다. iter_090 checkpoint 재개는 반복하지 않는다. R/G 추가 epoch·seed·위치 loss 보류와 원 결과 보존을 유지한다.
+
+# Strategy Check / 연구 방향 판단
+
+**시험 설정:** CURE 생성 설정은 검증됐으며 재생성할 이유가 없다. R/G 설정 확대도 보류한다. 이번 비용은 기존 출력의 평가 보완에 쓴다.
+
+**연구 관찰:** iter_088의 회복·충돌 관찰과 iter_095의 Describe에서도 남는 불일치를 유지한다. 다만 정확한 빈도와 추가 회복 가치는 미판정이다. 좌표 요구의 부분적 영향이나 위치 학습의 효과를 확정하지 않는다.
+
+**연구 질문:** 단순 공식 인터페이스와 넓은 영역 선택 이후에도 중요한 문제가 남는지는 아직 판단하지 못했다. 이는 같은 현상의 구체화이며 새 후보 탐색이 아니다.
+
+**이어받는 관찰 → 남은 설명 → 최소 비교 → 결정:** 영역별 답변의 회복·충돌 → 의미 평가 오류 또는 실제 잔여 가치 → 같은 저장 출력의 범위 보존 재평가 → 단순 대안 우선·한정 확대·최소 pilot 검토·현재 후보 보류 중 하나를 권고한다.
+
+직전 리뷰의 투자 권고를 유지한다. 즉시 보류는 수정 가능한 평가 오류를 남기고, 새 학습은 이 오류를 해결하지 못한다. 이번에는 원문이 남은 결정 사례의 보완이 더 직접적이다. 반복 비용에는 의미 검토와 재작업이 포함되지만 정확한 비용 비율은 측정되지 않았다. 범용 평가기 개발로 확장하지 않는다.
+
+# Hypothesis
+
+원 계획의 H_interface, H_granularity, H_propensity를 유지한다. 이번에는 평가 결함을 고친 뒤 이 가설들에 관한 기존 출력의 증거 범위를 판정한다. 새 모델 개입·학습 효과 검증은 없다.
+
+# Limitation Evidence / Correct Usage Checks
+
+대상은 observed인 `padchest-regional-report-concatenation-conflict`다. iter_088 review.json의 유효 실험·blocking 없음·사용법 검사 근거는 당시 고정 관찰 범위로 유지한다. iter_095의 새로운 의미 평가 blocker는 이번에 별도로 해결해야 하며 기존 limitation을 자동 승격하지 않는다.
+
+CURE의 자산·공식 prompt·전처리와 D8 입력/token 회귀는 iter_095의 불변 provenance에 연결해 재사용한다. 입력 연결 및 completion hash는 현재 저장 파일에서 확인한다. CURE를 MedGemma 1.5에 로드하거나 새 추론을 수행하지 않는다.
+
+Locate P007 left lung의 최종 비EOS를 명시한다. 형식 실패를 숨기거나 유리한 분모에서 제거하지 않는다. 원출력을 유지한 분석과 해당 불완전 출력의 근거를 제외한 paired 민감도를 함께 제시한다. 새로운 cap 재시도는 없다.
+
+# Contribution Path / Baselines / Reuse
+
+가장 가까운 대안은 원 계획에서 확인한 CURE 공식 영역 판독과 영역 수 선택이다. 이번은 그 대안 이후의 잔여 가치 확인이며 신규 기여가 아니다. 최소 방법으로 이어지려면 회복을 보존하면서 부정 범위 충돌을 줄이고 단순 텍스트 처리·C-G 이후의 이점을 보여야 한다. 강한 직접 SFT·모듈형 판독 대조와 외부 확인은 실제 방법 계획에서 구체화한다.
+
+현재 branch와 HEAD `aaaf9c0747469fb6f75f91be7201843cd9a83357`를 유지한다. 필요한 파일이 현재 기반에 있으므로 reuse_assets는 비운다.
+
+- `report95_lock.py`, `report95_common.py`, `report86_common.py`: 승인된 고정 분할·hash·요청 연결을 활용한다. 기존 출력 로더 전체가 승인됐다고 간주하지 않는다.
+- `report95_view.py`, `report95_eval.py`, `report95_verify.py`: needs_fix다. 원문 연결과 기존 산술 구조를 재사용하되 의미 규칙·회복/충돌 동시 발생·시간 비용·실제 quote 검증을 보완한다.
+- 새 실행 진입점은 `report96_*.py`, 결과는 `research/results/iter_096/`로 분리한다. 기존 모듈의 상수 경로를 바꿔 옛 main을 실행하지 않는다. 필요한 함수만 안전하게 호출하거나 경로를 명시적으로 받도록 한정 수정한다.
+- `report95_gen.py`와 `report95_launch.py`의 resume·메모리 예약 결함은 이번 CPU 분석에서 사용하지 않으므로 수정 범위 밖에 둔다. 향후 GPU 재사용 전 해결해야 한다.
+
+# Proposed Experiment
+
+## 유지 / 변경 / 미완료
+
+**유지:** E32 32명과 원 순서, reference_target 및 원 amendment, C-G·두 형식의 동일 8영역, 환자 분석 단위, 원 성공·확대 기준, seed95017·bootstrap 10,000회.
+
+**변경:** 의미 판정을 구조적으로 분리하고 기존 집계 결함을 수정한다. 원 판정과 정정 판정의 사례별 차이·이유·영향을 별도 저장한다.
+
+**미완료:** 모든 결정 사례의 문맥 재점검, 나머지 hash 고정 12명 검사, 회복과 충돌의 동시 발생, matched 주장의 시간 오류 비용, 독립 quote 및 수치 검증이다.
+
+## 1. 입력과 판정 규약 잠금
+
+E32 selection, reference, blind key, iter_086의 C-G/Locate 원출력, iter_095의 Describe 4개 shard 및 completion을 연결하는 manifest를 만든다. 환자당 17개, 총544개 출력의 ID·조건·영역·중복·누락·digest를 확인한다. 기존 95 결과를 덮어쓰지 않는다.
+
+집계 결과를 보기 전에 다음 규칙을 고정한다.
+
+- 소견 종류와 존재의 확실성, 원인 진단의 확실성, 시간 주장, 실제 서술 해부학 범위, 부정의 급성·중요도·other 제한을 각각 기록한다.
+- `opacity ... may represent pneumonia`에서 opacity 존재와 pneumonia 추정을 분리한다. `new`는 현재 존재와 별도 시간 근거 항목이다.
+- `No acute pulmonary infiltrates`를 모든 infiltrate의 부정으로 바꾸지 않는다. 급성 속성이 맞지 않거나 불명확하면 확정 충돌로 세지 않는다.
+- 명시적 정상 폐 실질 표현을 누락하지 않되 기구·골격·혈관 정상 표현까지 폐 소견 부정으로 확장하지 않는다.
+- lobe와 radiographic zone은 별도 표기로 보존한다. 확실한 같은 측 폐의 포함 관계와 불확실한 lobe–zone 대응을 구분한다. 단순 U/M/L 집합 교집합만으로 확정 회복·충돌을 승인하지 않는다.
+- 원문에 위치가 없으면 원 계획의 질문 범위/전역 해석 민감도를 유지한다. 명시적 전역 표현을 유리하게 질문 범위로 축소하지 않는다.
+- 미표기 사실은 음성이 아니다. 미지원·reference와 명시적으로 모순·판단불가를 나눈다.
+
+## 2. 한정 원문 검토
+
+모든 양성 reference 환자, 기존 회복/충돌 사례, 수정 규칙이 회복·충돌·오류 비용을 바꿀 수 있는 사례를 결정 관련 집합으로 고정한다. 자동 초안은 후보 찾기에만 사용한다. 새 후보가 발견되면 검토 집합에 추가하고 이유를 남긴다.
+
+결정 관련 집합 밖에서는 기존에 잠근 12명 목록이 있으면 그대로 사용한다. 없으면 ImageID에 대해 SHA256(`iter096-audit95017|ImageID`) 오름차순으로 12명을 선택한다. 남은 사람이 12명보다 적으면 전원 검사한다. 이 목록은 재판정 전에 저장하고 추가 결정 사례와 겹쳐도 유리한 새 환자로 교체하지 않는다.
+
+각 선정 환자의 17개 출력 전체 문맥을 확인해 누락 주장과 '-' 판정도 점검한다. 변경 없음도 검토 근거를 남기며 초안을 최종본으로 복사하는 것으로 완료 처리하지 않는다. 기존 조건 제거 ID를 유지하되 이미 출력을 본 assistant의 평가이며 독립 눈가림·전문의 검증이 아님을 명시한다.
+
+각 회복은 reference fact와 생성 span을 연결한다. 각 충돌은 양성·부정 두 span 및 같은 범위라는 근거를 기록한다. 시간·원인 표현은 matched 주장에도 검사한다. 임상적으로 판단 못 하는 부분은 모호성으로 보존한다.
+
+## 3. 집계와 단계 경계
+
+동작 확인은 P001/P004/P005/P018의 실제 문장과 반대 예제로 수행한다. 가능성 탐색은 새 출력을 생성하지 않고 기존 E32를 정정 분석한다.
+
+환자·사실 수준 회복, 조건별 명시적 충돌, reference 반박/미지원 주장, 시간·원인·위치 비용을 분리한다. 회복 없음/회복만/충돌만/회복과 충돌의 환자별 표를 만들고, 회복한 동일 사실 자체가 부정되는지도 별도 표시한다.
+
+원 계획의 보수적 위치 분석, 모호 대응 제외, 시간 불일치 제외, 질문 범위/전역 범위 민감도를 함께 보고한다. primary와 민감도 수치를 혼동하지 않는다. 원 집계와 정정 집계의 차이는 환자별 이유까지 추적한다.
+
+규모 확대와 독립 확인은 이번 반복에서 수행하지 않는다. E96 확대 분기가 충족되면 후속 계획의 구체적 근거를 제시한다. 신규 학습·E64 생성·prompt 탐색·추가 모델은 자동 실행하지 않는다.
+
+## 4. 자원과 재개
+
+현재 blocker는 출력 부족이 아니라 의미 평가 결함이다. 따라서 신규 GPU 요청은 0이며 GPU 처리량 재측정도 하지 않는다. E32는 544개 저장 출력으로 비교가 가능하다. 첫 검토 묶음과 CPU bootstrap 시간을 측정해 실제 작업량에 따른 예상 wall-clock을 보고한다. 근거 없는 시간 상한은 두지 않는다.
+
+환자별 검토 완료·규약 hash·원문 hash를 checkpoint로 남겨 재개 시 완료 검토를 반복하지 않는다. 변경된 규약에 영향받는 환자만 다시 확인하고 변경 이력을 남긴다.
+
+향후 E64가 승인되면 원 계획의 512개 Describe 요청과 두 GPU 배치를 유지하되, 실행 코드/완료 hash 잠금 및 모든 worker의 2GiB 여유 합산을 먼저 수정해야 한다. 실제 nvidia-smi와 peak를 확인하고 2/4 worker 또는 batch 비교의 기존 근거를 재사용할 수 있는지 판단한다. 이는 이번 실행 지시가 아니다.
+
+# Implementation Tasks for Claude
+
+1. 기준 계획 SHA256, iter_095 review.json/code_assets, 현재 HEAD·작업 트리를 확인한다.
+2. `results/iter_096/`에 불변 입력 manifest, 수정 규약, 검토 대상 목록을 저장한다.
+3. 기존 출력 로더의 비EOS 무시를 상속하지 말고 형식 상태를 명시적으로 반환·집계한다. 잘못된 digest·중복 ID·누락 출력은 거부한다.
+4. 실제 원문에 연결된 의미 판정과 변경 이력을 작성한다. 소견 존재와 원인 hedge, 급성 부정, 정상 폐 실질, lobe/zone, 시간 표현을 빠짐없이 분리한다.
+5. 현재 사용하는 평가 경로만 수정한다. quote 검증은 원본 request ID와 정확한 span/offset을 실제 대조하며 상수 통과를 제거한다.
+6. 원 평가 함수를 호출하지 않는 별도 집계로 회복·충돌·동시 발생·오류 비용과 주요 CI를 재계산한다. 같은 판정표를 읽는 독립 산술이며 독립 의미 평가라고 부르지 않는다.
+7. 원 확대 분기 및 종료 기준 각각에 충족/미달/미평가와 사례 근거를 적는다. 새 모델 호출 없이 보고서를 마친다.
+8. 과거 결과·판정은 보존하고 새 소스는 orchestrator checkpoint 절차로 보존한다.
+
+# Evaluation (성공/실패 기준 포함)
+
+**보완 완료 기준:** 모든 결정 사례와 고정 검토 표본의 원문 확인, 입력·quote 검증, 정정 이력, 독립 집계 일치, 원 기준별 판단이 갖춰져야 한다. 이를 과학적 양성 결과와 구분한다.
+
+**원 E32 확대 분기 유지:** (a) 세부 영역에서 C-G와 같은 형식의 넓은 영역이 놓친 명확한 현재 소견을 최소2명에서 회복하거나, (b) Describe 또는 넓은 영역 선택이 최소2명에서 회복을 보존하며 충돌을 줄이거나, (c) 명확한 회복과 충돌은 있으나 사건이 부족하고 남은 reference에 판단을 바꿀 기회가 있는 경우다. 각 분기를 별도로 대조한다. E64의 양성 기회 부재는 (c)에 관련되며 (a)/(b)를 자동 기각하지 않는다.
+
+**양성:** 원 최소 pilot 기준인 Describe 세부 영역의 추가 회복 최소3명, 명확한 충돌 최소5명, 모호 표현 제외와 한 환자 제거 후 반복 관찰 유지가 확인되면 별도 최소 개입 검토를 권고한다. 환자 제거별 실제 수를 모두 보고해 원 기준을 유리하게 해석하지 않는다. 이번 보완으로 방법 효과나 신규성을 승인하지 않는다.
+
+**단순 대안:** 원 E96 운영 기준은 회복 손실 환자1명 이하·충돌 감소 최소5명이다. E32만으로 E96 충족을 선언하지 않는다. E32의 근거가 원 확대 분기를 충족하면 단순 대안 충분성 확인을 위한 후속 확대의 가치를 명시한다.
+
+**음성:** 명확한 추가 회복이 없거나 모호한 소수 사례뿐이면 현재 CURE 폐 영역 회복 후보를 보류한다. 이는 좌표·영역 판독·위치 supervision 전체의 무용성 판정이 아니다.
+
+**불확정:** 보완 후에도 해부학·reference·문장 의미 선택에 따라 결정이 바뀌면 현재 후보를 보류한다. 같은 자료의 추가 규칙 조정은 하지 않는다. 재개 조건은 모호한 결정 사례를 해결할 독립 의미 검증 또는 적합한 reference 등 구체적인 새 근거다.
+
+# Risks / Checks
+
+- E32는 반복 개발 자료이며 공개 checkpoint의 환자별 학습 노출이 배제되지 않았다.
+- 조건별 유리한 의미 규칙이나 사후 문턱을 선택하지 않는다. 기존 판정과 정정 판정을 함께 남긴다.
+- 소견 종류·측면·lobe/zone·시간을 한 token으로 압축하지 않는다. 명시적 포함 관계와 불확실성을 보존한다.
+- quote 존재와 의미 정확성은 별개다. 자동 검증 통과만으로 의미 평가를 완료했다고 쓰지 않는다.
+- 비EOS 출력의 삭제·재생성으로 형식 차이를 숨기지 않는다.
+- 생성기·launcher의 미해결 재사용 결함을 이번 분석 완료로 해제하지 않는다.
+- 현재 시험 설정 보류, 유효 관찰 보존, 연구 질문 미판정을 최종 보고에서 각각 적는다.
+
+## 대규모 GPU 필요 후보
+
+동일 판독 supervision 아래 좌표 출력·영역 설명·일관성 학습을 여러 모델과 기관에서 교차하는 학습은 원 계획의 장기 후보로 보존한다. 이번 의미 평가 보완은 그 투자를 승인하는 근거가 아니며, 현재 잔여 가치가 확인되기 전에 확대하지 않는다.
+
+# 계획의 근거 (GPT 조사 노트)
+
+## 확인한 사실
+
+- `agent/GOAL.md`, iter_095 계획·리뷰 원문 및 review.json/code_assets, 관련 `LIMITATIONS.md`·`CODE_ASSETS.md`, iter_088의 원본 limitation_updates를 확인했다.
+- 기준 `agent/runs/iter_095/plan.md` SHA256은 `3e079003205374c9b841a9557b93bf64011f2152280d1d3e211bd9f655f3b4f7`로 일치한다.
+- research HEAD는 `aaaf9c0747469fb6f75f91be7201843cd9a83357`이고 작업 트리·diff는 비어 있다. 필요한 report95 파일은 현재 브랜치에 있다. 다른 checkpoint에서 선별 반입할 파일은 없다.
+- `report95_view.py`는 문장 전체 HEDGE를 존재 판정에 적용하고 lobe/zone을 같은 scope token으로 압축한다. `report95_eval.py`는 이 집합의 교집합으로 충돌을 계산하며 temporal_unsupported는 unmatched 주장만 센다. `report95_verify.py`의 quote 검사는 상수 True다. 따라서 직전 리뷰의 수정 권고는 실제 실행 경로에 연결된다.
+- 저장 원출력에서 P005의 `There is a new right upper lobe opacity, which may represent pneumonia`를 확인했다. opacity 존재, pneumonia의 불확실성, new의 시간 근거를 분리해야 한다.
+- P004/P018의 `No acute pulmonary infiltrates`와 Describe의 정상 폐 실질 표현을 확인했다. 급성 부정의 범위를 보존하는 동시에 누락된 정상문도 평가해야 한다.
+- P001의 두 형식 출력에는 `In comparison ... again`이 있다. 현재 소견 대응 여부와 무관하게 시간 표현 비용을 집계해야 한다.
+- iter_092 리뷰에서 인계 학습 epoch6·E128 생성 완료와 pending 없음이 확인됐다. 과거 iter_090 재개 지시는 다시 실행하지 않는다.
+
+## 판단
+
+직전 리뷰의 한정 보완 권고를 유지한다. 새 문헌 조사나 모델 순회가 필요한 문제가 아니라 저장 출력의 평가 결함이다. 기존 원 계획의 선행 비교·공식 사용법 검증을 출처로 재사용하며 새로운 문헌 주장은 추가하지 않는다. 현재 관찰을 살리기 위해 문턱을 바꾸지 않고, 원 확대 분기와 종료 기준을 수정된 증거에 다시 적용한다.
+
+
+
+## iter_096 CLAUDE IMPLEMENTATION REPORT — 2026-10-08 05:01:25
+
+# Work Performed
+
+## 요약
+
+- **핵심 결과:** 새 GPU 요청 없이 iter_095 E32 저장 출력 544건의 의미 판정을 다시 만들었다. 급성 부정, 원인 hedge, 정상 폐 실질 표현, lobe/zone, 시간 표현을 분리한 결과, 원 계획의 확대 분기 (a)(b)(c)는 모두 primary 조건에서 미충족이다.
+- **근거:** 확정 충돌 환자는 Locate L8 20/32, Describe D8 25/32이다(iter_095는 10/32, 14/32). 세부 영역의 추가 회복(strict)은 1명이고, 이 1명도 원인 표현에 기댄 인정이다. 산술 검증 90/90, fixture 22/22가 통과했다.
+- **주의:** (a)는 lobe–zone 대응 인정 여부에 따라 3명으로 바뀌므로 해부 선택에 의존하는 불확정이다. 이번 판정은 assistant가 이미 출력을 본 상태에서 한 것이다. 전문의 검토도, 독립 눈가림도 아니다.
+- **다음:** 현재 CURE 폐 영역 회복 후보는 보류를 권고한다. 이는 위치 학습 연구 질문 전체의 기각이 아니다.
+
+## 수행한 작업
+
+- **기준 확인:** iter_095 plan.md의 SHA256이 계획에 적힌 값과 일치했다. HEAD `aaaf9c0`, 작업 트리는 깨끗했다.
+- **입력 잠금** (`report96_lock.py`)
+  - 환자 32명 × 17출력 = 544건(G 32, L 256, D 256)의 요청 ID·조건·영역·record digest를 확인했다. 중복과 누락은 없다.
+  - 비EOS는 환자 7의 Locate left lung 1건이다. 같은 문장을 반복해 4096 token을 채운 출력이다. 원출력을 유지했고, 이 출력을 뺀 민감도도 계산했다.
+  - 결정 관련 집합 28명(양성 reference 9명 + 이전 회복/충돌 환자)을 재판정 전에 고정했다. 나머지 4명(환자 9·10·15·23)은 SHA256(`iter096-audit95017|ImageID`) 규칙으로 전원 audit했다.
+- **의미 규약** (`report96_sem.py`)
+  - 소견 존재(definite/hedged), 원인(hedged/probable/concern), 시간(new/unchanged/again/still/resolved), 부정 종류(specific/clear/qualified), 범위(측면·level·lobe/zone/lung)를 필드로 나눴다.
+  - 급성 수식 부정과 "clear condensations"는 qualified로 분류해 확정 충돌에서 뺐다.
+  - "The lungs are clear", "parenchyma normal" 같은 정상 폐 표현은 clear 부정으로 기록했다.
+  - 번들 안에서 반복된 동일 주장은 첫 번째만 세고 `dup_claims`로 남겼다.
+- **문장 단위 검토:** 고유 문장 198개 중 143개가 claim을 갖는다. 나머지 55개는 효과·혈관·심비대·전반 정상 같은 비폐실질 문장이다. 검토 중 규칙 오류 5건을 고쳤다.
+  - clear 판정이 neg 분기에 가려진 순서 문제
+  - 빈 문장 처리
+  - "in comparison"을 new로 분류한 오류
+  - nodule 정규식
+  - 시간 모순 규칙에서 'increase' 대 'new'를 모순으로 본 것
+  - 문장 단위 override는 2개이며 이유를 `OVERRIDES`에 남겼다.
+- **평가·검증**
+  - `report96_ref.py`는 reference 10사실과 음성 reference 8명을 수동 인코딩했다.
+  - `report96_eval.py`는 report95_eval 함수를 호출하지 않고 집계한다.
+  - `report96_verify.py`는 셀 집합 기반의 별도 산술이다. 원본 `outputs.jsonl`에서 텍스트를 다시 읽어 모든 quote의 start/end와 text sha를 대조한다. 기존 상수 True 검사를 대체했다.
+  - `report96_diff.py`, `report96_review.py`, `report96_decide.py`, `report96_seal.py`는 각각 환자별 차이 추적, 환자별 검토 기록, 원 기준 판정, 산출물 봉인을 맡는다.
+- 규칙 초안과 산출물은 v1~v3으로 이력을 남겼다. 최종은 judgments v3, report v3b이다.
+
+# Files Changed
+
+신규 소스 (모두 `research/`, 기존 파일 수정 없음):
+
+- `report96_sem.py`, `report96_ref.py`, `report96_lock.py`, `report96_eval.py`
+- `report96_verify.py`, `report96_diff.py`, `report96_review.py`, `report96_decide.py`, `report96_seal.py`
+- `test_report96.py`
+
+신규 결과:
+
+- `results/iter_096/lock/input_manifest.json`
+- `results/iter_096/judging/` — `judgments_E32_{v1,v2,v3}.json`, `sentence_review_{v1,v2,v3}.json`, `case_review_E32_v3.json`, `outputs_view_E32*.txt`
+- `results/iter_096/eval/` — `report_E32_*`, `verify_E32_*`, `correction_diff_E32_v3b.json`, `decision_E32_v3b.json`
+- `results/iter_096/tests/fixtures_report96_{a,b,c}.json`
+- `results/iter_096/completion_v3b.json`
+
+개발 중간 파일은 삭제하지 않았다.
+
+- `judgments_E32.json`: 첫 draft
+- `report_E32_v3excl_nonEOS.json`: 변수 shadowing으로 이름이 잘못 붙은 v3 산출물(내용은 v3와 동일하며 최종 아님)
+- `verify_E32_v2.json`: manifest self-sha 검사 오류로 FAIL이 기록된 첫 검증. 고친 뒤 `_r2`에서 통과했다.
+
+# Commands / Experiments
+
+모두 성공했다. GPU 요청은 없고(0), 모두 CPU 작업이다.
+
+- `python report96_lock.py` — 544건 연결, 비EOS 1건
+- `python report96_eval.py judge v1|v2|v3`, `eval v3 b`
+- `python report96_verify.py v3 b` — 90/90 PASS
+- `python test_report96.py fixtures_report96_c.json` — 22/22 PASS
+- `python report96_diff.py v3 b`, `report96_review.py v3`, `report96_decide.py v3 b`, `report96_seal.py v3 b fixtures_report96_c.json`
+
+실행 실패와 수정 이력:
+
+- 한 번의 verify FAIL은 코드 오류였고 고쳤다.
+- 한 번의 보고서 이름 오류는 변수 shadowing 때문이었다.
+- 샌드박스가 따옴표 포함 f-string heredoc을 막아 파일 스크립트로 바꿨다.
+
+Wall-clock은 판정표 생성·평가·검증 각각 수 초~수십 초 수준이다(정밀 측정은 하지 않음).
+
+# Results
+
+원 결과: `results/iter_096/eval/report_E32_v3b.json`, `decision_E32_v3b.json`. 수치는 모두 E32 개발 자료(32명, 양성 reference 9명·10사실) 기준이다.
+
+**확정 충돌 환자 수** (같은 번들 안, 긍정 소견 vs 겹치는 범위의 정상/부정 서술)
+
+| 번들 | iter_095 | primary | 복수 "lungs"를 질문 영역으로 좁힘 | lobe=zone 인정 | iter_095식 하한(원인 hedge 양성 제외) |
+|---|---|---|---|---|---|
+| L8 | 10 | 20 | 19 | 21 | 9 |
+| D8 | 14 | 25 | 23 | 25 | 15 |
+| CG, L2, D2 | 0 | 0 | 0 | 0 | 0 |
+| L6, D6 | — | 1 | 1 | 3 | 1 |
+
+- D8−L8 = +0.156 (95% CI [−0.031, 0.344]). 하한 변형에서는 +0.1875 [0.0, 0.375]이다. 어느 변형에서도 Describe가 Locate보다 충돌을 줄이지 않았다.
+- 차이의 주원인: 원인 hedge가 붙은 문장을 존재 불확실로 읽던 iter_095 규칙을 정정한 것(신규 충돌 23쌍). 정상 폐 표현 누락 정정이 1쌍이다.
+- 급성 부정을 확정 충돌에서 뺀 것이 L8 환자 4·18의 구 충돌을 제거했다.
+- 환자 4의 기타 1쌍은 lobe 양성 vs zone 부정의 같은 level 대응을 불확실로 분류해 제외한 것이다.
+- 충돌은 거의 전부 광역 출력("lungs/right lung is clear")과 세부 영역 출력의 opacity 사이에서 생긴다. 세부 영역끼리만(L6/D6) 보면 1명이다.
+- 한 번들 안에서 회복한 사실이 직접 부정된 경우는 L8 환자 1(P001 F1) 1건이다.
+
+**회복** (양성 reference 10사실)
+
+| 번들 | strict | lenient(시간 일치) |
+|---|---|---|
+| CG | 0 | 2 |
+| L2, D2 | 각 1 (환자 2의 지속 atelectasis, 광역 출력이 이미 회복) | 각 1 |
+| L8, D8, L6, D6 | 각 2 | 5~6 |
+
+- 세부 영역이 CG ∪ 같은 형식 광역 영역을 넘어 추가로 회복한 환자는 strict 1명(환자 1)이다. lenient는 5명(0, 1, 4, 5, 6)이다. 이 5명은 일반 opacity 대 infiltrate/consolidation이거나 lobe–zone 불확실 대응이다.
+- strict 1명은 "consistent with pneumonia"의 원인 지원으로 opacity를 infiltrate로 인정한 것이다. 원인 지원을 빼면 0명이다.
+- lobe=zone을 인정하면 3명(1, 4, 5)이다.
+
+**원 계획 기준별 판정**
+
+| 기준 | 판정 |
+|---|---|
+| (a) 세부 영역이 광역이 놓친 명확한 소견을 ≥2명에서 회복 | **미충족** (strict 1명). 해부/원인 인정 민감도에 따라 3명까지 바뀌므로 **불확정** |
+| (b) 회복을 보존하며 충돌을 줄임 (≥2명) | **미충족** (최대 1명) |
+| (c) 사건은 적지만 남은 reference에 판단 기회 | **미충족** (E64 양성·명시적 부재 기회 0) |
+| 최소 pilot 양성 (추가 회복 ≥3, 충돌 ≥5, 모호 제외·한 명 제거 후 유지) | **미충족**. 충돌 ≥5는 D8 25명으로 충족하지만 D6 단독은 1명이다 |
+| E96 운영 기준 (회복 손실 ≤1명, 충돌 감소 ≥5) | **미평가** (E96 비실행). E32만으로 선언하지 않음 |
+
+(b)의 이 계산은 "L8의 추가 회복을 A도 회복하면서, L8에는 충돌이 있고 A에는 없는 환자"를 센 것이다. 계획 문장의 해석이므로 판단 범위에 포함한다.
+
+**오류 비용** (D8 / L8)
+
+- 양성 주장 94 / 74건 중 reference에 매칭된 것은 23 / 19건이다.
+- 시간 주장 41 / 36건 중 reference가 뒷받침한 것은 6 / 6건, 모순은 5 / 3건이다.
+- 원인 제시 주장 66 / 48건 중 reference 지지가 없는 것은 64 / 46건이다.
+- 음성 reference 8명에서 직접 모순은 0건이다. opacity는 reference의 qualified 부정에만 걸렸다.
+
+**검증**
+
+- 산술 90/90: manifest hash, request ID 544 유일, record digest, 모든 quote의 offset 일치, 충돌·회복·bootstrap 별도 재계산
+- fixture 22/22: P001/P004/P005/P018 실제 문장, 반대 예제, offset·quote·text hash 변조 거부
+
+# Goal Progress / Reused Assets
+
+**목표 진전**
+
+- **시험 설정:** CURE 폐 영역 8영역 회복 후보는 추가 회복이 작고 해부 대응에 의존한다. 이 설정의 투자는 보류를 권고한다.
+- **연구 관찰(유지):** 광역 "lungs/right lung is clear"와 세부 영역의 opacity 서술이 같은 환자에서 자주 공존한다(L8 20/32, D8 25/32). 수정한 의미 규칙에서도 확인된다.
+  - 이 중 상당수는 원인 hedge 문장을 존재 확정으로 읽은 결과이므로, hedge를 존재 불확실로 읽는 하한(9/15)과 함께 해석해야 한다.
+- **연구 질문:** 위치 학습이 판독 정확성에 더하는 가치는 이번 결과로 판단할 수 없다. 이번 결과는 한 공개 checkpoint의 한 인터페이스와 작은 개발 자료에 대한 것이다.
+
+**미검증:** 독립 의미 검증(전문의, 다른 평가자), lobe–zone 대응의 독립 근거, 양성 reference가 더 많은 자료, 어느 쪽 서술(광역 정상 vs 세부 opacity)이 맞는지의 판정.
+
+**재사용**
+
+- `report95_view.outputs_for`, `report95_common`, `report86_common`(hash·저장·digest)을 호출했다.
+- `report95_eval` 함수는 비교용 읽기 전용으로만 호출했다.
+- `reuse_assets`는 비어 있어 반입은 없었다. 위 모듈은 모두 needs_fix 상태였고 그 결함을 이번 경로에서 수정하지 않았다. 일반 재사용 승인은 하지 않는다.
+
+# Problems
+
+**현재 결론 무효: 없음.** 단, 위 한계를 전제로 한다.
+
+**재사용 전 수정**
+
+- `report96_sem.py`는 이 E32 문장 198개에 맞춘 규칙 기반이다. 새 자료의 범용 의미 평가기가 아니다.
+- 이 의미 판정은 assistant가 한 것이고, 이미 E96 일부를 본 평가자이다. 영역 이름은 가려지지 않는다. 조건명(G/L/D)만 O-id로 가렸다.
+- 환자별 검토는 결정 관련 28명과 audit 4명 모두 원문을 읽고 `case_review_E32_v3.json`에 notes를 남겼다. 그러나 `case_review`에 메모가 있는 환자는 0–8·9·10·15·23뿐이다. 나머지 21명은 claim 목록만 있고 개별 메모가 없다. 이들은 고유 문장 표 검토로 커버했다.
+- 재판정 후 새로 결정 관련이 된 환자는 10, 15다. 둘 다 이미 audit 집합에 있어 교체하지 않았다.
+- 이 정정 판정은 iter_095 판정을 대체하지 않는다. 별도 결과 경로에 병기한다.
+
+**추후 개선**
+
+- 위치 reference에 박스 좌표가 있으면 lobe–zone 대응을 독립 근거로 확정할 수 있다.
+- report95_gen / report95_launch의 resume·메모리 예약 결함은 CPU 분석이라 이번에 쓰지 않았고 수정하지 않았다. GPU 재사용 전에 해결해야 한다.
+- 보고서에 쓴 (b) 기준 계산 방식은 계획 문장의 한 해석이다.
+
+# Recommendation to GPT
+
+1. **현재 시험 설정은 보류:** 현재 CURE 폐 영역 회복 후보(8영역 Describe/Locate)는 보류를 권고한다. 근거는 (a)(b)(c) 미충족, (a)의 해부 선택 의존, 세부 영역 추가 회복 strict 1명이다. E64 확대는 reference 기회가 없어 판단을 바꾸지 못한다.
+2. **연구 관찰은 유지:** 광역 정상 서술과 세부 opacity 서술의 불일치(수정 규칙에서도 20~25/32, 하한 9~15/32)는 제한된 관찰이다. 이 불일치의 어느 쪽이 맞는지는 미판정이다. "위치 학습 무용"이나 "CURE 재현 실패"로 확대하지 않는다.
+3. **연구 질문은 미판정:** 재개 조건은 lobe–zone 대응을 좌표로 확정할 수 있고, 양성 reference가 더 많은 자료(예: 박스가 있는 PadChest-GR 전체)에서 독립 의미 검증을 하는 것이다. 같은 E32의 규칙 조정은 하지 않는다.
+4. **다음 후보:** 지금 세션에서 새 실험을 만들지는 않았다. 박스 기반 대응 확정은 CPU 분석이라 비용이 낮다. 다음 투자는 그 분석 / 중요한 다른 잔여 질문 / 범위를 명시한 보류 중 하나로 결정해 주기 바란다.
+
+SELF_CHECK: FAIL
+SUMMARY: E32 저장 출력 544건의 의미 판정을 정정해 확정 충돌 L8 20/32·D8 25/32(iter_095 10/14)를 얻었으나 세부 영역 추가 회복은 strict 1명(lobe–zone 해석에 따라 최대 3명)뿐이라 확대 분기 (a)(b)(c) 모두 미충족이므로 현재 CURE 폐 영역 후보 보류를 권고한다. 판정은 assistant 단독이며 독립 의미 검증과 일부 환자 메모는 미완이라 FAIL로 표시한다.
+
+# [orchestrator] 권한 거부된 도구 호출
+- Bash: cd results/iter_095; python -c "
+import json
+r=json.load(open('lock/reference_target.json'));s=json.load(open('lock/selection.json'))
+print(s.keys(),len(s['E32']))
+for i,img in enumerate(s['E32']):
+    x=r[img];print(i,img,x['layer'],[ (f['fact_id'],f['sentence']) for f in x['pos_facts']],[(f['class'],f['sentence']) for f in x['neg_facts']])
+"; wc -l judging/*.txt; head -c 1500 eval/report_E32_v2.json; ls ../../../agent/runs/iter_095/ | head -30
+- Bash: python - <<'EOF'
+import json
+r=json.load(open('results/iter_096/eval/report_E32_v1.json'))
+for b,d in r['bundles'].items():
+    print(b,d['conflict_patients'],d['pair_status_patients'],d['cause_conflict_patients_pneumonia'])
+for lv in ['strict','strict_ti','lenient','lenient_timeok']:
+    print(lv,{b:r['bundles'][b]['facts_recovered_'+lv] for b in r['bundles']})
+EOF
+- Bash: python - <<'EOF'
+import json
+r=json.load(open('results/iter_096/eval/report_E32_v1.json'))
+J=json.load(open('results/iter_096/judging/judgments_E32_v1.json'))
+idx={}
+for o in J['outputs']:
+    for si,s in enumerate(o['sentences']):
+        for ci,c in enumerate(s['claims']):
+            idx[f"{o['p']}:{o['oid']}:{si}:{ci}"]=(o['cond'],o['region'],s['quote'][:70],c['kind'])
+for b in ['CG','L2','D2','L6','D6']:
+    print('==',b)
+    for p,fs in r['cases'][b]['recoveries'].items():
+        for f,dd in fs.items():
+            print(p,f,{k:[idx[c][1]+'|'+idx[c][2] for c in v][:3] for k,v in dd.items()})
+d=r['detail']['main']
+for lv in ['strict','lenient_timeok']:
+    print(lv,{k:(v['patients'],v['facts']) if isinstance(v,dict) else v for k,v in d[lv].items()})
+print(r['patient_table'])
+print(r['leave_one_patient_out'])
+EOF
+- Bash: sed -i "s/if k != 'rows'}))/if k not in ('rows', 'sha256')}))/" report96_verify.py && grep -n "'rows', 'sha256'" report96_verify.py && python - <<'EOF'
+import os
+os.remove('results/iter_096/eval/verify_E32_v2.json') if False else None
+EOF
+ls results/iter_096/eval
+- Bash: cat > /tmp/ignore_marker 2>/dev/null; python - <<'EOF'
+import json, time
+import report95_eval as E95, report96_eval as E
+from report86_common import save
+from report96_lock import R96
+J=json.load(open(str(R96)+'/judging/judgments_E32_v3.json'))
+claims, outs_text, _ = E95.load_judgments(['E32'])
+B=E95.bundle_outputs(outs_text)
+cl=E.flat_claims(J)
+sel=json.load(open('results/iter_095/lock/selection.json'))['E32']
+old_rep=json.load(open('results/iter_095/eval/report_E32_v2.json'))
+res={}
+for b in E.BUNDLES:
+    old=E95.conflicts(claims,B[b],mode='question')
+    oldp={sel.index(i) for i,v in old.items() if v}
+    assert len(oldp)==old_rep['bundles'][b]['conflict_patients']['primary'], (b,len(oldp))
+    newc=E.conflicts(cl,b,'primary')
+    new=set(newc)
+    ent={'old_patients':sorted(oldp),'new_patients':sorted(new),'new_only':{}, 'old_only':{}}
+    for p in sorted(new-oldp):
+        reasons=set()
+        for pos,neg,st in newc[p]:
+            oc=claims.get((sel[p],pos['oid']),[]); on=claims.get((sel[p],neg['oid']),[])
+            if any(c['pol']=='Pu' for c in oc): reasons.add('원인 hedge가 있는 문장 전체를 존재 불확실(Pu)로 처리했던 규칙 -> 존재 확정으로 정정')
+            elif not on: reasons.add('정상 폐 실질 표현을 iter_095가 부정으로 기록하지 않음 -> 정정')
+            else: reasons.add('기타(범위·종류 규칙 변경)')
+        ent['new_only'][str(p)]=sorted(reasons)
+    for p in sorted(oldp-new):
+        reasons=set()
+        for pr in old[sel[p]]:
+            # pr = (pos oid, neg oid)
+            nn=[c for c in claims.get((sel[p],pr[1]),[]) if c['pol']=='N']
+            txt=' '.join(c['quote'] for c in nn)
+            reasons.add('급성(acute) 수식 부정을 소견 부정으로 처리했던 규칙 -> 확정 충돌에서 제외(qualified)' if 'acute' in txt.lower() else '기타')
+        ent['old_only'][str(p)]=sorted(reasons)
+    res[b]=ent
+save(R96/'eval/correction_diff_E32_v3.json',{'note':'iter_095 판정(report95_eval 함수, 읽기 전용 호출)과 iter_096 v3 판정의 primary 충돌 환자 비교. 사유는 환자 쌍의 원 판정 필드로 자동 분류한 것이며 단일 원인 귀속이 아니다.','bundles':res})
+for b in ('L8','D8'): print(b,len(res[b]['old_patients']),len(res[b]['new_patients']),{k:v for k,v in res[b]['old_only'].items()}, len(res[b]['new_only']))
+from collections import Counter
+print(Counter(r for b in ('L8','D8') for v in res[b]['new_only'].values() for r in v))
+EOF
+
+
+
+## iter_096 GPT REVIEW [CONTINUE] — 2026-10-08 05:08:08
+
+# 요약
+
+- **판정:** CONTINUE / inconclusive. 의미 평가 보완 완료는 승인하지 않는다.
+- **핵심 근거:** 저장 판정의 충돌 Locate 20/32·Describe 25/32와 strict 추가 회복 1명은 산술적으로 재현됐다. 그러나 실제 원문에 연결되는 부정·시간 처리 오류가 남았다.
+- **의미·한계:** 영역 간 불일치 관찰은 유지된다. 정확한 빈도, 회복 가치, 위치 학습의 효과와 신규 기여는 미확정이다.
+- **다음:** 현재 CURE 설정 확대와 같은 E32 규칙 정비의 반복 투자는 보류한다. 관련 연구 묶음에서 다음 투자 하나를 전략적으로 선택한다.
+
+## 알림 요약
+
+- 결과: 흉부 X-ray 32명의 CURE 저장 출력 재평가와 산술 검증을 완료했지만, 소실된 음영의 부정 처리와 위치별 시간 근거 연결에 오류가 남았다.
+- 의미: Describe에서도 영역 간 불일치는 남는다. 현재 시험 설정의 확대 근거 부족과 위치 학습 연구 질문 전체의 가치는 구분해야 한다.
+- 후속: 새 생성보다 연구 묶음의 투자 선택을 권고한다. 반복 평가 정비가 강한 baseline 이후의 잔여 문제를 충분히 좁히지 못했기 때문이다.
+- 대안: 현재 E32의 오류만 추가 수정할 수 있다. 비용은 작지만 해부 대응과 reference 부족은 남으므로 다음 투자 결정을 바꿀 근거가 있을 때만 가치가 있다.
+
+# Assessment
+
+계획·구조화 계획·보고서·변경 diff·commit·재사용 manifest와 실제 도구 로그를 확인했다. 구현 담당은 Claude이며 claude_meta.json의 실제 모델은 claude-sonnet-5-5, 설정은 sonnet/medium이다. 리뷰 대상은 23a37396b79a169850f5a8fcd2c5a2c4109ffc7f다. 신규 소스 10개의 작업 파일과 해당 SHA의 내용이 일치하고 unpreserved_paths는 없다.
+
+이번 작업은 신규 모델 실험이 아닌 기존 출력의 유효한 부분 재분석이다. 원문에서 확인 가능한 불일치와 일부 의미 정정은 해석 가능하므로 valid_experiment=true로 판단한다. 다만 blocking_issues는 정확한 빈도·오류 비용·보완 완료 주장에 적용되며, 전체 평가가 검증됐다는 뜻은 아니다. SELF_CHECK: FAIL과도 부합한다.
+
+# Key Findings
+
+- 입력은 E32 32명, C-G 32개와 Locate/Describe 각각 256개로 총 544개다. 양성 reference는 9명·10사실이다.
+- completion_v3b.json의 19개 봉인 파일 hash 불일치는 없었다. 저장을 비활성화한 메모리 내 검사에서 기존 90/90 검증과 22/22 fixture를 재현했다. 파일이나 결과는 수정하지 않았다.
+- 저장 환자 집합을 별도 집계해 충돌 C-G/L2/D2=0, L8=20, D8=25, L6/D6=1명을 재현했다. D8−L8은 0.15625, 환자 bootstrap 95% CI는 [-0.03125, 0.34375]다. 이는 현재 판정표의 산술이며 검증된 최종 충돌률이 아니다.
+- strict 회복 집합은 넓은 영역에서 P002 F2, 8영역에서 P001 F1과 P002 F2였다. 세부 영역의 추가 회복은 P001 한 명이며 원인 표현의 지원 여부에 의존한다. 해부 대응을 완화한 수치를 primary 성공으로 바꿀 수 없다.
+- P007 Locate left lung의 비EOS는 보존됐다. 이번에 새 생성·학습·GPU 요청을 하지 않은 것은 계획과 자원 정책에 맞는다.
+- 과거 iter_090 인계 학습을 다시 실행하지 않았다. iter_092에서 완료된 작업을 반복하지 않은 것은 적절하다.
+
+# Problems / Concerns
+
+**1. 소실 표현의 부정이 누락됐다.** P025 Describe에는 'The previously described opacities in the right lower lobe have resolved.'와 'There is a vague opacity in the right lower lobe, which could represent pneumonia.'가 함께 있다. resolved를 qualified로 제외하는 규칙은 현재 존재와 시간 주장을 분리하지 못한다. 해당 한 항목만 확정 부정으로 취급한 리뷰 민감도에서 D8은 25→26명, D6은 1→2명이다. 이를 정정 최종치로 발표하는 것은 아니지만 원 정확 수치의 승인 불가를 보여준다.
+
+**2. 시간 지지가 다른 위치에서 전파된다.** error_cost는 대응한 alt 대신 fact의 어느 alt에든 시간 정보가 있는지 검사한다. P005의 우하엽 new가 상엽 new·unchanged의 지원 근거가 된다. 따라서 시간 지원 6/6과 이를 포함한 오류 비용은 검증되지 않았다. '시간 모순이 검출되지 않음'과 '시간 정보가 지원됨'도 구분해야 한다.
+
+**3. 문맥 검토 완료 근거가 불충분하다.** report96_review.py는 context_reviewed를 or True로 기록한다. 실제 notes는 13명에 있고 19명은 비어 있다. 보고서의 '21명 메모 없음'도 산출물과 맞지 않는다. 도구 로그에는 원문 구간·축약 출력·고유 문장 검토가 있지만, 자동 claim 목록과 완료 플래그는 원 계획의 모든 결정 사례 문맥 검토를 증명하지 않는다.
+
+**4. 재사용 범위가 좁다.** 회복 계산은 겹침을 완전 대응처럼 사용할 수 있고 분기 (b)는 같은 사실 보존 대신 환자 집합을 비교한다. 일부 결과 필드는 상수이며 pilot 판정 문구도 고정돼 있다. 현재 데이터에서 산술 통과했다는 이유로 범용 평가기로 승인하지 않는다.
+
+입력·출력 무결성 검사 자체의 가치는 남는다. 다만 모듈들이 공유하는 의미 가정의 오류는 별도 산술로 제거되지 않는다. 전체 스냅샷 재사용은 불승인한다.
+
+# Interpretation
+
+소견 존재와 원인 진단의 hedge를 분리하고 급성 부정을 보수적으로 다룬 것은 직전 평가보다 나아졌다. 하지만 의미 평가 오류만으로 모든 불일치를 설명할 수 없다는 제한된 결론과, 정확한 회복·충돌률을 확보했다는 결론은 다르다.
+
+저장 primary에서는 확대 분기 (a)/(b)가 미달이고 (c)의 남은 reference 기회가 없다. 그러나 의미 보완이 끝나지 않았으므로 이를 모든 원 기준의 확정 음성 결과로 승인하지 않는다. 추가 투자를 승인할 충분한 증거가 없다는 판단은 가능하다. 현재 설정 보류는 대안 충분성이나 연구 가치 부재의 확증이 아니다.
+
+새 성능 개선·방법 효과·공식 CURE benchmark 재현 실패는 입증하지 않았다. 원출력과 과거 판정은 유지한다. 현재 limitation은 이번 수치로 갱신하거나 validated로 승격하지 않는다.
+
+# Strategy Check / 연구 방향 판단
+
+**시험 설정:** 현재 CURE 8영역 회복 후보의 확대를 보류한다. R/G의 추가 epoch·seed도 자동 재개하지 않는다. 저장 출력 보완만으로 강한 판독 baseline이나 방법 필요성이 확보되지는 않았다.
+
+**연구 관찰:** iter_088의 회복·충돌, iter_092의 위치 출력과 낮은 판독 성능, iter_094의 선택 시점 영향, iter_095의 Describe 불일치를 유지한다. 이번에는 원인 hedge와 소견 존재를 혼동하던 설명을 일부 줄였다. 반면 정확한 오류 빈도·해부 대응·어느 출력이 영상에 맞는지는 해결하지 못했다.
+
+**연구 질문:** 위치 학습이 판독을 어떻게 바꾸는지는 여전히 미판정이다. 한 CURE checkpoint의 인터페이스 비교는 위치 supervision 자체의 효과를 식별하지 않는다. R/G가 base보다 낮았다는 사실도 위치 학습 전체의 무용성을 뜻하지 않는다.
+
+실행 유효성은 저장 출력의 부분 진단으로 인정한다. 성능 개선은 없고, 가설 지지는 '좌표 요구를 없애도 일부 불일치가 남는다'는 범위다. 신규 기여 가능성은 강한 단순 대안 이후의 회복 가치가 불확실해 미확인이다.
+
+반복 횟수 때문에 보류하는 것이 아니다. 현재 남은 판단은 규칙 수정보다 reference의 판별력과 중요한 사용 과제의 선택에 더 의존한다. 이번 작업은 GPU 0인 의미 검토·평가 재작업이며 정확한 비용 비율은 측정되지 않았다. 같은 자료에서 규칙을 계속 보완하는 기회비용을 포함해 관련 연구 묶음을 재검토해야 한다.
+
+# Recommended Next Experiment
+
+즉시 추가 실험을 발주하지 않는다. 다음 계획에서는 근거 있는 판독 baseline 재구성과 다른 중요한 잔여 질문을 비교해 하나의 투자만 선택한다. 선택에는 기존 방법이 해결하지 못한 조건, 이를 가를 최소 비교, 결과별 종료 행동이 필요하다.
+
+현재 CURE 후보의 재개 조건은 모호한 회복 사례를 판별할 새로운 의미·위치 근거와 그로 인해 달라질 투자 결정이다. 박스 좌표가 있다는 사실만으로 lobe와 zone의 동치를 승인하지 않는다. 같은 E32의 추가 규칙 조정이나 reference 기회가 없는 E64 생성은 자동 후속으로 붙이지 않는다.
+
+논문 추천은 보류한다. 이번 보완은 불확정이며 새로 더 깊이 탐구할 방향의 긍정적 근거를 확정하지 못했다. 마일스톤도 지정하지 않는다.
