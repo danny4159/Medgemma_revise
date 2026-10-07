@@ -2450,6 +2450,8 @@ Claude 계정의 /usage 또는 Settings > Usage에서 제한을 확인한 뒤 �
 
 ## iter_090 — 위치 학습의 판독 누락·언급 성향 분리 (7번째 시도) · 2026-10-07 10:42
 
+사용자 보완으로 iter_091에서 재계획. 아래는 보존된 이전 기록이며 실패 판정이 아니다.
+
 - 🧭 **계획** (GPT normal): 같은 R/G 비교를 유지하며 현재 소견 필터와 길이별 수치 검증을 보완한다. 원 gate 통과 후 조건부 학습·E128 평가로 이어가며 위치 학습의 판독 효과는 아직 미검증이다.
   - 대안: 1) 위치 학습의 판독 누락·언급 성향 분리: target·수치 경로를 한정 복구해 원래 통제 비교를 수행한다. · 2) 현재 R/G 실행 경로 보류: 수치 동등성이나 자료 의미를 복구하지 못하면 정확한 blocker와 재개 조건을 보존한다. · 3) 새 방법·모델·자료 전환: 현재 실행 실패가 과학적 선택을 반박하지 않았으므로 이번에는 선택하지 않는다.
   - 1순위 선택 근거: 직전 리뷰의 권고를 유지한다. 수정 대상과 원 기준이 구체적이며 기존 권한 안에서 복구·검증할 수 있다. 사용자만 결정할 가치 선택이나 추가 권한은 없다.
@@ -2457,4 +2459,30 @@ Claude 계정의 /usage 또는 Settings > Usage에서 제한을 확인한 뒤 �
 - 💾 **개발 이력 체크포인트** `41232edf304c85f3e747c9da7dae2fe9f473d2ac`: interrupted (검증 승인 아님)
 - ⏹ 중단: Ctrl+C (Codex 구현/실험 중)
 - 📁 원본: `agent/runs/iter_090/`
+
+## iter_091 — 위치 학습의 판독 누락·언급 성향 분리 (8번째 시도) · 2026-10-07 18:20
+
+사용자 보완 원문: agent/runs/iter_091/intervention.json
+
+- ▶ 실행 시작 (orchestrator 0220ea8+수정)
+- 🧭 **계획** (GPT deep_medium): 검증된 recovery checkpoint에서 Claude로 R/G 학습을 인계하고, 기존 epoch6/12 조건과 E128 평가를 마친다. 프로그램 대기로 왕복을 줄이며 판독 개선 여부는 원 기준으로 판단한다.
+  - 대안: 1) 위치 학습의 판독 누락·언급 성향 분리: 기존 recovery checkpoint와 결정 기록을 이어받아 미완료 비교를 마친다. · 2) 실행 경로의 한정 보완: 인계 시 실제 digest·resume 결함이 확인될 경우에만 해당 경로를 수정하고 필요한 회귀 검사를 수행한다. · 3) 새 방법·연구 질문 전환: 현재 비교가 아직 완료되지 않았고 사용자도 조건 유지를 지정했으므로 이번 범위에서는 선택하지 않는다.
+  - 1순위 선택 근거: 인계 checkpoint와 실행 근거가 일치하며 연구 조건·권한·종료점이 이미 정해져 있다. 추가 사용자 판단 없이 같은 비교를 완료할 수 있다.
+- ▶ **결정**: 자동 진행 (smart) — 1순위로 진행
+- 💾 **개발 이력 체크포인트** `41232edf304c85f3e747c9da7dae2fe9f473d2ac`: implementation_finished (검증 승인 아님)
+- 🔧 **Claude** (standard): (요약 없음) [자체 검증 없음, 파일 13개 변경]
+  - 브랜치 `approach/grounding-report-transfer`에서 계속
+  - ⚠ 권한 거부 3건
+- 🔍 **리뷰** (GPT normal): [CONTINUE / execution_failed] R/G 학습은 57 updates 추가 후 안전 저장됐지만, 구현 응답 종료 뒤 background 작업도 정지됐다. 판독 효과는 미판정이며 최신 checkpoint에서 완료 대기 경로를 보완해야 한다.
+  - 접근법 판단: 학습은 안전하게 재개·저장됐지만 구현 세션의 조기 종료로 계획한 가설 비교를 완료하지 못했다.
+  - 목표 진전: R277/G256에서 학습을 재개하고 R305/G285 checkpoint까지 보존했다. G의 pending epoch4 validation도 완료됐다. 실행 복구 가능성은 확인했지만, 판독 성능 개선·가설 지지·신규 기여에 관한 새 근거는 없다. 기존 관찰과 한계 상태를 유지한다.
+  - 판정 범위: iter_091의 Claude 인계 후 실행 수명 관리와 계획 미완료에 한정한다. recovery 학습은 일부 수행됐으나 epoch6 비교·조건부 epoch12·E128 평가가 미실행이다. 사용자 승인으로 정지한 iter_090이나 위치 보조 CE 가설을 실패로 판정하지 않는다.
+  - 현재 결론 무효: 구현자가 supervisor 완료 전에 최종 응답을 반환했고, 이후 background launcher와 wait task가 killed 처리됐다. 원 계획의 완료·평가·검증 단계에 도달하지 못했다.
+  - 현재 결론 무효: epoch6의 네 trajectory 완료, validation 기반 선택·연장 판단, 최종 E128 판독 비교가 없어 R/G 효과를 판정할 수 없다.
+  - 재사용 전 수정: background task 생성만으로 구현 호출을 끝내지 않도록 동일 세션의 완료 대기를 보완해야 한다. pending 상태를 구현 완료로 처리하는 경계도 점검해야 한다.
+  - 재사용 전 수정: 재개 직전 실제 소유 프로세스·lock과 최신 checkpoint를 다시 확인하고 R305/G285 및 LR2e-4의128에서 이어가야 한다. 인계 당시 R277/G256으로 되돌리지 않는다.
+  - 재사용 전 수정: iter_091 인계 manifest·완료 보고서가 없다. 새 checkpoint·attempt·원 출처를 연결하고 실제 종료 상태를 보고해야 한다.
+  - 추후 개선: assistant 의미 평가의 임상 타당성, foundation/CURE 학습 노출과 외부 일반화는 원 계획대로 미확정이다.
+  - 다음: 같은 R/G 질문의 한정 실행 보완을 권고한다. 학습 상태가 보존됐으므로 대기 수명 관리를 바로잡고 원 비교를 마치는 것이 우선이다. 기준은 agent/runs/iter_091/plan.md와 상속된 iter_090 계획·amendment·stage_decision_rules로 유지한다. 동일 Claude 세션을 가능하면 재사용하고 supervisor가 pending인 동안 최종 응답으로 종료하지 않는다. 실제 소유 프로세스와 lock을 확인한 뒤, R checkpoint305와 G checkpoint285의 hash/config를 검증하여 기존 자동 resume로 이어간다. LR2e-4 두 조건은 checkpoint128을 유지한다. 완료된 57 updates와 G epoch4 validation을 반복하지 않는다. epoch6 완료·고정 조건의 epoch12·선택 잠금·E128 평가·독립 집계까지 원 기준으로 마친다. 운영 연결을 수정해야 한다면 연구 trainer/config digest와 분리하고, pending→완료·오류 처리만 회귀 검증한다. 새로운 문헌·모델·loss·표본 확대는 추가하지 않는다.
+- 📁 원본: `agent/runs/iter_091/`
 
