@@ -259,3 +259,23 @@ SPIDER 반복 개발 E24 24명의 supervision 미제공 ordinal 2/4 47개에서,
 - 미해결: R과 공유 ResNet18 C의 정확도 차이: R−C 0.00071, 95% CI [-0.24667, 0.23810]
 - 미해결: 다른 seed·독립 환자·실제 예측 영역에서의 재현성과 방법 개입의 실용 가치
 
+## padchest-regional-report-concatenation-conflict — observed
+
+PadChest-GR 개발 E96의 고정 CURE checkpoint·prompt에서 영역별 출력과 GRG를 합친 C-H는 C-G보다 비정상 48명의 확정 recall이 6.08pp 높았으나 명시 모순 환자 비율은 47.92pp 증가했다. 상속된 의미 규약상 확정 내부 모순은 전체 C-H 76/96명, C-G 0/96명이었다. 이는 현재 단순 결합·assistant 평가 조건의 관찰이며, CURE 공식 benchmark의 재현 실패나 일반적인 영역 판독·결합 능력의 한계를 입증하지 않는다.
+
+- 적용 목표 시작: iter_003
+- 최신 리뷰: agent/runs/iter_088/review.json
+- 근거: research/results/iter_088/eval/report.json: C-H−C-G recall +0.060764, 95% CI [0.010417, 0.119792]; contra_v2 +0.479167, CI [0.333333, 0.625000].
+- 근거: research/results/iter_088/adjudication/judgments_final.txt 및 linked.json: 내부 충돌의 두 원문 span과 영역 출처.
+- 근거: research/results/iter_086/E96/readings.jsonl: 재사용한 96명·768개 원출력.
+- 근거: 이번 리뷰의 별도 DSL 파싱·환자 bootstrap에서 주요 수치와 C-H/C-G 내부 모순 환자 수를 재현했다.
+- 사용·평가 검증: 신규 생성 없이 iter_086의 고정 입력·출력 검증 근거를 재사용했다.
+- 사용·평가 검증: 리뷰에서 생성 주장 anchor의 원문 offset 9,174개를 대조해 불일치 0을 확인했다.
+- 사용·평가 검증: P000의 left lung 정상 서술과 left mid lung zone의 좌하엽 음영 서술 등 원문·영역 연결을 직접 확인했다.
+- 사용·평가 검증: 고정 24명 재점검, 위치·속성·부정 범위 보완 및 변경 이력이 보존됐다.
+- 사용·평가 검증: C-H는 공유 GRG 포함 환자당 30요청이며 C-G는 1요청이다. 동일 비용 비교가 아니다.
+- 미해결: 영역 범위와 표현의 모호성을 독립 평가자가 판정해도 충돌 빈도가 유지되는가?
+- 미해결: C-G 선택이나 간단한 중복·충돌 처리 이후에도 중요한 추가 회복 가치가 남는가?
+- 미해결: 현재 개발 자료 밖에서도 재현되는가? 공개 checkpoint의 환자별 학습·선택 노출은 미확정이다.
+- 미해결: 관찰된 차이를 위치 supervision 자체의 효과로 설명할 수 있는가?
+
