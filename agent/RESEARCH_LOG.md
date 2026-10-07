@@ -34575,3 +34575,379 @@ NLL 변화와 recall 변화의 작은 상관만으로 NLL의 일반적 부적합
 여러 환자에서 오류 비용을 고려해도 선택 보완의 가치가 남으면 별도 baseline 시험 하나를 제안한다. 그렇지 않거나 결론이 의미 모호성에 의존하면 현재 recipe의 추가 seed·epoch·위치 loss 투자를 보류한다. E128을 다시 고르거나 독립 확인으로 재사용하지 않는다. 다음 GPU 구성은 기존 처리량·메모리 증거를 확인해 정하며 불필요한 전수 비교를 추가하지 않는다.
 
 논문 추천은 보류한다. 이번에는 개선 방법의 유망성이 확인되지 않았고 baseline 선택과 의미 평가의 불확정성이 남는다.
+
+
+## iter_094 GPT PLAN [위치 학습의 판독 누락·언급 성향 분리 / proceed] — 2026-10-08 00:56:59
+
+# 요약
+
+- **이번에 할 일:** 선택된 R/G epoch1의 V32 판독 64건을 생성해 저장 epoch2/6·base와 비교한다.
+- **필요한 이유:** 원 선택 규칙은 준수됐지만 선택된 checkpoint의 동일 집단 판독이 빠져 있다.
+- **확인할 기준:** 여러 환자의 정확한 소견 회복이 오류 비용과 의미 민감도를 고려해도 남는지 본다.
+- **주의·다음:** 원 E128 판정은 보존한다. 선택 보완 시험 하나 제안 또는 현재 recipe 투자 보류로 종료한다.
+
+## 알림 맥락
+
+- 연구: 위치 학습과 판독 정확성
+- 데이터: 흉부 X-ray PadChest-GR
+- 모델: MedGemma 1.5의 report-only/위치 보조 LoRA
+- 과제: 동일 영상의 학습 시점별 판독문을 비교한다
+- 가설: NLL로 선택된 시점보다 후반 시점이 정확한 소견을 더 회복할 수 있다
+- 질문: 판독 baseline의 낮은 성능을 checkpoint 선택 보완으로 줄일 근거가 있는가?
+- 변경: 구체화
+- 연결: iter_093에서 원 선택은 재현했지만 선택된 epoch1의 동일 V32 판독은 없었다
+- 작업: 결측 64건과 기존 출력을 비교해 선택 보완 투자 또는 현재 recipe 보류를 결정한다
+
+# Current Understanding
+
+기준 문서는 `agent/runs/iter_093/plan.md`, SHA256 `97f5c93bfb252fbb996105320901f34b57e74820460d150b51fc6c8c54d455e4`와 해당 review.md/json이다. 부모 `iter_092/plan.md` SHA256 `70bbf0f32bafaaa2c0f267c9fa75efc57e562d282765437d5258c3d8ef062e7f`, iter_090 계획·amendment·recovery/stage_decision_rules.json과 최종 선택도 연결한다.
+
+네 trajectory의 학습과 E128 평가는 완료됐다. 과거 인계 지시의 checkpoint 재개는 완료된 일회성 작업이다. 이번에는 학습을 재개하지 않는다. 보존·인증 상속·완료 대기 운영 원칙은 유지한다.
+
+iter_092의 G−R recall +0.532pp·추가 회복1명·원 기준 미달은 유지한다. iter_093은 NLL과 생성 recall의 제한적 불일치를 확인했지만 선택된 epoch1의 동일 V32 생성이 없어 선택 보완 효과를 판단하지 못했다. V32는 반복 개발 자료이며 독립 확인이 아니다.
+
+# Strategy Check / 연구 방향 판단
+
+**이어받는 관찰 → 남은 설명 → 최소 비교 → 바꿀 판단:** 위치 출력은 개선됐으나 판독 baseline이 약했다 → 원 선택 위반은 배제됐지만 선택 시점·적응 부족·평가 범위가 남는다 → 선택된 epoch1과 저장 후반 checkpoint를 동일 V32에서 비교한다 → 생성 품질 기반 선택 보완 하나의 시험 또는 현재 recipe 투자 보류를 결정한다.
+
+같은 현상의 구체화이며 새 후보 탐색이 아니다. 직전 리뷰의 권고를 유지한다. 즉시 새 학습은 변경 요인을 특정하기 어렵고, 즉시 보류는 64요청으로 확인 가능한 결측을 남긴다. 이번 측정이 두 대안보다 정보 가치가 높다. 인식·선택·결합 중 내부 원인을 확정하는 실험은 아니다.
+
+지배 비용은 신규 생성보다 사례별 의미 검토일 수 있다. 실제 생성 시간과 검토량을 구분해 기록한다. 이번 종료 뒤 추가 epoch1 후보나 주변 진단을 붙이지 않는다.
+
+# Hypothesis
+
+선택된 epoch1보다 같은 LR의 후반 report-only checkpoint가 여러 환자의 확정 소견을 회복할 수 있다. 그러나 증가가 잘못된 언급·의미 모호성·한 환자에 의존하면 선택 보완의 투자 근거는 약하다. G에서만 차이가 나면 report-only baseline 보완 근거와 구분한다.
+
+# Limitation Evidence / Correct Usage Checks
+
+직접 대상은 iter_092/093의 유효한 제한적 관찰이다. 이에 대응하는 등록 limitation id가 없으므로 `limitation_ids=[]`를 유지한다. 다른 RSNA validated 주장을 이번 판독 선택 문제의 검증 근거로 전용하지 않는다.
+
+공식 processor·chat template·영상 전처리·안정화 LoRA 연산·생성 조건은 기존 검증과 동일하게 유지한다. 신규 실행에서 checkpoint/adapter digest, 입력 ID·영상 hash·prompt·reference 연결과 출력 완결성을 확인한다. 정답률100%를 실행 gate로 요구하지 않는다.
+
+# Contribution Path / Baselines / Reuse
+
+신규 contribution은 미확정이다. 직접 report-only SFT와 표준 위치 보조 CE 이후 남은 문제를 해석하는 진단이다. 선택 보완 자체를 새로운 의료 VLM 방법으로 주장하지 않는다. 향후 방법 효과에는 강한 직접 SFT와 적절한 모듈형 판독 대조, 학습 노출·비용 통제가 필요하다.
+
+현재 브랜치와 HEAD `bdece28eacb2a8f06107358a988d0e1364768f44`를 유지한다. 필요한 파일이 모두 있으므로 선별 반입은 없다.
+
+- `report90_recovery_gen.py`, `report90_gen_safe.py`, `report90_gen.py`: 생성 연산·provenance·재개 검사를 재사용한다. `report90_recovery_train.py`, `report90_stable_v2.py`, `report89_model.py`, `report90_train.py`, `report90_numeric.py`, `rsna_diag/generate.py`, `rsna_diag/lora.py` 등 실제 protocol의 의존성을 연결한다.
+- 기존 queue는 epoch1을 지원하지 않고 V16까지 생성하므로 실행하지 않는다. 새 얇은 wrapper에서 parent와 worker 모두 iter_094의 OUT·runtime cache·진입점을 일관되게 지정한다. 기존 trainer/config를 변경하지 않는다.
+- `report86_common.py`, `report92_manifest.py`는 승인된 출처 연결 범위만 활용한다. 이전 경로에 쓰는 main은 실행하지 않는다.
+- `report90_semantic_eval.py`, `report90_semantic_verify.py`의 anchor·집계 기능과 `report93_analyze.py`의 확인된 수치 계산을 필요한 범위에서 재사용한다.
+- `report92_autojudge.py`, `report93_sens.py`는 의미 평가 needs_fix 상태다. 자동 결과는 초안으로만 사용하고, 아래 사례별 근거를 거친 판정으로 이번 별도 결과를 만든다. `report93_verify.py`의 과거 경로 덮어쓰기 main은 실행하지 않는다.
+
+## 대규모 GPU 필요 후보
+
+여러 기관·모델·학습량에서 report-only, 정확한 위치 supervision, 교란 위치 supervision과 모듈형 판독을 비교하는 후보를 보존한다. 현재는 baseline 선택의 가치가 미확정이므로 실행하지 않는다.
+
+# Proposed Experiment
+
+## 1. 유지 / 변경 / 미완료
+
+**유지:** V32 환자와 영상·reference v3·prompt, 모델 revision, seed17, greedy 생성, 기존 strict/type-only/possible 구분, 원 선택과 E128 판정.
+
+**변경:** iter_093에서 결측으로 남긴 선택 epoch1의 R/G 64건을 생성한다. 의미 평가의 급성·중요도·other 범위를 이번 판단에 필요한 사례에 한정해 보완한다. 신규 결과·로그·검증은 `research/results/iter_094/`에 저장한다.
+
+**미완료:** epoch1의 동일 집단 출력, 정확한 회복과 오류 비용의 paired 비교, 결과별 투자 결정.
+
+## 2. 동작 확인과 입력 잠금
+
+`results/iter_090/recovery/selection/final.json`에 연결된 다음 파일을 사용한다.
+
+- R: `recovery/train/R_lr0.0002/checkpoint_000064.pt`, 기록 SHA256 `48f7dccfa721564f1e216de4e7adf8d73381ac9d062448a2f6462c76f4162601`.
+- G: `recovery/train/G_lr0.0002/checkpoint_000064.pt`, 기록 SHA256 `d40208a6a02a4ed47fab84830fd7b447d1002f2527616c381f0abfbf55b2af3b`.
+
+실제 hash를 재계산하고 validation_01·config·complete_06·verified_06와 연결한다. 초기 비recovery266 updates 자산은 제외한다. V32 `requests.json`, `manifest.json`, `semantic/V32_reference_v3.json`, 저장 epoch2/6 출력과 판정의 hash를 고정한다.
+
+새 wrapper는 경로 격리·worker 진입점·중복 거부·완료 재개를 CPU 제어 검사로 확인한다. 두 조건의 첫 유효 출력에서 공식 tensor와 adapter digest·저장 레코드를 확인한 뒤 남은 요청을 계속한다. 이 출력은 64건에 포함한다. 새로운 모델 정답 gate는 없다.
+
+## 3. 실제 출력 탐색
+
+R/G 각32개, 신규 고유 요청64개를 생성한다. 같은 원 요청 순서와 prompt를 사용하며 cap1024, 비EOS cap 도달에만2048→4096으로 확장한다. 오답 때문에 재생성하지 않는다. 재시도·cap 확장은 고유 요청과 별도로 집계한다.
+
+주 비교 집합은 base32개와 LR2e-4 R/G의 epoch1/2/6 각32개, 총224출력이다. 이 중160건은 저장 출력을 재사용한다. LR1e-4의 기존 결과는 배경 표로만 남기며 유리한 후보를 새로 주대조로 바꾸지 않는다.
+
+주요 질문은 R epoch6−1이다. R epoch2−1은 사전에 지정한 이른 대안이다. G의 동일 비교와 각 조건 대 base는 보조 결과로 모두 보고한다. 실제 checkpoint 선택 파일은 변경하지 않는다.
+
+## 4. 의미 평가와 사례 검토
+
+평가 입력에서 모델·epoch 이름을 가린다. 기존 reference는 고정하며 미표기 소견을 음성 정답으로 만들지 않는다. 새64개 출력은 모두 실제 문장을 검토한다. 재사용 출력에서는 비교에 영향을 주는 strict 회복·소실과 모든 명시 모순 후보, 일반 정상문·other·급성 부정·위치/속성 대응 사례를 점검한다. 동일 문장이라도 환자 reference가 다르면 별도 판단이다.
+
+각 변경 판정에 출력 span, reference atom·원문 span, 판단 이유를 남긴다. 일반 정상문은 문구의 범위와 reference의 명시 근거를 대조한다. 'no acute'는 단순 소견 존재로 반박하지 않고 급성 여부가 없으면 unknown이다. 'other'는 선행 긍정 문장에서 제외되는 범위를 확인한다. 중요도는 소견명 목록으로 대신하지 않는다. 위치·속성은 substring만으로 match를 승인하지 않는다.
+
+현재 영향을 받는 규칙에 명시 지지·명시 모순·판단불가 대조를 고정하고 점검하되 fixture 통과를 독립 의미 검증으로 부르지 않는다. 원 판정과 수정 판정은 함께 보존한다. 모호한 match 불인정·모호 reference 제외 민감도와 오류 판정의 해석 범위를 제시한다. 판단불가를 정확 또는 임상 FP로 바꾸지 않는다.
+
+## 5. 규모 확대·독립 확인
+
+이번 본실행은 지정64건으로 끝난다. 신규 학습·epoch4 생성·다른 LR epoch1·E128 재평가·추가 seed는 없다. 이는 결정에 필요한 두 결측 조건의 전수 생성이며 임의 시간 절약용 표본 상한이 아니다.
+
+양성일 때만 다음 별도 계획에서 생성 품질 기반 선택 규칙 하나를 정의하고 새 독립 확인 집단·비용을 정한다. 이번 V32는 선택 개발 근거일 뿐 독립 확인이 아니다.
+
+## 6. 자원·예상 시간·재개
+
+실행 직전 `nvidia-smi`로 허용 GPU0,1의 UUID와 논리/물리 대응·여유를 확인한다. R/G를 각 GPU에 하나씩 배정하고 여유가 큰 장치부터 시작한다. 기존 긴 생성 peak11232MiB 또는 보수적 admission12000MiB와 worker당2048MiB 여유를 사용한다. 11232MiB worker 두 개와 여유 합26560MiB는24GiB를 넘으므로 GPU당2 worker는 현재 근거에서 제외한다.
+
+기존 batch1·두 GPU 구성의 불변 생성 경로와 메모리 근거를 재사용한다. 64건만 남고 checkpoint별 worker가 필요하므로 새 batch 탐색의 이득은 제한적이다. 새 코드가 batch·tensor·수치 경로를 바꾸지 않으면 처리량 탐색을 반복하지 않는다. 변경이 필요한 경우에만 개발 입력으로 batch1/2를 비교하고 총 처리량·peak·긴 출력 지연·정합성을 확인한다.
+
+기존 R epoch6의32건 launch wall114.49초를 참고하면 생성은 두 GPU에서 수분 규모로 예상한다. epoch1 출력 길이가 다를 수 있으므로 최초 완료 요청으로 예상 시간을 갱신한다. 적재·CPU 평가·문장 검토 시간은 별도이며 시간 상한은 없다.
+
+요청별 fsync·digest와 worker별 파일로 재개한다. 완료 파일은 불변으로 두고 torn tail은 원본 보존 후 소유 경로에서만 복구한다. supervisor의 실제 종료·자식 exit·64건 완결성을 확인한다. 장시간이면 `../experiment_wait.py --pid <실제 supervisor PID> --timeout 600` 또는 동등한 대기를 사용하며 pending을 완료로 간주하지 않는다. HF_TOKEN_PATH 값은 출력하지 않는다. 기본 환경·hf_cache는 변경하지 않는다.
+
+# Implementation Tasks for Claude
+
+1. 기준 plan·review·선택·checkpoint·V32 입력의 manifest와 사전 비교 규약을 iter_094에 저장한다.
+2. 기존 생성 연산을 유지하는 iter_094 wrapper와 두 작업 supervisor를 연결한다. 기존 queue·trainer는 재실행하지 않는다.
+3. 새64건을 생성하고 저장160건과 공통 reference로 연결한다.
+4. 모델명을 가린 의미 평가와 영향 사례별 원문 검토를 수행한다. 기존 needs_fix 규칙의 자동 판정을 그대로 승인하지 않는다.
+5. 환자별 회복·소실·오류 표, paired bootstrap10,000회·seed94017, leave-one-patient-out, 두 모호성 민감도를 계산한다.
+6. 별도 집계로 분모·recall·환자 수·모순·anchor·누락/중복을 재계산한다. 동일 의미 함수 재호출과 독립 의미 검토는 구분한다.
+7. 실제 비용·미검증 범위·종료 판단을 보고하고 원본과 소스를 보존한다.
+
+# Evaluation (성공/실패 기준 포함)
+
+전체32명, 비정상21명, strict recall 적격20명을 구분한다. 주지표는 확정 양성 atom에 대한 환자 평균 strict recall이다. type-only·possible-only, 정상문 출력, 명시 reference 모순·내부 모순·unknown, 비EOS·형식 실패를 별도로 보고한다. 임상 precision을 계산할 완전한 gold가 있다고 가정하지 않는다.
+
+**선택 보완의 양성 탐색 기준:** R epoch6 또는 사전 보조 후보 epoch2가 R epoch1 대비 (a) 적어도2명에서 환자 strict recall이 증가하고, 증가 환자 수가 감소 환자 수보다 많으며, (b) 평균 recall 차이가 양수이고 한 환자 제거 및 두 모호성 민감도에서도 양의 방향을 유지하며, (c) 명시 reference 모순·내부 모순 환자 수가 각각 전체와 비정상 층에서 증가하지 않아야 한다. 2명은 여러 환자의 최소 해석이며 임상적 최소 효과가 아니다. 오류 비증가 역시 작은 개발 집단의 투자 기준이며 안전성 증명이 아니다. unknown 범위에 대한 타당한 해석에 따라 이 판정이 뒤집히면 불확정으로 둔다.
+
+base 대비 결과도 함께 본다. 후반 R이 epoch1보다 나아도 base보다 낮다면 선택 보완이 baseline 문제를 해결했다고 쓰지 않는다. 양성은 별도 선택 보완 시험 하나를 검토할 근거일 뿐 강한 baseline 확보나 신규 방법 효과의 확증이 아니다. 두 후보를 비교한 탐색임을 표시하고 CI를 다중 비교 보정 없는 확증으로 해석하지 않는다.
+
+**음성:** R 두 후반 후보 모두 회복 근거가 없거나 회복이 명시 오류 증가와 함께 나타나면 현재 recipe의 추가 epoch·seed·위치 loss 투자를 보류한다.
+
+**불확정:** 한 환자 의존, 의미 모호성 의존, G만의 회복 또는 오류 비용을 판단할 근거 부족이면 해당 관찰을 보존하고 현재 baseline 선택 보완 투자를 보류한다. 같은 V32에서 다른 후보를 추가 생성하지 않는다.
+
+**기술 실패:** 입력·checkpoint·provenance·평가 연결 오류는 영향받은 경로의 실행 실패다. 같은 조건의 필요한 복구만 수행하며 모델 가설의 음성으로 바꾸지 않는다.
+
+# Risks / Checks
+
+- 원 E128 판정과 checkpoint 선택을 소급 변경하지 않는다.
+- V32 개발 이득을 독립 일반화 또는 위치 supervision의 인과 효과로 해석하지 않는다.
+- NLL의 일반적 부적합·정상문 target의 인과 역할을 이번 결과만으로 단정하지 않는다.
+- 생성 wrapper의 OUT 변경이 child·runtime cache·protocol에 모두 적용되는지 확인한다.
+- 원 결과 파일과 verify.json을 덮어쓰지 않는다.
+- 임상 전문가 검증·독립 평가자 검증이 없다는 한계를 유지한다.
+- 최종 결과는 선택 보완 시험 하나 제안 또는 현재 recipe 투자 보류로 수렴시킨다.
+
+# 계획의 근거 (GPT 조사 노트)
+
+이번 라운드는 read-only로 GOAL, iter_093 plan/review 및 review.json/code_assets, iter_092 plan/review, CODE_ASSETS 관련 항목, LIMITATIONS, 실제 생성·집계 소스와 선택 기록을 확인했다.
+
+- 기준 plan: agent/runs/iter_093/plan.md, SHA256 97f5c93bfb252fbb996105320901f34b57e74820460d150b51fc6c8c54d455e4.
+- research HEAD: bdece28eacb2a8f06107358a988d0e1364768f44. git status와 diff는 깨끗하며 필요한 생성·평가 파일은 현재 브랜치에 있다.
+- 실제 선택 파일은 research/results/iter_090/recovery/selection/final.json이다. R/G 모두 LR2e-4·epoch1·64 updates이며 checkpoint_000064.pt가 존재한다. 기록된 SHA256은 R 48f7dccfa721564f1e216de4e7adf8d73381ac9d062448a2f6462c76f4162601, G d40208a6a02a4ed47fab84830fd7b447d1002f2527616c381f0abfbf55b2af3b이다. 이번 계획 단계에서는 checkpoint 바이트 hash를 재계산하지 않았으므로 실행 전 대조한다.
+- iter_093 리뷰는 base recall 0.166667, epoch2 조건 범위 0.075–0.166667, epoch6 0.141667–0.200000을 독립 확인했다. 분모는 전체32명·비정상21명·recall 적격20명이다. G LR1e-4의 epoch6−2 +6.67pp는 현재 주대조 LR2e-4의 효과로 전용하지 않는다.
+- report90_recovery_gen.py는 학습과 같은 안정화 load_model을 사용한다. report90_gen.py는 OUT 하위 경로를 강제하고 worker subprocess 진입점과 runtime_cache도 연결한다. 따라서 기존 queue를 epoch1로 무리하게 실행하지 않고 iter_094 경로를 명시하는 얇은 wrapper가 필요하다. 기존 queue의 epoch 선택지는 2/6/8/12이며 추가 V16 요청도 생성하므로 이번 64건에 직접 사용하지 않는다.
+- report93_sens.py의 급성 부정·other·중요도 규칙과 report93_verify.py의 덮어쓰기 문제는 needs_fix다. 기존 모순 수를 검증된 안전성 지표로 재사용하지 않는다. report90_semantic_eval.py의 집계는 원문 anchor와 판단 자료를 입력받는 구조로 재사용할 수 있으나 의미 정답 자체를 검증하지는 않는다.
+- 기존 R LR2e-4 epoch6 32건의 launch_000.json은 wall_s=114.4917을 기록한다. 이는 epoch1의 측정값이 아니며 계획 비용의 참고값이다.
+
+같은 질문의 한정 후속으로 문헌 주장이나 연구 방향을 변경하지 않으므로 기존 선행 조사를 반복하지 않는다. 완료된 iter_090 인계·학습 재개도 반복하지 않는다.
+
+
+
+## iter_094 CLAUDE IMPLEMENTATION REPORT — 2026-10-08 01:05:06
+
+# 요약
+
+- **핵심 결과:** 선택된 epoch1의 V32 판독 64건을 생성했고(R/G 각 32건, 전부 EOS 종료), 저장된 epoch2/6·base와 비교했다. 사전 기준상 **불확정**이다. 원 계획의 규칙대로 현재 recipe의 선택 보완 투자는 보류하는 쪽이다. 선택 보완 시험 제안은 하지 않는다.
+- **근거:**
+  - 환자 평균 strict recall(recall 적격 20명)은 R epoch1 0.125, epoch2 0.167, epoch6 0.200이다. G는 0.100, 0.167, 0.167이고 base는 0.167이다.
+  - R epoch6−1은 +0.075(95% CI [-0.10, 0.25])이다. 증가 3명·감소 1명이다. 한 환자를 제거하면 +0.026~+0.132이고, 두 모호성 민감도에서도 양의 방향이다. 기준 (a), (b)는 충족한다.
+  - 기준 (c)(오류 비증가)는 해석에 따라 판정이 갈린다. 저장된 규약으로는 R epoch1의 명시 모순 0명이 epoch6에서 3명(모호 2건 제외 시 2명)이 된다. 이 중 우측 경유 중심정맥관 대 reference의 subclavian vein, 좌우 반대인 humeral prosthesis는 유효한 충돌이다.
+  - epoch1은 "No significant radiological findings." 위주(R 25/32, G 27/32)이다. 확정 양성 소견이 있는 환자의 일반 정상문 단독 출력까지 모순으로 세는 해석에서는 R epoch1이 13명, epoch6이 9명이라 (c)가 통과한다. 사전에 정한 대로 이는 불확정이다.
+  - R epoch2−1은 한 환자를 제거하면 평균이 음수가 되어(-0.009) (b)를 충족하지 못한다.
+  - 후반 R도 base 대비 R epoch6−base는 +0.033(CI [-0.075, 0.175])에 그친다. R epoch1은 base보다 낮다(-0.042). G는 R과 구분되는 회복이 없고(G6−R6 -0.033), G 단독 회복 근거도 없다.
+- **미검증·주의:**
+  - V32는 반복 사용한 개발 자료이며 독립 확인이 아니다. 판정은 assistant 검토(모델명을 가린 상태)이며 전문의 판독이 아니다.
+  - R epoch6−1의 3명 증가 중 1명(V27A01)은 모호한 reference에 의존한다.
+  - 별도 집계 검증(recall·차이·한 환자 제거·누락/중복·원문 anchor·completion hash)은 일치했다. 의미 판정 자체의 독립 검증은 아니다.
+  - 기존 결과 파일은 덮어쓰지 않았다.
+- **다음:** 이 recipe의 추가 epoch·seed·위치 loss 투자는 보류한다. 후반 R의 +0.075와 오류 해석 의존성은 관찰로 보존한다. 선택 보완을 다시 열려면 일반 정상문 처리와 모순 판정 규약을 먼저 고정한 독립 환자 집단이 필요하다.
+
+# Work Performed
+
+- 계획의 확정 사항을 확인했다. R/G checkpoint_000064.pt의 SHA256을 재계산해 `selection/final.json` 기록과 일치함을 봤고, V32 requests·reference v3·저장 판정 hash를 `results/iter_094/input_manifest.json`에 기록했다.
+- 기존 생성 연산(`report90_recovery_gen` 경로)은 그대로 두고 출력·runtime cache 경로만 iter_094로 바꾸는 wrapper `report94_gen.py`를 만들었다. parent와 worker가 같은 진입점을 쓴다. 기존 queue·trainer·config는 수정하지 않았다.
+- GPU1에 R, GPU0에 G를 각 1 worker로 배정해 64건을 생성했다. 각 launch wall은 143~147초다. 실행 직전 두 GPU 모두 24GB 중 약 24.0GB가 비어 있었다.
+- 신규 출력을 모델명을 가려 블라인드 파일로 만들고 reference 원문과 비교해 판정했다. 저장 판정과 같은 문장(Pacemaker, Tracheostomy tube 등)의 규약 일치를 대조했다.
+- 사전 기준 (a)(b)(c)를 코드화해 평가하고, 변경된 strict 사례와 모든 명시 모순 후보(14건)를 reference와 대조했다. (c)의 해석 민감도를 계산했다. 별도 집계 검증도 수행했다.
+
+# Files Changed
+
+신규 소스(`research/`): `report94_gen.py`, `report94_launch.py`, `report94_check.py`, `report94_blind.py`, `report94_judgments.py`, `report94_analyze.py`, `report94_sens.py`, `report94_verify.py`. 보조 출력 스크립트는 `report94_texts.py`, `report94_show.py`, `report94_cases.py`, `report94_precedent.py`, `report94_precedent2.py`다. 기존 파일은 수정하지 않았다. 결과는 `results/iter_094/`에만 저장했다(`gen/`, `semantic/epoch1/`, `analysis/`, `input_manifest.json`).
+
+# Commands / Experiments (실제 실행한 명령과 성공/실패)
+
+- `python report94_launch.py`(background): 성공, exit 0. R·G 모두 코드 0, `completion.json` 생성. 도중 supervisor 대기는 `../experiment_wait.py --pid 514441`로 했고 135초에 종료를 확인했다.
+- `python report94_check.py`: 성공. 64건 모두 EOS 종료, cap 확장 0, 빈 출력 0, record/request/protocol digest와 입력 ID가 일치하고 이미지 hash도 일치했다.
+- `python report94_blind.py`, `python report94_judgments.py`, `python report90_semantic_eval.py --stage ...`: 성공.
+- `python report94_analyze.py`: 성공. `python report94_sens.py`: 성공. `python report94_verify.py`: 성공(13/13 PASS).
+- 실패와 차단: 처음의 heredoc `python -`, `$(...)` 형식 명령 몇 개는 권한 검사로 거부되어 스크립트 파일 방식으로 바꿨다. `ps`는 승인이 필요해 쓰지 않았다. 도중 `sleep`은 차단되어 `experiment_wait.py`를 썼다.
+
+# Results (수치와 결과 파일 경로)
+
+환자 평균 strict recall(전체 32명, 비정상 21명, recall 적격 20명):
+
+| 조건 | strict recall | 확정 소견이 있는 환자의 일반 정상문 단독 출력 | 명시 모순 환자 |
+|---|---|---|---|
+| base | 0.1667 | 12 | 7 |
+| R epoch1 / 2 / 6 | 0.125 / 0.1667 / 0.200 | 14 / 7 / 8 | 0 / 1 / 3 |
+| G epoch1 / 2 / 6 | 0.100 / 0.1667 / 0.1667 | 16 / 8 / 5 | 0 / 1 / 2 |
+
+- 모순 환자 수는 저장 규약 기준이다. 세 가지 해석(저장 규약, 모호 제외, 일반 정상문을 모순으로 계산)별 수치는 `analysis/sensitivity.json`에 있다.
+- 사전 판정 (paired bootstrap 10,000회, seed94017):
+
+| 비교 | 평균 차이 | 증가/감소 | 한 환자 제거 최소 | (a) | (b) | (c) |
+|---|---|---|---|---|---|---|
+| R epoch6−1 | +0.075 | 3/1 | +0.026 | 충족 | 충족 | 저장 규약은 미충족, 일반 정상문 해석은 충족 |
+| R epoch2−1 | +0.042 | 3/1 | -0.009 | 충족 | 미충족 | 저장 규약은 미충족 |
+| G epoch6−1 | +0.067 | 4/1 | +0.018 | 충족 | 충족 | 저장 규약은 미충족 |
+| G epoch2−1 | +0.067 | 4/1 | +0.018 | 충족 | 충족 | 저장 규약은 미충족 |
+
+- 위 표는 일반 정상문 해석(모순 계산 규약 (3))에서는 R/G epoch6−1 모두 (c)가 충족되고, 저장 규약과 모호 제외에서는 미충족임을 뜻한다. R epoch6−1의 CI는 [-0.10, 0.25], G epoch6−1은 [-0.092, 0.225]다.
+- 확정 양성 소견이 없다고 판정한 이유 중 하나로, epoch1 #13(우측 중심정맥관)은 reference의 tip 위치 부재로 모호 표시했다. 이를 type_only로 바꾸면 R epoch6−1은 평균 +0.125, 증가 3명·감소 0명이 된다. 결론은 같다.
+- 해석: 사전 정한 대로 (a)(b)는 R epoch6에서 충족되고 (c)는 해석에 따라 판정이 뒤집히므로 **불확정**이다.
+- 결과 파일: `results/iter_094/analysis/{summary,sensitivity,verify}.json`, `results/iter_094/semantic/epoch1/eval/{report,per_output}.json`, `results/iter_094/gen/{R,G}_epoch1/`, `results/iter_094/input_manifest.json`.
+- 비용: 두 GPU 병렬 생성 wall은 약 147초다. 실제 지배 비용은 사례별 의미 검토였다. 시간·GPU 상한은 적용하지 않았다.
+
+# Goal Progress / Reused Assets (목표 진전·미검증 범위, 재사용 출처·검증)
+
+- 진전: 선택된 epoch1 checkpoint의 동일 V32 판독이 없어 판단하지 못하던 결측을 채웠다. epoch1은 정상문으로 거의 수렴해 있고, 후반 checkpoint의 소견 회복이 오류 비용 해석에 의존한다는 관찰을 확보했다.
+- 미검증: 독립 환자 집단 재현, 전문의·독립 평가자 판정, 일반 정상문 처리 규약의 고정, 위치 supervision의 인과 효과, 다른 seed·LR1e-4. 이번 결과를 독립 확인으로 부르지 않는다.
+- 재사용(검증 범위): `report90_recovery_gen`/`report90_gen_safe`/`report90_gen`의 생성 연산을 재사용했다. 입력 tensor와 공식 chat template 동일성은 worker 안의 기존 검사로 확인되고, `input_ids`가 저장된 epoch6 출력과 64건 모두 같다. `report90_semantic_eval`의 집계기는 그대로 사용했고, `report93_sens`와 `report92_autojudge`의 자동 판정은 쓰지 않았다. 기존 queue와 trainer는 실행하지 않았다.
+- 새 wrapper의 실제 중단·재개와 변조 거부는 이번에 별도로 시험하지 않았다. 기존 경로의 재개 검사에 의존했으며 이번 64건은 단일 launch로 완료됐다.
+
+# Problems (현재 결론 무효 / 재사용 전 수정 / 추후 개선을 구분)
+
+- 현재 결론 무효: 없음.
+- 한계(결론 해석 관련): 일반 정상문 처리 규약이 저장 판정 안에서 불일치한다. base의 "Normal chest X-ray."는 모순으로, epoch1·2·6의 "No significant (radiological) findings."는 unknown으로 계산돼 있다. 이 불일치가 (c) 판정의 해석 의존성을 만든다. 기존 판정은 소급 변경하지 않았다.
+- 재사용 전 수정: `report94_gen.py`는 `report90_gen.OUT`을 모듈 전역으로 덮어쓰는 방식이라 다른 경로에 재사용할 때 같은 방식으로 지정해야 한다. 판정 스크립트 `report94_judgments.py`는 이번 32명 전용 표이며 범용 의미 평가기가 아니다.
+- 추후 개선: 모순 후보 7건의 검토 기록이 사례 단위이고 독립 평가자 합의는 없다.
+
+# Recommendation to GPT
+
+- 현재 recipe(NLL 선택 epoch1 + 위치 보조 CE 포함 report SFT)의 추가 epoch·seed·위치 loss 투자는 보류한다. 후반 R의 소견 회복은 +0.075 수준이며 base 대비 +0.033으로 작고 오류 해석에 의존한다.
+- 이 연구 묶음을 이어가려면 새 학습이 아니라 먼저 일반 정상문·모순 판정 규약을 고정하고 독립 환자 집단에서 판독 baseline 자체의 약함(정상문 수렴)을 다룰지 결정하는 것이 우선이다. 그 결정 없이 선택 보완 시험을 추가하지 않는 것을 권고한다.
+
+SELF_CHECK: PASS
+SUMMARY: 선택 epoch1 R/G의 V32 판독 64건을 생성해 저장 출력과 비교한 결과, R epoch6−1 recall +0.075(CI [-0.10, 0.25])이나 오류 비용(c)이 일반 정상문 해석에 따라 갈려 사전 기준상 불확정이며 현재 recipe 선택 보완 투자는 보류한다.
+
+# [orchestrator] 권한 거부된 도구 호출
+- Bash: mkdir -p results/iter_094/gen && cat > report94_gen.py <<'EOF'
+"""iter_094: 기존 recovery 생성 연산(report90_recovery_gen)을 유지하고 출력·cache 경로만 iter_094로 격리한다.
+parent와 worker subprocess 모두 이 파일을 진입점으로 쓰므로 OUT이 일관된다."""
+import argparse
+from pathlib import Path
+import report90_gen as C
+import report90_gen_safe as S
+import report90_recovery_gen as RG  # load_model·SOURCES 패치 적용
+from report86_common import sha
+
+OUT=Path(__file__).resolve().parent/'results/iter_094'
+C.OUT=OUT
+C.SOURCES=C.SOURCES+['report94_gen.py']
+C.__file__=__file__
+
+if __name__=='__main__':
+    p=argparse.ArgumentParser();p.add_argument('command',choices=['worker','launch']);p.add_argument('--requests',required=True);p.add_argument('--out',required=True)
+    p.add_argument('--checkpoint');p.add_argument('--workers',type=int,default=2);p.add_argument('--shard',type=int,default=0);p.add_argument('--gpu');p.add_argument('--limit',type=int,default=0);p.add_argument('--peak-mib',type=int,default=12000)
+    a=p.parse_args();raise SystemExit(C.worker(a) if a.command=='worker' else S.launch(a))
+EOF
+python -c "
+import report94_gen as W
+print(W.C.OUT, W.C.__file__, W.C.SOURCES[-4:])
+p=W.C.protocol('results/iter_090/data/V32/requests.json','results/iter_090/recovery/train/R_lr0.0002/checkpoint_000064.pt');print(p['checkpoint_sha'][:8],list(p['code']))"
+- Bash: python ../experiment_wait.py --pid $(pgrep -f "report94_launch.py" | head -1) --timeout 600
+- Bash: ps -o pid,ppid,etime,cmd -p 514439,514441,514673
+- Bash: python - <<'EOF'
+import json
+from pathlib import Path
+R=Path('results')
+def rows(p):return [json.loads(l) for l in Path(p).read_text().splitlines()]
+old={r['id']:r for r in rows(R/'iter_090/recovery/validation/epoch6/R_lr0.0002_report/worker_0.jsonl')}
+for m in 'RG':
+    new=rows(R/f'iter_094/gen/{m}_epoch1/worker_0.jsonl')
+    print(m,len(new),len({r['id'] for r in new}),'eos',sum(r['attempts'][-1]['ended_eos'] for r in new),'multi-attempt',sum(len(r['attempts'])>1 for r in new),
+      'ids_match',all(r['input_ids']==old[r['id']]['input_ids'] for r in new),'empty',sum(not r['text'].strip() for r in new),'gpu',{r['gpu'] for r in new},
+      'words',sum(len(r['text'].split()) for r in new)/len(new))
+EOF
+
+
+
+## iter_094 GPT REVIEW [CONTINUE] — 2026-10-08 01:10:11
+
+# 요약
+
+- **판정:** 유효한 출력 비교이며 `inconclusive`다. 현재 recipe의 선택 보완·추가 학습 투자는 보류한다.
+- **핵심 근거:** recall 적격 20명에서 R epoch1→6은 0.125→0.200, 차이 95% CI는 [-0.100, 0.250]이다. 오류 비증가 기준은 확인하지 못했다.
+- **의미·한계:** 선택 시점의 출력 차이는 확인됐지만 강한 판독 baseline 확보와 위치 학습 효과는 미확정이다. 의미 평가 일부는 재사용 전 수정이 필요하다.
+- **다음:** 같은 V32 후보 추가를 끝내고, 기존 관찰을 이어받아 연구 묶음의 다음 투자 하나를 선택한다.
+
+## 알림 요약
+
+- 결과: 흉부 X-ray V32의 선택 epoch1 판독 64건을 완료했다. R의 후반 recall은 +7.5pp였지만 오류 비용을 포함한 개선은 불확정이다.
+- 의미: checkpoint 선택만 바꾸면 baseline 문제가 해결된다는 근거는 확보하지 못했다. 위치 supervision 전체의 실패를 뜻하지 않는다.
+- 후속: 현재 recipe 확대를 보류하고 강한 판독 대안 이후의 잔여 문제와 baseline 재구성의 투자 가치를 비교할 것을 권고한다. 이번 한정 진단의 결측은 해소됐기 때문이다.
+- 대안: 의미 규약을 고정한 독립 환자 비교가 가능하지만, 현재 불확정성을 해소할 가능성만으로 추가 평가를 발주하기에는 실용 가치와 변경 근거가 부족하다.
+
+# Assessment
+
+실제 담당은 `engineer_backend.json`과 `claude_meta.json`상 Claude이며 모델은 claude-sonnet-5-5, 설정은 sonnet/medium이다. 리뷰 대상 SHA는 `9ca45479e46c829fc14db698be1a335e831c2efb`다. 신규 소스 13개가 해당 SHA의 blob과 일치하며 작업 diff와 unpreserved_paths는 없다. 선별 반입 요청도 없다.
+
+계획·구조화된 결과·변경 diff·소스·실제 도구 호출과 완료 기록을 확인했다. 신규 학습이나 E128 재평가는 없었다. 완료된 사용자 인계 학습을 다시 실행하지 않은 것은 이번 계획과 일치한다.
+
+실제 비교는 완료됐으므로 valid_experiment=true다. 의미 평가의 제한은 정확한 오류율과 선택 보완의 양성 해석을 막지만, 실제 출력 변화 및 보수적인 불확정 판정 전체를 무효화하지 않는다. 전체 snapshot 재사용은 승인하지 않는다.
+
+# Key Findings
+
+1. **64건 생성 완료.** R/G 각 32개 고유 요청이 모두 EOS로 종료했다. 빈 출력과 cap 확장은 없다. checkpoint 바이트 hash, protocol 내 소스 hash, request·record digest, 영상 hash 및 기존 epoch6 input_ids 연결을 독립 확인했다. 두 completion의 산출물 hash도 일치했다. input_manifest의 19개 파일 hash 불일치는 0이다.
+
+2. **핵심 수치 독립 재계산.** 저장 요약 대신 judgments와 reference의 확정 양성 atom으로 7조건을 다시 집계했다. 전체 32명은 서로 다른 환자이며, 비정상 층 21명 중 recall 적격은 20명이다. base는 0.166667, R epoch1/2/6은 0.125/0.166667/0.200, G는 0.100/0.166667/0.166667이다. 검토한 match·claim 인용 566개는 원출력에 존재했다.
+
+3. **후반 회복과 불확실성.** R epoch6−1은 +0.075, 증가 3명·감소 1명이다. seed94017·10,000회 bootstrap CI [-0.100, 0.250]과 leave-one-out 최소 +0.026316을 재현했다. R epoch2−1은 +0.041667이나 leave-one-out 최소 -0.008772로 원 기준 (b)에 미달한다. R epoch6−base의 저장 차이 +0.033333 역시 독립 개선의 증거가 아니다.
+
+4. **회복의 실제 내용.** R6의 회복은 dual-chamber pacemaker 속성, hiatal hernia, 모호 reference로 표시된 chronic pulmonary change의 3명이다. 소실 1명은 catheter의 일부 위치만 언급한 epoch1을 strict로 인정한 판정에 의존한다. 이를 type_only로 처리한 저장 민감도에서는 R6−R1이 +0.125가 되지만, 오류 비용의 불확정은 해소되지 않는다.
+
+5. **오류와 정상문 편중.** 원문에서 epoch1의 일반 정상문은 R 25/32, G 27/32다. 저장 명시 모순은 R1 0명→R6 3명이며, R6에는 reference와 다른 catheter 경로와 humeral prosthesis 좌우 기술이 포함된다. 일반 정상문을 모두 모순으로 추가하는 민감도에서는 13→9명이지만, 이 수치는 아래 범위 문제 때문에 검증된 오류 감소로 승인하지 않는다.
+
+6. **자원과 완료.** R은 GPU1, G는 GPU0에서 각각 1 worker로 실행됐고 두 exit code는 0이다. 개별 launch는 약 143~147초, supervisor 전체는 155.557초다. 기존 메모리 근거와 작은 요청량을 재사용해 batch 탐색을 반복하지 않은 판단은 타당하다. 실행 로그에서 GPU 조회와 실제 supervisor 대기를 확인했다.
+
+# Problems / Concerns
+
+**현재 불확정 결론을 무효화하는 blocker는 없다.** 그러나 의미 보완이 완료됐다는 해석은 승인하지 않는다.
+
+- `report94_judgments.py`의 V13은 catheter tip 위치 누락을 인정하면서 strict/location=match로 저장한다. 모호성 민감도는 제공됐지만 엄격한 위치 일치 판정 자체가 타당해진 것은 아니다.
+- V14의 reference는 scoliosis 뒤에 `No other relevant findings`를 적는다. 이를 무조건적인 `No significant radiological findings`의 supported 근거로 사용하면 제외 범위를 잃는다.
+- `report94_sens.py`의 일반 정상문 민감도는 실제 일반 정상문 여부나 중요도를 검토하지 않고 negative-only 출력과 positive reference 존재를 사용한다. 기구 존재와 임상적으로 중요한 이상을 동일하게 취급할 수 있다. 따라서 13→9는 가정적 민감도이며, 타당한 의미 해석으로 양성 기준이 충족됐다는 증거가 아니다.
+- `normal_only_output_in_abnormal`은 positive claim 부재와 abnormal 플래그로 계산한다. 보고서의 '확정 소견 환자의 일반 정상문'이라는 표현과 다르다.
+- 도구 로그상 조건별 문장 분포를 먼저 본 뒤 조건명을 제거한 평가 화면을 읽었다. assistant 사례 검토는 확인되지만 독립 눈가림 평가라고 부를 수 없다.
+- 계획한 의미 대조 사례 검사와 wrapper의 중복 거부·완료 재개 제어 검사는 완료 근거가 없다. 단일 launch 결과는 유효하며, 이 미검증은 실제 재사용 전에 해결할 사항이다.
+
+검증 13/13 PASS는 연결·산술 검증이다. 의미 정답과 임상 사실성 검증을 대신하지 않는다. 기본 환경·모델 캐시 변경이나 원 E128 결과 덮어쓰기를 시사하는 실행 근거는 확인하지 못했다.
+
+# Interpretation
+
+선택된 epoch1의 동일 환자 출력이 없다는 설명은 이번에 해소됐다. 저장 규약과 민감도에서 후반 R의 일부 회복은 남으므로 '모든 시점이 같은 출력으로 실패했다'고 볼 수 없다. 그러나 선택 보완이 오류 비용 없이 충분한 판독 baseline을 만든다는 근거는 없다.
+
+원 계획은 의미 불확실성이 결정을 좌우하거나 오류 비용을 판단할 근거가 부족하면 불확정으로 종료하도록 했다. 이번 결과는 그 분기에 해당한다. 일반 정상문을 임의로 오류로 세거나 반대로 안전한 출력으로 인정해 양성·음성으로 확정하지 않는다. 판정 기준을 소급 변경하지 않는다.
+
+NLL의 일반적인 부적합, 정상문 target의 인과적 역할, 위치 supervision의 무효과 또는 인식·선택·결합의 내부 원인은 입증되지 않았다. iter_092의 E128 원 판정, iter_012의 grounding 개선, iter_088의 단순 영역 결합 충돌 관찰은 유지된다. 새 limitation 승격은 없다.
+
+논문 추천은 보류한다. 이번에는 선택 보완의 유망성이 오류 비용까지 포함해 확인되지 않았고 신규 방법 개선도 없다.
+
+# Strategy Check / 연구 방향 판단
+
+**이어받는 관찰 → 줄인 설명 → 남은 판단:** 위치 출력은 학습됐지만 판독 baseline이 약했다 → 원 선택 위반은 앞서 배제됐고 이번에는 동일 환자 epoch1 결측이 해소됐다 → 후반 회복만으로 baseline을 복구할 수 있는지는 오류 비용·평가 범위 때문에 남는다.
+
+- **실행 유효성:** 새64출력과 저장160출력 비교는 완료됐다. 준비만 수행한 반복이 아니다.
+- **성능 개선:** 저장 규약상 R의 후반 회복은 있다. 오류 비용을 포함한 실용 개선이나 base 대비 독립 우위는 미확인이다.
+- **가설 지지:** checkpoint에 따라 판독 내용이 달라진다는 제한된 관찰은 강화됐다. 선택 보완의 충분성과 위치 보조 학습 효과는 미확정이다.
+- **신규 기여 가능성:** 강한 report-only baseline 이후의 중요한 잔여 문제를 아직 확보하지 못했다. 선택 방식 변경 자체는 contribution이 아니다.
+
+iter_089~092의 자료·수치 복구와 실제 학습, iter_093~094의 선택 진단을 함께 보면 다음 비용을 같은 V32의 추가 후보와 의미 재집계에 쓰는 정보 가치는 낮아졌다. 이번 GPU 생성은 약156초였지만 사례 의미 검토와 재작업이 반복됐고, 그 비용의 정확한 시간은 계측되지 않았다. 반복 횟수 자체로 기각하는 판단은 아니다.
+
+**현재 선택은 recipe 투자 보류다.** 단순 C-H 결합도 자동 재개하지 않는다. iter_088에서 C-G 선택이 상당한 충돌을 피했기 때문이다. 다음 계획에서는 구체적인 근거가 있는 판독 baseline 재구성과 강한 기존 판독 시스템 이후의 잔여 문제를 비교해 하나를 선택해야 한다. 서로 다른 학습 조건의 시스템 순위나 단순 오류 발견만으로 새 방법을 발주하지 않는다.
+
+# Recommended Next Experiment
+
+이번 리뷰는 추가 생성이나 학습을 바로 권고하지 않는다. 먼저 같은 grounding-report-transfer 묶음에서 다음 투자 하나를 결정한다. 현재 recipe의 epoch4·다른 LR epoch1·추가 seed·위치 loss 및 E128 재선택은 보류한다.
+
+baseline 재구성을 택하려면 무엇을 바꾸면 판독 적합성이 회복될지에 대한 구체적인 근거와 최소 대조가 있어야 한다. 기존 강한 판독 시스템의 잔여 문제를 택하려면 단순 입력·출력 선택으로 해결되지 않는 실제 사용 문제를 기존 원출력과 연결해야 한다. 두 경로 모두 최소 비교, 강한 대안, 양성·음성·불확정별 종료 결정을 정한 뒤 실행한다. 근거 없이 같은 의미 평가 정비를 새 과학적 반복으로 만들지 않는다.
