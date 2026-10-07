@@ -1,0 +1,944 @@
+diff --git a/report87_check.py b/report87_check.py
+new file mode 100644
+index 0000000..8ccd5f9
+--- /dev/null
++++ b/report87_check.py
+@@ -0,0 +1,29 @@
++"""부분 판정 파일 구문·대응 검사(점수 계산·저장 없음). python report87_check.py <part files...>"""
++import sys
++from pathlib import Path
++
++import report86_eval as E1
++import report87_eval as E
++from report86_common import R86
++from report86_view import load
++
++
++def main(paths):
++    rows, reads, v1refs = load('E96')
++    amend = E.load_amend()
++    v1j = E1.parse_judgments((R86 / 'E96/judgments_E96_v2.txt').read_text(), rows, v1refs)
++    ok = True
++    for p in paths:
++        try:
++            jud = E.parse_v3(Path(p).read_text(), rows, amend, reads, v1j, subset=True)
++            n_cl = sum(len(o['claims']) for d in jud.values() for o in d.values())
++            n_i = sum(len(o['internal']) for d in jud.values() for o in d.values())
++            print('OK', Path(p).name, 'patients', len(jud), 'claim lines', n_cl, 'internal', n_i)
++        except E.JudgmentError as e:
++            ok = False
++            print('ERR', Path(p).name, e)
++    sys.exit(0 if ok else 1)
++
++
++if __name__ == '__main__':
++    main(sys.argv[1:])
+diff --git a/report87_eval.py b/report87_eval.py
+new file mode 100644
+index 0000000..1bc4df5
+--- /dev/null
++++ b/report87_eval.py
+@@ -0,0 +1,500 @@
++"""iter_087 의미 평가기(CPU). 규약: results/iter_087/semantic_protocol_v2.md. 입력: reference 보완(reference_amend_E96.json),
++판독 산출물(iter_086 readings.jsonl, 읽기 전용), 눈가림 key, v3 판정 파일(f/c/nf/i 줄), v1 판정(변경 이력 대조용).
++python report87_eval.py <judgments_v3.txt> <out_dir> [--subset]
++누락·중복·상호 배타성 위반·anchor 불일치·v1 변경 사유 누락은 JudgmentError로 중단한다(점수 계산 계속하지 않는다).
++"""
++import json
++import re
++import shlex
++import sys
++from pathlib import Path
++
++import numpy as np
++
++from report86_common import R86, ROOT, save, sha
++import report86_eval as E1
++from report86_view import CONDS, blind_order, clean, load as load_v1
++
++R87 = ROOT / 'results/iter_087'
++SEED = 84017
++NBOOT = 10000
++KEPT = ('pos_def', 'pos_hedged', 'pos_temporal', 'pos_ambiguous')
++LOCC, ATTRC = 'mcoan', 'mcoan'
++CLS_OK = {'S', 'U', 'C.neg', 'C.pos', 'C.loc', 'C.attr', 'C.locattr'}
++POLCERT = {'+d', '+p', '-d', '-p'}
++COMPARISONS = E1.COMPARISONS
++V1LOC = {'+': 'm', '-': 'c', '~': 'o', '': 'n'}
++
++
++class JudgmentError(ValueError):
++    pass
++
++
++def load_amend():
++    return json.loads((R87 / 'reference_amend_E96.json').read_text())['patients']
++
++
++def ch_groups(rec):
++    """C-H 영역 출력: report86_view.render_ch와 같은 묶음. returns ({k: [seg idx]}, G idx, per-seg source)"""
++    groups, order, gidx, srcs = {}, [], None, []
++    for i, s in enumerate(rec['segments']):
++        src = s['source'].split('|')[1]
++        srcs.append(src)
++        if src == 'G':
++            gidx = i
++            continue
++        t = clean(s['text'])
++        t = re.sub(r'^Location of the [^:]*:\s*\.?\s*', '', t)
++        t = re.sub(r'^Description:\s*', '', t)
++        t = t.replace('Description:', '').strip()
++        if t not in groups:
++            groups[t] = []
++            order.append(t)
++        groups[t].append(i)
++    return [groups[t] for t in order], gidx, srcs
++
++
++def locate(rec, cond, anchor, at):
++    """anchor('a||b'는 같은 사실의 서로 다른 문구) 원문 위치. returns (n_units, occurrences). C-H는 @ 필수, 그 외는 @ 금지."""
++    if '||' in anchor:
++        occ_all, n_u = [], None
++        for a in anchor.split('||'):
++            n_u, o = locate(rec, cond, a, at)
++            occ_all += [dict(x, anchor=a) for x in o]
++        return n_u, occ_all
++    if cond == 'C-H':
++        if not at:
++            raise JudgmentError('C-H claim needs @L<k>/@G/@r:<region>')
++        groups, gidx, srcs = ch_groups(rec)
++        if at == '@G':
++            segs = [gidx]
++        elif at.startswith('@L'):
++            k = int(at[2:])
++            if not 1 <= k <= len(groups):
++                raise JudgmentError(f'bad group {at} (n={len(groups)})')
++            segs = groups[k - 1]
++        elif at.startswith('@r:'):
++            segs = [i for i, s in enumerate(srcs) if s == at[3:]]
++            if not segs:
++                raise JudgmentError(f'no region {at}')
++        else:
++            raise JudgmentError(f'bad @ {at}')
++        occ = []
++        for i in segs:
++            t = rec['segments'][i]['text']
++            p = t.find(anchor)
++            if p < 0:
++                raise JudgmentError(f'anchor not in segment {srcs[i]}: {anchor!r}')
++            starts = [m.start() for m in re.finditer(re.escape(anchor), t)]
++            occ.append({'seg': i, 'source': srcs[i], 'starts': starts})
++        return len(segs), occ
++    if at:
++        raise JudgmentError(f'@ not allowed for {cond}')
++    t = rec['text']
++    starts = [m.start() for m in re.finditer(re.escape(anchor), t)]
++    if not starts:
++        raise JudgmentError(f'anchor not found: {anchor!r}')
++    return 1, [{'seg': 0, 'source': 'text', 'starts': starts}]
++
++
++def split_note(tokens):
++    if '--' in tokens:
++        i = tokens.index('--')
++        return tokens[:i], ' '.join(tokens[i + 1:])
++    return tokens, ''
++
++
++def parse_patient_outputs(lines, ctx, img, reads, rows_amend, v1j):
++    """lines: [(ln_no, raw)] of a patient block. returns {cond: output}"""
++    order = blind_order(img)
++    facts_def = {f['fact_id']: f for f in rows_amend[img]['facts']}
++    pos_ids = {fid for fid, f in facts_def.items() if f['v1_class'] in KEPT}
++    out, cur, curc = {}, None, None
++    n_line_err = 0
++    for ln_no, raw in lines:
++        try:
++            toks = shlex.split(raw.strip())
++        except ValueError as e:
++            raise JudgmentError(f'line {ln_no}: shlex {e}')
++        if not toks:
++            continue
++        m = re.fullmatch(r'O([1-8])', toks[0])
++        if m and len(toks) == 1:
++            cond = order[int(m.group(1)) - 1]
++            if cond in out:
++                raise JudgmentError(f'line {ln_no}: duplicate output {toks[0]}')
++            out[cond] = {'facts': {}, 'claims': [], 'nf': [], 'internal': [], 'cond': cond, 'oid': toks[0]}
++            curc, cur = cond, out[cond]
++            continue
++        if cur is None:
++            raise JudgmentError(f'line {ln_no}: line before output header')
++        rec = reads[(img, curc)]
++        kind = toks[0]
++        toks, note = split_note(toks)
++        try:
++            if kind == 'f':
++                fid, st = toks[1], toks[2]
++                if fid not in pos_ids or fid in cur['facts']:
++                    raise JudgmentError(f'bad/duplicate fact {fid}')
++                f = facts_def[fid]
++                ent = {'s': st, 'loc': None, 'attr': None, 'span': None, 'co': None, 'why': note}
++                if st == 'U':
++                    rest = toks[3:]
++                    if rest:
++                        raise JudgmentError('U takes no extra tokens')
++                elif st in ('D', 'P'):
++                    ent['loc'], ent['attr'], ent['span'] = toks[3], toks[4], toks[5]
++                    rest = toks[6:]
++                    if ent['loc'] not in LOCC or ent['attr'] not in ATTRC:
++                        raise JudgmentError('loc/attr code')
++                    need_loc = bool(f['loc_req'])
++                    hard_attr = [a for a in f['attr_req'] if not a.startswith('?')]
++                    if need_loc == (ent['loc'] == 'n'):
++                        raise JudgmentError(f'loc code {ent["loc"]} vs loc_req {f["loc_req"]}')
++                    if not f['attr_req'] and ent['attr'] != 'n':
++                        raise JudgmentError('attr must be n (no attr_req)')
++                    if f['attr_req'] and ent['attr'] == 'n' and hard_attr:
++                        raise JudgmentError('attr n but attr_req present')
++                    if f['attr_req'] and not hard_attr and ent['attr'] == 'o':
++                        raise JudgmentError('only hedged attr_req: use n instead of o')
++                elif st in ('N', 'n'):
++                    ent['span'] = toks[3]
++                    rest = toks[4:]
++                else:
++                    raise JudgmentError(f'status {st}')
++                if rest:
++                    if len(rest) not in (2, 3) or rest[0] != '+' or rest[1] not in ('N', 'D', 'P', 'n'):
++                        raise JudgmentError('bad secondary evidence')
++                    ent['co'] = {'s': rest[1], 'span': rest[2] if len(rest) > 2 else None}
++                if st in ('D', 'P', 'N', 'n') and curc != 'C-H' and ent['span'] not in rec['text']:
++                    raise JudgmentError(f'span not found {ent["span"]!r}')
++                if st in ('D', 'P', 'N', 'n') and curc == 'C-H' and not any(ent['span'] in s['text'] for s in rec['segments']):
++                    raise JudgmentError(f'span not in any segment {ent["span"]!r}')
++                cur['facts'][fid] = ent
++            elif kind == 'c':
++                cls, ref, pc, anchor = toks[1], toks[2], toks[3], toks[4]
++                at = toks[5] if len(toks) > 5 else None
++                if len(toks) > 6:
++                    raise JudgmentError('extra tokens in c line')
++                if cls not in CLS_OK or pc not in POLCERT:
++                    raise JudgmentError(f'cls/polcert {cls} {pc}')
++                refs = [] if ref == '-' else ref.split(',')
++                for r in refs:
++                    if r not in facts_def:
++                        raise JudgmentError(f'unknown ref {r}')
++                if cls == 'S' and not refs:
++                    raise JudgmentError('S needs ref')
++                if cls.startswith('C.') and not refs:
++                    raise JudgmentError('C needs ref')
++                if cls in ('C.neg',) and (pc[0] != '+' or not all(facts_def[r]['v2_class'] in ('neg_specific', 'normal_scoped') for r in refs)):
++                    raise JudgmentError('C.neg needs + claim and neg_specific/normal_scoped refs')
++                if cls == 'C.pos' and (pc[0] != '-' or not all(facts_def[r]['v1_class'] in KEPT for r in refs)):
++                    raise JudgmentError('C.pos needs - claim and positive refs')
++                if cls in ('C.loc', 'C.attr', 'C.locattr') and (pc[0] != '+' or not all(facts_def[r]['v1_class'] in KEPT for r in refs)):
++                    raise JudgmentError('C.loc/attr needs + claim and positive refs')
++                n_units, occ = locate(rec, curc, anchor, at)
++                cur['claims'].append({'cls': cls, 'refs': refs, 'pol': pc[0], 'cert': pc[1], 'anchor': anchor, 'at': at, 'n': n_units,
++                                      'occ': occ, 'note': note})
++            elif kind == 'nf':
++                n_units, occ = locate(rec, curc, toks[1], toks[2] if len(toks) > 2 else None)
++                cur['nf'].append({'anchor': toks[1], 'n': n_units})
++            elif kind == 'i':
++                strength, dim = toks[1], toks[2]
++                if strength not in ('d', 'p') or dim not in ('presence', 'location', 'attribute'):
++                    raise JudgmentError('i strength/dim')
++                rest = toks[3:]
++                parts, j = [], 0
++                while j < len(rest):
++                    a = rest[j]
++                    at = None
++                    if j + 1 < len(rest) and rest[j + 1].startswith('@'):
++                        at = rest[j + 1]
++                        j += 1
++                    j += 1
++                    _, occ = locate(rec, curc, a, at)
++                    parts.append({'anchor': a, 'at': at, 'occ': occ})
++                if len(parts) != 2:
++                    raise JudgmentError('i needs two anchors')
++                cur['internal'].append({'strength': strength, 'dim': dim, 'parts': parts, 'note': note})
++            else:
++                raise JudgmentError(f'unknown line kind {kind}')
++        except IndexError:
++            msg = f'line {ln_no}: missing token ({raw.strip()[:70]})'
++            if ctx is None:
++                raise JudgmentError(msg)
++            ctx.append(msg)
++            n_line_err += 1
++        except JudgmentError as e:
++            msg = f'line {ln_no}: {e} :: {raw.strip()[:90]}'
++            if ctx is None:
++                raise JudgmentError(msg)
++            ctx.append(msg)
++            n_line_err += 1
++    if n_line_err:
++        return out
++    if set(out) != set(CONDS):
++        raise JudgmentError(f'{img[:8]}: outputs {sorted(out)}')
++    # 출력별 완전성·대응 검사
++    for cond, o in out.items():
++        if set(o['facts']) != pos_ids:
++            raise JudgmentError(f'{img[:8]} {o["oid"]}: facts judged {sorted(o["facts"])} != required {sorted(pos_ids)}')
++        for fid, ent in o['facts'].items():
++            linked = [c for c in o['claims'] if fid in c['refs']]
++            f = facts_def[fid]
++            if ent['s'] in ('D', 'P'):
++                if not linked:
++                    raise JudgmentError(f'{img[:8]} {o["oid"]}: {fid} {ent["s"]} has no linked claim')
++                kinds = {c['cls'] for c in linked}
++                if ent['loc'] == 'c' and not (kinds & {'C.loc', 'C.locattr'}):
++                    raise JudgmentError(f'{img[:8]} {o["oid"]}: {fid} loc conflict needs C.loc/C.locattr claim')
++                if ent['attr'] == 'c' and not (kinds & {'C.attr', 'C.locattr'}):
++                    raise JudgmentError(f'{img[:8]} {o["oid"]}: {fid} attr conflict needs C.attr/C.locattr claim')
++                if ent['loc'] != 'c' and ent['attr'] != 'c' and kinds & {'C.loc', 'C.attr', 'C.locattr'}:
++                    raise JudgmentError(f'{img[:8]} {o["oid"]}: {fid} no conflict but C.loc/attr claim')
++                if ent['co'] and ent['co']['s'] in ('N', 'n') and 'C.pos' not in kinds:
++                    raise JudgmentError(f'{img[:8]} {o["oid"]}: {fid} co-evidence N needs a C.pos claim')
++                if ent['loc'] != 'c' and 'C.loc' in kinds or ent['attr'] != 'c' and 'C.attr' in kinds:
++                    raise JudgmentError(f'{img[:8]} {o["oid"]}: {fid} claim kind vs code mismatch')
++            elif ent['s'] in ('N', 'n'):
++                pc = [c for c in linked if c['cls'] == 'C.pos']
++                if not pc:
++                    raise JudgmentError(f'{img[:8]} {o["oid"]}: {fid} {ent["s"]} needs C.pos claim')
++                want = '-d' if ent['s'] == 'N' else '-p'
++                if not any(c['pol'] + c['cert'] == want for c in pc):
++                    raise JudgmentError(f'{img[:8]} {o["oid"]}: {fid} {ent["s"]} needs a {want} C.pos claim')
++            else:
++                if any(c['cls'] in ('C.pos', 'C.loc', 'C.attr', 'C.locattr') for c in linked):
++                    raise JudgmentError(f'{img[:8]} {o["oid"]}: {fid} U but conflict claim')
++        for c in o['claims']:
++            for r in c['refs']:
++                if c['cls'] in ('C.pos', 'C.loc', 'C.attr', 'C.locattr') and r in o['facts'] and o['facts'][r]['s'] == 'U':
++                    raise JudgmentError(f'{img[:8]} {o["oid"]}: claim refs U fact {r}')
++        # v1 대비 변경은 사유 필요
++        v1 = v1j.get(img, {}).get(cond) if v1j else None
++        if v1:
++            for fid, ent in o['facts'].items():
++                a = v1['facts'][fid]
++                s1 = a['s']
++                changed = s1 != ent['s'] and not (s1 == 'U' and ent['s'] == 'n')  # 약화된 정상(n)은 v1에서 U였던 규칙 변경
++                if ent['s'] in ('D', 'P') and s1 == ent['s'] and a['loc'] != '' and facts_def[fid]['loc_req'] and V1LOC[a['loc']] != ent['loc']:
++                    changed = True
++                if changed and not ent['why']:
++                    msg = f'{img[:8]} {o["oid"]}: {fid} changed from v1 ({s1}{a["loc"]}) to {ent["s"]} without -- why'
++                    if ctx is None:
++                        raise JudgmentError(msg)
++                    ctx.append(msg)
++    return out
++
++
++def parse_v3(text, rows, amend, reads, v1j=None, subset=False):
++    blocks, cur = {}, None
++    for ln_no, raw in enumerate(text.splitlines(), 1):
++        s = raw.strip()
++        if not s or s.startswith('#'):
++            continue
++        m = re.fullmatch(r'P(\d{3})', s)
++        if m:
++            idx = int(m.group(1))
++            if idx >= len(rows) or idx in blocks:
++                raise JudgmentError(f'line {ln_no}: bad/duplicate patient {s}')
++            cur = idx
++            blocks[idx] = []
++            continue
++        if cur is None:
++            raise JudgmentError(f'line {ln_no}: before first patient')
++        blocks[cur].append((ln_no, raw))
++    if not subset and set(blocks) != set(range(len(rows))):
++        raise JudgmentError(f'patients judged {len(blocks)} != {len(rows)}')
++    missing = []
++    res = {rows[i]['ImageID']: parse_patient_outputs(blocks[i], missing, rows[i]['ImageID'], reads, amend, v1j) for i in sorted(blocks)}
++    if missing:
++        raise JudgmentError('missing -- why for v1 changes:\n  ' + '\n  '.join(missing))
++    return res
++
++
++def per_output(img, cond, o, amend, reads):
++    facts = {f['fact_id']: f for f in amend[img]['facts']}
++    res = {}
++    for den, key in (('v1', 'v1_class'), ('v2', 'v2_class')):
++        pd = [fid for fid, f in facts.items() if f[key] == 'pos_def']
++        st = {fid: o['facts'].get(fid) for fid in pd}
++        # v2에서 P041 F2처럼 정정된 사실은 v1 pos_temporal이므로 판정은 f 줄에 있다.
++        n = len(pd)
++        D = sum(st[f]['s'] == 'D' for f in pd)
++        P = sum(st[f]['s'] == 'P' for f in pd)
++        Ds = sum(st[f]['s'] == 'D' and st[f]['loc'] in 'nm' and st[f]['attr'] in 'nm' for f in pd)
++        res[den] = {'n': n, 'D': D, 'P': P, 'N': sum(st[f]['s'] == 'N' for f in pd), 'n_hedged': sum(st[f]['s'] == 'n' for f in pd),
++                    'D_strict': Ds, 'loc_c': sum(st[f]['s'] in 'DP' and st[f]['loc'] == 'c' for f in pd),
++                    'loc_o': sum(st[f]['s'] in 'DP' and st[f]['loc'] == 'o' for f in pd),
++                    'attr_c': sum(st[f]['s'] in 'DP' and st[f]['attr'] == 'c' for f in pd),
++                    'attr_o': sum(st[f]['s'] in 'DP' and st[f]['attr'] == 'o' for f in pd),
++                    'recall_def': D / n if n else None, 'recall_strict': Ds / n if n else None, 'recall_incl_possible': (D + P) / n if n else None}
++    wide = [fid for fid, f in facts.items() if f['v2_class'] in ('pos_def', 'pos_hedged', 'pos_temporal')]
++    res['recall_wide_D'] = (sum(o['facts'][f]['s'] == 'D' for f in wide) / len(wide)) if wide else None
++    # 주장 집계(영역 수 반영)
++    S = {'d': 0, 'p': 0}
++    C = {'d': 0, 'p': 0}
++    U = {'d': 0, 'p': 0}
++    comp = {k: 0 for k in ('neg_v1', 'neg_new', 'neg_new_weakonly', 'pos_neg', 'pos_neg_other', 'loc', 'attr', 'neg_v1_poss', 'pos_neg_poss')}
++    tension = 0
++    has_pos_ref = any(f['v1_class'] in KEPT for f in facts.values())
++    for c in o['claims']:
++        tgt = {'S': S, 'U': U}.get(c['cls'], C)
++        tgt[c['cert']] += c['n']
++        if 'generic_global_normal' in c['note'] and has_pos_ref:
++            tension += c['n']
++        if c['cls'] == 'C.neg':
++            fs = [facts[r] for r in c['refs']]
++            if c['cert'] == 'd':
++                if any(f['v1_class'] == 'neg_specific' for f in fs):
++                    comp['neg_v1'] += c['n']
++                nonweak = [f for f in fs if f['v2_class'] == 'normal_scoped' and not f['weak']]
++                if nonweak:
++                    comp['neg_new'] += c['n']
++                elif any(f['v2_class'] == 'normal_scoped' for f in fs) and not any(f['v1_class'] == 'neg_specific' for f in fs):
++                    comp['neg_new_weakonly'] += c['n']
++            elif any(f['v1_class'] == 'neg_specific' for f in fs):
++                comp['neg_v1_poss'] += c['n']
++        elif c['cls'] == 'C.pos':
++            fs = [facts[r] for r in c['refs']]
++            if c['cert'] == 'd':
++                if any(f['v2_class'] == 'pos_def' for f in fs):
++                    comp['pos_neg'] += c['n']
++                else:
++                    comp['pos_neg_other'] += c['n']
++            else:
++                comp['pos_neg_poss'] += c['n']
++        elif c['cls'] in ('C.loc', 'C.locattr') and c['cert'] == 'd':
++            comp['loc'] += c['n']
++        if c['cls'] in ('C.attr', 'C.locattr') and c['cert'] == 'd':
++            comp['attr'] += c['n']
++    nS, nC, nU = sum(S.values()), sum(C.values()), sum(U.values())
++    n_pos_v1 = sum(f['v1_class'] == 'pos_def' for f in facts.values())
++    n_neg_v1 = sum(f['v1_class'] == 'neg_specific' for f in facts.values())
++    n_norm = sum(f['v2_class'] == 'normal_scoped' for f in facts.values())
++    comp_def = bool(n_pos_v1 or n_neg_v1)
++    ext_def = bool(comp_def or n_norm)
++    b = lambda x: int(x > 0)
++    # v1 pos_def의 위치 충돌 / 부정 성분 (common scope)
++    loc_v1 = sum(o['facts'][f]['s'] in 'DP' and o['facts'][f]['loc'] == 'c' and f in
++                 {fid for fid, ff in facts.items() if ff['v1_class'] == 'pos_def'} for f in o['facts'])
++    pos_neg_v1scope = sum(o['facts'][f]['s'] == 'N' for f in o['facts'] if facts[f]['v1_class'] == 'pos_def')
++    common = b(comp['neg_v1'] + pos_neg_v1scope + loc_v1) if comp_def else None
++    v2 = b(comp['neg_v1'] + comp['neg_new'] + comp['pos_neg'] + comp['loc'] + comp['attr']) if ext_def else None
++    v2nw = b(comp['neg_v1'] + comp['pos_neg'] + comp['loc'] + comp['attr']) if ext_def else None
++    res.update({'claims': {'S': nS, 'C': nC, 'U': nU, 'S_d': S['d'], 'S_p': S['p'], 'C_d': C['d'], 'C_p': C['p'], 'U_d': U['d'], 'U_p': U['p'],
++                           'n_total': nS + nC + nU, 'nonfactual': sum(x['n'] for x in o['nf']), 'tension_global_normal': tension},
++                'contra_components': comp, 'contra_common': common, 'contra_v2': v2, 'contra_v2_noweak': v2nw,
++                'contra_neg_v1': b(comp['neg_v1']) if ext_def else None, 'contra_neg_new': b(comp['neg_new']) if ext_def else None,
++                'contra_pos_neg': b(comp['pos_neg']) if ext_def else None, 'contra_loc': b(comp['loc']) if ext_def else None,
++                'contra_attr': b(comp['attr']) if ext_def else None,
++                'internal_d': len([x for x in o['internal'] if x['strength'] == 'd']), 'internal_p': len([x for x in o['internal'] if x['strength'] == 'p']),
++                'co_evidence': sum(1 for e in o['facts'].values() if e['co']),
++                'defined_common': comp_def, 'defined_extended': ext_def})
++    r = reads[(img, cond)]
++    res.update({'n_tokens': r['n_tokens'], 'final_non_eos': int(not all(r['final_eos'])), 'n_requests': len(r['request_ids']), 'n_attempts': r['n_attempts']})
++    return res
++
++
++def flat(p):
++    """환자×조건 지표 dict(비교·bootstrap 대상)."""
++    out = {}
++    for den in ('v1', 'v2'):
++        for m in ('recall_def', 'recall_strict', 'recall_incl_possible'):
++            out[f'{m}_{den}'] = p[den][m]
++        out[f'loc_c_{den}'] = p[den]['loc_c'] if p[den]['n'] else None
++        out[f'attr_c_{den}'] = p[den]['attr_c'] if p[den]['n'] else None
++    out['recall_wide_D'] = p['recall_wide_D']
++    for k in ('contra_common', 'contra_v2', 'contra_v2_noweak', 'contra_neg_v1', 'contra_neg_new', 'contra_pos_neg', 'contra_loc', 'contra_attr'):
++        out[k] = p[k]
++    out['internal_d'] = int(p['internal_d'] > 0)
++    out['internal_p'] = int(p['internal_p'] > 0)
++    out['claims_S'], out['claims_C'], out['claims_U'] = p['claims']['S'], p['claims']['C'], p['claims']['U']
++    out['claims_total'] = p['claims']['n_total']
++    return out
++
++
++def boot_ci(d, nboot=NBOOT):
++    d = np.asarray(d, float)
++    idx = np.random.default_rng(SEED).integers(0, len(d), size=(nboot, len(d)))
++    m = d[idx].mean(axis=1)
++    return [float(np.percentile(m, 2.5)), float(np.percentile(m, 97.5))]
++
++
++def evaluate(jud, rows, amend, reads):
++    strata = {r['ImageID']: r['stratum'] for r in rows}
++    per = {(i, c): per_output(i, c, jud[i][c], amend, reads) for i in jud for c in CONDS}
++    fl = {k: flat(v) for k, v in per.items()}
++    metrics = list(next(iter(fl.values())).keys())
++    sets = {'all': list(jud), 'abnormal': [i for i in jud if strata[i] == 'abnormal'], 'no_abnormal': [i for i in jud if strata[i] == 'no_abnormal']}
++    summary, comps = {}, {}
++    for sn, imgs in sets.items():
++        summary[sn] = {'n_patients': len(imgs), 'conditions': {}}
++        for c in CONDS:
++            agg = {}
++            for m in metrics:
++                vals = [fl[(i, c)][m] for i in imgs if fl[(i, c)][m] is not None]
++                agg[m] = {'mean': float(np.mean(vals)) if vals else None, 'n': len(vals)}
++            cl = {k: sum(per[(i, c)]['claims'][k] for i in imgs) for k in ('S', 'C', 'U', 'S_d', 'S_p', 'C_d', 'C_p', 'U_d', 'U_p', 'n_total', 'nonfactual', 'tension_global_normal')}
++            tot = cl['S'] + cl['C'] + cl['U']
++            cl['precision_lower'] = cl['S'] / tot if tot else None
++            cl['precision_upper'] = (cl['S'] + cl['U']) / tot if tot else None
++            cl['coverage'] = (cl['S'] + cl['C']) / tot if tot else None
++            td = cl['S_d'] + cl['C_d'] + cl['U_d']
++            cl['precision_lower_definite'] = cl['S_d'] / td if td else None
++            cl['precision_upper_definite'] = (cl['S_d'] + cl['U_d']) / td if td else None
++            cl['patients_with_no_claim'] = sum(per[(i, c)]['claims']['n_total'] == 0 for i in imgs)
++            agg['claims_total'] = cl
++            comp = {k: sum(per[(i, c)]['contra_components'][k] for i in imgs) for k in per[(imgs[0], c)]['contra_components']}
++            agg['contra_components_counts'] = comp
++            agg['contra_components_patients'] = {k: sum(per[(i, c)]['contra_components'][k] > 0 for i in imgs) for k in comp}
++            for den in ('v1', 'v2'):
++                agg['status_counts_' + den] = {k: sum(per[(i, c)][den][k] for i in imgs) for k in ('n', 'D', 'P', 'N', 'n_hedged', 'D_strict', 'loc_c', 'loc_o', 'attr_c', 'attr_o')}
++            agg['internal_counts'] = {'d': sum(per[(i, c)]['internal_d'] for i in imgs), 'p': sum(per[(i, c)]['internal_p'] for i in imgs)}
++            agg['final_non_eos_outputs'] = sum(per[(i, c)]['final_non_eos'] for i in imgs)
++            agg['requests_total'] = sum(per[(i, c)]['n_requests'] for i in imgs)
++            agg['tokens_mean'] = float(np.mean([per[(i, c)]['n_tokens'] for i in imgs]))
++            summary[sn]['conditions'][c] = agg
++        comps[sn] = {}
++        for a, b in COMPARISONS:
++            res = {}
++            for m in metrics:
++                pr = [(fl[(i, a)][m], fl[(i, b)][m]) for i in imgs if fl[(i, a)][m] is not None and fl[(i, b)][m] is not None]
++                if not pr:
++                    res[m] = None
++                    continue
++                d = [x - y for x, y in pr]
++                res[m] = {'diff': float(np.mean(d)), 'ci95': boot_ci(d) if len(d) > 1 else None, 'n': len(d)}
++            comps[sn][f'{a}-{b}'] = res
++    return {'summary': summary, 'comparisons': comps, 'bootstrap': {'n': NBOOT, 'seed': SEED, 'unit': 'patient paired, fresh rng(seed) per comparison-metric'},
++            'per_output': {f'{i}|{c}': v for (i, c), v in per.items()}}
++
++
++def serialize_judgments(jud):
++    """claims/anchor 위치를 포함한 저장용 구조(원문 span·영역 출처 연결)."""
++    out = {}
++    for img, d in jud.items():
++        out[img] = {c: {'facts': o['facts'], 'claims': o['claims'], 'nf': o['nf'], 'internal': o['internal']} for c, o in d.items()}
++    return out
++
++
++def run(jpaths, out_dir, subset=False):
++    rows, reads, _ = load_v1('E96')
++    amend = load_amend()
++    v1refs = load_v1('E96')[2]
++    v1j = E1.parse_judgments((R86 / 'E96/judgments_E96_v2.txt').read_text(), rows, v1refs)
++    text = '\n'.join(Path(p).read_text() for p in jpaths)
++    jud = parse_v3(text, rows, amend, reads, v1j, subset=subset)
++    res = evaluate(jud, rows, amend, reads)
++    res['inputs'] = {'judgments': {str(p): sha(p) for p in jpaths}, 'reference_amend_sha256': sha(R87 / 'reference_amend_E96.json'),
++                     'protocol_v2_sha256': sha(R87 / 'semantic_protocol_v2.md'), 'readings_sha256': sha(R86 / 'E96/readings.jsonl'),
++                     'eval_code_sha256': sha(__file__), 'subset': subset, 'n_patients': len(jud)}
++    out_dir = Path(out_dir)
++    save(out_dir / 'report.json', res)
++    save(out_dir / 'judgments_structured.json', serialize_judgments(jud))
++    return res
++
++
++if __name__ == '__main__':
++    args = [a for a in sys.argv[1:] if not a.startswith('--')]
++    run(args[:-1], args[-1], subset='--subset' in sys.argv)
+diff --git a/report87_lock.py b/report87_lock.py
+new file mode 100644
+index 0000000..5ba2a63
+--- /dev/null
++++ b/report87_lock.py
+@@ -0,0 +1,18 @@
++"""iter_087 규약 잠금: 전체 E96 판정 전에 규약·reference 보완·평가기 코드·fixture 결과 hash를 새 파일에 기록한다.
++python report87_lock.py   (이미 있으면 덮어쓰지 않고 실패; 이후 변경은 amendment 파일로 남긴다)"""
++from report86_common import ROOT, save, sha
++
++R87 = ROOT / 'results/iter_087'
++
++
++def main():
++    files = ['results/iter_087/semantic_protocol_v2.md', 'results/iter_087/reference_amend_E96.json', 'results/iter_087/source_manifest.json',
++             'report87_refamend.py', 'report87_eval.py', 'report87_view.py', 'report87_check.py', 'test_report87_eval.py',
++             'results/iter_087/tests/fixtures_report87_run2.json']
++    save(R87 / 'protocol_lock.json', {'purpose': '전체 E96 의미 판정(judgments_parts) 시작 전 잠금. 이후 변경은 amendment 파일로 이력을 남긴다.',
++                                      'files': {f: sha(ROOT / f) for f in files}})
++    print('locked', len(files))
++
++
++if __name__ == '__main__':
++    main()
+diff --git a/report87_lock_amend.py b/report87_lock_amend.py
+new file mode 100644
+index 0000000..a11b2e2
+--- /dev/null
++++ b/report87_lock_amend.py
+@@ -0,0 +1,10 @@
++"""규약 amendment hash 기록. python report87_lock_amend.py <out_name.json> <file relative to research/> ...
++기존 protocol_lock.json은 변경하지 않고 새 파일에 이후 변경 이력을 남긴다."""
++import sys
++
++from report86_common import ROOT, save, sha
++
++if __name__ == '__main__':
++    out, files = sys.argv[1], sys.argv[2:]
++    save(ROOT / 'results/iter_087' / out, {'files': {f: sha(ROOT / f) for f in files}})
++    print('saved', out, len(files))
+diff --git a/report87_manifest.py b/report87_manifest.py
+new file mode 100644
+index 0000000..c501aab
+--- /dev/null
++++ b/report87_manifest.py
+@@ -0,0 +1,39 @@
++"""iter_087 source manifest: iter_086 불변 입력·기준 계획·코드 SHA를 연결한다(읽기 전용, 새 파일만 쓴다).
++python report87_manifest.py
++기존 iter_086 무결성 검증(report86_merge: 3,456 행 digest·completion)은 입력 SHA가 불변이면 재사용한다. 여기서는 SHA만 대조한다."""
++import subprocess
++
++from report86_common import ROOT, R86, save, sha
++
++R87 = ROOT / 'results/iter_087'
++AGENT = ROOT.parent / 'agent/runs'
++EXPECTED = {'iter_086': '26c54de277676324b2942f1ac52647ef67ac8c04e04e36f1202e5bd7014126d7',
++            'iter_085': '5663189557a03e3e30b620dbb2202fd86b754ca9b2eebbe6eeb6fadffc962f2f',
++            'iter_084': '42334bc910f7abbb26e27f60696b59b5d2a974d6143fbe2aed153e08c315fefd'}
++
++
++def main():
++    head = subprocess.run(['git', 'rev-parse', 'HEAD'], cwd=ROOT, capture_output=True, text=True, check=True).stdout.strip()
++    srcs = {
++        'readings': R86 / 'E96/readings.jsonl', 'merge_summary': R86 / 'E96/merge_summary.json', 'E_lock': R86 / 'E96/E_lock.json',
++        'E_lock_amendment': R86 / 'E96/E_lock_amendment.json', 'blind_key_private': R86 / 'E96/blind_key_private.json',
++        'reference_facts_E_private': R86 / 'E/reference_facts_E_private.json', 'inputs_E96': R86 / 'E/inputs_E96.json',
++        'raw_manifest_E96': R86 / 'E/raw_manifest_E96.json', 'judgments_v1': R86 / 'E96/judgments_E96_v2.txt',
++        'corrections_v2': R86 / 'E96/corrections_v2.json', 'eval_v1_report': R86 / 'E96/eval/report.json',
++        'eval_v2_report': R86 / 'E96/eval_v2/report.json', 'recheck_sample': R86 / 'E96/recheck_sample.json',
++        'semantic_protocol_v1': R86 / 'semantic_protocol.md', 'cost': R86 / 'E96/cost.json', 'inheritance_manifest': R86 / 'inheritance_manifest.json',
++    }
++    plans = {'iter_%03d_plan' % n: AGENT / ('iter_%03d/plan.md' % n) for n in (84, 85, 86, 87)}
++    code = {p.name: sha(p) for p in sorted(ROOT.glob('report86_*.py')) + [ROOT / 'test_report86_eval.py', ROOT / 'test_report86.py']}
++    out = {'research_head': head,
++           'inputs': {k: {'path': str(v.relative_to(ROOT.parent)), 'sha256': sha(v)} for k, v in srcs.items()},
++           'plans': {k: {'path': str(v.relative_to(ROOT.parent)), 'sha256': sha(v)} for k, v in plans.items()},
++           'iter_086_code_sha256': code, 'expected_plan_sha256': EXPECTED}
++    for n, exp in EXPECTED.items():
++        assert out['plans'][n + '_plan']['sha256'] == exp, n
++    save(R87 / 'source_manifest.json', out)
++    print('ok', head, len(srcs), len(code))
++
++
++if __name__ == '__main__':
++    main()
+diff --git a/report87_refamend.py b/report87_refamend.py
+new file mode 100644
+index 0000000..b840c42
+--- /dev/null
++++ b/report87_refamend.py
+@@ -0,0 +1,156 @@
++"""iter_087 reference 보완(모델 출력·원 지표를 보지 않고 reference 문장만 읽어 작성, 사후 보완임을 명시).
++python report87_refamend.py   -> results/iter_087/reference_amend_E96.json (새 파일만)
++
++원 reference ID·원 class(v1)를 보존하고 다음만 추가한다:
++  loc_req   문장이 명시한 위치(없으면 None). 문장에 없는 annotation 위치는 쓰지 않는다.
++  attr_req  문장이 명시한 속성 목록. '?' 접두는 reference 자체가 불확실하게 쓴 속성(생략해도 strict 실패 아님, 충돌은 충돌).
++  targets   neg_specific / normal_scoped의 부정 대상 개념.
++  v2_class  v1과 같되 (a) 대상·속성이 명시된 정상 사실은 normal_scoped, (b) P041 F2 한 건을 정정(pos_temporal -> pos_def).
++  weak      범위가 약한 normal_scoped(민감도에서 제외 가능).
++포괄 문구(generic_normal: 'no relevant findings', 'within normal limits' 단독 등)와 rest-of 범위 문구는 평가에 쓰지 않는다.
++"""
++from report86_common import R86, ROOT, save, sha
++
++R87 = ROOT / 'results/iter_087'
++LUNG = 'lung_parenchyma'
++
++# 양성 사실의 위치·속성 요구: {환자 index: {fact: (loc_req, [attr...])}}
++POS = {
++    0: {'F2': ('nipple', ['nodular']), 'F3': ('right lower third of hemithorax', ['nodular'])},
++    2: {'F1': ('region of left atrium', ['punctiform', 'metallic']), 'F3': (None, ['chronic', 'COPD etiology'])},
++    3: {'F1': (None, ['left cavities'])},
++    5: {'F1': ('lingula and middle lobe', ['laminar'])},
++    8: {'F1': ('left', [])},
++    12: {'F1': (None, ['chronic']), 'F2': (None, ['calcified']),
++         'F3': ('both acromioclavicular joints', ['hypertrophic/mechanical'])},
++    15: {'F1': (None, ['dorsal', 'left concavity'])},
++    21: {'F1': ('bilateral', ['interstitial'])},
++    23: {'F1': (None, ['chronic'])},
++    24: {'F1': ('left first costochondral junction', ['pseudonodular'])},
++    25: {'F1': (None, ['dorsolumbar'])},
++    30: {'F1': (None, ['vascular origin'])},
++    31: {'F1': ('bilateral hila', ['?vascular origin'])},
++    32: {'F1': ('bilateral apical', ['pleuroparenchymal']), 'F2': (None, ['?vascular etiology'])},
++    33: {'F1': (None, ['marked'])},
++    36: {'F5': (None, ['slight', 'dorsal'])},
++    38: {'F1': (None, ['chronic'])},
++    40: {'F1': (None, ['chronic']), 'F2': (None, ['calcified'])},
++    41: {'F1': (None, ['dorsal']), 'F3': ('bilateral ribs', ['callus'])},
++    42: {'F1': ('left cardiac border', ['small', 'poorly defined'])},
++    45: {'F1': (None, ['chronic']), 'F2': ('left humeral head', ['degenerative'])},
++    47: {'F1': (None, ['chronic', 'pleuroparenchymal'])},
++    48: {'F1': ('retrocardiac', ['slight'])},
++    49: {'F2': ('descending thoracic aorta', [])},
++    50: {'F2': ('right hypochondrium', ['metal sutures'])},
++    52: {'F1': (None, ['marked', 'dorsolumbar'])},
++    53: {'F3': (None, ['small', 'parapneumonic'])},
++    56: {'F2': ('right humeral head', ['metallic'])},
++    58: {'F1': (None, ['chronic'])},
++    59: {'F1': (None, ['calcified']), 'F2': ('left mid lung field', ['well-defined', 'soft tissue density', '1.5 cm'])},
++    62: {'F5': (None, ['intense']), 'F6': ('right axilla', ['increased density'])},
++    65: {'F1': (None, ['chronic']), 'F2': ('right upper lobe', ['calcified'])},
++    66: {'F1': ('right base', ['chronic', 'inflammatory'])},
++    67: {'F1': ('right hemidiaphragm', ['anterior', 'lobulation'])},
++    69: {'F1': ('bilateral', [])},
++    70: {'F1': ('right humerus', ['?old', 'subcapital'])},
++    76: {'F1': ('right lung base', ['increased']), 'F2': ('right costophrenic angle', [])},
++    78: {'F2': (None, ['dorsal']), 'F3': (None, ['dorsal'])},
++    80: {'F1': ('left hilum', ['?vascular origin']), 'F3': ('dorsal spine', ['mechanical/degenerative'])},
++    82: {'F1': (None, ['chronic', 'pleuroparenchymal'])},
++    84: {'F1': ('left humerus', [])},
++    85: {'F1': ('right basal', ['?infectious-inflammatory'])},
++    86: {'F2': (None, ['chronic', 'pleuroparenchymal']), 'F3': (None, ['calcified']), 'F5': (None, ['degenerative'])},
++    90: {'F2': ('dorsal spine', ['mechanical/degenerative']), 'F3': ('right hemidiaphragm', [])},
++    93: {'F2': (None, ['dorsal'])},
++}
++# 명시적 특정 소견 부정(v1 neg_specific 유지) 대상 개념
++NEG = {
++    4: {'F2': ['consolidation', 'nodule', 'mass'], 'F3': ['effusion']},
++    26: {'F2': ['infiltrate', 'consolidation']},
++    33: {'F3': ['effusion']},
++    36: {'F4': ['costophrenic sinus blunting/effusion']},
++    37: {'F4': ['effusion']},
++    51: {'F2': ['costophrenic sinus blunting/effusion']},
++    52: {'F3': ['pulmonary tuberculosis']},
++    56: {'F1': ['consolidation']},
++    62: {'F4': ['effusion']},
++    63: {'F1': ['infiltrate', 'consolidation']},
++    72: {'F1': ['infiltrate', 'consolidation']},
++    73: {'F2': ['nodule', 'consolidation'], 'F3': ['costophrenic angle blunting/effusion']},
++    90: {'F1': ['consolidation', 'significant opacity']},
++}
++# 대상·속성이 명시된 정상 사실(v1 generic_normal -> v2 normal_scoped): (대상, weak)
++NORM = {
++    4: {'F1': (['cardiac_silhouette'], True)},
++    10: {'F2': ([LUNG, 'cardiomediastinal_silhouette'], False)},
++    14: {'F1': ([LUNG], False), 'F2': (['cardiomediastinal_silhouette'], False)},
++    15: {'F2': ([LUNG], False), 'F3': (['cardiothoracic_index'], False)},
++    16: {'F3': ([LUNG], False)},
++    26: {'F1': ([LUNG], False)},
++    36: {'F3': (['cardiomediastinal_silhouette'], False)},
++    37: {'F1': (['cardiothoracic_index'], False), 'F2': (['mediastinal_contour'], False), 'F3': ([LUNG], False), 'F5': (['bones'], False)},
++    49: {'F1': (['cardiothoracic_index'], False), 'F3': ([LUNG], False)},
++    51: {'F1': (['cardiomediastinal_silhouette'], False)},
++    53: {'F1': (['cardiothoracic_index'], False), 'F2': (['mediastinal_contour'], False)},
++    62: {'F1': (['cardiothoracic_index'], False), 'F2': (['mediastinal_contour'], False), 'F3': ([LUNG], False)},
++    67: {'F2': ([LUNG], False)},
++    73: {'F1': (['mediastinum', 'cardiac_silhouette'], False)},
++}
++# 원 분모 정정: (환자 index, fact) -> (new_class, 이유)
++CORRECT = {(41, 'F2'): ('pos_def', "'decreased height of vertebral bodies'는 설명적 기술이며 시간 비교가 아니다(v1 TEMPORAL 정규식의 decreas* 일치 오분류)")}
++# 중복 가능성(자동 병합하지 않음): 환자 index -> [[facts]]
++DUP_UNCERTAIN = {0: [['F2', 'F3']]}
++# 정정 분모 민감도에서 병합해 보는 해석
++KEPT = ('pos_def', 'pos_hedged', 'pos_temporal', 'pos_ambiguous')
++
++
++def build():
++    import json
++    rows = json.loads((R86 / 'E/inputs_E96.json').read_text())
++    refs = json.loads((R86 / 'E/reference_facts_E_private.json').read_text())
++    out, changes = {}, []
++    for i, r in enumerate(rows):
++        img = r['ImageID']
++        facts = []
++        for x in refs[img]['facts']:
++            fid, c1 = x['fact_id'], x['fact_class']
++            c2, targets, weak, note = c1, [], False, ''
++            loc, attr = None, []
++            if fid in POS.get(i, {}):
++                assert c1 in KEPT, (i, fid, c1)
++                loc, attr = POS[i][fid]
++            if fid in NEG.get(i, {}):
++                assert c1 == 'neg_specific', (i, fid, c1)
++                targets = NEG[i][fid]
++            if fid in NORM.get(i, {}):
++                assert c1 == 'generic_normal', (i, fid, c1)
++                targets, weak = NORM[i][fid]
++                c2 = 'normal_scoped'
++            if (i, fid) in CORRECT:
++                assert c1 == 'pos_temporal'
++                c2, note = CORRECT[(i, fid)]
++                changes.append({'patient_index': i, 'ImageID': img, 'fact_id': fid, 'v1_class': c1, 'v2_class': c2, 'reason': note})
++            facts.append({'fact_id': fid, 'sentence_en': x['sentence_en'], 'v1_class': c1, 'v2_class': c2, 'loc_req': loc, 'attr_req': attr,
++                          'targets': targets, 'weak': weak, 'note': note})
++        # 모든 NEG/NORM/POS 키가 실제 사실과 연결됐는지(오타 방지)
++        ids = {f['fact_id'] for f in facts}
++        for tbl in (POS, NEG, NORM):
++            assert set(tbl.get(i, {})) <= ids, (i, tbl.get(i))
++        out[img] = {'patient_index': i, 'stratum': r['stratum'], 'facts': facts,
++                    'dup_uncertain': DUP_UNCERTAIN.get(i, [])}
++    n_pos = sum(f['v1_class'] == 'pos_def' for v in out.values() for f in v['facts'])
++    n_pos2 = sum(f['v2_class'] == 'pos_def' for v in out.values() for f in v['facts'])
++    summ = {'n_patients': len(out), 'n_pos_def_v1': n_pos, 'n_pos_def_v2': n_pos2, 'denominator_changes': changes,
++            'n_normal_scoped': sum(f['v2_class'] == 'normal_scoped' for v in out.values() for f in v['facts']),
++            'n_normal_scoped_weak': sum(f['weak'] for v in out.values() for f in v['facts']),
++            'n_neg_specific': sum(f['v2_class'] == 'neg_specific' for v in out.values() for f in v['facts']),
++            'patients_with_normal_scoped': sum(any(f['v2_class'] == 'normal_scoped' for f in v['facts']) for v in out.values()),
++            'dup_uncertain': {str(k): v for k, v in DUP_UNCERTAIN.items()},
++            'blind_note': '작성 전에 형식 확인을 위해 P000·P002·P062 출력 일부를 보았다(계획이 이미 지목한 사례). 나머지 환자는 출력·원 지표를 보기 전에 reference 문장만으로 작성했다. 어떤 규칙도 모델 조건별로 다르지 않다.',
++            'note': '이미 본 E96의 오류에 대한 사후 보완이다. 모델·조건별로 다른 규칙을 쓰지 않는다.'}
++    save(R87 / 'reference_amend_E96.json', {'summary': summ, 'patients': out, 'code_sha256': sha(__file__)})
++    print(json.dumps(summ, ensure_ascii=False, indent=1))
++
++
++if __name__ == '__main__':
++    build()
+diff --git a/report87_view.py b/report87_view.py
+new file mode 100644
+index 0000000..0a06d5f
+--- /dev/null
++++ b/report87_view.py
+@@ -0,0 +1,42 @@
++"""iter_087 판정용 눈가림 view(읽기 전용). python report87_view.py <start> <end>   (환자 index 범위, end 제외)
++C-H는 영역 묶음에 L<k> 번호를 붙여 보여 준다(@L<k>로 주장에 연결). bbox 좌표 표기와 퇴행 반복은 view에서만 접는다(원문은 readings.jsonl)."""
++import re
++import sys
++
++from report86_view import blind_order, clean, load
++from report87_eval import ch_groups, load_amend
++
++
++def main(a, b):
++    rows, reads, _ = load('E96')
++    amend = load_amend()
++    for pi in range(a, b):
++        img = rows[pi]['ImageID']
++        print(f"==== P{pi:03d} {img[:8]} {rows[pi]['stratum']} ====")
++        for f in amend[img]['facts']:
++            if f['v2_class'] == 'generic_normal':
++                print(f"  ({f['fact_id']} generic_normal: {f['sentence_en']})")
++                continue
++            extra = ''
++            if f['loc_req'] or f['attr_req']:
++                extra = f" [loc_req={f['loc_req']}; attr_req={f['attr_req']}]"
++            if f['targets']:
++                extra += f" [targets={f['targets']}{' weak' if f['weak'] else ''}]"
++            print(f"  {f['fact_id']} [{f['v1_class']}{'->' + f['v2_class'] if f['v2_class'] != f['v1_class'] else ''}] {f['sentence_en']}{extra}")
++        for i, c in enumerate(blind_order(img), 1):
++            r = reads[(img, c)]
++            print(f'--- O{i} ---')
++            if c == 'C-H':
++                groups, gidx, srcs = ch_groups(r)
++                for k, g in enumerate(groups, 1):
++                    t = clean(r['segments'][g[0]]['text'])
++                    t = re.sub(r'^Location of the [^:]*:\s*\.?\s*', '', t)
++                    t = re.sub(r'^Description:\s*', '', t).replace('Description:', '').strip()
++                    print(f"L{k} [{', '.join(srcs[i] for i in g)}] {t}")
++                print('G ' + clean(r['segments'][gidx]['text']))
++            else:
++                print(clean(r['text']))
++
++
++if __name__ == '__main__':
++    main(int(sys.argv[1]), int(sys.argv[2]))
+diff --git a/test_report87_eval.py b/test_report87_eval.py
+new file mode 100644
+index 0000000..3fa0f1f
+--- /dev/null
++++ b/test_report87_eval.py
+@@ -0,0 +1,102 @@
++"""iter_087 평가기 fixture: 실제 P000·P062 판정(의미 규약 v2)으로 범위·속성·주장 집계·오류 거부를 검사한다.
++python test_report87_eval.py <out_json>   (새 파일만 쓴다). 의미 fixture 통과는 모델 정답률 gate가 아니다."""
++import json
++import sys
++from pathlib import Path
++
++import report86_eval as E1
++import report87_eval as E
++from report86_common import R86, ROOT, save
++from report86_view import load
++
++PARTS = ROOT / 'results/iter_087/judgments_parts'
++
++
++def main(out):
++    rows, reads, v1refs = load('E96')
++    amend = E.load_amend()
++    v1j = E1.parse_judgments((R86 / 'E96/judgments_E96_v2.txt').read_text(), rows, v1refs)
++    t0, t62 = (PARTS / 'part_P000.txt').read_text(), (PARTS / 'part_P062.txt').read_text()
++    jud = E.parse_v3(t0 + '\n' + t62, rows, amend, reads, v1j, subset=True)
++    i0, i62 = rows[0]['ImageID'], rows[62]['ImageID']
++    po = lambda img, c: E.per_output(img, c, jud[img][c], amend, reads)
++    from report86_view import blind_order
++    cond = lambda img, k: blind_order(img)[k - 1]
++    res = []
++
++    def check(name, cond_ok, detail=None):
++        res.append({'name': name, 'pass': bool(cond_ok), 'detail': detail})
++
++    # 1. 속성 코드: moderate vs intense=a, 생략=o, mild=c
++    for k, code in ((1, 'a'), (2, 'o'), (8, 'c')):
++        check(f'P062 O{k} F5 attr={code}', jud[i62][cond(i62, k)]['facts']['F5']['attr'] == code)
++    # 2. strict는 속성 a/o/c에서 실패, 개념 D는 유지
++    for k in (1, 2, 8):
++        p = po(i62, cond(i62, k))
++        check(f'P062 O{k} concept D / strict 0', p['v1']['D'] == 1 and p['v1']['D_strict'] == 0, p['v1'])
++    # 3. 속성 충돌만 C.attr 주장 + contra_attr, 원 scope(contra_common)는 0
++    p = po(i62, cond(i62, 8))
++    check('P062 O8 attr conflict -> contra_attr=1, contra_common=0', p['contra_attr'] == 1 and p['contra_common'] == 0 and p['claims']['C'] == 1, p['contra_components'])
++    # 4. 구체적 정상 사실(normal_scoped) 충돌은 v2에서만 모순
++    p = po(i62, cond(i62, 4))
++    check('P062 O4 폐실질 정상 vs opacity -> contra_neg_new=1, common=0', p['contra_neg_new'] == 1 and p['contra_common'] == 0 and p['contra_v2'] == 1)
++    check('P062 O4 possible-level C.neg는 definite 모순에 안 셈', p['contra_components']['neg_new'] == 1 and p['claims']['C_p'] == 1 and p['claims']['C_d'] == 1)
++    # 5. bones/ribs intact는 측만의 N이 아님(v1 N -> v3 U)
++    for k in (4, 5, 7):
++        check(f'P062 O{k} bones intact is not N for scoliosis', jud[i62][cond(i62, k)]['facts']['F5']['s'] == 'U')
++    # 6. P000 lungs clear는 폐외 소견 N이 아님, 모든 조건 모순 없음
++    for c in E.CONDS:
++        p = po(i0, c)
++        check(f'P000 {c} no N/contra', p['v1']['N'] == 0 and p['contra_v2'] == 0 and p['contra_common'] == 0)
++    p = po(i0, cond(i0, 5))
++    check('P000 possible nodule: recall_def 0, incl_possible 1/3, loc a', p['v1']['recall_def'] == 0 and abs(p['v1']['recall_incl_possible'] - 1 / 3) < 1e-12
++          and jud[i0][cond(i0, 5)]['facts']['F3']['loc'] == 'a')
++    # 7. 영역 수 반영 주장 집계 (P062 C-H: S=26, U=9, C=0) + 다중 reference 주장은 한 번만
++    ch = [c for c in E.CONDS if c == 'C-H'][0]
++    p = po(i62, ch)
++    check('P062 C-H claims S26 U9 C0 (영역 수 반영, 다중 ref 1회)', (p['claims']['S'], p['claims']['U'], p['claims']['C']) == (26, 9, 0), p['claims'])
++    # 8. 같은 문장의 다른 영역은 병합하지 않는다: P000 C-H L6(4 regions)
++    check('P000 C-H 영역 묶음 multiplicity', any(c['at'] == '@L6' and c['n'] == 4 for c in jud[i0][ch]['claims']))
++    check('P000 C-H 내부 모순 2건(폐 전체 정상 vs 좌/우 음영)', len(jud[i0][ch]['internal']) == 2 and po(i0, ch)['internal_d'] == 2)
++    # 9. 반복(같은 anchor)은 한 주장, 모든 위치 보존
++    cl = [c for c in jud[i0][ch]['claims'] if c['anchor'] == 'opacity in the right lower lobe'][0]
++    check('반복 문장은 한 주장이며 anchor 위치 2개 보존', cl['n'] == 1 and len(cl['occ'][0]['starts']) == 2, cl['occ'])
++    # 10. 포괄 정상 tension 열
++    check('generic_global_normal tension 집계', po(i62, cond(i62, 5))['claims']['tension_global_normal'] == 1)
++    # 11. 빈 분모는 None
++    check('빈 분모 None', po(i0, cond(i0, 3))['claims']['n_total'] == 1 and po(i62, cond(i62, 2))['v2']['n'] == 2)
++
++    def must_fail(name, text, needle):
++        try:
++            E.parse_v3(text, rows, amend, reads, v1j, subset=True)
++            check(name, False, 'accepted')
++        except E.JudgmentError as e:
++            check(name, needle in str(e), str(e)[:160])
++
++    rep = lambda s, a, b: s.replace(a, b, 1)
++    must_fail('D without linked claim', rep(t62, 'c S F5 +d "Dorsolumbar scoliosis with right dorsal convexity"\nc U - -d "No other relevant findings" -- generic_global_normal\nO3',
++                                              'c U - -d "No other relevant findings" -- generic_global_normal\nO3'), 'has no linked claim')
++    must_fail('attr conflict without C.attr claim', rep(t62, 'c C.attr F5 +d', 'c S F5 +d'), 'attr conflict needs')
++    must_fail('C.attr claim without attr c code', rep(t62, 'f F5 D n c "There is a mild', 'f F5 D n a "There is a mild'), 'no conflict but C.loc/attr claim')
++    must_fail('loc code must be n without loc_req', rep(t62, 'f F5 D n a "moderate dextroscoliosis of the thoracic spine"', 'f F5 D m a "moderate dextroscoliosis of the thoracic spine"'), 'loc code')
++    must_fail('attr n with attr_req', rep(t62, 'f F5 D n a "moderate dextroscoliosis of the thoracic spine"', 'f F5 D n n "moderate dextroscoliosis of the thoracic spine"'), 'attr n but attr_req')
++    must_fail('S without ref', rep(t62, 'c S F2 -d "The mediastinal and hilar contours are normal" @L16', 'c S - -d "The mediastinal and hilar contours are normal" @L16'), 'S needs ref')
++    must_fail('anchor not found', rep(t62, '"The trachea is not deviated" @L17', '"The trachea is deviated" @L17'), 'anchor not in segment')
++    must_fail('@ forbidden for non C-H', rep(t62, 'c S F1 -d "The heart size is normal"', 'c S F1 -d "The heart size is normal" @L1'), '@ not allowed')
++    must_fail('C-H without @', rep(t62, 'c U - +d "The aorta is mildly tortuous" @L2', 'c U - +d "The aorta is mildly tortuous"'), 'needs @L')
++    must_fail('v1 status change without why', rep(t62, 'f F5 U -- v1 N (ribs and spine appear intact) -> U: 골 intact는 골절 등 부정이며 측만을 부정하지 않음(범위 규칙)', 'f F5 U'), 'without -- why')
++    must_fail('C.neg must cite neg/normal_scoped fact', rep(t62, 'c C.neg F3 +d', 'c C.neg F5 +d'), 'C.neg needs')
++    must_fail('duplicate output', t62 + '\nO1\n', 'duplicate output')
++    must_fail('missing fact line', rep(t62, 'f F6 U\nc U - -d "No free air below the right hemidiaphragm is seen" @L14', 'c U - -d "No free air below the right hemidiaphragm is seen" @L14'), 'facts judged')
++    must_fail('N needs C.pos claim', rep(t62, 'f F5 U -- v1 N (visualized bones unremarkable) -> U: 포괄 골 정상은 측만을 부정하지 않음(범위 규칙)', 'f F5 N "The visualized bones are unremarkable"'), 'needs C.pos')
++    n_pass = sum(r['pass'] for r in res)
++    save(out, {'n_checks': len(res), 'n_pass': n_pass, 'checks': res})
++    print(f'{n_pass}/{len(res)} PASS')
++    for r in res:
++        if not r['pass']:
++            print('FAIL', r['name'], r['detail'])
++    sys.exit(0 if n_pass == len(res) else 1)
++
++
++if __name__ == '__main__':
++    main(Path(sys.argv[1]))
