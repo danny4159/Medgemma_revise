@@ -1,0 +1,150 @@
+"""iter_098 자료 적합성 잠금: E96 비정상 48명에서 회복 집단 N(P와 Q가 모두 명확)을 확정한다.
+
+- 후보 색인: iter_088 linked.json의 자동 판정(C-H에만 있는 reference 양성 사실). 색인일 뿐이며 원문으로 재확인한다.
+- 수동 판정(assistant 단일 검토, 전문의/독립 검증 아님)은 MANUAL에 근거 문구와 함께 고정한다.
+- 모든 인용 문구가 실제 원문(초안/영역 설명/reference)에 존재하는지 기계 검사한다.
+- N이 비면 생성 요청을 만들지 않고 보류 결정을 기록한다. 결과 파일은 배타 생성(덮어쓰기 금지).
+"""
+import json
+import sys
+from pathlib import Path
+
+import report98_data as D
+
+OUT = D.ROOT / "results" / "iter_098" / "data"
+
+# status: clear / ambiguous / temporal_only / in_draft ; 근거는 원문 인용
+MANUAL = {
+    8: {"fact": "F2", "ref": "Persistent atelectasis-condensation.", "ref_class": "pos_temporal",
+        "status": "in_draft_or_temporal", "draft_quote": "Volume loss of the left hemithorax",
+        "desc_quote": "large left lower lobe consolidation with volume loss",
+        "why": "초안이 이미 좌 반흉부 density/volume loss를 기술하고 reference는 'persistent'(시간) 속성을 포함한다. 새 회복으로 단정 불가."},
+    33: {"fact": "F2", "ref": "Pulmonary opacities in both pulmonary vertices predominantly on the right side and in the right lower lobe (LID) of new appearance.",
+         "ref_class": "pos_temporal", "status": "ambiguous", "draft_quote": "Chronic changes in lung parenchyma",
+         "desc_quote": "new right upper lobe opacity, which may represent pneumonia",
+         "why": "상엽 hedged 음영 대 양측 apical·우하엽 'new' 소견: 위치 범위·시간 속성이 부분 대응뿐이다."},
+    36: {"fact": "F1", "ref": "Decrease in bilateral basal infiltrates.", "ref_class": "pos_temporal",
+         "status": "temporal_only", "draft_quote": "No significant findings",
+         "desc_quote": "In the left lower lobe, a small infiltrate is seen",
+         "why": "P도 비어 있고 reference가 감소(시간 비교) 소견이다."},
+    53: {"fact": "F4", "ref": "The retrocardiac consolidation has decreased in size.", "ref_class": "pos_temporal",
+         "status": "ambiguous", "draft_quote": "Left pleural effusion",
+         "desc_quote": "new left lower lobe opacity, which may represent atelectasis or pneumonia",
+         "why": "consolidation 감소(시간 속성) 대 hedged opacity(atelectasis 또는 pneumonia): 핵심 소견 동일성 불확실."},
+    76: {"fact": "F1", "ref": "Increased infiltrate in the right lung base.", "ref_class": "pos_def",
+         "status": "ambiguous", "draft_quote": "Pulmonary parenchyma without major alterations",
+         "desc_quote": "New right lower lobe opacity concerning for pneumonia",
+         "why": "우하엽 opacity가 우폐 기저부 infiltrate와 근사하나 'new'·'pneumonia' 해석이 섞였다. P 비어 있음(초안은 cardiomegaly만, reference에 없음)."},
+    80: {"fact": "F2|F3", "ref": "Aortic elongation. / Mechanical changes in the dorsal spine.", "ref_class": "pos_def",
+         "status": "ambiguous", "draft_quote": "No significant findings",
+         "desc_quote": "The aorta is tortuous.",
+         "why": "tortuous≈elongation, degenerative changes≈mechanical changes의 의미 동치가 규약 밖. P 비어 있음."},
+    85: {"fact": "F1", "ref": "Right basal infiltrate, related to an infectious - inflammatory process.", "ref_class": "pos_def",
+         "status": "clear", "draft_quote": "No significant findings",
+         "desc_quote": "there is again increased opacification at the right base medially, consistent with pneumonia",
+         "why": "우측 기저부 opacification이 reference infiltrate와 대응한다. 그러나 P가 비어 있어 N 제외(Q-only)."},
+    86: {"fact": "F4", "ref": "Aortic elongation.", "ref_class": "pos_def",
+         "status": "ambiguous", "draft_quote": "No pathological findings for the patient's age",
+         "desc_quote": "mild unfolding of the thoracic aorta",
+         "why": "unfolding≈elongation 동치 미확정, P 비어 있음."},
+    90: {"fact": "F3", "ref": "Elevation of the right hemidiaphragm.", "ref_class": "pos_def",
+         "status": "clear", "draft_quote": "No significant findings",
+         "desc_quote": "Elevation of the right hemidiaphragm is unchanged.",
+         "why": "핵심 소견이 일치한다('unchanged'는 시간 속성). P 비어 있음(초안은 포괄 정상문뿐)이라 N 제외(Q-only)."},
+}
+# P: 초안이 reference 양성 사실을 명확히 기술한 환자(수동). 인용은 초안 원문.
+P_CLEAR = {
+    3: ("F1", "Cardiomegaly"), 8: ("F1", "Left pleural effusion"), 12: ("F1", "Chronic changes of the pulmonary parenchyma"),
+    21: ("F1", "Bilateral interstitial pattern"), 25: ("F1", "Dorsolumbar scoliosis"), 33: ("F1", "Cardiomegaly"),
+    45: ("F1", "Chronic pulmonary changes"), 49: ("F2", "Aortic elongation"), 52: ("F1", "Dorsal scoliosis"),
+    53: ("F3", "Left pleural effusion"), 56: ("F2", "Osteosynthesis material in the right humeral head"),
+    62: ("F5", "Dorsolumbar scoliosis"), 69: ("F1", "mammary prostheses"), 70: ("F2", "Cardiomegaly"),
+}
+
+
+def auto_index(ids, am, linked):
+    out = {}
+    for i in ids:
+        def S(c):
+            return set(r for cl in linked[i + "|" + c]["claims"] if cl["cls"] == "S" for r in cl["refs"])
+        cls = dict((f["fact_id"], f["v2_class"]) for f in am[i]["facts"])
+        g, h = S("C-G"), S("C-H")
+        pos = lambda s: sorted(f for f in s if cls[f].startswith("pos"))
+        out[am[i]["patient_index"]] = {"auto_P": pos(g), "auto_Q": pos(h - g)}
+    return out
+
+
+def main():
+    ids = D.abnormal_ids()
+    R = D.load_readings()
+    am = json.load(open(D.REF_AMEND))["patients"]
+    linked = json.load(open(D.R86.parent / "iter_088" / "adjudication" / "linked.json"))
+    idx_of = {am[i]["patient_index"]: i for i in ids}
+    auto = auto_index(ids, am, linked)
+
+    # 인용 문구 기계 검사
+    problems = []
+    for pi, m in MANUAL.items():
+        i = idx_of[pi]
+        pk = D.package(i, R)
+        bodies = " ".join(g["body"] for g in pk["groups"]).lower()
+        if m["draft_quote"].lower() not in pk["draft"].lower():
+            problems.append((pi, "draft_quote", m["draft_quote"]))
+        if m["desc_quote"].lower() not in bodies:
+            problems.append((pi, "desc_quote", m["desc_quote"]))
+        sents = " ".join(f["sentence_en"] for f in am[i]["facts"])
+        for part in m["ref"].split(" / "):
+            if part.strip() not in sents:
+                problems.append((pi, "ref", part))
+    for pi, (fid, q) in P_CLEAR.items():
+        i = idx_of[pi]
+        pk = D.package(i, R)
+        if q.lower() not in pk["draft"].lower():
+            problems.append((pi, "P_draft_quote", q))
+        if fid not in [f["fact_id"] for f in am[i]["facts"]]:
+            problems.append((pi, "P_fact", fid))
+    # 수동 판정이 자동 색인의 positive Q 후보를 빠짐없이 다루는지
+    auto_q = sorted(pi for pi, a in auto.items() if a["auto_Q"])
+    uncovered = [pi for pi in auto_q if pi not in MANUAL]
+    if uncovered:
+        problems.append(("auto_Q_not_reviewed", uncovered))
+
+    Q_clear = sorted(pi for pi, m in MANUAL.items() if m["status"] == "clear")
+    N = sorted(pi for pi in Q_clear if pi in P_CLEAR)
+    q_only_clear = [pi for pi in Q_clear if pi not in P_CLEAR]
+    decision = {
+        "n_abnormal": len(ids),
+        "auto_index_Q_patients": auto_q,
+        "auto_index_P_patients": sorted(pi for pi, a in auto.items() if a["auto_P"]),
+        "manual_P_clear_patients": sorted(P_CLEAR),
+        "manual_Q_clear_patients": Q_clear,
+        "N_recovery_cohort": N,
+        "q_only_clear": q_only_clear,
+        "q_ambiguous_or_temporal": sorted(pi for pi, m in MANUAL.items() if m["status"] != "clear"),
+        "run_generation": bool(N),
+        "reason": ("회복 집단 N(P와 Q가 모두 명확한 환자)이 비어 있어 계획된 종료 분기에 따라 생성 요청을 만들지 않는다."
+                   if not N else "N이 비어 있지 않음"),
+        "quote_check_problems": problems,
+        "review_note": "assistant 단일 수동 검토이며 전문의/독립 임상 검증이 아니다. 모호 항목은 unknown으로 유지했다.",
+        "inputs_sha256": {
+            "linked.json": D.sha(json.dumps(linked, sort_keys=True)),
+            "reference_amend_E96.json": D.sha(open(D.REF_AMEND).read()),
+            "readings.jsonl": D.sha(open(D.READINGS).read()),
+            "report98_lock.py": D.sha(open(__file__).read()),
+            "report98_data.py": D.sha(open(D.ROOT / "report98_data.py").read()),
+        },
+        "manual_Q": {str(k): v for k, v in MANUAL.items()},
+        "manual_P": {str(k): {"fact": v[0], "draft_quote": v[1]} for k, v in P_CLEAR.items()},
+        "auto_index": {str(k): v for k, v in auto.items() if v["auto_P"] or v["auto_Q"]},
+    }
+    OUT.mkdir(parents=True, exist_ok=True)
+    with open(OUT / "eligibility_decision.json", "x") as f:
+        json.dump(decision, f, ensure_ascii=False, indent=1)
+    print(json.dumps({k: decision[k] for k in ("auto_index_Q_patients", "manual_Q_clear_patients", "N_recovery_cohort",
+                                              "q_only_clear", "q_ambiguous_or_temporal", "run_generation",
+                                              "quote_check_problems")}, ensure_ascii=False))
+    return 0 if not problems else 1
+
+
+if __name__ == "__main__":
+    sys.exit(main())
