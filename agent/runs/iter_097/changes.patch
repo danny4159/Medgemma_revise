@@ -1,0 +1,944 @@
+diff --git a/report97_blind.py b/report97_blind.py
+new file mode 100644
+index 0000000..4b2a978
+--- /dev/null
++++ b/report97_blind.py
+@@ -0,0 +1,37 @@
++"""iter_097: 완료 판독을 조건명 없는 ID로 연결한다. 모델/조건 이름은 private_mapping에만 둔다.
++각 stage는 completion과 요청·protocol 검증(report90_gen_safe.verify)을 통과해야 한다."""
++import argparse
++import hashlib
++import json
++from pathlib import Path
++import report90_gen as C
++import report90_recovery_gen as S
++from report86_common import save,sha
++from report97_train import OUT,ORIGINAL
++
++BASE_SOURCES=list(C.SOURCES)  # 이전 iter 생성 stage의 protocol 코드 목록
++
++def main(a):
++    req=ORIGINAL/'data/V32/requests.json';refpath=ORIGINAL/'semantic/V32_reference_v3.json'
++    refs=json.loads(refpath.read_text())['rows'];refby={r['id']:r for r in refs}
++    mapping={};records=[];provenance={}
++    for stage in [Path(x).resolve() for x in a.stages]:
++        C.SOURCES=BASE_SOURCES+(['report97_gen.py'] if OUT in stage.resolve().parents else [])
++        proto=json.loads((stage/'protocol.json').read_text());w=json.loads((stage/'mapping.json').read_text())['workers']
++        rows,expected=S.verify(stage,req,proto,w);assert len(rows)==len(expected)==32 and (stage/'completion.json').exists()
++        provenance[str(stage/'completion.json')]=sha(stage/'completion.json')
++        for row in rows:
++            img=row['id'].removesuffix('|report');assert img in refby
++            blind=hashlib.sha256(f'97017|{a.name}|{stage.name}|{img}'.encode()).hexdigest()[:16];assert blind not in mapping
++            mapping[blind]=dict(stage=str(stage),id=row['id'],record_digest=row['record_digest'])
++            records.append(dict(blind_id=blind,image_id=img,text=row['text'],non_eos=not row['attempts'][-1]['ended_eos']))
++    records.sort(key=lambda r:(list(refby).index(r['image_id']),r['blind_id']))
++    dest=OUT/f'semantic/{a.name}';save(dest/'private_mapping.json',mapping)
++    save(dest/'blinded.json',dict(reference_sha=sha(refpath),records=records,provenance=provenance,source_sha=sha(__file__)))
++    for k in range(0,32,4):
++        selected=refs[k:k+4];ids={r['id'] for r in selected}
++        save(dest/f'part_{k//4:02}.json',dict(references=selected,outputs=[r for r in records if r['image_id'] in ids]))
++    print(len(records),'blinded outputs ->',dest)
++
++if __name__=='__main__':
++    p=argparse.ArgumentParser();p.add_argument('--name',required=True);p.add_argument('--stages',nargs='+',required=True);main(p.parse_args())
+diff --git a/report97_decide.py b/report97_decide.py
+new file mode 100644
+index 0000000..8ea53b3
+--- /dev/null
++++ b/report97_decide.py
+@@ -0,0 +1,60 @@
++"""iter_097 R→G 분기 판정. 사전 기준(plan.md Evaluation)을 그대로 구현한다. 결과를 보고 문턱을 바꾸지 않는다.
++입력: 같은 조건명 가림 batch의 per_output.json (R 신규, base, 고LR R 2종). 출력: results/iter_097/decisions/*.json"""
++import argparse
++import json
++from pathlib import Path
++import numpy as np
++from report86_common import save,sha
++from report97_train import OUT
++
++MIN_DIFF=0.05;MIN_NET=3;MAX_CONTRA_INC=1;BOOT=10000;SEED=97017
++
++def by_condition(per):
++    out={}
++    for x in per:out.setdefault(x['condition'],{})[x['image_id']]=x
++    return out
++
++def recall_vec(cond,ids,key='strict_recall'):return np.array([cond[i][key] for i in ids],float)
++
++def contra_patients(cond,conservative):
++    n=0
++    for x in cond.values():
++        hit=x['contradiction'] or x['internal_contradiction']
++        if conservative:hit=hit or any(c['status']=='unknown' and c.get('note','').startswith('POSSIBLE_CONTRA') for c in x['claims'])
++        n+=bool(hit)
++    return n
++
++def compare(new,old):
++    ids=sorted(i for i,x in new.items() if x['abnormal'] and x['strict_recall'] is not None);assert ids==sorted(i for i,x in old.items() if x['abnormal'] and x['strict_recall'] is not None)
++    a=recall_vec(new,ids);b=recall_vec(old,ids);d=a-b
++    inc=int((d>1e-12).sum());dec=int((d<-1e-12).sum());net=inc-dec
++    loo=[float(np.delete(d,k).mean()) for k in range(len(d))]
++    rng=np.random.default_rng(SEED);boots=[float(d[rng.integers(0,len(d),len(d))].mean()) for _ in range(BOOT)]
++    # 보수: 신규는 모호하지 않은 대응만, 비교군은 모든 strict 대응 인정
++    cons=recall_vec(new,ids,'no_ambiguous_match')-recall_vec(old,ids,'strict_recall')
++    cons_inc=int((cons>1e-12).sum());cons_dec=int((cons<-1e-12).sum())
++    c_new=contra_patients(new,False);c_old=contra_patients(old,False);cc_new=contra_patients(new,True);cc_old=contra_patients(old,False)
++    checks=dict(diff_ge_5pp=float(d.mean())>=MIN_DIFF-1e-12,net_ge_3=net>=MIN_NET,loo_positive=all(x>0 for x in loo),
++        contra_inc_le_1=c_new-c_old<=MAX_CONTRA_INC,
++        conservative_pass=float(cons.mean())>=MIN_DIFF-1e-12 and cons_inc-cons_dec>=MIN_NET and (cc_new-cc_old)<=MAX_CONTRA_INC)
++    return dict(n_recall_patients=len(ids),new_mean=float(a.mean()),old_mean=float(b.mean()),diff=float(d.mean()),
++        ci95=[float(np.percentile(boots,2.5)),float(np.percentile(boots,97.5))],increased=inc,decreased=dec,net=net,loo_min=min(loo),loo_max=max(loo),
++        contra_new=c_new,contra_old=c_old,conservative=dict(diff=float(cons.mean()),increased=cons_inc,decreased=cons_dec,contra_new_with_possible=cc_new,contra_old=cc_old),
++        type_only_diff=float(recall_vec(new,ids,'type_recall').mean()-recall_vec(old,ids,'type_recall').mean()),
++        checks=checks,passed=all(checks.values()),per_patient=[dict(image_id=i,new=float(x),old=float(y)) for i,x,y in zip(ids,a,b)])
++
++def main(a):
++    per=json.loads(Path(a.per_output).read_text());conds=by_condition(per)
++    new=conds[a.new];result={}
++    for name in a.comparators:result[name]=compare(new,conds[name])
++    verdict=all(r['passed'] for r in result.values())
++    save(a.output,dict(new=a.new,comparators=a.comparators,results=result,r_passes_possibility_criterion=verdict,
++        thresholds=dict(min_diff=MIN_DIFF,min_net=MIN_NET,max_contra_inc=MAX_CONTRA_INC,bootstrap=BOOT,seed=SEED),
++        sources={str(a.per_output):sha(a.per_output),__file__:sha(__file__)},
++        scope='V32 개발 자료 탐색 투자 문턱; 임상 비열등성·독립 확인 아님. CI 하한>0 은 hard gate 아님.'))
++    print(json.dumps({k:{x:v[x] for x in ('new_mean','old_mean','diff','increased','decreased','contra_new','contra_old','passed')} for k,v in result.items()}),flush=True)
++    print('R passes possibility criterion:',verdict)
++
++if __name__=='__main__':
++    p=argparse.ArgumentParser();p.add_argument('--per-output',dest='per_output',required=True);p.add_argument('--new',required=True)
++    p.add_argument('--comparators',nargs='+',required=True);p.add_argument('--output',required=True);main(p.parse_args())
+diff --git a/report97_finish.py b/report97_finish.py
+new file mode 100644
+index 0000000..cb62b4b
+--- /dev/null
++++ b/report97_finish.py
+@@ -0,0 +1,35 @@
++"""iter_097 분기 결정 기록과 산출물 봉인. 사전 기준(plan.md)을 바꾸지 않고 저장된 판정/검증만 읽는다."""
++import json
++from report86_common import save,sha
++from report97_train import OUT,ORIGINAL
++
++def main():
++    dec=json.loads((OUT/'decisions/R_vs_comparators_epoch6.json').read_text());ver=json.loads((OUT/'decisions/verify.json').read_text());assert ver['passed']
++    sens=json.loads((OUT/'decisions/R_vs_comparators_epoch6_sensitivity_inherited.json').read_text())
++    nll=lambda p:[json.loads((p/f'validation_{e:02}.json').read_text())['report_nll'] for e in (1,2,4,6)]
++    e2=json.loads((OUT/'semantic/epoch2/eval/report.json').read_text())['conditions']['R_lr2e-05_report']
++    e6=json.loads((OUT/'semantic/epoch6/eval/report.json').read_text())['conditions']
++    ground={n:json.loads(Path_(p).read_text()) for n,p in dict(R2e5=OUT/'validation/epoch6/R_lr2e-05_ground_eval.json',base=ORIGINAL/'validation/base_ground_eval.json',
++        R1e4=ORIGINAL/'recovery/validation/epoch6/R_lr0.0001_ground_eval.json',R2e4=ORIGINAL/'recovery/validation/epoch6/R_lr0.0002_ground_eval.json').items()}
++    out=dict(
++        branch=dict(r_passes_possibility_criterion=dec['r_passes_possibility_criterion'],g_executed=False,
++            reason='R(LR2e-5) 가능성 기준 미충족 -> 사전 분기에 따라 G 미실행. 판정은 조건명 가림 재판정 기준이며 상속 판정 민감도에서도 동일(net>=3 미충족).',
++            per_comparator={k:dict(diff=v['diff'],ci95=v['ci95'],increased=v['increased'],decreased=v['decreased'],net=v['net'],loo_min=v['loo_min'],checks=v['checks']) for k,v in dec['results'].items()},
++            sensitivity_inherited={k:dict(diff=v['diff'],net=v['net'],checks=v['checks']) for k,v in sens['results'].items()}),
++        trend=dict(nll_R_lr2e5={'epoch1,2,4,6':nll(OUT/'train/R_lr2e-05')},nll_R_lr1e4={'epoch1,2,4,6':nll(ORIGINAL/'recovery/train/R_lr0.0001')},nll_R_lr2e4={'epoch1,2,4,6':nll(ORIGINAL/'recovery/train/R_lr0.0002')},
++            nll_base=json.loads((ORIGINAL/'validation/base_nll.json').read_text())['report_nll'],
++            strict_recall_R_lr2e5_epoch2=e2['strict_recall'],strict_recall_R_lr2e5_epoch6=e6['R_lr2e-05_report']['strict_recall']),
++        ground_V16_f1_0p3={k:v['scores']['0.3'] for k,v in ground.items()},ground_V16_invalid={k:v['invalid'] for k,v in ground.items()},
++        epoch6_conditions={k:{a:b for a,b in v.items() if a in ('strict_recall','type_recall','no_ambiguous_match','contradiction','contradiction_abnormal','non_eos')} for k,v in e6.items()},
++        verify_passed=ver['passed'],
++        files={str(p.relative_to(OUT)):sha(p) for p in [OUT/'training_gate.json',OUT/'tests/resume/result.json',OUT/'tests/gen/result.json',OUT/'reference/case_table_v2.json',
++            OUT/'train/R_lr2e-05/complete_06.json',OUT/'train/R_lr2e-05/verified_06.json',OUT/'semantic/epoch2/eval/report.json',OUT/'semantic/epoch6/eval/report.json',OUT/'semantic/epoch6/eval/per_output.json',
++            OUT/'decisions/R_vs_comparators_epoch6.json',OUT/'decisions/R_vs_comparators_epoch6_sensitivity_inherited.json',OUT/'decisions/rejudge_agreement.json',OUT/'decisions/verify.json']},
++        source_sha=sha(__file__))
++    save(OUT/'decisions/branch_decision.json',out);print(json.dumps(out['branch']['per_comparator'],indent=1)[:1500])
++
++def Path_(p):
++    from pathlib import Path
++    return Path(p)
++
++if __name__=='__main__':main()
+diff --git a/report97_gate.py b/report97_gate.py
+new file mode 100644
+index 0000000..bc228de
+--- /dev/null
++++ b/report97_gate.py
+@@ -0,0 +1,20 @@
++"""iter_097 본학습 진입 gate: iter_090 불변 증거(hash 재확인) + 이번 LR2e-5 경로의 동작 확인 + reference 사례표 고정."""
++import json
++from report86_common import save,sha
++from report97_train import OUT,ORIGINAL
++
++def main():
++    inherited=json.loads((ORIGINAL/'recovery/training_gate.json').read_text());assert inherited['passed']
++    for p,h in inherited['evidence'].items():assert sha(p)==h,p
++    resume=OUT/'tests/resume/result.json';r=json.loads(resume.read_text());assert r['passed'] and r['lr']==2e-5
++    table=OUT/'reference/case_table_v2.json';t=json.loads(table.read_text());assert all(t['contrast_fixtures'].values()) and t['n_recall_patients']==20
++    evidence={str(resume):sha(resume),str(table):sha(table),str(ORIGINAL/'recovery/training_gate.json'):sha(ORIGINAL/'recovery/training_gate.json')}
++    evidence.update(inherited['evidence'])
++    for p in ['report97_train.py','report90_train.py','report90_stable_v2.py','report90_stable.py','report90_numeric.py','report89_model.py',
++              'rsna_diag/lora.py','rsna_diag/sft_data.py','rsna_diag/train.py']:evidence[p]=sha(p)
++    save(OUT/'training_gate.json',dict(passed=True,evidence=evidence,chosen_mb=1,lr=2e-5,source_sha=sha(__file__),
++        inherited=str(ORIGINAL/'recovery/training_gate.json'),inherited_sha=sha(ORIGINAL/'recovery/training_gate.json'),
++        reason='수치 경로·자료·mb1은 iter_090 recovery gate의 불변 증거를 hash로 계승. 이번 변경(LR2e-5, 결과/cache 경로)의 재개·optimizer LR·R 모드 loss는 tests/resume에서 재검증.'))
++    print('gate saved')
++
++if __name__=='__main__':main()
+diff --git a/report97_gen.py b/report97_gen.py
+new file mode 100644
+index 0000000..755cd2d
+--- /dev/null
++++ b/report97_gen.py
+@@ -0,0 +1,17 @@
++"""iter_097: 기존 recovery 생성 연산(report90_recovery_gen)을 유지하고 출력·cache 경로만 iter_097로 격리한다.
++parent와 worker subprocess 모두 이 파일을 진입점으로 쓰므로 OUT이 일관된다. (report94_gen.py와 동일 구조)"""
++import argparse
++from pathlib import Path
++import report90_gen as C
++import report90_gen_safe as S
++import report90_recovery_gen as RG  # noqa: F401  load_model·SOURCES 패치 적용
++
++OUT=Path(__file__).resolve().parent/'results/iter_097'
++C.OUT=OUT
++C.SOURCES=C.SOURCES+['report97_gen.py']
++C.__file__=__file__
++
++if __name__=='__main__':
++    p=argparse.ArgumentParser();p.add_argument('command',choices=['worker','launch']);p.add_argument('--requests',required=True);p.add_argument('--out',required=True)
++    p.add_argument('--checkpoint');p.add_argument('--workers',type=int,default=1);p.add_argument('--shard',type=int,default=0);p.add_argument('--gpu');p.add_argument('--limit',type=int,default=0);p.add_argument('--peak-mib',type=int,default=12000)
++    a=p.parse_args();raise SystemExit(C.worker(a) if a.command=='worker' else S.launch(a))
+diff --git a/report97_gen_test.py b/report97_gen_test.py
+new file mode 100644
+index 0000000..2b8bca6
+--- /dev/null
++++ b/report97_gen_test.py
+@@ -0,0 +1,43 @@
++"""iter_097 실제 생성 경로 검사: base V32 32건을 중단(limit)→재개로 생성하고 iter_090 기존 base 출력과 token 단위로 대조.
++요청 변조·완료 후 재실행·protocol 불일치 거부도 확인한다. 학습 중인 GPU와 겹치지 않게 GPU 하나만 지정한다."""
++import argparse
++import json
++import os
++import subprocess
++import sys
++import time
++from pathlib import Path
++from report86_common import save,sha,read_jsonl_complete
++from report97_train import OUT,ORIGINAL
++
++def run(args,gpu,log):
++    env=dict(os.environ);env['CUDA_VISIBLE_DEVICES']=gpu
++    with open(log+'.out','x') as so,open(log+'.err','x') as se:
++        return subprocess.run([sys.executable,'report97_gen.py',*args],env=env,stdout=so,stderr=se).returncode
++
++def main():
++    p=argparse.ArgumentParser();p.add_argument('--gpu',required=True);a=p.parse_args()
++    root=OUT/'tests/gen';root.mkdir(parents=True,exist_ok=True);out=OUT/'gen_tests/base_V32'
++    req=str(ORIGINAL/'data/V32/requests.json');base=['launch','--requests',req,'--out',str(out),'--workers','1','--peak-mib','12000']
++    steps=[]
++    t=time.monotonic();rc1=run(base+['--limit','3'],a.gpu,str(root/'partial'));n1=len(read_jsonl_complete(out/'worker_0.jsonl'))
++    steps.append(dict(step='partial_limit3',rc=rc1,n_records=n1,wall_s=time.monotonic()-t))
++    t=time.monotonic();rc2=run(base,a.gpu,str(root/'resume'));recs=read_jsonl_complete(out/'worker_0.jsonl')
++    steps.append(dict(step='resume_to_complete',rc=rc2,n_records=len(recs),wall_s=time.monotonic()-t,completion=(out/'completion.json').exists()))
++    old={r['id']:r for r in read_jsonl_complete(ORIGINAL/'recovery/validation/epoch2/base_report/worker_0.jsonl')}
++    new={r['id']:r for r in recs}
++    same=sum(old[k]['input_ids']==new[k]['input_ids'] and old[k]['text']==new[k]['text'] for k in new if k in old)
++    token_same=sum([x['suffix_ids'] if 'suffix_ids' in x else None for x in old[k]['attempts']]==[x['suffix_ids'] if 'suffix_ids' in x else None for x in new[k]['attempts']] for k in new if k in old)
++    # 변조: 다른 요청 파일로 같은 출력 경로 재실행 -> 거부(rc!=0)
++    sub=OUT/'gen_tests/requests_subset.json';save(sub,json.loads(Path(req).read_text())[:31])
++    rc3=run(['launch','--requests',str(sub),'--out',str(out),'--workers','1','--peak-mib','12000'],a.gpu,str(root/'tamper_requests'))
++    # 완료 후 동일 재실행: rc 0 이고 record 수 불변
++    rc4=run(base,a.gpu,str(root/'rerun_complete'));n4=len(read_jsonl_complete(out/'worker_0.jsonl'))
++    ids=[r['id'] for r in recs]
++    result=dict(passed=rc1==0 and n1==3 and rc2==0 and len(recs)==32 and len(set(ids))==32 and same==32 and token_same==32 and rc3!=0 and rc4==0 and n4==32,
++        steps=steps,text_and_input_ids_equal_to_iter090_base=same,attempt_suffix_tokens_equal=token_same,tampered_request_rc=rc3,rerun_complete_rc=rc4,rerun_records=n4,
++        all_eos=all(r['attempts'][-1]['ended_eos'] for r in recs),
++        completion_sha=sha(out/'completion.json'),source_sha=sha(__file__))
++    save(root/'result.json',result);print(json.dumps(result)[:700]);return 0 if result['passed'] else 2
++
++if __name__=='__main__':raise SystemExit(main())
+diff --git a/report97_genq.py b/report97_genq.py
+new file mode 100644
+index 0000000..7ba1ca9
+--- /dev/null
++++ b/report97_genq.py
+@@ -0,0 +1,29 @@
++"""iter_097: 완료된 epoch checkpoint의 고정 V32(report)/V16(ground) 요청을 지정 GPU 하나에서 순차 생성한다.
++checkpoint가 해당 epoch validation 기록(checkpoint_sha)과 일치할 때만 실행한다."""
++import argparse
++import json
++import os
++import subprocess
++import sys
++import time
++from report86_common import save,sha
++from report97_train import OUT,ORIGINAL
++
++def main():
++    p=argparse.ArgumentParser();p.add_argument('--mode',choices=['R','G'],required=True);p.add_argument('--epoch',type=int,required=True)
++    p.add_argument('--gpu',required=True);p.add_argument('--subsets',default='V32')
++    a=p.parse_args()
++    run=OUT/'train'/f'{a.mode}_lr2e-05';ck=run/f'checkpoint_{a.epoch*64:06}.pt';val=json.loads((run/f'validation_{a.epoch:02}.json').read_text())
++    assert sha(ck)==val['checkpoint_sha']==json.loads(ck.with_suffix('.json').read_text())['sha256']
++    root=OUT/f'validation/epoch{a.epoch}';root.mkdir(parents=True,exist_ok=True);results=[]
++    for subset in a.subsets.split(','):
++        kind={'V32':'report','V16':'ground'}[subset];name=f'{a.mode}_lr2e-05_{kind}';out=root/name
++        cmd=[sys.executable,'report97_gen.py','launch','--requests',str(ORIGINAL/f'data/{subset}/requests.json'),'--out',str(out),'--workers','1','--peak-mib','12000','--checkpoint',str(ck)]
++        env=dict(os.environ);env['CUDA_VISIBLE_DEVICES']=a.gpu;t=time.monotonic()
++        with (root/f'{name}_{int(time.time())}.stdout.log').open('x') as so,(root/f'{name}_{int(time.time())}.stderr.log').open('x') as se:
++            rc=subprocess.run(cmd,env=env,stdout=so,stderr=se).returncode
++        results.append(dict(name=name,rc=rc,wall_s=time.monotonic()-t,gpu=a.gpu,cmd=cmd))
++        print(json.dumps(results[-1]),flush=True);assert rc==0
++    save(root/f'genq_{a.mode}_{int(time.time())}.json',dict(results=results,source_sha=sha(__file__)))
++
++if __name__=='__main__':main()
+diff --git a/report97_ground_eval.py b/report97_ground_eval.py
+new file mode 100644
+index 0000000..ff0aab1
+--- /dev/null
++++ b/report97_ground_eval.py
+@@ -0,0 +1,12 @@
++"""iter_097 V16 정답 문장 제공 grounding 보조 평가. 기존 recovery 평가기(report90_recovery_ground_eval)를 그대로 쓰되
++iter_097 생성 stage의 protocol 코드 목록(report97_gen.py 포함)으로 검증한다."""
++import argparse
++import report90_gen as C
++import report97_gen  # noqa: F401  SOURCES 패치
++import report90_recovery_ground_eval as G
++from report90_numeric import OUT as ORIGINAL
++
++if __name__=='__main__':
++    p=argparse.ArgumentParser();p.add_argument('--stage',required=True);p.add_argument('--requests',default=str(ORIGINAL/'data/V16/requests.json'))
++    p.add_argument('--manifest',default=str(ORIGINAL/'data/V16/manifest.json'));p.add_argument('--output',required=True)
++    G.run(p.parse_args())
+diff --git a/report97_judge_epoch2.py b/report97_judge_epoch2.py
+new file mode 100644
+index 0000000..bb5f8e9
+--- /dev/null
++++ b/report97_judge_epoch2.py
+@@ -0,0 +1,60 @@
++"""iter_097 epoch2 (R LR2e-5) V32 출력의 assistant 판정. 조건명을 가린 blinded.json의 원문 span에 연결한다.
++일반 정상문은 iter_090 관례(reference에 'no significant finding' 원자가 있으면 supported, 아니면 unknown; 자동 모순 처리 안 함)를 그대로 따른다.
++비정상(비일반) 출력은 아래에 출력별 사유를 직접 적었다. 전문의 검토가 아니다."""
++import json
++from pathlib import Path
++from report86_common import save,sha
++from report97_train import OUT,ORIGINAL
++
++GENERIC=('No significant findings.','Within normal limits.')
++
++def generic(ref,text):
++    atoms=[a['id'] for a in ref['atoms'] if a['finding']=='no significant finding' and a['polarity']=='negative']
++    return dict(matches=[],claims=[dict(finding='significant abnormality',polarity='negative',certainty='definite',
++        status='supported' if atoms else 'unknown',quote=text,refs=atoms[:1],
++        note='일반 정상문; reference에 같은 전반 정상 원자 있음' if atoms else '일반 정상문; 자동 모순·자동 승인 안 함')],internal_conflicts=[],format_failure=False)
++
++def M(ref,quote,status,loc,att,amb=False):return dict(ref=ref,quote=quote,status=status,location=loc,attributes=att,ambiguous=amb)
++def C(finding,quote,status,refs,pol='positive',cert='definite',note=''):return dict(finding=finding,polarity=pol,certainty=cert,status=status,quote=quote,refs=refs,note=note)
++
++# image index -> 판정 (비일반 출력)
++SPECIAL={
++ 13:dict(matches=[M('V13A02','Central venous catheter.','type_only','missing','na')],
++   claims=[C('central venous catheter','Central venous catheter.','supported',['V13A02'])],note='위치(right jugular, tip) 누락 -> type_only'),
++ 16:dict(matches=[M('V16A00','Pulmonary infiltrates.','type_only','missing','missing',True)],
++   claims=[C('pulmonary infiltrate','Pulmonary infiltrates.','supported',['V16A00'])],note='perihilar/right 위치·alveolar 속성 누락; reference 자체 ambiguous'),
++ 20:dict(matches=[M('V20A01','Central venous catheter.','type_only','missing','na')],
++   claims=[C('central venous catheter','Central venous catheter.','supported',['V20A01']),
++           C('nasogastric tube','Nasogastric tube.','unknown',[],note='reference에 언급 없음; 미지원/판단 불가')],note='subclavian 경로 누락'),
++ 21:dict(matches=[M('V21A00','Pacemaker in situ.','type_only','na','missing')],
++   claims=[C('pacemaker','Pacemaker in situ.','supported',['V21A00'])],note='dual chamber 속성 누락 -> type_only'),
++ 22:dict(matches=[],claims=[C('aortic elongation','Aortic elongation.','unknown',[],note='reference는 hiatal hernia만; 미지원')],note='정답 소견 hiatal hernia 미대응'),
++ 23:dict(matches=[M('V23A00','Pacemaker with leads in the right atrium and right ventricle.','strict','na','na')],
++   claims=[C('pacemaker','Pacemaker with leads in the right atrium and right ventricle.','supported',['V23A00']),
++           C('pacemaker lead position','Pacemaker with leads in the right atrium and right ventricle.','unknown',[],note='lead 위치 reference 없음'),
++           C('cardiomegaly','Cardiomegaly.','unknown',[],note='reference에 없음')],note='V23A00 pacemaker에는 위치·속성이 없어 strict'),
++ 25:dict(matches=[],claims=[C('chronic pulmonary change','Chronic changes in lung parenchyma.','unknown',[],note='reference는 left lower lobe segmental atelectasis만')],note='정답 소견 미대응'),
++ 30:dict(matches=[M('V30A00','Tracheostomy tube.','strict','na','na')],
++   claims=[C('tracheostomy tube','Tracheostomy tube.','supported',['V30A00'])],note='nasogastric tube는 누락(V30A01 미대응)'),
++ 31:dict(matches=[],claims=[C('chronic pulmonary change','Chronic changes in lung parenchyma.','unknown',[],note='reference는 bilateral apical pleural thickening')],note='정답 소견 미대응; 유사 표현이나 같은 소견 아님'),
++}
++
++def main(name='epoch2'):
++    root=OUT/f'semantic/{name}';blinded=json.loads((root/'blinded.json').read_text())
++    refs=json.loads((ORIGINAL/'semantic/V32_reference_v3.json').read_text())['rows'];ix={r['id']:i for i,r in enumerate(refs)}
++    judgments=[];used=set()
++    for rec in blinded['records']:
++        i=ix[rec['image_id']];ref=refs[i]
++        if rec['text'] in GENERIC:j=generic(ref,rec['text'])
++        else:
++            assert i in SPECIAL,(i,rec['text']);s=SPECIAL[i];used.add(i)
++            j=dict(matches=s['matches'],claims=s['claims'],internal_conflicts=[],format_failure=False,note=s['note'])
++        judgments.append(dict(blind_id=rec['blind_id'],**j))
++    assert used==set(SPECIAL)
++    for k in range(0,32,4):
++        ids={refs[x]['id'] for x in range(k,k+4)};blind={r['blind_id'] for r in blinded['records'] if r['image_id'] in ids}
++        save(root/f'judgments/part_{k//4:02}.json',dict(blinded_sha=sha(root/'blinded.json'),judgments=[j for j in judgments if j['blind_id'] in blind],
++            helper_sha=sha(__file__),scope='assistant 판정; 일반 정상문은 관례 자동 처리, 비일반 출력은 출력별 수작업 사유'))
++    print(len(judgments))
++
++if __name__=='__main__':main()
+diff --git a/report97_judge_epoch6.py b/report97_judge_epoch6.py
+new file mode 100644
+index 0000000..c9cd1c3
+--- /dev/null
++++ b/report97_judge_epoch6.py
+@@ -0,0 +1,213 @@
++"""iter_097 epoch6 비교 batch(신규 R LR2e-5 / base / R LR1e-4 / R LR2e-4)의 assistant 판정.
++blinded.json은 조건명을 제거한 상태이며 판정 중 private_mapping은 열지 않았다. 전문의 검토가 아니다.
++
++규칙(사전 고정, iter_090 protocol 계승 + 이번 보완):
++- 일반 정상문(No significant findings 등): reference에 비모호 전반 정상 원자가 있으면 supported, 없으면 unknown. 자동 모순 처리 안 함.
++- 구체적 부정문(예: no pleural effusion, lungs are clear)이 비모호 확정 양성 reference와 정면 충돌하면 contradicted.
++  reference 원자가 모호(ambiguous)이거나 가능(possible)이면 contradicted 대신 unknown + 'POSSIBLE_CONTRA' 표시(보수 경계에서만 반박으로 셈).
++- 전반 정상 reference에 구체적 이상 소견을 추가한 출력: 미지원(unknown) + POSSIBLE_CONTRA. reference에 없는 추가 소견(비정상 reference)은 plain unknown.
++- 'No other relevant findings' 류는 자동 모순 처리하지 않는다.
++- strict: 소견 + reference가 명시한 위치·속성 모두 대응. 위치/속성 누락·충돌은 type_only."""
++import json
++import re
++from report86_common import save,sha
++from report97_train import OUT,ORIGINAL
++
++PC='POSSIBLE_CONTRA: '
++GENERIC=('No significant findings.','Within normal limits.','No relevant findings.','No significant radiological findings.','Chest without significant alterations.')
++
++def m(ref,q,status,loc,att,amb=False):return dict(ref=ref,quote=q,status=status,location=loc,attributes=att,ambiguous=amb)
++def c(finding,q,status,refs,pol='positive',cert='definite',note=''):return dict(finding=finding,polarity=pol,certainty=cert,status=status,quote=q,refs=refs,note=note)
++def J(matches,claims,note=''):return dict(matches=matches,claims=claims,note=note)
++
++def nsf_atoms(ref):return [a['id'] for a in ref['atoms'] if a['finding']=='no significant finding' and a['polarity']=='negative' and not a['ambiguous']]
++
++def generic(ref,text):
++    atoms=nsf_atoms(ref)
++    return J([],[c('significant abnormality',text,'supported' if atoms else 'unknown',atoms[:1],'negative',note='일반 정상문'+('; reference 전반 정상 원자 있음' if atoms else '; 자동 모순·승인 안 함'))])
++
++PATTERNS=dict(
++    overall=[r'Normal chest X-ray\.',r'No acute cardiopulmonary process\.'],
++    heart_normal=[r'The heart size is normal\.'],
++    lungs_clear=[r'The lungs are clear without focal consolidation, pleural effusion, or pneumothorax\.',r'The lungs are clear with no focal consolidation, pleural effusion, or pneumothorax\.',r'The lungs are clear\.'],
++    effusion=[r'There is no pleural effusion or pneumothorax\.'],
++    osseous=[r'The visualized osseous structures are unremarkable\.',r'The visualized osseous structures are intact\.',r'The bones are intact\.',r'There is no evidence of acute bony abnormality\.'],
++    mediastinum=[r'The mediastinal and hilar contours are (?:normal|unremarkable)\.',r'The mediastinal contours are (?:normal|unremarkable)\.',r'The mediastinum is unremarkable\.'])
++FINDING=dict(overall='significant abnormality',heart_normal='cardiomegaly',lungs_clear='pulmonary opacity/consolidation',effusion='pleural effusion/pneumothorax',osseous='osseous abnormality',mediastinum='mediastinal abnormality')
++
++# 정상형 base 서술(FINDINGS/IMPRESSION)의 이미지별 비기본 판정. 기본은 unknown.
++BASE_TABLE={
++ 0:dict(heart_normal=('unknown',['V00A00'],PC+'reference는 가능(possible) apparent cardiomegaly')),
++ 1:dict(effusion=('contradicted',['V01A00'],'reference: small left posterior costophrenic angle effusion')),
++ 9:dict(heart_normal=('supported',['V09A02'],''),lungs_clear=('supported',['V09A00','V09A01'],'')),
++ 13:dict(lungs_clear=('supported',['V13A00','V13A01'],'')),
++ 14:dict(osseous=('contradicted',['V14A01'],'osseous unremarkable vs dorsolumbar scoliosis')),
++ 15:dict(osseous=('contradicted',['V15A02'],'osseous intact vs degenerative bone changes'),lungs_clear=('contradicted',['V15A01'],'lungs clear vs chronic pleuroparenchymal changes')),
++ 17:dict(lungs_clear=('unknown',['V17A01'],PC+'reference nodular images 모호')),
++ 19:dict(effusion=('supported',['V19A03'],''),mediastinum=('contradicted',['V19A01'],'mediastinum unremarkable vs slight mediastinal widening')),
++ 24:dict(mediastinum=('contradicted',['V24A00'],'mediastinal contours unremarkable vs elongated aorta')),
++ 25:dict(lungs_clear=('contradicted',['V25A00'],'lungs clear vs segmental LLL atelectasis')),
++ 27:dict(lungs_clear=('contradicted',['V27A02'],'lungs clear vs fibrotic tracts')),
++}
++
++def base_normal(idx,ref,text):
++    claims=[];table=BASE_TABLE.get(idx,{});atoms=nsf_atoms(ref)
++    for cat,pats in PATTERNS.items():
++        for p in pats:
++            hit=re.search(p,text)
++            if hit:
++                if cat=='overall':status,refs,note=('supported',atoms[:1],'일반 정상 impression') if atoms else ('unknown',[],'일반 정상 impression; 자동 모순·승인 안 함')
++                else:status,refs,note=table.get(cat,('unknown',[],''))
++                claims.append(c(FINDING[cat],hit.group(0),status,refs,'negative',note=note));break
++    return J([],claims)
++
++# 이미지 index -> [(text 시작, 판정)]. 비정상(비일반) 출력 전부를 출력별로 직접 판정했다.
++S={
++ 1:[('Signs of air trapping.',J([],[c('air trapping','Signs of air trapping.','unknown',[],note='reference는 pleural effusion만; 미지원')]))],
++ 2:[('No significant findings. Small hiatal hernia.',J([],[c('significant abnormality','No significant findings.','supported',['V02A00'],'negative'),
++      c('hiatal hernia','Small hiatal hernia.','unknown',[],note=PC+'전반 정상 reference에 이상 소견 추가'),
++      c('aortic elongation','Aortic elongation.','unknown',[],note=PC+'전반 정상 reference에 이상 소견 추가'),
++      c('other findings','No other relevant findings.','unknown',[],'negative')]))],
++ 3:[('Aortic elongation. No other',J([],[c('aortic elongation','Aortic elongation.','unknown',[],note=PC+'전반 정상 reference에 이상 소견 추가'),
++      c('other findings','No other significant radiological findings.','unknown',[],'negative')]))],
++ 7:[('No significant findings. Mammary',J([],[c('significant abnormality','No significant findings.','supported',['V07A00'],'negative'),
++      c('mammary prostheses','Mammary prostheses.','unknown',[],note=PC+'전반 정상 reference에 이상 소견 추가')]))],
++ 8:[('Nodular image, probably',J([],[c('nodular image','Nodular image, probably due to superimposition, in the right upper lobe.','unknown',[],cert='possible',note=PC+'전반 정상 reference에 가능 소견 추가'),
++      c('benign image','Image of probable benign etiology in the left axillary border of the heart.','unknown',[],cert='possible',note=PC+'전반 정상 reference에 가능 소견 추가')])),
++    ('FINDINGS:\nThe lungs are clear. The heart size is normal. The mediastinal and hilar contours are unremarkable. There is no pleural effusion or pneumothorax. There are calcified granulomas',
++      J([],[c('lungs clear','The lungs are clear.','unknown',[],'negative'),
++      c('calcified granulomas','There are calcified granulomas in the right upper lobe.','unknown',[],note=PC+'전반 정상 reference에 이상 소견 추가; 반복 loop(비EOS)')],'비EOS 반복')),
++    ('Calcified granulomas in the right apex.',J([],[c('calcified granulomas','Calcified granulomas in the right apex.','unknown',[],note=PC+'전반 정상 reference에 이상 소견 추가; 반복 loop(비EOS)')],'비EOS 반복'))],
++ 11:[('No significant findings. Aortic elongation.',J([],[c('significant abnormality','No significant findings.','supported',['V11A00'],'negative'),
++      c('aortic elongation','Aortic elongation.','unknown',[],note=PC+'전반 정상 reference에 이상 소견 추가')]))],
++ 13:[('Central route through the right jugular. No relevant findings.',J([m('V13A02','Central route through the right jugular.','type_only','missing','na')],
++      [c('central venous catheter','Central route through the right jugular.','supported',['V13A02']),c('other findings','No relevant findings.','unknown',[],'negative')],'tip 위치 누락')),
++    ('Central route through the right jugular to the superior vena cava. No other significant radiological',J([m('V13A02','Central route through the right jugular to the superior vena cava.','type_only','conflict','na',True)],
++      [c('central venous catheter','Central route through the right jugular to the superior vena cava.','supported',['V13A02']),
++       c('catheter tip in SVC','to the superior vena cava','unknown',['V13A02'],note=PC+'reference tip은 right atrium 시작부; SVC/cavoatrial 경계 모호'),
++       c('other findings','No other significant radiological findings.','unknown',[],'negative')],'tip SVC vs RA 시작부')),
++    ('Central route through the right jugular to the superior vena cava. No other significant findings.',J([m('V13A02','Central route through the right jugular to the superior vena cava.','type_only','conflict','na',True)],
++      [c('central venous catheter','Central route through the right jugular to the superior vena cava.','supported',['V13A02']),
++       c('catheter tip in SVC','to the superior vena cava','unknown',['V13A02'],note=PC+'reference tip은 right atrium 시작부; SVC/cavoatrial 경계 모호'),
++       c('other findings','No other significant findings.','unknown',[],'negative')],'tip SVC vs RA 시작부')),
++    ('FINDINGS:\n\nThe heart size is normal.',J([m('V13A02','A right internal jugular central venous catheter is present.','type_only','missing','na')],
++      [c('central venous catheter','A right internal jugular central venous catheter is present.','supported',['V13A02']),
++       c('lungs clear','The lungs are clear without focal consolidation, pleural effusion, or pneumothorax.','supported',['V13A00','V13A01'],'negative'),
++       c('significant abnormality','No acute cardiopulmonary process.','unknown',[],'negative')],'tip 누락'))],
++ 14:[('Mild biconvex scoliosis.',J([m('V14A01','Mild biconvex scoliosis.','type_only','missing','conflict')],
++      [c('scoliosis','Mild biconvex scoliosis.','supported',['V14A01']),c('scoliosis curvature','biconvex','unknown',['V14A01'],note='reference는 right convexity; biconvex는 다른 곡선 기술'),
++       c('other findings','No other relevant findings.','supported',['V14A02'],'negative',note='reference도 No other relevant findings(모호)')],'dorsolumbar 위치 누락; convexity 표현 불일치'))],
++ 15:[('Right basal infiltrate.',J([],[c('basal infiltrate','Right basal infiltrate.','unknown',[],note='reference에 없음; 미지원')]))],
++ 16:[('Pulmonary parenchyma with image of alveolar consolidation in the right lung.',J([m('V16A00','Pulmonary parenchyma with image of alveolar consolidation in the right lung.','type_only','missing','match',True)],
++      [c('alveolar consolidation','Pulmonary parenchyma with image of alveolar consolidation in the right lung.','supported',['V16A00'])],'perihilar 위치 누락; reference 모호')),
++    ('FINDINGS:\n\nThe heart size appears enlarged.',J([m('V16A00','There is increased opacity in the right lung field, suggestive of pulmonary edema or consolidation.','possible_only','missing','ambiguous',True)],
++      [c('right lung opacity','There is increased opacity in the right lung field','supported',['V16A00'],cert='possible'),
++       c('cardiomegaly','The heart size appears enlarged.','unknown',[]),
++       c('pulmonary edema','pulmonary edema or consolidation','unknown',[],cert='possible')],'hedge된 대응')),
++    ('Cardiomegaly. Pulmonary edema.',J([],[c('cardiomegaly','Cardiomegaly.','unknown',[]),c('pulmonary edema','Pulmonary edema.','unknown',[])])),
++    ('Cardiomegaly. Blunting',J([],[c('cardiomegaly','Cardiomegaly.','unknown',[]),c('costophrenic blunting','Blunting of the right costophrenic angle.','unknown',[]),
++      c('infiltrate','No clear images of infiltrates or condensations are appreciated.','unknown',['V16A00'],'negative',note=PC+'reference 확정 infiltrates이나 원자가 모호')]))],
++ 18:[],
++ 20:[('Central route through the right jugular to the superior vena cava. Nasogastric tube with',J([m('V20A01','Central route through the right jugular to the superior vena cava.','type_only','conflict','na')],
++      [c('central venous catheter','Central route through the right jugular to the superior vena cava.','supported',['V20A01']),
++       c('jugular catheter route','Central route through the right jugular','contradicted',['V20A01'],note='reference는 subclavian 경로'),
++       c('nasogastric tube','Nasogastric tube with the distal end in the stomach.','unknown',[],note='reference 언급 없음')])),
++    ('Central route through the right jugular to the superior vena cava. Infradiaphragmatic',J([m('V20A01','Central route through the right jugular to the superior vena cava.','type_only','conflict','na')],
++      [c('central venous catheter','Central route through the right jugular to the superior vena cava.','supported',['V20A01']),
++       c('jugular catheter route','Central route through the right jugular','contradicted',['V20A01'],note='reference는 subclavian 경로'),
++       c('nasogastric tube','Infradiaphragmatic nasogastric tube.','unknown',[],note='reference 언급 없음')])),
++    ('Central route through the right jugular to the superior vena cava. Probable bilateral',J([m('V20A01','Central route through the right jugular to the superior vena cava.','type_only','conflict','na')],
++      [c('central venous catheter','Central route through the right jugular to the superior vena cava.','supported',['V20A01']),
++       c('jugular catheter route','Central route through the right jugular','contradicted',['V20A01'],note='reference는 subclavian 경로'),
++       c('pleural effusion','Probable bilateral pleural effusion.','unknown',[],cert='possible',note='reference 언급 없음')])),
++    ('FINDINGS:\n\nThe heart size appears mildly enlarged.',J([m('V20A02','The heart size appears mildly enlarged.','strict','na','na'),
++      m('V20A01','A right internal jugular central venous catheter is seen terminating in the superior vena cava.','type_only','conflict','na'),
++      m('V20A03','There is mild right lower lung atelectasis.','type_only','conflict','na')],
++      [c('cardiomegaly','The heart size appears mildly enlarged.','supported',['V20A02']),
++       c('central venous catheter','A right internal jugular central venous catheter is seen terminating in the superior vena cava.','supported',['V20A01']),
++       c('jugular catheter route','A right internal jugular central venous catheter','contradicted',['V20A01'],note='reference는 subclavian 경로'),
++       c('nasogastric tube','A nasogastric tube is seen coursing into the stomach.','unknown',[],note='reference 언급 없음'),
++       c('right lower lung atelectasis','There is mild right lower lung atelectasis.','unknown',['V20A03'],note='reference는 possible retrocardiac atelectasis; 위치 상이')],'V20A00 hilar congestion 누락'))],
++ 21:[('Cardiomegaly. Dual chamber pacemaker. Aortic',J([m('V21A00','Dual chamber pacemaker.','strict','na','match')],
++      [c('pacemaker','Dual chamber pacemaker.','supported',['V21A00']),c('cardiomegaly','Cardiomegaly.','unknown',[]),c('aortic elongation','Aortic elongation.','unknown',[]),
++       c('aortic atheromatosis','Calcified aortic atheromatosis.','unknown',[]),c('spondylosis','Signs of spondylosis in the spine.','unknown',[]),
++       c('other findings','No other relevant findings.','unknown',[],'negative')])),
++    ('Chronic pulmonary changes. Cardiomegaly. Dual chamber pacemaker.',J([m('V21A00','Dual chamber pacemaker.','strict','na','match')],
++      [c('pacemaker','Dual chamber pacemaker.','supported',['V21A00']),c('chronic pulmonary change','Chronic pulmonary changes.','unknown',[]),c('cardiomegaly','Cardiomegaly.','unknown',[])])),
++    ('Pacemaker. No significant radiological findings.',J([m('V21A00','Pacemaker.','type_only','na','missing')],
++      [c('pacemaker','Pacemaker.','supported',['V21A00']),c('significant abnormality','No significant radiological findings.','unknown',[],'negative')],'dual chamber 속성 누락')),
++    ('FINDINGS:\n\nThe lungs are clear. The heart size is normal. There is no pleural effusion or pneumothorax. The patient has a pacemaker.',J([m('V21A00','The patient has a pacemaker.','type_only','na','missing')],
++      [c('pacemaker','The patient has a pacemaker.','supported',['V21A00']),c('lungs clear','The lungs are clear.','unknown',[],'negative'),c('cardiomegaly','The heart size is normal.','unknown',[],'negative'),
++       c('significant abnormality','No acute cardiopulmonary process.','unknown',[],'negative')],'dual chamber 속성 누락'))],
++ 22:[('Large hiatal hernia.',J([m('V22A00','Large hiatal hernia.','strict','na','na')],[c('hiatal hernia','Large hiatal hernia.','supported',['V22A00']),c('hernia size','Large','unknown',['V22A00'],note='reference에 크기 없음')])),
++    ('Hiatal hernia.',J([m('V22A00','Hiatal hernia.','strict','na','na')],[c('hiatal hernia','Hiatal hernia.','supported',['V22A00'])])),
++    ('Vascular hilar enlargement',J([m('V22A00','Hiatal hernia.','strict','na','na')],[c('hiatal hernia','Hiatal hernia.','supported',['V22A00']),
++      c('hilar vascular enlargement','Vascular hilar enlargement of probable vascular origin.','unknown',[],cert='possible'),c('other findings','No other relevant findings.','unknown',[],'negative')])),
++    ('FINDINGS:\nThe heart size is normal.',J([m('V22A00','There is a large hiatal hernia.','strict','na','na')],
++      [c('hiatal hernia','There is a large hiatal hernia.','supported',['V22A00']),c('lungs clear','The lungs are clear without focal consolidation, pleural effusion, or pneumothorax.','unknown',[],'negative')]))],
++ 23:[("Pacemaker. No alterations in the chest",J([m('V23A00','Pacemaker.','strict','na','na')],[c('pacemaker','Pacemaker.','supported',['V23A00']),c('significant abnormality',"No alterations in the chest for the patient's age.",'unknown',[],'negative')])),
++    ('Pacemaker. Cardiomegaly.',J([m('V23A00','Pacemaker.','strict','na','na')],[c('pacemaker','Pacemaker.','supported',['V23A00']),c('cardiomegaly','Cardiomegaly.','unknown',[]),c('aortic elongation','Aortic elongation.','unknown',[])])),
++    ('Chronic changes in lung parenchyma. Cardiomegaly. Dual chamber',J([m('V23A00','Dual chamber pacemaker.','strict','na','na')],
++      [c('pacemaker','Dual chamber pacemaker.','supported',['V23A00']),c('pacemaker type','Dual chamber','unknown',['V23A00'],note='reference에 type 없음'),c('cardiomegaly','Cardiomegaly.','unknown',[]),
++       c('aortic valve prosthesis','Aortic valve prosthesis.','unknown',[]),c('congestive heart failure','Signs of congestive heart failure.','unknown',[])])),
++    ('FINDINGS:\n\nThe heart size is mildly enlarged.',J([m('V23A00','There is a pacemaker/defibrillator device with leads in the expected location.','strict','na','na')],
++      [c('pacemaker','There is a pacemaker/defibrillator device with leads in the expected location.','supported',['V23A00']),
++       c('pneumothorax','There is no pleural effusion or pneumothorax.','supported',['V23A03'],'negative'),
++       c('cardiomegaly','The heart size is mildly enlarged.','unknown',[]),c('vascular congestion','There is mild pulmonary vascular congestion.','unknown',[])]))],
++ 24:[('Chronic pulmonary changes. Aortic elongation. Scoliosis.',J([m('V24A00','Aortic elongation.','strict','na','na')],
++      [c('aortic elongation','Aortic elongation.','supported',['V24A00']),c('chronic pulmonary change','Chronic pulmonary changes.','unknown',[]),c('scoliosis','Scoliosis.','unknown',[])])),
++    ('No significant findings. Small right infrahilar',J([],[c('significant abnormality','No significant findings.','unknown',[],'negative'),
++      c('infiltrate','Small right infrahilar interstitial infiltrate.','unknown',[]),c('scoliosis','Slight dorsal scoliosis.','unknown',[])]))],
++ 25:[('Chronic pulmonary changes.',J([],[c('chronic pulmonary change','Chronic pulmonary changes.','unknown',[],note='reference는 segmental LLL atelectasis')])),
++    ('Chronic changes in lung parenchyma. No other',J([],[c('chronic pulmonary change','Chronic changes in lung parenchyma.','unknown',[],note='reference는 segmental LLL atelectasis'),c('other findings','No other relevant findings.','unknown',[],'negative')]))],
++ 27:[('Chronic pulmonary changes.',J([m('V27A01','Chronic pulmonary changes.','strict','match','match',True)],[c('chronic pulmonary change','Chronic pulmonary changes.','supported',['V27A01'])],'reference 모호')),
++    ('Chronic changes in lung parenchyma.',J([m('V27A01','Chronic changes in lung parenchyma.','strict','match','match',True)],[c('chronic pulmonary change','Chronic changes in lung parenchyma.','supported',['V27A01'])],'reference 모호'))],
++ 28:[('No significant findings. Left humeral head prosthesis.',J([m('V28A00','Left humeral head prosthesis.','type_only','conflict','na')],
++      [c('significant abnormality','No significant findings.','unknown',[],'negative'),c('humeral prosthesis laterality','Left humeral head prosthesis.','contradicted',['V28A00'],note='reference는 right humerus')])),
++    ('FINDINGS:\n\nThe lungs are clear.',J([m('V28A00','There is a right shoulder prosthesis.','strict','match','match',True)],
++      [c('shoulder prosthesis','There is a right shoulder prosthesis.','supported',['V28A00'],note='shoulder vs humerus 표현 차이'),c('lungs clear','The lungs are clear.','unknown',[],'negative')],'위치 표현 모호')),
++    ('Osteosynthesis material, right shoulder.',J([m('V28A00','Osteosynthesis material, right shoulder.','type_only','match','ambiguous',True)],
++      [c('osteosynthesis material','Osteosynthesis material, right shoulder.','unknown',['V28A00'],note='prosthesis가 아닌 fixation hardware 표현; 대응 모호'),
++       c('spondylosis','Signs of spondylosis in the spine.','unknown',[]),c('other findings','No other relevant findings.','unknown',[],'negative')],'소견 종류 모호')),
++    ('Right shoulder prosthesis. No other relevant findings.',J([m('V28A00','Right shoulder prosthesis.','strict','match','match',True)],
++      [c('shoulder prosthesis','Right shoulder prosthesis.','supported',['V28A00'],note='shoulder vs humerus 표현 차이'),c('other findings','No other relevant findings.','unknown',[],'negative')],'위치 표현 모호'))],
++ 29:[('Chronic pulmonary changes.',J([],[c('chronic pulmonary change','Chronic pulmonary changes.','unknown',[],note='reference에 없음')])),
++    ('No signs of pleural detachment',J([],[c('pleural detachment','No signs of pleural detachment are seen in the left hemithorax.','unknown',[],'negative'),c('rib callus','Bone calluses from fractures in the 5th and 6th left rib arches are visible.','unknown',[])])),
++    ('FINDINGS:\nThe heart size is normal.',J([m('V29A00','There is a nodular opacity in the right lower lobe.','type_only','missing','missing')],
++      [c('pulmonary nodule','There is a nodular opacity in the right lower lobe.','supported',['V29A00']),c('lungs clear','The lungs are clear without focal consolidation, pleural effusion, or pneumothorax.','unknown',[],'negative')],'크기·peripheral posterior 누락')),
++    ('No definitive images of pulmonary parenchyma nodules',J([],[c('pulmonary nodule','No definitive images of pulmonary parenchyma nodules or masses are observed.','contradicted',['V29A00','V29A01'],'negative',note='reference는 확정 nodules')]))],
++ 30:[('Tracheostomy tube. No other relevant findings.',J([m('V30A00','Tracheostomy tube.','strict','na','na')],[c('tracheostomy tube','Tracheostomy tube.','supported',['V30A00']),c('other findings','No other relevant findings.','unknown',[],'negative')],'NG tube 누락')),
++    ('Tracheostomy tube.',J([m('V30A00','Tracheostomy tube.','strict','na','na')],[c('tracheostomy tube','Tracheostomy tube.','supported',['V30A00'])],'NG tube 누락')),
++    ('FINDINGS:\n\nThe patient is intubated',J([m('V30A00','A tracheostomy tube is also present.','strict','na','na'),m('V30A01','A nasogastric tube is visualized.','strict','na','na')],
++      [c('tracheostomy tube','A tracheostomy tube is also present.','supported',['V30A00']),c('nasogastric tube','A nasogastric tube is visualized.','supported',['V30A01']),
++       c('endotracheal tube','The patient is intubated with an endotracheal tube in place.','unknown',[],note='reference에 없음; trach과 동시 기술'),
++       c('lungs clear','The lungs are clear bilaterally.','supported',['V30A02'],'negative')]))],
++ 31:[('Chronic pulmonary changes.',J([],[c('chronic pulmonary change','Chronic pulmonary changes.','unknown',[],note='reference는 bilateral apical pleural thickening')])),
++    ('Prominent aortic button.',J([],[c('aortic prominence','Prominent aortic button.','unknown',[]),c('costophrenic blunting','Blunting of the left costophrenic angle.','unknown',[])]))],
++}
++
++def judge(idx,ref,text):
++    if text in GENERIC:return generic(ref,text)
++    for key,j in S.get(idx,[]):
++        if text.startswith(key):return j
++    if text.startswith('FINDINGS:'):return base_normal(idx,ref,text)
++    raise KeyError((idx,text[:60]))
++
++def main(name='epoch6'):
++    root=OUT/f'semantic/{name}';blinded=json.loads((root/'blinded.json').read_text())
++    refs=json.loads((ORIGINAL/'semantic/V32_reference_v3.json').read_text())['rows'];ix={r['id']:i for i,r in enumerate(refs)}
++    judgments=[]
++    for rec in blinded['records']:
++        i=ix[rec['image_id']];j=judge(i,refs[i],rec['text'])
++        judgments.append(dict(blind_id=rec['blind_id'],matches=j['matches'],claims=j['claims'],internal_conflicts=[],format_failure=False,note=j['note']))
++    assert len({j['blind_id'] for j in judgments})==len(blinded['records'])==128
++    import report90_semantic_eval as E
++    byref={r['id']:r for r in refs};byj={j['blind_id']:j for j in judgments}
++    for rec in blinded['records']:E.score(byref[rec['image_id']],rec,byj[rec['blind_id']])  # 저장 전 anchor·규칙 검증
++    for k in range(0,32,4):
++        ids={refs[x]['id'] for x in range(k,k+4)};blind={r['blind_id'] for r in blinded['records'] if r['image_id'] in ids}
++        save(root/f'judgments/part_{k//4:02}.json',dict(blinded_sha=sha(root/'blinded.json'),judgments=[j for j in judgments if j['blind_id'] in blind],
++            helper_sha=sha(__file__),scope='assistant 판정(전문의 아님); 규칙은 파일 상단 docstring; 비정상 출력은 출력별 수작업, 일반 정상문·정상형 base 서술은 규칙 표'))
++    print(len(judgments))
++
++if __name__=='__main__':main()
+diff --git a/report97_launch.py b/report97_launch.py
+new file mode 100644
+index 0000000..ba4d322
+--- /dev/null
++++ b/report97_launch.py
+@@ -0,0 +1,41 @@
++"""iter_097 단일 trajectory supervisor: 가장 여유 있는 허용 GPU에 report97_train.py를 배정하고 자식을 회수한다.
++SIGTERM이면 자식에게 전달해 현재 update 뒤 checkpoint를 저장하게 한다(exit75 = 정상 정지). 재실행하면 digest 검증 후 자동 재개."""
++import argparse
++import fcntl
++import json
++import os
++import signal
++import subprocess
++import sys
++import time
++from report86_common import save,sha
++from report97_train import OUT
++
++def launch(mode,epochs,lr):
++    name=f'{mode}_lr{lr:g}';root=OUT/'launch'/name;root.mkdir(parents=True,exist_ok=True)
++    allowed=os.environ['CUDA_VISIBLE_DEVICES'].split(',')
++    with (root/'owner.lock').open('a') as lock:
++        fcntl.flock(lock,fcntl.LOCK_EX|fcntl.LOCK_NB)
++        attempt=len(list(root.glob('result_*.json')));start=time.monotonic()
++        raw=subprocess.check_output(['nvidia-smi','--query-gpu=index,memory.free,memory.used','--format=csv,noheader,nounits'],text=True)
++        free={r.split(',')[0].strip():int(r.split(',')[1]) for r in raw.splitlines()}
++        gpu=max(allowed,key=lambda g:free[g]);assert free[gpu]>=14.19*1024+2048+1024,('memory admission',free)
++        run=OUT/'train'/name
++        cmd=[sys.executable,'report97_train.py','--gpu',gpu,'--run-dir',str(run),'--mode',mode,'--lr',str(lr),'--epochs',str(epochs)]
++        so=(root/f'stdout_{attempt}.log').open('x');se=(root/f'stderr_{attempt}.log').open('x')
++        p=subprocess.Popen(cmd,stdout=so,stderr=se)
++        save(root/f'start_{attempt}.json',dict(cmd=cmd,gpu=gpu,pid=p.pid,supervisor_pid=os.getpid(),free_mib=free,source_sha=sha(__file__)))
++        print(json.dumps(dict(started=name,gpu=gpu,child_pid=p.pid,supervisor_pid=os.getpid())),flush=True)
++        def stop(*a):
++            if p.poll() is None:p.send_signal(signal.SIGTERM)
++        signal.signal(signal.SIGTERM,stop)
++        try:rc=p.wait()
++        finally:
++            if p.poll() is None:p.terminate();p.wait()
++            so.close();se.close()
++        save(root/f'result_{attempt:03}.json',dict(rc=rc,cmd=cmd,gpu=gpu,wall_s=time.monotonic()-start,source_sha=sha(__file__)))
++        return rc
++
++if __name__=='__main__':
++    p=argparse.ArgumentParser();p.add_argument('--mode',choices=['R','G'],required=True);p.add_argument('--epochs',type=int,default=6);p.add_argument('--lr',type=float,default=2e-5)
++    a=p.parse_args();raise SystemExit(launch(a.mode,a.epochs,a.lr))
+diff --git a/report97_reference.py b/report97_reference.py
+new file mode 100644
+index 0000000..5a64628
+--- /dev/null
++++ b/report97_reference.py
+@@ -0,0 +1,87 @@
++"""iter_097: V32 reference 사례표 고정(새 출력 생성 전)과 대조 사례 fixture.
++reference는 iter_090 V32_reference_v3(생성 출력 비열람 상태에서 고정)을 원문 인용과 함께 읽기 전용으로 계승한다.
++새 평가기는 만들지 않고 report90_semantic_eval.score의 strict/type_only 규칙만 대조 사례로 검사한다."""
++import json
++import re
++from pathlib import Path
++from report86_common import save,sha
++import report90_semantic_eval as E
++from report97_train import OUT,ORIGINAL
++
++REF=ORIGINAL/'semantic/V32_reference_v3.json'
++
++def classify(a,row):
++    """사례표 분류. 판정 규칙은 protocol.md(iter_090)와 동일하며 출력 결과를 보지 않고 정한다."""
++    if a['polarity']=='positive' and a['certainty']=='definite':klass='recall_target'
++    elif a['polarity']=='positive':klass='possible_only_not_in_denominator'
++    elif a['finding']=='no significant finding':klass='general_normal'
++    else:klass='negative_fact'
++    text=(a['source']+' '+(a['attributes'] or '')).lower()
++    return dict(id=a['id'],image_id=row['id'],patient=row['patient'],class_=klass,
++        quote=a['source'],start=a['start'],end=a['end'],finding=a['finding'],polarity=a['polarity'],certainty=a['certainty'],
++        location=a['location'],attributes=a['attributes'],ambiguous=a['ambiguous'],
++        lateral_view_dependent=bool(re.search(r'(?<![a-z])lateral (view|projection|radiograph)',text)),
++        bilateral_or_multisite=any(w in (a['location'] or '').lower() for w in ['bilateral','right','left'])
++            and 'bilateral' in (a['location'] or '').lower(),
++        cause_or_hedge_in_text=any(w in text for w in ['secondary','could be','probable','apparent','doubtful','context']),
++        strict_requires_location=bool(a['location']),strict_requires_attributes=bool(a['attributes']))
++
++def contrast_fixtures():
++    """score()의 strict 판정 규칙을 사전 대조 사례로 검사한다. 합성 판정이며 모델 출력이 아니다."""
++    atom=dict(id='X0',finding='atelectasis',polarity='positive',certainty='definite',location='left lower lobe',attributes='segmental',ambiguous=False)
++    other=dict(id='X1',finding='pleural effusion',polarity='positive',certainty='definite',location='',attributes='',ambiguous=False)
++    ref=dict(id='img',patient='p',abnormal=True,atoms=[atom,other])
++    def run(text,matches,claims=(),conflicts=()):
++        out=dict(blind_id='b',text=text,non_eos=False)
++        if not claims:claims=[dict(finding='fixture',polarity='positive',certainty='definite',status='unknown',quote=text,refs=[],note='')]
++        return E.score(ref,out,dict(matches=matches,claims=list(claims),internal_conflicts=list(conflicts)))
++    res={}
++    m=lambda q,ref_id,status,loc,att:dict(ref=ref_id,status=status,quote=q,location=loc,attributes=att,ambiguous=False)
++    # 1) 위치 누락: strict 아님, type-only 로만 인정
++    r=run('Atelectasis.',[m('Atelectasis','X0','type_only','missing','missing')],[]);res['location_missing_is_type_only']=r['strict_recall']==0 and r['type_recall']==.5
++    # 2) 위치·속성 일치: strict
++    r=run('Segmental atelectasis in the left lower lobe.',[m('Segmental atelectasis in the left lower lobe','X0','strict','match','match')],[]);res['full_match_is_strict']=r['strict_recall']==.5
++    # 3) 위치가 명시된 reference에 위치 'na' 로 strict 부여 시 거부(평가기 assertion)
++    try:run('Atelectasis.',[m('Atelectasis','X0','strict','na','na')],[]);res['strict_without_required_location_rejected']=False
++    except AssertionError:res['strict_without_required_location_rejected']=True
++    # 4) 한 소견 한쪽만 대응(양측/한쪽): 위치 conflict → strict 아님
++    r=run('Atelectasis in the right lower lobe.',[m('Atelectasis in the right lower lobe','X0','type_only','conflict','missing')],[]);res['laterality_conflict_not_strict']=r['strict_recall']==0
++    # 5) 일반 정상문은 recall 분모에 영향 없고 자동 모순도 아님(claim unknown)
++    c=dict(finding='significant abnormality',polarity='negative',certainty='definite',status='unknown',quote='No significant findings.',refs=[],note='')
++    r=run('No significant findings.',[],[c]);res['general_normal_unknown_not_contradiction']=(not r['contradiction']) and r['strict_recall']==0
++    # 6) 근거 없는 quote 거부
++    try:run('Atelectasis.',[m('Pneumonia','X0','type_only','missing','missing')],[]);res['unlinked_quote_rejected']=False
++    except AssertionError:res['unlinked_quote_rejected']=True
++    # 7) possible-only 는 strict 에 불포함
++    r=run('Possible atelectasis.',[m('Possible atelectasis','X0','possible_only','missing','missing')],[]);res['possible_only_not_strict']=r['strict_recall']==0 and r['possible_only']==.5
++    # 8) 환자 내부 모순 span 쌍
++    r=run('Atelectasis. No atelectasis.',[],[],[['Atelectasis.','No atelectasis.']]);res['internal_conflict_needs_two_spans']=r['internal_contradiction']
++    return res
++
++def main():
++    ref=json.loads(REF.read_text());rows=ref['rows']
++    table=[classify(a,row) for row in rows for a in row['atoms']]
++    positives=[t for t in table if t['class_']=='recall_target']
++    patients={t['image_id'] for t in positives}
++    fixtures=contrast_fixtures();assert all(fixtures.values()),fixtures
++    save(OUT/'reference/case_table_v2.json',dict(
++        reference=str(REF),reference_sha=sha(REF),reference_scope=ref['scope'],
++        n_images=len(rows),n_atoms=len(table),n_recall_target_atoms=len(positives),n_recall_patients=len(patients),
++        n_abnormal_without_definite_positive=len([r for r in rows if r['abnormal'] and r['id'] not in patients]),
++        lateral_view_dependent_recall_targets=[t['id'] for t in positives if t['lateral_view_dependent']],
++        rules=dict(
++            denominator='확정 양성 reference 원자(certainty=definite, polarity=positive)를 가진 환자; 환자별 비율의 macro 평균',
++            strict='소견 + reference에 명시된 위치·속성 모두 대응; 위치 누락은 type_only',
++            possible_only='possible reference/대응은 strict 분모·분자에서 제외',
++            bilateral='양측 reference에 한쪽만 대응하면 위치 불충족(type_only); 한쪽 대응을 양측 회복으로 처리하지 않음',
++            general_normal='no significant findings 류는 강한 부정 주장으로 자동 승인·자동 모순 처리하지 않고 unknown',
++            hedge='원인 hedge(예 secondary to)와 소견 존재 hedge를 구분: 소견 존재가 확정이면 원인 불확실성만으로 possible 처리하지 않음',
++            lateral_view='lateral 근거 의존 원자는 단일 frontal 입력에서 판정불가 사전 표시; 환자 전체를 제거하지 않음',
++            contradiction='reference가 명시적으로 반박하는 주장만 contradicted; reference에 없는 주장은 unknown(미지원·판단불가)'),
++        contrast_fixtures=fixtures,atoms=table,
++        source_sha=sha(__file__),scoring_sha=sha(E.__file__),
++        note='assistant 해석; 전문의 gold 아님. 생성 V32 출력 비열람 상태의 reference_v3을 그대로 계승.'))
++    print(json.dumps(dict(n_atoms=len(table),recall_atoms=len(positives),recall_patients=len(patients),fixtures=fixtures,
++        lateral=[t['id'] for t in positives if t['lateral_view_dependent']]),ensure_ascii=False))
++
++if __name__=='__main__':main()
+diff --git a/report97_rejudge_agreement.py b/report97_rejudge_agreement.py
+new file mode 100644
+index 0000000..21645b1
+--- /dev/null
++++ b/report97_rejudge_agreement.py
+@@ -0,0 +1,26 @@
++"""iter_097: 조건명을 가린 재판정(이번)과 iter_090 상속 판정의 환자별 일치도. 같은 reference·같은 score 규칙의 반복 판정 drift 점검."""
++import json
++from report86_common import save,sha
++from report97_train import OUT,ORIGINAL
++
++def load(p,cond):return {x['image_id']:x for x in json.loads(p.read_text()) if x['condition']==cond}
++
++def main():
++    new=OUT/'semantic/epoch6/eval/per_output.json'
++    pairs=[('base_V32',ORIGINAL/'recovery/semantic/epoch2/eval/per_output.json','base_report'),
++           ('R_lr0.0001_report',ORIGINAL/'recovery/semantic/epoch6/eval/per_output.json','R_lr0.0001_report'),
++           ('R_lr0.0002_report',ORIGINAL/'recovery/semantic/epoch6/eval/per_output.json','R_lr0.0002_report')]
++    refs={r['id']:i for i,r in enumerate(json.loads((ORIGINAL/'semantic/V32_reference_v3.json').read_text())['rows'])}
++    out={}
++    for cond,oldp,oldc in pairs:
++        a=load(new,cond);b=load(oldp,oldc);diffs=[]
++        for k in a:
++            if a[k]['strict_recall']!=b[k]['strict_recall'] or a[k]['contradiction']!=b[k]['contradiction'] or a[k]['type_recall']!=b[k]['type_recall']:
++                diffs.append(dict(ref_index=refs[k],strict=[a[k]['strict_recall'],b[k]['strict_recall']],type=[a[k]['type_recall'],b[k]['type_recall']],
++                    contradiction=[a[k]['contradiction'],b[k]['contradiction']],text_equal=None))
++        out[cond]=dict(n=len(a),n_patients_differing=len(diffs),differences=diffs)
++    save(OUT/'decisions/rejudge_agreement.json',dict(results=out,sources={str(new):sha(new),__file__:sha(__file__)},
++        scope='새 batch는 조건명을 가리고 새로 판정; 이전 판정은 iter_090 상속값. 불일치는 판정 drift 또는 규칙 차이.'))
++    print(json.dumps({k:v['n_patients_differing'] for k,v in out.items()}));print(json.dumps(out['base_V32']['differences']))
++
++if __name__=='__main__':main()
+diff --git a/report97_resume.py b/report97_resume.py
+new file mode 100644
+index 0000000..e3de8f3
+--- /dev/null
++++ b/report97_resume.py
+@@ -0,0 +1,50 @@
++"""iter_097 LR2e-5 경로의 동작 확인: 연속/중간step/epoch 경계 재개 대조 + R 모드 1 update.
++기술 checkpoint는 results/iter_097/tests에만 두며 본학습에 섞지 않는다."""
++import argparse
++import json
++import subprocess
++import sys
++import time
++import torch
++from report86_common import save,sha
++from report97_train import OUT,ORIGINAL,LR
++
++def main():
++    p=argparse.ArgumentParser();p.add_argument('--gpu',required=True);a=p.parse_args()
++    root=OUT/'tests/resume';root.mkdir(parents=True,exist_ok=True);runs=[]
++    def cmd_for(name,mode):
++        return [sys.executable,'report97_train.py','--gpu',a.gpu,'--run-dir',str(root/name),'--train',str(ORIGINAL/'data/T512/manifest.json'),
++            '--validation',str(ORIGINAL/'data/D8/manifest.json'),'--mode',mode,'--lr',str(LR),'--epochs','2','--test-patients','16']
++    plan=[('ref','G',[('full',[],0)]),('middle','G',[('stop',['--stop-step','1'],75),('resume',[],0)]),
++          ('epoch','G',[('stop',['--stop-step','2'],75),('resume',[],0)]),('rmode','R',[('stop',['--stop-step','1'],75)])]
++    for name,mode,phases in plan:
++        cmd=cmd_for(name,mode)
++        for phase,extra,want in phases:
++            record=root/f'attempt_{name}_{phase}.json'
++            if record.exists():
++                old=json.loads(record.read_text());assert old['command']==cmd+extra and old['rc']==want;runs.append(old);continue
++            t=time.monotonic()
++            with (root/f'{name}_{phase}.stdout.log').open('x') as so,(root/f'{name}_{phase}.stderr.log').open('x') as se:
++                rc=subprocess.run(cmd+extra,stdout=so,stderr=se).returncode
++            item=dict(name=name,phase=phase,rc=rc,wall_s=time.monotonic()-t,command=cmd+extra);runs.append(item);save(record,item);assert rc==want,(name,phase,rc)
++        print(json.dumps(dict(completed=name)),flush=True)
++    def read(name,step):
++        d=root/name;ck=torch.load(d/f'checkpoint_{step:06}.pt',map_location='cpu',weights_only=False)
++        rows=[json.loads(x) for f in sorted(d.glob('events_*.jsonl')) for x in f.read_text().splitlines()]
++        return ck,rows
++    base,expected=read('ref',4);checks=[]
++    for name in ['middle','epoch']:
++        ck,rows=read(name,4);assert len(rows)==len(expected)==4
++        aligned=all(all(x[k]==y[k] for k in ('step','epoch','pos','ids','loss','report_nll','ground_nll','grad_norm','digests')) for x,y in zip(expected,rows))
++        preserved=all(json.loads((root/name/f'validation_{e:02}.json').read_text())['state_preserved'] for e in (1,2))
++        state=ck['digests']==base['digests'] and ck['epoch']==base['epoch'] and ck['pos']==base['pos']
++        checks.append(dict(name=name,passed=aligned and preserved and state,events_equal=aligned,state_equal=state,validation_preserved=preserved))
++    lr_ok=all(g['lr']==LR for g in base['optimizer']['param_groups'])
++    cfg=json.loads((root/'ref/config.json').read_text());lr_ok=lr_ok and cfg['lr']==LR and cfg['mb']==1
++    rck,rrows=read('rmode',1)
++    r_ok=len(rrows)==1 and abs(rrows[0]['loss']-rrows[0]['report_nll'])<1e-9 and rrows[0]['ground_nll']==rrows[0]['ground_nll'] and all(g['lr']==LR for g in rck['optimizer']['param_groups'])
++    checks.append(dict(name='lr_and_config',passed=lr_ok));checks.append(dict(name='R_mode_loss_is_report_only',passed=r_ok,event=rrows[0]))
++    result=dict(passed=all(c['passed'] for c in checks),checks=checks,attempts=runs,technical_optimizer_updates=13,lr=LR,source_sha=sha(__file__))
++    save(root/'result.json',result);print(json.dumps(result)[:800],flush=True);return 0 if result['passed'] else 2
++
++if __name__=='__main__':raise SystemExit(main())
+diff --git a/report97_train.py b/report97_train.py
+new file mode 100644
+index 0000000..0564707
+--- /dev/null
++++ b/report97_train.py
+@@ -0,0 +1,38 @@
++"""iter_097: LR 2e-5 직접 판독(R)/조건부 위치 보조(G) 학습. 기존 report90 trainer의 연산은 그대로 두고
++결과·cache·gate 경로와 허용 LR만 iter_097로 격리한다. 기존 trainer/config/결과는 수정하지 않는다."""
++import argparse
++import os
++import subprocess
++import report89_model as M
++import report90_train as C
++import report90_numeric as N
++from report90_stable_v2 import apply
++
++ORIGINAL=N.OUT
++OUT=M.ROOT/'results/iter_097'
++LR=2e-5
++
++def environment(gpu):
++    allowed=os.environ['CUDA_VISIBLE_DEVICES'].split(',');assert gpu in allowed
++    # report90_numeric.environment는 M.OUT을 iter_090으로 되돌리므로 cache 격리를 iter_097로 직접 지정한다.
++    smi=subprocess.check_output(['nvidia-smi','--query-gpu=index,uuid,memory.total,memory.used,memory.free','--format=csv,noheader,nounits'],text=True)
++    row=next(x.split(', ') for x in smi.splitlines() if x.split(', ')[0]==gpu)
++    assert float(row[-1])>=14.19*1024+2048+1024
++    M.OUT=OUT
++    mapping=M.environment(gpu);mapping.update(peak_basis_gib=14.19,worker_margin_mib=2048,context_margin_mib=1024)
++    return mapping
++
++C.OUT=OUT
++C.environment=environment
++C.apply=apply
++C.SOURCES=C.SOURCES+['report90_stable_v2.py','report97_train.py']
++
++def main():
++    p=argparse.ArgumentParser();p.add_argument('--gpu',required=True);p.add_argument('--run-dir',required=True)
++    p.add_argument('--train',default=str(ORIGINAL/'data/T512/manifest.json'));p.add_argument('--validation',default=str(ORIGINAL/'data/V64/manifest.json'))
++    p.add_argument('--mode',choices=['R','G'],required=True);p.add_argument('--lr',type=float,choices=[LR],required=True)
++    p.add_argument('--mb',type=int,choices=[1],default=1);p.add_argument('--epochs',type=int,required=True)
++    p.add_argument('--test-patients',type=int,default=0);p.add_argument('--stop-step',type=int,default=-1)
++    return C.run(p.parse_args())
++
++if __name__=='__main__':raise SystemExit(main())
+diff --git a/report97_verify.py b/report97_verify.py
+new file mode 100644
+index 0000000..2de8248
+--- /dev/null
++++ b/report97_verify.py
+@@ -0,0 +1,80 @@
++"""iter_097 독립 재집계: score()/decide()를 호출하지 않고 judgments 원문에서 recall·반박·분기 수치를 다시 계산해 저장값과 대조.
++학습 로그(384 updates, LR, 유한값)와 새 생성 stage 완료 검증도 포함한다. 연결·산술 검사이며 의미 타당성의 증명이 아니다."""
++import glob
++import json
++import math
++from pathlib import Path
++import numpy as np
++import report90_gen as C
++import report97_gen  # noqa: F401  SOURCES 패치
++import report90_recovery_gen as S
++from report86_common import save,sha
++from report97_train import OUT,ORIGINAL
++
++def recompute():
++    root=OUT/'semantic/epoch6';blind=json.loads((root/'blinded.json').read_text());mapping=json.loads((root/'private_mapping.json').read_text())
++    refs=json.loads((ORIGINAL/'semantic/V32_reference_v3.json').read_text())['rows'];byref={r['id']:r for r in refs}
++    J={}
++    for f in sorted(glob.glob(str(root/'judgments/part_*.json'))):
++        d=json.loads(Path(f).read_text());assert d['blinded_sha']==sha(root/'blinded.json')
++        for j in d['judgments']:assert j['blind_id'] not in J;J[j['blind_id']]=j
++    assert set(J)=={r['blind_id'] for r in blind['records']}
++    per={}
++    for r in blind['records']:
++        cond=Path(mapping[r['blind_id']]['stage']).name;ref=byref[r['image_id']];j=J[r['blind_id']]
++        targets=[a['id'] for a in ref['atoms'] if a['polarity']=='positive' and a['certainty']=='definite']
++        strict=[m['ref'] for m in j['matches'] if m['status']=='strict'];sure=[m['ref'] for m in j['matches'] if m['status']=='strict' and not m['ambiguous']]
++        kinds=[m['ref'] for m in j['matches'] if m['status'] in ('strict','type_only')]
++        for m in j['matches']:assert m['quote'] in r['text']
++        for c in j['claims']:assert c['quote'] in r['text']
++        contra=any(c['status']=='contradicted' for c in j['claims'])
++        per.setdefault(cond,{})[r['image_id']]=dict(abnormal=ref['abnormal'],n=len(targets),
++            strict=len(set(strict)&set(targets))/len(targets) if targets else None,
++            sure=len(set(sure)&set(targets))/len(targets) if targets else None,
++            kinds=len(set(kinds)&set(targets))/len(targets) if targets else None,contra=contra)
++    return per
++
++def main():
++    per=recompute();stored=json.loads((OUT/'semantic/epoch6/eval/report.json').read_text())['conditions']
++    checks={};summary={}
++    for cond,rows in per.items():
++        ids=[k for k,v in rows.items() if v['abnormal'] and v['strict'] is not None]
++        s=float(np.mean([rows[k]['strict'] for k in ids]));t=float(np.mean([rows[k]['kinds'] for k in ids]));u=float(np.mean([rows[k]['sure'] for k in ids]))
++        con=float(np.mean([v['contra'] for v in rows.values()]))
++        summary[cond]=dict(recall_patients=len(ids),strict=s,type_only_or_strict=t,strict_unambiguous=u,contradiction_patients=int(sum(v['contra'] for v in rows.values())))
++        checks[f'{cond}_strict']=abs(s-stored[cond]['strict_recall'])<1e-12
++        checks[f'{cond}_type']=abs(t-stored[cond]['type_recall'])<1e-12
++        checks[f'{cond}_contra']=abs(con-stored[cond]['contradiction'])<1e-12
++    # 분기 수치 독립 재계산
++    new='R_lr2e-05_report';dec=json.loads((OUT/'decisions/R_vs_comparators_epoch6.json').read_text())['results']
++    for comp in ['base_V32','R_lr0.0001_report','R_lr0.0002_report']:
++        ids=sorted(k for k,v in per[new].items() if v['abnormal'] and v['strict'] is not None)
++        d=np.array([per[new][k]['strict']-per[comp][k]['strict'] for k in ids])
++        net=int((d>1e-12).sum())-int((d<-1e-12).sum());loo=min(float(np.delete(d,i).mean()) for i in range(len(d)))
++        rng=np.random.default_rng(97017);b=[float(d[rng.integers(0,len(d),len(d))].mean()) for _ in range(10000)]
++        checks[f'decide_{comp}']=abs(d.mean()-dec[comp]['diff'])<1e-12 and net==dec[comp]['net'] and abs(loo-dec[comp]['loo_min'])<1e-12 and abs(np.percentile(b,2.5)-dec[comp]['ci95'][0])<1e-12
++        summary[f'{new}_minus_{comp}']=dict(diff=float(d.mean()),net_patients=net,loo_min=loo,ci95=[float(np.percentile(b,2.5)),float(np.percentile(b,97.5))])
++    # 학습 검증
++    run=OUT/'train/R_lr2e-05';cfg=json.loads((run/'config.json').read_text())
++    events=[json.loads(l) for f in sorted(run.glob('events_*.jsonl')) for l in f.read_text().splitlines()]
++    checks['train_384_unique_updates']=[e['step'] for e in events]==list(range(1,385))
++    checks['train_finite']=all(math.isfinite(e[k]) for e in events for k in ('loss','report_nll','ground_nll','grad_norm'))
++    checks['train_cfg_lr_mode']=cfg['lr']==2e-5 and cfg['mode']=='R' and cfg['mb']==1 and len(cfg['patient_ids'])==512
++    checks['train_report_only_loss']=all(abs(e['loss']-e['report_nll'])<1e-5 for e in events)
++    checks['train_verified_file']=json.loads((run/'verified_06.json').read_text())['passed'] if (run/'verified_06.json').exists() else False
++    nll={e:json.loads((run/f'validation_{e:02}.json').read_text())['report_nll'] for e in (1,2,4,6)}
++    # 새 생성 stage 완료 검증 + record 수
++    req32=ORIGINAL/'data/V32/requests.json';req16=ORIGINAL/'data/V16/requests.json'
++    gen={}
++    for rel,req,n in [('validation/epoch2/R_lr2e-05_report',req32,32),('validation/epoch6/R_lr2e-05_report',req32,32),('validation/epoch6/R_lr2e-05_ground',req16,16),('gen_tests/base_V32',req32,32)]:
++        stage=(OUT/rel).resolve();C.SOURCES=C.SOURCES if 'report97_gen.py' in C.SOURCES else C.SOURCES+['report97_gen.py']
++        proto=json.loads((stage/'protocol.json').read_text());w=json.loads((stage/'mapping.json').read_text())['workers']
++        rows,expected=S.verify(stage,req,proto,w);checks[f'gen_{rel}']=len(rows)==len(expected)==n and (stage/'completion.json').exists()
++        gen[rel]=dict(n=len(rows),non_eos=sum(not r['attempts'][-1]['ended_eos'] for r in rows))
++    checks={k:bool(v) for k,v in checks.items()}
++    save(OUT/'decisions/verify.json',dict(passed=all(checks.values()),checks=checks,summary=summary,validation_nll_R_lr2e5=nll,generation=gen,
++        sources={f:sha(f) for f in [__file__,'report97_train.py','report97_decide.py','report97_judge_epoch6.py']},
++        scope='연결·산술 재계산. 의미 판정은 assistant 해석이며 이 검사가 임상 타당성을 보증하지 않음.'))
++    print(json.dumps(dict(passed=all(checks.values()),failed=[k for k,v in checks.items() if not v]),ensure_ascii=False))
++
++if __name__=='__main__':main()

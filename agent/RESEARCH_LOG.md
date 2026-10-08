@@ -35990,3 +35990,440 @@ EOF
 현재 CURE 후보의 재개 조건은 모호한 회복 사례를 판별할 새로운 의미·위치 근거와 그로 인해 달라질 투자 결정이다. 박스 좌표가 있다는 사실만으로 lobe와 zone의 동치를 승인하지 않는다. 같은 E32의 추가 규칙 조정이나 reference 기회가 없는 E64 생성은 자동 후속으로 붙이지 않는다.
 
 논문 추천은 보류한다. 이번 보완은 불확정이며 새로 더 깊이 탐구할 방향의 긍정적 근거를 확정하지 못했다. 마일스톤도 지정하지 않는다.
+
+
+## iter_097 GPT PLAN [위치 학습의 판독 누락·언급 성향 분리 / proceed] — 2026-10-08 05:17:48
+
+# 요약
+
+- **이번에 할 일:** LR2e-5의 직접 판독 SFT를 기존과 같은384 updates로 비교한다. R이 회복될 때만 같은 조건의 G를 실행한다.
+- **필요한 이유:** 기존 R/G는 base보다 낮았다. 기존 두 LR보다 낮은 최적화 강도는 아직 비교하지 않았다.
+- **확인할 기준:** 명확한 소견 recall 개선, 여러 환자의 회복, 명시적 오류와 평가 모호성을 함께 확인한다.
+- **주의·다음:** 탐색용 진단이다. 낮은 LR의 실패를 위치 학습 전체의 실패로, 성공을 신규 기여로 해석하지 않는다.
+
+## 알림 맥락
+
+- 연구: 위치 학습과 판독 정확성
+- 데이터: 흉부 X-ray PadChest-GR T512/V64와 기존 V32
+- 모델: MedGemma 1.5, 표준 언어층 LoRA SFT
+- 과제: 영상에서 판독문을 생성하고 조건부로 정답 소견의 위치를 출력한다
+- 가설: 기존 높은 학습률의 판독 저하가 위치 보조 효과를 가렸을 수 있다
+- 질문: 학습률을 낮춰 판독 baseline을 회복하면 위치 보조의 효과를 판단할 수 있는가?
+- 변경: 구체화
+- 연결: 기존 R/G의 낮은 판독과 선택 진단을 이어받아 아직 시험하지 않은 LR 설명 하나를 구분한다
+- 작업: 같은 학습량의 R 비교 후 통과할 때만 G를 추가해 다음 투자 여부를 정한다
+
+# Current Understanding
+
+iter_092에서 네 trajectory는 각각384 updates까지 완료됐다. E128 recall 적격94명의 R/G/base recall은1.152%/1.684%/7.837%였다. 위치 출력 학습은 있었으나 충분한 판독 baseline 이후의 효과는 미확인이다. iter_094의 V32 후반 회복은 오류 비용까지 포함한 충분성을 입증하지 못했다. iter_095~096의 CURE 8영역 회복 후보와 의미 규칙 반복 보완은 보류한다.
+
+iter_090 인계 작업은 완료됐으므로 오래된 checkpoint에서 재개하지 않는다. 기존 학습·선택·E128 판정은 변경하지 않는다. 이번은 새 결과 경로의 별도 LR 대조다.
+
+# Strategy Check / 연구 방향 판단
+
+**시험 설정:** 높은 LR의 추가 epoch·seed 대신 LR2e-5 한 조건을 시험한다. CURE v2의 LR별 위치–판독 trade-off는 이 대조의 근거지만, 우리 설정의 원인을 증명하지 않는다. prompt·target·sampling까지 동시에 바꾸지 않는다.
+
+**연구 관찰:** 위치 출력과 판독 성능의 차이, NLL과 실제 생성의 차이는 보존한다. 선택 규칙 위반 설명은 배제됐지만 인식·선택·결합의 내부 원인은 미분리다.
+
+**연구 질문:** 작동하는 직접 판독 baseline 이후 위치 supervision이 무엇을 바꾸는지 여전히 중요하다. 다만 CURE가 이미 최적화·sampling trade-off를 다루므로 이번 비교만으로 새 기여를 주장할 수 없다.
+
+현재 설정 개선 / 원인 진단 / 연구 묶음 보류를 비교하면, 빠진 LR 대조는 구체적인 설명 하나를 줄일 수 있다. 따라서 같은 현상 탐구를 선택한다. 새로운 모델·자료 후보 탐색이 아니다. 직전 리뷰의 조건부 baseline 재구성 권고를 유지한다. R이 회복되지 않거나 의미 모호성이 결정을 좌우하면 이 재구성 경로를 보류한다. 다음 loss나 modality로 자동 전환하지 않는다.
+
+지배 비용은 trajectory당 수 시간의 학습과 사례 의미 검토다. R 우선으로 불필요한 G 투자를 줄인다. 정확한 비용 절감률은 추정하지 않는다.
+
+# Hypothesis
+
+동일한 학습량에서 낮은 LR이 높은 LR보다 명확한 소견 회복을 보존하거나 개선할 수 있다. 회복된 R과 같은 조건의 G를 비교하면 위치 보조 CE의 제한된 효과를 더 해석 가능하게 볼 수 있다. 경쟁 설명은 수렴 부족, target 구성·prompt 불일치, 제한된 supervision, 실제 보조 CE 무효과다.
+
+# Limitation Evidence / Correct Usage Checks
+
+이번 baseline 가설에 해당하는 별도 validated limitation은 없다. limitation_ids는 빈 배열이며 method gate를 요청하지 않는다. iter_088의 observed 충돌 한계를 이 가설의 증거로 전용하지 않는다.
+
+iter_092·094의 유효한 실제 출력 관찰을 사용하되 의미 평가기의 needs_fix를 유지한다. MedGemma 1.5의 기존 revision·processor·template·전처리·assistant mask·좌표·생성 cap·CE 정의를 고정한다. recovery/training_gate.json의 evidence hash와 실제 의존 소스를 연결한다. 불변 수치 검사는 재사용하고 변경된 LR·경로·resume wrapper만 추가 검사한다. 원 수치 문턱은 logits0.125, NLL0.002, gradient relative L2 0.02, 공식 CE2e-5이며 동일 shape λ=0의 결정적 일치 조건도 유지한다.
+
+# Contribution Path / Baselines / Reuse
+
+가까운 선행은 [CURE v2](https://arxiv.org/html/2601.15408v2)와 [MAIRA-2](https://arxiv.org/abs/2406.04449)다. 단순 LR 조정·공동 CE·위치–판독 차이 자체는 contribution이 아니다. 이번에는 직접 SFT 적합성을 판단하며 detector/grounder+reporter보다 우수하다고 주장하지 않는다.
+
+현재 브랜치 HEAD는23a37396b79a169850f5a8fcd2c5a2c4109ffc7f이며 필요한 파일이 있으므로 선별 반입은 없다. report90_train.py, report90_recovery_train.py, report90_stable_v2.py, report90_stable.py, report90_numeric.py, report89_model.py, report86_common.py와 rsna_diag의 train/lora/sft_data/generate를 제한 재사용한다. 생성은 report94_gen.py의 격리 방식과 report90_recovery_gen.py·report90_gen.py·report90_gen_safe.py를 활용한다. 동적 patch 의존성까지 config에 기록한다.
+
+iter_092의 report92_manifest.py·report86_common.py 승인 범위는 출처 연결이다. iter_094의 blind/check 승인 범위 역시 연결·hash 검사이지 의미 평가가 아니다. report92/94/96 의미 판정기를 범용 승인본으로 호출하지 않는다. launcher의 완료 전 세션 종료, 생성 wrapper의 중복 거부·완료 재개 검사 누락을 실제 재사용 경로에서만 보완한다.
+
+# Proposed Experiment
+
+## 1. 자료와 평가 규약 잠금
+
+기존 T512/V64 manifest와 V32 환자를 그대로 사용한다. 환자·study·영상 중복 검사와 원 입력 hash를 계승한다. 새 표본을 성능에 따라 고르지 않는다. V32는 반복 개발 자료이며 독립 test가 아니다. E128은 열어 재선택하지 않는다.
+
+새 출력 전에 V32 reference를 원문 인용과 함께 작은 사례표로 고정한다. 소견 존재·위치·속성·시간·부정 범위를 분리하고 명확한 확정 양성 fact와 평가 불가 fact를 표시한다. 위치 누락은 strict 회복이 아니며 type-only 보조로 남긴다. 양측 fact를 한쪽으로 회복 처리하지 않는다. 원인 hedge와 소견 존재 hedge를 구분한다. lateral view 의존 fact는 단일 frontal 입력에서 판정 불가로 사전 표시하며 환자 전체를 편의상 제거하지 않는다.
+
+일반 정상문, no acute, no other, resolved, 위치 누락, 양측/한쪽, 원인 불확실성을 다루는 대조 사례를 먼저 검사한다. 현재 facts와 출력 span의 대응표를 사용하며 새 범용 NLP 평가기를 만들지 않는다. 오류는 reference가 명시적으로 반박하는 주장과 미지원·판단 불가 주장을 분리한다. reference에 없다는 이유만으로 hallucination으로 확정하지 않는다.
+
+## 2. 동작 확인
+
+새 iter_097 wrapper에서 결과·runtime cache·config를 격리한다. 기존 trainer와 과거 config는 수정하지 않는다. LR2e-5의 새 base 초기화, optimizer LR, seed·batch 순서·loss 가중치를 검증한다. 작은 기존 기술 입력으로 1 update 및 중단/재개 연결을 확인하고 기술 checkpoint는 본학습에 섞지 않는다. 과거 원자료·cache를 덮어쓰지 않는다.
+
+## 3. R 가능성 탐색
+
+T512, seed17, rank16/alpha32/dropout0.05, effective batch8, 검증된 microbatch1, 기존 optimizer·정밀도·stable_v2 연산을 사용한다. R의 위치 CE 가중치는0이며 기존과 같은 전체 입력을 유지한다. 변경은 LR2e-5와 새 결과 경로다.
+
+R을 epoch6, 총384 updates까지 실행한다. NLL은 기존 평가 시점1/2/4/6의 V64로 기록한다. 생성은 epoch2와6의 V32 각32건이다. epoch2 결과는 추세 기록이며 성능으로 중간 종료하거나 checkpoint를 선택하지 않는다. 기술 실패·비정상 수치는 즉시 처리한다.
+
+주대조는 고정 epoch6의 base, R LR1e-4, R LR2e-4다. 저장 출력이 같은 조건이면 재사용하고 LR1e-4 epoch6의 V32 결측만 최대32건 생성한다. 모든 조건을 이번 고정 의미 규약으로 비교하되 과거 수치는 덮어쓰지 않는다.
+
+## 4. 조건부 G 비교
+
+아래 R 가능성 기준을 충족할 때만 G를 동일 새 base 초기값·LR2e-5·384 updates로 학습한다. R과 같은 환자 순서·입력·report target·optimizer 조건을 유지하고 위치 CE 가중치만1로 바꾼다. G도 epoch2/6 V32 출력을 생성하고 주비교는 epoch6다. R/G/base의 기존 V16 보조 grounding은 동일 prompt·IoU@0.3으로 비교하며 동일 출력이 없을 때만 생성한다.
+
+## 5. 규모 확대와 독립 확인
+
+이번 최대 규모는 R/G 각384 updates다. 낮은 LR의 학습 부족 가능성이 있어도 epoch12·추가 seed·다른 LR을 자동 실행하지 않는다. 양성 탐색이면 full review에서 독립 환자 비교 또는 method pilot 가치를 별도로 판단한다. 이번 V32를 독립 확인이라고 부르지 않는다.
+
+# Implementation Tasks for Claude
+
+1. 기준 원본은 iter_097 think/round_01.json, iter_092/094/096 review.json과 recovery/training_gate.json이다. 완료된 인계를 반복하지 않는다.
+2. 새 wrapper와 protocol에 LR·출력 루트·의존 소스 hash·자료 hash·평가 규약·분기 기준을 잠근다. 과거 training_gate의 단순 passed 복사 대신 불변 증거와 이번 변경 검사를 구분한다.
+3. 실제 사용하는 생성 경로에서 소스/config 변경·중복 실행·완료 파일 변조 거부, 고유 요청 ID·shard 누락/중복·resume를 검사한다. 조건별 결과 파일을 분리한다.
+4. reference 사례표를 먼저 완성하고, 새 출력은 조건명을 제거한 화면에서 원문 span과 연결한다. assistant 검토를 독립 평가자나 전문의 검토로 쓰지 않는다. 모든 회복·소실·반박·판단 불가 사례에 실제 설명을 남기며 일괄 reviewed=true를 사용하지 않는다.
+5. R 실행 및 사전 분기 판정, 조건부 G 실행을 supervisor로 관리한다. checkpoint에 adapter/optimizer/RNG/다음 batch/pending validation을 보존한다. 기존32 updates·epoch 경계 저장을 계승한다.
+6. 프로그램 완료 대기를 사용하고 supervisor가 pending인 동안 최종 완료 응답을 내지 않는다. 실제 종료 code·완료 hash·요청 수를 확인한다.
+7. 원시 대응표에서 별도 집계로 recall·오류·분기를 재계산한다. 연결·산술 검사 통과와 의미 타당성은 구분한다. 보고서와 모든 신규 결과는 results/iter_097에 저장한다.
+
+# Evaluation (성공/실패 기준 포함)
+
+주지표는 명확한 확정 양성 reference fact를 가진 환자의 macro strict recall이다. type-only recall, 명시 반박 환자 수, 미지원 주장·판단 불가 환자 수, 형식 실패와 일반 정상문 빈도를 따로 보고한다. 일반 정상문을 자동 정상 판독으로 승인하지 않는다.
+
+**R→G 가능성 기준:** epoch6 저LR R은 base와 두 고LR epoch6 R 각각에 대해 strict recall이 최소5pp 높아야 한다. 각 비교에서 recall 증가 환자 수−감소 환자 수가 최소3명이어야 하며, 한 환자 제거 시 차이의 방향이 양수여야 한다. 명시 반박 환자는 각 비교보다 최대1명까지만 증가할 수 있다. 이는 V32의 탐색 투자 문턱이며 임상 비열등성 기준이 아니다. 모호한 회복을 모두 제외하고 명백히 가능한 반박을 포함하는 보수적 판정에서도 통과해야 한다. 그 범위를 원문으로 정할 수 없으면 불확정이다. 가정적으로 모든 미지원 주장을 참/거짓으로 만드는 비현실적 경계는 사용하지 않는다.
+
+환자 bootstrap10,000회·seed97017의95% CI와 환자별 변화표를 보고하되 CI 하한>0을 탐색의 일률적 hard gate로 요구하지 않는다. NLL 감소만으로 G를 실행하지 않는다.
+
+**양성:** R 기준 통과 시 G를 실행한다. G−R도 recall 최소5pp, 순증가 최소3명, leave-one-out 양의 방향, 명시 반박 증가 최대1명 및 의미 민감도 보존을 충족하면 제한된 양성 탐색으로 기록한다. 독립 확인과 강한 대안 비교의 투자 가치를 후속 리뷰에서 판단한다.
+
+**음성:** R이 회복하지 못하거나 명백한 오류 증가가 기준을 넘으면 G를 실행하지 않고 현재 LR 재구성을 보류한다. R은 회복하지만 G 이득이 없거나 악화되면 직접 판독 baseline 자산을 보존하고 현재 위치 보조 CE의 추가 투자를 보류한다. 위치 학습 전체의 무용성으로 확대하지 않는다.
+
+**불확정:** 개선이 작거나 수렴·의미 모호성이 결정을 좌우하면 이번 범위에서 종료한다. NLL4→6과 생성2→6의 방향을 함께 보고하되 추가 epoch를 처방하지 않는다. 재개에는 어떤 추가 근거가 판단을 바꿀지 명시해야 한다. 같은 V32의 규칙 탐색을 반복하지 않는다.
+
+# Risks / Checks
+
+- 두 GPU를 사용하되 의존성이 있는 R→G를 불필요하게 병렬화하지 않는다. R 학습 중 다른 GPU는 고LR baseline 결측 생성·기술 검사에 배정한다. 생성 shard는 두 GPU로 나눈다. 독립 작업이 끝나면 GPU를 채우기 위한 실험을 만들지 않는다.
+- 실행 직전 nvidia-smi와 허용 GPU의 물리/논리 대응을 확인한다. 과거 학습 peak13.51GiB·추론10.61GiB와 worker당2GiB 여유를 합산하면 동일 GPU 두 worker는24GiB를 초과한다. 따라서 기존 microbatch 비교·단일 worker 근거를 재사용한다. 새 실측이 이 조건과 다르고 안전 여유·독립 작업이 있으면 development 입력에서 batch 확대 또는 복수 worker 중 유망한 하나를 비교해 처리량·긴 출력·정합성·OOM으로 선택한다.
+- 과거38–42초/update 기준 R 약4.1–4.5시간, 조건부 G도 비슷하다. 최대 학습 약8.1–9.0 worker-hours에 validation·적재·생성·의미 검토가 추가된다. 첫 실제 update 묶음으로 추정치를 갱신하며 시간 상한으로 사용하지 않는다.
+- prompt와 target 형식 차이는 유지되므로 LR 대조의 결과가 이를 해소했다고 주장하지 않는다. foundation의 학습 노출과 임상 reference 완전성은 미확인이다.
+- 기본 환경·hf_cache는 변경하지 않는다. 필요한 격리 설치는 먼저 알리고 승인된 정책 안에서 진행한다. HF_TOKEN_PATH 값은 출력하지 않는다.
+- **대규모 GPU 필요 후보:** 여러 backbone·충분한 판독 학습량·학습 범위·sampling을 교차 비교하는 연구를 보존한다. 이번 결과만으로 full fine-tuning을 자동 처방하지 않는다.
+
+# 계획의 근거 (GPT 조사 노트)
+
+이전 round_01.json 원문과 iter_092/094 review.json, iter_091의 수치·메모리 검증 기록, report90_train.py·report90_recovery_train.py·report90_stable_v2.py·report89_model.py·report94_gen.py 및 recovery/training_gate.json을 확인했다. 현재 HEAD는 23a37396b79a169850f5a8fcd2c5a2c4109ffc7f이며 작업 트리는 깨끗하다.
+
+첫 질문: T512/effective batch8은 epoch당64 updates이며 기존 trajectory는384 updates다. LR2e-5도384 updates에서 비교하고 epoch2/6만 생성하면 동일 학습량과 추세를 분리할 수 있다. 낮은 LR의 수렴 충분성은 보장하지 않으므로 추가 학습 없이 불확정 범위를 남긴다.
+
+둘째 질문: 기존 자동 의미 판정을 승인하지 않는다. 생성 전에 V32 reference를 원자 단위로 고정하고 명확한 회복·명시적 반박·판단 불가를 분리한다. 일반 정상문을 자동 안전 또는 자동 모순으로 처리하지 않으며, 모호한 사례가 확대를 결정하면 보류한다. 작은 사례표와 인용 검토로 한정하고 범용 평가기를 만들지 않는다.
+
+셋째 질문: R 우선이 낫다. 기존 R 자체가 약하므로 G를 동시에 학습하면 핵심 blocker를 해결하지 못한 채 학습 비용을 두 배로 쓸 수 있다. R 학습 동안 다른 GPU에서 필요한 기존 baseline 결측 생성·기술 검사를 처리한다. 조건부 G 학습 후 생성 shard는 두 GPU에 배정한다. 과거 training peak13.51GiB와 inference peak10.61GiB에 worker당2GiB를 더하면 같은 GPU의 두 worker 배치는24GiB를 초과하므로 현재 구성 재사용이 타당하다.
+
+문헌은 앞 라운드가 확인한 CURE v2 Table15/§9.3.3(https://arxiv.org/html/2601.15408v2)와 MAIRA-2(https://arxiv.org/abs/2406.04449)를 계승한다. 새 문헌 재조회나 모델 호출은 하지 않았다. 파일 변경·실험 실행은 없었다.
+
+이전 사고 라운드 노트: agent/runs/iter_097/think/
+
+
+
+## iter_097 CLAUDE IMPLEMENTATION REPORT — 2026-10-08 10:37:15
+
+# Work Performed
+
+**요약**
+- **핵심 결과:** LR 2e-5 직접 판독 SFT(R)는 사전 가능성 기준을 충족하지 못했다. 그래서 계획대로 G(위치 보조 CE)는 실행하지 않았다.
+- **근거:** 384 updates를 정상 완료했다. 조건명을 가린 재판정에서 epoch6 V32 strict recall은 R 0.225, base 0.192, R(LR1e-4) 0.175, R(LR2e-4) 0.200이다. 순증가 환자 수(증가−감소)는 base 0, LR1e-4 2, LR2e-4 1로 모두 기준 3명 미만이다.
+- **미검증·주의:** V32는 반복 개발 자료(20명 recall 분모)라 CI가 넓다. 판정은 assistant 해석이고 전문의 검토가 아니다. 수렴 부족은 배제하지 못했다. 이 결과는 위치 학습 전체의 무용성이 아니다.
+- **다음:** 현재 LR 재구성 경로는 보류하고, 연구 질문은 유지한다.
+
+**구현·실행 순서**
+1. 계획, 기존 trainer·생성·판정 코드, 인계 기록을 확인했다. 새 wrapper `report97_train.py`는 기존 trainer 연산을 그대로 쓰고 결과·cache·gate 경로와 허용 LR(2e-5)만 iter_097로 격리했다. 기존 파일은 수정하지 않았다.
+2. 동작 확인(`report97_resume.py`): 연속 실행, 중간 step 재개, epoch 경계 재개를 비교했다. R 모드 1 update와 optimizer LR도 확인했다. 통과 후 `training_gate.json`을 잠갔다. iter_090 recovery gate 증거 21건은 hash로 계승했다.
+3. 생성 경로 검사(`report97_gen_test.py`): base V32 32건을 limit 3 후 재개로 생성했다. 요청 파일 변조 시 rc=1로 거부됐고, 완료 후 재실행은 record 수가 불변이었다.
+4. V32 reference 사례표를 새 출력 전에 고정했다(`case_table_v2.json`). 확정 양성 원자 35개, 환자 20명이고 lateral 의존 원자는 0이다. strict·type_only·양측·정상문·quote 거부 등 대조 fixture 8건이 통과했다.
+5. R 학습을 supervisor(`report97_launch.py`)로 GPU1에서 실행했다. R 학습 중 GPU0에서 epoch2 V32 생성을 했다.
+6. epoch6 생성(V32 32건, V16 16건)은 GPU0·GPU1에서 병렬로 실행했다.
+7. 판정: 조건명을 가린 epoch6 batch 128건(신규 R, base, R LR1e-4, R LR2e-4)을 새로 판정했다. 비일반 출력은 출력별로 직접 판정했고, 일반 정상문은 iter_090 관례에 따랐다. 판정 규칙은 `report97_judge_epoch6.py` 상단에 있다.
+8. 사전 기준을 `report97_decide.py`로 구현해 적용했다. 독립 재집계(`report97_verify.py`)는 통과했다.
+
+# Files Changed
+
+신규 코드(전부 `research/`, 기존 파일 수정 없음):
+- `report97_train.py`, `report97_launch.py`, `report97_resume.py`, `report97_gate.py`
+- `report97_gen.py`, `report97_genq.py`, `report97_gen_test.py`
+- `report97_reference.py`
+- `report97_blind.py`, `report97_judge_epoch2.py`, `report97_judge_epoch6.py`
+- `report97_decide.py`, `report97_ground_eval.py`, `report97_rejudge_agreement.py`, `report97_verify.py`, `report97_finish.py`
+
+신규 결과: `results/iter_097/`
+
+# Commands / Experiments
+
+| 단계 | 결과 |
+|---|---|
+| `report97_resume.py --gpu 0` | 성공(rc 0), 6단계 모두 기대 rc |
+| `report97_gate.py` | 성공 |
+| `report97_launch.py --mode R --epochs 6` | 성공(rc 0), 15,736초, GPU1, peak_reserved 13.51GiB, 약 38–42초/update |
+| `report90_recovery_train_verify.py` | PASS |
+| `report97_gen_test.py --gpu 0` | 성공 |
+| `report97_genq.py` epoch2 V32 | 성공, 98.5초 |
+| `report97_genq.py` epoch6 V32 / V16 | 성공(V32는 긴 출력 때문에 오래 걸림) |
+| 판정 → `report90_semantic_eval.py` → `report97_decide.py` | 성공 |
+| `report97_verify.py` | 성공(`passed` true) |
+| `report97_finish.py` | 성공 |
+
+실패·복구 내역:
+- 첫 `report97_reference.py` 실행의 `case_table.json`에 lateral 플래그 버그가 있었다("bilateral"이 "lateral"로 잡힘). write-once 저장이라 `case_table_v2.json`으로 새로 저장했고 v1은 남아 있다.
+- epoch6 판정 파일 첫 저장본이 strict 규칙 assertion에 걸려, 직접 생성한 `semantic/epoch6/judgments` 폴더를 두 번 지우고 다시 생성했다. 저장 전 `score()` 검증을 추가했다. 지운 것은 이번 반복에서 몇 분 전에 만든 결함 파일뿐이다.
+- `decisions/verify.json.663264.tmp` 잔여 파일이 있다(`json` 직렬화 오류 중단분). 삭제 권한이 없어 남겼고, 최종 `verify.json`과는 별개다.
+- 첫 background 실행이 `results/iter_097` 디렉터리 부재로 즉시 실패했다. 디렉터리 생성 후 재실행했다.
+
+# Results
+
+경로는 모두 `results/iter_097/` 기준이다.
+
+**학습**(`train/R_lr2e-05/`): 384 updates 연속 고유, 모두 유한, `loss`=`report_nll`. V64 NLL(epoch 1/2/4/6):
+
+| 조건 | NLL |
+|---|---|
+| R LR2e-5 | 1.790 / 1.600 / 1.471 / 1.545 |
+| R LR1e-4(기존) | 1.532 / 1.460 / 1.595 / 2.392 |
+| R LR2e-4(기존) | 1.523 / 1.532 / 1.742 / 2.298 |
+| base | 5.320 |
+
+LR2e-5의 NLL 4→6은 +5.0%(소폭 상승)이고, 기존 고LR의 큰 상승(2.30–2.39)은 나타나지 않았다.
+
+**V32 epoch6 (조건명 가림, 20명 recall 분모)**: `semantic/epoch6/eval/report.json`
+
+| 조건 | strict | type_only 포함 | 모호 제외 strict | 반박 환자(32명) |
+|---|---|---|---|---|
+| R LR2e-5 | 0.225 | 0.342 | 0.175 | 1 |
+| base | 0.192 | 0.321 | 0.167 | 8 |
+| R LR1e-4 | 0.175 | 0.317 | 0.175 | 1 |
+| R LR2e-4 | 0.200 | 0.342 | 0.175 | 3 |
+
+R LR2e-5의 epoch2 strict는 0.075이고 epoch6은 0.225다(생성 2→6은 상승).
+
+**가능성 기준**(`decisions/R_vs_comparators_epoch6.json`): 신규 R−비교군 strict 차이, 환자 bootstrap 95% CI(seed 97017, 10,000회), 증가/감소 환자 수는 다음과 같다.
+
+| 비교군 | 차이 | 95% CI | 증가/감소 | 순증가 |
+|---|---|---|---|---|
+| base | +3.3pp | [−7.5, 17.5] | 2/2 | 0 |
+| R LR1e-4 | +5.0pp | [−10, 20] | 3/1 | 2 |
+| R LR2e-4 | +2.5pp | [−12.5, 17.5] | 2/1 | 1 |
+
+- 세 비교 모두 순증가≥3과 보수적 판정(모호 회복 제외)에서 미달이다. 반박 환자 증가≤1은 충족했다.
+- 판정: `r_passes_possibility_criterion=false`, G 미실행.
+- 민감도: 비교군을 iter_090 상속 판정으로 바꿔도(base 0.167 기준 +5.8pp) 순증가 기준에서 모두 미달이다(`..._sensitivity_inherited.json`).
+
+**재판정 일치도**(`decisions/rejudge_agreement.json`): R LR2e-4는 0명, R LR1e-4는 1명이 상속 판정과 달랐다. base는 5명이 달랐다(주로 반박 판정, 1명은 strict 0→0.5). base의 이 차이(약 2.5pp)가 비교 결과를 바꾸지는 않는다.
+
+**V16 보조 grounding**: F1@0.3은 R LR2e-5 0.0625(invalid 14/16), base 0.0625(invalid 3/16), R LR1e-4와 R LR2e-4는 0.0(invalid 16/16)이다.
+
+**검증**: `decisions/verify.json`의 recall·반박·분기·학습·생성 완료 검사 전부 통과. 요약은 `decisions/branch_decision.json`에 있다.
+
+**자원**: 두 GPU를 사용했다. R 학습은 GPU1에서만 실행했다. 의존성(R→G)과 24GiB 한계(학습 13.5GiB+worker 여유, 추론 10.6GiB 이상) 때문에 같은 GPU 복수 worker는 쓰지 않았다. 학습은 약 4.4시간, 생성·검증은 약 수 시간이다.
+
+# Goal Progress / Reused Assets
+
+**진전**
+- **시험 설정:** LR2e-5는 V32에서 base 및 기존 고LR R 대비 명확한 회복 개선을 보이지 못했다. 기존 고LR의 후반 NLL 상승은 완화됐다. 현재 LR 재구성 설정은 보류한다.
+- **연구 관찰:** 낮은 LR에서도 R이 base를 뚜렷이 넘지 못했다. 이는 "높은 LR이 판독 저하의 주원인"이라는 설명을 약화시킨다. 다만 20명 recall 분모, 단일 seed, 고정 384 updates라는 제한이 있다. 수렴 부족, prompt/target 형식 차이, 제한된 supervision은 미분리다.
+- **연구 질문:** 작동하는 직접 판독 baseline 이후 위치 supervision의 효과는 판단하지 못했다. 이번 결과는 위치 학습 전체나 신규 기여에 대한 판단이 아니다.
+
+**재사용**
+- iter_090 `training_gate` 증거 21건을 hash로 계승했다.
+- 재사용한 코드는 `report90_train/stable_v2/numeric/gen/gen_safe/recovery_gen`, `report89_model`, `rsna_diag/*`, `report90_semantic_eval`, `report90_recovery_train_verify`, `report90_recovery_ground_eval`이다.
+- 새 trainer·생성 경로는 이번에 직접 검증했다. 학습은 재개 비교로, 생성은 base 32건의 token 단위 일치로 확인했다.
+- 비교군 base·R LR1e-4·R LR2e-4 출력은 상속분을 재사용했고, 가림 재판정과 일치도로 확인했다.
+
+# Problems
+
+- **현재 결론 무효:** 없음.
+- **재사용 전 수정 필요**
+  - 판정은 assistant 해석이다. 모호 reference(V16/V17/V27/V28)와 base의 5명 drift에서 최대 약 2.5pp의 해석 불확실성이 있다.
+  - 이번에 새로 만든 judge 코드는 이 iter의 고정 V32 전용이다.
+  - `report97_gen_test`의 `all_eos=false`는 상속된 base 출력의 비EOS(32건 중 1건)다. 평가 분모에는 유지했다.
+- **추후 개선**
+  - G 미실행이라 위치 보조 CE의 효과는 이번에 측정하지 않았다.
+  - 4→6 NLL 소폭 상승이 있어 epoch4 선택 등은 사전 계획 밖이므로 처방하지 않았다.
+  - 유일한 잔여물은 tmp 파일 1개다.
+
+# Recommendation to GPT
+
+- **투자 판단:** 현재 LR 재구성 경로는 "시험 설정 보류"로 한정한다. 연구 질문 보류는 아니다.
+- **유지할 관찰:** 위치 출력과 판독의 차이, NLL과 소견 회복의 차이는 유지한다. LR2e-5가 고LR의 후반 NLL 상승을 완화한 사실도 유지한다.
+- **다음 후보(중요성·정보 가치 순):**
+  1. 강한 기존 모델(CURE 등)의 저장 출력과 직접 비교하는 최소 비교. 새 학습은 하지 않는다.
+  2. 더 큰 독립 판독 자료로 재측정. 자료 정의가 먼저다.
+  3. 보류한다면 재개 조건은 "분모 확대 또는 독립 자료 확보"로 명시한다.
+- **하지 말 것:** 같은 V32에서 LR·epoch·seed를 더 돌리거나 규칙 판정기를 반복 보완하는 것.
+
+SELF_CHECK: PASS
+SUMMARY: LR2e-5 R(384 updates)을 정상 완료했으나 V32 epoch6 strict recall 0.225가 base 0.192·고LR R 대비 순증가 3명 미만이라 사전 기준 미달, G는 미실행하고 현재 LR 재구성 설정만 보류(연구 질문은 유지, 단일 seed·20명 분모·assistant 판정 한계)
+
+# [orchestrator] 권한 거부된 도구 호출
+- Bash: cd /SSD1_1TB/home/milab/daniel/08_medgemma/research; python - <<'E'
+import json,collections
+p='results/iter_090/recovery/semantic/epoch2/'
+m=json.load(open(p+'private_mapping.json'));print(collections.Counter(v['stage'].split('/')[-1] for v in m.values()))
+r=json.load(open(p+'eval/report.json'))
+for k,v in r['conditions'].items():print(k,{a:(round(b,3) if isinstance(b,float) else b) for a,b in v.items() if a in('strict_recall','type_recall','contradiction_abnormal','recall_n')})
+E
+ls results/iter_090/recovery/final_generation/base_report; cat results/iter_090/recovery/final_generation/contract.json | head -c 1500; cat results/iter_090/recovery/stage_decision_rules.json | head -c 2500
+- Bash: cd /SSD1_1TB/home/milab/daniel/08_medgemma/research; mkdir -p results/iter_097; cat > report97_train.py <<'E'
+"""iter_097: LR 2e-5 직접 판독(R)/조건부 위치 보조(G) 학습. 기존 report90 trainer의 연산은 그대로 두고
+결과·cache·gate 경로와 허용 LR만 iter_097로 격리한다. 기존 trainer/config/결과는 수정하지 않는다."""
+import argparse
+import os
+import report89_model as M
+import report90_train as C
+import report90_numeric as N
+from report90_stable_v2 import apply
+from report86_common import sha  # noqa: F401  (SOURCES hash 대상 일관성)
+
+ORIGINAL=N.OUT
+OUT=M.ROOT/'results/iter_097'
+LR=2e-5
+
+def environment(gpu):
+    allowed=os.environ['CUDA_VISIBLE_DEVICES'].split(',');assert gpu in allowed
+    # report90_numeric.environment는 M.OUT을 iter_090으로 되돌리므로 cache 격리를 iter_097로 직접 지정한다.
+    import subprocess
+    smi=subprocess.check_output(['nvidia-smi','--query-gpu=index,uuid,memory.total,memory.used,memory.free','--format=csv,noheader,nounits'],text=True)
+    row=next(x.split(', ') for x in smi.splitlines() if x.split(', ')[0]==gpu)
+    assert float(row[-1])>=14.19*1024+2048+1024
+    M.OUT=OUT
+    mapping=M.environment(gpu);mapping.update(peak_basis_gib=14.19,worker_margin_mib=2048,context_margin_mib=1024)
+    return mapping
+
+C.OUT=OUT
+C.environment=environment
+C.apply=apply
+C.SOURCES=C.SOURCES+['report90_stable_v2.py','report97_train.py']
+
+def main():
+    p=argparse.ArgumentParser();p.add_argument('--gpu',required=True);p.add_argument('--run-dir',required=True)
+    p.add_argument('--train',default=str(ORIGINAL/'data/T512/manifest.json'));p.add_argument('--validation',default=str(ORIGINAL/'data/V64/manifest.json'))
+    p.add_argument('--mode',choices=['R','G'],required=True);p.add_argument('--lr',type=float,choices=[LR],required=True)
+    p.add_argument('--mb',type=int,choices=[1],default=1);p.add_argument('--epochs',type=int,required=True)
+    p.add_argument('--test-patients',type=int,default=0);p.add_argument('--stop-step',type=int,default=-1)
+    return C.run(p.parse_args())
+
+if __name__=='__main__':raise SystemExit(main())
+E
+python -c "
+import report97_train as t, report90_train as C
+print(C.OUT, C.SOURCES)"; ls results/iter_090/data/T512 results/iter_090/data/D8 | head; nvidia-smi --query-compute-apps=pid,used_memory --format=csv
+- Bash: cd /SSD1_1TB/home/milab/daniel/08_medgemma/research; python report97_resume.py --gpu 0 > results/iter_097/tests_resume.stdout.log 2> results/iter_097/tests_resume.stderr.log; echo rc=$?; tail -c 600 results/iter_097/tests_resume.stdout.log
+- Bash: sed -i "s#reference/case_table.json#reference/case_table_v2.json#" report97_reference.py; python report97_reference.py; python -c "
+import json;d=json.load(open('results/iter_097/reference/case_table_v2.json'));print(d['n_abnormal_without_definite_positive'],d['lateral_view_dependent_recall_targets'],d['n_recall_patients'])"
+- Bash: python report97_decide.py --per-output results/iter_097/semantic/epoch6/eval/per_output.json --new R_lr2e-05_report --comparators base_V32 R_lr0.0001_report R_lr0.0002_report --output results/iter_097/decisions/R_vs_comparators_epoch6.json; python - <<'E'
+import json
+new={x['image_id']:x for x in json.load(open('results/iter_097/semantic/epoch6/eval/per_output.json')) if x['condition']=='base_V32'}
+old={x['image_id']:x for x in json.load(open('results/iter_090/recovery/semantic/epoch2/eval/per_output.json')) if x['condition']=='base_report'}
+refs={r['id']:i for i,r in enumerate(json.load(open('results/iter_090/semantic/V32_reference_v3.json'))['rows'])}
+for k in new:
+    a,b=new[k]['strict_recall'],old[k]['strict_recall']
+    if a!=b or new[k]['contradiction']!=old[k]['contradiction']:print(refs[k],'strict',a,b,'contra',new[k]['contradiction'],old[k]['contradiction'])
+E
+
+
+
+## iter_097 GPT REVIEW [CONTINUE] — 2026-10-08 10:42:25
+
+# 요약
+
+- **판정:** 유효한 제한적 실험이며 `inconclusive`다. 저LR R의 확대 기준 미달과 G 미실행은 타당하다.
+- **핵심 근거:** V32 recall 적격 20명에서 R 22.5%, base 19.17%다. base 대비 증가/감소는 2/2명으로 순증가 3명 기준에 미달했다.
+- **의미·한계:** 후반 NLL 상승은 완화됐지만 충분한 판독 baseline 회복은 입증되지 않았다. 오류 감소 수치는 의미 판정 문제로 승인하지 않는다.
+- **다음:** 현재 LR 재구성은 보류한다. 영역 근거를 판독문에 반영할 때 추가 소견을 회복하면서 맞는 내용을 보존하는지 한정 비교한다.
+
+## 알림 요약
+
+- 결과: 흉부 X-ray 저LR 판독 학습 384 updates를 완료했지만 V32 회복 환자 순증가가 base 대비 0명으로 확대 기준에 미달해 위치 보조 본학습은 실행하지 않았다.
+- 의미: 낮은 LR만으로 현재 판독 baseline을 회복한다는 근거는 부족하다. 위치 학습 전체의 효과는 미판정이며, 오류 감소의 정확한 크기도 승인하지 않는다.
+- 후속: 저장된 영역 소견을 활용한 교정에서 회복과 정답 보존을 함께 비교하도록 권고한다. 추가 학습보다 외부 근거의 활용 가치를 직접 구분할 수 있다.
+- 대안: 현재 판독 적응·영역 교정 투자를 모두 보류할 수 있다. 재작업 비용은 줄지만, 명확한 영역 정보가 판독문에 활용될 수 있는지는 남는다.
+
+# Assessment
+
+원 계획의 R 학습·고정 epoch 비교·조건부 G 종료를 확인했다. 실제 담당은 `engineer_backend.json`의 Claude이며 `claude_meta.json`은 Sonnet/medium, 실제 modelUsage는 `claude-sonnet-5-5`로 기록한다.
+
+리뷰 대상은 `e26d1ad7f499186434639bb0d1e908d27ce5c4f5`다. 신규 소스 16개와 작업 파일의 byte 일치를 확인했다. `unpreserved_paths`는 비어 있다. `changes.patch`는 기존 코드 삭제 없이 신규 코드가 추가된 변경이다. 전체 스냅샷 재사용은 승인하지 않지만 검증된 학습 연산과 현재 음성·불확정 결과는 보존할 가치가 있다.
+
+# Key Findings
+
+## 실행·출처 검증
+
+- `train/R_lr2e-05/events_000.jsonl`에서 고유 384 updates와 report-only loss를 직접 확인했다. 최종 checkpoint hash는 `complete_06.json`과 일치했다.
+- `training_gate.json`의 증거 32개, train config의 소스와 manifest hash를 직접 대조했다. T512/V64의 PatientID·StudyID·ImageID 교집합은 각각 0이었다. foundation의 사전학습 노출까지 배제한 검사는 아니다.
+- `tests/resume/result.json`은 중간 update·epoch 경계 재개의 state/events 일치와 validation 보존을 기록한다. 기존 수치 검증은 hash가 유지된 범위에서 계승했다.
+- 네 신규 생성 stage에서 고유 출력 수 32/32/32/16과 completion의 worker 파일 hash를 확인했다. 생성 검사는 기존 base와 입력·출력 token 32건 일치, 요청 변조 거부, 완료 재실행 불변을 기록한다.
+- epoch6 judgments의 인용 339개를 실제 출력과 대조했다. 이는 인용 연결 검사이며 의미 판정의 임상적 승인이 아니다.
+
+## 독립 수치 재계산
+
+저장 evaluator를 호출하지 않고 reference와 judgments의 matches에서 recall을 재계산했다. 환자 bootstrap 10,000회·seed97017도 별도 계산했다.
+
+| epoch6 비교 | 저LR R−비교군 | 95% CI | 증가/감소 환자 | 최소 leave-one-out 차이 |
+|---|---:|---:|---:|---:|
+| base | +3.33pp | [−7.5, 17.5]pp | 2/2 | −1.75pp |
+| R LR1e-4 | +5.00pp | [−10, 20]pp | 3/1 | 0pp |
+| R LR2e-4 | +2.50pp | [−12.5, 17.5]pp | 2/1 | −2.63pp |
+
+모든 비교에서 순증가 3명과 leave-one-out 양의 방향 조건을 충족하지 못했다. CI 하한을 새 gate로 사용하지 않았다. 보수적 모호 대응 제외 recall은 신규 R 17.5%이며 기존 고LR 두 조건도 17.5%다. 따라서 오류 지표를 유리하게 해석해도 현재 G 확대는 승인되지 않는다.
+
+저LR V64 NLL은 epoch1/2/4/6에서 1.790/1.600/1.471/1.545였다. 고LR epoch6의 2.392/2.298보다 낮지만, NLL 개선만으로 판독 개선을 주장할 수 없다. R의 생성 recall은 epoch2 7.5%에서 epoch6 22.5%로 증가했다. 충분한 수렴이나 최적 checkpoint를 확정한 결과는 아니다.
+
+## 자원·운영
+
+학습 supervisor는 GPU1에서 약 15,736초, 약 4.37시간을 기록했다. 학습 중 GPU0에서 생성했고 최종 판독·grounding 생성도 두 장에 분리했다. 학습 peak 약 13.51GiB와 추론 peak 및 worker별 여유를 고려한 단일 worker 선택은 합리적이다. 낮은 점유율을 실패 사유로 삼지 않는다.
+
+도구 로그에는 `experiment_wait.py`를 이용한 대기와 정상 종료 확인이 있다. 과거 iter_090 인계를 다시 수행하지 않았고, 완료된 고LR 자산을 재사용했다. 다만 epoch6 판정 폴더를 두 차례 삭제·재생성한 기록은 원본 보존 지시에 어긋난다. 최종 원시 생성 출력은 보존됐지만 삭제된 초기 판정의 완전한 감사 이력은 복구됐다고 볼 수 없다.
+
+# Problems / Concerns
+
+1. **오류 감소 해석은 제한한다.** 저장된 반박 환자 수 1/32 대 8/32의 산술은 재현됐다. 그러나 V15의 뼈가 intact라는 표현을 퇴행성 변화와 확정 충돌로 처리하고, V24의 종격동 윤곽 정상과 elongated aorta도 충돌로 처리하는 근거는 충분하지 않다. 일반 정상문은 unknown으로 두면서 일부 구체적 정상문은 넓게 반박으로 잡아 조건별 문체 차이도 영향을 줄 수 있다. 오류 비용의 검증 완료 주장은 승인하지 않는다.
+2. **일부 strict 회복은 잠정적이다.** V28 reference의 metallic 속성이 출력에 명시되지 않았는데 match로 처리됐다. 해당 대응은 ambiguous로 표시돼 보수적 판정에서는 제외된다. 이 문제를 고쳐도 이미 미달한 확대 결정을 살릴 근거는 없다.
+3. **검사 통과의 범위를 구분해야 한다.** reference fixture는 사전에 부여한 의미 라벨의 산술·assertion 검사다. no acute·resolved·원인 hedge 등의 실제 의미 이해를 검증하지 않는다. `verify.json` 역시 같은 의미 판정을 재집계한 결과다.
+4. **재사용 결함이 남는다.** 보수적 분기의 leave-one-out 검사 누락, finish의 고정된 실패 분기, genq의 허용 GPU 검사 누락 및 일부 부정 테스트 미실행을 수정해야 한다. 이번 수치와 실제 사용 GPU를 소급 무효화하지 않는다.
+5. **비EOS 범위를 정확히 보고해야 한다.** 신규 R epoch6 판독과 grounding에도 각각 1건이 남는다. base의 1건만 언급하면 불완전하다. 분모에서 제외하지 않은 처리는 유지한다.
+
+# Interpretation
+
+이번 비교는 실행 복구만 완료한 반복이 아니다. 낮은 LR의 새 학습과 실제 출력을 확보해, 동일 384 updates에서 LR2e-5가 충분한 회복을 제공하는지 시험했다. 결과는 사전 확대 기준 미달이다.
+
+다만 ‘높은 LR이 판독 저하의 주원인’이라는 넓은 인과 설명을 기각하기에는 부족하다. 낮은 LR에서 학습 진행 정도가 달라질 수 있고 target·prompt·제한된 supervision도 유지됐다. 말할 수 있는 범위는 **현재 학습량에서 LR만 낮추는 개입이 요구한 회복을 입증하지 못했다**는 것이다. G 본학습 미실행이므로 위치 보조 효과에 관한 새 비교는 없다.
+
+# Strategy Check / 연구 방향 판단
+
+## 시험 설정 / 연구 관찰 / 연구 질문
+
+- **시험 설정:** T512·seed17·384 updates의 LR 재구성 경로는 보류한다. 추가 LR·epoch·seed를 자동 발주하지 않는다.
+- **연구 관찰:** 낮은 NLL과 명확한 소견 회복이 함께 보장되지 않는다는 제한된 관찰을 이어받는다. 현재 시험은 후반 NLL 악화가 완화돼도 확대 기준을 충족하지 못했음을 추가했다. 위치 출력과 판독의 차이는 과거 결과이며 이번 독립 재현으로 합치지 않는다.
+- **연구 질문:** 위치·영역 근거가 판독을 어떻게 바꾸는지는 미판정이다. 현재 recipe를 계속 구제하는 것보다, 이미 생성된 영역 정보가 판독문 회복과 정답 보존에 쓰이는지 구분할 가치가 있다.
+
+실행은 유효하다. 성능 개선의 충분성은 미입증이다. 좁은 LR 회복 가설의 지지는 부족하며, 신규 contribution은 확인되지 않았다. 기록상 지배적인 측정 비용은 약 4.37시간의 R 학습이다. 의미 검토·재작업도 있었으나 별도 계측이 없어 비용 비율은 미측정이다.
+
+## 과거 관찰의 한정 재선별
+
+- **이미 설명돼 재실행 불필요:** iter_041의 공동 요청 손실은 iter_048의 직접 공동 SFT로 상당 부분 회복됐고 iter_046의 적응 MedGrounder도 강한 대안이었다. 이를 일반적 결합 결함으로 되살리거나 동일 loss 탐색을 재개하지 않는다.
+- **관찰 보존·현재 투자 보류:** iter_031의 continuation은 E402 누락 사건 11/27을 회복했지만 F1을 0.628→0.474로 낮췄다. 현재 판독문 결합과 다른 과제이므로 동일 원인의 재현으로 합치지 않는다. iter_064의 MedGemma 추가 slice 손실과 Qwen의 다른 반응도 보존하되 현재 X-ray 판독과 직접 연결할 새 근거가 없어 MRI를 재개하지 않는다.
+- **현재 질문과 연결해 최소 확인 가치:** iter_088의 영역별 정보 회복과 단순 결합 충돌을 출발점으로 삼는다. 실제 저장 P000에서도 C-G는 ‘No relevant findings’지만 영역 출력에는 좌하엽 opacity 서술과 정상 폐 서술이 함께 있다. 이 사례 자체를 정답 회복으로 확정하지 않고 reference 연결을 먼저 확인한다. iter_047/053의 교정–보존 본평가가 미실행이었다는 점을 이어받되 과거 gate를 완화해 재시작하지 않는다.
+
+## 후보 비교와 선택
+
+1. **직접 판독 baseline 추가 재구성 — 보류.** iter_092~094/097의 관찰은 있으나 다음에 바꿀 학습 조건을 특정할 근거가 부족하다. 수 시간의 추가 학습이 같은 수렴·평가 불확실성을 남길 가능성이 있다. 새 reference·target 적합성 또는 강한 baseline 증거가 생길 때 재검토한다.
+2. **영역 근거를 이용한 선택적 교정·보존 — 선택.** 중요한 사용 문제는 누락을 보완하면서 이미 맞는 소견을 손상시키지 않는 것이다. 가까운 강한 단순 대안은 C-G 유지와 고정 규칙의 소견 추가다. 남은 설명은 정보 내용 자체의 효과, 위치 출처의 효과, 단순 편집 효과다. 기존 출력과 소규모 생성으로 구분할 수 있으며 주요 비용은 명확한 사례 확인과 제한된 추론이다. 정확한 소요 시간은 다음 계획에서 기존 처리량으로 산출한다.
+3. **현재 묶음 전체 투자 보류 — 대안.** 학습·평가 재작업을 줄이는 장점이 있다. 다만 실제 영역 정보와 판독문 사이의 활용 가능성을 아직 직접 비교하지 않았으므로, 현재는 두 번째 후보의 한정 진단이 더 높은 정보 가치를 가진다. 명확한 사례가 없거나 단순 대안이 충분하면 이 선택으로 종료한다.
+
+# Recommended Next Experiment
+
+다음 계획은 선택한 교정–보존 질문을 이어받으며 전수 전략 검토를 반복하지 않는다. 기존 C-G 초안과 영역 출력 중 명확한 사실 대응을 가진 소규모 사례를 먼저 고정한다. 동일 영상·초안·수정 지시 아래 영역 근거 없음, 같은 근거 문장만 제공, 위치 출처까지 제공하는 조건을 비교한다. 원문 유지와 고정된 단순 추가도 함께 평가한다. 정답표를 입력하는 oracle 실험과 구분한다.
+
+추가 소견 회복, 기존 정답 보존, 새로 생긴 오류를 사실 단위로 분리한다. 위치 정보가 없는 같은 근거 문장 대조로 정보량과 위치 출처의 효과를 구분한다. 근거가 충분한 양성이면 실제 지지된 요소에만 후속 투자하고, 단순 대안이 충분하면 새 방법 개발을 보류한다. 의미 모호성이 다시 결정을 좌우하면 해당 후보를 보류하며 같은 규칙 정비를 반복하지 않는다.
+
+이번에는 논문을 추천하지 않는다. 현재 저LR 시험은 불확정이고, 선택한 교정 방향의 개선도 아직 실행으로 확인되지 않았다.
