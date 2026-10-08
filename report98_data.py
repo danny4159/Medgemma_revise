@@ -31,11 +31,15 @@ def load_inputs():
     return json.load(open(INPUTS))
 
 
-def load_readings():
+def load_readings(path=None):
+    """readings.jsonl을 (ImageID, condition) 키로 읽는다. 중복 키는 내용이 같아도 거부한다(iter_099)."""
     out = {}
-    for line in open(READINGS):
+    for line in open(path or READINGS):
         r = json.loads(line)
-        out[(r["ImageID"], r["condition"])] = r
+        k = (r["ImageID"], r["condition"])
+        if k in out:
+            raise ValueError("duplicate readings key: %r" % (k,))
+        out[k] = r
     return out
 
 
