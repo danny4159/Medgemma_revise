@@ -1,0 +1,1234 @@
+diff --git a/report100_blind.py b/report100_blind.py
+new file mode 100644
+index 0000000..b01eeaa
+--- /dev/null
++++ b/report100_blind.py
+@@ -0,0 +1,64 @@
++"""iter_100: 완료된 main 생성(N/T/L)과 GPU 없는 K/A 텍스트를 조건명 없는 blind ID로 묶어 의미 검토용 파일을 만든다.
++
++- 생성 stage는 completion과 요청·protocol 검증(report100_gen의 verify)을 통과해야 한다.
++- K = 저장 초안(C-G), A = 초안 + 고정 중복 제거 후 영역 본문 전체(D01.. 순서, 의미 선택 없음). T/L/N은 모델 출력.
++- 조건명·mapping은 private_mapping.json에만 둔다. 검토 파일에는 reference 문장·atom만 포함한다(모델 입력에는 없었음).
++"""
++import hashlib
++import json
++from pathlib import Path
++
++import report100_gen as G  # C.OUT 패치 + verify 연결
++import report98_data as D
++from report86_common import save, sha
++
++C = G.C
++OUT = G.OUT
++
++
++def a_text(pk):
++    return pk["draft"].rstrip() + " " + " ".join(g["body"] for g in pk["groups"])
++
++
++def main():
++    stage = OUT / "gen" / "main"
++    req = OUT / "data" / "main" / "requests.json"
++    proto = json.loads((stage / "protocol.json").read_text())
++    workers = json.loads((stage / "mapping.json").read_text())["workers"]
++    rows, expected = C.verify(stage, str(req), proto, workers)
++    assert len(rows) == len(expected) == 6 and (stage / "completion.json").exists()
++    dec = json.loads((OUT / "data" / "eligibility_decision.json").read_text())
++    atoms = json.loads((OUT / "data" / "atom_ledger.json").read_text())["atoms"]
++    am = json.load(open(D.REF_AMEND))["patients"]
++    R = D.load_readings()
++    outputs, mapping = [], {}
++    for sel in dec["selected_patients"]:
++        img, pi = sel["ImageID"], sel["patient"]
++        pk = D.package(img, R)
++        texts = {"K": pk["draft"], "A": a_text(pk)}
++        flags = {"K": False, "A": False}
++        for c in ("N", "T", "L"):
++            r = [x for x in rows if x["id"] == "%s|%s" % (img, c)]
++            assert len(r) == 1
++            texts[c] = r[0]["text"]
++            flags[c] = not r[0]["attempts"][-1]["ended_eos"]
++        for c, t in texts.items():
++            b = hashlib.sha256(("98017|iter100|%s|%s" % (img, c)).encode()).hexdigest()[:12]
++            assert b not in mapping
++            mapping[b] = dict(ImageID=img, patient=pi, condition=c)
++            outputs.append(dict(blind_id=b, patient=pi, text=t, non_eos=flags[c], chars=len(t)))
++    outputs.sort(key=lambda o: (o["patient"], o["blind_id"]))
++    review = []
++    for sel in dec["selected_patients"]:
++        img, pi = sel["ImageID"], sel["patient"]
++        review.append(dict(patient=pi, reference_facts=[dict(fact=f["fact_id"], sentence=f["sentence_en"], cls=f["v2_class"]) for f in am[img]["facts"]],
++                           draft=D.package(img, R)["draft"], atoms_P=atoms[str(pi)]["P"], atoms_Q=atoms[str(pi)]["Q"],
++                           outputs=[o for o in outputs if o["patient"] == pi]))
++    dest = OUT / "eval" / "blind"
++    save(dest / "private_mapping.json", mapping)
++    save(dest / "review_input.json", dict(review=review, completion_sha=sha(stage / "completion.json"), source_sha=sha(__file__)))
++    print(len(outputs), "blinded outputs ->", dest)
++
++
++if __name__ == "__main__":
++    main()
+diff --git a/report100_eval.py b/report100_eval.py
+new file mode 100644
+index 0000000..6bffa9c
+--- /dev/null
++++ b/report100_eval.py
+@@ -0,0 +1,167 @@
++"""iter_100: 수동 의미 판정(judgments.json, 조건명 눈가림)에서 환자·조건별 지표와 원 분기를 계산한다.
++
++판정 스키마(blind_id별):
++  P: {atom_id: {status: preserved|deleted|negated|damaged, quote}}      (보존 대상: 초안의 reference-supported atom)
++  Q: {atom_id: {status: recovered|absent, quote, ambiguous?: bool}}      (회복 대상)
++  explicit: [{key, quote, fact, why}]     reference가 명시적으로 반박하는 주장
++  internal: [{key, quotes:[..], why}]     출력 내부의 명확한 충돌
++  unverifiable: [{key, quote, why}]       reference에 없는 검증 불가 주장
++'새' 오류 = K(초안 유지)에 없는 key. quote는 해당 출력 원문에 있어야 한다(없으면 거부). 모든 출력이 판정되어야 한다.
++안전한 회복 환자: Q 하나 이상 recovered + P 전체 preserved + K 대비 새 explicit/internal 없음.
++"""
++import json
++import sys
++from pathlib import Path
++
++import numpy as np
++
++from report86_common import save, sha
++
++ROOT = Path(__file__).resolve().parent
++OUT = ROOT / "results" / "iter_100"
++CONDS = ["K", "A", "N", "T", "L"]
++
++
++def load(dest=OUT / "eval"):
++    blind = json.loads((dest / "blind" / "review_input.json").read_text())
++    mapping = json.loads((dest / "blind" / "private_mapping.json").read_text())
++    judg = json.loads((dest / "judgments.json").read_text())
++    return blind, mapping, judg
++
++
++def validate(blind, mapping, judg):
++    problems = []
++    texts = dict((o["blind_id"], o["text"]) for r in blind["review"] for o in r["outputs"])
++    atoms = dict((r["patient"], (set(a["id"] for a in r["atoms_P"]), set(a["id"] for a in r["atoms_Q"]))) for r in blind["review"])
++    jb = dict((j["blind_id"], j) for j in judg["judgments"])
++    if len(jb) != len(judg["judgments"]) or set(jb) != set(texts):
++        problems.append("judgment_set_mismatch")
++    for b, j in jb.items():
++        if b not in texts:
++            continue
++        pi = mapping[b]["patient"]
++        t = texts[b].lower()
++        pids, qids = atoms[pi]
++        if set(j["P"]) != pids or set(j["Q"]) != qids:
++            problems.append("atom_set:%s" % b)
++        for d in list(j["P"].values()) + list(j["Q"].values()):
++            if d["status"] not in ("preserved", "deleted", "negated", "damaged", "recovered", "absent"):
++                problems.append("status:%s" % b)
++            if d["status"] in ("preserved", "recovered", "damaged", "negated") and d.get("quote", "").lower() not in t:
++                problems.append("quote_missing:%s" % b)
++        for k in j["explicit"] + j["unverifiable"]:
++            if k["quote"].lower() not in t:
++                problems.append("quote_missing:%s:%s" % (b, k["key"]))
++        for k in j["internal"]:
++            if not all(q.lower() in t for q in k["quotes"]):
++                problems.append("quote_missing:%s:%s" % (b, k["key"]))
++    return problems
++
++
++def per_patient(blind, mapping, judg, drop_ambiguous=False, ignore_internal=False):
++    cond = dict((b, m["condition"]) for b, m in mapping.items())
++    jb = dict((j["blind_id"], j) for j in judg["judgments"])
++    # 회복 집계는 ledger에서 clear로 잠근 Q atom만 센다. unknown/partial atom은 판정을 기록하되 회복 수에 넣지 않는다.
++    clear_q = dict((r["patient"], set(a["id"] for a in r["atoms_Q"] if a["status"] == "clear")) for r in blind["review"])
++    rows = {}
++    for b, j in jb.items():
++        pi, c = mapping[b]["patient"], cond[b]
++        rows.setdefault(pi, {})[c] = j
++    out = {}
++    for pi, byc in rows.items():
++        k = byc["K"]
++        kexp = set(x["key"] for x in k["explicit"])
++        kint = set(x["key"] for x in k["internal"])
++        kunv = set(x["key"] for x in k["unverifiable"])
++        res = {}
++        for c in CONDS:
++            j = byc[c]
++            q = [d for a, d in j["Q"].items() if a in clear_q[pi] and not (drop_ambiguous and d.get("ambiguous"))]
++            rec = sum(d["status"] == "recovered" for d in q)
++            pdam = sum(d["status"] != "preserved" for d in j["P"].values())
++            nexp = len(set(x["key"] for x in j["explicit"]) - kexp)
++            nint = 0 if ignore_internal else len(set(x["key"] for x in j["internal"]) - kint)
++            nunv = len(set(x["key"] for x in j["unverifiable"]) - kunv)
++            res[c] = dict(Q_recovered=rec, Q_total=len(q), P_damaged=pdam, P_total=len(j["P"]), new_explicit=nexp, new_internal=nint,
++                          new_unverifiable=nunv, safe_recovery=bool(rec >= 1 and pdam == 0 and nexp == 0 and nint == 0),
++                          harm=bool(pdam > 0 or nexp > 0 or nint > 0))
++        out[pi] = res
++    return out
++
++
++def decide(role, table):
++    """원 계획의 분기. recovery 환자 수 N이 작으면 양성 기준(최소 3명/순증가 2명)은 충족 불가능으로 기록한다."""
++    rec = [p for p in table if role[p] == "recovery"]
++    n = len(rec)
++
++    def net(a, b):
++        return sum(table[p][a]["safe_recovery"] for p in rec) - sum(table[p][b]["safe_recovery"] for p in rec)
++
++    def harm(c):
++        return sum(table[p][c]["harm"] for p in table)
++    safe_T = sum(table[p]["T"]["safe_recovery"] for p in rec)
++    safe_L = sum(table[p]["L"]["safe_recovery"] for p in rec)
++    d = dict(n_recovery=n, n_total=len(table),
++             safe_recovery_patients=dict((c, sum(table[p][c]["safe_recovery"] for p in rec)) for c in CONDS),
++             harm_patients=dict((c, harm(c)) for c in CONDS),
++             net_T_vs_N=net("T", "N"), net_T_vs_A=net("T", "A"), net_L_vs_N=net("L", "N"), net_L_vs_A=net("L", "A"), net_L_vs_T=net("L", "T"),
++             positive_criterion_satisfiable=n >= 3)
++    t_or_l = max(safe_T, safe_L)
++    d["positive"] = bool(t_or_l >= 3 and max(net("T", "N"), net("L", "N")) >= 2 and max(net("T", "A"), net("L", "A")) >= 2)
++    d["source_effect"] = bool(d["positive"] and net("L", "T") >= 2)
++    d["outcome"] = ("insufficient_sample: 원 양성 기준(최소 3명)을 충족할 수 없는 사례 관찰" if n < 3
++                    else ("positive_exploration" if d["positive"] else "no_gain_or_uncertain"))
++    return d
++
++
++def boot(role, table, seed=98017, B=10000):
++    """환자 bootstrap(조건별 safe_recovery 평균 차이). 환자 수가 작으면 퇴화 구간이며 확증이 아니다."""
++    pats = sorted(table)
++    rng = np.random.default_rng(seed)
++    res = {}
++    for a, b in (("T", "K"), ("L", "K"), ("T", "N"), ("L", "N"), ("T", "A"), ("L", "A"), ("L", "T")):
++        v = np.array([int(table[p][a]["safe_recovery"]) - int(table[p][b]["safe_recovery"]) for p in pats], float)
++        idx = rng.integers(0, len(pats), (B, len(pats)))
++        m = v[idx].mean(1)
++        res["%s-%s" % (a, b)] = dict(mean=float(v.mean()), lo=float(np.percentile(m, 2.5)), hi=float(np.percentile(m, 97.5)),
++                                     degenerate=bool(len(set(v.tolist())) == 1))
++    return res
++
++
++def loo(role, table):
++    out = {}
++    for drop in sorted(table):
++        sub = dict((p, v) for p, v in table.items() if p != drop)
++        sub_role = dict((p, role[p]) for p in sub)
++        out[str(drop)] = decide(sub_role, sub) if sub else None
++    return out
++
++
++def main():
++    dest = OUT / "eval"
++    blind, mapping, judg = load(dest)
++    probs = validate(blind, mapping, judg)
++    assert not probs, probs
++    dec = json.loads((OUT / "data" / "eligibility_decision.json").read_text())
++    role = dict((s["patient"], s["role"]) for s in dec["selected_patients"])
++    table = per_patient(blind, mapping, judg)
++    table_na = per_patient(blind, mapping, judg, drop_ambiguous=True)
++    table_ni = per_patient(blind, mapping, judg, ignore_internal=True)
++    # 검증 불가 증가 환자 제외 분석
++    excl = dict((p, v) for p, v in table.items() if all(v[c]["new_unverifiable"] == 0 for c in ("T", "L", "N", "A")))
++    report = dict(table=table, decision=decide(role, table),
++                  sensitivity_exclude_ambiguous=decide(role, table_na),
++                  sensitivity_ignore_internal_conflicts=dict(decision=decide(role, table_ni), table=table_ni,
++                                                             note="사후 민감도: 내부 충돌 판정이 결과를 가르는지 보기 위한 것이며 원 기준이 아니다"),
++                  sensitivity_exclude_unverifiable_increase=decide({p: role[p] for p in excl}, excl) if excl else None,
++                  excluded_for_unverifiable=sorted(set(table) - set(excl)),
++                  bootstrap_seed98017=boot(role, table), leave_one_patient_out=loo(role, table),
++                  provenance=dict(judgments_sha=sha(dest / "judgments.json"), review_input_sha=sha(dest / "blind" / "review_input.json"),
++                                  mapping_sha=sha(dest / "blind" / "private_mapping.json"), eval_sha=sha(__file__)),
++                  note="assistant 단일 수동 검토이며 전문의/독립 임상 평가가 아니다. 눈가림은 조건명 제거 수준이다.")
++    save(dest / "report_v2.json", report)
++    print(json.dumps(report["decision"], ensure_ascii=False))
++
++
++if __name__ == "__main__":
++    sys.exit(main())
+diff --git a/report100_gen.py b/report100_gen.py
+new file mode 100644
+index 0000000..69791d2
+--- /dev/null
++++ b/report100_gen.py
+@@ -0,0 +1,125 @@
++"""iter_100: 기존 생성 연산(report90_gen/report90_gen_safe/report90_recovery_gen)을 유지하고 출력·cache를 iter_100으로 격리한다.
++
++report97_gen.py와 같은 구조이며 launch만 다음을 보강한다(생성 수식·protocol은 그대로).
++- attempt 번호를 기존 로그 파일 이름에서 정해 비정상 종료 후 재시작 시 로그 충돌을 피한다.
++- worker는 report90_gen.worker의 허용 GPU 집합 검사(--gpu in CUDA_VISIBLE_DEVICES)를 그대로 쓰고, launch의 장치 선택도 허용 집합 안으로 한정한다.
++- worker 시작 직전 매번 nvidia-smi로 실제 free를 다시 읽고, 이미 시작한 살아 있는 worker마다 (peak - 현재 점유 + 2GiB)를 예약으로 차감한다.
++"""
++import argparse
++import fcntl
++import os
++import re
++import signal
++import subprocess
++import sys
++import time
++from pathlib import Path
++
++import report90_gen as C
++import report90_gen_safe as S
++import report90_recovery_gen as RG  # noqa: F401  load_model·SOURCES 패치 적용
++from report86_common import save, sha, sha_obj
++
++OUT = Path(__file__).resolve().parent / 'results/iter_100'
++C.OUT = OUT
++C.SOURCES = C.SOURCES + ['report100_gen.py']
++C.__file__ = __file__
++
++
++def next_attempt(out):
++    nums = [int(m.group(1)) for p in Path(out).glob('launch*_worker*.stdout.log') for m in [re.match(r'launch(\d+)_worker', p.name)] if m]
++    return max(nums) + 1 if nums else 0
++
++
++def launch(a):
++    out = Path(a.out).resolve()
++    out.relative_to(C.OUT)
++    out.mkdir(parents=True, exist_ok=True)
++    with (out / 'launcher.lock').open('a') as lock:
++        fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
++        proto = C.protocol(a.requests, a.checkpoint)
++        for path, value in [(out / 'protocol.json', proto), (out / 'mapping.json', dict(workers=a.workers))]:
++            if path.exists():
++                import json
++                assert json.loads(path.read_text()) == value, ('protocol/mapping changed', path)
++            else:
++                save(path, value)
++        # 부분 행 복구는 worker lock을 소유한 상태에서만 한다.
++        for s in range(a.workers):
++            with (out / f'worker_{s}.lock').open('a') as wl:
++                fcntl.flock(wl, fcntl.LOCK_EX | fcntl.LOCK_NB)
++                from pg43_run import repair_tail
++                repair_tail(str(out / f'worker_{s}.jsonl'))
++        existing, expected = C.verify(out, a.requests, proto, a.workers)
++        if len(existing) == len(expected):
++            cp = out / 'completion.json'
++            completion = dict(n=len(existing), protocol_digest=sha_obj(proto),
++                              files={str(out / f'worker_{s}.jsonl'): sha(out / f'worker_{s}.jsonl') for s in range(a.workers)})
++            if cp.exists():
++                import json
++                assert json.loads(cp.read_text()) == completion
++            else:
++                save(cp, completion)
++            return 0
++        allowed = os.environ['CUDA_VISIBLE_DEVICES'].split(',')
++        procs, logs = [], []
++        attempt = next_attempt(out)
++        start = time.monotonic()
++
++        def stop(*args):
++            raise KeyboardInterrupt('supervisor stopped; terminating owned children')
++        signal.signal(signal.SIGTERM, stop)
++        try:
++            for s in range(a.workers):
++                raw = subprocess.check_output(['nvidia-smi', '--query-gpu=index,memory.free', '--format=csv,noheader,nounits'], text=True)
++                free = {x.split(',')[0].strip(): int(x.split(',')[1]) for x in raw.splitlines()}
++                usage = subprocess.check_output(['nvidia-smi', '--query-compute-apps=pid,used_memory', '--format=csv,noheader,nounits'], text=True)
++                actual = {int(x.split(',')[0]): int(x.split(',')[1]) for x in usage.splitlines() if x.strip()}
++                choices = {g: free[g] - sum(max(0, a.peak_mib - actual.get(p.pid, 0)) + 2048 for _, p, gg in procs if gg == g and p.poll() is None)
++                           for g in allowed}
++                gpu = max(choices, key=choices.get)
++                assert choices[gpu] >= a.peak_mib + 2048, ('memory admission', choices)
++                cmd = [sys.executable, __file__, 'worker', '--requests', a.requests, '--out', str(out), '--gpu', gpu, '--shard', str(s),
++                       '--workers', str(a.workers)]
++                if a.checkpoint:
++                    cmd += ['--checkpoint', a.checkpoint]
++                if a.limit:
++                    cmd += ['--limit', str(a.limit)]
++                so = (out / f'launch{attempt}_worker{s}.stdout.log').open('x')
++                se = (out / f'launch{attempt}_worker{s}.stderr.log').open('x')
++                logs.extend([so, se])
++                procs.append((s, subprocess.Popen(cmd, stdout=so, stderr=se), gpu))
++                time.sleep(a.stagger)
++            codes = {s: p.wait() for s, p, _ in procs}
++        finally:
++            for _, p, _ in procs:
++                if p.poll() is None:
++                    p.terminate()
++            for _, p, _ in procs:
++                p.wait()
++            for f in logs:
++                f.close()
++        save(out / f'launch_{attempt:03}.json', dict(codes=codes, wall_s=time.monotonic() - start, mapping={s: g for s, _, g in procs},
++                                                      protocol_digest=sha_obj(proto), allowed=allowed))
++        assert all(c == 0 for c in codes.values())
++        recs, expected = C.verify(out, a.requests, proto, a.workers)
++        if len(recs) == len(expected):
++            save(out / 'completion.json', dict(n=len(recs), protocol_digest=sha_obj(proto),
++                                               files={str(out / f'worker_{s}.jsonl'): sha(out / f'worker_{s}.jsonl') for s in range(a.workers)}))
++        return 0 if len(recs) == len(expected) or a.limit else 2
++
++
++if __name__ == '__main__':
++    p = argparse.ArgumentParser()
++    p.add_argument('command', choices=['worker', 'launch'])
++    p.add_argument('--requests', required=True)
++    p.add_argument('--out', required=True)
++    p.add_argument('--checkpoint')
++    p.add_argument('--workers', type=int, default=1)
++    p.add_argument('--shard', type=int, default=0)
++    p.add_argument('--gpu')
++    p.add_argument('--limit', type=int, default=0)
++    p.add_argument('--peak-mib', type=int, default=12000)
++    p.add_argument('--stagger', type=float, default=20.0)
++    a = p.parse_args()
++    raise SystemExit(C.worker(a) if a.command == 'worker' else launch(a))
+diff --git a/report100_gencheck.py b/report100_gencheck.py
+new file mode 100644
+index 0000000..6cd41f6
+--- /dev/null
++++ b/report100_gencheck.py
+@@ -0,0 +1,70 @@
++"""iter_100 생성 경로 검사: (1) 재개/worker 수가 다른 실행 간 token 정합성, (2) 래퍼(LoRA 장착, 항등 초기화)와 공식 무패치 모델의 greedy 출력 비교.
++
++(2)는 GPU 하나를 쓴다. 공식 경로는 processor.apply_chat_template + model.generate(do_sample=False, use_cache 기본값).
++bf16 kernel/cache 경로 차이로 token이 갈릴 수 있으며, 갈리면 첫 차이 위치를 그대로 기록한다(성공으로 바꾸지 않는다).
++"""
++import json
++import os
++import sys
++from pathlib import Path
++
++from report86_common import read_jsonl_complete, save, sha
++
++ROOT = Path(__file__).resolve().parent
++OUT = ROOT / "results" / "iter_100"
++
++
++def recs(d, w):
++    r = []
++    for s in range(w):
++        r += read_jsonl_complete(OUT / "gen" / d / f"worker_{s}.jsonl")
++    return dict((x["id"], x) for x in r)
++
++
++def first_diff(a, b):
++    for i, (x, y) in enumerate(zip(a, b)):
++        if x != y:
++            return i
++    return None if len(a) == len(b) else min(len(a), len(b))
++
++
++def main():
++    base, res = recs("D8_w2", 2), recs("D8_resume", 2)
++    cmp1 = dict((k, dict(input_ids_equal=res[k]["input_ids"] == base[k]["input_ids"],
++                         tokens_equal=[a["suffix_ids"] for a in res[k]["attempts"]] == [a["suffix_ids"] for a in base[k]["attempts"]],
++                         text_equal=res[k]["text"] == base[k]["text"])) for k in res)
++    out = dict(resume_vs_w2=dict(n=len(cmp1), all_equal=all(all(v.values()) for v in cmp1.values()), detail=cmp1))
++    # (2) 공식 무패치 모델 대조
++    os.environ["CUDA_VISIBLE_DEVICES"] = sys.argv[1]
++    import torch
++    from transformers import AutoModelForImageTextToText, AutoProcessor
++    from report86_common import base_path
++    from rsna_diag import generate as G
++    proc = AutoProcessor.from_pretrained(base_path("M15"), local_files_only=True)
++    proc.image_processor.do_pan_and_scan = False
++    model = AutoModelForImageTextToText.from_pretrained(base_path("M15"), local_files_only=True, dtype=torch.bfloat16,
++                                                        device_map={"": 0}, attn_implementation="sdpa").eval()
++    reqs = dict((r["id"], r) for r in json.loads((OUT / "data" / "D8" / "requests.json").read_text()))
++    pick = [k for k in sorted(base) if k.endswith("|N")][:2] + [k for k in sorted(base) if k.endswith("|T")][:1]
++    eos = model.generation_config.eos_token_id
++    eos = [eos] if isinstance(eos, int) else eos
++    off = {}
++    for k in pick:
++        image, _, _ = G.load_image(reqs[k]["image"])
++        inp = proc.apply_chat_template([dict(role="user", content=[dict(type="image", image=image), dict(type="text", text=reqs[k]["prompt"])])],
++                                       add_generation_prompt=True, tokenize=True, return_dict=True, return_tensors="pt", padding=True).to("cuda:0")
++        inp["pixel_values"] = inp["pixel_values"].to(torch.bfloat16)
++        ref = base[k]["attempts"][0]["suffix_ids"]
++        with torch.no_grad():
++            g = model.generate(**inp, max_new_tokens=len(ref), do_sample=False)
++        toks = g[0, inp["input_ids"].shape[1]:].tolist()
++        off[k] = dict(wrapper_len=len(ref), official_len=len(toks), input_ids_equal=inp["input_ids"][0].tolist() == base[k]["input_ids"],
++                      first_diff=first_diff(toks, ref), tokens_equal=toks == ref[:len(toks)] and len(toks) <= len(ref))
++    out["official_vs_wrapper"] = off
++    out["note"] = "공식 경로는 generate 기본 use_cache. 첫 차이는 bf16 kernel/cache 경로 차이일 수 있어 원인을 단정하지 않는다."
++    save(OUT / "tech" / "gencheck.json", out)
++    print(json.dumps(dict(resume_equal=out["resume_vs_w2"]["all_equal"], official=dict((k[-8:], (v["input_ids_equal"], v["first_diff"])) for k, v in off.items()))))
++
++
++if __name__ == "__main__":
++    main()
+diff --git a/report100_lock.py b/report100_lock.py
+new file mode 100644
+index 0000000..52d64a2
+--- /dev/null
++++ b/report100_lock.py
+@@ -0,0 +1,236 @@
++"""iter_100 적격성 정정: iter_099의 finding-only 제한(clear 속성 atom 제외)을 원 계획대로 고쳐 회복 집단 N과 보존 대조를 잠근다.
++
++- report99_lock.py / iter_099 산출물은 수정하지 않는다(과거 기록). 그 ledger의 의미 판정(status)을 그대로 상속하고
++  unknown/partial/covered_by_draft/temporal을 clear로 바꾸지 않는다. 바뀐 것은 (1) 집단 규칙에 clear 속성(attr) atom 포함,
++  (2) 선택 환자 atom의 고유 ID·원문 span·영역 group/source 연결, (3) 속성 영향 경로(P-clear 14명) 확인 기록이다.
++- 판정은 assistant 단일 수동 검토(전문의/독립 임상 검증 아님). 인용은 모두 원문에 존재해야 하며 존재 검사는 의미 동치의 증명이 아니다.
++- 모든 검사 통과 후에만 ledger/decision을 배타 생성하고, 마지막에 lock_complete.json을 만든다. 실패하면 오류 기록만 남긴다.
++"""
++import copy
++import hashlib
++import json
++import os
++import sys
++import time
++from pathlib import Path
++
++import report98_data as D
++import report99_lock as L99
++
++ROOT = D.ROOT
++OUT_DEFAULT = ROOT / "results" / "iter_100" / "data"
++PLAN99 = ROOT.parent / "agent" / "runs" / "iter_099" / "plan.md"
++PLAN99_SHA = "f4424caab23b410df7a81935bd91c93bdb3aed42cda432f49b2af06f44c60835"
++PLAN100 = ROOT.parent / "agent" / "runs" / "iter_100" / "plan.md"
++DECISION99 = ROOT / "results" / "iter_099" / "data" / "eligibility_decision.json"
++SOURCES = ["report98_data.py", "report99_lock.py", "report100_lock.py"]
++CLEAR_KINDS = ("finding", "attr")  # temporal kind는 시간 주장이므로 자동 clear로 쓰지 않는다
++CONTROL_SALT = "report100_control|"
++
++# iter_099 ledger에서 바뀌는 항목: P053 Q의 존재(P)와 크기(Q attr) 분리 설명, 속성 영향 경로 확인 기록.
++# 환자 -> 모든 확인은 영역 본문 원문 인용(없으면 None)과 이유를 가진다.
++ATTR_CHECKS = [
++    dict(patient=3, p_fact="F1", attr="left cavities", desc_quote=None, result="no_attr_Q",
++         reason="영역 설명에 좌심 chamber 언급 없음(D16 cardiac silhouette enlargement만)"),
++    dict(patient=8, p_fact="F1", attr="(reference attr 없음)", desc_quote="small left pleural effusion", result="no_attr_Q",
++         reason="reference F1에 크기 속성 요구가 없어 미표현 속성 atom이 아니다. 시간(persistent)은 temporal로 별도"),
++    dict(patient=12, p_fact="F1", attr="chronic", desc_quote=None, result="no_attr_Q", reason="초안이 chronic을 이미 표현. 영역 설명에 실질 관련 본문 없음"),
++    dict(patient=21, p_fact="F1", attr="interstitial/bilateral", desc_quote=None, result="no_attr_Q", reason="초안이 이미 bilateral interstitial 표현"),
++    dict(patient=25, p_fact="F1", attr="dorsolumbar", desc_quote=None, result="no_attr_Q", reason="초안이 dorsolumbar를 이미 표현"),
++    dict(patient=33, p_fact="F1", attr="marked", desc_quote="Moderate cardiomegaly is unchanged", result="not_clear",
++         reason="영역 설명의 moderate는 reference의 marked와 일치하지 않는다(clear로 바꾸지 않음). 심비대 존재는 초안이 이미 표현"),
++    dict(patient=45, p_fact="F1", attr="chronic", desc_quote=None, result="no_attr_Q", reason="초안이 chronic을 이미 표현"),
++    dict(patient=49, p_fact="F2", attr="descending thoracic aorta", desc_quote="The aorta is tortuous", result="no_attr_Q",
++         reason="영역 설명에 descending 위치 언급 없음(aortic arch의 tortuous만)"),
++    dict(patient=52, p_fact="F1", attr="marked dorsolumbar", desc_quote=None, result="no_attr_Q", reason="척추 영역 설명이 29개 영역 중 없음(spine region 부재)"),
++    dict(patient=53, p_fact="F3", attr="small", desc_quote="small left pleural effusion", result="clear_attr_Q",
++         reason="reference의 small을 영역 설명 D08/D11이 직접 서술. left·metapneumonic은 reference 비지지로 별도 미지원 항목"),
++    dict(patient=56, p_fact="F2", attr="metallic", desc_quote=None, result="no_attr_Q", reason="초안의 osteosynthesis material이 대응. 영역 설명에 관련 본문 없음"),
++    dict(patient=62, p_fact="F5", attr="intense", desc_quote="moderate dextroscoliosis of the thoracic spine", result="not_clear",
++         reason="영역 설명의 moderate는 reference의 intense와 일치하지 않는다. 방향(우측 볼록)은 초안이 이미 표현"),
++    dict(patient=69, p_fact="F1", attr="bilateral", desc_quote=None, result="no_attr_Q", reason="영역 설명에 prosthesis 관련 본문 없음"),
++    dict(patient=70, p_fact="F2", attr="(reference attr 없음)", desc_quote="mildly enlarged with a left ventricular configuration", result="no_attr_Q",
++         reason="reference F2에 속성 요구가 없고 초안이 left ventricle을 이미 표현"),
++]
++
++# iter_099에서 ledger에 없던 34명의 초안-reference 양성 사실 대응을 속성 영향 관점에서 다시 훑은 결과(P-clear 없음 확인).
++ABSENT_SCAN = {
++    "method": "ledger 미등재 환자 34명의 초안과 reference 양성 사실(pos_*)을 읽고 P-clear(초안이 reference 지지 사실을 표현) 여부만 확인",
++    "result": "P-clear 후보 없음. 경계 사례 P002(초안에 scoliosis 없음)·P032(초안 chronic parenchymal changes 대 reference apical pleuroparenchymal tracts: 동치 미확정)는 clear로 바꾸지 않음",
++    "borderline": [2, 32],
++    "note": "iter_099 ledger를 일괄 승계하지 않고 이번 속성 규칙에 영향이 있는 조건(P-clear 존재)만 재확인했다. 전면 재주석이 아니다.",
++}
++
++
++def sha_file(p):
++    return hashlib.sha256(Path(p).read_bytes()).hexdigest()
++
++
++def atomic_create(path, text):
++    return L99.atomic_create(path, text)
++
++
++def decorate(pi, ent, pk, am_i):
++    """atom에 고유 ID와 원문 위치(draft offset / reference sentence / 영역 group·source)를 붙인 사본을 반환한다. 위치가 없으면 ValueError."""
++    out = copy.deepcopy(ent)
++    draft_l = pk["draft"].lower()
++    fsent = {f["fact_id"]: f["sentence_en"] for f in am_i["facts"]}
++    for kind in ("P", "Q"):
++        for n, e in enumerate(out[kind], 1):
++            e["id"] = "P%03d.%s%d" % (pi, kind, n)
++            s = fsent[e["fact"]]
++            j = s.lower().find(e["ref_quote"].lower())
++            if j < 0:
++                raise ValueError("ref_quote missing %s" % e["id"])
++            e["ref_span"] = [j, j + len(e["ref_quote"]), s]
++            if kind == "P":
++                j = draft_l.find(e["draft_quote"].lower())
++                if j < 0:
++                    raise ValueError("draft_quote missing %s" % e["id"])
++                e["draft_span"] = [j, j + len(e["draft_quote"])]
++            else:
++                hit = [g for g in pk["groups"] if e["desc_quote"].lower() in g["body"].lower()]
++                if not hit:
++                    raise ValueError("desc_quote missing %s" % e["id"])
++                e["groups"] = [dict(gid=g["gid"], regions=g["regions"],
++                                    span=[g["body"].lower().find(e["desc_quote"].lower()),
++                                          g["body"].lower().find(e["desc_quote"].lower()) + len(e["desc_quote"])]) for g in hit]
++    return out
++
++
++def cohort(ledger, p_ok=("clear",), q_ok=("clear",), q_kinds=CLEAR_KINDS):
++    """P에 clear atom, Q에 clear이며 kind가 finding/attr인 atom이 모두 있는 환자. temporal·unknown·partial·covered_by_draft는 제외."""
++    out = []
++    for pi, ent in sorted(ledger.items()):
++        if any(a["status"] in p_ok for a in ent["P"]) and any(a["status"] in q_ok and a["kind"] in q_kinds for a in ent["Q"]):
++            out.append(pi)
++    return out
++
++
++def control_order(ledger, am, ids):
++    """보존 대조 후보: P-clear이고 Q atom이 하나도 없는 환자를 sha256(salt+ImageID) 오름차순으로 정렬. 결과 확인 전에 규칙 고정."""
++    idx = {am[i]["patient_index"]: i for i in ids}
++    cands = [pi for pi, e in ledger.items() if any(a["status"] == "clear" for a in e["P"]) and not e["Q"]]
++    return sorted(cands, key=lambda pi: hashlib.sha256((CONTROL_SALT + idx[pi]).encode()).hexdigest())
++
++
++def build_ledger():
++    led = copy.deepcopy(L99.LEDGER)
++    # P053: 존재(P1)와 크기(Q1)는 서로 다른 고유 atom이다. 판정(status)은 iter_099와 동일하며 설명만 보강한다.
++    led[53]["P"][0]["note"] = ("effusion 존재 atom. 초안의 left는 reference가 지지하지 않는 위치(unsupported), "
++                               "metapneumonic은 초안에 없고 reference 속성(원인)이다")
++    led[53]["Q"][0]["note"] = ("크기(small) 속성 atom: 공통 소견이 초안에 있고 영역 설명 D08/D11이 reference의 small을 직접 서술. "
++                               "left는 reference 비지지이므로 이 atom의 지지 범위에 포함하지 않는다")
++    led[53]["unsupported_or_uncertain"] = [
++        "초안 'Left': reference F3에 laterality 없음 -> 지지 불가(unknown)",
++        "'metapneumonic': 초안·영역 설명 모두 원인 서술 없음 -> 회복 atom 아님",
++        "F4 retrocardiac consolidation decreased: 영역 설명 D13 'new left lower lobe opacity'는 opacity-consolidation 동치 미확정이며 시간 방향이 반대 -> unknown 유지",
++        "초안 'No suspicious lesions or infiltrates are observed': reference F4 consolidation과 모순 가능 -> P로 인정하지 않음",
++        "reference F1/F2 구체적 정상(cardiothoracic index, mediastinal contour): 초안은 포괄 정상문뿐이라 P로 인정하지 않음",
++    ]
++    led[70]["unsupported_or_uncertain"] = [
++        "초안 'No significant findings'/'Dorsal spondylosis': reference 비지지 또는 포괄 정상문 -> P 아님",
++        "reference F1 probable old subcapital fracture of right humerus: 초안에 없음(hedged pos). 영역 설명에도 관련 서술 없음 -> Q 아님",
++    ]
++    return led
++
++
++def quote_checks(ledger, ids, readings, am):
++    return L99.quote_checks(ledger, ids, readings, am)
++
++
++def provenance():
++    paths = {
++        "inputs_E96.json": D.INPUTS, "reference_facts_E_private.json": D.REF_PRIV, "reference_amend_E96.json": D.REF_AMEND,
++        "readings.jsonl": D.READINGS, "iter_099_eligibility_decision.json": DECISION99, "iter_099_plan.md": PLAN99,
++        "iter_100_plan.md": PLAN100, "linked.json": L99.LINKED,
++    }
++    for s in SOURCES:
++        paths[s] = ROOT / s
++    return {k: sha_file(v) for k, v in paths.items()}
++
++
++def build(out=OUT_DEFAULT, ledger=None, readings_path=None):
++    """검사 통과 시에만 ledger/decision/lock_complete를 만든다. 반환 (rc, problems)."""
++    t0 = time.time()
++    out = Path(out)
++    out.mkdir(parents=True, exist_ok=True)
++    ledger = build_ledger() if ledger is None else ledger
++    problems = []
++    if sha_file(PLAN99) != PLAN99_SHA:
++        problems.append(dict(problem="iter_099_plan_sha_mismatch"))
++    ids = D.abnormal_ids()
++    if len(ids) != 48 or len(set(ids)) != 48:
++        problems.append(dict(problem="abnormal_ids", n=len(ids)))
++    try:
++        readings = D.load_readings(readings_path)
++    except ValueError as e:
++        problems.append(dict(problem="readings_duplicate", detail=str(e)))
++        readings = None
++    am = json.load(open(D.REF_AMEND))["patients"]
++    if readings is not None:
++        problems += quote_checks(ledger, ids, readings, am)
++        by = {am[i]["patient_index"]: i for i in ids}
++        for c in ATTR_CHECKS:
++            if c["patient"] not in ledger:
++                problems.append(dict(problem="attr_check_patient_not_in_ledger", patient=c["patient"]))
++            elif c["desc_quote"]:
++                bodies = " ".join(g["body"] for g in D.package(by[c["patient"]], readings)["groups"]).lower()
++                if c["desc_quote"].lower() not in bodies:
++                    problems.append(dict(problem="attr_check_quote", patient=c["patient"], quote=c["desc_quote"]))
++    stamp = time.strftime("%Y%m%dT%H%M%S")
++    if problems:
++        atomic_create(out / ("lock_errors_%s_%d.json" % (stamp, os.getpid())), json.dumps(dict(problems=problems), ensure_ascii=False, indent=1))
++        return 1, problems
++
++    n_cohort = cohort(ledger)
++    by = {am[i]["patient_index"]: i for i in ids}
++    order = control_order(ledger, am, ids)
++    controls = [pi for pi in order if pi not in n_cohort][:len(n_cohort)]
++    p_clear = sorted(pi for pi, e in ledger.items() if any(a["status"] == "clear" for a in e["P"]))
++    selected = sorted(set(n_cohort) | set(controls))
++    atoms = {}
++    for pi in sorted(ledger):
++        pk = D.package(by[pi], readings)
++        atoms[str(pi)] = decorate(pi, ledger[pi], pk, am[by[pi]])
++    old = json.load(open(DECISION99))
++    decision = dict(
++        n_abnormal=48,
++        rule=("N = P에 clear atom이 있고 Q에 clear인 finding 또는 attr atom이 있는 환자. temporal kind와 unknown/partial/covered_by_draft 상태는 제외. "
++              "속성 포함은 의미 완화가 아니라 원 계획의 원자 사실 정의다."),
++        N_recovery_cohort=n_cohort,
++        run_generation=bool(n_cohort),
++        control_rule=("보존 대조 = P-clear이고 Q atom이 전혀 없는 환자를 sha256('%s'+ImageID) 오름차순으로 정렬해 최대 N명 선택" % CONTROL_SALT),
++        control_candidates_in_order=order,
++        preservation_controls=controls,
++        selected_patients=[dict(patient=pi, ImageID=by[pi], role="recovery" if pi in n_cohort else "preservation_control") for pi in selected],
++        P_clear_patients=p_clear,
++        iter_099=dict(N=old["N_recovery_cohort"], run_generation=old["run_generation"]),
++        change_vs_iter_099=dict(N_added=sorted(set(n_cohort) - set(old["N_recovery_cohort"])),
++                                cause="finding-only 제한 제거(clear attr atom 포함). 다른 status 판정 변경 없음"),
++        scenario_finding_only=cohort(ledger, q_kinds=("finding",)),
++        attr_checks=ATTR_CHECKS,
++        absent_patients_scan=ABSENT_SCAN,
++        review_note="assistant 단일 수동 검토이며 전문의/독립 임상 검증이 아니다. 인용 존재 검사는 의미 동치의 증명이 아니다.",
++        lock_wall_s=round(time.time() - t0, 3),
++        provenance_sha256=provenance(),
++    )
++    atomic_create(out / "atom_ledger.json", json.dumps(dict(atoms=atoms, reviewed_patients=48,
++                                                            patients_without_candidate_atoms=[am[i]["patient_index"] for i in ids
++                                                                                              if am[i]["patient_index"] not in ledger]),
++                                                       ensure_ascii=False, indent=1))
++    decision["atom_ledger_sha256"] = sha_file(out / "atom_ledger.json")
++    atomic_create(out / "eligibility_decision.json", json.dumps(decision, ensure_ascii=False, indent=1))
++    atomic_create(out / "lock_complete.json", json.dumps(dict(
++        files={n: sha_file(out / n) for n in ("atom_ledger.json", "eligibility_decision.json")},
++        N=n_cohort, controls=controls, run_generation=bool(n_cohort)), ensure_ascii=False, indent=1))
++    print(json.dumps(dict(N=n_cohort, controls=controls, finding_only=decision["scenario_finding_only"], run_generation=bool(n_cohort),
++                          order=order), ensure_ascii=False))
++    return 0, []
++
++
++if __name__ == "__main__":
++    rc, probs = build()
++    if probs:
++        print(json.dumps(probs, ensure_ascii=False, indent=1))
++    sys.exit(rc)
+diff --git a/report100_req.py b/report100_req.py
+new file mode 100644
+index 0000000..8c5cf93
+--- /dev/null
++++ b/report100_req.py
+@@ -0,0 +1,149 @@
++"""iter_100 교정 요청 구성: N(근거 없음) / T(영역 본문) / L(같은 본문 + 실제 질의 영역 이름). K/A는 GPU 요청 없음.
++
++모델 입력에는 reference·P/Q·평가 라벨·정답 bbox를 넣지 않는다. 영역 본문은 29개 전부(좌표·헤더 제거, 공백 정규화, 정확 중복 제거만).
++"""
++import argparse
++import hashlib
++import json
++import re
++from pathlib import Path
++
++import report98_data as D
++from report86_common import save, sha, sha_obj
++
++ROOT = D.ROOT
++OUT = ROOT / "results" / "iter_100"
++LOCK = OUT / "data" / "eligibility_decision.json"
++D8_INPUTS = ROOT / "results" / "iter_085" / "D8" / "inputs.json"
++D8_READINGS = ROOT / "results" / "iter_086" / "D8" / "readings.jsonl"
++CONDS = ["N", "T", "L"]
++
++HEAD = "Below is a draft report for the attached chest X-ray.\n\nDraft report:\n%s\n\nAutomatically generated region notes (they may be incorrect):\n%s\n\n"
++TASK = ("Task: Review the draft report against the image. Keep every statement of the draft that is supported by the image. "
++        "Change or add a statement only when the image or a note supports it, and do not copy note statements that you cannot verify on the image. "
++        "Output only the final revised report text.")
++
++
++def notes(pk, cond):
++    if cond == "N":
++        return "(none)"
++    lines = []
++    for g in pk["groups"]:
++        if cond == "T":
++            lines.append("%s: %s" % (g["gid"], g["body"]))
++        else:
++            lines.append("%s (generated for region: %s): %s" % (g["gid"], "; ".join(g["regions"]), g["body"]))
++    return "\n".join(lines)
++
++
++def prompt(pk, cond):
++    return HEAD % (pk["draft"], notes(pk, cond)) + TASK
++
++
++def build_requests(items, readings):
++    """items: [(ImageID, image_path, file_sha256)] -> 요청 목록(환자 순서 고정, 조건 N,T,L)과 검사 기록."""
++    reqs, info = [], []
++    for img, path, fsha in items:
++        assert sha(path) == fsha, ("image hash mismatch", img)
++        pk = D.package(img, readings)
++        for c in CONDS:
++            reqs.append(dict(id="%s|%s" % (img, c), image=str(path), file_sha256=fsha, prompt=prompt(pk, c)))
++        info.append(dict(ImageID=img, n_groups=len(pk["groups"]), draft_chars=len(pk["draft"]),
++                         body_chars=sum(len(g["body"]) for g in pk["groups"])))
++    return reqs, info
++
++
++def leak_check(reqs, refs):
++    """요청 prompt에 reference 문장·평가 라벨이 들어갔는지(문장 전체 일치) 검사한다. 문제 목록 반환."""
++    bad = []
++    for r in reqs:
++        img = r["id"].split("|")[0]
++        for s in refs.get(img, []):
++            if s.lower().strip(". ") and len(s) > 25 and s.lower() in r["prompt"].lower():
++                bad.append(dict(id=r["id"], sentence=s))
++        for w in ("P/Q", "reference", "ground truth", "recovery", "preservation"):
++            if w in r["prompt"].lower():
++                bad.append(dict(id=r["id"], word=w))
++    return bad
++
++
++def tl_identity(reqs, readings):
++    """T/L 본문 byte 동일성(헤더 제거 후 gid와 본문이 일치), 순서 동일, L 출처 = 실제 저장 source, N 동일 template을 검사한다."""
++    problems = []
++    for img in sorted(set(r["id"].split("|")[0] for r in reqs)):
++        pk = D.package(img, readings)
++        by = dict((r["id"].split("|")[1], r) for r in reqs if r["id"].startswith(img + "|"))
++        if sorted(by) != sorted(CONDS):
++            problems.append(dict(img=img, problem="conditions"))
++            continue
++        for c in CONDS:
++            if by[c]["image"] != by["N"]["image"] or by[c]["file_sha256"] != by["N"]["file_sha256"]:
++                problems.append(dict(img=img, cond=c, problem="image_differs"))
++            if not by[c]["prompt"].endswith(TASK) or pk["draft"] not in by[c]["prompt"]:
++                problems.append(dict(img=img, cond=c, problem="template_or_draft"))
++        t_lines = by["T"]["prompt"].split("(they may be incorrect):\n")[1].split("\n\n" + "Task:")[0].split("\n")
++        l_lines = by["L"]["prompt"].split("(they may be incorrect):\n")[1].split("\n\n" + "Task:")[0].split("\n")
++        if len(t_lines) != len(l_lines) or len(t_lines) != len(pk["groups"]):
++            problems.append(dict(img=img, problem="group_count"))
++            continue
++        for g, tl, ll in zip(pk["groups"], t_lines, l_lines):
++            tg, tb = tl.split(": ", 1)
++            m = re.match(r"^(D\d\d) \(generated for region: (.*?)\): (.*)$", ll, re.S)
++            if not m or tg != g["gid"] or tb != g["body"] or m.group(1) != g["gid"] or m.group(3) != tb.strip() \
++                    or m.group(2).split("; ") != g["regions"]:
++                problems.append(dict(img=img, gid=g["gid"], problem="T_L_mismatch"))
++        if "(none)" not in by["N"]["prompt"]:
++            problems.append(dict(img=img, problem="N_notes"))
++    return problems
++
++
++def d8_items(n=4):
++    """기술 검사용 D8 4명: 총 입력(본문 길이)이 가장 긴 환자 1명 + 나머지는 sha256('report100_d8|'+ImageID) 오름차순 3명. E96과 환자/study/영상 비중복 확인."""
++    d8 = json.load(open(D8_INPUTS))
++    E = D.load_inputs()
++    pe, se, ie = set(i["PatientID"] for i in E), set(i["StudyID"] for i in E), set(i["ImageID"] for i in E)
++    R = D.load_readings(D8_READINGS)
++    for i in d8:
++        assert i["PatientID"] not in pe and i["StudyID"] not in se and i["ImageID"] not in ie
++    size = dict((i["ImageID"], len(D.package(i["ImageID"], R)["draft"]) + sum(len(g["body"]) for g in D.package(i["ImageID"], R)["groups"])) for i in d8)
++    longest = max(d8, key=lambda i: size[i["ImageID"]])
++    rest = sorted([i for i in d8 if i is not longest], key=lambda i: hashlib.sha256(("report100_d8|" + i["ImageID"]).encode()).hexdigest())
++    return [longest] + rest[:n - 1], R, size
++
++
++def main():
++    ap = argparse.ArgumentParser()
++    ap.add_argument("stage", choices=["D8", "main"])
++    a = ap.parse_args()
++    dest = OUT / "data" / a.stage
++    if a.stage == "D8":
++        sel, R, size = d8_items()
++        items = [(i["ImageID"], i["image"], i["file_sha256"]) for i in sel]
++        meta = dict(patients=[i["ImageID"] for i in sel], input_size_chars=dict((i["ImageID"], size[i["ImageID"]]) for i in sel),
++                    source_inputs=str(D8_INPUTS), source_readings=str(D8_READINGS), source_inputs_sha=sha(D8_INPUTS), source_readings_sha=sha(D8_READINGS))
++        refs = {}
++    else:
++        dec = json.loads(LOCK.read_text())
++        assert (OUT / "data" / "lock_complete.json").exists() and dec["run_generation"]
++        lc = json.loads((OUT / "data" / "lock_complete.json").read_text())
++        assert all(sha(OUT / "data" / n) == h for n, h in lc["files"].items())
++        E = dict((i["ImageID"], i) for i in D.load_inputs())
++        sel_ids = [s["ImageID"] for s in dec["selected_patients"]]
++        items = [(i, E[i]["image"], E[i]["file_sha256"]) for i in sel_ids]
++        R = D.load_readings()
++        am = json.load(open(D.REF_AMEND))["patients"]
++        refs = dict((i, [f["sentence_en"] for f in am[i]["facts"]]) for i in sel_ids)
++        meta = dict(patients=sel_ids, roles=dict((s["ImageID"], s["role"]) for s in dec["selected_patients"]), lock_complete_sha=sha(OUT / "data" / "lock_complete.json"))
++    reqs, info = build_requests(items, R)
++    probs = leak_check(reqs, refs) + tl_identity(reqs, R)
++    assert not probs, probs
++    assert len(set(r["id"] for r in reqs)) == len(reqs)
++    save(dest / "requests.json", reqs)
++    save(dest / "manifest.json", dict(stage=a.stage, n_requests=len(reqs), requests_sha=sha(dest / "requests.json"), per_patient=info, meta=meta,
++                                      checks=dict(leak_check="reference 문장/평가 단어 없음", tl_identity="T/L 본문·gid·순서 동일, L 출처=저장 source", n_conditions=3),
++                                      source_sha=dict(req=sha(__file__), data=sha(ROOT / "report98_data.py"))))
++    print(a.stage, len(reqs), "requests ->", dest)
++
++
++if __name__ == "__main__":
++    main()
+diff --git a/report100_tech.py b/report100_tech.py
+new file mode 100644
+index 0000000..21fe64e
+--- /dev/null
++++ b/report100_tech.py
+@@ -0,0 +1,165 @@
++"""iter_100 기술 검사(D8 12요청): 2 worker 처리량·peak, 가능하면 4 worker, 중단(limit)→재개, 완료 후 재실행, 요청/완료 변조 거부, worker 수 간 token 정합성.
++
++내용 정답률은 gate가 아니다. 각 단계는 새 out 디렉터리를 쓰고 기존 결과를 덮어쓰지 않는다. 단계는 --step으로 하나씩 실행한다(재시작 가능).
++"""
++import argparse
++import json
++import os
++import shutil
++import subprocess
++import sys
++import threading
++import time
++from pathlib import Path
++
++from report86_common import read_jsonl_complete, save, sha
++
++ROOT = Path(__file__).resolve().parent
++OUT = ROOT / "results" / "iter_100"
++REQ = OUT / "data" / "D8" / "requests.json"
++TECH = OUT / "tech"
++
++
++class Sampler(threading.Thread):
++    """1초 간격으로 GPU별 used 메모리와 프로세스별 점유를 기록한다(관측 peak)."""
++
++    def __init__(self):
++        super().__init__(daemon=True)
++        self.stop = threading.Event()
++        self.peak = {}
++        self.proc_peak = {}
++        self.n = 0
++
++    def run(self):
++        while not self.stop.is_set():
++            try:
++                g = subprocess.check_output(["nvidia-smi", "--query-gpu=index,memory.used", "--format=csv,noheader,nounits"], text=True)
++                for ln in g.splitlines():
++                    i, u = [x.strip() for x in ln.split(",")]
++                    self.peak[i] = max(self.peak.get(i, 0), int(u))
++                p = subprocess.check_output(["nvidia-smi", "--query-compute-apps=pid,used_memory", "--format=csv,noheader,nounits"], text=True)
++                for ln in p.splitlines():
++                    if ln.strip():
++                        pid, u = [x.strip() for x in ln.split(",")]
++                        self.proc_peak[pid] = max(self.proc_peak.get(pid, 0), int(u))
++                self.n += 1
++            except Exception:
++                pass
++            self.stop.wait(1.0)
++
++
++RESUME_REQ = TECH / "requests_resume8.json"
++
++
++def resume_requests():
++    """재개 검사용 8요청: D8의 N/T 조건만(비EOS 확장이 없던 짧은 요청). 기준은 D8_w2의 같은 요청 token."""
++    if not RESUME_REQ.exists():
++        TECH.mkdir(parents=True, exist_ok=True)
++        save(RESUME_REQ, [r for r in json.loads(REQ.read_text()) if r["id"].endswith("|N") or r["id"].endswith("|T")])
++    return RESUME_REQ
++
++
++def gen(args, out, log, req=None):
++    cmd = [sys.executable, "report100_gen.py", "launch", "--requests", str(req or REQ), "--out", str(out)] + args
++    with open(str(log) + ".out", "x") as so, open(str(log) + ".err", "x") as se:
++        t = time.monotonic()
++        rc = subprocess.run(cmd, stdout=so, stderr=se, cwd=str(ROOT)).returncode
++    return rc, time.monotonic() - t
++
++
++def recs(out, workers):
++    r = []
++    for s in range(workers):
++        r += read_jsonl_complete(Path(out) / f"worker_{s}.jsonl")
++    return r
++
++
++def toks(r):
++    return [x["suffix_ids"] for x in r["attempts"]]
++
++
++def summarize(out, workers, wall, smp):
++    r = recs(out, workers)
++    n_new = [x["attempts"][-1]["n_new"] for x in r]
++    return dict(n_records=len(r), n_unique=len(set(x["id"] for x in r)), all_eos=all(x["attempts"][-1]["ended_eos"] for x in r),
++                n_attempts=[len(x["attempts"]) for x in r], input_tokens=[len(x["input_ids"]) for x in r], new_tokens=n_new,
++                wall_s=wall, req_per_min=len(r) / wall * 60 if wall else None, gpu_peak_used_mib=smp.peak, proc_peak_mib=smp.proc_peak,
++                gpus=sorted(set(x["gpu"] for x in r)))
++
++
++def step(name, args, workers, req=None):
++    out = OUT / "gen" / name
++    if out.exists():
++        raise SystemExit("exists: %s" % out)
++    TECH.mkdir(parents=True, exist_ok=True)
++    smp = Sampler()
++    smp.start()
++    rc, wall = gen(args + ["--workers", str(workers)], out, TECH / name, req)
++    smp.stop.set()
++    res = dict(name=name, rc=rc, workers=workers, args=args, **(summarize(out, workers, wall, smp) if out.exists() else dict(wall_s=wall)))
++    save(TECH / f"{name}.json", res)
++    print(json.dumps({k: res[k] for k in ("name", "rc", "n_records", "req_per_min", "gpu_peak_used_mib") if k in res}))
++    return res
++
++
++def main():
++    ap = argparse.ArgumentParser()
++    ap.add_argument("step", choices=["w2", "w4", "resume_a", "resume_b", "rerun", "tamper"])
++    ap.add_argument("--peak-mib", type=int, default=12000)
++    a = ap.parse_args()
++    pk = ["--peak-mib", str(a.peak_mib)]
++    if a.step == "w2":
++        step("D8_w2", pk, 2)
++    elif a.step == "w4":
++        step("D8_w4", pk, 4)
++    elif a.step == "resume_a":
++        step("D8_resume", pk + ["--limit", "2"], 2, resume_requests())
++    elif a.step == "resume_b":
++        out = OUT / "gen" / "D8_resume"
++        smp = Sampler()
++        smp.start()
++        rc, wall = gen(pk + ["--workers", "2"], out, TECH / "D8_resume_b", resume_requests())
++        smp.stop.set()
++        res = dict(name="D8_resume_b", rc=rc, **summarize(out, 2, wall, smp))
++        save(TECH / "D8_resume_b.json", res)
++        print(json.dumps({k: res[k] for k in ("rc", "n_records")}))
++    elif a.step == "rerun":
++        out = OUT / "gen" / "D8_w2"
++        before = dict((p.name, sha(p)) for p in sorted(out.glob("worker_*.jsonl")))
++        rc, wall = gen(pk + ["--workers", "2"], out, TECH / "D8_w2_rerun")
++        after = dict((p.name, sha(p)) for p in sorted(out.glob("worker_*.jsonl")))
++        save(TECH / "D8_w2_rerun.json", dict(rc=rc, unchanged=before == after, wall_s=wall))
++        print(rc, before == after)
++    elif a.step == "tamper":
++        base = OUT / "gen" / "D8_w2"
++        res = {}
++        # (1) 다른 요청 파일로 같은 출력 경로 재실행 -> 거부
++        sub = TECH / "requests_subset.json"
++        save(sub, json.loads(REQ.read_text())[:11])
++        cmd = [sys.executable, "report100_gen.py", "launch", "--requests", str(sub), "--out", str(base), "--workers", "2"] + pk
++        with open(str(TECH / "tamper_requests.out"), "x") as so, open(str(TECH / "tamper_requests.err"), "x") as se:
++            res["changed_requests_rc"] = subprocess.run(cmd, stdout=so, stderr=se, cwd=str(ROOT)).returncode
++        # (2) 완료 사본의 worker 출력 한 글자 변조 -> 거부(원본은 건드리지 않고 복사본에서 시험)
++        cp = OUT / "gen" / "D8_w2_tampered_copy"
++        shutil.copytree(base, cp, ignore=shutil.ignore_patterns("launcher.lock", "worker_*.lock", "*.log"))
++        w = cp / "worker_0.jsonl"
++        data = w.read_text()
++        w.write_text(data.replace('"text": "', '"text": "X', 1))
++        cmd = [sys.executable, "report100_gen.py", "launch", "--requests", str(REQ), "--out", str(cp), "--workers", "2"] + pk
++        with open(str(TECH / "tamper_output.out"), "x") as so, open(str(TECH / "tamper_output.err"), "x") as se:
++            res["tampered_output_rc"] = subprocess.run(cmd, stdout=so, stderr=se, cwd=str(ROOT)).returncode
++        # (3) 요청 prompt 변조 사본
++        rq = json.loads(REQ.read_text())
++        rq[0]["prompt"] += " "
++        bad = TECH / "requests_prompt_changed.json"
++        save(bad, rq)
++        cmd = [sys.executable, "report100_gen.py", "launch", "--requests", str(bad), "--out", str(base), "--workers", "2"] + pk
++        with open(str(TECH / "tamper_prompt.out"), "x") as so, open(str(TECH / "tamper_prompt.err"), "x") as se:
++            res["changed_prompt_rc"] = subprocess.run(cmd, stdout=so, stderr=se, cwd=str(ROOT)).returncode
++        res["original_unchanged"] = sha(base / "worker_0.jsonl") == json.loads((base / "completion.json").read_text())["files"][str(base / "worker_0.jsonl")]
++        save(TECH / "tamper_result.json", res)
++        print(res)
++
++
++if __name__ == "__main__":
++    main()
+diff --git a/report100_verify.py b/report100_verify.py
+new file mode 100644
+index 0000000..7ce8836
+--- /dev/null
++++ b/report100_verify.py
+@@ -0,0 +1,58 @@
++"""iter_100 산술 재계산: judgments.json을 report100_eval을 import하지 않고 다시 읽어 환자·조건별 지표를 계산해 report_v2.json과 대조한다.
++의미 라벨(judgments)은 같은 입력이므로 이 검사는 독립 의미 검증이 아니다. 또한 생성 비용·비EOS 기록을 원시 worker 파일에서 집계한다."""
++import json
++from pathlib import Path
++
++from report86_common import read_jsonl_complete, save, sha
++
++ROOT = Path(__file__).resolve().parent
++OUT = ROOT / "results" / "iter_100"
++
++
++def main():
++    ev = OUT / "eval"
++    judg = json.loads((ev / "judgments.json").read_text())["judgments"]
++    mp = json.loads((ev / "blind" / "private_mapping.json").read_text())
++    rep = json.loads((ev / "report_v2.json").read_text())
++    ri = json.loads((ev / "blind" / "review_input.json").read_text())["review"]
++    clearq = {}
++    for r in ri:
++        clearq[r["patient"]] = [a["id"] for a in r["atoms_Q"] if a["status"] == "clear"]
++    by = {}
++    for j in judg:
++        m = mp[j["blind_id"]]
++        by.setdefault(m["patient"], {})[m["condition"]] = j
++    mismatches, table = [], {}
++    for pi, cs in by.items():
++        kk = lambda j, f: set(x["key"] for x in j[f])
++        for c, j in cs.items():
++            rec = sum(1 for a in clearq[pi] if j["Q"][a]["status"] == "recovered")
++            pdam = sum(1 for v in j["P"].values() if v["status"] != "preserved")
++            ne = len(kk(j, "explicit") - kk(cs["K"], "explicit"))
++            ni = len(kk(j, "internal") - kk(cs["K"], "internal"))
++            nu = len(kk(j, "unverifiable") - kk(cs["K"], "unverifiable"))
++            safe = rec >= 1 and pdam == 0 and ne == 0 and ni == 0
++            table.setdefault(str(pi), {})[c] = dict(Q_recovered=rec, P_damaged=pdam, new_explicit=ne, new_internal=ni, new_unverifiable=nu, safe_recovery=safe)
++            ref = rep["table"][str(pi)][c]
++            for k, v in table[str(pi)][c].items():
++                if ref[k] != v:
++                    mismatches.append((pi, c, k, ref[k], v))
++    # 비용·EOS: 원시 worker 파일
++    recs = []
++    for s in range(2):
++        recs += read_jsonl_complete(OUT / "gen" / "main" / f"worker_{s}.jsonl")
++    ids = [r["id"] for r in recs]
++    launch = json.loads((OUT / "gen" / "main" / "launch_000.json").read_text())
++    cost = dict(n_requests=len(recs), unique=len(set(ids)),
++                per_request=[dict(id=r["id"].split("|")[1] + "|" + r["id"][:6], input_tokens=len(r["input_ids"]),
++                                  attempts=[a["n_new"] for a in r["attempts"]], ended_eos=r["attempts"][-1]["ended_eos"]) for r in sorted(recs, key=lambda r: r["id"])],
++                non_eos=sum(not r["attempts"][-1]["ended_eos"] for r in recs), launch_wall_s_incl_loading=launch["wall_s"],
++                gpu_mapping=launch["mapping"], generated_tokens_total=sum(sum(a["n_new"] for a in r["attempts"]) for r in recs))
++    out = dict(n_mismatch=len(mismatches), mismatches=mismatches, cost=cost, report_sha=sha(ev / "report_v2.json"),
++               note="산술 재계산만 수행. 의미 판정의 독립 검증이 아님")
++    save(ev / "verify.json", out)
++    print(json.dumps(dict(n_mismatch=len(mismatches), non_eos=cost["non_eos"], wall=cost["launch_wall_s_incl_loading"], tokens=cost["generated_tokens_total"])))
++
++
++if __name__ == "__main__":
++    main()
+diff --git a/report100_view.py b/report100_view.py
+new file mode 100644
+index 0000000..3fbd0cf
+--- /dev/null
++++ b/report100_view.py
+@@ -0,0 +1,25 @@
++"""iter_100: 지정 환자의 reference fact·초안·영역 본문 그룹을 텍스트로 출력한다(읽기 전용)."""
++import json
++import sys
++
++import report98_data as D
++
++
++def show(pis, maxlen=400):
++    ids = D.abnormal_ids()
++    R = D.load_readings()
++    am = json.load(open(D.REF_AMEND))["patients"]
++    by = {am[i]["patient_index"]: i for i in ids}
++    for pi in pis:
++        i = by[pi]
++        pk = D.package(i, R)
++        print("PATIENT", pi, i)
++        print(" DRAFT:", pk["draft"])
++        for f in am[i]["facts"]:
++            print("  ", f["fact_id"], f["sentence_en"], "|", f["v2_class"], f["attr_req"], f["loc_req"])
++        for g in pk["groups"]:
++            print("  ", g["gid"], g["regions"], "|", g["body"][:maxlen])
++
++
++if __name__ == "__main__":
++    show([int(x) for x in sys.argv[1:]])
+diff --git a/test_report100.py b/test_report100.py
+new file mode 100644
+index 0000000..761c33d
+--- /dev/null
++++ b/test_report100.py
+@@ -0,0 +1,115 @@
++"""iter_100 회귀 검사: clear 속성 포함, unknown/partial/temporal 제외 유지, atom 고유 ID·출처 연결, 원문 없는 quote 거부, 잠금 보호.
++
++iter_099의 test_report99.py는 finding-only 조건을 복제해 원 계획 준수를 검증하지 못했다. 여기서는 규칙을 ledger에서 직접 독립 계산한다.
++중복 readings 거부는 수정 없는 report98_data.py의 iter_099 증거를 hash 확인 후 재사용하되, 이 호출에서 한 번 더 실제 실행한다.
++"""
++import copy
++import json
++import sys
++from pathlib import Path
++
++import report98_data as D
++import report100_lock as L
++
++T = D.ROOT / "results" / "iter_100" / "tests"
++checks = []
++
++
++def check(name, ok, detail=""):
++    checks.append(dict(name=name, passed=bool(ok), detail=detail))
++
++
++def files(d):
++    return sorted(p.name for p in Path(d).iterdir() if not p.name.startswith("lock_errors"))
++
++
++def main():
++    T.mkdir(parents=True, exist_ok=True)
++    # 0) report98_data.py가 iter_099 검증 당시와 동일한지(hash)
++    old = json.load(open(L.DECISION99))["provenance_sha256"]["report98_data.py"]
++    check("report98_data_unchanged_since_iter099", old == L.sha_file(D.ROOT / "report98_data.py"), old)
++
++    # 1) 독립 계산: ledger에서 직접 N을 구해 대조(finding-only는 []이고 attr 포함 시 [53])
++    led = L.build_ledger()
++    p_ok = set(pi for pi, e in led.items() if any(a["status"] == "clear" for a in e["P"]))
++    q_f = set(pi for pi, e in led.items() if any(a["status"] == "clear" and a["kind"] == "finding" for a in e["Q"]))
++    q_fa = set(pi for pi, e in led.items() if any(a["status"] == "clear" and a["kind"] in ("finding", "attr") for a in e["Q"]))
++    check("finding_only_cohort_empty_and_attr_cohort_is_P053", sorted(p_ok & q_f) == [] and sorted(p_ok & q_fa) == [53] and L.cohort(led) == [53],
++          json.dumps(dict(finding_only=sorted(p_ok & q_f), with_attr=sorted(p_ok & q_fa))))
++
++    # 2) unknown/partial/covered_by_draft/temporal은 clear 속성이 있어도 자동 포함되지 않는다
++    for status in ("unknown", "partial", "covered_by_draft"):
++        bad = copy.deepcopy(led)
++        bad[53]["Q"][0]["status"] = status
++        check("attr_status_%s_excluded" % status, L.cohort(bad) == [])
++    bad = copy.deepcopy(led)
++    bad[53]["Q"][0]["kind"] = "temporal"
++    check("attr_kind_temporal_excluded", L.cohort(bad) == [])
++
++    # 3) 존재와 크기 atom은 별도 고유 ID
++    ids = D.abnormal_ids()
++    am = json.load(open(D.REF_AMEND))["patients"]
++    R = D.load_readings()
++    by = dict((am[i]["patient_index"], i) for i in ids)
++    dec53 = L.decorate(53, led[53], D.package(by[53], R), am[by[53]])
++    pid, qid = dec53["P"][0]["id"], dec53["Q"][0]["id"]
++    check("existence_and_size_have_distinct_ids", pid != qid and dec53["P"][0]["fact"] == dec53["Q"][0]["fact"] == "F3", "%s %s" % (pid, qid))
++    g = dec53["Q"][0]["groups"]
++    check("size_atom_source_linked_to_D08_D11", sorted(x["gid"] for x in g) == ["D08", "D11"]
++          and sorted(r for x in g for r in x["regions"]) == ["left costophrenic angle", "left lower lung zone"], json.dumps(g))
++    check("all_ledger_ids_unique", True if len(set(a["id"] for pi in led for k in ("P", "Q")
++                                                    for a in L.decorate(pi, led[pi], D.package(by[pi], R), am[by[pi]])[k])) ==
++          sum(len(led[pi]["P"]) + len(led[pi]["Q"]) for pi in led) else False)
++
++    # 4) 원문 없는 quote와 중복 readings 거부, 실패 시 잠금 파일 없음
++    bad = copy.deepcopy(led)
++    bad[53]["Q"][0]["desc_quote"] = "this sentence does not exist in any region description"
++    out = T / "work_badquote"
++    rc, pr = L.build(out, ledger=bad)
++    check("bad_desc_quote_no_lock", rc == 1 and files(out) == [] and any(p["problem"] == "desc_quote" for p in pr))
++    lines = open(D.READINGS).read().splitlines()
++    dup = T / "readings_dup.jsonl"
++    if not dup.exists():
++        with open(dup, "x") as f:
++            f.write("\n".join(lines + [lines[3]]) + "\n")
++    out = T / "work_dup"
++    rc, pr = L.build(out, readings_path=dup)
++    check("dup_readings_no_lock", rc == 1 and files(out) == [] and pr[0]["problem"] == "readings_duplicate")
++    try:
++        D.load_readings(dup)
++        check("load_readings_rejects_duplicate", False)
++    except ValueError:
++        check("load_readings_rejects_duplicate", True)
++
++    # 5) 정상 build와 비덮어쓰기, 결과 재계산
++    out = T / "work_ok"
++    rc, _ = L.build(out)
++    h1 = dict((n, L.sha_file(out / n)) for n in files(out))
++    try:
++        L.build(out)
++        second = "no_error"
++    except FileExistsError:
++        second = "FileExistsError"
++    h2 = dict((n, L.sha_file(out / n)) for n in files(out))
++    check("ok_build_no_overwrite", rc == 0 and second == "FileExistsError" and h1 == h2 and len(h1) == 3, json.dumps(sorted(h1)))
++    d = json.load(open(out / "eligibility_decision.json"))
++    lc = json.load(open(out / "lock_complete.json"))
++    check("decision_N_controls", d["N_recovery_cohort"] == [53] and len(d["preservation_controls"]) == 1 and d["run_generation"] is True,
++          json.dumps(dict(N=d["N_recovery_cohort"], controls=d["preservation_controls"], order=d["control_candidates_in_order"])))
++    check("lock_complete_hashes_match", all(L.sha_file(out / n) == h for n, h in lc["files"].items()))
++    # 통제 규칙 재계산: 첫 후보는 hash 최소이고 Q가 없다
++    la = json.load(open(out / "atom_ledger.json"))["atoms"]
++    ctl = d["preservation_controls"][0]
++    check("control_has_no_Q_and_clear_P", la[str(ctl)]["Q"] == [] and any(a["status"] == "clear" for a in la[str(ctl)]["P"]))
++    check("attr_checks_cover_all_P_clear", sorted(c["patient"] for c in d["attr_checks"]) == sorted(d["P_clear_patients"]))
++    check("no_temp_leftover", not [p.name for p in out.iterdir() if p.name.startswith(".tmp_")])
++
++    res = dict(n_checks=len(checks), n_pass=sum(c["passed"] for c in checks), checks=checks)
++    with open(T / "regress_report100.json", "x") as f:
++        json.dump(res, f, ensure_ascii=False, indent=1)
++    print(json.dumps(dict(n=res["n_checks"], ok=res["n_pass"], failed=[c["name"] for c in checks if not c["passed"]])))
++    return 0 if res["n_pass"] == res["n_checks"] else 1
++
++
++if __name__ == "__main__":
++    sys.exit(main())
