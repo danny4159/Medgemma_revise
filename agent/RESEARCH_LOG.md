@@ -38977,3 +38977,389 @@ iter_103의 자유 판독 경로 역시 새 정답 근거 없이 재채점·생�
 연구 목표는 미완료이므로 CONTINUE를 유지하되 다음 반복 실행 승인은 별개다. `--confirm-each-iter`에 따라 결과·보류 이유·대안을 보고하고 사용자 승인 또는 피드백을 기다린다.
 
 논문 추천은 보류한다. 현재 제안 손상 방향은 불확정이며, 제한된 대안 성과만으로 새 후속 방법의 유망성이 확인되지는 않았다.
+
+
+## iter_106 GPT PLAN [동일 소견 집합의 공동 위치 보존 / proceed] — 2026-10-09 08:50:59
+
+# 요약
+
+- **이번에 할 일:** CURE에 같은 두 소견을 따로 또는 함께 제시하고, 독립 출력의 단순 결합과 공동 출력의 주석 영역 보존을 비교한다.
+- **필요한 이유:** 기존 PG와 전체 판독은 입력 정보와 평가 범위가 달라 직접적인 종합 능력 비교가 아니다. 이 차이를 제거한 작은 위치 집합 비교가 필요하다.
+- **확인할 기준:** 두 순서에서 반복되는 영역 손실, 동일 소견 반복 대조, 형식·종료 상태, 실제 비용을 함께 본다.
+- **주의·다음:** 복합 PG는 공식 단일 phrase 과제의 확장이다. 자유 판독·임상 사실성·새 기여를 주장하지 않으며, 이번 리뷰 뒤 다음 반복은 사용자 승인을 기다린다.
+
+## 알림 맥락
+
+- 연구: 위치 근거의 공동 처리와 보존
+- 데이터: 흉부 X-ray PadChest-GR 공식 train의 기존 개발 36명
+- 모델: CURE 공개 adapter와 정확한 MedGemma 4B base, 추가 학습 없음
+- 과제: 같은 영상과 두 소견 문장을 받아 위치 box를 개별 또는 공동 출력
+- 가설: 개별적으로 확보한 위치가 공동 요청에서 줄어들 수 있으나 형식·반복·순서로 설명될 수도 있음
+- 질문: 두 소견을 한 번에 물어도 따로 찾았던 위치가 유지되는가?
+- 변경: 구체화
+- 연결: iter_105의 독립 grounding 대안은 보존하고 A/B 선택은 보류하며, 동일 정보의 위치 집합 비교로 좁힘
+- 작업: 저장 출력의 비교 가능성을 확인한 뒤 부족한 공동·반복 조건만 생성해 추가 투자 여부를 판단
+
+# Current Understanding
+
+iter_105는 CURE 독립 PG의 두 후보 연결 32/32를 확인했지만 문장별 IoU≥0.3은 56/64였다. 한 문장만 맞아도 연결이 맞을 수 있으므로 새 비교는 permutation 연결 정확도를 사용하지 않는다.
+
+계획 단계에서 iter_105 E32와 iter_086 E96의 ImageID 교집합이 0임을 확인했다. 저장 PG·영역 설명·GRG를 같은 영상의 세 조건처럼 결합하지 않는다. GRG는 소견 발견, PG는 소견 문장 제공, Describe는 해부영역 지정이라는 정보 차이도 있다. 구현에서 기존 manifest의 환자·study·영상·소견·출처 연결을 한정 기록하되, 비교 불가능한 자유 판독 출력을 보충하려고 새 GRG를 생성하지 않는다.
+
+이번 질문은 **주어진 두 소견의 위치 집합 보존**이다. 문장 종합, 소견 발견, 문장별 binding, 판독 정확성은 범위 밖이다. 독립 조건도 문장별 라벨을 제거한 box 집합으로 평가해 공동 조건과 평가 범위를 맞춘다.
+
+# Strategy Check / 연구 방향 판단
+
+사용자 승인 후속에 따라 iter_105의 즉시 보류 권고를 한정 변경한다. 같은 A/B 설정을 재개하는 것이 아니다.
+
+- **시험 설정:** LoRA·추가 LR·E96·A/B parser 개선은 보류한다. 공식 PG를 출발점으로 고정 복합 입력을 한 번 시험한다.
+- **연구 관찰:** iter_105의 독립 PG 강점과 불완전한 문장별 coverage를 계승한다. iter_088의 관찰은 보존하지만 095/096의 미승인 충돌 빈도를 확정 근거로 사용하지 않는다.
+- **연구 질문:** 여러 소견의 위치를 한 요청에서 유지할 수 있는지는 공개 정답으로 관측 가능하다. 다만 이것이 판독 종합의 충분조건이거나 중요한 새 방법 문제인지는 미확정이다.
+
+**기술 질문 → 실패 조건 → 공개 정답 비교 → 주장 범위:** 독립적으로 확보한 여러 위치의 보존 → 동일 두 소견·같은 영상에서 공동 요청의 주석 영역 손실 → 공개 bbox에 대한 일대일 집합 matching과 반복 대조 → 현재 CURE·두 소견 복합 PG 확장 조건에 한정한다.
+
+대안은 두 가지다. 자유 문장 종합은 사용 문제에 가깝지만 정답·의미 모호성 때문에 과거 재작업을 반복할 위험이 크다. 위치 집합 비교는 더 좁지만 동일 내용과 명시적 정답을 확보한다. 후자를 선택하며, 자료·형식 부적합이면 범위를 명시해 보류한다.
+
+iter_048의 공동 직접 SFT가 F1을 0.333→0.523으로 회복한 결과를 받아들인다. 따라서 이번에는 문장 ID별 JSON을 요구하지 않으며, 차이가 나도 일반 결합 결함이나 학습으로 해결되지 않는 문제로 부르지 않는다. CURE의 다른 checkpoint·자료·인터페이스이므로 과거 현상의 독립 재현으로 합치지도 않는다.
+
+지배 비용은 신규 생성보다 연결·평가 구현일 가능성이 있으나 아직 계측되지 않았다. 불변 사용법 검사를 재사용하고 새 요청·집합 평가·재개 경로만 검증한다. 타 모델 비교는 현재 형식 적합성도 모르는 상태에서 비용을 늘리므로 이번에는 보류한다. 양성 결과도 CURE 조건의 관찰로 제한한다.
+
+# Hypothesis
+
+같은 영상과 소견 내용을 제공해도 복합 PG에서 독립 PG의 위치 집합 일부가 보존되지 않을 수 있다. 다음 설명을 구분한다.
+
+1. 두 다른 소견을 함께 처리할 때의 제한된 위치 집합 손실.
+2. 반복·입력 길이 또는 순서에 따른 변화.
+3. 복합 phrase의 지원 범위·학습 분포와 출력 형식·종료 문제.
+
+반복 대조는 token 길이를 정확히 일치시키지 않으므로 순수한 길이 원인을 제거했다고 주장하지 않는다. 복합 PG의 학습 노출도 미확정이다.
+
+# Limitation Evidence / Correct Usage Checks
+
+관련 한계는 `padchest-sentence-grounding-and-joint-retention`과 `padchest-regional-report-concatenation-conflict`다. 둘 다 observed이며 이번 방법 진입 근거로 승격하지 않는다. iter_048, 088, 095, 096, 105 리뷰의 사용법·평가 한계를 유지한다.
+
+[CURE 공식 저장소](https://github.com/PabloMessina/CURE)의 PG template `Ground the phrase: {phrase}`와 normalized `[cx, cy, w, h]`, 공식 CLAHE 전처리를 사용한다. 단일 소견은 공식 사용 확인이고 두 문장을 연결한 입력은 확장 검증이다. 실패를 논문 재현 실패로 쓰지 않는다.
+
+base revision `290cda5eeccbee130f987c4ad74a59ae6f196408`, adapter revision `4bb5dc5a5025a854d1f25e475769949915b08b44`, 기존 weights lock·processor·공식 transform digest를 확인한다. CURE를 MedGemma 1.5에 로드하지 않는다. 격리 Python은 `research/results/environments/cure085/bin/python`이다.
+
+# Contribution Path / Baselines / Reuse
+
+주 baseline은 CURE 공식 독립 PG 두 출력의 단순 결합이다. 이를 새로운 방법으로 부르지 않는다. 독립 처리의 요청 두 번과 공동 처리 한 번의 실제 비용을 함께 측정한다. GT 문장은 두 조건 모두 받으며 GT box·후보 영역·정답 연결은 모델에 제공하지 않는다.
+
+이번에는 같은 과제의 강한 직접 SFT를 새로 학습하지 않는다. iter_048은 형식 적응이라는 경쟁 설명의 근거이며, 신규 방법 효과를 주장할 때는 직접 공동 SFT와 적절한 모듈형 대안을 별도 계획에서 비교해야 한다.
+
+`reuse_iteration=82`의 승인 기반에 reuse_assets의 iter_105 파일을 반입한다. 해당 파일은 현재 브랜치에는 존재하지만 새 기반에 필요한 자산이다. source SHA와 blob을 확인했다. 이전 파일의 과거 실행 진입점을 바꾸지 말고 새 `iter106` 모듈에서 필요한 경로만 연결한다. `lk105_eval.py`·A/B 판정·lenient 분기는 사용하지 않는다. `lk105_spec.py`는 PG 좌표 경로만 참고·검증하며 전체 평가 승인을 의미하지 않는다.
+
+## 대규모 GPU 필요 후보
+
+여러 소견 수와 출력 방식에 걸친 충분한 공동 multi-task 학습 및 독립 기관 검증은 향후 후보로만 남긴다. 현재 현상·잔여 가치가 미확정이므로 발주하지 않으며, 대규모 학습이 반드시 필요하다고 단정하지 않는다.
+
+# Proposed Experiment
+
+## 1. 한정 자료 연결과 동작 확인
+
+기존 iter_105 D4와 E32의 36명을 그대로 사용한다. 새 환자를 선정하거나 성능에 따라 제외하지 않는다. 공식 train·반복 개발 자료이며 공개 checkpoint의 학습 노출을 배제하지 못한다.
+
+첫 단계에서 저장 PG, iter_086의 GRG/영역 출력, iter_095 Describe manifest를 환자·study·ImageID·입력 hash별로 연결한다. 출력 간 정보 차이와 연결 가능 건수를 표로 남긴다. 연결이 없거나 task가 다르면 paired 비교 불가로 표시한다. 이 작업은 기존 목록과 대표 원문 확인으로 제한하며 자유 문장 의미를 재판정하지 않는다.
+
+D4의 원문 두 개, 공식 `boxes`와 `extra_boxes` 의미, 영상 canvas를 원 metadata에 연결한다. main box 두 개를 주 정답으로 유지하고 extra annotation은 별도 민감도에만 사용한다. extra box를 추가 병변 수로 세지 않는다. 기존 단일 box·비중첩 선정 범위도 명시한다.
+
+D4에서 아래 네 신규 요청을 실행한다. 입력 tensor·공식 greedy 생성·출력 좌표·cap 종료·재개를 검사한다. 정답률 100%를 요구하지 않는다.
+
+## 2. 고정 비교 조건
+
+환자별 기존 원문을 S1, S2라 한다. 문장 내용·구두점을 고치지 않고 사이에 공백 하나를 둔다.
+
+- **I:** 기존 `Ground the phrase: S1`과 `Ground the phrase: S2`의 두 출력. 평가 시 box multiset을 단순 결합한다. 임의 NMS나 중복 제거를 하지 않는다.
+- **J12:** `Ground the phrase: S1 S2`.
+- **J21:** `Ground the phrase: S2 S1`.
+- **R11:** `Ground the phrase: S1 S1`.
+- **R22:** `Ground the phrase: S2 S2`.
+
+I와 J는 총 소견 정보와 영상이 같다. I는 요청·영상 처리 두 번, J는 한 번이며 조건 간 context 분할이 다르다. R11/R22는 동일 소견 반복의 영향만 본다. 반복 출력은 각각 해당 소견의 box 하나를 기준으로 평가한다.
+
+모든 신규 조건은 같은 checkpoint·precision·processor·greedy·seed17, cap 1024→2048→4096을 사용한다. 비EOS cap 도달 때만 동일 요청을 다음 cap으로 재실행하고 모든 attempt를 보존한다. 모델 점수에 따라 cap을 늘리지 않는다.
+
+## 3. D4 적합성 분기
+
+형식은 문장 prose와 하나 이상의 유효 좌표, 또는 좌표 없는 응답으로 기록한다. 좌표 없음은 모델의 위치 미출력 관찰이며 기술 실패로 숨기지 않는다. malformed 좌표와 최종 비EOS는 별도 상태다.
+
+D4 공동 8요청 중 malformed 또는 최종 비EOS가 3개 이상이면, 현재 인터페이스로 내용 손실을 분리하기 어렵다고 보고 E32를 보류한다. 정확도·box 개수 부족만으로 E32 진입을 막지 않는다. 그 외에는 입력·GT·parser의 기술 blocker가 없을 때 E32를 실행한다. 이는 작은 탐색을 위한 형식 적합성 기준이며 보편적 모델 gate가 아니다.
+
+출력 문장이 기대와 다르더라도 새 semantic parser를 만들지 않는다. bracket 좌표의 의미가 도저히 식별되지 않거나 출력 전체가 다른 과제를 수행하면 대표 원문과 이유를 남기고 설계를 보류한다. prompt·parser·문턱 변경은 이번 실행 안에서 하지 않는다.
+
+## 4. 가능성 탐색과 종료
+
+D4가 성립하면 E32 전원에 네 신규 조건 128요청을 실행한다. 총 신규 과학 요청은 D4 포함 144개다. 기존 독립 PG 72개는 provenance와 생성 조건이 일치할 때 재사용한다. 기술적으로 재사용 불가능한 요청만 같은 조건으로 재생성하며 사유와 비용을 별도 기록한다.
+
+이번 E32가 본 탐색의 종료 규모다. 기존 32명의 64개 소견 기회를 그대로 이용해 환자 변동·두 순서·반복 대조를 확인하려는 선택이며 확증 power를 보장하지 않는다. E96 확대나 독립 확인은 이번 계획에 없다. 추가 규모가 필요하면 리뷰에서 효과·분산·정보 가치를 근거로 별도 제안한다.
+
+# Implementation Tasks for Claude
+
+1. `research/results/iter_106/`에 provenance, protocol, 출력, 평가, 비용, 독립 검증을 저장한다. 과거 원본을 덮어쓰지 않는다.
+2. 기존 manifest와 저장 출력의 연결표를 만들고 대표 D4 입력에서 공개 주석 의미를 확인한다. 자유 문장 임상 판정은 하지 않는다.
+3. 새 요청 네 조건을 고정하고 과학 protocol에 요청·평가기·모델·입력·source digest를 잠근다. E32 이전 잠금 시점을 로그로 남긴다.
+4. 기존 CURE runner의 모델 로딩·공식 입력·원자적 출력·재개 경로를 재사용한다. 이번 출력 디렉터리와 요청 집합에 필요한 변경만 한다.
+5. 모든 bracket 좌표의 finite 값·양의 크기·좌표 규약을 검사한다. 원본 정규화 xyxy로 변환하며 clipping·box 제거를 몰래 적용하지 않는다. 비정상 출력 상태와 box 없는 응답을 별도 보존한다.
+6. 최대 일대일 matching 평가와 독립 verifier를 구현한다. 중복 예측, 한 큰 box가 두 GT에 겹치는 경우, 빈 출력, 좌표 범위 오류, 비EOS fixture를 반드시 포함한다.
+7. D4 기술·적합성 분기에 따라 E32를 실행하거나 이유를 보고 종료한다. parser·prompt·확대 기준을 임의 수정하지 않는다.
+8. 최종 보고서에 자료 점검 완료와 새 과학적 관찰을 구분하고, 단순 대안 충분/영역 손실/형식 설명/평가 불가/불확정을 명시한다.
+
+## 자원·시간·재개
+
+실행 직전 `nvidia-smi`로 허용 GPU 0,1의 실제 여유를 확인하고 여유가 큰 장치부터 사용한다. 기존 CURE peak 약 9,997MiB는 참고 실측이다. 새 복합 입력 peak와 GPU 전체 점유에 worker당 2GiB 여유를 더해 배치한다.
+
+D4에서 총2 worker와, 안전 여유가 있을 때 총4 worker 또는 batch 확대 중 유망한 하나를 짧게 비교한다. 동일 token·요청 수·오류·throughput·p95·GPU별 peak를 기록한다. 기존 짧은 workload에서 추가 모델 로딩 비용이 절감 예상보다 크면 기존 실측을 재사용하고 이유를 적는다. 두 GPU에 독립 환자 shard를 배정하며 GPU당 worker 1개를 고정 규칙으로 삼지 않는다.
+
+단일 PG의 과거 6.33초/요청을 신규 144개에 곱한 약15.2분은 생성시간 합의 거친 참고값이다. 실제 wall-clock은 D4 처리량과 남은 요청·cap 재시도 비율로 다시 산출한다. 시간 상한을 두지 않는다. 독립 두 요청과 공동 한 요청의 실제 end-to-end 비용 비교에는 D4 I 조건을 재측정하며 기존 생성시간 합을 latency로 쓰지 않는다.
+
+요청별 고유 ID, worker별 결과, protocol 잠금, 중복·누락 검사, 부분 행 보존 및 completion hash를 유지한다. 변경 없는 장시간 실행은 기존 completion 대기 경로를 사용한다. OOM이면 batch·동시성만 조정하고 prompt·표본·metric은 유지한다.
+
+# Evaluation (성공/실패 기준 포함)
+
+## 주 평가
+
+각 환자의 두 main GT box와 예측 multiset 사이에서 IoU≥0.3인 최대 일대일 matching을 수행한다. 한 예측이 두 GT를 동시에 맞힐 수 없다.
+
+- **주지표:** 환자별 영역 recall = matched GT 수/2. I−J12, I−J21과 두 순서 평균 차이를 보고한다.
+- **보조:** 두 영역 모두 회복한 환자 비율, annotation-relative precision/F1, unmatched 예측 수, box 수, IoU≥0.5 민감도.
+- **보존 사건:** I에서 맞힌 GT 중 각 J에서 잃은 수와 두 순서에서 모두 잃은 환자 수.
+- **반복 대조:** 각 독립 PG와 대응 R11/R22의 단일 GT recall 차이. 실제 prompt token 수를 병기한다.
+- **불확실성:** 환자 paired bootstrap 10,000회, seed106017, 95% CI. 개발 표본의 탐색 구간이며 독립 확증으로 부르지 않는다.
+
+미표기 소견은 음성이 아니다. unmatched box는 전체 임상 FP가 아니라 선택된 두 주석에 대응하지 않은 예측이다. bbox 집합 보존은 소견 문장별 올바른 binding을 증명하지 않는다. 문자열 일치를 사실성으로 사용하지 않는다.
+
+형식 실패·최종 비EOS는 주분모에 유지하고 해당 요청의 위치 회복을 0으로 계산한다. 동시에 정상 완료한 paired subset과 실패 기여를 보조로 보고한다. 형식 실패를 제외한 값만으로 양성 판정하지 않는다. parser나 유리한 IoU를 사후 선택하지 않는다.
+
+## 결과별 투자 결정
+
+- **명확한 제한적 손실:** I−J가 두 순서에서 각각 10pp 이상이고, 두 순서 모두에서 I의 정답 영역을 잃는 환자가 4명 이상일 때 검토한다. 10pp는 약 열 개의 주석 영역 중 하나를 잃는 탐색상 중요 손실이며 보편적 contribution 문턱이 아니다. 형식·cap 사건을 분리한 뒤에도 방향이 남고 반복 대조의 손실보다 커야 복합 내용과 연결된 관찰로 해석한다. CI와 사례 집중도를 보고하되 이 조건만으로 방법 진입하지 않는다.
+- **단순 대안 충분:** I가 높은 회복을 제공하고 공동 처리의 정확도·비용 이점이 없다면 독립 결합을 보존하고 현재 통합 방법 투자를 보류한다. 전 과제의 충분성은 주장하지 않는다.
+- **공동 처리도 보존:** 두 순서에서 작은 차이를 보이면 현재 조건의 실패 가설을 지지하지 않는다. CI가 넓으면 동등성 확증이라고 쓰지 않는다.
+- **형식·반복 설명:** malformed·비EOS 또는 동일 소견 반복에서도 유사한 손실이 지배하면 해당 인터페이스·입력 분포 설명으로 한정한다. 새 prompt·공동 SFT를 자동 발주하지 않는다.
+- **평가 불가:** 주석 의미·좌표 대응 또는 복합 응답의 해석이 성립하지 않으면 필요한 근거를 특정하고 설계를 보류한다. 다른 자유 문장 평가로 우회하지 않는다.
+- **불확정:** 효과가 작거나 환자·순서 의존이면 현재 32명 결과를 보존한다. 추가 표본이 판단을 바꾸는 경우에만 관측 분산과 최소 중요 손실을 이용해 다음 규모·예상 비용을 제안한다. 이번 실행에서 추가 표본을 열지 않는다.
+
+비용은 D4의 동일 환자 workload에서 독립 두 요청 완료까지와 공동 한 요청 완료까지를 같은 경계로 측정한다. 정확도 손실을 상쇄할 비용 기회가 있는지 기술하되 작은 timing 표본으로 확정적 우위를 주장하지 않는다.
+
+# Risks / Checks
+
+- 복합 phrase는 공식적으로 검증된 단일 phrase와 다르다. 실패를 CURE 재현 실패·일반 종합 능력 결함으로 확대하지 않는다.
+- 두 비중첩 단일 box 소견으로 선정된 개발 집단이다. 겹치는 소견·다수 소견·자유 판독으로 일반화하지 않는다.
+- 문장 반복은 완전한 token 길이 통제가 아니다. 남은 길이·내용 차이를 숨기지 않는다.
+- 독립 출력 결합은 내용 대응 정보를 가지고 있지만 주평가에서는 그 라벨을 제거한다. 이 때문에 문장별 binding은 미측정이다.
+- 모델 학습 노출, PadChest 정답의 불완전성, extra annotation 의미를 명시한다.
+- 이전 A/B strict/lenient 문제는 원 판정대로 보존한다. 미사용 평가 경로를 정비하기 위한 별도 작업은 하지 않는다.
+- source·입력·출력·평가를 연결한 독립 재계산을 마친 뒤 full review를 받는다. 이번 진행만 승인됐으며 다음 반복은 `--confirm-each-iter`를 유지한다.
+
+# 계획의 근거 (GPT 조사 노트)
+
+## 새로 확인한 것
+
+- `agent/GOAL.md`, iter_105 리뷰 원문과 code_assets, iter_048·088·095·096 리뷰, 관련 `LIMITATIONS.md` 및 `CODE_ASSETS.md` 항목을 확인했다.
+- iter_105 CURE PG 연결은 32/32지만 문장별 IoU≥0.3은 56/64이고 box 미출력은 4/64다. 따라서 연결 정확도를 완전한 위치 보존으로 사용할 수 없다.
+- 실제 manifest 비교에서 iter_105 E32와 iter_086 E96의 ImageID 교집합은 0이었다. 기존 PG와 판독 출력을 동일 환자 paired 비교로 합칠 수 없다. 환자·study 수준의 전체 연결은 구현에서 별도로 기록한다.
+- 저장 C-G는 소견을 발견하는 GRG이고 PG는 정답 문장을 제공받는다. 영역별 Describe 역시 질의 대상과 내용 정보가 다르다. 이들의 점수 차이만으로 공동 처리 손실을 추정하지 않는다.
+- [CURE 공식 저장소](https://github.com/PabloMessina/CURE)는 PG, GRG, 영역별 Describe 및 단순 결합을 구분한다. 단일 PG template과 정규화 cxcywh 출력을 확인했다. 두 독립 소견의 연결 입력은 공식 단일 phrase 과제의 확장으로 취급해야 한다. [논문](https://arxiv.org/abs/2601.15408)도 확인했다.
+- 현재 연구 HEAD는 `f6b2942c2fcf2138feace3000f5bbdbfadb9a825`이며 작업 변경은 없었다. 선택한 파일과 의존성의 blob 존재를 확인했다. 새 브랜치 기반은 전체 재사용 승인 iter_082이며 필요한 iter_105 파일을 명시적으로 반입한다.
+
+## 선택과 한계
+
+자유 문장 종합은 현재 공개 정답으로 결정 관련 사실성을 안정적으로 판별하기 어렵다. 이번에는 동일한 두 소견을 제공하는 PG 위치 집합 비교를 선택한다. 이는 연구 방향의 확정이나 새로운 방법이 아니다. 공식 인터페이스에 가까운 단순 출력에서도 차이가 남는지 확인하고, 단순 결합의 정확도·비용으로 추가 투자를 판단한다. 기존 088/095/096의 잠정 의미 빈도는 새 성공 기준에 사용하지 않는다.
+
+
+
+## iter_106 CLAUDE IMPLEMENTATION REPORT — 2026-10-09 09:12:05
+
+# 요약
+
+- **핵심 결과:** CURE에 두 소견을 한 요청에 합쳐 물으면 박스를 거의 내지 않았다. 독립 PG 두 출력을 합치면 위치 recall 0.875였고, 공동 요청은 J12 0.234, J21 0.109였다(E32, 환자 32명, IoU≥0.3, GT 2개).
+- **근거:** I−J 평균 차이는 0.703이다(95% CI [0.594, 0.805]). 같은 소견을 반복한 대조도 I 대비 0.406 낮았다(CI [0.266, 0.531]). 손실의 대부분은 좌표 없는 문장 응답이다. 박스를 내는 비율은 I 91–97%, R 50–53%, J12 37.5%, J21 21.9%였다.
+- **미검증·주의:** 사전 지표는 모두 충족했지만, 이 결과는 "복합 phrase를 지원하지 않는 인터페이스" 설명과 구분되지 않는다. 일반적인 공동 처리 결함이라고 말할 수 없다. 사전 계획의 clean subset은 no_box를 걸러내지 않아 형식 분리가 반영되지 않았다. 학습 노출은 미확인이고 개발 자료다.
+- **다음:** 결과를 보고 사용자 승인을 기다린다. 추천 후속은 CURE의 지원 인터페이스(단일 phrase 반복 호출 또는 GRG)와 비용만 비교하는 것이다. 복합 prompt나 SFT 투자는 보류한다.
+
+# Work Performed
+
+- iter_105 코드를 `lk106_*`로 복사·수정했다(요청 집합, 출력 경로, 요청별 end-to-end timing). 가중치 lock은 iter_105 lock을 상속했고, 파일 크기와 작은 자산 digest가 모두 같은 경우에만 만들었다.
+- 한정 자료 점검: D4+E32 36명을 원 PadChest-GR metadata와 대조했다(환자·study·split, S1/S2, main/extra box, 영상 hash). 불일치는 0이었다.
+- 연결 가능성 확인:
+  - iter_086 E96과의 ImageID 교집합은 0이다.
+  - D8과는 2건이 겹치지만 GRG와 PG는 입력 정보가 달라 paired 비교를 하지 않았다.
+- D4 24요청(I1/I2/J12/J21/R11/R22)을 실행한 뒤, 사전 gate(J 8요청의 malformed·비EOS)를 확인하고 E32 128요청을 실행했다.
+- 평가와 독립 verifier를 구현했고, 좌표 형식과 박스 유무를 분리하는 사후 기술 분석을 추가했다.
+
+# Files Changed
+
+신규 파일은 아래와 같다.
+
+- 코드: `lk106_spec.py`, `lk106_run.py`, `lk106_eval.py`, `lk106_verify.py`, `lk106_prov.py`, `lk106_tech.py`, `lk106_test.py`, `lk106_runtests.py`, `lk106_lock.py`, `lk106_supp.py`
+- 결과: `results/iter_106/` 아래에만 저장했다.
+- 반입한 iter_105 파일은 수정하지 않았다.
+
+# Commands / Experiments
+
+모두 성공했다.
+
+- `lk106_prov.py`: 36명 연결 확인, 문제 0.
+- `lk106_test.py`: CPU fixture 21/21.
+- `lk106_run.py launch --stage D4 --workers 2`: exit 0, wall 110.9s.
+- `lk106_tech.py`: 공식 `apply_chat_template` + `generate` 대조 24/24(input_ids, suffix token, pixel hash 일치).
+- `lk106_runtests.py`: 통제 중단, torn tail 재개, baseline과 token 일치, 변조 거부(텍스트 수정, 행 삭제·중복, completion hash, prompt 변경) 11/11.
+- `lk106_lock.py`: D4의 I1/I2가 iter_105 저장 출력과 8/8 token 동일. E32 직전 잠금 파일 생성.
+- `lk106_run.py launch --stage E32 --workers 2`: exit 0, wall 422.8s.
+- `lk106_eval.py`와 `lk106_verify.py`: E32 13/13, D4도 일치.
+- 4 worker(GPU당 2개) 시도는 admission 거부로 실패했다(남은 메모리 11,988 / 8 MiB, 필요 12,048 MiB). 산출 행은 없다.
+- 실패한 시도: 처음 `lk106_verify.py`를 실행했을 때 numpy bool을 JSON으로 저장하지 못해 실패했다. 이 한 곳만 `bool()`로 고쳐 다시 실행했다. 이 수정은 E32 잠금 이후에 이루어졌고, 계산 로직은 바뀌지 않았다.
+
+# Results
+
+수치는 `results/iter_106/eval/report_E32.json`, `report_D4.json`, `supplement_E32.json`, `RESULTS.md`에 있다.
+
+- **GPU 구성 선택:** GPU당 worker 2개는 메모리 여유 때문에 불가능했다. 그래서 GPU당 1개(총 2 worker)로 고정했다. batch 확대는 비교하지 않았다. 추가 비용이 절감 예상보다 컸다.
+- **GPU peak:** 10,069 / 9,997 MiB.
+- **D4 gate:** malformed 0, 최종 비EOS 0 → E32 진입.
+- **E32 주지표:**
+  - recall: I 0.875, J12 0.234, J21 0.109. 의미 평가는 하지 않았다.
+  - I−J12 0.641, I−J21 0.766.
+  - 두 순서에서 모두 I의 정답 영역을 잃은 환자 수는 report의 `patients_lost_both_orders` 필드에 있다.
+- **형식 상태(E32):**
+  - no_box: J12 20/32, J21 25/32, R11 15/32, R22 16/32.
+  - 좌표가 나온 J 요청 중 단일 박스 출력: J12 7/12, J21 6/7.
+- **비용(D4 4명 end-to-end):** 독립 두 요청 14.9s, 공동 한 요청 6.5s(J12) / 5.0s(J21). 공동이 빠른 것은 좌표 token을 덜 내기 때문이며 같은 산출물 비교가 아니다.
+- **iter_105 독립 PG 재사용:** 완료 검증을 통과했다. D4의 iter_105 D4_w1f는 소스 digest가 달라 재사용하지 않고 재생성했다.
+
+# Goal Progress / Reused Assets
+
+- **자료 점검:** 완료(36명, 불일치 0). 이는 자료 연결 확인이지 새 과학적 관찰이 아니다.
+- **새 관찰(CURE 조건, 제한적):**
+  - 복합 phrase에서는 위치 박스 자체가 줄어든다. 같은 소견 반복에서도 비슷한 양상이 나온다.
+  - 좌표가 나온 경우도 부분적이다.
+- **미검증:**
+  - 복합 PG를 지원하는 모델에서의 결과.
+  - 직접 SFT 이후의 결과.
+  - 문장별 binding과 자유 판독.
+- **재사용 검증:** 요청 집합과 digest 변경 거부를 확인했다. 새 결과 경로에서의 부분 재개와 completion 변조 거부도 확인했다.
+- **재사용하지 않은 것:** `lk105_spec.py`의 A/B 평가와 lenient 분기는 쓰지 않았다.
+
+# Problems
+
+- **현재 결론에 영향:** 사전 flag의 `clean_subset`이 no_box를 분리하지 못한다. 그래서 flag가 모두 true인 것을 "복합 내용과 연결된 손실"로 읽을 수 없다. 사후 분석은 주판정과 분리했다.
+- **재사용 전 수정:**
+  - 대표 환자 수가 작다(3명만 두 순서 모두 박스 출력).
+  - 반복 대조는 token 길이를 완전히 통제하지 않았다.
+  - `lk106_verify.py`는 요청 완전성과 provenance를 직접 검증하지 않는다(`lk106_run.verify_completion` 몫).
+- **후속 개선:** extra annotation 민감도는 report에 포함했지만 해석은 미완이다. 기계적 평가기를 더 손볼 필요는 없다.
+
+# Recommendation to GPT
+
+- **결과 해석:** "정답이 단순 결합으로 충분(단순 대안 충분) + 형식·인터페이스 설명" 쪽이다. 일반적인 공동 처리 결함이라고 말할 근거는 없다.
+- **추천:** 복합 prompt 추가나 SFT는 하지 않는다. 다음은 CURE가 지원하는 인터페이스(GRG 한 번 vs 단일 phrase 반복)의 비용·위치 회복 비교로 좁히는 것을 권한다.
+- **대안:** 복합 입력을 지원하는 다른 모델에서 같은 두 소견 비교를 하는 것.
+- **보류 범위:** 이 CURE 복합 PG 인터페이스에서의 공동 요청 투자만 보류한다.
+- **판단:** 계획은 완결 실행했지만, 위 해석 한계 때문에 FAIL로 둔다.
+
+SELF_CHECK: FAIL
+SUMMARY: CURE 복합 PG는 박스를 내는 비율 자체가 낮아(J12 37.5%, J21 21.9%) recall I 0.875 대 J 0.23/0.11이지만, 형식·인터페이스 설명과 구분되지 않아 일반적 공동 처리 결함으로 해석할 수 없다.
+
+# [orchestrator] 권한 거부된 도구 호출
+- Bash: sed -e 's/lk105_run as R/lk106_run as R/; s/lk105_spec as S/lk106_spec as S/; s/iter_105/iter_106/g; s/lk105_tech/lk106_tech/g' lk105_tech.py > lk106_tech.py
+python - <<'E'
+s=open('lk106_tech.py').read()
+s=s.replace('PICK = ["img-N-o0", "img-W-o1", "txt-C-o0", "txt-N-o1", "pg-S1", "pg-S2"]','PICK = ["I1", "I2", "J12", "J21", "R11", "R22"]')
+s=s.replace('--stage", default="D4")','--stage", default="D4")')
+open('lk106_tech.py','w').write(s)
+E
+grep -n "PICK\|rec = recs\|rid =" lk106_tech.py
+- Bash: python ../experiment_wait.py --pid $(pgrep -f "lk106_run.py launch" | head -1) --timeout 600
+- Bash: CUDA_VISIBLE_DEVICES=0 HF_HUB_OFFLINE=1 TOKENIZERS_PARALLELISM=false results/environments/cure085/bin/python lk106_tech.py --system CURE --stage D4 --gen-dir results/iter_106/gen/D4_w2 --workers 2 --out results/iter_106/tests/tech_CURE.json --n-images 4 2>&1 | tail -5
+- Bash: python - <<'E'
+import json, time
+from report86_common import read_jsonl_complete, sha, sha_obj, save, ROOT
+import lk106_run as R
+old={r['id']:r for r in read_jsonl_complete('results/iter_105/gen/D4_w1f/cure/shard0/outputs.jsonl') if r['kind']=='pg'}
+new={}
+for k in (0,1):
+    for r in read_jsonl_complete(f'results/iter_106/gen/D4_w2/cure/shard{k}/outputs.jsonl'): new[r['id']]=r
+cmp=[]
+for i,r in old.items():
+    n=new[i.replace('|pg-S1','|I1').replace('|pg-S2','|I2')]
+    cmp.append({'id':i,'tokens_equal':r['attempts'][-1]['suffix_ids']==n['attempts'][-1]['suffix_ids'],'input_ids_equal':r['input_ids']==n['input_ids'],'pixel_equal':r['pixel_sha256']==n['pixel_sha256']})
+print(all(c['tokens_equal'] and c['input_ids_equal'] and c['pixel_equal'] for c in cmp),len(cmp))
+save(R.R106/'tests/reproduce_iter105_D4_independent.json',{'n':len(cmp),'all_equal':all(c['tokens_equal'] and c['input_ids_equal'] and c['pixel_equal'] for c in cmp),'checks':cmp})
+lock={'time':time.time(),'iso':time.strftime('%Y-%m-%dT%H:%M:%S'),'purpose':'E32 생성 직전 잠금(D4 결과를 본 뒤, E32 출력 전). prompt·parser·문턱·표본 변경 없음',
+ 'd4_gate':'J 8요청 중 malformed(coord_invalid/truncated)=0, 최종 비EOS=0 → E32 진입(plan §3). no_box 다수는 형식 관찰이며 gate 아님',
+ 'e32_requests_sha256':sha_obj(R.requests('E32','CURE')),'sources':{f:sha(ROOT/f) for f in R.EXEC_SOURCES+['lk106_eval.py','lk106_verify.py','lk106_test.py','lk106_runtests.py','lk106_prov.py','lk106_tech.py']},
+ 'inputs_E32':sha(R.DATA/'inputs_E32.json'),'weights_lock':sha(R.LOCKFILE),'worker_config':'CURE 2 workers (1/GPU); 2 workers/GPU 메모리 admission 거부(D4_w4: 11988/8 MiB free vs need 12048)'}
+save(R.R106/'protocol/lock_before_E32.json',lock)
+E
+
+
+
+## iter_106 GPT REVIEW [CONTINUE] — 2026-10-09 09:15:06
+
+# 요약
+
+- **판정:** 유효한 탐색 실험이지만 원인 해석은 inconclusive다. 현재 CURE 복합 PG의 추가 투자를 보류한다.
+- **핵심 근거:** E32 recall은 독립 결합 0.875, 공동 두 순서 0.234375/0.109375다. 동일 문장 반복도 독립 대비 0.40625 감소했다.
+- **의미·한계:** 공동 입력의 위치 출력 손실은 확인됐지만 서로 다른 소견의 결합에 특이적인 문제는 입증되지 않았다.
+- **다음:** 추가 prompt·학습·표본 확대를 발주하지 않는다. 재개 근거와 다음 실행은 사용자 승인 경계에서 판단한다.
+
+## 알림 요약
+
+- 결과: 흉부 X-ray 32명의 CURE 위치 recall은 독립 결합 0.875에서 공동 요청 0.234/0.109로 낮아졌다. 같은 문장 반복에서도 손실이 컸다.
+- 의미: 좌표 없는 응답 증가를 확인했다. 복합 입력 분포와 결합 능력을 분리하지 못해 일반적인 종합 결함 주장은 보류한다.
+- 후속: 독립 결합 이후의 잔여 가치가 확인되지 않아 현재 복합 PG 투자를 보류할 것을 권고한다.
+- 대안: 복수 소견을 공식 지원하는 경로에서 동일 정보 비교를 설계할 수 있지만, 현재는 구체적인 지원·잔여 가치 근거가 없어 새 모델 실행을 권고하지 않는다.
+
+# Assessment
+
+`valid_experiment=true`, `approach_status=inconclusive`다. 구현 보고서의 SELF_CHECK: FAIL을 실행 실패로 그대로 옮기지 않는다. D4 적합성 검사와 E32 실제 비교는 완료됐으며, 부족한 것은 복합 내용 손실에 대한 해석이다.
+
+구현 담당은 engineer_backend.json의 Claude이며 claude_meta.json은 claude-sonnet-5-5, medium을 기록한다. 리뷰 대상은 `e6f7855f6596f113ec8d0940dc514f21284e18c5`다. changes.patch와 보존 대상 파일을 확인했고 작업 파일과 해당 SHA 사이의 내용 불일치는 없었다. unpreserved_paths는 비어 있다.
+
+# Key Findings
+
+1. 원시 E32 신규 출력 128건과 기존 독립 PG를 연결했다. 별도 좌표 파싱·일대일 matching으로 recall 0.875/0.234375/0.109375를 재현했다.
+2. I−J12는 0.640625 [0.500000, 0.765625], I−J21은 0.765625 [0.640625, 0.875000], 순서 평균 차이는 0.703125 [0.593750, 0.8046875]였다. 환자 bootstrap 10,000회와 고정 seed를 독립 재계산했다.
+3. 두 순서에서 모두 독립 처리의 정답 영역을 잃은 환자는 24/32였다. 현재 출력에는 최대 matching의 GT 집합 선택이 모호한 환자가 없었다.
+4. 동일 문장 반복의 손실은 0.40625 [0.265625, 0.53125]였다. 이는 서로 다른 소견을 합치는 조건만으로 손실을 설명할 수 없다는 반대 근거다.
+5. 좌표 없는 응답은 J12 20/32, J21 25/32, R11 15/32, R22 16/32다. 현재 출력은 모두 EOS로 종료했고 cap 재시도는 없었다. 대표 원문은 소견 문장만 반복하거나 좌표 한 개만 출력했다.
+6. 주석 두 영역을 모두 회복한 환자는 독립 결합 24/32, 공동 J12 4/32, J21 1/32다. 독립 결합은 이 개발 집단의 강한 단순 대안이지만 완전한 정답이나 임상적 충분성은 아니다.
+
+# Problems / Concerns
+
+**평가 해석:** 계획은 no_box를 모델의 위치 미출력 관찰로 명시했고 D4 진입 실패 조건에서 제외했다. 따라서 no_box가 많다는 이유로 E32 실행을 무효화하지 않는다. 또한 clean_subset에 no_box가 포함되는 것 자체는 정상 종료 subset 정의와 맞는다. 다만 그 값으로 형식·인터페이스 영향을 제거했다고 말할 수는 없다. 보고서의 '사전 지표 모두 충족'은 수치 flag 충족으로 제한한다.
+
+**parser 재사용:** 세 숫자 bracket이나 nan은 malformed가 아니라 no_box로 분류된다. 이는 향후 적합성 gate에 영향을 줄 수 있다. 리뷰에서 현재 원시 E32 bracket을 별도로 확인했으며 해당 문제는 주수치에 영향을 주지 않았다.
+
+**사후 분석:** 두 순서 모두 좌표가 나온 환자는 3명뿐이다. 이 선택된 subset의 손실을 주판정이나 독립적인 내용 결합 증거로 사용하지 않는다.
+
+**출처와 잠금:** E32 이전 잠금 시각은 1791504214.37이며 두 worker 시작은 그 이후다. 잠금 이후 변경된 파일은 verifier 하나였고 실제 도구 로그에서 numpy bool의 JSON 직렬화 수정임을 확인했다. D4/E32 completion의 기록된 파일 hash는 모두 일치했다. 큰 가중치 hash의 계승은 크기 검사에 의존하므로 다음 재사용 전에 보완할 필요가 있다.
+
+**자원·비용:** E32는 허용 GPU 0,1의 두 worker로 정상 종료했고 launcher wall-clock은 422.8초다. GPU당 두 worker 시도는 admission 거부였으며 처리량 비교가 완료된 것은 아니다. D4 독립 두 요청 약 14.9초와 공동 약 6.5/5.0초는 출력량도 다른 요청 시간 비교다. 공동 요청의 단축 원인이 좌표 token 감소라고 인과적으로 확정할 수 없으며, 같은 품질의 비용 우위도 아니다. 전체 구현·감사·재작업 비용을 분해한 계측은 없다.
+
+# Interpretation
+
+공개 정답이 뒷받침하는 범위는 선택된 두 주석 영역의 집합 회복이다. 문장별 binding, 미표기 소견의 음성, 자유 판독의 임상 정확성은 평가하지 않았다. 개발 자료이며 checkpoint의 학습 노출도 배제하지 못했다.
+
+복합 입력의 손실은 반복 대조보다 크지만, 반복 자체도 큰 영향을 보인다. 일반 결합 결함이 입증된 것도 아니고 인터페이스가 유일한 원인으로 확정된 것도 아니다. iter_048의 공동 형식 학습 회복이라는 반대 근거를 유지한다. 이번 결과를 그 과거 현상의 독립 재현으로 합치지 않는다.
+
+# Strategy Check / 연구 방향 판단
+
+- **시험 설정:** CURE 단일 phrase template에 문장을 이어 붙이는 현재 확장 설정은 추가 투자 보류다.
+- **연구 관찰:** 단순한 출력 cap 부족 설명은 약화됐다. 반면 입력 반복·분포 설명은 강화됐고, 내용 수·문장 경계·학습 노출의 영향은 남았다.
+- **연구 질문:** 위치 근거의 공동 처리·판독 연결 질문 전체는 기각하지 않는다. 그러나 중요한 잔여 문제가 있다는 선언만으로 현재 설정을 연장하지 않는다.
+
+실행 유효성은 확보됐다. 새 방법의 성능 개선은 시험하지 않았다. 제한적인 위치 출력 손실 가설은 지지되지만 결합에 특이적인 원인과 신규 기여는 미확인이다.
+
+투자 후보는 두 가지로 좁힌다. 현재 복합 PG를 prompt·학습으로 복구하는 후보는 인터페이스 적응과 새 기여를 구분할 근거가 없고 과거 형식 학습 결과와 중복될 위험이 크다. 지원되는 복수 소견 경로의 비교는 원인 구분에 더 가깝지만, 현재 기록에는 실행할 구체적 경로와 독립 결합 이후의 가치가 없다. 따라서 이번에는 **현재 설계의 투자 보류**를 선택한다.
+
+구현 보고서가 제안한 GRG 한 번과 정답 문장 제공 PG의 직접 비교는 채택하지 않는다. 소견 발견과 제공된 소견의 위치 찾기는 정보 조건이 다르므로 이번에 좁힌 질문을 다시 혼동한다. 기존 자유 문장 판정·전문의 자원 대기를 재개하지 않는다.
+
+# Recommended Next Experiment
+
+즉시 추가 실험은 권고하지 않는다. 재개하려면 복수 소견을 지원하는 동일 정보 인터페이스와 독립 처리의 실제 잔여 문제를 먼저 특정해야 한다. 그 근거 없이 E96·새 prompt·LoRA·모델 순회나 평가기 정비만의 반복을 만들지 않는다.
+
+이번 연구 목표는 미완료이므로 CONTINUE다. 이는 후속 실행 허가가 아니며 `--confirm-each-iter`에 따라 승인·피드백을 기다린다.
+
+논문 추천은 보류한다. 현재 결과는 제한된 인터페이스 관찰이며 더 깊은 방법 투자의 유망성이 확인되지 않았다.

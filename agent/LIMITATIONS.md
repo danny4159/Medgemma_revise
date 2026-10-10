@@ -279,3 +279,21 @@ PadChest-GR 개발 E96의 고정 CURE checkpoint·prompt에서 영역별 출력�
 - 미해결: 현재 개발 자료 밖에서도 재현되는가? 공개 checkpoint의 환자별 학습·선택 노출은 미확정이다.
 - 미해결: 관찰된 차이를 위치 supervision 자체의 효과로 설명할 수 있는가?
 
+## cure-composite-phrase-grounding-output-loss — observed
+
+PadChest-GR 공식 train의 반복 개발 E32에서 고정 CURE와 단일 phrase template에 두 소견을 이어 붙인 확장 입력의 영역 recall@0.3은 독립 출력 결합 0.875 대비 두 순서에서 0.234375/0.109375였다. 같은 소견 반복에서도 독립 대비 recall이 0.40625 감소했다. 좌표 미출력이 주된 관찰이며, 정상적인 복합 입력 지원을 전제로 한 공동 처리 결함이나 자유 판독의 한계를 입증하지 않는다.
+
+- 적용 목표 시작: iter_003
+- 최신 리뷰: agent/runs/iter_106/review.json
+- 근거: research/results/iter_106/eval/report_E32.json 및 iter_105/iter_106 E32 원시 outputs.jsonl
+- 근거: 리뷰 독립 재계산: I−J 평균 0.703125, 환자 bootstrap 95% CI [0.59375, 0.8046875]; 두 순서 모두 손실 환자 24/32.
+- 근거: 좌표 없는 응답 J12 20/32, J21 25/32, R11 15/32, R22 16/32; 최종 비EOS 0.
+- 사용·평가 검증: 리뷰에서 원시 좌표 파싱·일대일 matching·요청 문장·bootstrap을 별도로 재계산했다.
+- 사용·평가 검증: tests/tech_CURE.json: D4 24요청의 공식 processor 입력·pixel hash·생성 token 일치.
+- 사용·평가 검증: tests/reproduce_iter105_D4_independent.json: 독립 PG 8요청 재현.
+- 사용·평가 검증: E32 이전 protocol 잠금 시점과 실행 시작 순서를 확인했고, D4/E32 completion 파일 hash 불일치는 없었다.
+- 미해결: 복합 phrase 학습 분포와 반복·문장 경계·내용 수의 영향을 분리하지 못했다.
+- 미해결: 반복 대조는 환자별 token 길이를 정확히 맞춘 조건이 아니다.
+- 미해결: 공개 checkpoint의 환자별 학습 노출과 독립 일반화는 미확인이다.
+- 미해결: 독립 결합 이후 새로운 통합 방법이 필요한 실용적 잔여 문제는 확인되지 않았다.
+
