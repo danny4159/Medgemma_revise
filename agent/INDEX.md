@@ -112,6 +112,7 @@
 - iter_104 [사용자 보완으로 전환 → iter_105] 기존 기록 보존, 성공·실패 판정 아님 (계획 확인)
 - iter_105 [CONTINUE] (deep_medium/standard/normal) <소견–영역 연결 제안의 영향 진단: inconclusive> 💾f6b2942c2fcf2138feace3000f5bbdbfadb9a825 흉부 X-ray 32명에서 CURE의 독립 grounding 연결은 32/32였지만 두 모델의 직접 선택은 확대 기준에 미달했다. 현재 설정은 보류하며, 충분한 영상 인식 이후의 제안 손상과 임상 판독 개선은 미확정이다. → 다음: 현재 합성 연결 선택 후보의 추가 투자를 보류한다. 기본 선택 능력·영상 기여가 확인되지 않았고 CURE 독립 grounding 이후의 잔여 이득도 입증되지 않아, E96·추가 prompt·parser·모델 순회는 발주하지 않는다. 재개는 실제 자동 제안의 오류 분포 또는 독립 grounding이 놓치는 중요한 오류와 이를 구분할 최소 비교가 구체화될 때만 검토한다. 기존 자유 판독 경로는 iter_103의 새 정답 근거 조건을 유지하고 전문의 자원을 다시 묻지 않는다. 보류 기록이나 코드 정비만을 위한 반복은 만들지 않으며, 이후 실행은 --confirm-each-iter의 사용자 승인 뒤에만 시작한다.
 - iter_106 [CONTINUE] (deep_medium/standard/normal) <동일 소견 집합의 공동 위치 보존: inconclusive> 💾e6f7855f6596f113ec8d0940dc514f21284e18c5 흉부 X-ray 32명에서 위치 recall은 독립 결합 0.875, 공동 요청 0.234/0.109였다. 같은 문장 반복도 악화돼 일반 결합 결함은 미확정이며 현재 복합 PG 투자는 보류한다. → 다음: 현재 CURE 복합 PG의 추가 투자를 보류한다. 동일 문장 반복에서도 큰 손실이 발생했고 독립 결합 이후의 실용적 잔여 가치가 없어, 추가 prompt·SFT·E96·모델 순회를 권고하지 않는다. 재개는 복수 소견을 지원하는 공식 인터페이스에서 동일 정보·출력 범위의 비교가 가능하고, 독립 처리의 구체적인 비용 또는 정확도 문제가 확인될 때만 검토한다. GRG와 정답 문장 제공 PG의 직접 정확도·비용 순위 비교는 정보량이 달라 후속으로 채택하지 않는다. 보류 기록·평가기 정비만을 위한 반복은 만들지 않으며 다음 실행은 --confirm-each-iter의 사용자 승인 뒤에만 시작한다.
+- iter_107 [CONTINUE] (deep_medium/standard/normal) <자연 다중 영역 근거 보존 검토: abandon> 💾e2a66795876215937e1eda5b2c6e70d30474298d 흉부 X-ray 핵심 10명에서 CURE는 두 위치 근거를 모두 보존했다. 현재 부분 누락 개입은 보류하며, 개발 자료의 결과를 일반 grounding 충분성이나 판독 정확성으로 확대하지 않는다. → 다음: 현재 자연 다중 영역 부분 누락 후보의 추가 투자를 보류한다. 공식 CURE가 핵심 10명 모두에서 두 근거를 보존해 최소 개입의 대상이 확인되지 않았다. 비핵심 6건의 적은 box 수만으로 다음 실험을 발주하지 않는다. 재개는 두 주석의 분할 차이와 기본 위치 오차를 구분할 공개 정답, 강한 단순 대안 이후에도 남는 중요한 오류, 결과에 따라 투자가 달라지는 최소 비교가 함께 구체화될 때만 검토한다. 지원 공동 경로도 동일 정보 대조의 새 근거가 없으므로 보류한다. 같은 전략 감사·평가기 정비만을 위한 반복이나 새 생성·학습은 권고하지 않으며, 이번 보류 범위와 대안을 보고한 뒤 --confirm-each-iter 사용자 승인·피드백을 기다린다.
 
 ## 이전 목표들의 접근법 (참고용, 현재 목표의 재평가 횟수에는 안 들어감)
 
@@ -162,11 +163,11 @@
 - 위치 학습의 판독 누락·언급 성향 분리 [approach/grounding-report-transfer]: 21회 (iter_084, iter_085, iter_086, iter_087, iter_088, iter_089, iter_090, iter_091, iter_092, iter_093, iter_094, iter_095, iter_096, iter_097, iter_098, iter_099, iter_100, iter_101, iter_102, iter_103, iter_104), 유효한 실험 10회, 미분류 0회, 최근 판정: 사용자 보완으로 전환 (검증 미완료), 커밋: 7748fdcffdc0e5f44bf090a6563f6e6dd3490274, 1fad82e7d39c3468ffbbe27a5f94eaf6d32e0415, 544d73cc0b870f19f1c1fe96dbc5a6ca4f8c06d3, faee416633f87d281656c00982b973757c36817b, ee00917e09032fddb27118b8f7404a2d0f76d734, 41232edf304c85f3e747c9da7dae2fe9f473d2ac, 93193abc4d04c44cf40b2695376d520209fa1745, bdece28eacb2a8f06107358a988d0e1364768f44, 9ca45479e46c829fc14db698be1a335e831c2efb, aaaf9c0747469fb6f75f91be7201843cd9a83357, 23a37396b79a169850f5a8fcd2c5a2c4109ffc7f, e26d1ad7f499186434639bb0d1e908d27ce5c4f5, f86dccf19f2f5bfe7f17b0031acb45649dc38527, 21a260b2e05e8d939816292cb8b509299ed788b4, b17950cbe2947f065ae895ec9032d9d856327c95, ff49c721b77d35723aa7407a3455f8f3ce1ed61c, ff49c721b77d35723aa7407a3455f8f3ce1ed61c, ff49c721b77d35723aa7407a3455f8f3ce1ed61c
 - 소견–영역 연결 제안의 영향 진단 [approach/region-link-advice]: 1회 (iter_105), 유효한 실험 1회, 미분류 0회, 최근 판정: inconclusive, 커밋: f6b2942c2fcf2138feace3000f5bbdbfadb9a825
 - 동일 소견 집합의 공동 위치 보존 [approach/finding-set-retention]: 1회 (iter_106), 유효한 실험 1회, 미분류 0회, 최근 판정: inconclusive, 커밋: e6f7855f6596f113ec8d0940dc514f21284e18c5
+- 자연 다중 영역 근거 보존 검토 [approach/natural-region-retention]: 1회 (iter_107), 유효한 실험 1회, 미분류 0회, 최근 판정: abandon, 커밋: e2a66795876215937e1eda5b2c6e70d30474298d
 
-현재 연구 브랜치: approach/finding-set-retention (코드 위치: /SSD1_1TB/home/milab/daniel/08_medgemma/research)
+현재 연구 브랜치: approach/natural-region-retention (코드 위치: /SSD1_1TB/home/milab/daniel/08_medgemma/research)
 
 ### 최근 계획의 대안 순위
 
-1. 동일 소견 집합의 공동 위치 보존: 공개 bbox와 기존 CURE PG를 사용해 동일 내용의 개별·공동 처리를 작은 비교로 구분한다.
-2. 영역 설명의 문장 종합: 사용자 질문에 더 직접적이지만 현재 자유 문장의 정답 범위와 의미 평가 불확실성이 결정을 막아 보류한다.
-3. 현재 후보 투자 보류: 복합 PG가 지원 형식에서 평가 가능하지 않거나 단순 결합 이후 잔여 가치가 없으면 선택한다.
+1. 자연 다중 영역 근거 보존 검토: 기존 47개 소견과 모듈형 출력에 CURE 공식 PG만 추가해 부분 누락의 잔여 가치를 판단한다.
+2. 지원 공동 경로 비교 보류: 현재 확인한 경로에서는 동일 소견 정보의 직접 대조가 성립하지 않아 신규 생성하지 않는다.
