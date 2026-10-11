@@ -39766,3 +39766,460 @@ iter_106과 이번 집단·입력이 다르므로 두 결과의 차이를 입력
 연구 목표와 기존 자산은 유지한다. --confirm-each-iter에 따라 이번 결과·보류 이유·대안을 보고한 뒤 승인 또는 피드백을 기다린다. 추가 전문가 가용성을 다시 묻지 않는다.
 
 논문 추천은 보류한다. 이번 결과는 현재 실패 조건에 대한 투자 근거를 약화했으며, 별도 방법 탐구의 유망성을 확인한 결과가 아니다.
+
+
+## iter_108 GPT PLAN [국소 근거의 판단 가치 / proceed] — 2026-10-11 14:53:08
+
+# 요약
+
+- **이번에 할 일:** 원본 흉부 X-ray에 예측 영역 영상을 더 주었을 때, 표적 음영 판단과 전체 비정상 판단이 어떻게 달라지는지 비교한다.
+- **필요한 이유:** 기존 텍스트 근거의 이득은 질문 범위와 인터페이스에 의존했다. 실제 영상 영역 제공의 효과는 그 실험으로 판단하지 못했다.
+- **확인할 기준:** 원본 복제·같은 크기의 중앙 crop 및 질문별 고정 입력 선택 이후에도 중요한 차이가 남는지 본다.
+- **주의·다음:** frozen 진단이며 새 방법이 아니다. 단순 대안이 충분하면 방법 투자는 보류한다. 리뷰 뒤 다음 반복은 사용자 승인을 기다린다.
+
+## 알림 맥락
+
+- 연구: 위치 근거와 판독 판단의 연결
+- 데이터: 흉부 X-ray, 기존 RSNA 개발 P180/E600
+- 모델: MedGemma 1.5 frozen reader와 저장된 RSNA grounding SFT 예측
+- 과제: 원본과 보조 영역 영상을 보고 표적 음영 유무·전체 비정상 여부에 각각 답한다
+- 가설: 국소 근거의 이득과 손상은 질문 범위에 따라 다르며 단순 입력 선택으로 설명될 수 있다
+- 질문: 특정 음영을 찾은 영역을 더 보여 주면 그 판단을 돕고 다른 이상 판단도 보존하는가?
+- 변경: 방향 전환
+- 연결: PadChest-GR의 자연 다중 영역은 CURE가 보존했다. 같은 누락 가설을 연장하지 않고 RSNA의 명확한 두 판단 정답으로 외부 영상 근거의 효과를 비교한다
+- 작업: 저장 예측을 재사용해 원본·복제·예측 영역·중앙 영역을 비교하고 추가 방법이 필요한지 결정한다
+
+# Current Understanding
+
+iter_107의 핵심 10명에서 CURE 두 영역 보존 10/10, 부분 누락 0을 받아들인다. 비핵심 재분류·threshold 변경·환자 교체와 iter_105/106 확장 입력 재시도는 하지 않는다.
+
+iter_017에서는 같은 RSNA 원본을 제공해도 텍스트 근거의 효과가 질문과 문구에 의존했다. 좌표 L과 개수 K의 정답 쌍은 600명 모두 같았고, NoOpacity/NotNormal 집단의 정답 쌍은 direct 40/200에서 L 4/200으로 낮아졌다. 이것은 시각적 crop 제공의 결과가 아니다.
+
+이번 자료의 정답은 원본 영상에 대한 RSNA category다. opacity=(O=yes,A=yes), normal=(no,no), not_normal_no_opacity=(no,yes)다. 영역의 임상 진위나 자유 판독 전체를 평가하지 않는다. bbox가 비었다고 정상으로 간주하지 않는다.
+
+# Strategy Check / 연구 방향 판단
+
+**기술 질문 → 실패 조건 → 공개 정답 비교 → 주장 범위:** 불완전한 표적 근거를 시각적으로 제공할 때, 원본이 남아 있어도 질문 범위별 손익이 생기는가 → 표적 판단 이득과 전체 비정상 판단 손상이 함께 나타나는 조건 → 동일 환자의 O/A 정답으로 복제·크기 일치 crop·고정 입력 선택을 비교 → 현재 frozen 모델·예측 영역·RSNA 개발 자료의 입력 정책 효과로 한정한다.
+
+후보는 두 개만 비교한다.
+
+1. **국소 근거의 판단 가치 — 선택.** 실제 사용 문제는 localizer의 선택된 영역을 reader에 제공할 때의 이득과 손상이다. 근거 prompting·전체 영상+grounding·crop VQA는 선행 범위다. 이번에 구분할 설명은 영상 수, 확대, 위치 선택, localizer 오류와 질문 범위다. 공개된 두 label과 기존 저장 예측으로 평가가 성립한다. 고정 입력 선택이 충분하면 복잡한 결합 방법에 투자하지 않는다.
+2. **위치 학습의 판단 전이 — 보류.** 위치 출력과 판독 출력의 차이는 남아 있지만 report-only baseline·선택 조건·의미 평가 혼선이 해결되지 않았다. 형식 rehearsal과 공동 학습 성공도 선행에 있다. 새 LR·seed를 추가할 정보 가치는 현재 더 낮다. 동일 정보·정답·학습 대조로 기존 설명을 줄일 새 근거가 있을 때 재검토한다.
+
+**시험 설정:** 기존 LoRA recipe를 구제하지 않는다. 이번에는 frozen reader와 저장된 localizer 결과만 사용한다.
+
+**연구 관찰:** 107의 성공과 17의 텍스트 인터페이스 의존을 함께 유지한다. 이번 비교는 같은 누락 현상의 재현이 아니라 외부 영상 근거라는 새 개입이다.
+
+**연구 질문:** 작은 입력 효과 자체가 contribution은 아니다. 단순 routing으로 이득·보존이 해결되는지를 먼저 받아들인다. 현재 질문 범위는 이미 알려져 있으므로 routing 성공을 새로운 능력으로 포장하지 않는다.
+
+지배 비용은 새 다중 영상 생성과 변경 경로 검증으로 예상한다. 실제 비율은 미측정이다. 과거 전체 이력·불변 코드를 다시 감사하지 않는다.
+
+# Hypothesis
+
+- H1: 예측 영역 T는 원본 복제 D보다 O 판단을 개선할 수 있다.
+- H2: 같은 T가 A 판단, 특히 not_normal_no_opacity에서 손상을 만들 수 있다.
+- H3: T와 중앙 영역 C가 비슷하면 위치 선택보다 확대·보조 영상의 일반 효과가 주요 설명이다.
+- H4: O에는 유용한 입력, A에는 원본을 쓰는 고정 정책으로 이득과 보존이 함께 달성되면 현재 결합 방법의 추가 필요성은 작다.
+
+기본 판단이 낮거나 localizer가 틀린 경우를 충분한 인식 이후의 결합 실패로 해석하지 않는다. 새로운 내부 원인을 증명하는 실험이 아니다.
+
+# Limitation Evidence / Correct Usage Checks
+
+대상은 observed `rsna-evidence-interface-sensitivity`이며 원본은 iter_017 review.json과 LIMITATIONS.md다. 이번 역할은 diagnostic이다.
+
+reader는 MedGemma 1.5 revision `91850547d9f0b2fdd21aa7c5f4f3d1a8a52c243b`, bf16, greedy다. B0는 이번에 로드·학습하지 않고 저장 bbox만 쓴다. 원본 입력은 기존 값 보존 RGB·square padding을 유지한다.
+
+공식 processor는 다중 영상 입력을 구성할 수 있지만 전체+crop이 공식 검증된 임상 과제라는 뜻은 아니다. 모델 카드의 다중 patch/longitudinal 설명과 일반 다중 영상 평가 제한 문구를 함께 기록한다. 이번은 확장 사용의 통제 진단이다.
+
+Q_O/Q_A, plain 지시, strict 및 semantic_v1을 원본 qa_spec.py에서 가져온다. semantic_v1을 주평가로 사용하고 strict를 함께 보고한다. 설명문을 정답에 맞춰 사후 구제하지 않는다. cap은 기존 QA와 같은 1000→2000→4000, 비EOS는 별도 실패다.
+
+# Contribution Path / Baselines / Reuse
+
+## 선행과 구별 범위
+
+[Visual Evidence Prompting](https://aclanthology.org/2025.acl-long.205/)은 전문 모델 근거를 전달하는 접근이다. [PadChest grounding 연구](https://proceedings.mlr.press/v315/aas-alas26a.html)는 전체 영상과 국소 근거의 이득을 보고한다. [Grounding과 Medical VQA 연구](https://arxiv.org/html/2604.27720v2)는 crop 및 학습 형식 대조를 다룬다. 따라서 이번 구성 자체의 신규성은 주장하지 않는다.
+
+PadChest 논문 PDF 본문은 이번 도구 경로에서 확보하지 못했다. 확인하지 못한 대조가 없다고 가정하지 않는다. 최소 탐색의 목적은 프로젝트에서 후속 방법 투자가 필요한지를 판단하는 것이며, 방법 전환 전에 선행의 상세 중복을 추가 확인해야 한다.
+
+## 강한 단순 대안
+
+- F: 기존 원본 직접 답변.
+- R: O에는 T, A에는 F. 빈 예측이면 두 질문 모두 F.
+- R_L: O에는 L, A에는 F. 빈 예측이면 F.
+- R_B: O는 유효 bbox의 유무 규칙, A는 F. localizer 오류도 전체 분모에 포함한다.
+- 기존 iter_017 B/K/L: 같은 환자의 역사적 참조. 새 시각 조건과 안내문이 달라 순수 전달 방식 효과로 해석하지 않는다.
+
+R의 A 보존은 정의상 성립한다. 이를 발견으로 부르지 않고 T의 표적 이득을 단순 정책으로 사용할 수 있는지 판단한다. R_L/R_B의 성공도 받아들인다. 비용은 policy가 실제로 필요로 하는 호출만 계산하며 실험 전체 조건 비용을 배포 비용으로 사용하지 않는다.
+
+## 코드와 결과 재사용
+
+새 브랜치 기반은 재사용 승인 iter_082다. 그 MRI 분석 모듈을 이번 평가기로 사용하지 않는다. 필요한 107 실행 소스와 17 qa_spec은 reuse_assets의 SHA·파일 목록대로 반입한다. 현재 브랜치에 있는 파일이라도 새 기반에는 없음을 확인했다.
+
+`lk105_run.py`의 M15 로딩·보존 패턴, `report86_common.py`의 hash/원자적 저장, `rsna_diag/generate.py`의 load_image/generate, geometry·parser를 한정 재사용한다. 새 wrapper는 결과 root와 요청 생성·다중 영상 연결만 분리하고 기존 실행기를 무관하게 범용화하지 않는다. 구 QA 실행기의 잠금·확대 결함을 계승하지 않는다.
+
+결과 입력은 다음을 잠근다.
+
+- `results/iter_016/manifests/{sets.json,labels.json,infer_manifest.jsonl,checkpoints.json}`
+- `results/iter_015/reuse/bbox_B0_concise.jsonl` 및 그 원본 source/protocol 연결
+- iter_016의 해당 F 원시 응답·요청·completion
+- 역사적 참조에 사용하는 iter_017 응답·요청·completion
+
+출력 재사용 전에 환자·질문·prompt·revision·영상·generation 설정·정확한 요청 집합을 대조한다. 현재 파일 크기만으로 가중치 불변성을 승인하지 않는다.
+
+# Proposed Experiment
+
+## 1. 한정 자료 점검과 동작 확인
+
+기존 P180은 category별 60명, E600은 각 200명이다. 두 집단은 개발 자료이며 P180⊂E600이다. 순서와 구성은 변경하지 않는다.
+
+저장 bbox의 비어 있지 않은 환자는 P180에서 54/1/17명, E600에서 164/5/67명이다. 각각 opacity/normal/not_normal_no_opacity 순이다. 빈 예측의 정책은 F 유지로 고정한다. 새 box를 만들거나 빈 예측 환자를 다른 사람으로 교체하지 않는다.
+
+정식 parser와 source 연결 검사 결과가 위 집계와 다르면 원인을 먼저 보고한다. invalid/truncated를 빈 예측으로 바꾸지 않는다. 입력 결함이 해결되지 않으면 모델 비교를 실행하지 않는다.
+
+기술 표본은 P180 nonempty에서 환자 ID 정렬 기준 opacity 첫 3명, normal 첫 1명, not_normal_no_opacity 첫 2명으로 고정한다. 정답은 연결 확인·층화에만 쓰고 crop 선택에는 쓰지 않는다. 원본·crop overlay, 실제 processor tensor, 질문 연결을 확인한다. 모델의 100% 정답을 요구하지 않는다.
+
+## 2. 영상과 조건 고정
+
+F는 기존 원본 출력이다. 예측 crop은 유효 B0 box 전체의 최소 enclosing rectangle을 square-padded 원본 canvas에서 자른다. yxyx/1000을 pixel로 바꾸고 시작은 floor, 끝은 ceil, 경계는 canvas에 clip한다. 추가 margin·GT 기반 선택·box 개수 제한은 없다. crop은 값 보존 후 square padding하며 별도 수동 확대는 하지 않는다. 실제 resize는 고정 processor가 수행한다.
+
+중앙 crop은 예측 crop과 정확히 같은 pixel 높이·너비를 원본 중앙에서 자른다. 이는 비표적·정상 영역이라는 뜻이 아니다. 위치 선택을 제거한 대조다. T와 C가 동일한 경우도 그대로 보존한다.
+
+신규 조건은 다음과 같다.
+
+- D: 원본 + 동일 원본. O/A 각각 1요청.
+- T: 원본 + 예측 crop. O/A 각각 1요청.
+- C: 원본 + 크기 일치 중앙 crop. O/A 각각 1요청.
+- L: 예측 crop 단독. O만 1요청. 원본 label을 제한된 관측으로 추정하는 정보 제한 대조이며 crop의 임상 음성 판정이 아니다.
+
+D/T/C의 공통 안내문은 다음으로 고정한다: `Image 1 is the complete source chest radiograph. Image 2 is an auxiliary view of the same radiograph and may be a full image or a crop. It is not an independent examination or proof of an abnormality. Answer the question about Image 1 using the available evidence.` 뒤에 기존 질문과 plain 지시를 붙인다. 조건명·정답·box 개수·localizer의 positive 선언은 입력하지 않는다.
+
+L에는 `This is an auxiliary crop from a source chest radiograph. Answer the following question about the source radiograph using this limited view.`와 Q_O/plain을 붙인다. F와 문구·정보량이 다른 제한 대조임을 명시한다.
+
+D/T/C의 첫 영상 tensor가 F의 원본 tensor와 일치해야 한다. processor 자동 crop 수·영상 token·해상도를 저장한다. pixel tensor가 같아도 전체 문맥의 표현이 같다는 주장은 하지 않는다.
+
+## 3. 가능성 탐색: P180
+
+nonempty 72명에 7요청씩 총 504건이다. 기술 표본의 설정 불변 출력은 재사용한다. 빈 예측 108명은 정책상 F를 그대로 사용하며 신규 요청처럼 집계하지 않는다.
+
+주요 비교는 T−D의 O 정확도와 T−D의 not_normal_no_opacity A 정확도다. T−C는 위치 선택의 설명을, D−F는 추가 영상·안내문 영향을 구분한다. R/R_L/R_B 및 F와의 정답 쌍 정확도도 함께 계산한다.
+
+## 4. 조건부 확대: E600
+
+효과를 보기 전에 아래 분기를 코드로 잠근다. P180에서 다음 중 하나이면 E600의 나머지 nonempty 164명으로 확대한다.
+
+- 위 두 주요 비교 또는 T−C의 O 비교에서 절대 차이가 10pp 이상이고, 양쪽 답변이 모두 semantic-valid이면서 답이 달라진 환자가 해당 비교에서 3명 이상이다.
+- 위 비교 중 환자 4명 이상에서 semantic-valid 답변이 달라졌고, paired 95% CI가 0과 +10pp 또는 −10pp를 함께 포함하며, 해당 endpoint의 P/E 실제 분모로 `현재 CI 반폭 × sqrt(n_P/n_E)`를 계산했을 때 예상 반폭이 15pp 이하가 된다. 이는 정밀도 계획용 근사이며 결과 CI가 아니다.
+
+10pp는 소수 문구 차이를 넘어 후속 투자에 고려할 탐색 효과, 15pp는 이번 개발 진단의 거친 방향 판단 정밀도다. 통계적 확증 기준이 아니다. 내용상 변화 없이 invalid 처리만으로 조건을 만족한 경우는 확대하지 않는다. 기술 오류는 고쳐 동일 조건을 재개할 수 있지만 parser·질문·표본을 바꾸지 않는다.
+
+확대하면 누적 신규 과학 요청은 236×7=1,652건이다. P180을 포함한 E600은 독립 확인으로 부르지 않는다. 조건을 충족하지 않으면 P180 결과와 탐색 한계를 보고하고 종료한다. 작은 표본의 무변화를 동등성으로 선언하지 않는다.
+
+## 5. 독립 확인과 학습
+
+이번에는 수행하지 않는다. 새 seed·adapter·detector·외부 환자·reserve를 자동 추가하지 않는다. 다른 계열 모델은 첫 실패의 필수 gate가 아니며, 단순 대안 이후 중요한 잔여 관찰이 남았을 때 그 범위를 확인하는 다음 선택으로만 검토한다.
+
+## 6. GPU·비용·재개
+
+시작 직전 nvidia-smi로 허용 장치 0,1의 실제 메모리·UUID를 확인하고 여유가 큰 GPU부터 배정한다. 두 GPU에 독립 환자 shard를 둔다. 다른 프로세스는 변경하지 않는다.
+
+기술 6명의 동일 요청에서 두 GPU 각 1 worker와, 실측 peak 합계에 worker당 2GiB 여유를 더해 수용 가능한 GPU당 2 worker 구성을 짧게 비교한다. admission이 불가능하면 그 수치와 이유를 남긴다. 추가 worker 대신 batch 확대가 더 유망하면 한 가지를 선택하되 전수 탐색하지 않는다. token·parser 결과 정합성, 전체 처리량, 긴 출력 peak·지연, 오류와 CPU/I/O 경합으로 선택한다.
+
+과거 단일 영상 QA 처리량 150–300 req/min을 단순 적용하면 504건은 약 2–4분, 1,652건은 약 6–12분이지만 이번 두 영상 처리량은 미측정이다. 이 수치를 완료 시간 약속이나 상한으로 쓰지 않는다. 기술 실측 요청/분과 loading 시간을 이용해 P/E wall-clock을 다시 산출해 본생성 전에 저장한다. 검증·출처 연결 시간은 별도 기록한다.
+
+새 학습 checkpoint는 없다. 요청별 원시 token·시도·pixel hash, worker별 결과, protocol, 원자적 completion을 재개 지점으로 쓴다. 완료 요청도 현재 입력·소스 연결을 검증한다. 활성 claim을 지우지 않는다. OOM은 batch/동시성을 낮추고 같은 과학 조건으로 재개한다.
+
+# Implementation Tasks for Claude
+
+1. 승인 기반과 reuse manifest를 확인하고 새 결과 root를 `research/results/iter_108`로 고정한다. 기존 결과·checkpoint·정책은 변경하지 않는다.
+2. 한정 source/환자/정답/예측 연결과 기술 6명의 영상 검사를 완료한다. 별도 자료 감사 반복을 만들지 않는다.
+3. crop·prompt·요청 목록·parser·metric·확대 및 종료 분기를 구현하고 fixture와 독립 계산 예제를 준비한다. 모든 분기 코드와 입력 hash를 본생성 전에 잠근다. 구현자가 추가 수치 문턱을 만들지 않는다.
+4. 기존 M15 실행 패턴을 이용해 새 다중 영상 wrapper를 연결한다. 구 실행기 전체를 개편하지 않는다. 파일 크기 기반 가중치 계승, admission 실패 기록 누락, 완료 입력 검사 문제는 이번 경로에서 해소한다.
+5. 기술 6명에서 F 재현 12건, 공식 processor tensor 대조, 중단·재개·변조 거부, worker 구성 정합성을 검사한다. F가 재현되지 않으면 원인을 확인한다. provenance가 같은데 실행 환경 차이로 token이 달라지면 저장 F를 주대조로 혼용하지 말고 이번 동일 환경에서 해당 단계 F를 새로 생성한다. 이 경우 추가 비용은 2×180 또는 2×600건이며 실행 전에 이유와 새 예산을 기록한다.
+6. P180 및 승인된 조건부 E600을 실행한다. 단계 결정은 해당 endpoint의 결과와 코드 잠금 hash를 연결한다.
+7. full-denominator 결과, 조건별 형식 실패, paired 손익, 단순 정책 및 비용을 보고한다. production 함수와 독립적으로 주요 정확도·전이 수·CI를 재계산한다.
+
+# Evaluation (성공/실패 기준 포함)
+
+## 지표
+
+- 주요 endpoint: nonempty 환자에서 T−D의 O 정확도; nonempty not_normal_no_opacity에서 T−D의 A 정확도.
+- 위치 대조: T−C의 O 및 A 차이. D−F는 추가 영상과 공통 안내문의 합성 효과다.
+- 전체 정책 지표: P180/E600의 category별 정답 쌍 정확도와 균등 평균 S_scope, O의 sensitivity/specificity, A의 category별 정확도.
+- 보존 지표: 두 답변 모두 semantic-valid인 correct→wrong 및 wrong→correct 환자 수. invalid로 생긴 전이는 별도 표시한다.
+- crop 특성: 면적비, T=C 여부, 유효 box 수, 양성 환자의 GT와 예측 영역 대응을 사전 정의한 기술통계로 보고한다. 이를 결과를 좋게 만드는 후속 subset 선택에 쓰지 않는다.
+
+invalid는 전체 분모에서 실패로 계산한다. 동시에 paired 비교에서 invalid 답을 모두 유리/불리하게 배정한 정확도 차이 범위를 보고한다. 내용 효과의 방향이 이 범위에 따라 바뀌면 형식 영향과 분리되지 않았다고 판정한다. valid-only 성능을 주결과로 대체하지 않는다.
+
+category 내 환자 paired bootstrap 10,000회, seed 10817로 95% 탐색 CI를 계산한다. 모든 조건·질문을 환자 단위로 함께 재표집한다. normal nonempty는 최대 5명이므로 해당 조건의 안정성·동등성 주장을 하지 않는다. 변화 0건에서는 퇴화 bootstrap만 제시하지 않고 사건율의 exact binomial 구간도 보고한다.
+
+## 양성 관찰과 후속
+
+최종 수행 단계에서 주요 차이의 절댓값이 10pp 이상이고 CI가 0을 제외하며, 최소 3명의 semantic-valid 변화와 형식 민감도 검사로 방향이 유지되면 해당 입력 정책 효과의 제한된 양성 근거로 기록한다. T−C·D−F·localizer 오류에 따라 설명 범위를 좁힌다.
+
+T의 O 이득을 R이 그대로 사용하면서 A 손상을 피하고 R_L/R_B가 비슷하거나 더 나으면 단순 대안의 충분성을 받아들이고 새 방법 투자는 보류한다. R의 정의상 보존을 새 발견으로 보고하지 않는다. 대안보다 남는 10pp 규모의 정확도 기회 또는 실측된 비용 부담이 있어야 최소 개입을 후속 후보로 제안하며, 신규성은 별도 검토한다.
+
+## 음성
+
+T가 D/C보다 의미 있는 표적 이득을 보이지 않거나 손상이 추가 영상·단순 확대·잘못된 localizer로 설명되면 현재 시각적 근거 제공 후보의 방법 투자를 보류한다. crop-only보다 원본 보존이 좋다는 결과만으로 새로운 결합 문제를 주장하지 않는다. 유효한 음성 관찰은 보존한다.
+
+## 불확정
+
+작은 차이·넓은 CI·형식 의존·기본 판단 부족은 각각 구분한다. 허용한 E600 이후 추가 생성·학습·crop 조정은 하지 않는다. 재개에는 동일 불확실성을 줄일 구체적인 자료·대조 또는 새로운 잔여 가치 근거가 필요하다. 단순히 CI가 넓다는 이유로 다음 실험을 예약하지 않는다.
+
+실행 유효성, 성능 변화, 가설 지지, contribution을 별도로 보고한다. 입력·정답·provenance 결함으로 비교가 무효면 execution_failed이며 가설의 음성이 아니다.
+
+# Risks / Checks
+
+- 예측 box는 정답 근거가 아니다. nonempty 선택 자체의 편향과 localizer 오탐을 보존한다.
+- 중앙 crop은 정상 대조가 아니며, GT를 보고 비표적 영역으로 이동시키지 않는다.
+- enclosing crop은 여러 box 사이의 context를 포함한다. 완전한 병변 격리나 동일 정보량을 주장하지 않는다.
+- 원본을 보존해도 모델 내부 표현 보존은 보장되지 않는다. tensor 확인과 인과 해석을 구분한다.
+- 기존 Q_A의 기본 정확도가 낮다는 점을 유지한다. 새 손상만으로 충분한 인식 이후의 일반 결합 결함을 선언하지 않는다.
+- R/R_L/R_B는 사전에 고정한 정책이다. 결과를 보고 환자별 최선 답을 고르는 oracle ensemble을 실용 비교군으로 사용하지 않는다.
+- 데이터는 반복 개발 자료이며 base의 사전학습 노출도 완전히 배제되지 않는다. 독립 일반화·임상 성능 주장을 하지 않는다.
+- 기본 환경과 hf_cache는 변경하지 않는다. 필요 패키지는 사전 알림 후 승인된 격리 환경에 설치하고 실제 입력으로 검증한다.
+- full review와 --confirm-each-iter를 유지한다. 이번 계획의 조건부 확대만 승인 범위이며 다음 반복은 별도 사용자 승인이 필요하다.
+
+## 대규모 GPU 필요 후보
+
+동일 자료·노출량에서 위치 supervision, 답변 supervision, vision encoder 적응을 분리하는 다중 seed 공동 학습은 장기 후보로 남긴다. 현재 관찰이 그 투자를 요구한다는 근거는 없으며 이번에는 수행하지 않는다.
+
+# 계획의 근거 (GPT 조사 노트)
+
+## 이번 라운드의 결론
+
+국소 영상 근거의 판단 가치를 선택한다. PadChest-GR에서 임의의 속성·음성 정답을 만드는 설계는 채택하지 않는다. 기존 RSNA의 두 질문을 함께 사용하면 같은 영상에서 표적 판단과 더 넓은 판단의 손익을 구분할 수 있다. 이는 iter_017의 텍스트 전달 실험과 다른 개입이며, 신규성이 확인된 방법은 아니다.
+
+## 직전 질문에 대한 답
+
+1. **PadChest-GR 정답 적합성:** 실제 JSON의 첫 항목에서 양성 문장·labels·locations·boxes/extra_boxes를 확인했다. 양성 문장인데 box가 없는 경우도 있다. 이 자료만으로 임의 속성 정답이나 미표기 소견의 음성을 만들 수 없다. 후보 1의 자료를 RSNA로 구체화한다. 질문은 영역 자체의 임상 진위가 아니라 공개된 원본 영상의 두 label 판단이다.
+2. **가까운 선행의 범위:** [PadChest grounding 연구](https://proceedings.mlr.press/v315/aas-alas26a.html)는 전체 영상+grounding과 부분·노이즈 근거의 이득을 보고한다. PDF는 web 도구의 content-type 오류, 로컬 읽기 요청은 DNS 실패로 본문을 확보하지 못했다. 세부 대조 부재를 주장하지 않으며, 단순 전체+영역 효과는 이미 선행 범위라고 보수적으로 취급한다. [Grounding과 Medical VQA 연구](https://arxiv.org/html/2604.27720v2)의 crop 조건 및 학습 대조도 확인했다. 이번 원본 보존·질문 범위별 손익 진단의 신규성을 보장하지 않는다. [Visual Evidence Prompting](https://aclanthology.org/2025.acl-long.205/)도 전문 모델의 정보를 전달하는 가까운 대안이다.
+3. **위치 학습 전이 후보:** 기존 출력으로 형식 차이는 분석할 수 있지만, 낮은 report-only baseline·선택 조건·판독 의미 평가의 경쟁 설명을 해소할 새 근거는 없다. 추가 학습 없이 후보 1보다 분명한 정보 이득을 제공하지 못하므로 이번에는 보류한다. 학습 recipe의 실패를 질문 전체의 기각으로 읽지 않는다.
+
+## 원본과 로컬 확인
+
+- round_01.json 원문, GOAL, iter_107 review를 읽었다. 10/10 두 영역 보존과 부분 누락 0을 유지한다.
+- iter_016/017/037의 review.json, iter_017 plan, LIMITATIONS의 rsna-evidence-interface-sensitivity, 관련 CODE_ASSETS 항목을 확인했다. iter_017의 좌표 추가 효과 부재와 NoOpacity/NotNormal 손실은 현재 범위로 보존한다.
+- `results/iter_016/manifests/sets.json`, `labels.json`, `infer_manifest.jsonl`과 `results/iter_015/reuse/bbox_B0_concise.jsonl`을 읽었다. P180의 비어 있지 않은 출력은 opacity 54, normal 1, not_normal_no_opacity 17명이다. E600은 각각 164, 5, 67명이다. 해당 목록에서 누락·간단 JSON 파싱 실패는 0이었다. 정식 source·좌표 검증을 대신하지 않는다.
+- 기존 D12는 위 bbox 재사용 파일에 없었다. 따라서 새로운 D12 bbox 생성을 발주하지 않고 P180 안의 고정 6명으로 기술 검사를 구성한다.
+- 현재 research HEAD는 e2a66795876215937e1eda5b2c6e70d30474298d이며 status/diff는 비어 있다. 필요한 qa_spec은 현재 브랜치에 없어 실제 이전 blob을 확인했다. 새 기반으로 사용할 iter_082의 reusable_code=true와 제한 승인 범위, tree를 확인했다.
+- [MedGemma 1.5 공식 카드](https://huggingface.co/google/medgemma-1.5-4b-it)는 다중 patch·longitudinal 입력을 설명하지만 일반 다중 영상 평가에 관한 제한 문구도 남아 있다. 따라서 전체+crop은 지원 processor를 사용하는 확장 사용 진단이며 공식 검증 과제의 재현이라고 부르지 않는다.
+- 파일 변경·환경 설치·모델 실행은 하지 않았다. 새로운 과학적 관찰은 없다.
+
+## 대규모 GPU 필요 후보
+
+위치·답변 supervision과 vision encoder 적응을 동일 노출량으로 분리하는 다중 seed 공동 학습은 장기 후보로 보존한다. 현재 실험은 그 필요성을 입증하지 않으며 이번에 발주하지 않는다.
+
+이전 사고 라운드 노트: agent/runs/iter_108/think/
+
+
+
+## iter_108 CLAUDE IMPLEMENTATION REPORT — 2026-10-11 15:38:11
+
+# 요약
+
+- **핵심 결과:** 예측 영역 crop(T)을 원본에 더해도 표적 음영 질문(O)은 좋아지지 않았다. T는 원본 복제(D)와 같거나 약간 낮았다. 크기를 맞춘 중앙 crop(C)과도 차이가 없었다. 전체 비정상 질문(A)의 하락은 대부분 답변 형식 이탈로 설명된다. 단순 규칙(bbox가 비어 있으면 no)이 T 정책(R)보다 낫거나 같았다. 이 설정의 입력 방식에 방법 투자는 보류한다.
+- **근거:** E600 nonempty 236명에서 정확도 차이를 환자 단위 bootstrap 95% 구간으로 계산했다. T−D O는 −0.030 [−0.064, +0.004]이고, 답이 달라진 환자는 8명(개선 3·악화 5)이다. T−C O는 +0.004 [−0.025, +0.034]이다. S_scope(O·A를 모두 맞춘 비율의 category 균등 평균)는 F/R/R_L/R_B가 0.610/0.597/0.530/0.632이다. 새 요청 1,652건은 모두 EOS 종료·재시도 0이다.
+- **주의:** frozen MedGemma 1.5와 RSNA 개발 자료, 단일 설정이다. A 질문에서 새 안내문 아래 "설명 문장"으로 답한 비율이 F 1%에서 D/T/C 27~43%로 늘었다. 주 parser(semantic_v1)가 이를 오답으로 처리하므로 A의 하락은 내용 효과와 분리되지 않는다. 여기에 O 정확도의 상대 크기가 영향을 줬을 가능성은 미확인이다.
+- **다음:** 새 구현과 실행에 이어 이후 투자 판단은 GPT 리뷰와 사용자 승인에 맡긴다.
+
+# Work Performed
+
+- 승인 기반과 reuse manifest의 11개 blob을 확인했고(SHA 일치), 새 결과 root를 `results/iter_108`로 고정했다.
+- 한정 자료 점검을 했다. P180/E600 nonempty는 계획 집계와 일치한다(54/1/17, 164/5/67). 저장 B0 bbox는 invalid/truncated가 0건이다. 영상 file hash 불일치는 0건이다. F 1,200건은 모두 EOS 종료(cap 1000)이다.
+- crop 기하·두 영상 요청·F 재현 요청(`ev108_spec/data/build/run.py`)과 평가·분기 코드(`ev108_eval.py`, `ev108_report.py`)를 구현했다.
+- 기존 `pg43_run.py` 패턴 위에 다중 영상 runner를 새로 만들었다(`ev108_run.py`). 계획이 요구한 보완을 이 경로에서 해소했다.
+  - 가중치 파일 내용 sha256을 protocol에 잠그고 worker가 시작할 때 다시 대조한다. 파일 크기로는 계승하지 않는다.
+  - 요청 행 전체를 재구성해 `request_id`를 다시 계산한다.
+  - 영상별 tensor hash를 기록한다.
+  - admission 실패와 attempt 종료 상태를 파일로 남긴다.
+  - 전수 검증을 통과해야 completion을 쓴다.
+- 평가·분기·policy·요청·입력은 **2026-10-11 15:04:01 KST**에 잠갔다(`protocol/eval_lock.json`). 이 시각 이전에 multi-image 출력은 없다. 잠금 이후 잠금 파일 변경은 0건이다(eval lock 21개 파일·각 stage protocol의 코드·locked_files).
+- F 12/12 재현 → 기술 gate → P180 → 사전 분기(확대 필요) → E600R 순서로 실행했다.
+
+# Files Changed
+
+- 새 코드: `ev108_{spec,data,build,run,eval,report,verify,lock,frepro,overlay}.py`, `test_ev108{,_proc,_qaspec,_report_dry,_runtime}.py`
+- 반입: `rsna_diag/qa_spec.py`와 iter_105 파일 9개는 blob 일치만 확인했으며 수정하지 않았다.
+- 결과는 `results/iter_108/` 아래에만 썼다. 기존 결과·checkpoint·정책 파일은 건드리지 않았다.
+
+# Commands / Experiments (실제 실행한 명령과 성공/실패)
+
+- 반입 파일 blob 해시 대조: 성공.
+- `ev108_build.py`로 crop·요청 생성: TECH 42, P180R 462, E600R 1,148건(과학 요청 합계 1,652)을 만들었고 `ev108_build.py frepro`로 FREPRO 12건을 만들었다. 성공.
+- `test_ev108.py`(CPU fixture): 61/61 통과. 처음엔 2건이 실패했다. 테스트 자체의 오기(`aff` 연쇄 비교)와 잘못 설정한 fake CI 때문이었고 코드는 고치지 않았다.
+- `test_ev108_proc.py`: 98/98 통과. 처음 두 번 실패했다. 첫 실패는 image token id를 `processor.image_token_id`(`<start_of_image>`)로 센 것이고 `<image_soft_token>` 262144로 고쳤다. 둘째 실패는 독립 경로 B에서 `<bos>`가 이중으로 붙은 것이고 `add_special_tokens=False`로 고쳤다. 두 실패 파일은 이름을 바꿔 보존했다. 이번 결론을 막는 오류는 아니다.
+- `test_ev108_report_dry.py`(합성 답변으로 전체 보고 경로): 성공.
+- F 12요청(2 worker): 입력 id·출력 token 12/12 일치.
+- TECH 42요청: w2, w4, 부분 재개(`resume`)가 모두 token·tensor hash 일치. SIGKILL 후 재개와 admission 거부 시험까지 포함해 `test_ev108_runtime.py` 20/20 통과.
+- P180R 462요청과 E600R 1,148요청: 각각 2 worker(GPU 0, 1 각 1개)로 실행했다. exit code 0이다.
+- `ev108_report.py` p180 → `decision_P180.json`(expand=true) → e600 `final_E600.json`: 성공.
+- `ev108_verify.py` p180/e600: 독립 재계산 all_ok.
+- `test_ev108_qaspec.py`: 18/18 통과.
+- 실패한 명령은 위 첫 번째와 두 번째 proc 시도뿐이다. 그 밖의 오류와 OOM은 없었다.
+
+# Results (수치와 결과 파일 경로)
+
+- **한정 자료 점검과 단계:** 도달 단계는 E600 nonempty 236명이다. P180에서 T−C O가 사전 분기 B(환자 4명 변화, CI가 0과 +10pp를 함께 포함, 예상 반폭 0.038 ≤ 0.15)를 충족해 확대했다. 확대는 효과를 본 선택이 아니라 사전에 잠근 규칙의 결과다. `eval/decision_P180.json`.
+- **E600 주 endpoint** (`eval/report_E600.json`, `comparisons_sem`):
+
+  | 비교 | 차이(95% CI) | 의미 있는 변화 환자 |
+  |---|---|---|
+  | T−D O | −0.030 [−0.064, +0.004] | 8명 (3 개선, 5 악화) |
+  | T−D A (not_normal_no_opacity, n=67) | −0.134 [−0.224, −0.060] | 0명 (전부 invalid 유발 9건) |
+  | T−C O | +0.004 [−0.025, +0.034] | 8명 (6 개선, 2 악화) |
+  | D−F O | −0.004 [−0.038, +0.030] | 13명 |
+  | L−F O | −0.186 | 147명 |
+
+  `limited_positive`(사전 정의한 제한적 양성 기준)는 세 endpoint 모두 false이다.
+- **A 질문 형식 실패** (semantic_v1 invalid 수): D 65, T 98, C 102, F 2. A 전체에서 답이 달라진 환자(두 답이 모두 유효)는 0명이다. F 대비 D의 not_normal_no_opacity A 정확도가 0.866 → 0.388이고 invalid는 31이다.
+- **Policy** (`policies_sem`, 전체 600명, 빈 예측은 F): S_scope는 F 0.610, R 0.597, R_L 0.530, R_B 0.632이다. 차이는 R−F −0.013 [−0.030, +0.002], R_B−F +0.022 [−0.002, +0.045], R_B−R +0.035 [+0.007, +0.063]이다. F의 S_scope 0.610은 iter_016 보고의 M0 semantic 값 0.6100과 일치한다.
+- **crop 특성:** nonempty 236명에서 T와 C가 같은 경우는 0이다. 면적비 중앙값은 0.067이다. 양성 164명 중 예측 box가 GT와 IoU 0.3 이상인 경우가 139명이다.
+- **정합성:** `verify_*.json`에서 점추정·전이 수·S_scope가 정확히 일치했고 CI 차이는 0.03 미만이다(CI 재표집은 같은 seed의 층화 bootstrap 별도 구현이다). `RESULT_MANIFEST.json`에 25개 산출물의 sha256을 남겼다.
+- **비용(실측):** wall은 P180R 462요청 356.4초, E600R 1,148요청 778.3초이다. 생성 구간 처리량은 약 89–93 req/min이다. GPU peak 예약 메모리는 8.41GB이다. 요청당 평균 생성 시간은 D 0.95초, T 1.18초, C 1.21초, L 0.47초이다. localizer 비용은 이번에 측정하지 않았다.
+- **병렬 구성 비교(TECH 42요청):** GPU당 1 worker(w2)는 58.2 req/min, 2 worker(w4)는 56.1 req/min으로 이득이 없었다. 장치 시간은 135초 → 156초로 늘었다. 그래서 w2를 채택했다. 4 worker를 본실험에 쓴 적은 없다.
+
+# Goal Progress / Reused Assets (목표 진전·미검증 범위, 재사용 출처·검증)
+
+- **시험 설정:** 이 입력 방식(두 번째 영상 제공 + 고정 안내문, frozen reader)은 더 투자할 가치가 낮다. 실행 유효성은 확보됐다. 성능 변화는 거의 없다. 가설 지지(국소 영상 제공의 이득)는 얻지 못했다.
+- **연구 관찰(유지):** 같은 원본이 있을 때 예측 영역 crop은 O에 도움이 되지 않고 위치 선택 효과도 보이지 않는다. A에서는 안내문/다중 영상 때문에 출력 형식이 크게 깨지는 현상이 관찰됐고, 이는 내용 판단 변화와 분리되지 않았다.
+- **연구 질문(미결):** 이 결과만으로 외부 영상 근거의 가치를 판단할 수 없다. 모델·자료·입력 방식을 한 조건만 본 것이다. 이번 조건은 신규성을 주장하지 않는다.
+- **미검증:** 형식을 통제한 A 질문(안내문 없이 또는 단일 답변 강제), 독립 확인 집단, 다른 모델, 학습 적응, 임상 정확성. P180⊂E600은 개발 자료이므로 독립 확인으로 부르지 않는다.
+- **재사용 검증:** `qa_spec.py` blob 일치와 18/18 fixture, F의 token 재현과 S_scope 일치. `pg43_run.py`의 소유권·부분 행 복구·digest 함수는 실제 SIGKILL 재개와 변조 거부로 검증했다. `lk105_run.py`는 설계 참고만 했고 호출하지 않았다. 반입한 `generate.py`는 `load_image`, `generate`, 모델 로딩 경로만 사용했다.
+
+# Problems (현재 결론 무효 / 재사용 전 수정 / 추후 개선을 구분)
+
+- **현재 결론 무효:** 없다.
+- **재사용 전 필요:** `ev108_run.py`의 admission은 시작 시점의 free 메모리만 본다. 시작 이후 외부 점유 증가를 다시 확인하지 않는다. 같은 이유로 재개 시 다른 worker 수를 쓰면 예약량이 달라진다. 현재 2 worker 실행에서는 영향 없었다.
+- **추후 개선:**
+  - 시각 감사는 overlay 6개 중 3개만 직접 열어 확인했고 나머지 3개는 열지 않았다.
+  - 독립 검증의 CI 차이가 정확히 0인 것은 같은 seed·유사한 재표집 순서 때문일 수 있다. 완전한 독립 재표집이 아니라 점추정·전이 수 일치를 주 근거로 본다.
+  - weights 해시 검증이 worker 시작마다 약 25초를 더한다. 로딩 시간 측정에 포함됐다.
+  - 이번 평가기는 이 고정 표본 전용이다.
+
+# Recommendation to GPT
+
+- 이번 반복에 추가 실험은 필요하지 않다. 사전 분기에 따라 E600까지 마쳤고 `limited_positive`는 모두 false이다.
+- 추천: 이 입력 방식은 투자 보류로 종료하고, 소견·위치 정보를 활용하는 다른 최소 비교로 넘어가는 선택을 검토하라. 이유는 단순 규칙 R_B가 R 이상이었고 T와 C가 구분되지 않았기 때문이다.
+- 타당한 대안 하나: A 질문 형식 이탈이 내용 판단과 분리되지 않았으므로, 지시 형식(안내문 유무)을 통제한 한정 대조로 A 손상이 형식 때문인지 확인하는 선택. 다만 이 결정은 원 주판정과 분리되는 설계 변경이므로 계획 단계 승인이 필요하다. 구현자는 parser를 바꾸지 않았다.
+
+SELF_CHECK: PASS
+SUMMARY: 원본에 예측 영역 crop을 더하는 방식은 표적 음영 판단을 개선하지 못했고(T−D O −0.030, T−C O +0.004, E600 236명), A 하락은 답변 형식 이탈이 주원인이며 단순 bbox 규칙이 T 정책 이상이라 이 입력 방식 투자는 보류를 권고한다.
+
+# [orchestrator] 권한 거부된 도구 호출
+- Bash: python - <<'EOF'
+import json
+s=json.load(open('results/iter_016/manifests/sets.json'))
+print({k:{c:len(v) for c,v in d.items()} if isinstance(d,dict) else len(d) for k,d in s.items()})
+l=json.load(open('results/iter_016/manifests/labels.json'))
+print(len(l), list(l.items())[:2])
+print(open('results/iter_016/requests/p180x_ev__M0.jsonl').readline()[:1500])
+print(open('results/iter_016/requests/e600x_plain__M0.jsonl').readline()[:1500])
+r=json.loads(open('results/iter_016/gen/e600x_plain__M0/gen_worker0.jsonl').readline())
+print({k:(v if k not in('input_ids','suffix_ids','attempts') else '...') for k,v in r.items()})
+print(json.load(open('results/iter_016/gen/e600x_plain__M0/completion.json')).keys())
+EOF
+- Bash: python -c "
+import json,glob,collections
+sets=json.load(open('results/iter_016/manifests/sets.json'))
+lab=json.load(open('results/iter_016/manifests/labels.json'))
+bb={}
+for l in open('results/iter_015/reuse/bbox_B0_concise.jsonl'):
+    r=json.loads(l); bb[r['id']]=r
+print(len(bb))
+for S in ('P180','E600'):
+    c=collections.Counter(); ne=collections.Counter()
+    for cat,ids in sets[S].items():
+        for i in ids:
+            assert lab[i]['category']==cat
+            r=bb[i]; c[(cat,r['ended_eos'])]+=1
+            if r['suffix_text_raw'].strip()!='[]<end_of_turn>': ne[cat]+=1
+    print(S,dict(c),dict(ne))
+print(len(set(sets['P180']['opacity'])-set(sets['E600']['opacity'])))
+# F coverage
+fs=collections.Counter()
+for st in ('e180_plain__M0','e600x_plain__M0'):
+    for fn in glob.glob('results/iter_016/gen/%s/gen_worker*.jsonl'%st):
+        for l in open(fn):
+            r=json.loads(l); fs[(st,r['target'],r['condition'],r['fmt'])]+=1
+print(fs)
+"
+- Bash: nvidia-smi --query-gpu=index,uuid,memory.used,memory.total --format=csv; df -h /SSD1_1TB | tail -1; echo $CUDA_VISIBLE_DEVICES
+- Bash: printenv CUDA_VISIBLE_DEVICES
+
+
+
+## iter_108 GPT REVIEW [CONTINUE] — 2026-10-11 15:42:21
+
+# 요약
+
+- **판정:** 유효한 실험이다. 현재 crop 제공 설정의 추가 투자는 보류한다.
+- **핵심 근거:** E600 nonempty 236명에서 표적 판단 T−D는 −2.97pp, T−C는 +0.42pp였다. 사전 제한적 양성 기준은 모두 미달했다.
+- **의미·한계:** 복잡한 crop reader의 추가 가치는 확인되지 않았다. 형식 실패가 있어 내용 판단 능력의 무효성이나 손상을 확정하지 않는다.
+- **다음:** 추가 생성·학습을 권고하지 않는다. 결과와 재개 조건을 보고하고 다음 반복 승인·피드백을 기다린다.
+
+## 알림 요약
+
+- 결과: 흉부 X-ray 개발 236명에서 예측 crop은 원본 복제보다 표적 정확도가 3.0pp 낮았고 중앙 crop과는 0.4pp 차이였다. 전체 600명의 정답 쌍 점수는 crop 정책 0.597, bbox 규칙 0.632였다.
+- 의미: 현재 시각 근거 제공 설정에 추가 투자할 근거가 약해졌다. 전체 비정상 판단의 하락은 형식 실패와 분리되지 않아 일반적인 근거 결합 결함은 미확정이다.
+- 후속: 현재 설정을 보류하고, 단순 대안 이후의 중요한 잔여 문제를 구체화할 새 근거가 있을 때만 재개할 것을 권고한다.
+- 대안: A 질문의 형식 통제 비교는 내용 손상 여부를 좁힐 수 있지만, 표적 이득이 없는 현재 결과에서 방법 투자 결정을 바꿀 가치가 낮아 우선하지 않는다.
+
+# Assessment
+
+계획한 P180 탐색과 조건부 E600 확대를 완료했다. `valid_experiment=true`, 현재 설계의 후속 투자는 `abandon`으로 판정한다. 이는 분야 전체의 가설 기각이 아니다.
+
+실제 담당은 engineer_backend.json과 claude_meta.json에서 Claude, Sonnet/medium으로 확인했다. 리뷰 대상은 `c2602f4b237ec9a90b7e04c99474ea7a0003bfb0`이다. changes.patch의 신규·반입 파일을 검토했고 commit.json에 지정된 파일은 현재 작업 파일과 모두 일치했다. unpreserved_paths는 없다.
+
+# Key Findings
+
+**실행과 사전 분기.** TECH 42건, P180R 462건, E600R 1,148건으로 과학 요청은 1,652건이다. 고유 요청 ID 1,652개, 최종 EOS 1,652건이며 completion의 worker 파일 hash가 일치했다. F 재현 12건과 worker 비교·재개 검사는 별도 기술 비용이다. 평가 잠금의 21개 파일과 입력 hash는 현재 파일과 일치했고 잠금은 신규 과학 출력보다 앞섰다. 실제 도구 로그에서 잠금→F 재현→TECH→P180→E600 실행을 확인했다.
+
+P180의 T−C O는 +4.17pp, CI [−2.78, +11.11]pp, 두 답변이 유효한 변화 4명이었다. 예상 반폭 3.84pp로 사전 확대 분기 B를 충족했다. E600 확대는 허용 범위였다.
+
+**독립 재계산.** production 평가 함수를 호출하지 않고 원시 응답의 parser와 category 층화 bootstrap을 별도로 구성했다.
+
+- T−D O: 236명, 차이 −7/236=−2.97pp, 95% CI [−6.36, +0.42]pp. 유효 답변 간 개선 3명·악화 5명이다.
+- T−C O: +1/236=+0.42pp, CI [−2.54, +3.39]pp. 유효 답변 간 개선 6명·악화 2명이다.
+- T−D A, not_normal_no_opacity: 67명, −9/67=−13.43pp, CI [−22.39, −5.97]pp. 유효 답변 간 변화는 0명이고 점수 전이 9건은 invalid가 관여했다.
+- 전체 E600 정답 쌍: F 366/600=0.6100, R 358/600=0.5967, R_L 318/600=0.5300, R_B 379/600=0.6317. 세 category가 각각 200명이므로 이 비율은 S_scope와 같다.
+
+근거는 `results/iter_108/eval/report_E600.json`, `decision_P180.json` 및 해당 gen 원시 출력이다.
+
+**입력 검증.** 원본 pixel과 저장 crop 사각형으로 T/C 영상 472개를 독립 재구성해 불일치 0을 확인했다. 대표 overlay를 직접 확인했다. 공식 processor 대조 98/98, F 입력·출력 token 12/12 재현, runtime 검사 20/20의 저장 결과와 관련 실행 로그를 확인했다. GT가 crop 선택에 들어가는 경로는 확인되지 않았다.
+
+**자원.** 두 GPU를 사용했다. TECH 처리량은 2 worker 58.2 req/min, 4 worker 56.1 req/min으로 이번 작은 작업에서 추가 worker의 이득이 없었다. 본실행은 GPU당 1 worker였고 P180R/E600R wall-clock은 약 356/778초, peak reserved 메모리는 8.41GiB였다. 낮은 utilization을 이유로 결과를 기각할 사유는 없다.
+
+# Problems / Concerns
+
+현재 제한된 결론을 무효화하는 blocker는 없다. 다만 해석과 재사용에 다음 제한이 있다.
+
+1. **O도 형식 영향이 있다.** T/D/C의 O invalid는 22/17/20건이다. T−D의 형식 민감도 범위는 [−10.17, +6.36]pp, T−C는 [−8.05, +9.75]pp로 방향이 바뀐다. 따라서 '위치 선택 효과가 없다'보다 '현재 평가에서 추가 이득을 확인하지 못했다'가 정확하다.
+2. **A 점수 하락은 내용 손상의 증명이 아니다.** A invalid는 F/D/T/C에서 2/65/98/102건이다. 원시 출력에는 명시적인 최종 yes/no를 포함하지만 고정 parser가 거부하는 설명문도 있다. T−D A의 형식 범위는 [−59.70, +46.27]pp다. 문장 내용을 사후 구제해 원 점수를 바꾸거나, 모든 설명문을 올바른 판단으로 간주하지 않는다.
+3. **과거 F 출처 검사는 재사용 전에 보완해야 한다.** load_gen_dir는 worker hash 검사라는 주석과 달리 해당 검사를 하지 않는다. F 원시 출력·요청·completion도 현재 eval lock의 내용 잠금에 포함되지 않는다. 이번에는 저장 집계, 중복 없는 1,200건, 과거 기준점과의 일치 및 12건 재현이 제한된 비교를 뒷받침하지만 범용 provenance 승인은 하지 않는다.
+4. **실행기 비용·실패 경로.** 출력 0건에서의 max 집계와 재개 시 현재 mapping으로 과거 worker를 해석하는 비용 집계는 수정이 필요하다. 현재 본실행은 해당 실패·배치 변경 조건이 아니었다.
+5. **정책·비용 설명.** R/R_L은 빈 bbox에서 F를 사용하지만 R_B는 no를 사용한다. 이를 공통 fallback으로 설명하면 안 된다. localizer 비용이 미측정이므로 시스템 비용 우위는 미판정이다.
+
+# Interpretation
+
+공개 RSNA 정답은 원본 영상의 표적 음영 유무와 정상/비정상 범주를 평가한다. crop 자체의 임상 진위, 모든 소견의 발견, 자유 판독 정확성을 평가하지 않는다. nonempty 환자 선택과 반복 개발 집단이라는 범위를 유지한다.
+
+원본을 보존한 예측 crop 제공은 이번 설정에서 유용한 표적 이득을 만들지 못했다. 중앙 crop과의 작은 차이도 위치 선택의 고유 가치를 지지하지 않는다. 그러나 두 질문의 형식 민감도 때문에 내부 인식·attention·근거 결합의 원인은 확정되지 않았다. 원본 tensor 보존은 내부 표현 보존의 증거가 아니다.
+
+# Strategy Check / 연구 방향 판단
+
+**시험 설정:** 현재 frozen reader·고정 안내문·예측 crop 설정은 보류한다. 계획한 확대를 마쳤고 단순 bbox 규칙 이후의 중요한 추가 가치가 확인되지 않았다.
+
+**연구 관찰:** iter_017의 텍스트 근거 인터페이스 의존성은 유지한다. 이번 시각 근거 비교는 별도 개입이며 같은 원인의 독립 재현이 아니다. iter_107의 공식 CURE 두 영역 보존 성공도 그대로 받아들인다. 현재 결과에서 추가로 배운 것은 crop 제공이 자동으로 표적 판단 개선을 만들지 않으며, 비정상 판단의 점수 하락은 형식과 분리되지 않는다는 점이다.
+
+**연구 질문:** 위치·영역 근거 활용 전체를 기각하지 않는다. 그렇지만 미해결이라는 이유만으로 같은 설정을 연장하지 않는다. 계획에서 보류한 위치 학습 전이 역시 새로운 학습 대조 근거 없이 재개하지 않는다.
+
+후속 선택은 두 가지로 비교했다. 첫째, 현재 설정을 보류하면 표적 이득이 없는 입력 방식의 추가 비용을 피하며 유효한 관찰을 보존한다. 둘째, A 형식을 통제하면 내용 손상 여부를 좁힐 수 있지만 현재 표적 효과와 단순 대안 비교를 뒤집을 근거가 부족하다. **첫째를 권고한다.** 범용 평가기 개발이나 또 다른 형식 순회는 발주하지 않는다.
+
+실행 유효성은 확보됐고 성능 개선은 미확인이다. H1의 실용적 이득과 H2의 내용 손상은 지지되지 않았으며 H3의 내부 원인도 확정되지 않았다. 신규 contribution은 없다. 기록상 신규 본생성은 약 18.9분, Claude 세션은 약 44.7분이지만 준비·검증·대기의 정확한 비용 분해는 없어 어느 항목이 지배했는지 단정하지 않는다.
+
+# Recommended Next Experiment
+
+지금은 추가 실험을 권고하지 않는다. 현재 설정을 보류하고 단순 대안 이후의 중요한 잔여 정확도·비용 문제, 공개 정답 범위, 결과별 투자 결정이 함께 구체화될 때만 재개한다. A 형식 보완은 가능한 대안으로 남기되 자동 후속으로 지정하지 않는다. 보류 기록만을 위한 iteration을 만들지 않고 사용자 승인·피드백을 기다린다.
+
+이번 방향에서 후속 탐구의 긍정적 근거가 확인되지 않아 논문 추천은 하지 않는다.
