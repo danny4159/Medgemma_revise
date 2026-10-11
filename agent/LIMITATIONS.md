@@ -297,3 +297,21 @@ PadChest-GR 공식 train의 반복 개발 E32에서 고정 CURE와 단일 phrase
 - 미해결: 공개 checkpoint의 환자별 학습 노출과 독립 일반화는 미확인이다.
 - 미해결: 독립 결합 이후 새로운 통합 방법이 필요한 실용적 잔여 문제는 확인되지 않았다.
 
+## rsna-global-presence-location-verification — observed
+
+반복 개발 RSNA E600에서 detector17 epoch18·threshold0.70의 nonempty 출력 226명에 대해, 고정 MedGemma 1.5 전역 opacity 존재 응답의 No를 이용한 검토는 같은 41명 검토량의 최대 box confidence보다 오류를 적게 포착했다(30 대 38). 양성 영상의 위치·coverage 오류 포착도 4 대 15였다. 이는 현재 고정 검토 규칙의 추가 가치 부족이며, 존재 응답의 모든 정보 부재나 영역별 검증·의료 VLM 전체의 한계를 뜻하지 않는다.
+
+- 적용 목표 시작: iter_003
+- 최신 리뷰: agent/runs/iter_111/review.json
+- 근거: research/results/iter_111/eval/report.json: 주 차이 −0.03539823, 환자 bootstrap 95% CI [−0.06046512, −0.00888889].
+- 근거: research/results/iter_111/eval/per_patient.json: 대상 226명, 오류 152명, resolved 222명, 검토량 41명.
+- 근거: 리뷰의 읽기 전용 독립 matching·10,000회 bootstrap 재계산에서 주 차이와 양성 위치 오류 차이의 CI가 일치했다.
+- 근거: 대상 내 unresolved 4건의 가능한 16개 배정을 전수 계산했으며 주 차이는 −3.54~−2.65pp였다.
+- 사용·평가 검증: 리뷰 SHA 7776d92ff7761cb88d111f5cae344fee98b0ac5d의 대상 14개 파일과 작업 파일이 일치했고 eval_lock의 코드 hash도 일치했다.
+- 사용·평가 검증: iter_016 원 protocol 두 개의 내용 digest와 요청·manifest hash를 대조했다. 원 리뷰의 정답 연결·학습 분리 검증을 해당 불변 입력 범위에서 재사용했다.
+- 사용·평가 검증: E600 영상 600개의 file hash, 고유 환자 600명, 원 detector·GT 행과 ledger 연결을 확인했다.
+- 사용·평가 검증: 존재 응답의 원 worker hash 및 text·EOS·request ID 연결이 일치했고 비EOS 응답은 없었다. 고정 추출 fixture 30/30을 재실행했다.
+- 미해결: 독립 환자·다른 모델·다른 질문 조건의 재현은 미검증이다.
+- 미해결: 영역을 직접 검사하는 검증기가 confidence 이후 유용한 정보를 제공하는지는 이번 비교로 판단하지 않았다.
+- 미해결: 오류 포착을 실제 임상 교정이나 시각 근거의 인과적 사용으로 해석할 수 없다.
+

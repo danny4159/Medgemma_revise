@@ -40776,3 +40776,411 @@ iter_109 원 리뷰의 crop 종료와 A의 미확정 상태는 유지한다. 이
 
 이전 사고 라운드 노트: agent/runs/iter_110/think/
 
+
+
+## iter_111 GPT PLAN [소견 판단의 위치 오류 식별 가치 / proceed] — 2026-10-11 22:18:06
+
+# 요약
+
+- **이번에 할 일:** RSNA의 지정 opacity에 대해 존재 판단이 잘못된 위치 근거를 추가로 식별하는지 비교한다.
+- **필요한 이유:** 소견이 있다는 답과 box가 함께 나와도 위치가 맞다는 보장은 없다. 단순 존재 gate의 성공과 위치 검증의 가치를 분리해야 한다.
+- **확인할 기준:** 같은 검토량에서 detector confidence보다 오류를 더 찾는지, 그 이득이 양성 영상의 위치 오류에도 남는지 본다.
+- **주의·다음:** 저장 출력의 개발 분석이다. 새 학습·crop·parser 탐색은 없으며 결과 후 다음 반복은 사용자 승인을 기다린다.
+
+## 알림 맥락
+
+- 연구: 위치 근거와 의료 VLM 판단의 연결
+- 데이터: 흉부 X-ray RSNA 개발 E600
+- 모델: MedGemma 1.5 원본 영상 응답, 직접 grounding SFT, detector17의 저장 출력
+- 과제: 지정 opacity의 존재 답변과 위치 출력을 공개 정답으로 함께 평가한다
+- 가설: 존재 판단이 주는 오류 신호는 detector confidence로 설명되거나 부재 오류에 한정될 수 있다
+- 질문: 소견이 있다는 판단은 잘못된 위치 근거를 걸러내는 데 실제로 도움이 되는가?
+- 변경: 구체화
+- 연결: 자유 생성 문장의 정답 연결 부족 → 사용자 승인에 따라 명시적인 존재·위치 정답으로 범위를 좁힌다
+- 작업: 저장 실제 출력의 오류 분해와 동일 검토량 비교로 독립 확인에 투자할지 결정한다
+
+# Current Understanding
+
+iter_110은 계획 확인 단계에서 사용자 보완으로 전환됐다. 구현 실패나 모델 가설의 음성 결과가 아니다. 자유 판독문 전체의 정확성 검증은 보류한다. iter_108~109의 crop 투자 종료와 parser 분석 종료도 유지한다.
+
+RSNA E600에는 opacity/normal/not_normal_no_opacity 각 200명이 있다. 표적은 pneumonia 자체가 아니라 기존 Q_O와 연결된 pulmonary opacity suspicious for pneumonia다. 음성 두 범주는 표적 음성이며 모두 임상적으로 정상이라는 뜻이 아니다.
+
+iter_042의 presence gate 성공은 중요한 반대 근거다. 존재 확인이 음성 false-box를 줄인다는 사실을 새로 발견하려는 실험을 하지 않는다. 이번 질문은 그 신호가 위치 근거의 정확성까지 검증하는 데 유용한가이다.
+
+# Strategy Check / 연구 방향 판단
+
+**기술 질문 → 실패 조건 → 공개 정답 비교 → 주장 범위:** 전역 존재 판단의 추가 오류 식별력 → 존재 답과 nonempty box가 일치하지만 box가 주석에 맞지 않는 조건 → 명시적 표적 존재 라벨과 양성 box의 matching, 같은 검토량의 confidence 대조 → 현재 RSNA 출력에서의 오류 검토 가치에 한정한다. 근거의 인과적 사용이나 자유 판독 사실성을 주장하지 않는다.
+
+후보는 두 개만 비교했다. 첫째는 이번 존재 판단의 위치 오류 식별 진단이다. 기존 자료로 존재 오류와 위치 오류를 분리하고 강한 단순 대조를 넣을 수 있다. 둘째는 공동 답변·좌표 생성이다. 그러나 iter_048은 공동 형식 직접 학습으로 큰 회복을 보였으며, 이번에 새 인터페이스를 만들면 같은 형식 혼선을 반복할 가능성이 크다. 첫째를 선택한다.
+
+**시험 설정:** 모델과 입력을 바꾸지 않고 저장 출력을 비교한다. SFT나 새 검증기를 학습하지 않는다.
+
+**연구 관찰:** iter_017의 인터페이스 의존성, iter_037의 위치 trade-off, iter_042의 단순 gate 성공을 계승한다. iter_082의 불일치 순위 실패는 강한 confidence 대조가 필요한 근거다. 서로 다른 과제의 결과를 같은 원인의 재현으로 합치지 않는다.
+
+**연구 질문:** 단순 대안 이후 정보가 없다면 현재 전역 존재 확인 후보는 종료한다. 추가 정보가 남아도 새로운 방법으로 선언하지 않고 독립 확인의 가치만 판단한다. 반복 개발 자료의 재분석이라는 기회비용 때문에 같은 출력에서 순위를 최적화하지 않는다.
+
+# Hypothesis
+
+H1: 독립적인 존재 답변과 detector의 존재 출력 간 불일치는 detector confidence가 놓친 판단·위치 오류를 식별한다.
+
+H0: 추가 신호가 없거나, 이득은 정답 음성 영상의 존재 오류에만 한정된다. 양성 영상의 위치 오류는 전역 존재 확인으로 구별되지 않는다.
+
+H2: 관측 차이가 형식 미해결 응답이나 특정 표본에 의존한다. 이 경우 내용상 추가 정보와 분리해 불확정으로 보고한다.
+
+# Limitation Evidence / Correct Usage Checks
+
+관련 원문은 agent/LIMITATIONS.md, iter_037/review.json, iter_042/review.md다. 두 limitation은 observed이며 이번 설계는 diagnostic이다. method 진입 근거로 승격하지 않는다.
+
+iter_042의 음성 false-box 39/40→1/40와 양성 보존 불확정을 함께 유지한다. iter_037의 detector17 선택점과 SFT의 서로 다른 IoU trade-off도 유지한다.
+
+자료 점검에서는 E600 ID를 원 manifest·RSNA 원 라벨·원 box에 연결한다. 원 라벨이 음성을 명시하는지 확인하며 box 부재만으로 음성을 생성하지 않는다. 원본 영상 hash, 환자 대응, 좌표 canvas, checkpoint, 요청의 Q_O 문구와 GT 비노출을 확인한다. source 모델의 사전학습 노출은 미확인으로 기록한다.
+
+# Contribution Path / Baselines / Reuse
+
+기여는 미확정이다. [Phrase-grounded Fact-checking](https://arxiv.org/abs/2509.21356)은 소견·위치 오류 검증을, [MedGrounder](https://arxiv.org/abs/2512.01085)는 scored zero/one/multiple regions를 이미 다룬다. 이번 분석은 이 방법들을 이겼다는 비교가 아니다.
+
+주대조는 detector17의 기존 epoch18·threshold0.70 출력이다. 원본 영상에 대한 MedGemma의 독립 존재 응답을 붙였을 때 검토 대상 선택이 좋아지는지 본다. 답변과 위치를 강제로 일치시키는 규칙을 정확성의 근거로 사용하지 않는다.
+
+직접 grounding SFT의 bbox 유무 규칙과 presence gate를 보조 시스템으로 평가한다. 과거 학습량·데이터가 다른 detector와 SFT의 점수 차이를 위치 supervision의 인과 효과로 해석하지 않는다.
+
+새 브랜치는 승인된 iter_082 기반을 요청한다. reuse_assets의 실제 SHA와 개별 파일만 반입한다. 현재 트리에 있는 파일도 새 기반에는 없음을 확인했다. metrics.py는 iter_037 원본에서 가져온다. ev109 분석 CLI와 detector 분석 CLI 전체를 복구하지 않는다. 승인된 순수 함수를 조합한 이번 연결·평가 경로만 작성한다.
+
+# Proposed Experiment
+
+## 1. 자료·응답 적합성 확인
+
+입력은 다음으로 고정한다.
+
+- E600: results/iter_016/manifests/sets.json, labels.json, infer_manifest.jsonl.
+- 존재 응답: iter_016/gen/e180_plain__M0 및 e600x_plain__M0의 Q_O 원시 출력. iter_109의 F ledger는 대조용이다.
+- 직접 SFT: iter_015/reuse/bbox_B0_concise.jsonl와 그 원본 출처.
+- detector: iter_035/confirm800/det17/raw_preds.json, worker 원본·completion, select/LOCK.json 및 seed17/v400_selection.json.
+
+E600 전체가 세 출력에 연결되는지 먼저 검사한다. 누락을 제외한 편의 표본으로 바꾸지 않는다. 환자별 원본 row·request·protocol·completion·현재 file hash를 이번 manifest에 연결한다. 과거 digest 문자열만 복사하지 않는다.
+
+세 GT 범주에서 고정 ID hash 순으로 각 4명, 총 12명을 대표 점검한다. 영상·정답·좌표와 실제 응답을 확인한다. 모델 정답률은 진입 gate가 아니다. ID/좌표/표적 의미가 성립하면 같은 호출에서 전체 비교로 진행한다. 연결이 성립하지 않으면 누락 경로와 영향 범위를 보고하고 종료한다.
+
+답 추출은 승인된 ev109_extract_v1을 변경 없이 사용한다. unresolved를 No로 바꾸거나 제외하지 않는다. strict 수치는 보조로 보존하되 새 parser 비교 실험을 만들지 않는다.
+
+## 2. 고정된 오류 정의
+
+주 IoU는 0.3, 보조는 0.5다. detector 좌표는 img_hw와 원 영상에 맞춰 공통 canvas로 변환한다. 최대 일대일 matching으로 TP·FP·FN을 계산한다.
+
+판단·근거 공동 성공은 다음과 같다. 정답 음성은 No와 빈 box가 함께 있어야 한다. 정답 양성은 Yes이며 TP=n_GT=n_pred여야 한다. 이는 주석상 완전한 집합 대응이라는 엄격한 연구 지표이며 임상 안전의 정의가 아니다. 별도로 존재 정확도, 양성 F1, 최소 한 GT 포착, FP/환자, FN/환자, invalid를 보고한다.
+
+오류는 정답 음성의 양성 주장, 정답 양성의 전체 미검출, 정답 양성에서 nonempty지만 FP 또는 FN이 남는 위치·coverage 오류로 분해한다. IoU 불일치를 순수 인식 실패로 부르지 않는다.
+
+## 3. 주 비교: 같은 검토량의 오류 포착
+
+대상 S는 E600 중 기존 threshold0.70에서 detector가 nonempty인 환자 전원이다. GT나 reader 응답으로 S를 고르지 않는다. detector의 원 예측은 고정한다.
+
+주 오류 Y는 S에서 detector의 공동 성공이 실패한 경우다. reader가 명시적으로 No인 사례를 존재 불일치 경보로 삼는다. unresolved는 별도 검토 대상으로 두고, 양쪽 전략에 동일하게 먼저 배정한다.
+
+내용 비교에서는 resolved S의 reader-No 수를 k로 정한다. VLM 전략은 그 k명을 선택한다. confidence 전략은 같은 resolved S에서 detector의 최대 box score가 낮은 k명을 선택한다. 경계 동률은 동률 집단의 균등 검토 기대값으로 계산한다. k=0 또는 k=전체이면 내용 선택의 추가 정보가 없는 퇴화 비교로 보고한다.
+
+주 endpoint는 두 전략이 찾은 Y 수의 차이를 전체 S 수로 나눈 값이다. 같은 검토량, 제거한 올바른 출력 수, 오류 recall·precision도 보고한다. GT 음성 오류와 GT 양성 위치·coverage 오류의 기여를 따로 제시한다. confidence 보조 대조로 최소 box score 순위도 같은 k에서 고정 보고하며, 주대조를 사후 교체하지 않는다.
+
+이것은 검토 우선순위 진단이다. 사람 검토가 오류를 실제 교정했다고 가정하거나 자동 교정된 정확도로 보고하지 않는다.
+
+## 4. 보조 비교와 통계
+
+E600 전체에서 detector bbox 유무, SFT bbox 유무, reader와 각 localizer의 독립 결합, 고정 presence gate의 판단·근거 공동 성공을 보고한다. gate는 reader-No면 빈 box, reader-Yes면 기존 box 유지, unresolved면 미해결이다. 비어 있는 box를 새로 만들지 않는다. 이 보조표만으로 주 투자 기준을 통과시키지 않는다.
+
+환자 bootstrap 10,000회, seed11117을 사용한다. 매 resample에서 k와 confidence 경계를 다시 계산한다. 전체 공동 점수는 세 범주별 결과와 동일 가중 평균을 함께 보고한다. unresolved의 가능한 Yes/No 배정이 주 결정을 바꾸는지 보수적 범위를 계산하되 동일 응답을 조건별 독립 변수로 취급하지 않는다.
+
+## 5. 단계와 자원
+
+동작 확인은 12명 연결·fixture다. 가능성 탐색은 고정 E600의 저장 실제 출력 전체 비교다. 기존 출력이 모두 있으므로 효과를 본 뒤 작은 subset에서 E600으로 확대하는 선택을 만들지 않는다. 이것은 새 대량 생성이나 확증 실험이 아니다.
+
+본격 확대·독립 확인·새 학습은 이번 범위에 없다. 양성일 때만 다음 승인용 독립 확인 설계를 제안한다. 작은 차이나 넓은 CI만으로 표본을 자동 늘리지 않는다.
+
+새 GPU 요청은 0이다. GPU blocker 때문에 CPU에 머무르는 것이 아니라 질문에 필요한 실제 출력이 이미 존재하기 때문이다. 신규 추론이 불가피한 provenance 결함이 발견되면 임의 재생성하지 않고 해당 비교를 미실행으로 보고한다. 향후 승인된 새 생성에서는 nvidia-smi, 두 GPU의 실측 peak와 worker당 2GiB 여유, batch 확대 또는 GPU당 2 worker의 처리량 비교를 적용한다.
+
+CPU wall-clock은 입력 읽기·hash와 최초 200 bootstrap을 측정해 산출한다. 임의 시간 상한은 없다. 단계별 manifest·입력 digest·산출물 hash를 results/iter_111에 보존하고, 동일 config에서만 안전하게 재개한다.
+
+# Implementation Tasks for Claude
+
+1. 기준 원문과 reuse_assets를 확인하고 승인 순수 함수만 연결한다. 기존 결과와 공통 정책은 수정하지 않는다.
+2. 이번 입력 전용 provenance ledger를 작성한다. F의 원 protocol·원시 worker·completion을 내용 hash로 연결한다. detector도 checkpoint·선택 LOCK·worker 출력과 연결한다.
+3. 대표 12명에서 실제 입력·정답·좌표·응답 적합성을 확인한다. 누락·충돌이면 조용히 제외하지 않는다.
+4. 오류 정의·k 선택·동률 처리·bootstrap·unresolved 규칙을 과학 비교 집계 전에 잠근다. 전체 결과는 이미 개발 자료임을 명시한다.
+5. 고정 전체 비교를 실행하고 환자별 사건·선택 여부·근거 row를 보존한다.
+6. 독립 구현으로 matching, 주 포착 수, 동률 기대값, 공동 성공과 paired CI를 재계산한다. 원 raw JSON에서 출발한다.
+7. 데이터·응답·출처 변조 거부, 빈 집합, k=0/전체, 복수 box, 동일 응답 공유, 중단 후 재개를 실제 검증한다. 과거 출력 파일을 덮어쓰지 않는다.
+8. 보고서에 시험 설정·연구 관찰·연구 질문, 양성/음성/불확정과 추천 후속을 구분한다. 종료 후 full 리뷰와 사용자 승인을 기다린다.
+
+# Evaluation (성공/실패 기준 포함)
+
+**양성 탐색:** 주 endpoint가 0.05 이상이고 paired 95% CI 하한이 0보다 크며, GT 양성의 위치·coverage 오류에서도 추가 포착이 양수이고 최소 box score 대조보다도 순이득이 남아야 한다. 5pp는 S의 100명당 최소 5개 오류를 추가로 찾는 연구 투자 기준이며 임상 기준이 아니다. unresolved의 보수적 해석으로 방향이 뒤집히면 불확정이다. 통과하면 독립 확인을 제안한다.
+
+**음성 투자 판단:** 주 endpoint가 0 이하이거나 추가 이득이 GT 음성의 존재 오류에만 한정되면 현재 전역 존재 확인을 위치 검증으로 확장하는 후보를 종료한다. 이는 gate의 기존 유용성을 부정하지 않는다.
+
+**불확정:** 0보다 크지만 기준에 못 미치거나 표본·동률·unresolved에 의존하면 한계를 보고하고 이번 분석을 종료한다. 추가 표본이 어떤 결정을 바꿀지 관측 discordance로 설명할 수 있을 때만 별도 독립 확인을 권고한다. 같은 자료의 가중치·parser·검토량 최적화는 하지 않는다.
+
+**실행 실패:** 표적 의미·환자·좌표·원 출력 연결이 성립하지 않으면 과학적 음성으로 판정하지 않는다. 허용된 한정 경로 수정 후에도 연결되지 않으면 원인과 필요한 자산을 보고한다. 별도 감사 반복을 자동 시작하지 않는다.
+
+# Risks / Checks
+
+- 동일 표적의 존재와 위치를 평가하지만 이것이 근거의 인과적 사용을 입증하지는 않는다.
+- 존재가 맞고 위치가 틀린 사례의 발견만으로 새 contribution을 주장하지 않는다.
+- RSNA 주석의 위치·coverage 오차를 임상적 오류 전체로 확대하지 않는다.
+- E600은 반복 개발 자료다. 새 독립 test나 사전학습 미노출 자료로 부르지 않는다.
+- detector와 SFT의 학습 예산 차이를 명시한다. 현재 모델 순위를 새로운 학습 효과로 해석하지 않는다.
+- VLM 추가 호출의 비용이 존재한다. 이번 저장 분석의 CPU 비용과 실용 시스템의 추론 비용을 혼동하지 않는다.
+- 과거 parser 분석은 종료 상태를 유지한다. 승인 규칙 재사용은 허용하지만 규칙 추가·의미 재판정은 하지 않는다.
+- GOAL, 과거 판정·출력·checkpoint, Claude 구현 담당과 --confirm-each-iter를 유지한다.
+
+## 대규모 GPU 필요 후보
+
+다기관의 명시적 존재·부재와 위치 정답을 함께 사용하는 vision–language 공동 post-training은 장기 후보로 보존한다. 전역 존재 확인 이후의 중요한 잔여 문제와 강한 직접 SFT·모듈형 검증기 대비 필요성이 확인돼야 한다. 현재 진단만으로 대규모 학습이나 새 loss를 발주하지 않는다.
+
+# 계획의 근거 (GPT 조사 노트)
+
+## 확인한 사실과 선택
+
+iter_110 plan.json 원문을 확인했다. 자유 생성 문장의 정답 연결 부족은 유지하며, 사용자 승인에 따라 사전 지정 소견으로 평가 범위를 바꾼다. 연구 목표 변경이나 이전 실험의 실패 판정은 아니다.
+
+iter_042 원 리뷰에서 presence gate는 음성 false-box를 39/40에서 1/40로 줄였다. 양성 성능 보존은 불확정이고, 단순 gate 이후 큰 잔여 문제가 입증되지 않았다. 따라서 부재 거부를 같은 방식으로 다시 시험하지 않는다.
+
+iter_037 원 리뷰와 LIMITATIONS.md는 detector–SFT의 위치 정밀도·coverage trade-off를 보존한다. detector17의 기존 선택은 epoch18, threshold0.70이다. iter_046/048 원 리뷰의 적응 모듈형 대안과 공동 형식 학습 회복도 받아들인다.
+
+iter_082 원 리뷰에서 MRI 불일치 순위는 confidence보다 큰 오류를 적게 포착했다(3 대 5). 불일치 자체의 유용성을 가정하지 않으며, 이번에도 강한 confidence 대조와 같은 검토량을 요구한다. MRI 과제는 재개하지 않는다.
+
+## 실제 자산 확인
+
+현재 research HEAD는 ba6cdae9e66497b28cad778c02000b6543456f86이며 git status는 깨끗했다. ev108_data.py, ev108_spec.py, ev109_extract.py, rsna_diag/qa_spec.py와 관련 원 리뷰를 읽었다. E600은 600명이며 labels.json에 category·patient·원본 pixel box·정규화 box가 있다. Q_O는 pulmonary opacity suspicious for pneumonia를 묻고 환자 정답은 입력하지 않는다.
+
+research/results/iter_035/confirm800/det17/raw_preds.json의 실제 행에서 boxes_xyxy_px, scores, labels, img_hw를 확인했다. select/LOCK.json과 seed17/v400_selection.json에 checkpoint·threshold가 보존돼 있다. E600 전체 연결과 원본 정답 출처의 재검증은 구현의 한정 점검에 남긴다. 이번 계획 단계에서는 새 joint metric이나 비교 결과를 계산하지 않았다.
+
+iter_109의 F 추출 ledger 실제 행을 확인했다. 이를 편의상 새 정답으로 사용하지 않고 iter_016 원시 응답·요청·protocol·completion에 연결한다. iter_109의 ledger 분기 결함과 iter_037의 자동 provenance 결함 때문에 기존 분석 CLI를 그대로 실행하지 않는다. 승인된 순수 함수만 재사용한다.
+
+## 가까운 선행
+
+[Phrase-grounded Fact-checking](https://arxiv.org/abs/2509.21356)은 소견과 위치 오류 검증을 이미 다룬다. 따라서 판단·위치 공동 평가 자체를 새 기여로 주장하지 않는다. [Generalised Medical Phrase Grounding](https://arxiv.org/abs/2512.01085)은 zero/one/multiple scored regions와 모듈형 구성을 다룬다. 이번 확인은 논문 초록 범위이며 해당 방법의 전체 재현이나 우열 비교가 아니다.
+
+## 비용과 한계
+
+이번 질문은 보존된 실제 출력으로 직접 비교할 수 있다. 새 GPU 생성 없이도 가설을 검증할 수 있어 CPU 분석을 선택했다. GPU 접근 blocker가 있는 것은 아니다. 과거 출력의 재생성은 추가 정보가 없고, 주요 비용은 연결·검증 구현일 것으로 예상하나 실제 비중은 미측정이다. 반복 개발 자료의 탐색으로 보고한다.
+
+
+
+## iter_111 CLAUDE IMPLEMENTATION REPORT — 2026-10-11 22:26:33
+
+# 요약
+
+- **핵심 결과:** 존재 판단(MedGemma 1.5 원본의 Q_O 응답)은 같은 검토량의 detector confidence보다 오류를 더 잘 찾지 못했다. 사전 규칙상 판정은 **negative**다.
+  - 주 endpoint는 −3.54pp이고 환자 bootstrap 95% CI는 [−6.05, −0.89]다.
+- **근거:** 전체 평가 대상은 RSNA E600 600명이다.
+  - 평가 대상 S(detector17, epoch18, threshold 0.70에서 box가 나온 환자)는 226명이다. 이 중 152명이 오류다(음성 영상의 양성 주장 77, 양성 영상의 위치·coverage 오류 75).
+  - 존재 응답이 "No"라서 검토 대상이 된 환자는 k=41명이다. 이 41명에서 VLM은 오류 30개를 찾았고, confidence는 같은 검토량에서 38개를 찾았다.
+  - 음성 영상의 오류는 26 대 23으로 VLM이 3개 많았다. 양성 영상의 위치 오류는 4 대 15로 VLM이 적었다. 이득이 있다면 음성의 존재 오류에 한정된다.
+  - 최소 box score 대조도 37개로 VLM보다 많이 찾았다(endpoint −3.10pp).
+  - unresolved 4명은 네 가지 배정(all-Yes, all-No, adverse, favorable) 모두 endpoint가 −2.65~−3.54pp였다. 방향은 바뀌지 않는다.
+- **미검증·주의:**
+  - E600은 반복 사용한 개발 자료다. 독립 확인이 아니고, 존재 응답은 한 모델·한 prompt의 결과다.
+  - 이 결과는 전역 존재 응답을 위치 검증 신호로 쓰는 후보에 한정한 negative다. 영역별 검증이나 근거의 인과적 사용에 대한 결론이 아니다.
+  - 기존 gate의 유용성(음성 false-box 감소)은 부정하지 않는다. 아래 표에서 detector gate의 공동 성공은 loc 대비 −2.3pp(CI [−5.0, +0.3])로, 향상은 확인되지 않았다.
+- **다음:** 후속 반복은 사용자 승인 후에 진행한다.
+  - 현재 전역 존재 확인을 위치 검증으로 확장하는 후보는 종료를 권고한다.
+  - 같은 출력의 순위·검토율 최적화는 하지 않는다.
+
+# Work Performed
+
+- **반입 검증:** 반입 7개 파일의 blob이 reuse_manifest와 모두 일치한다(`git hash-object`).
+  - `ev109_extract` fixture 30개를 규칙 변경 없이 메모리에서 재실행해 전부 통과했다(저장 파일 덮어쓰기 방지).
+  - `rules_digest`는 260bbb1d…로 iter_109의 lock과 같다.
+  - `resolve(target, raw, ended_eos)` 인터페이스에는 정답·조건이 들어가지 않는다.
+  - 기존 iter_109의 F 응답 추출 ledger와 이번 O 응답을 request_id로 대조했다(600/600). 원문·EOS 차이는 0, 추출 답 차이는 0이다.
+- **provenance ledger(`ev111_link.py`):** E600 600명의 아래 항목을 환자 단위로 연결했다. 문제 0건이다.
+  - GT: px와 norm 좌표 환산이 일치한다.
+  - 영상: file hash를 현재 파일과 대조했고, 600/600이 원본 pixel hash까지 재현됐다.
+  - Q_O 응답: request, record, completion, protocol 필드를 대조했고 중복·누락이 없다.
+  - SFT bbox: 원 worker 파일을 재추출해 reuse 파일과 대조했다.
+  - detector: `raw_preds`, shard, checkpoint hash를 LOCK 및 v400_selection과 대조했고, `img_hw`는 영상 크기와 일치한다.
+- **대표 12명 점검:** 범주별 sha256 순 4명의 overlay를 직접 열어 확인했다. GT(녹색), detector(적색), SFT(청색)가 폐 영역에 맞게 정렬됐고, 좌표 변환 오류는 없다.
+- **규칙 잠금:** fixture 39/39 통과 후 `eval_lock.json`을 2026-10-11T22:24:39+0900에 기록했다. 코드 9개와 ledger·provenance hash를 포함하며, 이 시점은 비교 실행 전이다.
+- **전체 비교(`ev111_run.py`):** lock을 검증한 뒤 저장 출력으로 실행했다. 새 추론·학습·GPU 요청은 0건이다.
+- **독립 재계산(`ev111_verify.py`):** 원 JSON에서 별도 구현으로 matching, 포착 수, 동률 기대값, bootstrap을 재계산했다.
+
+# Files Changed
+
+- **새 코드(`research/`):**
+  - `ev111_link.py`, `ev111_core.py`, `ev111_lock.py`, `ev111_run.py`, `ev111_rep12.py`, `ev111_verify.py`, `test_ev111.py`
+  - 반입: `rsna_diag/{__init__,geometry,qa_spec,metrics}.py`, `ev108_spec.py`, `ev109_extract.py`, `test_ev109_extract.py`. 모두 무수정이다.
+- **새 결과(`results/iter_111/`):**
+  - `provenance/`(ledger, provenance, eval_lock), `rep12/`, `tests/`, `eval/`(report, per_patient, verify_v2)
+- 기존 결과·코드는 수정하거나 덮어쓰지 않았다.
+
+# Commands / Experiments (실제 실행한 명령과 성공/실패)
+
+| 명령 | 결과 |
+|---|---|
+| `python ev111_link.py` | 성공, 600행 |
+| `python ev111_rep12.py` | 성공 |
+| `python test_ev111.py` (첫 실행) | 38/38 (`tests/fixtures.json`) |
+| `python test_ev111.py results/iter_111/tests/fixtures_v2.json` (재실행) | 39/39 |
+| `python ev111_lock.py` | 성공 |
+| `python ev111_run.py` | 성공, CPU 약 3.4초 |
+| `python ev111_verify.py` (첫 실행) | 실패 아님. 검증기가 `correct` 대신 `none` 라벨을 써서 per-patient 불일치 74건 표시. `verify.json`으로 보존 |
+| `python ev111_verify.py` (라벨 수정 후, `verify_v2.json`) | 성공, 13개 검사 전부 일치, 환자별 불일치 0 |
+
+- 두 번째 test 실행은 core 리팩터링(벡터화 bootstrap) 후 재검증이다. 첫 실행 결과는 `fixtures.json`에 보존했다.
+- 변조 거부 검사는 4건이다(label, detector raw, SFT 응답, O worker 누락). 모두 `problems`로 거부됐고, 기존 ledger 덮어쓰기도 거부됐다.
+- 응답이 비정형인 9건 중 8건은 hedge("could be suspicious") 때문에 unresolved이고, 1건(con_00009487)은 explicit Yes다. 추출 규칙은 바꾸지 않았다.
+
+# Results (수치와 결과 파일 경로)
+
+- 파일: `results/iter_111/eval/report.json`, `per_patient.json`, `verify_v2.json`
+- 존재 응답 분포는 아래와 같다. 비정형 9건 중 1건만 explicit Yes로 추출됐고, 8건은 unresolved다.
+
+| 범주 | Yes | No | unresolved |
+|---|---|---|---|
+| opacity 200 | 152 | 43 | 5 |
+| normal 200 | 4 | 195 | 1 |
+| not_normal_no_opacity 200 | 71 | 127 | 2 |
+
+- **주 비교:**
+  - 환자 bootstrap은 10,000회, seed 11117이다. 매 resample에서 k와 confidence 경계를 다시 계산했다.
+  - 비교는 S 226명에서 했고, 이 중 resolved는 222명이다. 퇴화(k=0 또는 k=전체)는 bootstrap 전체에서 0%였다.
+
+| 항목 | 값 |
+|---|---|
+| 주 endpoint | −3.54pp, CI [−6.05, −0.89] |
+| 음성 영상 오류 (VLM 대 confidence) | 26 대 23 |
+| 양성 영상 위치 오류 (VLM 대 confidence) | 4 대 15 |
+| 양성 위치 오류 차이 | −4.87pp, CI [−7.34, −1.80] |
+| 최소 box score 대조 endpoint | −3.10pp, CI [−6.06, 0.00] |
+| VLM 오류 recall / precision | 0.20 / 0.73 |
+| 검토로 제거된 올바른 출력 | 11 |
+
+- **공동 성공(IoU 0.3, 부수 보고):** 아래 표의 결합·gate는 unresolved를 실패로 센 값이다. 동일 가중 평균은 전체 값과 같은 값이어서 따로 쓰지 않았다.
+
+| 시스템 | loc | indep | gate | gate−loc (95% CI) |
+|---|---|---|---|---|
+| detector17 | 0.662 | 0.595 | 0.638 | −0.023 ([−0.050, +0.003]) |
+| SFT B0 | 0.703 | 0.643 | 0.672 | −0.032 ([−0.055, −0.008]) |
+
+- indep−loc는 detector가 −0.067 [−0.087, −0.048]이고 SFT가 −0.060 [−0.080, −0.042]이다.
+- gate는 FP/환자를 0.278에서 0.223(detector), 0.262에서 0.215(SFT)로 줄였다. 하지만 양성 영상 손실이 이를 상쇄해 공동 성공은 오르지 않았다.
+- detector와 SFT는 학습 예산이 달라서 둘의 차이를 위치 supervision의 효과로 읽을 수 없다.
+- **시간(실측):** 입력 읽기·prep은 약 0.2~0.3초, 최초 bootstrap 200회는 0.06초, 전체 비교는 3.4초다. 지배 비용은 구현·검증이었고, 기록된 시간 계측은 없어 미측정이다.
+
+# Goal Progress / Reused Assets (목표 진전·미검증 범위, 재사용 출처·검증)
+
+- **시험 설정:** 현재 저장 출력과 현재 규칙으로 비교한 결과다.
+  - 존재 응답을 위치 오류 검토 신호로 쓰는 설정은 투자 가치가 낮다. 이는 이번 판정이며, gate 자체의 기존 성공을 뒤집지 않는다.
+- **연구 관찰:**
+  - 존재 응답은 음성 영상의 존재 오류에서는 confidence 이상의 신호를 보였다(26 대 23).
+  - 양성 영상의 위치·coverage 오류(75건)는 거의 잡지 못했다(4건). 존재 판단이 맞아도 위치 근거는 별도로 검증해야 한다.
+  - 이는 iter_082(MRI 불일치 순위가 confidence보다 적게 포착)와 같은 방향이다. 서로 다른 과제이므로 같은 원인의 재현으로 합치지 않는다.
+- **연구 질문:** 영역별 검증기나 grounder 기반 검증(Phrase-grounded Fact-checking, MedGrounder 계열)은 이번 결과로 판단하지 않았다. 신규성은 주장하지 않는다.
+- **재사용 승인 요청 범위:** blob 일치, fixture 30/30, rules digest 일치, metrics 재검증(brute-force matching 600건 대조)을 확인했다.
+  - 원 reuse의 required_checks 중 "대표 overlay 대조"는 12명으로 수행했다. 좌표 변환은 300건 무작위 brute-force 및 GT px/norm 환산 검사(600명)로 대조했다.
+- **미검증:** 독립 환자·타 모델·타 prompt에서의 재현, 사전학습 노출, 비정형 응답 8건의 의미 재판정.
+
+# Problems (현재 결론 무효 / 재사용 전 수정 / 추후 개선을 구분)
+
+- **현재 결론 무효:** 없다.
+- **재사용 전 수정:**
+  - `ev111_link.py`는 경로가 고정돼 있다. 다른 표본에 쓰려면 일반화가 필요하다.
+  - `ev111_verify.py`의 bare Yes/No 외 응답은 저장된 추출값을 그대로 쓰므로 그 부분의 독립성은 약하다(9건, 모두 원문 확인).
+  - `decide()`의 negative 분기는 "주 endpoint≤0" 또는 "양성 위치 오류 추가 포착≤0"이다. 이번 결과는 첫 조건에서 판정됐다.
+- **추후 개선(선택):**
+  - detector 선택점 하나만 사용했다(0.70). 다른 운영점은 사후 탐색이 되므로 하지 않았다.
+  - 첫 `verify.json`은 라벨 명명 차이로 불일치를 표시한 채 보존돼 있고, 유효한 검증은 `verify_v2.json`이다.
+
+# Recommendation to GPT
+
+- **권고:** 이번 후보("전역 존재 판단 → 위치 근거 검증")는 현재 범위에서 종료한다. 다음 선택은 사용자 승인 뒤에 정한다.
+- **이유:** 같은 검토량에서 confidence보다 오류를 못 찾았고(−3.5pp, CI 상한 −0.9pp), 양성 영상의 위치 오류에는 정보가 없었다.
+- **대안(실질적인 것 하나):** 영역 단위의 검증기(scored regions)와 단순 confidence를 같은 검토량으로 비교한다. 기존 출력으로 한정 비교가 가능한지부터 확인한다. 새 학습은 포함하지 않는다.
+
+SELF_CHECK: PASS
+SUMMARY: RSNA E600 저장 출력(MedGemma 존재 응답, SFT bbox, detector17)을 공개 정답과 연결해 비교한 결과, 같은 검토량에서 존재 판단은 detector confidence보다 오류를 못 찾았다(−3.54pp, CI [−6.05, −0.89]; 양성 위치 오류 4 대 15). 사전 규칙상 negative이고, 독립 재계산도 일치했다. 개발 자료 한 모델·한 prompt라는 범위 한정이 있다.
+
+# [orchestrator] 권한 거부된 도구 호출
+- Bash: python - <<'E'
+import json
+d=json.load(open('results/iter_016/manifests/sets.json'));print({k:(len(v) if hasattr(v,'__len__') else v) for k,v in d.items()})
+l=json.load(open('results/iter_016/manifests/labels.json'));print(type(l),len(l));k=list(l)[:1] if isinstance(l,dict) else l[:1];print(k, l[k[0]] if isinstance(l,dict) else '')
+E
+head -c 1500 results/iter_016/manifests/infer_manifest.jsonl; echo; ls results/iter_016/gen | head -30; ls results/iter_016/protocols results/iter_016/requests | head -30
+- Bash: git grep -n -B2 -A22 "def preds_to_norm_yxyx" 755ec06e17606936422f1595f7bf62dc53085e59 -- rsna_diag/det_lib.py
+- Bash: sed -i 's/typ\[i\] = "none" if ok else/typ[i] = "correct" if ok else/; s#eval/verify.json#eval/verify_v2.json#' ev111_verify.py && python ev111_verify.py && python -c "
+import json;d=json.load(open('results/iter_111/eval/verify_v2.json'));print(d['nonbare_reader_responses'])"
+
+
+
+## iter_111 GPT REVIEW [CONTINUE] — 2026-10-11 22:31:55
+
+# 요약
+
+- **판정:** 유효한 진단이며 현재 후보는 `abandon`이다. 전역 존재 판단을 위치 오류 검토에 추가할 근거를 확보하지 못했다.
+- **핵심 근거:** detector nonempty 226명에서 같은 41명을 검토할 때 오류 포착은 존재 판단 30건, confidence 38건이었다. 차이는 −3.54pp, 95% CI [−6.05, −0.89]pp다.
+- **의미·한계:** 양성 영상의 위치·coverage 오류 포착도 4 대 15였다. 현재 고정 규칙의 음성이며 영역별 검증이나 의료 VLM 전체의 기각은 아니다.
+- **다음:** 현재 후보의 추가 투자를 종료하고 사용자 피드백을 기다린다. 보조 gate metric 오류는 주 결론과 분리하며 전체 코드 재사용은 승인하지 않는다.
+
+## 알림 요약
+
+- 결과: 흉부 X-ray RSNA의 detector 양성 출력 226명에서, 같은 41명 검토 시 존재 판단은 오류 30건·confidence는 38건을 찾았다. 독립 재계산과 미해결 답 16개 배정에서도 음성 판정이 유지됐다.
+- 의미: 전역적인 '소견 없음' 답변을 위치 검증 신호로 확대하는 현재 후보의 가치는 확인되지 않았다. 영역을 직접 검증하는 능력과 독립 일반화는 미검증이다.
+- 후속: 현재 후보와 같은 출력의 순위 최적화를 종료할 것을 권고한다. 추가 확대가 투자 판단을 바꿀 근거가 부족하다.
+- 대안: 영역을 직접 검사하는 별도 검증 경로는 현재 비교가 다루지 않았다. 위치 오류에 직접 대응한다는 장점이 있지만, 지원 입력·공개 정답·confidence 대비 가치를 먼저 구체화해야 하므로 자동 실험은 권고하지 않는다.
+
+# Assessment
+
+계획된 E600 저장 출력 비교를 완료했다. 실제 담당은 `engineer_backend.json`과 `claude_meta.json`상 Claude이며 Sonnet/medium, 기록된 모델은 `claude-sonnet-5-5`다. 신규 추론·학습·GPU 요청은 없다. 필요한 출력이 이미 존재하므로 CPU 분석 선택은 적절하다.
+
+리뷰 대상은 `7776d92ff7761cb88d111f5cae344fee98b0ac5d`다. 구현 전후 diff와 신규 코드를 읽고 대상 14개 파일의 commit 내용과 작업 파일이 같음을 확인했다. unpreserved_paths는 없다. 반입 7개 파일의 blob과 평가 lock의 코드 hash도 일치했다.
+
+원 계획의 음성 조건은 주 endpoint≤0이다. 관측 −0.03539823이 이를 충족한다. 주 결론을 무효화하는 문제는 없으며, 아래 보조 metric·재사용 결함과 구분한다.
+
+# Key Findings
+
+1. **주 비교:** 대상 226명 중 오류 152명, resolved 222명, reader-No 41명이다. 존재 판단은 오류 30건, 최대 score 대조는 38건, 최소 score 대조는 37건을 포착했다. 최대 score 대비 −3.54pp, 최소 score 대비 −3.10pp다.
+2. **오류 분해:** 음성 영상 오류 포착은 26 대 23이지만, 양성 영상 위치·coverage 오류 포착은 4 대 15다. 양성 오류 차이는 전체 대상 기준 −4.87pp, 95% CI [−7.34, −1.80]pp다. 이는 모든 존재 정보가 무용하다는 증명이 아니다.
+3. **미해결 답:** 대상 내 unresolved 4건의 가능한 Yes/No 배정 16개를 리뷰에서 전수 계산했다. 주 차이는 −3.54~−2.65pp로 모두 음성이다. 이번 투자 종료는 답 추출의 미해결 배정에 의존하지 않는다.
+4. **공동 성공:** IoU 0.3에서 detector의 localizer/독립 결합/gate 성공은 397/357/383명, SFT는 422/386/403명이다. 리뷰의 별도 계산과 일치했다. unresolved를 실패로 센 보조 수치이며 임상 안전 지표가 아니다.
+5. **독립 검증:** 원 detector·GT와 ledger 행의 불일치는 0이었다. 별도 최대 matching과 환자 bootstrap 10,000회로 주 endpoint 및 양성 위치 오류 CI를 재현했다. 답 추출 fixture 30/30을 재실행했고, 원 worker의 text·EOS·request ID 및 hash를 대조했다.
+6. **출처와 입력:** iter_016 원 protocol 두 개의 내용 digest와 관련 요청·manifest hash가 일치했다. 해당 입력이 불변이므로 iter_016 리뷰의 원 정답 연결·학습 분리 검증을 재사용했다. 현재 영상 600개 file hash 불일치 0, 고유 환자 600명이며 모두 1024×1024다. 대표 overlay12.png도 확인했다.
+7. **실행 로그:** 평가 lock 생성 후 본 비교를 실행했다. 최초 검증기의 `none`/`correct` 명칭 불일치는 별도 결과로 보존됐고 수정본 `verify_v2.json`이 있다. 이 명칭 수정은 주 분석 결과를 바꾸지 않았다. 저장 fixture 39/39 통과를 확인했으나 이것이 모든 metric·재개 경로의 검증을 뜻하지 않는다.
+
+# Problems / Concerns
+
+**주 결론의 blocker는 없다.** 다만 다음 오류 때문에 전체 스냅샷 재사용을 승인하지 않는다.
+
+- `ev111_core.system_table`은 gate의 FP/FN에는 삭제된 box를 반영하지만 양성 F1·최소 한 GT 포착률에는 원 box를 사용한다. 리뷰에서 gate 적용 후 양성 F1@0.3을 재계산하면 detector는 0.578119→0.513119, SFT는 0.610500→0.544667이다. 저장된 gate 양성 F1과 hit 지표는 현재 gate 성능으로 인용할 수 없다. 주 endpoint와 공동 성공은 이 경로에 의존하지 않는다.
+- `decide()`는 ep≤0에서 unresolved 방향 전환 확인 없이 음성으로 종료한다. 현재는 16개 배정 전수 계산으로 판정을 보완했으나 일반 재사용에는 분기 검사가 필요하다.
+- `ev111_link.py`는 원 protocol의 내용 검증을 자동 수행하지 않고 digest를 연결한다. pixel hash 불일치도 문제로 거부하지 않는다. 현재 protocol·입력은 리뷰에서 별도로 확인했지만 자동 provenance 경로는 보완해야 한다.
+- `ev111_verify.py`는 `Image.size`의 width/height를 반대로 받아 비정사각 영상에서 padding 축이 잘못된다. 현재 정사각 입력에는 영향이 없다. 비정형 답을 저장 평가값에서 가져오는 부분과 EOS 미검사도 재사용 전에 보완해야 한다.
+- 덮어쓰기 거부 fixture는 중단 후 안전한 재개 검사가 아니다. 부분 결과가 남은 경우의 복구를 검증했다고 보고하면 안 된다.
+
+보고서의 '양성 위치 오류에는 정보가 없었다'는 표현은 과도하다. 정확한 결론은 **현재 규칙이 confidence보다 적게 포착했다**이다. '검토로 제거된 올바른 출력 11건'도 실제 삭제가 아니라 올바른 출력에 사용한 검토량이다.
+
+# Interpretation
+
+이번 결과는 전역 존재 판단을 위치 근거 검증으로 사용하는 현재 후보의 투자 종료를 지지한다. 음성 영상에서 얻은 소폭 포착 이득은 양성 영상의 위치 오류 포착 손실을 상쇄하지 못했다. 존재가 맞다는 답과 위치 출력의 정확성은 별도로 평가해야 한다.
+
+그러나 IoU·coverage 오류는 임상적 인식 오류와 같지 않다. 이 비교는 근거의 인과적 사용, 자유 판독 사실성, 영역별 검증 능력을 측정하지 않았다. detector와 SFT의 학습량도 다르므로 두 시스템의 공동 점수 차이를 위치 supervision 효과로 해석하지 않는다.
+
+원 계획대로 새로운 독립 표본이나 학습을 자동 확대하지 않는다. 보조 metric 수정은 현재 음성 판단을 뒤집기 위한 재분석 과제가 아니다.
+
+# Strategy Check / 연구 방향 판단
+
+**선택은 현재 전역 존재 확인 후보의 투자 종료다.** 시험 설정의 종료와 위치·판단 연결이라는 연구 질문 전체의 보류를 구분한다.
+
+- **시험 설정:** 고정 No 경보는 강한 confidence 대조보다 약했다. 동일 E600의 parser·검토율·threshold·가중치 탐색을 추가할 이유가 없다.
+- **연구 관찰:** iter_042의 단순 presence gate 성공은 유지한다. 이번에는 그 신호가 양성 영상의 위치·coverage 오류 검토에도 유용하다는 기대가 약해졌다. iter_037의 위치 정밀도·coverage trade-off와 iter_082의 다른 과제에서의 순위 음성 결과도 보존하되 같은 원인의 재현으로 합치지 않는다.
+- **연구 질문:** 영역별 검증은 미검증이다. 미검증이라는 사실만으로 다음 실험의 투자 근거가 되지는 않는다. 가까운 방법 이후 남는 사용 문제와 실제 지원 입력을 구체화할 때 재개할 수 있다.
+
+후보 비교는 두 가지로 한정했다. 현재 전역 경보의 개선·독립 확대는 음성 endpoint와 기회비용 때문에 선택하지 않는다. 영역별 검증은 위치 오류를 직접 다룰 가능성이 있지만 이번 자료에서 유망성이 확인된 것은 아니므로 즉시 새 출력·학습을 발주하지 않는다. 현재는 범위를 명시한 투자 보류를 선택한다.
+
+실행 유효성은 확인됐다. 성능 개선은 없었다. 가설 판단은 현재 전역 경보의 추가 가치에 대한 음성이다. 신규 contribution과 외부 일반화는 미확인이다. 보고된 본 분석 시간은 약 3.39초이고, 구현·검증 작업별 지배 비용은 따로 계측되지 않았다. 코드 정비만으로 다음 연구 반복을 소비하지 않는다.
+
+논문 추천은 보류한다. 이번 음성 후보와 미검증 영역별 검증 방향에는 추천 요건을 충족하는 긍정적 실험 근거가 없다.
+
+# Recommended Next Experiment
+
+현재 후보에는 추가 실험을 권고하지 않는다. 사용자에게 결과와 한계를 보고하고 `--confirm-each-iter` 승인을 기다린다. CONTINUE는 최종 목표 미완료를 뜻하며 다음 반복의 자동 실행 허가가 아니다.
+
+영역별 검증을 다시 선택하려면 실제 지원되는 영역 입력, 공개 정답이 판별하는 오류, confidence와 동일 검토량으로 비교할 고정 기준을 제시해야 한다. 양성이면 독립 확인, 음성이면 해당 검증 경로 종료, 불확정이면 무엇이 투자 판단을 바꿀지 구체화해야 한다. 이 근거 없이 동일 출력의 순위 분석이나 전략 감사만 반복하지 않는다. 이번 코드 결함은 실제 재사용할 경로가 정해졌을 때 한정 수정한다.

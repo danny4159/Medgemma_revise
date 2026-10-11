@@ -1,0 +1,1816 @@
+diff --git a/ev108_spec.py b/ev108_spec.py
+new file mode 100644
+index 0000000..e8a99ae
+--- /dev/null
++++ b/ev108_spec.py
+@@ -0,0 +1,175 @@
++"""iter_108 진단: 원본 + 예측 영역 영상 제공(frozen MedGemma 1.5)의 순수 규칙 모듈 (결과를 보기 전에 고정).
++
++- 영상 조건: F(기존 원본 단일 영상 출력, 재사용), D(원본+원본 복제), T(원본+예측 enclosing crop), C(원본+크기 일치 중앙 crop),
++  L(예측 crop 단독, O만). 질문 O/A는 별도 대화. 정답은 요청 구성에 쓰지 않는다.
++- crop은 저장된 B0 bbox(yxyx/1000, square-padded 기준)에서만 만든다. GT는 crop 선택에 쓰지 않는다.
++- 이 파일의 어떤 수치 문턱도 계획(plan.md Proposed Experiment §4, Evaluation)이 정한 값만 쓴다.
++"""
++import hashlib
++import json
++import math
++import re
++
++import numpy as np
++from PIL import Image
++
++from rsna_diag import geometry, qa_spec
++
++SEED = 10817
++N_BOOT = 10000
++CATS = qa_spec.CATEGORIES
++TARGETS = qa_spec.TARGETS
++FMT = "plain"
++CAPS = [1000, 2000, 4000]
++
++GUIDE_DTC = ("Image 1 is the complete source chest radiograph. Image 2 is an auxiliary view of the same radiograph and may be a "
++             "full image or a crop. It is not an independent examination or proof of an abnormality. "
++             "Answer the question about Image 1 using the available evidence.")
++GUIDE_L = ("This is an auxiliary crop from a source chest radiograph. Answer the following question about the source "
++           "radiograph using this limited view.")
++MULTI_CONDS = ("D", "T", "C")
++
++
++def sha(b):
++    return hashlib.sha256(b if isinstance(b, bytes) else b.encode()).hexdigest()
++
++
++def canon(o):
++    return json.dumps(o, sort_keys=True, ensure_ascii=False, default=str)
++
++
++def core_prompt(target):
++    """iter_016 F(원본 단일 영상 direct plain)의 prompt와 동일."""
++    return f"{qa_spec.QUESTIONS[target]} {qa_spec.FORMATS[FMT]}"
++
++
++def prompt_for(cond, target):
++    core = core_prompt(target)
++    guide = GUIDE_L if cond == "L" else GUIDE_DTC
++    return f"{guide}\n\n{core}"
++
++
++# ---------------- bbox / crop ----------------
++_BOX_ITEM = re.compile(r"\s*\{\s*\"box_2d\"\s*:\s*\[\s*(-?\d+)\s*,\s*(-?\d+)\s*,\s*(-?\d+)\s*,\s*(-?\d+)\s*\]\s*,\s*\"label\"\s*:\s*\"[^\"]*\"\s*\}\s*")
++
++
++def parse_saved_bbox(text, ended_eos):
++    """저장된 B0 concise 출력의 엄격 해석. returns (status, boxes yxyx 정수 list).
++    status: ok(boxes 1+) | empty([]) | truncated | invalid. invalid/truncated는 빈 예측으로 바꾸지 않는다."""
++    if not ended_eos:
++        return "truncated", []
++    t = text[:-len(qa_spec.EOT)] if text.endswith(qa_spec.EOT) else text
++    t = t.strip()
++    if t == "[]":
++        return "empty", []
++    try:
++        v = json.loads(t)
++    except ValueError:
++        return "invalid", []
++    if not isinstance(v, list) or not v:
++        return "invalid", []
++    boxes = []
++    for it in v:
++        if not isinstance(it, dict) or "box_2d" not in it:
++            return "invalid", []
++        b = it["box_2d"]
++        if not (isinstance(b, list) and len(b) == 4 and all(isinstance(x, int) and not isinstance(x, bool) for x in b)):
++            return "invalid", []
++        y0, x0, y1, x1 = b
++        if not (0 <= y0 < y1 <= 1000 and 0 <= x0 < x1 <= 1000):
++            return "invalid", []
++        boxes.append([y0, x0, y1, x1])
++    return "ok", boxes
++
++
++def enclosing(boxes):
++    return [min(b[0] for b in boxes), min(b[1] for b in boxes), max(b[2] for b in boxes), max(b[3] for b in boxes)]
++
++
++def crop_rect(yxyx, side):
++    """yxyx/1000 -> pixel (x0,y0,x1,y1): 시작 floor, 끝 ceil, canvas에 clip. 퇴화(폭/높이 0)면 None."""
++    y0, x0, y1, x1 = yxyx
++    px0 = max(0, math.floor(x0 * side / 1000.0))
++    py0 = max(0, math.floor(y0 * side / 1000.0))
++    px1 = min(side, math.ceil(x1 * side / 1000.0))
++    py1 = min(side, math.ceil(y1 * side / 1000.0))
++    if px1 <= px0 or py1 <= py0:
++        return None
++    return px0, py0, px1, py1
++
++
++def center_rect(h, w, side):
++    """예측 crop과 같은 pixel 높이 h, 너비 w를 정사각 canvas 중앙에서 자른다 (floor 중심)."""
++    y0 = (side - h) // 2
++    x0 = (side - w) // 2
++    return x0, y0, x0 + w, y0 + h
++
++
++def crop_square_padded(canvas_rgb, rect):
++    """canvas(정사각 padding된 RGB uint8)에서 rect를 자르고 값 보존 후 square padding한다. returns (padded uint8 RGB, affine)."""
++    x0, y0, x1, y1 = rect
++    sub = canvas_rgb[y0:y1, x0:x1]
++    padded, aff = geometry.pad_square(sub)
++    return padded, aff
++
++
++def rect_area_ratio(rect, side):
++    x0, y0, x1, y1 = rect
++    return (x1 - x0) * (y1 - y0) / float(side * side)
++
++
++# ---------------- parsing ----------------
++def sem(target, raw, ended):
++    """semantic_v1 (주평가). returns (status, answer)."""
++    st, ans, _ = qa_spec.parse_semantic(target, FMT, raw, ended)
++    return st, ans
++
++
++def strict(target, raw, ended):
++    return qa_spec.parse_plain(raw, ended)
++
++
++def correct_answer(cat, target):
++    return qa_spec.GT_PAIR[cat][0 if target == "O" else 1]
++
++
++# ---------------- stats ----------------
++def boot_diff(a, b, seed=SEED, n=N_BOOT):
++    """환자 단위 paired 차이 a-b (0/1 벡터)의 bootstrap 95% 구간. 모든 분산이 0이면 퇴화 표시."""
++    a = np.asarray(a, float)
++    b = np.asarray(b, float)
++    d = a - b
++    rng = np.random.default_rng(seed)
++    idx = rng.integers(0, len(d), size=(n, len(d)))
++    m = d[idx].mean(axis=1)
++    lo, hi = np.percentile(m, [2.5, 97.5])
++    return float(d.mean()), float(lo), float(hi), bool(np.all(d == d[0]))
++
++
++def exact_binom_ci(k, n, alpha=0.05):
++    """Clopper-Pearson 구간 (scipy 없이 bisection)."""
++    def cdf(x, n_, p):
++        return sum(math.comb(n_, i) * p ** i * (1 - p) ** (n_ - i) for i in range(0, x + 1))
++    if n == 0:
++        return (0.0, 1.0)
++    lo = 0.0
++    hi = 1.0
++    if k > 0:
++        a, b = 0.0, 1.0
++        for _ in range(80):
++            m = (a + b) / 2
++            if 1 - cdf(k - 1, n, m) < alpha / 2:
++                a = m
++            else:
++                b = m
++        lo = (a + b) / 2
++    if k < n:
++        a, b = 0.0, 1.0
++        for _ in range(80):
++            m = (a + b) / 2
++            if cdf(k, n, m) > alpha / 2:
++                a = m
++            else:
++                b = m
++        hi = (a + b) / 2
++    return (lo, hi)
+diff --git a/ev109_extract.py b/ev109_extract.py
+new file mode 100644
+index 0000000..cf7ae13
+--- /dev/null
++++ b/ev109_extract.py
+@@ -0,0 +1,92 @@
++"""iter_109 명시적 Yes/No 답 추출 (GT·영상·모델·조건 이름 없이 응답 텍스트와 질문 종류 O/A만 입력).
++
++- 원 semantic_v1(ev108_spec.sem)이 받아들이는 응답은 그대로 유지한다 (resolve()에서 먼저 적용).
++- 그 밖에 아래 두 가지 명시적 패턴만 추가로 받아들이고, 나머지는 모두 unresolved다. 패턴은 결과를 보기 전에 잠근다.
++  R1 문두 직접 응답: 문두(공백·마크다운 강조 제외)의 독립된 Yes/No 뒤에 문장부호(. , : ; !) 또는 줄바꿈 또는 문자열 끝이 온다.
++  R2 결론형: 독립 문장·줄(문장 경계 또는 줄 시작 직후)이 [Therefore|Thus|Hence|So|In conclusion,] [the] [final] answer is|: yes/no [.!] 로 끝난다.
++     같은 답의 반복은 허용한다. 서로 다른 답이 둘 이상이면 conflict 이므로 unresolved.
++- 추가 거부(unresolved): 인용/코드(`, ", “, ”, 줄머리 >), 질문 반복, 설명문 속 반대 yes/no 단어, 불확실성·조건 표현(고정 목록), 답 없음.
++  `no`가 임상적 부정인지 해석해 구제하지 않는다. 설명문의 단어 no는 단지 반대 token으로 취급한다.
++"""
++import hashlib
++import re
++
++import ev108_spec as S
++from rsna_diag import qa_spec
++
++RULES_VERSION = "ev109_extract_v1"
++EOT = qa_spec.EOT
++
++_MD = r"[\*_]*"
++R1 = re.compile(r"^\s*" + _MD + r"(yes|no)" + _MD + r"(?=\s*[.,:;!]|\s*\n|\s*$)", re.I)
++R2 = re.compile(r"(?:^|(?<=\n)|(?<=[.!?]\s)|(?<=[.!?]))\s*" + _MD +
++                r"(?:(?:therefore|thus|hence|so|in conclusion)\s*,?\s*)?(?:the\s+)?(?:final\s+)?answer\s*(?:is\s*:?|:)\s*" + _MD +
++                r"(yes|no)" + _MD + r"\s*[.!]?\s*" + _MD + r"(?=\n|$)", re.I)
++QUOTE_CHARS = re.compile(r"[`\"“”]|(?m:^\s*>)")
++HEDGES = ["possibly", "possible", "probably", "probable", "may", "might", "could", "perhaps", "unclear", "uncertain", "uncertainty",
++          "difficult", "cannot", "can't", "unable", "if", "unless", "whether", "hard to", "not sure", "would", "suggest", "suggests"]
++HEDGE_RE = re.compile(r"\b(?:" + "|".join(re.escape(h) for h in HEDGES) + r")\b", re.I)
++QUESTION_ECHO = [qa_spec.Q_O.lower()[:40], qa_spec.Q_A.lower()[:40], "answer only yes or no"]
++WORD_YN = re.compile(r"\b(yes|no)\b", re.I)
++
++
++def clean(raw):
++    t = raw[:-len(EOT)] if raw.endswith(EOT) else raw
++    return t.strip()
++
++
++def extract(text, target):
++    """returns dict(answer yes|no|None, rule, reason, spans). target ∈ O/A 는 인터페이스 호환용이며 규칙은 질문 종류에 의존하지 않는다."""
++    if target not in qa_spec.QUESTIONS:
++        raise ValueError(target)
++    t = clean(text)
++    if not t:
++        return dict(answer=None, rule=None, reason="empty", spans=[])
++    low = t.lower()
++    if QUOTE_CHARS.search(t):
++        return dict(answer=None, rule=None, reason="quote_or_code", spans=[])
++    if any(q in low for q in QUESTION_ECHO):
++        return dict(answer=None, rule=None, reason="question_echo", spans=[])
++    found = []
++    m1 = R1.match(t)
++    if m1:
++        found.append(("R1", m1.group(1).lower(), (m1.start(1), m1.end(1))))
++    for m in R2.finditer(t):
++        found.append(("R2", m.group(1).lower(), (m.start(1), m.end(1))))
++    if not found:
++        return dict(answer=None, rule=None, reason="no_explicit_answer", spans=[])
++    answers = {a for _, a, _ in found}
++    spans = [dict(rule=r, answer=a, span=list(s), text=t[s[0]:s[1]]) for r, a, s in found]
++    if len(answers) > 1:
++        return dict(answer=None, rule=None, reason="conflicting_answers", spans=spans)
++    ans = answers.pop()
++    # 설명 속 반대 token: 일치 span 바깥의 yes/no 단어
++    used = [s for _, _, s in found]
++    for m in WORD_YN.finditer(t):
++        if any(s[0] <= m.start() < s[1] for s in used):
++            continue
++        if m.group(1).lower() != ans:
++            return dict(answer=None, rule=None, reason="opposite_token", spans=spans)
++    # 불확실성·조건 표현: 문장 전체 (답 span 제외 전체 텍스트)
++    if HEDGE_RE.search(t):
++        return dict(answer=None, rule=None, reason="hedge_or_conditional", spans=spans)
++    return dict(answer=ans, rule="+".join(sorted({r for r, _, _ in found})), reason="explicit", spans=spans)
++
++
++def resolve(target, raw, ended_eos):
++    """원 semantic_v1 → 명시적 추출. returns dict(answer, source: semantic_v1|explicit|unresolved, reason, rule, spans). 입력에 GT/조건 없음."""
++    st, ans = S.sem(target, raw, ended_eos)
++    if st == "valid":
++        return dict(answer=ans, source="semantic_v1", reason="semantic_v1", rule=None, spans=[])
++    if st == "truncated" or not ended_eos:
++        return dict(answer=None, source="unresolved", reason="truncated", rule=None, spans=[])
++    e = extract(raw, target)
++    if e["answer"] is not None:
++        return dict(answer=e["answer"], source="explicit", reason="explicit", rule=e["rule"], spans=e["spans"])
++    return dict(answer=None, source="unresolved", reason=e["reason"], rule=None, spans=e["spans"])
++
++
++def rules_digest():
++    import inspect
++    import sys
++    return hashlib.sha256(inspect.getsource(sys.modules[__name__]).encode()).hexdigest()
+diff --git a/ev111_core.py b/ev111_core.py
+new file mode 100644
+index 0000000..8aa72f2
+--- /dev/null
++++ b/ev111_core.py
+@@ -0,0 +1,209 @@
++"""iter_111 판단·위치 공동 평가와 검토량 대조의 순수 함수. 입력은 ev111_link.py가 만든 ledger rows.
++원 규칙(plan.md Evaluation): IoU 0.3 주 / 0.5 보조, 최대 일대일 matching(rsna_diag.metrics), 답 추출 ev109_extract_v1 무변경."""
++import numpy as np
++
++import ev108_spec as S8
++import ev109_extract as X
++from rsna_diag import geometry as G
++from rsna_diag import metrics as M
++
++THR_DET = 0.70
++IOU_MAIN, IOU_AUX = 0.3, 0.5
++SEED, NBOOT = 11117, 10000
++CATS = ("opacity", "normal", "not_normal_no_opacity")
++
++
++def prep(rows):
++    """ledger rows -> 환자별 dict. 답/박스는 GT와 독립으로 만든다."""
++    out = []
++    for r in rows:
++        top, left, side = r["pad"]
++        d = r["det"]
++        db, ds = [], []
++        for b, s, l in zip(d["boxes_xyxy_px"], d["scores"], d["labels"]):
++            if l != 1 or s < THR_DET:
++                continue
++            db.append(G.canvas_to_norm(b, top, left, side))
++            ds.append(float(s))
++        st, sb = S8.parse_saved_bbox(r["SFT"]["raw"], r["SFT"]["ended_eos"])
++        ans = X.resolve("O", r["O"]["raw"], r["O"]["ended_eos"])
++        out.append(dict(id=r["id"], cat=r["category"], gt=r["gt_yxyx_norm"], det=db, det_scores=ds,
++                        sft=sb, sft_status=st, ans=ans["answer"], ans_source=ans["source"]))
++    return out
++
++
++def box_outcome(pred, gt, thr):
++    """returns dict(tp, fp, fn, exact: GT 양성이면 TP==n_gt==n_pred, 음성이면 pred 비어 있음)."""
++    tp = len(M.match(pred, gt, thr)) if pred and gt else 0
++    fp, fn = len(pred) - tp, len(gt) - tp
++    exact = (len(pred) == 0) if not gt else (tp == len(gt) == len(pred))
++    return dict(tp=tp, fp=fp, fn=fn, exact=bool(exact))
++
++
++def system_boxes(p, loc):
++    """loc: det|sft -> (boxes, valid)."""
++    if loc == "det":
++        return p["det"], True
++    return p["sft"], p["sft_status"] in ("ok", "empty")
++
++
++def joint(p, loc, mode, thr):
++    """mode: loc(박스 유무=존재 출력) | indep(reader 답 + localizer) | gate(reader No면 빈 박스).
++    returns True/False/None(미해결). 박스를 쓰는데 localizer 출력이 invalid면 False."""
++    boxes, valid = system_boxes(p, loc)
++    pos = bool(p["gt"])
++    if mode == "loc":
++        if not valid:
++            return False
++        return box_outcome(boxes, p["gt"], thr)["exact"]
++    a = p["ans"]
++    if a is None:
++        return None
++    if mode == "gate" and a == "no":
++        boxes, valid = [], True
++    if not valid:
++        return False
++    if pos != (a == "yes"):
++        return False
++    return box_outcome(boxes, p["gt"], thr)["exact"]
++
++
++def error_type(p):
++    """detector 양성 출력(S)의 주 오류 Y와 유형. returns (Y, type)."""
++    ok = box_outcome(p["det"], p["gt"], IOU_MAIN)["exact"]
++    if ok:
++        return False, "correct"
++    return True, "neg_claim" if not p["gt"] else "pos_location"
++
++
++def expected_found(score, Y, k):
++    """score 낮은 순 k개 선택(경계 동률은 균등 기대값)으로 찾는 Y 합."""
++    score, Y = np.asarray(score, float), np.asarray(Y, float)
++    n = len(score)
++    if k <= 0 or n == 0:
++        return 0.0
++    if k >= n:
++        return float(Y.sum())
++    srt = np.sort(score)
++    v = srt[k - 1]
++    lo = score < v
++    tie = score == v
++    j = k - int(lo.sum())
++    return float(Y[lo].sum() + j / tie.sum() * Y[tie].sum())
++
++
++def vec(P):
++    """환자별 사전 계산(비싼 matching은 한 번만). 부트스트랩은 이 배열의 index 재표집으로 수행한다."""
++    inS = np.array([bool(p["det"]) for p in P])
++    et = [error_type(p) if p["det"] else (False, "none") for p in P]
++    return dict(inS=inS, Y=np.array([e[0] for e in et]), typ=np.array([e[1] for e in et]),
++                res=np.array([p["ans"] is not None for p in P]), no=np.array([p["ans"] == "no" for p in P]),
++                smax=np.array([max(p["det_scores"]) if p["det"] else np.nan for p in P]),
++                smin=np.array([min(p["det_scores"]) if p["det"] else np.nan for p in P]))
++
++
++def endpoint(v, idx=None):
++    """주 endpoint 구성요소. S=detector nonempty. idx가 있으면 해당 index(복원 추출)로 재계산(k·confidence 경계 모두 재계산)."""
++    g = (lambda a: a) if idx is None else (lambda a: a[idx])
++    m = g(v["inS"])
++    if not m.any():
++        return None
++    Y, typ, res, no = g(v["Y"])[m], g(v["typ"])[m], g(v["res"])[m], g(v["no"])[m]
++    smax, smin = g(v["smax"])[m], g(v["smin"])[m]
++    n = len(Y)
++    k, nr = int(no.sum()), int(res.sum())
++    out = dict(n_S=n, n_Y=int(Y.sum()), n_unres=int((~res).sum()), n_resolved=nr, k=k)
++    vlm = float(Y[no].sum())
++    conf = expected_found(smax[res], Y[res], k)
++    confmin = expected_found(smin[res], Y[res], k)
++    out.update(found_vlm=vlm, found_conf=conf, found_confmin=confmin, ep=(vlm - conf) / n, ep_aux=(vlm - confmin) / n,
++               Y_res=int(Y[res].sum()))
++    for t in ("neg_claim", "pos_location"):
++        mt = typ == t
++        out[f"vlm_{t}"] = float((Y & no & mt).sum())
++        out[f"conf_{t}"] = expected_found(smax[res], (Y & mt)[res], k)
++        out[f"confmin_{t}"] = expected_found(smin[res], (Y & mt)[res], k)
++        out[f"Y_{t}"] = int((Y & mt).sum())
++    out["review_correct_removed_vlm"] = int((no & ~Y).sum())
++    out["recall_vlm"] = vlm / out["Y_res"] if out["Y_res"] else float("nan")
++    out["precision_vlm"] = vlm / k if k else float("nan")
++    out["degenerate"] = bool(k == 0 or k == nr)
++    return out
++
++
++def endpoint_arrays(P):
++    return endpoint(vec(P))
++
++
++def boot(P, B=NBOOT, seed=SEED, keys=("ep", "ep_aux")):
++    v = vec(P)
++    rng = np.random.default_rng(seed)
++    idx = rng.integers(0, len(P), size=(B, len(P)), dtype=np.int32)
++    res = {k: [] for k in keys}
++    res["pos_diff"], res["pos_diff_aux"], res["degenerate"] = [], [], 0
++    for b in range(B):
++        e = endpoint(v, idx[b])
++        if e is None:
++            continue
++        for k in keys:
++            res[k].append(e[k])
++        res["pos_diff"].append((e["vlm_pos_location"] - e["conf_pos_location"]) / e["n_S"])
++        res["pos_diff_aux"].append((e["vlm_pos_location"] - e["confmin_pos_location"]) / e["n_S"])
++        res["degenerate"] += e["degenerate"]
++    return res
++
++
++def ci(v, lo=2.5, hi=97.5):
++    v = np.asarray(v, float)
++    return [float(np.percentile(v, lo)), float(np.percentile(v, hi))]
++
++
++def assign_unresolved(P, mode):
++    """미해결 답 배정으로 만든 복사본. mode: yes|no|adverse|favorable (adverse/favorable은 GT를 이용한 경계 계산용)."""
++    Q = []
++    for p in P:
++        q = dict(p)
++        if p["ans"] is None:
++            if mode in ("yes", "no"):
++                q["ans"] = mode
++            else:
++                Y, _ = error_type(p) if p["det"] else (False, None)
++                flagged_adverse = bool(p["det"]) and not Y  # 올바른 출력을 검토 대상으로 소모
++                flagged_fav = bool(p["det"]) and Y
++                q["ans"] = "no" if (flagged_adverse if mode == "adverse" else flagged_fav) else "yes"
++        Q.append(q)
++    return Q
++
++
++def system_table(P, loc, mode, thr):
++    """전체/범주별 공동 성공과 보조 지표."""
++    def one(sub):
++        n = len(sub)
++        js = [joint(p, loc, mode, thr) for p in sub]
++        unres = sum(j is None for j in js)
++        succ = sum(j is True for j in js)
++        pos = [p for p in sub if p["gt"]]
++        f1 = [M.patient_metrics(system_boxes(p, loc)[0], p["gt"], thr)["f1"] for p in pos] if pos else []
++        hit = [M.patient_metrics(system_boxes(p, loc)[0], p["gt"], thr)["tp"] > 0 for p in pos] if pos else []
++        fp = fn = 0
++        for p in sub:
++            b, _ = system_boxes(p, loc)
++            if mode == "gate" and p["ans"] == "no":
++                b = []
++            o = box_outcome(b, p["gt"], thr)
++            fp += o["fp"]
++            fn += o["fn"]
++        ex = None
++        if mode != "loc":
++            ex = float(np.mean([(p["ans"] == "yes") == bool(p["gt"]) for p in sub if p["ans"] is not None])) if any(p["ans"] is not None for p in sub) else None
++        else:
++            ex = float(np.mean([bool(system_boxes(p, loc)[0]) == bool(p["gt"]) for p in sub]))
++        inv = sum(not system_boxes(p, loc)[1] for p in sub)
++        return dict(n=n, joint=succ / n, joint_n=succ, unresolved=unres, joint_if_unres_fail=succ / n,
++                    joint_best_case=(succ + unres) / n, existence_acc=ex, pos_f1=float(np.mean(f1)) if f1 else None,
++                    pos_any_hit=float(np.mean(hit)) if hit else None, fp_per_patient=fp / n, fn_per_patient=fn / n, invalid_loc=inv)
++    out = {"all": one(P)}
++    for c in CATS:
++        out[c] = one([p for p in P if p["cat"] == c])
++    out["equal_weight_joint"] = float(np.mean([out[c]["joint"] for c in CATS]))
++    return out
+diff --git a/ev111_link.py b/ev111_link.py
+new file mode 100644
+index 0000000..25f3c8d
+--- /dev/null
++++ b/ev111_link.py
+@@ -0,0 +1,198 @@
++"""iter_111 E600 provenance ledger: 존재 응답(Q_O, MedGemma 1.5 원본), 직접 SFT bbox(seed17), detector17 출력, GT를
++환자 단위로 연결하고 모든 출처를 내용 hash로 검증한다. 결과 지표는 계산하지 않는다(ev111_core.py).
++문제가 하나라도 있으면 ledger를 쓰지 않고 problems만 쓴 뒤 종료코드 1. 기존 파일은 덮어쓰지 않는다."""
++import glob
++import hashlib
++import json
++import os
++import sys
++
++import numpy as np
++from PIL import Image
++
++from rsna_diag import geometry as G
++
++R = "results"
++OUT = f"{R}/iter_111/provenance"
++SETS = f"{R}/iter_016/manifests/sets.json"
++LABELS = f"{R}/iter_016/manifests/labels.json"
++INFER = f"{R}/iter_016/manifests/infer_manifest.jsonl"
++O_STAGES = {"e180_plain": f"{R}/iter_016/gen/e180_plain__M0", "e600x_plain": f"{R}/iter_016/gen/e600x_plain__M0"}
++O_REQ = {"e180_plain": f"{R}/iter_016/requests/e180_plain__M0.jsonl", "e600x_plain": f"{R}/iter_016/requests/e600x_plain__M0.jsonl"}
++SFT_DIR = f"{R}/iter_012/confirm_sft_seed17"
++SFT_REUSE = f"{R}/iter_015/reuse/bbox_B0_concise.jsonl"
++DET_DIR = f"{R}/iter_035/confirm800/det17"
++DET_LOCK = f"{R}/iter_035/select/LOCK.json"
++DET_SEL = f"{R}/iter_035/select/seed17/v400_selection.json"
++THR, EPOCH = 0.70, 18
++
++
++def fsha(p):
++    h = hashlib.sha256()
++    with open(p, "rb") as f:
++        for c in iter(lambda: f.read(1 << 20), b""):
++            h.update(c)
++    return h.hexdigest()
++
++
++def jl(p):
++    with open(p) as f:
++        return [json.loads(x) for x in f if x.strip()]
++
++
++def read_workers(d):
++    rows, files = [], {}
++    for p in sorted(glob.glob(f"{d}/gen_worker*.jsonl")):
++        files[os.path.basename(p)] = fsha(p)
++        rows += jl(p)
++    return rows, files
++
++
++def main():
++    os.makedirs(OUT, exist_ok=True)
++    if os.path.exists(f"{OUT}/ledger.json") or os.path.exists(f"{OUT}/problems.json"):
++        sys.exit("exists: 기존 ledger/problems 덮어쓰기 금지")
++    P = []
++    sets = json.load(open(SETS))["E600"]
++    labels = json.load(open(LABELS))
++    ids = sorted(i for c in sets.values() for i in c)
++    cat_of = {i: c for c, v in sets.items() for i in v}
++    if len(ids) != 600 or len(set(ids)) != 600:
++        P.append(f"E600 ids {len(ids)}/{len(set(ids))}")
++    infer = {r["id"]: r for r in jl(INFER)}
++    inputs = {k: fsha(v) for k, v in dict(sets=SETS, labels=LABELS, infer=INFER, det_lock=DET_LOCK, det_sel=DET_SEL,
++                                          sft_reuse=SFT_REUSE, det_raw=f"{DET_DIR}/raw_preds.json",
++                                          det_completion=f"{DET_DIR}/completion.json").items()}
++
++    # --- 존재 응답 Q_O
++    O = {}
++    o_prov = {}
++    for st, d in O_STAGES.items():
++        reqs = jl(O_REQ[st])
++        comp = json.load(open(f"{d}/completion.json"))
++        rs = fsha(O_REQ[st])
++        if comp["requests_sha256"] != rs or comp["n_missing"] or comp["n_duplicate"] or comp["n_extra"] or comp["returncodes"] != [0] * len(comp["returncodes"]):
++            P.append(f"{st}: completion 불일치 {comp.get('requests_sha256') == rs}")
++        recs, files = read_workers(d)
++        rb = {}
++        for r in recs:
++            if r["request_id"] in rb:
++                P.append(f"{st}: 중복 record {r['request_id']}")
++            rb[r["request_id"]] = r
++        if len(rb) != comp["n_expected"] or len(reqs) != comp["n_expected"]:
++            P.append(f"{st}: record 수 {len(rb)} vs {comp['n_expected']}")
++        o_prov[st] = dict(requests_sha256=rs, completion_protocol_digest=comp["protocol_digest"], config_digest=comp["config_digest"],
++                          worker_files=files, adapter_digest=comp["adapter_digest"])
++        for q in reqs:
++            if q["target"] != "O":
++                continue
++            r = rb.get(q["request_id"])
++            if r is None:
++                P.append(f"{st}: record 없음 {q['id']}")
++                continue
++            for k in ("id", "checkpoint", "target", "fmt", "condition", "prompt_sha256", "config_digest", "adapter_digest"):
++                a = q.get(k)
++                b = r.get(k, r.get("prompt_name") if k == "condition" else None)
++                if k == "prompt_sha256":
++                    b = r.get("prompt_sha256")
++                if a != b:
++                    P.append(f"{st}:{q['id']} 필드 {k} 불일치 {a!r} {b!r}")
++            if r["image_file_sha256"] != q["file_sha256"] or r["protocol_digest"] != comp["protocol_digest"]:
++                P.append(f"{st}:{q['id']} 이미지/protocol hash 불일치")
++            if q["id"] in O:
++                P.append(f"중복 O {q['id']}")
++            O[q["id"]] = dict(stage=st, request_id=q["request_id"], raw=r["suffix_text_raw"], ended_eos=r["ended_eos"],
++                              finish_reason=r["finish_reason"], image_file_sha256=r["image_file_sha256"],
++                              input_ids_sha256=r["input_ids_sha256"], prompt=q["prompt"])
++
++    # --- SFT bbox: 원 worker 파일에서 재추출하여 reuse 파일과 대조
++    reuse = {r["id"]: r for r in jl(SFT_REUSE)}
++    comp = json.load(open(f"{SFT_DIR}/completion.json"))
++    src_rows, sft_files = read_workers(SFT_DIR)
++    sb = {}
++    for r in src_rows:
++        if r.get("prompt_name") == "concise":
++            if r["id"] in sb:
++                P.append(f"SFT 중복 {r['id']}")
++            sb[r["id"]] = r
++    sft_prov = dict(dir=SFT_DIR, worker_files=sft_files, protocol_digest=comp.get("protocol_digest"),
++                    adapter_digest=sorted({r["adapter_digest"] for r in src_rows}), n_concise=len(sb))
++    SFT = {}
++    for i in ids:
++        r, u = sb.get(i), reuse.get(i)
++        if r is None or u is None:
++            P.append(f"SFT 없음 {i}")
++            continue
++        if (r["suffix_text_raw"], r["ended_eos"], r["request_id"], r["adapter_digest"]) != (u["suffix_text_raw"], u["ended_eos"], u["request_id"], u["adapter_digest"]):
++            P.append(f"SFT 원본-reuse 불일치 {i}")
++        if r["image_file_sha256"] != infer[i]["file_sha256"]:
++            P.append(f"SFT 이미지 hash 불일치 {i}")
++        SFT[i] = dict(request_id=r["request_id"], raw=r["suffix_text_raw"], ended_eos=r["ended_eos"], finish_reason=r["finish_reason"])
++
++    # --- detector17
++    comp = json.load(open(f"{DET_DIR}/completion.json"))
++    sel = json.load(open(DET_SEL))
++    lock = json.load(open(DET_LOCK))
++    raw_sha = fsha(f"{DET_DIR}/raw_preds.json")
++    if raw_sha != comp["raw_preds_sha256"]:
++        P.append("det raw_preds hash 불일치")
++    for fn, h in comp["shard_sha256"].items():
++        if fsha(f"{DET_DIR}/{fn}") != h:
++            P.append(f"det shard hash 불일치 {fn}")
++    if lock["files"]["seed17"]["sha256"] != fsha(DET_SEL):
++        P.append("LOCK-v400_selection hash 불일치")
++    if sel["selected"]["epoch"] != EPOCH or sel["selected"]["threshold"] != THR:
++        P.append("선택 epoch/threshold 불일치")
++    if comp["checkpoint_sha256"] != sel["selected_checkpoint_sha256"] or fsha(comp["checkpoint"]) != comp["checkpoint_sha256"]:
++        P.append("checkpoint hash 불일치")
++    det = json.load(open(f"{DET_DIR}/raw_preds.json"))
++    det_prov = dict(raw_preds_sha256=raw_sha, checkpoint_sha256=comp["checkpoint_sha256"], epoch=EPOCH, threshold=THR,
++                    lock_sha256=inputs["det_lock"], selection_sha256=inputs["det_sel"], manifest_digest=comp["manifest_digest"])
++
++    # --- 환자별 연결
++    rows = []
++    for i in ids:
++        lab, inf = labels.get(i), infer.get(i)
++        if lab is None or inf is None or i not in O or i not in SFT or i not in det:
++            P.append(f"연결 누락 {i}: lab={lab is not None} inf={inf is not None} O={i in O} SFT={i in SFT} det={i in det}")
++            continue
++        if lab["category"] != cat_of[i]:
++            P.append(f"category 불일치 {i}")
++        p = inf["image"]
++        if not os.path.exists(p):
++            P.append(f"영상 없음 {i}")
++            continue
++        if fsha(p) != inf["file_sha256"] or O[i]["image_file_sha256"] != inf["file_sha256"]:
++            P.append(f"영상 file hash 불일치 {i}")
++        im = Image.open(p)
++        w, h = im.size
++        top, left, side = G.pad_offsets(h, w)
++        d = det[i]
++        if list(d["img_hw"]) != [h, w]:
++            P.append(f"det img_hw {d['img_hw']} != 영상 {[h, w]} {i}")
++        pixel_ok = hashlib.sha256(np.asarray(im).tobytes()).hexdigest() == inf["pixel_sha256"]
++        for b in lab["boxes"]:  # px→norm 환산이 저장 norm과 같은지
++            c = G.canvas_to_norm(b["xyxy_px"], top, left, side)
++            if max(abs(x - y) for x, y in zip(c, b["yxyx_norm"])) > 1e-3:
++                P.append(f"GT px/norm 불일치 {i}")
++        if (lab["category"] == "opacity") != bool(lab["boxes"]):
++            P.append(f"category-box 불일치 {i}")
++        rows.append(dict(id=i, category=lab["category"], patient=lab["patient"], image=p, size_hw=[h, w], pad=[top, left, side],
++                         file_sha256=inf["file_sha256"], pixel_hash_reproduced=pixel_ok,
++                         gt_yxyx_norm=[b["yxyx_norm"] for b in lab["boxes"]], gt_ann_ids=[b["ann_id"] for b in lab["boxes"]],
++                         O=O[i], SFT=SFT[i],
++                         det=dict(boxes_xyxy_px=d["boxes_xyxy_px"], scores=d["scores"], labels=d["labels"], img_hw=d["img_hw"])))
++    prov = dict(inputs=inputs, O=o_prov, SFT=sft_prov, det=det_prov, n_rows=len(rows),
++                n_pixel_hash_reproduced=sum(r["pixel_hash_reproduced"] for r in rows))
++    if P:
++        json.dump(P, open(f"{OUT}/problems.json", "w"), indent=1, ensure_ascii=False)
++        print("PROBLEMS", len(P), P[:10])
++        sys.exit(1)
++    json.dump(prov, open(f"{OUT}/provenance.json", "w"), indent=1, sort_keys=True)
++    s = json.dumps(dict(rows=rows), sort_keys=True)
++    open(f"{OUT}/ledger.json", "w").write(s)
++    print("OK", len(rows), "pixel_reproduced", prov["n_pixel_hash_reproduced"], "ledger_sha256", hashlib.sha256(s.encode()).hexdigest())
++
++
++if __name__ == "__main__":
++    main()
+diff --git a/ev111_lock.py b/ev111_lock.py
+new file mode 100644
+index 0000000..d6ed568
+--- /dev/null
++++ b/ev111_lock.py
+@@ -0,0 +1,28 @@
++"""iter_111 평가 규칙 잠금: 코드·입력 digest를 실제 시각과 함께 기록한다. 과학 비교(ev111_run.py) 실행 전에만 의미가 있다."""
++import hashlib
++import json
++import os
++import sys
++import time
++
++FILES = ["ev111_core.py", "ev111_run.py", "ev111_link.py", "ev109_extract.py", "ev108_spec.py", "rsna_diag/metrics.py",
++         "rsna_diag/geometry.py", "rsna_diag/qa_spec.py", "test_ev111.py"]
++PROV = "results/iter_111/provenance"
++OUT = f"{PROV}/eval_lock.json"
++
++
++def fsha(p):
++    return hashlib.sha256(open(p, "rb").read()).hexdigest()
++
++
++if os.path.exists(OUT):
++    sys.exit("exists")
++if os.path.exists("results/iter_111/eval/report.json"):
++    sys.exit("report가 이미 있으므로 사전 잠금이 아니다")
++lk = dict(locked_at_unix=time.time(), locked_at=time.strftime("%Y-%m-%dT%H:%M:%S%z"),
++          code_sha256={f: fsha(f) for f in FILES}, ledger_sha256=fsha(f"{PROV}/ledger.json"), provenance_sha256=fsha(f"{PROV}/provenance.json"),
++          params=dict(det_threshold=0.70, iou_main=0.3, iou_aux=0.5, seed=11117, B=10000, positive_ep=0.05),
++          outcome_computed_before_lock=False,
++          note="rep12 연결 점검은 박스·답 원문 확인만 했고 지표를 계산하지 않았다. fixture 38/38 통과 후 잠금.")
++json.dump(lk, open(OUT, "w"), indent=1)
++print(lk["locked_at"])
+diff --git a/ev111_rep12.py b/ev111_rep12.py
+new file mode 100644
+index 0000000..a07f112
+--- /dev/null
++++ b/ev111_rep12.py
+@@ -0,0 +1,57 @@
++"""대표 12명(범주별 sha256(id) 오름차순 4명) 연결 점검: 영상·GT·detector·SFT 박스 overlay와 존재 응답 원문. 지표 계산 없음."""
++import hashlib
++import json
++import os
++import sys
++
++from PIL import Image, ImageDraw
++
++import ev109_extract as X
++import ev111_core as C
++
++OUT = "results/iter_111/rep12"
++
++
++def main():
++    os.makedirs(OUT, exist_ok=True)
++    if os.path.exists(f"{OUT}/rep12.json"):
++        sys.exit("exists")
++    rows = json.load(open("results/iter_111/provenance/ledger.json"))["rows"]
++    P = {p["id"]: p for p in C.prep(rows)}
++    sel = []
++    for c in C.CATS:
++        ids = sorted((r["id"] for r in rows if r["category"] == c), key=lambda i: hashlib.sha256(i.encode()).hexdigest())[:4]
++        sel += ids
++    R = {r["id"]: r for r in rows}
++    tiles, info = [], []
++    for i in sel:
++        r, p = R[i], P[i]
++        im = Image.open(r["image"]).convert("RGB")
++        w, h = im.size
++        top, left, side = r["pad"]
++        d = ImageDraw.Draw(im)
++
++        def px(b):  # yxyx norm -> pixel(원본, padding 0일 때 동일)
++            return [b[1] * side / 1000 - left, b[0] * side / 1000 - top, b[3] * side / 1000 - left, b[2] * side / 1000 - top]
++        for b in p["gt"]:
++            d.rectangle(px(b), outline=(0, 255, 0), width=4)
++        for b in p["det"]:
++            d.rectangle(px(b), outline=(255, 0, 0), width=3)
++        for b in p["sft"]:
++            d.rectangle(px(b), outline=(0, 128, 255), width=3)
++        tiles.append(im.resize((384, 384)))
++        info.append(dict(id=i, category=p["cat"], size=[h, w], n_gt=len(p["gt"]), n_det=len(p["det"]), det_scores=p["det_scores"],
++                         sft_status=p["sft_status"], n_sft=len(p["sft"]), O_raw=r["O"]["raw"][:120], ans=p["ans"], ans_source=p["ans_source"],
++                         O_prompt=r["O"]["prompt"], request_id=r["O"]["request_id"]))
++    W = Image.new("RGB", (384 * 4, 384 * 3))
++    for n, t in enumerate(tiles):
++        W.paste(t, ((n % 4) * 384, (n // 4) * 384))
++    W.save(f"{OUT}/overlay12.png")
++    json.dump(info, open(f"{OUT}/rep12.json", "w"), indent=1, ensure_ascii=False)
++    for x in info:
++        print(x["id"], x["category"], "gt", x["n_gt"], "det", x["n_det"], "sft", x["sft_status"], x["n_sft"], "ans", x["ans"], x["ans_source"], repr(x["O_raw"][:50]))
++    print(info[0]["O_prompt"])
++
++
++if __name__ == "__main__":
++    main()
+diff --git a/ev111_run.py b/ev111_run.py
+new file mode 100644
+index 0000000..61c515a
+--- /dev/null
++++ b/ev111_run.py
+@@ -0,0 +1,141 @@
++"""iter_111 전체 비교 실행: lock 검증 → 저장 출력 비교 → report/per_patient. 새 추론·학습 없음. 기존 결과 덮어쓰기 금지."""
++import hashlib
++import json
++import os
++import sys
++import time
++
++import numpy as np
++
++import ev111_core as C
++from rsna_diag import metrics as M
++
++PROV = "results/iter_111/provenance"
++OUT = "results/iter_111/eval"
++LOCK = f"{PROV}/eval_lock.json"
++
++
++def fsha(p):
++    return hashlib.sha256(open(p, "rb").read()).hexdigest()
++
++
++def check_lock():
++    lk = json.load(open(LOCK))
++    bad = [f for f, h in lk["code_sha256"].items() if fsha(f) != h]
++    for k, p in (("ledger_sha256", f"{PROV}/ledger.json"), ("provenance_sha256", f"{PROV}/provenance.json")):
++        if fsha(p) != lk[k]:
++            bad.append(p)
++    if bad:
++        sys.exit(f"lock 불일치: {bad}")
++    return lk
++
++
++def weights(score, k):
++    """conf 전략의 환자별 선택 확률(경계 동률 균등). expected_found와 동일 규칙."""
++    score = np.asarray(score, float)
++    n = len(score)
++    if k <= 0 or n == 0:
++        return np.zeros(n)
++    if k >= n:
++        return np.ones(n)
++    v = np.sort(score)[k - 1]
++    w = (score < v).astype(float)
++    tie = score == v
++    w[tie] = (k - int((score < v).sum())) / tie.sum()
++    return w
++
++
++def decide(ep, ci_lo, pos_diff, ep_aux, degenerate, unres_bounds):
++    """원 계획 Evaluation의 분기. 임의 수정 금지."""
++    if degenerate:
++        return "negative", "k=0 또는 k=resolved S 전체: 내용 선택의 추가 정보 없음(ep=0)"
++    if ep <= 0:
++        return "negative", "주 endpoint<=0"
++    if pos_diff <= 0:
++        return "negative", "추가 이득이 GT 음성 오류에 한정(양성 위치 오류 추가 포착<=0)"
++    if ep >= 0.05 and ci_lo > 0 and ep_aux > 0 and min(unres_bounds) > 0:
++        return "positive", "ep>=0.05, CI하한>0, 양성 위치 오류 추가 포착>0, 최소 score 대조 순이득>0, unresolved 범위에서 방향 유지"
++    return "inconclusive", "ep>0이나 기준(5pp/CI/최소 score 대조/unresolved 범위) 미충족"
++
++
++def main():
++    if os.path.exists(f"{OUT}/report.json"):
++        sys.exit("exists")
++    os.makedirs(OUT, exist_ok=True)
++    lk = check_lock()
++    t0 = time.time()
++    rows = json.load(open(f"{PROV}/ledger.json"))["rows"]
++    P = C.prep(rows)
++    n = len(P)
++    v = C.vec(P)
++    t_prep = time.time() - t0
++    rep = dict(lock_locked_at=lk["locked_at"], n=n, t_prep_s=t_prep)
++    # reader 분포
++    rd = {}
++    for c in list(C.CATS) + ["all"]:
++        sub = [p for p in P if c == "all" or p["cat"] == c]
++        rd[c] = dict(n=len(sub), yes=sum(p["ans"] == "yes" for p in sub), no=sum(p["ans"] == "no" for p in sub),
++                     unresolved=sum(p["ans"] is None for p in sub), explicit=sum(p["ans_source"] == "explicit" for p in sub))
++    rep["reader_answers"] = rd
++    # S와 오류 분해
++    e = C.endpoint(v)
++    rep["endpoint_point"] = e
++    S = [p for p in P if p["det"]]
++    rep["S_breakdown"] = {c: dict(n=sum(p["cat"] == c for p in S), Y=sum(C.error_type(p)[0] for p in S if p["cat"] == c)) for c in C.CATS}
++    rep["S_error_types"] = {t: sum(C.error_type(p)[1] == t for p in S) for t in ("correct", "neg_claim", "pos_location")}
++    # 부트스트랩 (최초 200회 시간 측정)
++    t1 = time.time()
++    C.boot(P, B=200)
++    t200 = time.time() - t1
++    b = C.boot(P)
++    rep["bootstrap"] = dict(B=C.NBOOT, seed=C.SEED, t200_s=t200, ep=dict(mean=float(np.mean(b["ep"])), ci95=C.ci(b["ep"])),
++                            ep_aux=dict(ci95=C.ci(b["ep_aux"])), pos_diff=dict(ci95=C.ci(b["pos_diff"])),
++                            pos_diff_aux=dict(ci95=C.ci(b["pos_diff_aux"])), degenerate_fraction=b["degenerate"] / len(b["ep"]))
++    rep["pos_diff_point"] = (e["vlm_pos_location"] - e["conf_pos_location"]) / e["n_S"]
++    rep["pos_diff_aux_point"] = (e["vlm_pos_location"] - e["confmin_pos_location"]) / e["n_S"]
++    # unresolved 범위
++    ub = {}
++    for mode in ("yes", "no", "adverse", "favorable"):
++        ee = C.endpoint(C.vec(C.assign_unresolved(P, mode)))
++        ub[mode] = dict(ep=ee["ep"], ep_aux=ee["ep_aux"], k=ee["k"], found_vlm=ee["found_vlm"], found_conf=ee["found_conf"],
++                        pos_diff=(ee["vlm_pos_location"] - ee["conf_pos_location"]) / ee["n_S"])
++    rep["unresolved_bounds"] = ub
++    rep["decision"] = dict(zip(("outcome", "reason"), decide(e["ep"], rep["bootstrap"]["ep"]["ci95"][0], rep["pos_diff_point"], e["ep_aux"],
++                                                          e["degenerate"], [x["ep"] for x in ub.values()])))
++    # 시스템 표
++    sysrep = {}
++    for loc in ("det", "sft"):
++        for mode in ("loc", "indep", "gate"):
++            for thr in (C.IOU_MAIN, C.IOU_AUX):
++                sysrep[f"{loc}_{mode}_iou{thr}"] = C.system_table(P, loc, mode, thr)
++    rep["systems"] = sysrep
++    idx = M.bootstrap_indices(n, 10000, C.SEED)
++    pc = {}
++    for loc in ("det", "sft"):
++        base = np.array([C.joint(p, loc, "loc", .3) is True for p in P], float)
++        for mode in ("indep", "gate"):
++            a = np.array([C.joint(p, loc, mode, .3) is True for p in P], float)
++            pc[f"{loc}_{mode}_minus_loc_joint0.3_unresolved_as_fail"] = dict(zip(("diff", "lo", "hi"), M.paired_boot_ci(a, base, idx)))
++    rep["paired_joint"] = pc
++    rep["t_total_s"] = time.time() - t0
++    # per patient
++    sel_conf = np.zeros(n)
++    sel_confmin = np.zeros(n)
++    inS = v["inS"]
++    ids_res = np.where(inS & v["res"])[0]
++    k = e["k"]
++    sel_conf[ids_res] = weights(v["smax"][ids_res], k)
++    sel_confmin[ids_res] = weights(v["smin"][ids_res], k)
++    chk = float((sel_conf[ids_res] * v["Y"][ids_res]).sum())
++    rep["weights_check"] = dict(conf_found_from_weights=chk, conf_found=e["found_conf"], ok=abs(chk - e["found_conf"]) < 1e-9)
++    pp = [dict(id=p["id"], cat=p["cat"], ans=p["ans"], ans_source=p["ans_source"], det_nonempty=bool(p["det"]), Y=bool(v["Y"][i]),
++               type=str(v["typ"][i]), smax=None if np.isnan(v["smax"][i]) else float(v["smax"][i]),
++               smin=None if np.isnan(v["smin"][i]) else float(v["smin"][i]), vlm_selected=bool(v["no"][i] and inS[i]),
++               conf_select_prob=float(sel_conf[i]), confmin_select_prob=float(sel_confmin[i]), sft_status=p["sft_status"]) for i, p in enumerate(P)]
++    json.dump(pp, open(f"{OUT}/per_patient.json", "w"))
++    json.dump(rep, open(f"{OUT}/report.json", "w"), indent=1, default=float)
++    print(json.dumps(dict(decision=rep["decision"], ep=e["ep"], ci=rep["bootstrap"]["ep"]["ci95"], k=e["k"], n_S=e["n_S"], t=rep["t_total_s"]), default=float))
++
++
++if __name__ == "__main__":
++    main()
+diff --git a/ev111_verify.py b/ev111_verify.py
+new file mode 100644
+index 0000000..9233dca
+--- /dev/null
++++ b/ev111_verify.py
+@@ -0,0 +1,169 @@
++"""iter_111 독립 재계산. 원 출력(labels.json, det raw_preds.json, SFT 원 worker 파일, Q_O 원 worker 파일)에서 출발하고
++ev111_core/ev109_extract/rsna_diag.metrics를 import하지 않는다(bare Yes/No 외의 비정형 응답만 저장 추출값과 대조).
++결과: results/iter_111/eval/verify.json (새 파일)."""
++import glob
++import itertools
++import json
++import os
++import re
++import sys
++
++import numpy as np
++
++R = "results"
++OUT = f"{R}/iter_111/eval/verify_v2.json"
++
++
++def iou(a, b):
++    y0, x0, y1, x1 = max(a[0], b[0]), max(a[1], b[1]), min(a[2], b[2]), min(a[3], b[3])
++    i = max(0, y1 - y0) * max(0, x1 - x0)
++    u = (a[2] - a[0]) * (a[3] - a[1]) + (b[2] - b[0]) * (b[3] - b[1]) - i
++    return i / u if u > 0 else 0.0
++
++
++def tp_max(pred, gt, thr):
++    best = 0
++    for r in range(min(len(pred), len(gt)) + 1):
++        for gi in itertools.combinations(range(len(gt)), r):
++            for pi in itertools.permutations(range(len(pred)), r):
++                if all(iou(pred[p], gt[g]) >= thr for g, p in zip(gi, pi)):
++                    best = max(best, r)
++    return best
++
++
++def rows(p):
++    return [json.loads(x) for x in open(p) if x.strip()]
++
++
++def main():
++    if os.path.exists(OUT):
++        sys.exit("exists")
++    sets = json.load(open(f"{R}/iter_016/manifests/sets.json"))["E600"]
++    labels = json.load(open(f"{R}/iter_016/manifests/labels.json"))
++    cat = {i: c for c, v in sets.items() for i in v}
++    ids = sorted(cat)
++    det = json.load(open(f"{R}/iter_035/confirm800/det17/raw_preds.json"))
++    img = {r["id"]: r["image"] for r in rows(f"{R}/iter_016/manifests/infer_manifest.jsonl")}
++    from PIL import Image
++    # Q_O 원 응답 (record), SFT 원 응답
++    O = {}
++    for st in ("e180_plain__M0", "e600x_plain__M0"):
++        for p in sorted(glob.glob(f"{R}/iter_016/gen/{st}/gen_worker*.jsonl")):
++            for r in rows(p):
++                if r["target"] == "O":
++                    assert r["id"] not in O
++                    O[r["id"]] = r["suffix_text_raw"]
++    SFT = {}
++    for p in sorted(glob.glob(f"{R}/iter_012/confirm_sft_seed17/gen_worker*.jsonl")):
++        for r in rows(p):
++            if r["prompt_name"] == "concise" and r["id"] in cat:
++                SFT[r["id"]] = r["suffix_text_raw"]
++    stored = {x["id"]: x for x in json.load(open(f"{R}/iter_111/eval/per_patient.json"))}
++    rep = json.load(open(f"{R}/iter_111/eval/report.json"))
++    EOT = "<end_of_turn>"
++    mism = []
++    ans, Y, typ, smax, smin, inS = {}, {}, {}, {}, {}, {}
++    nonbare = []
++    for i in ids:
++        t = O[i]
++        m = re.fullmatch(r"\s*(yes|no)\s*\.?\s*", t.replace(EOT, ""), re.I)
++        if m:
++            a = m.group(1).lower()
++        else:
++            nonbare.append(i)
++            a = stored[i]["ans"]  # 비정형: 저장 추출값 사용(아래에서 원문 출력)
++        ans[i] = a
++        h, w = Image.open(img[i]).size
++        side, top, left = max(h, w), (max(h, w) - h) // 2 if h < w else 0, (max(h, w) - w) // 2 if w < h else 0
++        d = det[i]
++        boxes, sc = [], []
++        for b, s, l in zip(d["boxes_xyxy_px"], d["scores"], d["labels"]):
++            if l == 1 and s >= 0.70:
++                x0, y0, x1, y1 = b
++                boxes.append([(y0 + top) * 1000 / side, (x0 + left) * 1000 / side, (y1 + top) * 1000 / side, (x1 + left) * 1000 / side])
++                sc.append(s)
++        gt = [b["yxyx_norm"] for b in labels[i]["boxes"]]
++        inS[i] = bool(boxes)
++        if boxes:
++            tp = tp_max(boxes, gt, 0.3)
++            ok = (len(gt) == 0 and False) or (len(gt) > 0 and tp == len(gt) == len(boxes))
++            Y[i] = not ok
++            typ[i] = "correct" if ok else ("neg_claim" if not gt else "pos_location")
++            smax[i], smin[i] = max(sc), min(sc)
++    S = [i for i in ids if inS[i]]
++    res = [i for i in S if ans[i] is not None]
++    flagged = [i for i in res if ans[i] == "no"]
++    k = len(flagged)
++
++    def conf_found(key, only=None):
++        sc = sorted(res, key=lambda i: key[i])
++        if k == 0:
++            return 0.0
++        if k >= len(sc):
++            return float(sum(1 for i in sc if Y[i] and (only is None or typ[i] == only)))
++        v = key[sc[k - 1]]
++        lo = [i for i in sc if key[i] < v]
++        tie = [i for i in sc if key[i] == v]
++        f = lambda L: sum(1 for i in L if Y[i] and (only is None or typ[i] == only))
++        return f(lo) + (k - len(lo)) / len(tie) * f(tie)
++    out = dict(n_S=len(S), k=k, n_unres=len(S) - len(res))
++    vlm = sum(1 for i in flagged if Y[i])
++    out.update(found_vlm=vlm, found_conf=conf_found(smax), found_confmin=conf_found(smin),
++               vlm_pos=sum(1 for i in flagged if Y[i] and typ[i] == "pos_location"), conf_pos=conf_found(smax, "pos_location"),
++               ep=(vlm - conf_found(smax)) / len(S))
++    e = rep["endpoint_point"]
++    cmp = []
++    for a, b in (("n_S", "n_S"), ("k", "k"), ("n_unres", "n_unres"), ("found_vlm", "found_vlm"), ("found_conf", "found_conf"),
++                 ("found_confmin", "found_confmin"), ("vlm_pos", "vlm_pos_location"), ("conf_pos", "conf_pos_location"), ("ep", "ep")):
++        cmp.append(dict(name=a, indep=out[a], stored=e[b], ok=abs(out[a] - e[b]) < 1e-9))
++    # 환자별 Y·type·답 일치
++    pp_bad = [i for i in ids if stored[i]["ans"] != ans[i] or stored[i]["det_nonempty"] != inS[i] or (inS[i] and (stored[i]["Y"] != Y[i] or stored[i]["type"] != typ[i]))]
++    # reader/SFT/joint 일부: SFT loc joint at 0.3 전체
++    def sft_boxes(t):
++        t = t.replace(EOT, "").strip()
++        if t == "[]":
++            return []
++        return [x["box_2d"] for x in json.loads(t)]
++    sj = 0
++    for i in ids:
++        b = sft_boxes(SFT[i])
++        gt = [x["yxyx_norm"] for x in labels[i]["boxes"]]
++        ok = (len(b) == 0) if not gt else (tp_max(b, gt, 0.3) == len(gt) == len(b))
++        sj += ok
++    cmp.append(dict(name="sft_loc_joint_n@0.3", indep=sj, stored=rep["systems"]["sft_loc_iou0.3"]["all"]["joint_n"], ok=sj == rep["systems"]["sft_loc_iou0.3"]["all"]["joint_n"]))
++    # reader 존재 정확도 (resolved)
++    ra = [(ans[i] == "yes") == bool(labels[i]["boxes"]) for i in ids if ans[i] is not None]
++    cmp.append(dict(name="reader_existence_acc", indep=float(np.mean(ra)), stored=rep["systems"]["det_indep_iou0.3"]["all"]["existence_acc"],
++                    ok=abs(float(np.mean(ra)) - rep["systems"]["det_indep_iou0.3"]["all"]["existence_acc"]) < 1e-12))
++    # 독립 부트스트랩 (같은 seed 같은 index 표집)
++    rng = np.random.default_rng(11117)
++    idx = rng.integers(0, len(ids), size=(10000, len(ids)), dtype=np.int32)
++    eps = []
++    for b in range(10000):
++        samp = [ids[j] for j in idx[b]]
++        Sb = [i for i in samp if inS[i]]
++        rb = [i for i in Sb if ans[i] is not None]
++        kb = sum(1 for i in rb if ans[i] == "no")
++        vb = sum(1 for i in rb if ans[i] == "no" and Y[i])
++        srt = sorted(rb, key=lambda i: smax[i])
++        if kb == 0 or not srt:
++            cf = 0.0
++        elif kb >= len(srt):
++            cf = float(sum(Y[i] for i in srt))
++        else:
++            v = smax[srt[kb - 1]]
++            lo = [i for i in srt if smax[i] < v]
++            tie = [i for i in srt if smax[i] == v]
++            cf = sum(Y[i] for i in lo) + (kb - len(lo)) / len(tie) * sum(Y[i] for i in tie)
++        eps.append((vb - cf) / len(Sb))
++    lo, hi = float(np.percentile(eps, 2.5)), float(np.percentile(eps, 97.5))
++    cmp.append(dict(name="boot_ci_lo", indep=lo, stored=rep["bootstrap"]["ep"]["ci95"][0], ok=abs(lo - rep["bootstrap"]["ep"]["ci95"][0]) < 1e-12))
++    cmp.append(dict(name="boot_ci_hi", indep=hi, stored=rep["bootstrap"]["ep"]["ci95"][1], ok=abs(hi - rep["bootstrap"]["ep"]["ci95"][1]) < 1e-12))
++    nb = {i: O[i][:100] for i in nonbare}
++    ok = all(c["ok"] for c in cmp) and not pp_bad
++    json.dump(dict(all_ok=ok, checks=cmp, per_patient_mismatch=pp_bad, nonbare_reader_responses=nb), open(OUT, "w"), indent=1, ensure_ascii=False)
++    print("all_ok", ok, [c["name"] for c in cmp if not c["ok"]], len(pp_bad), len(nonbare))
++
++
++if __name__ == "__main__":
++    main()
+diff --git a/rsna_diag/__init__.py b/rsna_diag/__init__.py
+new file mode 100644
+index 0000000..e69de29
+diff --git a/rsna_diag/geometry.py b/rsna_diag/geometry.py
+new file mode 100644
+index 0000000..3d65211
+--- /dev/null
++++ b/rsna_diag/geometry.py
+@@ -0,0 +1,87 @@
++"""전처리(정사각 padding)와 좌표 변환.
++
++좌표 규약
++- 원본/pixel bbox: xyxy = [x0, y0, x1, y1] (pixel, 원본 canvas).
++- 모델 출력/GT 정규화 bbox: [y0, x0, y1, x1] in [0, 1000], padding된 정사각 전체 영상 기준.
++padding: 중앙 정렬, 위/왼쪽에 floor(d/2), 아래/오른쪽에 나머지 (공식 notebook pad_image_to_square와 동일).
++"""
++import numpy as np
++from PIL import Image
++
++
++def pad_offsets(h, w):
++    """returns (top, left, side)."""
++    side = max(h, w)
++    top = (side - h) // 2 if h < w else 0
++    left = (side - w) // 2 if w < h else 0
++    return top, left, side
++
++
++def to_uint8_rgb_preserving(arr, mode=None):
++    """값 보존 경로: uint8 L/RGB는 밝기 유지(gray는 채널 복제), RGBA는 흰 배경 alpha 합성(반올림).
++
++    uint8이 아닌 dtype은 지원하지 않는다 (임의 정규화 금지) -> ValueError.
++    """
++    a = np.asarray(arr)
++    if a.dtype != np.uint8:
++        raise ValueError(f"unsupported dtype {a.dtype}")
++    if a.ndim == 2:
++        return np.repeat(a[:, :, None], 3, axis=2)
++    if a.ndim == 3 and a.shape[2] == 1:
++        return np.repeat(a, 3, axis=2)
++    if a.ndim == 3 and a.shape[2] == 3:
++        return a.copy()
++    if a.ndim == 3 and a.shape[2] == 4:
++        af = a[:, :, 3:4].astype(np.float64) / 255.0
++        rgb = a[:, :, :3].astype(np.float64)
++        out = rgb * af + 255.0 * (1.0 - af)
++        return np.floor(out + 0.5).astype(np.uint8)
++    raise ValueError(f"unsupported shape {a.shape}")
++
++
++def pad_square(rgb):
++    """검은 padding, 중앙, 위/왼쪽 floor. returns (padded, (top, left, side))."""
++    h, w = rgb.shape[:2]
++    top, left, side = pad_offsets(h, w)
++    out = np.zeros((side, side, rgb.shape[2]), dtype=rgb.dtype)
++    out[top:top + h, left:left + w] = rgb
++    return out, (top, left, side)
++
++
++def notebook_pad_emulation(arr):
++    """공식 notebook의 preprocess를 numpy로 모사한다 (skimage 미설치, pip 불가 -> 근사 emulation).
++
++    skimage.util.img_as_ubyte(uint8) = 항등. gray2rgb: 채널 복제(uint8 유지).
++    rgba2rgb: img_as_float(x/255) 후 흰 배경 alpha 합성 -> float64 [0,1]. 그 뒤 `* 255` 후 astype(uint8):
++      - float 경로(RGBA 입력): 값 x/255*255 를 uint8로 truncation (부동소수 오차로 1 LSB 감소 가능).
++      - uint8 경로(L/RGB 입력): uint8 * 255 는 uint8에서 modulo 256 wrap (v -> (255*v) mod 256).
++    """
++    a = np.asarray(arr)
++    if a.dtype != np.uint8:
++        raise ValueError("emulation only for uint8 input")
++    if a.ndim == 2:
++        a = np.repeat(a[:, :, None], 3, axis=2)
++    if a.shape[2] == 4:
++        f = a.astype(np.float64) / 255.0
++        alpha = f[:, :, 3:4]
++        a = f[:, :, :3] * alpha + 1.0 * (1.0 - alpha)
++    padded, aff = pad_square(a)
++    return (padded * 255).astype(np.uint8), aff
++
++
++def canvas_to_norm(box_xyxy, top, left, side):
++    """원본 pixel xyxy -> padding canvas 기준 [y0,x0,y1,x1] (0-1000, float)."""
++    x0, y0, x1, y1 = box_xyxy
++    return [(y0 + top) * 1000.0 / side, (x0 + left) * 1000.0 / side,
++            (y1 + top) * 1000.0 / side, (x1 + left) * 1000.0 / side]
++
++
++def norm_to_canvas(box_yxyx, top, left, side):
++    """padding canvas 기준 [y0,x0,y1,x1] (0-1000) -> 원본 pixel xyxy (clipping 없음)."""
++    y0, x0, y1, x1 = box_yxyx
++    return [x0 * side / 1000.0 - left, y0 * side / 1000.0 - top,
++            x1 * side / 1000.0 - left, y1 * side / 1000.0 - top]
++
++
++def to_pil(rgb):
++    return Image.fromarray(rgb)
+diff --git a/rsna_diag/metrics.py b/rsna_diag/metrics.py
+new file mode 100644
+index 0000000..33c5131
+--- /dev/null
++++ b/rsna_diag/metrics.py
+@@ -0,0 +1,136 @@
++"""bbox 평가 (iter_009). 모든 box는 [y0,x0,y1,x1] (0-1000, padding canvas)."""
++import itertools
++import math
++
++import numpy as np
++
++
++def area(b):
++    return max(0.0, b[2] - b[0]) * max(0.0, b[3] - b[1])
++
++
++def inter(a, b):
++    return max(0.0, min(a[2], b[2]) - max(a[0], b[0])) * max(0.0, min(a[3], b[3]) - max(a[1], b[1]))
++
++
++def iou(a, b):
++    i = inter(a, b)
++    u = area(a) + area(b) - i
++    return i / u if u > 0 else 0.0
++
++
++def union_area(boxes):
++    """겹친 면적을 한 번만 세는 직사각형 합집합 면적 (좌표 압축)."""
++    boxes = [b for b in boxes if area(b) > 0]
++    if not boxes:
++        return 0.0
++    ys = sorted({v for b in boxes for v in (b[0], b[2])})
++    tot = 0.0
++    for y0, y1 in zip(ys[:-1], ys[1:]):
++        iv = sorted((b[1], b[3]) for b in boxes if b[0] <= y0 and b[2] >= y1)
++        cur_s = cur_e = None
++        length = 0.0
++        for s, e in iv:
++            if cur_e is None or s > cur_e:
++                if cur_e is not None:
++                    length += cur_e - cur_s
++                cur_s, cur_e = s, e
++            else:
++                cur_e = max(cur_e, e)
++        if cur_e is not None:
++            length += cur_e - cur_s
++        tot += length * (y1 - y0)
++    return tot
++
++
++def union_iou(pred, gt):
++    if not pred and not gt:
++        return 0.0
++    up, ug = union_area(pred), union_area(gt)
++    # 교집합 면적 = up + ug - union(all)
++    ia = up + ug - union_area(list(pred) + list(gt))
++    u = up + ug - ia
++    return ia / u if u > 0 else 0.0
++
++
++def match(pred, gt, thr):
++    """threshold thr 이상 IoU 쌍의 최대 cardinality one-to-one matching.
++    동률은 총 IoU 최대, 이후 (gt index 순의) pred index tuple 사전순 최소. returns list[(gi, pi)]."""
++    mat = [[iou(p, g) for p in pred] for g in gt]
++    best = {"key": None, "pairs": []}
++
++    def rec(gi, used, pairs, tot):
++        if gi == len(gt):
++            key = (len(pairs), tot)
++            cur = best["key"]
++            if cur is None or key[0] > cur[0] or (key[0] == cur[0] and key[1] > cur[1] + 1e-12):
++                best["key"], best["pairs"] = key, list(pairs)
++            return
++        # 사전순 최소 tie-break: pred index 오름차순으로 탐색하고 엄격히 더 좋을 때만 갱신 (none 분기는 마지막)
++        for pi in range(len(pred)):
++            if pi not in used and mat[gi][pi] >= thr:
++                pairs.append((gi, pi))
++                rec(gi + 1, used | {pi}, pairs, tot + mat[gi][pi])
++                pairs.pop()
++        rec(gi + 1, used, pairs, tot)
++
++    rec(0, frozenset(), [], 0.0)
++    return best["pairs"]
++
++
++def patient_metrics(pred, gt, thr):
++    pairs = match(pred, gt, thr)
++    tp = len(pairs)
++    prec = tp / len(pred) if pred else 0.0
++    rec = tp / len(gt) if gt else 0.0
++    f1 = 2 * prec * rec / (prec + rec) if prec + rec > 0 else 0.0
++    return {"tp": tp, "n_pred": len(pred), "n_gt": len(gt), "precision": prec, "recall": rec, "f1": f1,
++            "unmatched_gt": len(gt) - tp, "unmatched_pred": len(pred) - tp}
++
++
++def max_iou_all(pred, gt):
++    return max((iou(p, g) for p in pred for g in gt), default=0.0)
++
++
++def wilson(k, n, z=1.959964):
++    if n == 0:
++        return (float("nan"), float("nan"))
++    p = k / n
++    d = 1 + z * z / n
++    c = (p + z * z / (2 * n)) / d
++    h = z * math.sqrt(p * (1 - p) / n + z * z / (4 * n * n)) / d
++    return (c - h, c + h)
++
++
++def bootstrap_indices(n, B=10000, seed=20260924):
++    rng = np.random.default_rng(seed)
++    return rng.integers(0, n, size=(B, n), dtype=np.int32)
++
++
++def paired_boot_ci(a, b, idx):
++    """a,b: 같은 환자 순서의 값. 차이 a-b 평균의 percentile 95% CI. returns (mean_diff, lo, hi)."""
++    d = np.asarray(a, float) - np.asarray(b, float)
++    m = d[idx].mean(axis=1)
++    return float(d.mean()), float(np.percentile(m, 2.5)), float(np.percentile(m, 97.5))
++
++
++def derangement(n, seed):
++    """Sattolo: 고정점이 없는 순열 (단일 순환)."""
++    rng = np.random.default_rng(seed)
++    p = list(range(n))
++    for i in range(n - 1, 0, -1):
++        j = int(rng.integers(0, i))
++        p[i], p[j] = p[j], p[i]
++    assert all(p[i] != i for i in range(n))
++    return p
++
++
++def medoid_box(dev_gt_boxes_per_image):
++    """dev 양성 GT box 후보 중 (영상별 best IoU)의 평균이 최대인 실제 box. 동률은 입력 순서(고정 ID 순)."""
++    cands = [b for boxes in dev_gt_boxes_per_image for b in boxes]
++    best, best_s = None, -1.0
++    for c in cands:
++        s = float(np.mean([max(iou(c, g) for g in boxes) for boxes in dev_gt_boxes_per_image]))
++        if s > best_s + 1e-12:
++            best, best_s = c, s
++    return best, best_s
+diff --git a/rsna_diag/qa_spec.py b/rsna_diag/qa_spec.py
+new file mode 100644
+index 0000000..b1955bf
+--- /dev/null
++++ b/rsna_diag/qa_spec.py
+@@ -0,0 +1,156 @@
++"""iter_015/016 target-scope 진단의 질문·출력 형식·evidence 문장·QA parser·정답 mapping (결과를 보기 전에 고정).
++
++iter_016: strict parser(parse_plain/parse_json)는 그대로 두고 별도의 semantic_v1(parse_semantic)을 추가한다. parser는 정답 category를 입력으로 받지 않는다.
++
++- Q_O: 폐렴 의심 pulmonary opacity 존재. Q_A: RSNA 판독 규약상 Normal이 아닌가(abnormal). 둘은 별도 대화로 실행한다.
++- 정답 쌍 (Q_O, Q_A): opacity=(yes,yes), normal=(no,no), not_normal_no_opacity=(no,yes).
++- parser는 공백·대소문자·단일 문장부호(plain)만 정규화한다. bbox 목록, 모순, 설명만 있는 답, truncation은 별도 실패로 구분한다.
++  빈 목록 []는 no로 바꾸지 않는다.
++"""
++import hashlib
++import json
++import re
++
++Q_O = "Is there a pulmonary opacity suspicious for pneumonia in this chest radiograph?"
++Q_A = ("Under the RSNA chest-radiograph labeling convention, is this image abnormal rather than Normal? "
++       "An abnormal image need not contain an opacity suspicious for pneumonia. A healed rib fracture alone counts as Normal.")
++QUESTIONS = {"O": Q_O, "A": Q_A}
++FORMATS = {"plain": "Answer only yes or no.", "json": 'Return only {"answer":"yes"} or {"answer":"no"}.'}
++TARGETS = ("O", "A")
++CATEGORIES = ("opacity", "normal", "not_normal_no_opacity")
++GT_PAIR = {"opacity": ("yes", "yes"), "normal": ("no", "no"), "not_normal_no_opacity": ("no", "yes")}
++
++BBOX_FMT = "yxyx integers in [0,1000] relative to the entire square-padded image, y before x"
++EVIDENCE_HEAD = "A separate localization step examined this chest radiograph for pulmonary opacities suspicious for pneumonia. "
++EVIDENCE_TEXT = {
++    "predicted_nonempty": "It proposed these boxes as JSON [y_min, x_min, y_max, x_max] (" + BBOX_FMT + "): {boxes}. The proposal may be wrong.",
++    "predicted_empty": "It proposed no boxes. An empty proposal does not mean the image is Normal; it only means no such opacity was localized.",
++    "unavailable": "No localization proposal is available for this image. This does not mean the image is Normal.",
++    "oracle_nonempty": "Reference annotation boxes for pulmonary opacity, JSON [y_min, x_min, y_max, x_max] (" + BBOX_FMT + "): {boxes}.",
++    "oracle_empty": "The reference annotation contains no pulmonary opacity box. This does not mean the image is Normal.",
++}
++
++
++def sha(b):
++    return hashlib.sha256(b if isinstance(b, bytes) else b.encode()).hexdigest()
++
++
++def qa_prompt(target, fmt, evidence_text=None):
++    """evidence_text가 있으면 질문 앞에 붙는다 (원본 영상은 항상 함께 제공)."""
++    core = f"{QUESTIONS[target]} {FORMATS[fmt]}"
++    return core if evidence_text is None else f"{EVIDENCE_HEAD}{evidence_text}\n\n{core}"
++
++
++def boxes_json(boxes):
++    return json.dumps([{"box_2d": [int(round(v)) for v in b]} for b in boxes], separators=(",", ":"))
++
++
++def evidence_text(kind, boxes=None):
++    """kind: predicted|unavailable|oracle. boxes: 유효한 bbox 목록(빈 목록 가능). predicted에서 boxes=None이면 unavailable."""
++    if kind == "unavailable" or (kind == "predicted" and boxes is None):
++        return EVIDENCE_TEXT["unavailable"]
++    key = f"{kind}_{'nonempty' if boxes else 'empty'}"
++    return EVIDENCE_TEXT[key].format(boxes=boxes_json(boxes)) if boxes else EVIDENCE_TEXT[key]
++
++
++EOT = "<end_of_turn>"
++_PUNCT = ".!"
++
++
++def parse_plain(raw, ended_eos):
++    """returns (status, answer). status: valid | truncated | empty | bbox_list | contradictory | explanation."""
++    if not ended_eos:
++        return "truncated", None
++    t = raw[:-len(EOT)] if raw.endswith(EOT) else raw
++    t = t.strip()
++    if not t:
++        return "empty", None
++    core = t.lower()
++    if core and core[-1] in _PUNCT:
++        core = core[:-1]
++    if core in ("yes", "no"):
++        return "valid", core
++    if "box_2d" in t or re.fullmatch(r"\s*\[.*\]\s*", t, re.S):
++        return "bbox_list", None
++    words = set(re.findall(r"[a-z]+", t.lower()))
++    if "yes" in words and "no" in words:
++        return "contradictory", None
++    return "explanation", None
++
++
++def _pairs(pairs):
++    keys = [k for k, _ in pairs]
++    if len(set(keys)) != len(keys):
++        raise ValueError("duplicate key")
++    return dict(pairs)
++
++
++def parse_json(raw, ended_eos):
++    """단일 answer 키와 yes/no 값만 허용 (fence·추가 키·중복 키 불허)."""
++    if not ended_eos:
++        return "truncated", None
++    t = raw[:-len(EOT)] if raw.endswith(EOT) else raw
++    t = t.strip()
++    if not t:
++        return "empty", None
++    if "box_2d" in t:
++        return "bbox_list", None
++    try:
++        v = json.loads(t, object_pairs_hook=_pairs)
++    except ValueError:
++        words = set(re.findall(r"[a-z]+", t.lower()))
++        return ("contradictory" if {"yes", "no"} <= words else "explanation"), None
++    if isinstance(v, dict) and list(v) == ["answer"] and v["answer"] in ("yes", "no"):
++        return "valid", v["answer"]
++    return "schema_error", None
++
++
++def parse_answer(fmt, raw, ended_eos):
++    return (parse_plain if fmt == "plain" else parse_json)(raw, ended_eos)
++
++
++SEMANTIC_VERSION = "semantic_v1"
++_NORMAL_MAP = {"normal": "no", "abnormal": "yes"}
++
++
++def _bare_word(t):
++    """전체 문자열이 단어 하나(+ 마지막 단일 . 또는 !)이면 소문자 단어, 아니면 None. 내부 공백·중복 문장부호는 받지 않는다."""
++    core = t.lower()
++    if core and core[-1] in _PUNCT:
++        core = core[:-1]
++    return core if re.fullmatch(r"[a-z]+", core) else None
++
++
++def parse_semantic(target, fmt, raw, ended_eos):
++    """semantic_v1. returns (status, answer, conversion). conversion: identity(strict와 동일) | bare_yes_no | json_answer | bare_normal_abnormal | None.
++
++    1 EOS 없으면 truncated. 2 끝의 <end_of_turn> 한 개와 앞뒤 공백만 제거. 3 전체가 yes/no(대소문자·마지막 단일 . !)면 두 출력 지시 모두 받는다.
++    4 전체가 JSON이고 유일한 키 answer의 값이 정확한 소문자 yes/no면 받는다(중복 키·추가 키·배열·fence 불가).
++    5 target=='A'에서만 전체 bare Normal/Abnormal을 no/yes로 대응한다 (JSON 값의 Normal/Abnormal, Q_O의 Normal은 불허).
++    설명문·혼합 답·모순·bbox·빈 목록·부분 일치는 구제하지 않는다 (strict parser의 실패 분류를 그대로 쓴다)."""
++    if target not in QUESTIONS:
++        raise ValueError(f"unknown target {target!r}")
++    st, ans = parse_answer(fmt, raw, ended_eos)
++    if st == "valid":
++        return "valid", ans, "identity"
++    if st == "truncated" or st == "empty":
++        return st, None, None
++    t = (raw[:-len(EOT)] if raw.endswith(EOT) else raw).strip()
++    w = _bare_word(t)
++    if w in ("yes", "no"):
++        return "valid", w, "bare_yes_no"
++    if w in _NORMAL_MAP and target == "A":
++        return "valid", _NORMAL_MAP[w], "bare_normal_abnormal"
++    if t.startswith("{"):
++        try:
++            v = json.loads(t, object_pairs_hook=_pairs)
++        except ValueError:
++            v = None
++        if isinstance(v, dict) and list(v) == ["answer"] and v["answer"] in ("yes", "no"):
++            return "valid", v["answer"], "json_answer"
++    return st, None, None
++
++
++def request_key(fields):
++    """request_id 재계산용. fields 전부(모델 revision, adapter digest, 영상 identity, target, format, condition, prompt sha, evidence digest, config digest)가 포함된다."""
++    return sha(json.dumps(fields, sort_keys=True, default=str))[:32]
+diff --git a/test_ev109_extract.py b/test_ev109_extract.py
+new file mode 100644
+index 0000000..1ddd2d8
+--- /dev/null
++++ b/test_ev109_extract.py
+@@ -0,0 +1,87 @@
++"""iter_109 추출 규칙의 합성 fixture. 실제 출력·GT를 쓰지 않는다. 통과 후 규칙 파일 hash를 lock 파일로 저장한다(기존 파일 덮어쓰기 금지)."""
++import hashlib
++import json
++import os
++import sys
++import time
++from pathlib import Path
++
++import ev109_extract as X
++from rsna_diag import qa_spec
++
++E = "<end_of_turn>"
++Q = qa_spec.Q_O
++# (name, target, raw, ended_eos, expected_answer, expected_source)
++CASES = [
++    ("bare_yes", "O", "Yes.\n" + E, True, "yes", "semantic_v1"),
++    ("bare_normal_A", "A", "Normal." + E, True, "no", "semantic_v1"),
++    ("bare_normal_O_rejected", "O", "Normal." + E, True, None, "unresolved"),
++    ("leading_yes_explanation", "O", "Yes. There is a right lower lobe opacity.\n" + E, True, "yes", "explicit"),
++    ("leading_no_explanation", "O", "No. The lungs are clear.\n" + E, True, "no", "explicit"),
++    ("leading_no_comma", "A", "No, the study is unremarkable." + E, True, "no", "explicit"),
++    ("leading_markdown", "O", "**Yes**\n\nThere is an opacity." + E, True, "yes", "explicit"),
++    ("no_noun_phrase_start", "O", "No evidence of pneumonia is seen." + E, True, None, "unresolved"),
++    ("conclusion_answer_colon", "A", "The image shows a chest tube. The image is abnormal.\n\nAnswer: Yes" + E, True, "yes", "explicit"),
++    ("conclusion_therefore", "O", "A lobar process is described.\n\nTherefore, the answer is yes." + E, True, "yes", "explicit"),
++    ("conclusion_final", "A", "Final answer: no" + E, True, "no", "explicit"),
++    ("conclusion_repeat_same", "O", "Yes. Opacity present.\n\nAnswer: Yes" + E, True, "yes", "explicit"),
++    ("lead_conclusion_conflict", "O", "Yes. Opacity.\n\nFinal answer: no" + E, True, None, "unresolved"),
++    ("two_conclusions_conflict", "O", "Answer: yes\nAnswer: no" + E, True, None, "unresolved"),
++    ("quoted_answer", "O", 'The reader said "the answer is yes" but this is unverified.' + E, True, None, "unresolved"),
++    ("code_fence", "O", "```\nAnswer: yes\n```" + E, True, None, "unresolved"),
++    ("blockquote", "O", "> Answer: yes" + E, True, None, "unresolved"),
++    ("question_echo_only", "O", Q + E, True, None, "unresolved"),
++    ("question_echo_with_answer", "O", Q + "\nAnswer: yes" + E, True, None, "unresolved"),
++    ("possibly_yes", "O", "Possibly yes." + E, True, None, "unresolved"),
++    ("yes_possibly", "O", "Yes. This could possibly be pneumonia." + E, True, None, "unresolved"),
++    ("if_conditional", "O", "If there is fever, the answer is yes." + E, True, None, "unresolved"),
++    ("opposite_token_in_text", "O", "Yes. There is no pleural effusion." + E, True, None, "unresolved"),
++    ("conclusion_with_opposite_no", "A", "There is no pneumothorax.\n\nAnswer: Yes" + E, True, None, "unresolved"),
++    ("explanation_no_answer", "A", "The image appears to be a chest radiograph with subtle findings." + E, True, None, "unresolved"),
++    ("image_is_abnormal_sentence", "A", "The image is abnormal." + E, True, None, "unresolved"),
++    ("not_eos", "O", "Yes. Opacity present", False, None, "unresolved"),
++    ("empty", "O", E, True, None, "unresolved"),
++    ("bbox_list", "O", '[{"box_2d":[1,2,3,4]}]' + E, True, None, "unresolved"),
++    ("answer_mid_sentence", "O", "I think the answer is yes because of the opacity." + E, True, None, "unresolved"),
++]
++
++
++def main():
++    out_dir = Path("results/iter_109/tests")
++    out_dir.mkdir(parents=True, exist_ok=True)
++    res, ok_all = [], True
++    for name, tg, raw, eos, exp_a, exp_src in CASES:
++        r = X.resolve(tg, raw, eos)
++        ok = r["answer"] == exp_a and r["source"] == exp_src
++        r2 = X.resolve(tg, raw, eos)
++        ok = ok and r == r2  # 결정성: 동일 입력 동일 출력
++        ok_all &= ok
++        res.append(dict(name=name, ok=ok, expected=[exp_a, exp_src], got=[r["answer"], r["source"], r["reason"]]))
++    # 인터페이스에 GT/조건이 없음: resolve 시그니처 확인
++    import inspect
++    sig = list(inspect.signature(X.resolve).parameters)
++    res.append(dict(name="signature_no_gt", ok=sig == ["target", "raw", "ended_eos"], got=sig))
++    ok_all &= res[-1]["ok"]
++    summary = dict(version=X.RULES_VERSION, n=len(res), n_pass=sum(r["ok"] for r in res), all_pass=bool(ok_all), results=res)
++    print(summary["n_pass"], "/", summary["n"])
++    for r in res:
++        if not r["ok"]:
++            print("FAIL", r)
++    if ok_all:
++        p = out_dir / "fixtures_extract.json"
++        if p.exists():
++            sys.exit("fixtures_extract.json exists; not overwriting")
++        p.write_text(json.dumps(summary, indent=1, ensure_ascii=False))
++        lock = out_dir.parent / "extract_lock.json"
++        if lock.exists():
++            sys.exit("lock exists")
++        files = {f: hashlib.sha256(open(f, "rb").read()).hexdigest() for f in ("ev109_extract.py", "test_ev109_extract.py", "ev108_spec.py", "rsna_diag/qa_spec.py")}
++        lock.write_text(json.dumps(dict(locked_at_unix=time.time(), locked_at=time.strftime("%Y-%m-%dT%H:%M:%S%z"), rules_version=X.RULES_VERSION,
++                                        files_sha256=files, note="GT 연결 전 잠금. 이후 규칙 변경 금지."), indent=1))
++        print("locked", files)
++    else:
++        sys.exit(1)
++
++
++if __name__ == "__main__":
++    main()
+diff --git a/test_ev111.py b/test_ev111.py
+new file mode 100644
+index 0000000..158dd3b
+--- /dev/null
++++ b/test_ev111.py
+@@ -0,0 +1,200 @@
++"""iter_111 fixture: 합성 사례 + 변조 거부 + 재개/덮어쓰기 거부. 실제 결과 비교는 하지 않는다. results/iter_111/tests/fixtures.json 새 파일."""
++import itertools
++import json
++import os
++import shutil
++import sys
++import tempfile
++
++import numpy as np
++
++import ev111_core as C
++import ev111_link as L
++from rsna_diag import metrics as M
++
++OUT = sys.argv[1] if len(sys.argv) > 1 else "results/iter_111/tests/fixtures.json"
++res = []
++
++
++def chk(name, ok, **kw):
++    res.append(dict(name=name, ok=bool(ok), **kw))
++
++
++def P(i, gt, det=(), scores=(), ans="no", cat=None, sft=(), sft_status="empty"):
++    return dict(id=i, cat=cat or ("opacity" if gt else "normal"), gt=[list(b) for b in gt], det=[list(b) for b in det],
++                det_scores=list(scores), sft=[list(b) for b in sft], sft_status=sft_status, ans=ans, ans_source="x")
++
++
++A = [100, 100, 300, 300]
++B = [500, 500, 700, 700]
++FAR = [800, 800, 950, 950]
++
++
++def brute_match(pred, gt, thr):
++    best = 0
++    for r in range(min(len(pred), len(gt)) + 1):
++        for gi in itertools.combinations(range(len(gt)), r):
++            for pi in itertools.permutations(range(len(pred)), r):
++                if all(M.iou(pred[p], gt[g]) >= thr for g, p in zip(gi, pi)):
++                    best = max(best, r)
++    return best
++
++
++def main():
++    os.makedirs(os.path.dirname(OUT), exist_ok=True)
++    if os.path.exists(OUT):
++        sys.exit("exists")
++    # --- box_outcome / joint
++    chk("empty_empty_neg", C.box_outcome([], [], .3)["exact"])
++    chk("neg_with_box_fails", not C.box_outcome([A], [], .3)["exact"])
++    chk("pos_empty_fails", not C.box_outcome([], [A], .3)["exact"])
++    chk("pos_exact", C.box_outcome([A], [A], .3)["exact"])
++    o = C.box_outcome([A, FAR], [A], .3)
++    chk("pos_extra_fp_fails", (not o["exact"]) and o["fp"] == 1 and o["fn"] == 0)
++    o = C.box_outcome([A], [A, B], .3)
++    chk("pos_missing_gt_fails", (not o["exact"]) and o["fn"] == 1)
++    chk("multi_box_exact", C.box_outcome([B, A], [A, B], .3)["exact"])
++    chk("duplicate_pred_one_gt", C.box_outcome([A, A], [A], .3)["tp"] == 1 and not C.box_outcome([A, A], [A], .3)["exact"])
++    edge = [100, 100, 300, 300]
++    shifted = [100, 100, 300, 300 + 0]  # IoU=1
++    chk("iou_boundary_inclusive", C.box_outcome([[100, 100, 200, 200]], [[100, 100, 200, 300]], .5)["exact"])  # IoU=0.5 정확히
++    # brute-force matching 대조
++    rng = np.random.default_rng(3)
++    bad = 0
++    for _ in range(300):
++        def rb():
++            y, x = rng.integers(0, 700, 2)
++            h, w = rng.integers(60, 250, 2)
++            return [int(y), int(x), int(y + h), int(x + w)]
++        pr = [rb() for _ in range(rng.integers(0, 4))]
++        gt = [rb() for _ in range(rng.integers(0, 3))]
++        for thr in (.3, .5):
++            if len(M.match(pr, gt, thr)) != brute_match(pr, gt, thr):
++                bad += 1
++    chk("match_vs_bruteforce_300x2", bad == 0, bad=bad)
++    # joint modes
++    pos = P("p", [A], [A], [.9], ans="yes")
++    neg = P("n", [], [A], [.9], ans="no", cat="normal")
++    chk("loc_pos_ok", C.joint(pos, "det", "loc", .3) is True)
++    chk("loc_neg_with_box_false", C.joint(neg, "det", "loc", .3) is False)
++    chk("indep_neg_No_but_box_false", C.joint(neg, "det", "indep", .3) is False)
++    chk("gate_neg_No_empties_box", C.joint(neg, "det", "gate", .3) is True)
++    chk("gate_pos_No_fails", C.joint(P("p2", [A], [A], [.9], ans="no"), "det", "gate", .3) is False)
++    chk("unresolved_none", C.joint(P("u", [A], [A], [.9], ans=None), "det", "gate", .3) is None)
++    sft_bad = P("s", [A], ans="yes", sft_status="invalid")
++    chk("sft_invalid_is_not_empty_success", C.joint(sft_bad, "sft", "loc", .3) is False and C.joint(P("s2", [], ans="no", sft_status="invalid", cat="normal"), "sft", "loc", .3) is False)
++    chk("gate_No_ignores_invalid_boxes", C.joint(P("s3", [], ans="no", sft_status="invalid", cat="normal"), "sft", "gate", .3) is True)
++    # --- expected_found 동률
++    chk("tie_expected", abs(C.expected_found([.1, .5, .5, .5], [0, 1, 0, 0], 2) - (0 + 1 / 3)) < 1e-12)
++    chk("k0", C.expected_found([.1, .2], [1, 1], 0) == 0.0)
++    chk("k_all", C.expected_found([.1, .2], [1, 0], 2) == 1.0)
++    chk("empty_set", C.expected_found([], [], 3) == 0.0)
++    # --- endpoint: 모든 reader가 No면 k=전체 -> 퇴화, ep=0
++    Ps = [P(f"a{i}", [A] if i % 2 else [], [A], [.7 + .01 * i], ans="no", cat="opacity" if i % 2 else "normal") for i in range(8)]
++    e = C.endpoint_arrays(Ps)
++    chk("k_all_degenerate", e["degenerate"] and abs(e["ep"]) < 1e-12 and e["k"] == e["n_resolved"], e=e["ep"])
++    Ps0 = [dict(p, ans="yes") for p in Ps]
++    e0 = C.endpoint_arrays(Ps0)
++    chk("k0_degenerate", e0["degenerate"] and e0["k"] == 0 and e0["found_vlm"] == 0)
++    # reader가 정확히 오류를 가리키는 oracle-like 합성: S 6명, 오류 3명(neg 3), reader No=오류
++    Pm = []
++    for i in range(6):
++        neg_ = i < 3
++        Pm.append(P(f"m{i}", [] if neg_ else [A], [A], [.9 - 0.01 * i], ans="no" if neg_ else "yes", cat="normal" if neg_ else "opacity"))
++    em = C.endpoint_arrays(Pm)
++    # conf은 점수 낮은 3명(i=3..5, 모두 정답)을 고르므로 0 포착, vlm=3
++    chk("endpoint_known", em["found_vlm"] == 3 and em["found_conf"] == 0 and abs(em["ep"] - 0.5) < 1e-12 and em["vlm_neg_claim"] == 3 and em["vlm_pos_location"] == 0, em=em["ep"])
++    # S 밖 환자(detector 빈 출력)는 분모에 들어가지 않음
++    em2 = C.endpoint_arrays(Pm + [P("z", [A], [], [], ans="no")])
++    chk("S_excludes_det_empty", em2["n_S"] == 6)
++    # 미해결: 양쪽 상쇄(비교에서 제외)하되 n_S 분모엔 포함
++    Pu = Pm + [P("u1", [], [A], [.75], ans=None, cat="normal")]
++    eu = C.endpoint_arrays(Pu)
++    chk("unresolved_in_denominator_not_in_selection", eu["n_S"] == 7 and eu["n_unres"] == 1 and eu["n_resolved"] == 6 and eu["k"] == 3)
++    # 같은 응답을 공유하는 서로 다른 시스템: ans는 환자당 하나
++    chk("shared_answer_single_source", all("ans" in p and not isinstance(p["ans"], (list, dict)) for p in Pm))
++    # 퇴화 bootstrap이 실패 없이 동작
++    b = C.boot(Pm, B=200)
++    chk("boot_runs", len(b["ep"]) == 200)
++    # 부트스트랩 index 재표집 == 재표집 환자 리스트로 직접 계산
++    rng2 = np.random.default_rng(5)
++    ix = rng2.integers(0, len(Pu), size=len(Pu))
++    ea = C.endpoint(C.vec(Pu), ix)
++    eb = C.endpoint(C.vec([Pu[j] for j in ix]))
++    chk("boot_index_equals_direct", all(abs(ea[k] - eb[k]) < 1e-12 for k in ("ep", "ep_aux", "found_vlm", "found_conf", "found_confmin")) and ea["k"] == eb["k"])
++    # assign_unresolved
++    q = C.assign_unresolved(Pu, "yes")
++    chk("assign_yes", all(p["ans"] is not None for p in q) and q[-1]["ans"] == "yes")
++    q2 = C.assign_unresolved(Pu, "adverse")
++    q3 = C.assign_unresolved(Pu, "favorable")
++    # u1은 오류(Y)인 neg_claim: adverse는 오류를 놓치게('yes'), favorable은 잡게('no') 배정
++    chk("assign_adverse_favorable", q2[-1]["ans"] == "yes" and q3[-1]["ans"] == "no")
++    # --- 답 추출 변경 없음
++    import ev109_extract as X
++    chk("extract_rules_digest", X.rules_digest() == "260bbb1d8b270f577549c62ac4b02affbacb9ee7461c21536f5b5a71e7321bd5")
++    import inspect
++    chk("resolve_signature_no_gt", list(inspect.signature(X.resolve).parameters) == ["target", "raw", "ended_eos"])
++    # --- 변조 거부: link를 임시 사본으로 돌려 problems 발생 확인
++    tmp = tempfile.mkdtemp()
++    orig = {k: getattr(L, k) for k in ("OUT", "LABELS", "DET_DIR", "SFT_REUSE", "O_STAGES")}
++
++    def run_link(**over):
++        for k, v in orig.items():
++            setattr(L, k, v)
++        L.OUT = os.path.join(tmp, "o_" + str(len(os.listdir(tmp))))
++        for k, v in over.items():
++            setattr(L, k, v)
++        try:
++            L.main()
++        except SystemExit as ex:
++            return ex.code, json.load(open(os.path.join(L.OUT, "problems.json"))) if os.path.exists(os.path.join(L.OUT, "problems.json")) else None
++        return 0, None
++
++    lab = json.load(open(orig["LABELS"]))
++    k0 = sorted(lab)[0]
++    lab_bad = {**lab, k0: {**lab[k0], "category": "normal" if lab[k0]["category"] == "opacity" else "opacity"}}
++    p1 = os.path.join(tmp, "labels_bad.json")
++    json.dump(lab_bad, open(p1, "w"))
++    code, pr = run_link(LABELS=p1)
++    chk("tamper_label_category_rejected", code == 1 and pr and any("category" in x or "연결 누락" in x for x in pr), n=len(pr or []))
++    d2 = os.path.join(tmp, "det")
++    shutil.copytree(orig["DET_DIR"], d2)
++    raw = json.load(open(f"{d2}/raw_preds.json"))
++    kk = sorted(raw)[0]
++    raw[kk]["scores"] = [0.0] + list(raw[kk]["scores"][1:]) if raw[kk]["scores"] else [0.5]
++    json.dump(raw, open(f"{d2}/raw_preds.json", "w"))
++    code, pr = run_link(DET_DIR=d2)
++    chk("tamper_det_raw_rejected", code == 1 and pr and any("raw_preds hash" in x for x in pr))
++    rows = open(orig["SFT_REUSE"]).read().splitlines()
++    r0 = json.loads(rows[0])
++    r0["suffix_text_raw"] = "[]<end_of_turn>" if r0["suffix_text_raw"] != "[]<end_of_turn>" else '[{"box_2d": [1, 1, 5, 5], "label": "x"}]<end_of_turn>'
++    p3 = os.path.join(tmp, "sft_bad.jsonl")
++    open(p3, "w").write("\n".join([json.dumps(r0)] + rows[1:]) + "\n")
++    code, pr = run_link(SFT_REUSE=p3)
++    chk("tamper_sft_text_rejected", code == 1 and pr and any("SFT 원본-reuse" in x for x in pr))
++    # 응답 hash: O 출력 worker 파일 한 줄 제거 -> record 수 불일치/누락
++    d4 = os.path.join(tmp, "gen")
++    shutil.copytree(orig["O_STAGES"]["e600x_plain"], d4)
++    w = f"{d4}/gen_worker0.jsonl"
++    ln = open(w).read().splitlines()
++    open(w, "w").write("\n".join(ln[1:]) + "\n")
++    code, pr = run_link(O_STAGES={**orig["O_STAGES"], "e600x_plain": d4})
++    chk("tamper_O_missing_record_rejected", code == 1 and pr and any("record" in x for x in pr))
++    # 기존 ledger 덮어쓰기 거부
++    for k, v in orig.items():
++        setattr(L, k, v)
++    try:
++        L.main()
++        ow = False
++    except SystemExit as ex:
++        ow = isinstance(ex.code, str) and "exists" in ex.code
++    chk("overwrite_rejected", ow)
++    shutil.rmtree(tmp)
++    ok = all(r["ok"] for r in res)
++    json.dump(dict(n=len(res), n_pass=sum(r["ok"] for r in res), results=res), open(OUT, "w"), indent=1)
++    print(sum(r["ok"] for r in res), "/", len(res), [r["name"] for r in res if not r["ok"]])
++    sys.exit(0 if ok else 1)
++
++
++if __name__ == "__main__":
++    main()
