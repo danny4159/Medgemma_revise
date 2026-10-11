@@ -40223,3 +40223,430 @@ P180의 T−C O는 +4.17pp, CI [−2.78, +11.11]pp, 두 답변이 유효한 변�
 지금은 추가 실험을 권고하지 않는다. 현재 설정을 보류하고 단순 대안 이후의 중요한 잔여 정확도·비용 문제, 공개 정답 범위, 결과별 투자 결정이 함께 구체화될 때만 재개한다. A 형식 보완은 가능한 대안으로 남기되 자동 후속으로 지정하지 않는다. 보류 기록만을 위한 iteration을 만들지 않고 사용자 승인·피드백을 기다린다.
 
 이번 방향에서 후속 탐구의 긍정적 근거가 확인되지 않아 논문 추천은 하지 않는다.
+
+
+## iter_109 GPT PLAN [국소 근거의 판단 가치 / proceed] — 2026-10-11 16:07:04
+
+# 요약
+
+- **이번에 할 일:** iter_108 저장 답변의 명시적 Yes/No를 한 번 추출해 원 평가와 비교한다.
+- **필요한 이유:** 표적 질문도 invalid 처리에 따라 효과 방향이 바뀌며, 비정상 판단의 점수 전이 9건에는 모두 invalid가 관여했다.
+- **확인할 기준:** 같은 환자의 표적 이득·다른 판단 보존·단순 대안 이후의 가치가 미해결 답변의 보수적 범위에서도 남는지 본다.
+- **주의·다음:** 사후 측정 민감도 분석이다. 원 판정은 보존하며 새 추론·학습 없이 종료하고 다음 반복 승인을 기다린다.
+
+## 알림 맥락
+
+- 연구: 위치 근거와 판독 판단의 연결
+- 데이터: 흉부 X-ray, 기존 RSNA 개발 E600과 그 안의 P180
+- 모델: MedGemma 1.5 frozen reader의 저장 답변, 새 학습 없음
+- 과제: 원본과 보조 영역 영상을 보고 생성한 표적 음영·전체 비정상 답변을 재평가한다
+- 가설: 명시적 답을 거부한 형식 평가가 현재 효과 추정의 일부를 설명할 수 있다
+- 질문: 답변에 적힌 명확한 Yes/No를 읽어도 예측 영역 제공의 추가 가치는 없는가?
+- 변경: 구체화
+- 연결: iter_108의 crop 확대 보류는 유지하되 두 질문의 형식 민감도가 투자 판단을 바꾸는지 사용자 승인 범위에서 확인한다
+- 작업: 고정 추출 규칙을 저장 답변에 한 번 적용하고 원 점수·사후 점수·미해결 범위를 비교한다
+
+# Current Understanding
+
+기준 문서는 `agent/runs/iter_108/plan.md`, SHA256 `3039796248dff6be330bb09a41a6f4cd841a2d08e9d258b5db3f93dc6adb78d1`이다. 원 리뷰 대상은 `c2602f4b237ec9a90b7e04c99474ea7a0003bfb0`이다.
+
+**유지:** 환자·질문·입력·모델·저장 출력, strict/semantic_v1, 원 확대 gate와 원 판정. E600은 반복 개발 자료이며 P180을 포함한다.
+
+**변경:** 사용자 승인에 따라 별도 명시적 답 추출과 unresolved 범위만 추가한다. 새 결과는 `research/results/iter_109/`에 저장한다.
+
+**남은 판단:** E600 nonempty 236명에서 원 T−D O는 −2.97pp, T−C O는 +0.42pp지만 invalid는 T/D/C 22/17/20건이다. not_normal_no_opacity 67명의 A 차이 −13.43pp는 내용 손상과 분리되지 않았다.
+
+**회귀 검증:** 원 점수·분모·invalid 수·정책 점수를 독립적으로 재현한다. 불일치 시 새 점수 해석 전에 해당 연결만 확인한다.
+
+# Strategy Check / 연구 방향 판단
+
+이번은 새 후보 탐색이 아니라 iter_108의 같은 관찰에 대한 한정 보완이다. 이전 전략 비교를 전수 반복하지 않는다. 직전 리뷰의 무분석 보류 권고를 바꾸는 근거는 사용자 승인과 원 리뷰 자체의 형식 민감도다.
+
+**기술 질문 → 실패 조건 → 공개 정답 비교 → 주장 범위:** 국소 시각 근거가 판단에 주는 이득·손상이 출력 형식 평가와 분리되는가 → 명확한 답을 설명문 때문에 실패 처리한 조건 → 동일 RSNA 환자의 O/A 정답과 D/T/C·고정 정책을 paired 비교 → 현재 저장 출력의 측정 및 투자 판단에 한정한다.
+
+선택은 저장 출력의 한 번 분석이다. 대안인 즉시 보류는 비용이 더 작지만 확인된 형식 혼선을 남긴다. 새 prompt·모델·crop·학습 비교는 이번 승인 범위 밖이며 선택하지 않는다.
+
+- **시험 설정:** 현재 crop 설정 확대 보류를 유지한다. 이번에는 설정을 개선하지 않는다.
+- **연구 관찰:** 원 수치를 보존하고, 명시적 답을 읽으면 어떤 점수 전이가 남는지만 확인한다.
+- **연구 질문:** 외부 근거 활용 전체의 가치나 신규성은 미확정이다. 평가 보완을 새 가설 검증으로 보고하지 않는다.
+
+지배 비용은 사용 출력의 provenance 확인과 한정 추출·통계 구현으로 예상한다. 실제 시간은 기록하며 비용 절감률은 추정하지 않는다.
+
+# Hypothesis
+
+H1: 원 invalid 중 명시적인 응답이 있어 형식 평가가 효과 추정에 영향을 주었다.
+
+H2: 이를 보수적으로 읽어도 표적 이득 또는 단순 bbox 대안 이후의 가치가 부족해 현재 투자 보류는 유지된다.
+
+두 설명은 동시에 성립할 수 있다. 점수 변화만으로 내용 인식의 개선·손상이나 내부 결합 원인을 확정하지 않는다.
+
+# Limitation Evidence / Correct Usage Checks
+
+`rsna-evidence-interface-sensitivity`의 LIMITATIONS.md 항목과 iter_017 원 리뷰를 확인했다. 해당 observed 주장은 텍스트 근거 인터페이스 조건에 한정되며 이번 시각 crop 결과의 독립 재현으로 합치지 않는다.
+
+직접 대상은 iter_108의 유효 리뷰이며 blocking_issues는 없다. 다만 F provenance는 재사용 보완 대상이다. 기존 영상·processor·crop 검증은 해당 SHA와 입력 불변성을 전제로 인용하고 전수 재실행하지 않는다.
+
+정답은 opacity=(O yes,A yes), normal=(no,no), not_normal_no_opacity=(no,yes)다. crop의 임상 진위나 미표기 소견의 음성을 추론하지 않는다. 외부 전문가·LLM judge를 사용하지 않는다.
+
+# Contribution Path / Baselines / Reuse
+
+이번 contribution은 미확정이다. 전체 영상+영역 근거와 질문별 입력 선택은 iter_108에서 검토한 기존 접근 범위로 취급한다. 이번 분석으로 신규성을 추가 주장하지 않는다.
+
+현재 `approach/regional-evidence-value`를 유지한다. 필요한 파일은 현재 HEAD에 있으며 `reuse_assets` 반입은 없다.
+
+- `ev108_spec.py`, `ev108_eval.py`, `rsna_diag/qa_spec.py`, `rsna_diag/geometry.py`, `test_ev108.py`, `test_ev108_qaspec.py`: 원 평가 및 순수 계산의 한정 승인 범위를 재사용한다. 원 parser와 gate는 수정하지 않는다.
+- `ev108_data.py`: 데이터 경로·연결 형식을 참조하되 `load_gen_dir`를 검증된 hash 로더로 신뢰하지 않는다. iter_109 전용 읽기 경로에서 필요한 검사를 구현한다.
+- `ev108_report.py`: 조건·정책 정의를 참조한다. 기존 main은 원 결과 경로에 쓰므로 실행하지 않는다.
+- `ev108_run.py`의 출력 0건·occupancy 결함은 이번 경로에서 사용하지 않아 보류한다. 주변 실행기 정비를 발주하지 않는다.
+
+대조는 D/T/C 두 질문, F와 L, F/R/R_L/R_B다. R은 nonempty에서 O=T,A=F; R_L은 O=L,A=F이고 둘의 empty는 F다. R_B는 유효 bbox 유무로 O=yes/no, A=F다. 정의상 A 보존을 새 효과라고 하지 않는다. 환자별 최선 조건 선택은 금지한다.
+
+# Proposed Experiment
+
+## 1. 사용 출력만 연결·잠금
+
+E600의 고정 600명과 nonempty 236명을 그대로 사용한다. D/T/C의 O/A는 1,416건, L O는 236건이다. 원 report가 선택한 `results/iter_108/gen/TECH/w2`, `P180R/main`, `E600R/main`만 합친다. TECH의 w4/resume/kill 및 FREPRO는 과학 표본에 추가하지 않는다.
+
+F는 `results/iter_016/gen/{e180_plain,e600x_plain}__M0`의 총 1,200건이다. 대응 requests와 source protocol, completion을 연결한다. 환자·질문·조건·설정·request ID·중복/누락·최종 EOS를 확인하고 이번 입력 목록과 hash를 저장한다.
+
+iter_108 completion의 worker_file_sha256을 대조한다. F completion의 per_file은 행 수이므로 hash로 오해하지 않는다. requests_sha256·protocol_digest·record 연결과 당시 저장된 근거를 확인한다. 새로 계산한 현재 hash는 이번 분석의 불변성 증거이지 과거 무결성의 소급 증명이 아니다. source 연결이 불충분하면 F 관련 결과와 전체 정책 비교만 보류한다. D/T/C 비교를 함께 폐기하거나 F를 새 생성하지 않는다.
+
+P180은 E600의 부분집합이다. P180 결과를 보조 표로 재현할 수 있으나 E600과 합산하거나 독립 재현으로 부르지 않는다.
+
+## 2. GT 없는 명시적 답 규칙 고정
+
+추출 함수의 입력은 응답 텍스트·질문 종류 O/A뿐이다. EOS 등 실행 상태 검사는 별도 외부 경로에서 한다. 환자 ID·GT·영상·모델·조건 이름은 추출 함수에 전달하지 않는다.
+
+원 semantic_v1 결과는 별도로 그대로 보존한다. 새 평가는 그 규칙이 수용한 단독 답·단독 JSON·A의 단독 Normal/Abnormal을 유지하고 아래 명시적 답 패턴만 추가한다.
+
+- 문두의 독립된 `Yes` 또는 `No` 뒤 문장부호와 설명이 오는 직접 응답.
+- 독립 문장 또는 마지막 결론의 `The answer is yes/no.`, `Therefore, the answer is yes/no.`, `Answer: yes/no.`, `Final answer: yes/no.`. 대소문자·공백과 답 token 주변의 단순 Markdown 강조만 고정 정규화한다.
+- 답 추출에는 매칭 span, 규칙 ID, 원문을 보존한다. 질병 서술이나 Normal을 포함한 설명문을 임상적으로 yes/no로 변환하지 않는다.
+- 인용·code fence·blockquote·질문 반복·가정문 속 후보, 양쪽 답이 상충하는 문장, 불확실 응답, 명시적 답이 없는 설명은 unresolved다. 마지막 답이라는 이유만으로 앞의 상충 답을 덮어쓰지 않는다.
+- 설명문에 반대 yes/no token, 불확실성·조건 표현, 답의 적용 질문이 불명확한 표현이 있으면 보수적으로 unresolved로 둔다. `no`가 임상 부정인지 판단해 구제하지 않는다. 모호한 인용 경계도 구제하지 않는다.
+
+구현자는 위 허용 패턴과 거부 패턴의 유한 목록·regex를 합성 fixture와 함께 먼저 저장하고 SHA256을 잠근다. `Yes. 설명`, 결론형 답, 같은 답 반복의 허용 여부, 인용 답, 질문만 반복, `Yes ... final answer: no`, `possibly yes`, `if ... yes`, no 명사구만 있는 설명, O의 Normal, 비EOS를 각각 검사한다. 복잡한 문장 해석이 필요한 경우는 unresolved로 귀결한다.
+
+실제 출력의 조건별 점수·GT를 보고 패턴을 추가하지 않는다. 기존 일부 원문과 결과를 이미 봤다는 사후성을 명시한다. 전체 적용 후 발견한 미지원 문장은 잔여 범위에 포함하고 규칙을 확장하지 않는다.
+
+## 3. 한 번 전체 적용
+
+최대 2,852개 고유 저장 응답 전체에 공통 규칙을 적용한다. invalid만 선택적으로 손으로 구제하지 않는다. 동일 텍스트·질문의 추출 결과는 동일해야 한다. 추출 완료 파일과 규칙 hash를 고정한 뒤 GT·조건을 연결한다.
+
+원 strict, 원 semantic_v1, 새 explicit-answer 평가를 나란히 제시한다. 새 평가의 unresolved는 점추정에서 실패로 포함하며 보수적 범위를 별도 제시한다. valid-only 집단을 주평가로 삼지 않는다.
+
+## 4. paired 지표와 미해결 범위
+
+주 endpoint는 원 계획대로 nonempty 236명의 T−D O, not_normal_no_opacity 67명의 T−D A다. T−C의 두 질문과 전체 nonempty A도 보고한다. F 검증 시 D−F/T−F, L 및 전체 정책 S_scope를 계산한다.
+
+조건·질문별 정답률, invalid→명시적 답 전환 수, unresolved 사유, 개선/악화/유지, 원 invalid가 관여한 전이를 보고한다. 원 A 전이 9건은 고정 규칙 이후 남은 내용 전이·해소·unresolved로 분해한다. 추출 답은 정답과 무관하게 원문 span으로 추적 가능해야 한다.
+
+각 unresolved 응답의 가능한 답은 yes/no 두 값이다. 환자별로 가능한 배정을 열거하여 비교 차이의 최솟값·최댓값을 구하고 고정 환자 가중치로 합산한다. 정책들이 공유하는 F 응답은 같은 변수로 묶어 상쇄와 의존성을 보존한다. 같은 응답을 두 정책에 서로 다르게 배정하지 않는다. 정답 쌍은 O/A의 공동 배정으로 계산한다.
+
+category 내 환자 paired bootstrap 10,000회, seed 10817을 유지한다. 모든 조건과 질문을 함께 재표집한다. 점추정 CI와 unresolved 범위는 서로 다른 불확실성으로 표시하며 범위 끝점의 bootstrap도 보조로 보고한다. 퇴화 CI와 normal nonempty 5명의 한계를 명시한다.
+
+## 5. 단계·비용·종료
+
+동작 확인은 합성 parser·경계 계산 fixture와 원 점수 회귀다. 가능성 탐색은 저장 E600 전체에 한 번 적용하는 사후 분석이다. 추가 표본 확대·학습·독립 확인은 이번에 없다. 이미 생성된 출력 전체가 질문의 대상이므로 작은 환자 subset으로 재선택하지 않는다.
+
+GPU 사용·신규 요청·학습은 모두 0이다. CPU만 사용하는 이유는 사용자가 지정한 측정 혼선이 현재 blocker이기 때문이다. GPU 진입은 자동 분기가 아니며, 실질적 신호에 대한 별도 계획과 다음 사용자 승인 이후에만 가능하다. 따라서 이번에 worker/batch 처리량 비교를 하지 않는다.
+
+읽기/hash 및 최초 200 bootstrap 반복 시간을 기록해 전체 예상 wall-clock을 산출한다. 임의 시간 상한은 없다. 입력 manifest·규칙 lock·추출 ledger·집계별 완료 상태를 재개 지점으로 사용하고 동일 hash일 때만 이어간다.
+
+# Implementation Tasks for Claude
+
+1. 기준 plan/review와 현재 HEAD·소스 상태를 확인한다. 기존 결과와 원 평가기를 덮어쓰지 않는다.
+2. iter_109 전용 provenance manifest를 만들고 사용 출력의 source 연결만 검증한다. 불충분한 F 비교는 명시적으로 비활성화한다.
+3. `ev109_extract.py`와 합성 fixture에 허용·거부 규칙을 구현하고 GT 연결 전 잠근다. 일반 자연어 평가기로 확장하지 않는다.
+4. `ev109_analyze.py`에서 원 평가 회귀, 공통 추출, 환자별 공유 unresolved 변수의 범위 계산과 paired 통계를 구현한다. 기존 승인 순수 함수를 필요한 범위에서 재사용한다.
+5. 원시 응답→추출 span→정답 연결→비교 기여를 보존한다. 모든 새 수용 응답은 GT·조건 없는 표에서 규칙 일치 여부를 검사하며 사람의 재해석으로 답을 바꾸지 않는다.
+6. production 집계와 별도 계산으로 주요 정답 수·전이·bounds·정책 차이를 검증한다. shared F 상쇄, 양쪽 unresolved, 동일 조건 비교 0, 명시적 답을 추가할수록 범위가 넓어지지 않는 성질을 검사한다.
+7. 원 결과/사후 결과/잔여 불확실성과 투자 판단을 보고하고 full review로 넘긴다. 새 GPU 작업·다음 반복은 시작하지 않는다.
+
+# Evaluation (성공/실패 기준 포함)
+
+분석 실행 성공은 출처·규칙·회귀·독립 계산이 맞고 투자 판단의 민감도를 보고한 상태다. 효과 양성이나 원 계획 성공과 구분한다.
+
+**양성 신호:** 원 계획의 10pp 규모, CI의 0 제외, 최소 3명의 해석 가능한 paired 변화와 방향 안정성을 참고해 사후 신호를 판별한다. 이를 원 gate 재통과라고 부르지 않는다. 표적 이득은 D뿐 아니라 C와 비교하고, F 검증 시 R/R_L/R_B 이후 남는 가치도 확인한다. A 손상만 남고 고정 routing으로 회피되면 내용 관찰을 보존하되 새 방법 필요성으로 승격하지 않는다. 실질적 잔여 신호는 다음 사용자 승인에서 고정 응답·독립 자료 검증을 제안할 근거일 뿐이다.
+
+**보류 유지:** 명시적 답 추출 후에도 실질적 표적 이득과 단순 대안 이후의 가치가 없거나, unresolved를 어떻게 배정해도 이 투자 판단이 같으면 현재 crop 후보 보류를 유지하고 분석을 반복하지 않는다. 작은 효과의 비유의성을 동등성으로 선언하지 않는다.
+
+**불확정:** unresolved 배정·표본 불확실성 또는 F provenance가 실질적 효과와 대안 비교 판단을 바꿀 수 있으면 무엇이 미판정인지 보고하고 종료한다. 비교 가능한 D/T/C 결과는 보존한다. 새 parser·문장 임상 판정·추론으로 자동 연장하지 않는다.
+
+수치 문턱과 별개로 시험 설정 / 연구 관찰 / 연구 질문을 분리하고, 원 iter_108 판정은 수정하지 않는다. 종료 후 --confirm-each-iter 승인·피드백을 기다린다.
+
+# Risks / Checks
+
+- 사후 규칙 선택의 편향은 GT 차단만으로 사라지지 않는다. 이미 본 결과와 일부 원문을 명시한다.
+- 명시적 답 추출은 응답 의도 전체나 임상 진실의 판정이 아니다. 설명과 답의 의미 충돌을 임상적으로 해소하지 않는다.
+- 범위 계산은 공유 원시 응답의 의존성을 유지한다. 정책마다 unresolved를 독립 배정하면 범위가 잘못 넓어질 수 있다.
+- F의 현재 hash 생성과 역사적 provenance 확인을 구분한다. 실패 시 관련 비교만 보류한다.
+- P180/E600 중복, 기술 반복 출력, patient/request 중복을 제거한다. 출력 선택은 원 report의 출처를 따른다.
+- localizer의 실제 비용은 미측정이다. 호출 수 차이를 전체 시스템 속도 우위로 바꾸지 않는다.
+- 발견된 범위 밖 문장이나 평가기 확장은 다음 자동 과제로 만들지 않는다.
+
+## 대규모 GPU 필요 후보
+
+위치·답변 supervision과 vision encoder 적응을 같은 노출량으로 분리하는 다중 seed 공동 학습은 기존 장기 후보로 보존한다. 이번 측정 보완은 그 투자의 필요성을 증명하지 않으며 실행하지 않는다.
+
+# 계획의 근거 (GPT 조사 노트)
+
+GOAL, iter_108 plan.md/review.md/review.json, LIMITATIONS.md의 rsna-evidence-interface-sensitivity, iter_017 원 review.json, CODE_ASSETS.md의 iter_108 항목과 현재 평가·자료 로더를 확인했다. 현재 research HEAD는 c2602f4b237ec9a90b7e04c99474ea7a0003bfb0이며 git status는 비어 있다. 기준 plan.md SHA256은 3039796248dff6be330bb09a41a6f4cd841a2d08e9d258b5db3f93dc6adb78d1이다.
+
+원 리뷰의 E600 표적 T−D −7/236, T−C +1/236 및 not_normal_no_opacity A −9/67은 유지한다. 이번 계획 중 새 점수를 계산하지 않았다. semantic_v1은 설명문을 거부하고 A의 단독 Normal/Abnormal만 제한적으로 변환한다. 따라서 명시적 답 추출을 원 parser 수정이 아닌 별도 사후 분석으로 둔다.
+
+report_E600.json이 사용하는 과학 출력은 TECH/w2, P180R/main, E600R/main이다. TECH의 w4/resume/kill 출력을 추가하지 않는다. F는 iter_016의 e180_plain__M0와 e600x_plain__M0다. F completion의 per_file 값은 hash가 아니라 행 수이며 requests_sha256·protocol_digest는 존재한다. 현재 파일 hash를 새로 기록하는 것만으로 역사적 무결성을 입증할 수 없으므로 당시 source 연결과 구분해야 한다.
+
+ev108_spec.py, ev108_eval.py, rsna_diag/qa_spec.py 및 해당 검사 파일은 현재 고정 과제 범위에서 approved다. ev108_data.py/load_gen_dir의 hash 미검사는 이번 읽기 경로에서만 보완한다. 실행기 초기 실패·occupancy 문제는 이번 CPU 분석과 무관하므로 수정하지 않는다. 필요한 코드는 현재 브랜치에 있어 선별 반입은 없다. 문헌·모델 지원 범위·새 방법 선택은 바꾸지 않아 추가 웹 조사는 하지 않았다.
+
+
+
+## iter_109 CLAUDE IMPLEMENTATION REPORT — 2026-10-11 16:13:46
+
+# 요약
+
+- **핵심 결과:** iter_108 저장 답변에 명시적 Yes/No 추출을 한 번 적용했다. 표적 질문(O)에서는 crop 이득이 어떤 unresolved 배정에서도 10pp에 못 미쳤고, 현재 crop 후보 투자 보류는 유지된다. 원 T−D O −2.97pp는 −0.42pp로 약해져, 원래 음의 방향은 형식(invalid) 영향이 컸다.
+- **근거:** 원 점수 회귀 차이 0건, 독립 검증 42/42. 새 추론·학습·GPU 사용은 0이다.
+- **미검증·주의:** 전체 비정상 판단(A)은 unresolved가 많아 crop의 손상도 이득도 판정하지 못했다. 사후 분석이며 원 gate 재통과나 독립 확인이 아니다.
+- **다음:** 사용자 승인 대기. 자동 parser 확장이나 새 생성은 시작하지 않았다.
+
+# Work Performed
+
+1. 사용한 출력의 출처 연결을 검증했다.
+   - iter_108 D/T/C/L 1,652건은 `ev108_run.verify_completion`으로 재검증했다.
+   - F 1,200건(iter_016 `e180_plain`/`e600x_plain` M0)은 `requests_sha256`, 요청 집합, record–request 연결, 행 수, 현재 영상 hash를 확인했다.
+   - F의 원본 pixel hash는 iter_108 D/T/C의 첫 영상과 일치했다.
+2. 명시적 답 추출 규칙(`ev109_extract.py`)을 GT 연결 전에 합성 fixture 31/31 통과 후 잠갔다.
+   - 원 `semantic_v1`이 받던 응답은 그대로 유지했다.
+   - 추가한 패턴은 문두의 `Yes.`/`No.`와 `Answer: Yes`, `Therefore, the answer is yes` 같은 결론형뿐이다. 같은 답의 반복은 허용했다.
+   - 인용·코드, 질문 반복, 반대 yes/no 단어, 불확실성·조건 표현, 상충 답은 모두 unresolved로 뒀다.
+3. 추출 ledger 2,852행을 만들고 잠근 뒤 GT를 연결했다.
+   - 규칙 lock 시각, ledger 잠금 시각과 digest는 실제 시점으로 `results/iter_109/` 아래 파일에 기록했다.
+4. 분석(`ev109_analyze.py`).
+   - 원 strict/semantic_v1 평가기를 그대로 회귀 재현했다.
+   - 같은 평가기에 명시적 답 평가를 적용해 나란히 비교했다.
+   - unresolved를 환자별로 열거한 공동 배정 범위를 계산했다. F 응답은 정책 간 공유 변수로 묶었다.
+   - bootstrap은 category 층화 10,000회, seed 10817이다.
+5. 독립 검증(`ev109_verify.py`).
+   - production 집계를 호출하지 않았다. 변수 전수 열거, 단순 루프 bootstrap, 추출 재현, 단조성 성질을 확인했다.
+6. P180은 보조 표(`report_P180_aux.json`)로만 재현했고 E600과 합산하지 않았다.
+
+# Files Changed
+
+새 파일만 추가했고 기존 코드와 결과는 수정하지 않았다.
+
+- `ev109_extract.py`: 명시적 답 추출 규칙
+- `test_ev109_extract.py`: 합성 fixture와 규칙 잠금
+- `ev109_prov.py`: 출처 검증과 추출 ledger 생성
+- `ev109_analyze.py`: 회귀, 명시적 답 평가, 범위 계산, 전이 분해
+- `ev109_verify.py`: 독립 검증
+- 결과: `results/iter_109/{extract_lock.json, tests/, provenance/, eval/}`
+
+# Commands / Experiments
+
+- `python test_ev109_extract.py`: 성공, 31/31. 규칙 파일 hash를 잠갔다.
+- `python ev109_prov.py`: 부분 실패 후 복구했다.
+  - iter_108 검증과 ledger 잠금은 성공했다.
+  - F 검증이 stage당 2건 불일치로 실패했다. 내 코드 버그였다. 원본 영상 기준으로 L(crop 단독) 행의 pixel hash를 잘못 포함했다.
+  - 이미 잠근 ledger는 건드리지 않았다. `python ev109_prov.py F`로 F 전용 ledger와 `manifest_F.json`, `ledger_lock_F.json`을 추가했고 문제 0으로 통과했다. 첫 `manifest.json`(F 실패 기록)은 보존했다.
+- `python ev109_analyze.py`: 성공, 약 13초. 200 bootstrap 반복은 0.012초이고 전체 분석은 약 9초였다.
+- `python ev109_verify.py`: 성공, 42/42.
+- GPU 사용 0, 새 요청 0, 학습 0이다. 따라서 worker/batch 처리량 비교는 하지 않았다.
+
+# Results
+
+경로: `results/iter_109/eval/report_E600.json`, `verify_E600.json`, `report_P180_aux.json`. 아래 수치는 E600 nonempty 236명(not_normal_no_opacity는 67명)의 paired 비교다.
+
+**회귀:** 저장된 iter_108 report의 strict/semantic 비교와 정책 점수를 모두 재현했다(차이 0건). 경계를 열거로 낸 값과 `E.compare`의 `format_bound`도 일치했다. P180 보조 표도 회귀 0건이다.
+
+**응답 구성**(unresolved 수는 236건 기준, F는 600건 기준):
+
+| 조건·질문 | unresolved | 명시적 답으로 새로 해석 |
+|---|---|---|
+| T_O | 6 | 16 |
+| D_O | 4 | 13 |
+| C_O | 7 | 13 |
+| T_A | 76 | 22 |
+| D_A | 54 | 11 |
+| C_A | 79 | 23 |
+| F_O | 8 | 1 |
+| F_A | 6 | 10 |
+
+- unresolved 사유는 대부분 `hedge_or_conditional`(고정 목록의 불확실성·조건 표현)과 `no_explicit_answer`(설명만 있고 명시적 답 없음)다.
+- 명시적 답 패턴은 있었지만 보수 규칙 때문에 unresolved가 된 응답은 125건이다.
+
+**주 endpoint:**
+
+| 비교 | 원 semantic | 명시적 답 점추정 [95% CI] | unresolved 공동 배정 범위 |
+|---|---|---|---|
+| T−D O | −0.0297 | −0.0042 [−0.034, 0.025] | [−0.021, +0.021] |
+| T−C O | +0.0042 | +0.0254 [−0.004, 0.055] | [−0.004, +0.051] |
+| T−D A (nno) | −0.1343 | −0.1194 [−0.194, −0.045] | [−0.522, +0.358] |
+| T−C A (nno) | +0.0448 | +0.0746 [0.015, 0.149] | [−0.388, +0.552] |
+
+- 점추정에서 unresolved는 오답으로 계산했다.
+- O의 T−D 비교에서 원래 invalid가 관여한 9건을 분해하면, 6건은 정오 동일, 2건은 T가 맞고 D가 틀린 내용 차이, 1건은 unresolved였다.
+- A의 T−D(nno) 9건은 3건 정오 동일, 6건 unresolved였고 내용 전이는 0건이다.
+
+**단순 대안과 정책(S_scope):**
+
+| 정책 | 점수 |
+|---|---|
+| F | 0.627 |
+| R | 0.627 |
+| R_L | 0.547 |
+| R_B | 0.648 |
+
+| 정책 차이 | 점추정 [95% CI] | 공동 배정 범위 |
+|---|---|---|
+| R−F | 0.000 [−0.015, 0.013] | [−0.003, +0.008] |
+| R_B−R | +0.022 [−0.005, 0.048] | [+0.012, +0.022] |
+| R_L−F | −0.080 [−0.110, −0.050] | [−0.085, −0.078] |
+
+원본 영상 단독(F)이나 bbox 유무 규칙(R_B)을 넘는 crop 정책의 이득은 없었다.
+
+# Goal Progress / Reused Assets
+
+**시험 설정:** 현재 crop 설정의 추가 투자 보류를 유지한다. 이번에 설정을 개선하지는 않았다.
+
+**연구 관찰:**
+- 원 O 결과의 T−D 음의 방향은 대부분 형식(invalid) 때문이었다. 명시적 답을 읽으면 약 0이다(H1은 O에서 지지).
+- 그래도 표적 이득은 어떤 배정에서도 10pp 미만이다(H2 지지).
+- A에서는 `T_A` 236건 중 76건, `C_A` 79건, `D_A` 54건이 unresolved다. 보수적 범위가 ±수십 pp로 넓어 crop의 손상도 이득도 판정하지 못했다.
+- A의 점추정 −11.9pp는 unresolved를 오답으로 센 값이다. 내용 손상으로 읽을 수 없다.
+
+**연구 질문:** 국소 근거 활용 전체의 가치는 이번 분석으로 판단할 수 없다. 신규성도 미확정이다.
+
+**재사용 자산:**
+- `ev108_eval.py`, `ev108_spec.py`, `ev108_run.verify_completion`, `ev108_data.py`, `rsna_diag/qa_spec.py`는 수정 없이 재사용했다.
+- 원 평가기는 회귀로 재현했다. 반입(reuse_assets)은 없었다.
+
+# Problems
+
+**현재 결론 무효화 문제:** 없음.
+
+**한계:**
+- 사후 분석이다. 이미 결과와 일부 원문을 본 뒤 규칙을 만들었고, 규칙은 GT 연결 전에 잠갔다. 새 사전등록이나 원 gate 재통과로 부르지 않는다.
+- 추출 규칙이 보수적이다. 불확실성·조건 표현과 반대 token을 거부해서, 사실상 명확한 응답 일부도 unresolved로 남았다. 규칙은 결과를 보고 넓히지 않았다.
+- F의 역사적 `protocol_digest` 재계산 모듈(`qa_protocol`)이 이 브랜치에 없어 재계산하지 못했다. `requests_sha256`·record 연결·현재 hash로 검증했고, 과거 무결성의 소급 증명은 아니다.
+- E600은 반복 사용한 개발 자료이며 P180을 포함한다.
+- normal nonempty는 5명뿐이라 해당 category 해석에 한계가 있다.
+- `ev108_data.load_gen_dir`의 hash 미검사 문제는 이번 경로에서 쓰지 않았다. 고치지도 않았다.
+
+**추후 개선(필수 아님):** 위 한계 외에 지금 처리할 항목은 없다.
+
+# Recommendation to GPT
+
+- 현재 crop 후보의 보류를 유지하고 이 평가 보완은 반복하지 않는 것을 권한다. O에서 이득이 없고, 단순 대안(F, R_B)이 crop 정책 이상이라는 점은 unresolved 배정과 무관하게 유지된다.
+- 한 가지 선택지가 있다. A의 unresolved 비율이 높아서 전체 비정상 판단에서 crop이 어떤 영향을 주는지는 이번 저장 답변으로 알 수 없다. 이를 직접 보려면 고정 응답 형식과 독립 자료의 별도 승인 계획이 필요하다. 현재 O 결과를 근거로는 우선순위가 높지 않다.
+- 이번 분석에서 새 parser·문장 재판정·GPU 실험은 자동 연장하지 않았다.
+
+SELF_CHECK: PASS
+SUMMARY: iter_108 저장 답변에 고정 명시적 Yes/No 추출을 적용하자 표적 질문의 crop 이득은 unresolved 배정과 무관하게 10pp 미만이라 투자 보류가 유지됐다(T−D O −2.97→−0.42pp). 전체 비정상 판단은 unresolved가 많아 판정 불가이며, 사후 분석이고 원 회귀 0건·독립 검증 42/42다.
+
+# [orchestrator] 권한 거부된 도구 호출
+- Bash: python - <<'E'
+import json
+r=json.loads(open('results/iter_016/gen/e600x_plain__M0/gen_worker0.jsonl').readline())
+print({k:(v if k not in('input_ids',) else '...') for k,v in r.items() if k not in ('input_ids',)})
+c=json.load(open('results/iter_108/gen/E600R/main/completion.json')); print({k:(v if len(str(v))<300 else '...') for k,v in c.items()})
+E
+ls results/iter_016/requests results/iter_016/protocol 2>/dev/null | head -30; grep -n "def verify_records" -A40 ev108_run.py | head -70
+- Bash: python -c "
+import json,glob
+sets=json.load(open('results/iter_016/manifests/sets.json'))
+e600={i for c in sets['E600'] for i in sets['E600'][c]}
+p180={i for c in sets['P180'] for i in sets['P180'][c]}
+st='e180_plain__M0'
+ids=set()
+for f in glob.glob('results/iter_016/gen/'+st+'/gen_worker*.jsonl'):
+    for l in open(f): ids.add(json.loads(l)['id'])
+print(len(ids),len(ids-e600),len(ids-p180),len(p180-e600),len(e600))
+# pixel check
+d=json.loads(open('results/iter_108/gen/E600R/main/gen_worker0.jsonl').readline())
+print(d['patient'],d['input_pixel_sha256'][0])
+for f in glob.glob('results/iter_016/gen/*/gen_worker*.jsonl')[:0]: pass
+for f in glob.glob('results/iter_016/gen/e600x_plain__M0/gen_worker*.jsonl'):
+    for l in open(f):
+        r=json.loads(l)
+        if r['id']==d['patient']: print(r['input_pixel_sha256']); break
+"
+
+
+
+
+## iter_109 GPT REVIEW [CONTINUE] — 2026-10-11 16:18:28
+
+# 요약
+
+- **판정:** 한정 사후 민감도 분석은 success다. 현재 crop 후보의 추가 투자 보류를 유지한다.
+- **핵심 근거:** 236명의 표적 정확도 차이는 예측 crop−전체 영상 복제 −2.97→−0.42pp였다. unresolved 배정 범위는 [−2.12, +2.12]pp다.
+- **의미·한계:** 평가 형식이 원 음의 점추정에 영향을 줬다. 전체 비정상 판단의 내용 손상은 여전히 미확정이며 새로운 방법 효과를 검증한 것은 아니다.
+- **다음:** 동일 출력 재분석·추가 생성은 종료하고 사용자 승인·피드백을 기다린다.
+
+## 알림 요약
+
+- 결과: 흉부 X-ray RSNA 236명에서 명시적 답을 읽으면 crop의 표적 차이는 복제 대비 −0.42pp, 중앙 crop 대비 +2.54pp였다. 현재 표본의 unresolved 범위에서도 10pp 이득은 남지 않았다.
+- 의미: 평가 보완으로 원 음의 차이가 약해졌지만 투자 보류는 유지된다. 전체 비정상 판단의 내용 효과와 독립 일반화는 미확정이다.
+- 후속: 실질적 표적 이득과 단순 대안 이후의 가치가 확인되지 않아 현재 crop 후보와 같은 출력의 재분석을 종료할 것을 권고한다. 다음 반복은 사용자 승인 후에만 진행한다.
+- 대안: 전체 비정상 판단만 고정 응답·독립 자료로 확인할 수 있다. 형식 혼선은 줄일 수 있지만 새 생성 비용이 들고 현재 표적 결과가 투자 가치를 뒷받침하지 않아 우선 권고하지 않는다.
+
+# Assessment
+
+iter_109는 diagnostic, method_stage=none이며 저장 출력의 측정 민감도 분석이다. 새 추론·학습·GPU 사용은 없고 이는 사용자 승인 범위와 일치한다. 분석 성공을 iter_108 원 gate 통과나 새로운 방법 성공으로 해석하지 않는다.
+
+실제 담당은 engineer_backend.json과 claude_meta.json에서 Claude, claude-sonnet-5-5, medium으로 확인했다. 도구 로그에서 추출 규칙 작성·잠금, provenance 실패와 복구, 분석 및 검증 수행을 확인했다. 리뷰 SHA는 ba6cdae9e66497b28cad778c02000b6543456f86이며 신규 소스 5개가 작업 파일과 일치한다. unpreserved_paths는 비어 있다. 코드 수정이나 결과 파일 생성 없이 검토했다.
+
+# Key Findings
+
+1. **원본·계산 연결:** 2,852개 ledger의 응답 원문·EOS가 원시 출력과 모두 일치했다. TECH/w2, P180R/main, E600R/main의 worker hash를 확인했다. F의 요청 hash·record 연결·현재 영상 hash 검사도 재실행해 문제가 없었다. P180은 E600의 보조 부분집합이며 중복 가산하지 않았다.
+2. **원 평가 보존:** 메모리 내 재계산에서 strict/semantic 비교와 정책 점수의 원 report 대비 차이는 모두 0건이었다. 합성 응답 fixture 30/30을 재실행했으며 저장된 인터페이스 포함 검사는 31/31이다.
+3. **독립 재계산:** 생산 집계와 별도 코드로 정답 연결, 환자별 차이, category 층화 bootstrap 10,000회 및 unresolved 범위를 재현했다.
+
+| 비교 | 명시적 답 점추정 | 95% CI | unresolved 배정 범위 |
+|---|---:|---:|---:|
+| 예측 crop−복제, 표적 O, 236명 | −0.42pp | [−3.39, +2.54]pp | [−2.12, +2.12]pp |
+| 예측 crop−중앙 crop, 표적 O, 236명 | +2.54pp | [−0.42, +5.51]pp | [−0.42, +5.08]pp |
+| 예측 crop−복제, A, not_normal_no_opacity 67명 | −11.94pp | [−19.40, −4.48]pp | [−52.24, +35.82]pp |
+
+unresolved를 실패로 처리한 점추정의 CI와 답 배정 범위는 서로 다른 불확실성이다. 특히 A의 음의 CI를 내용 손상의 증거로 읽을 수 없다. 원 A 전이 9건은 3건의 정오 차이 해소와 6건의 unresolved로 나뉘며 확정된 내용 전이는 0건이다.
+
+정책 점수도 독립 재현했다. 전체 영상 F와 표적 질문에만 crop을 쓰는 R의 S_scope는 모두 0.62667, crop 단독 표적 정책 R_L은 0.54667, bbox 유무 규칙 R_B는 0.64833이다. 공유 F 응답을 같은 변수로 묶은 R−F 범위는 [−0.00333, +0.00833], R_B−R은 [+0.01167, +0.02167]이다. F가 모든 배정에서 R보다 높다는 뜻은 아니지만 실질적인 crop 정책 이득은 확인되지 않았다.
+
+근거는 research/results/iter_109/eval/report_E600.json, report_P180_aux.json, verify_E600.json과 provenance의 원시 응답 연결이다.
+
+# Problems / Concerns
+
+현재 제한된 결론을 무효화하는 blocker는 없다. 다만 전체 snapshot 재사용은 승인하지 않는다.
+
+- provenance 복구 후 코드와 분석기의 입력 계약이 맞지 않는다. 정상 main은 F를 주 ledger에 포함하지만 분석기는 별도 F ledger를 항상 요구한다. 현재 결과는 복구 산출물로 계산돼 유효하나 깨끗한 재실행은 보장되지 않는다.
+- F 연결이 실패하면 관련 비교만 보류해야 하지만 분석기는 F 파일을 필수로 읽는다.
+- F source protocol의 역사적 digest는 재계산되지 않았다. 현재 요청 연결 검사는 통과했으나 새 hash를 과거 무결성의 소급 증명으로 볼 수 없다. 다음 재사용에서는 사용 원본·protocol·completion의 내용 hash 연결을 보완해야 한다.
+- 비교 범위 함수는 동일 응답의 두 역할을 독립 변수로 취급한다. 현재 서로 다른 조건 비교에는 영향이 없지만 동일 조건 비교의 unresolved 범위 검사는 부족하다.
+- 원문 확인은 명시적 답의 규칙 일치 확인이다. 설명문에 포함된 질병·기구 서술의 임상적 진위를 승인한 것이 아니다.
+
+# Interpretation
+
+H1은 제한적으로 지지된다. 명시적 답을 거부한 원 형식 평가가 표적 질문의 음의 점추정 일부를 만들었다. H2와 관련해서는 현재 표본의 표적 비교와 단순 정책 대조가 crop 투자 보류를 유지한다. 작은 효과의 비유의성을 동등성으로 선언하거나 현재 표본의 bounds를 모집단 상한으로 확대하지 않는다.
+
+A는 T/D/C에서 각각 76/54/79건이 unresolved다. 공개 RSNA 정답은 고정 O/A 판단을 평가할 수 있지만 자유 판독문 전체의 임상 정확성이나 내부 근거 결합 원인을 판정하지 못한다. 원 iter_108 판정은 보존하며 이번 결과는 별도 사후 분석으로 남긴다.
+
+# Strategy Check / 연구 방향 판단
+
+**이어받은 관찰 → 줄인 설명:** iter_108의 형식 민감성을 이어받아, 표적 정확도의 원 음의 차이를 그대로 내용 손상으로 읽는 설명을 약화했다. 명시적 답을 읽어도 큰 표적 이득은 나타나지 않았다.
+
+**시험 설정:** 현재 예측 crop·frozen reader 설정의 추가 투자는 보류한다. 새 prompt·crop 크기·학습을 자동 발주할 근거가 없다.
+
+**연구 관찰:** 평가 혼선이 일부 해소됐고 표적 이득 부족은 유지된다. A의 내용 효과는 줄지 않은 불확실성으로 보존한다.
+
+**연구 질문:** 위치 근거 활용 전체의 가치나 한계를 판정하지 않았다. 강한 단순 대안 이후의 중요한 잔여 문제와 신규 contribution은 미확정이다.
+
+실행 유효성은 충족했다. 성능 개선 개입은 없었다. 측정 민감도 가설에는 정보가 추가됐지만 새로운 시각 가설이나 방법의 지지는 얻지 못했다. 기록상 비용은 CPU provenance·추출·집계 구현과 한 번의 연결 버그 복구이며, 저장 분석 시간은 약 9초다. 전체 작업별 비용 분해는 미측정이고 GPU 비용은 0이다.
+
+현재 종료와 A 전용 독립 확인을 비교하면 종료를 권고한다. 후자는 남은 혼선을 줄일 수 있으나 표적 이득이나 단순 대안 이후의 가치가 없는 상태에서 투자 우선순위가 낮다. 같은 의미 평가 정비를 반복하지 않는다.
+
+# Recommended Next Experiment
+
+현재 새 실험은 권고하지 않는다. crop 후보와 한 번의 사후 분석을 종료하고 --confirm-each-iter에 따른 사용자 승인·피드백을 기다린다. A 전용 후속을 선택하려면 중요한 실제 사용 문제, 고정 응답·독립 자료에서 구분할 경쟁 설명, 결과별 투자 변화가 구체화돼야 한다. 그 전에는 추가 생성·학습·parser 확장을 시작하지 않는다.
+
+실제 방법 개선이나 후속 탐구의 긍정적 신호가 확인된 반복이 아니므로 논문 추천은 보류한다.
