@@ -129,6 +129,7 @@
 - iter_121 [CONTINUE] (deep_medium/standard/normal) <MRI 관측 범위와 분할 집계 진단: execution_failed> 💾ee8078ab0acba94f0d84d3ab2997e76eeb117bb9 MR-RATE 두 batch의 8,503 study에서 DWI·ADC metadata를 식별하지 못해 모델 실험을 중단했다. 자료 조건의 실패이며 전체 데이터의 부재나 MedGemma 한계를 입증하지 않는다. → 다음: 한정 보완을 권고한다. 확보한 두 batch의 보고서와 제공 sequence를 연결해 관측 비교가 성립하는 과제 하나를 정하고, 성립 여부를 확인하면 자료 준비 반복을 끝낸다. 기존 plan의 환자 분리·약한 정답 해석·동일 영상 예산·고정 집계·출력 검증 원칙은 유지한다. DWI–ADC 급성 경색 설계는 현재 범위에서 보류하고, 대체 질환·sequence는 보고서의 명시적 양성·음성·unknown과 영상 연결 근거를 확인한 뒤 별도 계획으로 고정한다. 자동 라벨 0을 음성으로 쓰거나 탈수초 질환을 즉시 유망 후보로 선언하지 않는다. 자료가 성립하면 같은 계획에서 소수 실제 영상 확인과 조건부 MedGemma 탐색까지 연결하고, 성립하지 않으면 해당 후보를 보류하며 batch 전수 반입·질환 순회를 하지 않는다. 승인된 외부 경로의 실행 권한 설정도 정상화한다.
 - iter_122 [CONTINUE] (deep_medium/standard/normal) <MRI 관측 범위와 분할 집계 진단: execution_failed> 💾ee8078ab0acba94f0d84d3ab2997e76eeb117bb9 MR-RATE 외부 경로 접근이 차단돼 모델 출력은 0건이다. 실행기의 경로 설정 누락을 확인했으며, 가설 판정 없이 설정 복구 후 기존 비교를 이어갈 것을 권고한다. → 다음: 한정 보완을 권고한다. 승인된 외부 경로를 구현 실행기에 반영하고 실제 세션의 접근 검증을 통과하면 운영 복구를 끝내고 기존 실험으로 이어간다. 상위 관리 코드의 별도 수정·검증 경로에서 orchestrator.py의 Claude 실행 인자와 관련 권한 설정에 /home/test/.local/share/medgemma/mr_rate를 명시적으로 연결한다. 구현 세션에서 정상 목록 조회·기존 CSV 읽기·전용 결과 경로 쓰기를 확인하고 기존 보호 경로의 제한을 유지한다. Python이나 symlink로 거부를 우회하지 않는다. 기준은 agent/runs/iter_122/plan.md(SHA256 5a5371d834ba684e7c459e1e52708ca0e86f2314952fbd636c897fc24a5ad0b8)이며 질문·두 batch train·정답 규칙·기술6명과 별도48명·216요청·parser·성공/중단 기준을 유지한다. 모든 자료 구성과 추론은 미완료다. 새로운 결과 경로와 복구 기록을 남기고 원 기록은 보존한다. 설정 변경만으로 복구를 선언하거나 같은 접근 검사만 하는 연구 반복을 다시 만들지 않는다. 정상 설정 후에도 외부 정책이 접근을 차단하고 관리 경로에서 해결할 수 없다는 근거가 생길 때만 구체적인 운영 조치를 사람에게 요청한다.
 - iter_123 [CONTINUE] (light/standard/normal) <MRI 관측 범위와 분할 집계 진단: abandon> 💾e39ba0666faf34899f9a4c230102b9d3fb1c44e7 MR-RATE MRI 48명에서 중앙·넓은·분할 입력 모두 PRESENT로 답해 BA 0.50이었다. 분할 이득은 없었으며, 현재 설계 확대는 보류한다. 기본 인식과 모델 특이성은 미확인이다. → 다음: 한정 보완을 권고한다. 동일 MRI 입력의 타 계열 기본 판별 대조 한 번으로 MedGemma 특이 현상인지 판단하고, 결과가 같거나 해석 불가능하면 현재 후보 투자를 보류하는 것으로 끝낸다. 다음 계획은 iter_123의 고정 원출력과 판정을 보존하고, 기존 48명에서 출력과 무관하게 정한 소수 양·음성 및 두 batch를 포함하는 subset을 사용한다. 사용할 사례의 위치·보고서 상충만 먼저 확인하며 정답 재채점으로 원 결과를 바꾸지 않는다. 한 타 계열 모델의 공식 입력 방식과 같은 W 영상·정보·질문을 고정하고, 성공·음성·불확정별 종료 행동을 사전 지정한다. 타 모델이 판별해도 곧바로 새 방법으로 확대하지 말고 전문 대안 이후의 잔여 가치가 있는지 판단한다. 영상 없는 응답만으로 영상 무사용을 단정하는 대조, 동일 모델 prompt 순회, C/W/P 표본 확대·LoRA는 권고하지 않는다. 재사용 수정은 선택한 실행 경로에 필요한 항목만 수행한다.
+- iter_124 [CONTINUE] (deep_medium/standard/normal) <MRI 고정 응답의 타 계열 대조: abandon> 💾a1a2743d0f29b0c6df592b97c572d03778b12b0d MR-RATE MRI 23명에서 Qwen도 MedGemma처럼 전원 PRESENT로 답해 BA 0.50이었다. 현재 고정 판별 후보는 보류하며, 공통 원인과 MRI 전체 능력은 미판정이다. → 다음: 투자 보류·전환을 권고한다. 현재 고정 FLAIR 판별 후보는 사전 음성 기준을 충족했으므로 추가 prompt·환자·세 번째 모델 없이 종료하고, 승인된 MR-RATE 범위에서 관측과 정답 연결이 더 명확한 기술 질문 하나를 선택한다. 기존 metadata·보고서에서 후보를 최대2~3개만 비교하고, 실제 적격 사례·관련 sequence·강한 단순 대안·결과별 종료 조건이 성립하는 하나에 한정해 작은 실제 비교를 계획한다. 질환명이나 모델 순위 변경만으로 새 연구 질문을 만들지 않는다. 현재 후보 재개는 관측 충분성 또는 전문 대안 이후의 잔여 가치에 대한 새 근거가 있을 때만 별도 계약으로 검토한다. 선택하지 않은 실행기의 전수 복구는 하지 않는다.
 
 ## 이전 목표들의 접근법 (참고용, 현재 목표의 재평가 횟수에는 안 들어감)
 
@@ -188,10 +189,11 @@
 - 오류 혼합 근거의 선택적 교정 진단 [approach/noisy-evidence-correction]: 4회 (iter_116, iter_117, iter_118, iter_119), 유효한 실험 3회, 미분류 0회, 최근 판정: inconclusive, 커밋: 66cd4542720d0efe69b2fbbdfabbe24ebe0253a0, ae15ee5bde73c415715f127720ffdcf24f60d2cc, 87b672866ae9be7b4d8c261b30f755f7fcaa97cf, 0846c0834bf179cc9e7ca6044c0cf0f4bd629486
 - 영상 간 대상 대응의 투자 적합성 판단 [approach/cross-image-target-use]: 1회 (iter_120), 유효한 실험 0회, 미분류 0회, 최근 판정: execution_failed, 커밋: 752fba411759a093129c05feadfdff75e4d9a1b3
 - MRI 관측 범위와 분할 집계 진단 [approach/mri-coverage-aggregation]: 3회 (iter_121, iter_122, iter_123), 유효한 실험 1회, 미분류 0회, 최근 판정: abandon, 커밋: ee8078ab0acba94f0d84d3ab2997e76eeb117bb9, ee8078ab0acba94f0d84d3ab2997e76eeb117bb9, e39ba0666faf34899f9a4c230102b9d3fb1c44e7
+- MRI 고정 응답의 타 계열 대조 [approach/mri-cross-model-response]: 1회 (iter_124), 유효한 실험 1회, 미분류 0회, 최근 판정: abandon, 커밋: a1a2743d0f29b0c6df592b97c572d03778b12b0d
 
-현재 연구 브랜치: approach/mri-coverage-aggregation (코드 위치: /SSD1_1TB/home/milab/daniel/08_medgemma/research)
+현재 연구 브랜치: approach/mri-cross-model-response (코드 위치: /SSD1_1TB/home/milab/daniel/08_medgemma/research)
 
 ### 최근 계획의 대안 순위
 
-1. MRI 관측 범위와 분할 집계 진단: 복구된 실행 환경에서 iter_122의 고정 비교를 완료해 연구 판단에 필요한 실제 출력을 얻는다.
-2. 현재 자료 설계 보류: 원 적격성·영상 연결 조건이 성립하지 않을 때만 선택하며 다른 질환이나 batch를 자동 탐색하지 않는다.
+1. MRI 고정 응답의 타 계열 대조: 기존 영상과 작은 고정 집단으로 모델 특이성 판단을 마친다.
+2. 현재 후보 즉시 보류: 추가 비용은 줄지만 동일 입력의 판별 가능성과 모델 차이는 미확인으로 남는다.

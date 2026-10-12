@@ -375,20 +375,20 @@ iter_118의 RSNA 192명 합성 초안 개입에서 관찰한 순 명시 오답 �
 
 ## mrrate-flair-fixed-positive-response — observed
 
-MR-RATE batch04·batch23 공식 train의 개발 48명(보고서 기준 양성24·음성24), 고정 axial FLAIR 입력과 PRESENT/ABSENT/UNCERTAIN prompt에서 MedGemma 1.5는 중앙8장·넓은8장·넓은8장의 두 묶음 분할 요청 모두 PRESENT를 출력했다. 보고서 기준 BA는 모든 조건에서 0.50이고 분할 집계의 개선은 없었다. 이는 현재 설정의 제한된 응답 관찰이며 영상 무사용, 일반적인 MRI 인식 또는 결합 능력의 결함을 확정하지 않는다.
+iter_123의 MedGemma 1.5 개발48명 전원 PRESENT 관찰은 유지된다. 그중 출력과 무관하게 층화 선정한 24명에서 보고서 상충 1명을 제외한 23명(양성11·음성12)의 동일 W FLAIR8장·고정 질문에 Qwen2.5-VL-7B-Instruct도 전원 PRESENT를 출력했다. 두 모델의 보고서 기준 BA는 0.50이며 환자별 상태가 동일했다. 따라서 이 응답 현상을 MedGemma에만 특이적이라고 해석할 근거는 없지만, 공통 내부 결함·영상 무사용·일반 MRI 능력의 한계를 확정하지 않는다.
 
 - 적용 목표 시작: iter_003
-- 최신 리뷰: agent/runs/iter_123/review.json
-- 근거: research/results/iter_123/gen/explore/requests.jsonl 및 worker_m0.jsonl–worker_m3.jsonl: 고유 192요청·48환자, 원문 첫 줄 모두 PRESENT.
-- 근거: research/results/iter_123/eval_explore.json: C/W/P sensitivity 1.0, specificity 0.0, BA 0.50; P−W와 W−C 모두 0, paired bootstrap 95% CI [0,0].
-- 근거: 리뷰에서 원시 출력·선정 manifest를 독립 대조했다. 모든 환자의 조건 간 정오 차이가 0이므로 모든 층화 bootstrap 재표집의 차이도 0임을 확인했다.
-- 사용·평가 검증: 리뷰 대상 e39ba0666faf34899f9a4c230102b9d3fb1c44e7의 신규 15개 소스와 작업 파일 내용이 일치했다. protocol에 기록된 코드·입력 hash도 일치했다.
-- 사용·평가 검증: tensor_check_tech.json 24/24 및 tensor_check_explore.json 192/192의 공식 processor 경로·영상 순서 검사 결과를 확인했다.
-- 사용·평가 검증: 탐색 요청에 연결된 고유 PNG 746개의 SHA256을 재검증했다. 192응답 모두 EOS이며 최대 출력은 65 token이었다.
-- 사용·평가 검증: source CSV hash와 선정 사례의 보고서 관련 문장을 대조했다. 정답은 보고서 기반이며 독립 임상 영상 정답이 아니다.
-- 사용·평가 검증: 음성 사례 montage를 직접 확인했다. 시각 검사는 임상 정상 판정이나 라벨 재판정을 대신하지 않는다.
-- 미해결: 기본 영상 인식 부족, 질문에 따른 응답 성향, 제한된 관측과 보고서 불확실성의 상대 기여는 미확인이다.
-- 미해결: 타 계열 모델·독립 환자·다른 입력 방식에서의 재현은 미검증이다.
-- 미해결: 일부 보고서의 넓은 정상 기술과 국소 이상 기술 사이 상충을 정규식만으로 충분히 처리했는지 확인이 필요하다.
-- 미해결: 전문 WMH 대안 이후에도 새로운 VLM 방법이 필요한 잔여 문제가 있는지 미확인이다.
+- 최신 리뷰: agent/runs/iter_124/review.json
+- 근거: research/results/iter_124/gen/explore/main/worker0.jsonl 및 worker1.jsonl: 고유 23요청, 원문 첫 줄 모두 PRESENT.
+- 근거: research/results/iter_124/eval/report.json: 두 모델 BA 0.50, sensitivity 1.0, specificity 0.0, paired 차이 0, bootstrap CI [0,0].
+- 근거: 리뷰에서 요청·원출력·원 라벨을 독립 대조했다. 모든 환자의 paired 정오 차이가 0이므로 모든 층화 재표집의 차이도 0이다.
+- 사용·평가 검증: 리뷰 대상 a1a2743d0f29b0c6df592b97c572d03778b12b0d의 8개 소스와 작업 파일이 일치했다.
+- 사용·평가 검증: 기존 W 요청과 새 요청의 prompt·영상 순서·환자·라벨을 대조하고 고유 PNG 184개의 SHA256을 재검증했다.
+- 사용·평가 검증: tests/tech_inputs.json: 기술4명의 공식 입력 경로 대조·영상 순서·누출 검사 실패 0.
+- 사용·평가 검증: 탐색23건 모두 EOS, 최대49 token, 합계801 token으로 출력 길이 부족은 관찰되지 않았다.
+- 사용·평가 검증: 층별 hash 선정과 출력 파일 seal을 독립 확인했다. 보고서 정답은 임상 영상 정답이 아니며 적격성의 일부 해석 불확실성은 남는다.
+- 미해결: 선택8장의 소견 가시성, 기본 인식, 질문 성향의 상대 기여는 미확인이다.
+- 미해결: SDZBI7EXA5의 frontal white matter 소견을 명시적인 non-periventricular 소견이라고 설명한 것은 원문보다 강한 해석이다.
+- 미해결: 전문 WMH 대안 이후의 잔여 가치와 독립 환자 재현은 미검증이다.
+- 미해결: 현재 후보 재개에는 새로운 관측 충분성 또는 실용적 잔여 가치 근거가 필요하다.
 

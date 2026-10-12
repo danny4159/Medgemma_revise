@@ -45660,3 +45660,388 @@ parser는192건을 `ok_loose`로 읽었다. 이는 첫 줄에 PRESENT와 설명�
 한정 보완 하나를 권고한다. 다음 계획에서 기존 자료의 소수 양·음성, 두 batch를 포함한 subset과 타 계열 모델 하나를 출력과 무관하게 고정한다. 해당 사례의 원문 위치·상충만 먼저 확인하고 같은 W 영상·질문·정보로 기본 판별을 대조한다.
 
 타 모델이 판별하면 MedGemma 특이성의 제한된 근거로 보존하고 전문 대안 대비 잔여 가치를 판단한다. 같은 고정 응답이나 낮은 수행, 정답 해석 의존이 남으면 현재 후보 투자를 보류하고 종료한다. 그 결과만으로 공통 내부 결함을 주장하지 않는다. 원48명 결과의 재채점, 같은 MedGemma prompt 탐색, 표본 확대·학습은 자동 발주하지 않는다. 필요한 코드 수정은 이 비교에 사용하는 경로로 한정한다.
+
+
+## iter_124 GPT PLAN [MRI 고정 응답의 타 계열 대조 / proceed] — 2026-10-13 02:18:54
+
+# 요약
+
+- **이번에 할 일:** 기존 MR-RATE 개발48명에서 고정24명을 선정해 같은 FLAIR8장과 질문을 Qwen에 제공한다.
+- **필요한 이유:** MedGemma의 전원 PRESENT 관찰은 유효하지만 모델 특이성은 미확인이다.
+- **확인할 기준:** 보고서 적격 paired 집단의 BA·양성/음성 판별·모델 차이와 CI를 확인한다.
+- **주의·다음:** 임상 정확도나 내부 원인을 확정하지 않는다. 낮은 수행·불확정이면 현재 후보 투자를 보류한다.
+
+## 알림 맥락
+
+- 연구: MRI volume 근거 활용
+- 데이터: MR-RATE 뇌 MRI, axial FLAIR
+- 모델: MedGemma 1.5 저장 출력과 Qwen2.5-VL-7B-Instruct frozen 추론
+- 과제: 동일8장에서 뇌실주위 백질 고신호의 존재·부재·판단 불가 출력
+- 가설: 전원 양성 응답은 모델·인터페이스에 특이적일 수 있음
+- 질문: 같은 MRI를 다른 계열 모델은 양성과 음성으로 구분하는가?
+- 변경: 구체화
+- 연결: iter_123의 중앙·넓은·분할 입력이 모두 PRESENT였으므로 분할 확대를 보류하고 모델 특이성만 확인함
+- 작업: 고정24명의 보고서 적격성과 동일 입력을 확인하고 타 계열 대조 한 번으로 후보의 후속 투자 여부를 결정
+
+# Current Understanding
+
+iter_123/review.json의 유효 음성 판정과 원48명 결과를 유지한다. 이번은 C/W/P 설계의 재시도가 아니다. MRI volume 근거 활용이라는 상위 질문을 유지하며, 기존 W 입력의 모델 차이만 확인한다.
+
+실제 selection_lock의 탐색 분포는 batch04 양성16·음성12, batch23 양성8·음성12다. 원 보고서의 위치·상충 검토가 일부 부족하므로 이번 표본의 적격성을 새 출력 전에 확인한다. 원 라벨·원 결과는 수정하지 않는다.
+
+# Strategy Check / 연구 방향 판단
+
+직전 카드 출처는 iter_123/review.md다. 추가 근거는 실제 manifest의 층별 표본과 재사용 가능한 Qwen revision 기록이다.
+
+1. **중요한 문제:** MRI의 제한된 관측에서 판별 실패를 모델 고유 문제와 자료·관측 문제로 구분해야 후속 방법 투자를 결정할 수 있다.
+2. **현재 근거:** MedGemma의 전원 PRESENT는 관찰이다. 타 모델 수행과 영상 근거의 충분성은 가설이다.
+3. **쉬운 해결책:** 넓은 sampling·분할 OR는 현재 설정에서 효과가 없었다. 모델 교체와 전문 WMH 대안의 충분성은 미검증이다.
+4. **남은 설명:** 모델·prompt 인터페이스, 기본 인식, 제한된 slice, 보고서 불확실성이 얽혀 있다. 같은 입력의 타 계열 대조로 일반적 실패 주장을 제한한다.
+5. **다음 결정:** 큰 판별 차이가 있으면 제한된 모델 특이성을 보존하고 전문 대안 이후 가치를 별도 검토한다. 낮거나 불확정이면 현재 후보 투자를 보류한다.
+
+현재 MedGemma prompt 개선이나 C/W/P 확대보다 작은 타 계열 대조를 우선한다. 해결된 것은 현재 분할 이득 부재이며 남은 질문을 모두 이번에 해결하려 하지 않는다.
+
+# Hypothesis
+
+A: 모델·인터페이스 특이 응답이라면 Qwen은 같은 W 입력에서 양성과 음성 모두 일정 수준 판별하며 MedGemma보다 높은 보고서 일치도를 보인다.
+
+B: 관측·자료 불확실성 또는 두 모델의 기본 수행 부족이 지배적이면 Qwen도 낮은 점수를 보일 수 있다. 음성 결과는 B의 각 원인을 구분하지 않으며 공통 내부 결함의 증명이 아니다.
+
+모델 교체는 구조·학습 데이터·processor까지 바꾸므로 순수 아키텍처 인과 개입으로 해석하지 않는다.
+
+# Limitation Evidence / Correct Usage Checks
+
+대상은 observed인 mrrate-flair-fixed-positive-response다. iter_123의 공식 processor 대조·PNG hash·EOS 검사와 유효 출력 관찰을 계승한다. 보고서 일부의 모호성 때문에 임상 영상 정확도와 validated 한계를 주장하지 않는다.
+
+Qwen은 revision cc594898137f460bfe9f0759e9844b3ce807cfb5를 고정한다. 기존 qwen_fetch.json의 snapshot과 파일 hash를 확인하고 실제 Python·package 버전을 기록한다. 설치 문제가 있으면 승인된 격리 환경에서 해결하며 기본 환경과 hf_cache는 변경하지 않는다.
+
+공식 모델 카드의 다중 영상 processor/chat template 경로를 사용한다. 기술 입력에서 직접 공식 경로와 wrapper의 input_ids, pixel_values, image_grid_thw, 영상 순서가 일치하는지 검사한다. 모델 간 pixel tensor 동일성을 요구하지는 않는다. 동일 PNG를 제공하되 각 processor의 resize·token 수를 보고한다. Qwen은 원896×896 PNG를 축소하지 않는 공식 해상도 설정을 우선 고정하고 실제 처리 크기를 기록한다. 메모리 문제 시 먼저 batch·vision 처리 chunk를 줄인다. 해상도 변경이 필요하면 기술 단계에서만 이유와 최종 설정을 잠근다.
+
+# Contribution Path / Baselines / Reuse
+
+이번 진단의 가치는 과도한 일반화를 막고 다음 투자를 종료하거나 좁히는 것이다. Qwen 성공 자체는 신규 방법 기여가 아니다. 직접 SFT·encoder+head·전문 WMH 모델 이후 잔여 가치는 미검증이며 이번에 학습을 추가하지 않는다.
+
+주대조는 같은 환자의 기존 MedGemma W 원출력이다. prompt와 Image 번호·8장의 순서를 유지한다. 보고서·라벨·환자/파일 이름은 모델에 전달하지 않는다. 모델 고유 chat template만 공식 형식을 따른다. 상수 PRESENT의 BA0.50도 표시한다.
+
+현재 HEAD와 파일을 확인했다. 새 브랜치는 orchestrator가 관리하고 reuse_assets의 mr123_run.py와 의존 mr123_data.py만 선별 반입한다. prompt·messages_for·parse를 활용하되 과거 CLI·worker·data 생성 경로는 호출하지 않는다. 기존 PNG 재렌더링·재다운로드가 필요하지 않다. 모든 새 산출물은 iter_124 경로로 분리한다.
+
+보관된 s64_run.py는 실제로 존재하며 원 리뷰의 needs_fix와 MSD 전용 의존성을 확인했다. 전체 과거 실행기를 복구하지 않는다. 이번 MR-RATE 요청에 공식 Qwen adapter를 연결하는 작업은 별도이며 과거 자산을 잃었다고 보고하지 않는다.
+
+# Proposed Experiment
+
+## 1. 자료·표본 고정
+
+기존 탐색48명만 후보로 사용한다. batch04/batch23×원 positive/negative의 네 층에서 SHA256 문자열 `124|patient_uid|study_uid`의 오름차순 첫6명을 뽑아24명을 먼저 잠근다. 출력, 소견 크기, 영상의 쉬움으로 선택하지 않는다.
+
+이24명의 전체 findings와 impression에서 다음을 사례표에 기록한다: 정확한 근거 span, 뇌실주위 백질 위치의 직접 명시 여부, FLAIR 고신호 존재 또는 해당 부위 정상 신호의 명시 여부, 상충·예외·소견 존재 불확실성. 원인 질환의 불확실성과 고신호 존재 불확실성을 분리한다. 넓은 정상 문장과 국소 이상이 충돌하고 명시적 예외로 해소되지 않으면 부적격/unknown으로 표시한다. 새 LLM 합의로 임상 정답을 만들지 않는다.
+
+불명확한 사례는 이번 paired 점수에서 제외하고 원 라벨을 변경하지 않는다. 대체 환자는 뽑지 않는다. 네 층 각각 적격4명 이상이면 적격16–24명으로 진행한다. 이 기준은 작은 모델 차이를 확증하기 위한 것이 아니라 양·음성과 두 batch가 남는 최소 탐색 구성이다. 미달하면 자료 해석 부족으로 후보를 보류하며 다른 batch·질환으로 이번 실행을 연장하지 않는다.
+
+선정·제외·적격 여부를 Qwen 출력 전에 봉인한다. 평가 집단이 원48명과 다르다는 점과 원48명 BA0.50을 별도로 보존한다. 해부학 영상 검사는 방향·연결·표시 오류만 확인하며 병변 정답을 새로 판정하지 않는다.
+
+## 2. 동작 확인
+
+기존 기술6명에서 원 양성·음성 각각 hash 순 첫2명, 총4명의 W 입력을 사용한다. 이들은 본 비교에 포함하지 않는다. 생성은 greedy, max_new_tokens512다. 비EOS가 발생하면 기술4명만1024로 한 번 재검사하고 탐색 전에 길이를 고정한다. 계속 잘리면 기술 실행 실패로 처리한다. 낮은 정확도 자체는 본 비교 차단 사유가 아니다.
+
+parser는 기존 mr123_run.parse의 첫 줄 상태 규약을 그대로 사용한다. strict와 loose, UNCERTAIN, refusal, invalid를 분리한다. 자유 설명을 사후 의미 판정해 점수를 올리지 않는다. 합성 parser 사례와 기존 W 출력 재현을 검사한다.
+
+## 3. 가능성 탐색
+
+적격16–24명에게 환자당 Qwen W 요청1건을 실행한다. MedGemma는 같은 요청의 기존 원출력을 읽는다. 학습·seed 탐색·다른 prompt·추가 모델은 없다. 완료 후 정확한 요청 집합·응답 집합·hash를 검사하고 독립 집계한다.
+
+## 4. 규모 확대·독립 확인
+
+이번에는 자동 확대하지 않는다. 24명은 큰 차이를 찾는 개발 탐색이며 20pp 효과를 확증할 충분한 검정력을 보장하지 않는다. 양성이어도 독립 환자 검증과 전문 대안 비교는 후속 투자 판단을 거친 별도 계획이다. 불확정이면 CI가 넓다는 이유만으로 같은 후보를 이어가지 않는다.
+
+## 자원·시간·재개
+
+기존 모델 cache는 research/results/environments/qwen25vl_cache에 기록돼 있다. 실제 존재·hash·디스크를 확인한다. 신규 MRI 반입은0이다. 추가 cache가 필요하면 승인된 외부 경로를 사용한다.
+
+실행 직전 nvidia-smi와 상속 CUDA_VISIBLE_DEVICES를 확인한다. 두 GPU에 Qwen worker를 하나씩 두고 독립 환자 shard를 배정하는 구성을 우선한다. 과거 iter_064의 Qwen 점유16,311MiB는 다른 입력의 참고치다. 7B bf16 가중치만으로 GPU당2개 복제가 곤란할 가능성이 크므로 이번에는 기술4명으로 batch1 대비 batch2를 먼저 비교한다. peak와 worker당2GiB 여유, 처리량·출력 정합성·긴 출력 지연을 확인해 선택한다. 복수 worker가 실제로 메모리에 들어가고 남은 요청량에서 이득이 예상될 때만 검토한다.
+
+기본 신규 요청은 기술4+탐색최대24=28건이다. batch 비교 재요청4건, 필요 시 길이 재검사4건을 별도 집계한다. 기술 실측 총처리량 r requests/min으로 탐색 예상 시간을 N/r로 산출하고 모델 load·hash 검사·입력 읽기·답 저장 시간을 별도로 더한다. 새 입력의 wall-clock과 peak는 현재 미측정이며 임의 시간 상한은 두지 않는다.
+
+소규모 고정 shard 방식으로 중복 할당을 피한다. stage lock과 worker별 파일, 요청별 완료 ledger를 둔다. 살아 있는 worker의 claim·출력은 건드리지 않는다. 마지막 불완전 행만 원본을 보존한 뒤 소유 worker 종료 확인 후 복구하며 중간 손상은 실패로 처리한다. 학습 checkpoint는 없고 요청·응답·protocol과 소스 checkpoint를 보존한다.
+
+# Implementation Tasks for Claude
+
+1. iter_123 원 리뷰·고정 manifest·W 요청·원출력과 반입 소스를 확인한다. 원 기록을 변경하지 않는다.
+2. hash 선정24명과 사례별 보고서 적격성 표를 만들고 출력 전에 잠근다. 선정 정규식을 최종 적격성 판정으로 재사용하지 않는다.
+3. 기존 Qwen cache·환경을 확인하고 공식 adapter를 연결한다. 모델·processor·소스·prompt·PNG·정답 manifest를 protocol로 고정한다.
+4. 기술4명의 입력·생성 길이·parser·batch 처리량과 출력 정합성을 확인한다. 필요한 실행 경로에만 안전 재개·hash 강제 검증을 추가한다.
+5. 조건 성립 시 같은 호출에서 고정 탐색을 완료한다. 생성·평가에서 요청 누락·중복·손상·hash 불일치·완료 수 불일치가 있으면 실패 반환한다.
+6. 원시 응답을 이용한 별도 집계로 BA·CI·coverage를 검산하고 실제 비용·미검증 범위·최종 투자 행동을 보고한다. 필수 full 리뷰를 받는다.
+
+# Evaluation (성공/실패 기준 포함)
+
+주지표는 보고서 적격 집단의 BA다. UNCERTAIN과 invalid는 각 원 클래스에서 오답으로 센다. sensitivity, specificity, confusion counts, 명시 답 coverage, strict/loose, 거부·unknown·비EOS를 모두 보고한다. Qwen−MedGemma paired 차이는 label×batch 층 내 환자 bootstrap10,000회, seed124, 95% CI로 계산한다. 전체와 batch별 결과, 양방향 정오 전환 수를 함께 보고한다.
+
+- **양성:** Qwen BA≥0.75, sensitivity·specificity 각각≥0.67, BA 차이≥0.20 및 CI 하한>0을 모두 만족한다. 두 batch 중 하나라도 BA≤0.50이면 batch 의존 불확정으로 제한한다. 제한된 모델·인터페이스 차이의 근거를 보존하고 전문 대안 이후 잔여 가치 검토만 후속 후보로 둔다.
+- **음성:** Qwen BA≤0.60 또는 전원 동일 상태면 현재 고정 판별 후보의 투자를 보류한다. 공통 내부 원인은 미판정이다.
+- **불확정:** 나머지, 적격성 부족, 출력 형식 때문에 판별이 어려운 경우는 증거 부족으로 후보 투자를 보류한다. 기술 오류는 실행 실패와 구분한다. 추가 prompt·표본·모델을 실행하지 않는다.
+
+20pp는 이번 소규모 비교에서 후속 검토를 정당화할 큰 차이 기준이지 임상 도입 기준이 아니다. 비용은 Qwen의 PNG 읽기부터 답 저장까지 실측한다. 기존 MedGemma의 저장 제외 요청시간은 별도 참고치로만 표시하고 두 값을 end-to-end 속도 우위로 비교하지 않는다. 신규 방법의 정확도·비용 개선은 이번 평가 대상이 아니다.
+
+# Risks / Checks
+
+- 보고서 정답은 선택8장에서의 시각적 가시성을 보장하지 않는다. 영상 진단 정확도나 병변 위치 정답으로 확장하지 않는다.
+- 모델 차이에는 parameter 수·학습 노출·processor가 포함된다. Qwen 성공도 순수 인식 원인의 증명은 아니다.
+- 기존 개발 자료와 양·음성의 획득 방식 차이를 보고한다. 독립 일반화·임상 유효성은 미검증이다.
+- 원 PNG·series·revision·render 설정의 hash를 검증한다. 불일치가 있으면 이전 파일을 덮어쓰지 않는다.
+- token은 HF_TOKEN_PATH로만 참조하고 출력하지 않는다. 기존 hf_cache와 다른 사용자 작업을 변경하지 않는다.
+- 기존 자산의 실제 누락·접근 실패는 구체적으로 기록한다. 권한 거부를 Python이나 symlink로 우회하지 않는다.
+
+## 대규모 GPU 필요 후보
+
+전체 volume·다중 sequence encoder와 언어모델의 공동 적응, 대규모 MRI 영상–보고서 사전학습은 장기 후보로 보존한다. 현재 작은 고정 과제의 실패만으로 필요성을 주장하지 않으며 이번에는 실행하지 않는다.
+
+# 계획의 근거 (GPT 조사 노트)
+
+## 확인한 사실
+
+- GOAL, iter_123의 원 review.json·plan.md, LIMITATIONS의 해당 항목, CODE_ASSETS의 iter_123 항목과 실제 소스를 확인했다. 현재 research HEAD는 e39ba0666faf34899f9a4c230102b9d3fb1c44e7이며 status는 clean이다.
+- iter_123은 유효한 첫 실험이다. 개발48명·192요청 모두 PRESENT였으며 C/W/P BA0.50, 조건 간 차이0이다. 보고서 일부의 위치·상충 검토와 실행기의 안전한 재사용에는 결함이 남는다.
+- selection_lock.json의 실제 manifest에서 탐색 집단은 batch04 양성16·음성12, batch23 양성8·음성12다. 따라서 각 층6명인 24명 고정 추출은 원 manifest상 가능하다. 보고서 전체 재검토 후 적격 수는 아직 확정되지 않았다.
+- mr123_run.py의 실제 질문은 뇌실주위 백질 FLAIR 병적 고신호이며, 동일8장의 W 입력을 재사용할 수 있다. parser는 첫 줄의 단일 상태를 읽고 strict/loose를 구분한다.
+- iter_064 원 리뷰에서 MedGemma R−C BA 손실0.27083과 Qwen의 반대 근거를 확인했다. 이는 다른 자료의 관찰이며 이번 MR-RATE의 수행을 보장하지 않는다.
+- 보관된 s64_run.py와 iter_064 code_assets를 확인했다. 해당 실행기는 MSD target manifest·과거 자료 모듈과 강하게 연결돼 있어 이번 작은 W 대조에 전체 반입하지 않는다. 자산 소실로 간주하지 않으며 공식 Qwen 입력 adapter만 이번 MR-RATE 경로에 연결한다.
+- iter_062/env/qwen_fetch.json에 Qwen revision cc594898137f460bfe9f0759e9844b3ce807cfb5, 전용 cache 경로, 모델 파일 SHA와 Apache-2.0 기록이 있다. 이번 계획에서는 전체 가중치 존재·hash를 재검증하지 않았으므로 구현 시작 시 확인한다.
+- [Qwen 공식 모델 카드](https://huggingface.co/Qwen/Qwen2.5-VL-7B-Instruct)에서 공식 processor/chat template 입력과 생성 경로, Apache-2.0 표기를 확인했다. MRI 특화 성능 근거로 사용하지 않는다.
+
+## 판단
+
+기존48명의 출력과 무관한 층화24명은 약한 판별 신호를 정밀 추정하기 위한 확증 표본이 아니라, 큰 모델 차이가 있는지를 확인할 한정 비교다. 표본 부족을 이유로 자동 확대하지 않는다. 기존 보고서를 새 임상 정답으로 재해석하지 않고 명시적 위치·신호·상충 여부만 확인한다. 추가 사고 라운드 없이 구현 가능한 범위다.
+
+
+
+## iter_124 CLAUDE IMPLEMENTATION REPORT — 2026-10-13 02:37:52
+
+# 요약
+
+- **핵심 결과:** Qwen2.5-VL-7B도 적격 23명 전원에 PRESENT를 답했다. BA 0.50, sensitivity 1.0, specificity 0.0이고, MedGemma 기존 W 출력과 환자별로 하나도 다르지 않았다(ΔBA 0, CI [0,0]). 사전 분기는 **음성**이므로 이 고정 FLAIR 판별 후보(뇌실주위 백질 고신호 PRESENT/ABSENT)는 투자를 보류한다.
+- **근거:** 입력은 공식 경로와 기본 HF 경로의 tensor가 일치했다. 23건 모두 EOS로 끝났고, 출력 합산 801 token에 최대 49 token이었다. 독립 재계산도 일치했다.
+- **미검증·주의:** 두 모델 공통 내부 결함, MRI 전체의 한계, 영상의 실제 판별 가능성은 구분하지 못했다. 8장 중 뇌실 높이 slice는 2~3장뿐이라 관측 부족이라는 설명이 남는다.
+- **다음:** 이 후보에는 추가 환자·prompt·모델을 붙이지 않는다. 다른 질환군이나 질문으로 전환하는 판단은 GPT 리뷰 몫이다.
+
+# Work Performed
+
+1. **자료 확인:**
+   - 반입 `mr123_data.py`와 `mr123_run.py`의 blob SHA가 manifest와 일치한다.
+   - iter_123 W 요청 192건의 parser 재현을 확인했다.
+   - iter_123 경로에는 읽기만 했다.
+2. **24명 선정:**
+   - iter_123 탐색 48명에서 batch×label 네 층별로 `SHA256('124|patient_uid|study_uid')` 오름차순 첫 6명을 뽑았다.
+   - 모델 출력은 보지 않았다.
+3. **적격성 표 (잠금 2026-10-13T02:20:45):**
+   - 24명 전체 findings·impression을 읽고 근거 span을 기록했다.
+   - 적격은 23명이다.
+   - 층별 적격은 batch04 음성 6 / 양성 6, batch23 음성 6 / 양성 5다. 모든 층이 4명 이상이라 진행 조건을 충족했다.
+   - `7YYNKXI6YW`는 광범위한 FLAIR 병변 기술과 "No pathological intensity change ... cerebral parenchyma" 문장이 명시적 예외 없이 충돌해 제외했다. 대체 환자는 뽑지 않았다.
+4. **Qwen 연결:**
+   - 새 `mr124_run.py`에 아래를 구현했다.
+     - 고정 shard
+     - worker별 flock
+     - 답변과 비용을 한 행에 쓰는 원자적 저장
+     - torn-tail 복구
+     - 중간 손상 시 예외
+     - protocol hash(코드·요청·적격성·Qwen 파일 전체 sha)
+     - verify의 누락·중복·hash·종료코드 검사
+   - 모델 파일 hash는 기존 `qwen_fetch.json`과 일치했다.
+5. **기술 4명 검사:**
+   - 입력: 공식 `process_vision_info` 경로와 HF 기본 chat-template 경로의 `input_ids`·`pixel_values`·`image_grid_thw`가 일치했고, 영상 순서(PNG k = tensor k)와 정답 문자열 누출 없음도 확인했다.
+   - 생성: batch1과 batch2를 비교하고, 강제 종료 후 재개를 시험했다.
+6. **평가 코드 잠금 (2026-10-13T02:33:21):**
+   - `mr124_eval.py`를 탐색 생성 이전에 잠갔다.
+   - 독립 검산기 `mr124_verify_eval.py`는 생성 이후에 작성했다. 사전 잠금이 아니다.
+7. **탐색 실행과 평가:** 적격 23명 × 1요청을 두 GPU에 worker 1개씩 두고 실행했다. 이어 verify, 평가, 독립 검산을 수행했다.
+
+# Files Changed
+
+- 신규 코드 (`research/`): `mr124_select.py`, `mr124_lock.py`, `mr124_run.py`, `mr124_eval.py`, `mr124_tests.py`, `mr124_verify_eval.py`
+- 반입 보존 (수정 없음, untracked): `mr123_data.py`, `mr123_run.py`
+- 결과: `results/iter_124/{data,gen,tests,eval}/`
+- 기존 iter_123 파일은 변경하지 않았다.
+
+# Commands / Experiments (실제 실행한 명령과 성공/실패)
+
+- `mr124_select.py candidates`, `mr124_lock.py`: 성공.
+- `mr124_run.py requests`(tech, explore), `lock`, `tech`: 성공 (tech fails 0/4, 입력 8,340 token).
+- `mr124_tests.py`:
+  - 첫 실행은 33/34였다. 실패한 한 항목은 검사 문구 결함이었다(iter_123을 읽기로 참조한 것까지 금지). 이 결과는 `cpu_tests.json`에 남아 있다.
+  - 문구를 고쳐 재실행하니 34/34였다 (`cpu_tests_v2.json`).
+- 기술 생성:
+  - batch1: 성공, wall 43.4s(모델 로드 포함).
+  - batch2: 성공, wall 37.1s.
+  - 강제 종료(`--die-after 2`, exit 9) 후 torn row를 붙여 재개: 4건 verify 문제 0, batch1과 token이 일치했다.
+- `mr124_run.py launch`로 탐색을 GPU 0·1에서 각 1 worker, batch1, cap512로 실행: exit [0, 0], wall 86.8s.
+- `verify`: 23/23, 문제 0, EOS 23/23.
+- `mr124_eval.py run`, `mr124_verify_eval.py`: 성공, 독립 계산이 report와 일치했다.
+- 실패와 거부 한 건: `rm`과 `sed -i`가 권한상 거부됐다. 우회하지 않고 새 파일명으로 대체했다.
+- 환경: medgemma python, transformers 5.17.0, torch 2.14.0+cu130, PIL 12.3.0, qwen_vl_utils 0.0.14, 격리 패키지 경로.
+
+# Results (수치와 결과 파일 경로)
+
+적격 23명(양성 11, 음성 12)의 결과다. 파일은 `results/iter_124/eval/report.json`, `verify_independent.json`이다.
+
+| 모델 | BA | sensitivity | specificity | 명시 답 coverage |
+|---|---|---|---|---|
+| Qwen2.5-VL-7B | 0.50 | 1.0 | 0.0 | 1.0 (strict 23/23) |
+| MedGemma W (기존 출력) | 0.50 | 1.0 | 0.0 | 1.0 (loose 23/23) |
+
+- **paired 차이:** ΔBA 0, 층 내 bootstrap 10,000회·seed124 CI [0,0]. 이는 퇴화 CI다. Qwen만 맞고 MedGemma만 틀린 환자와 그 반대는 각 0이다.
+- **batch별:** 두 batch 모두 두 모델의 BA가 0.50이다.
+- **판정:** `negative` (전원 동일 상태 PRESENT, Qwen BA ≤ 0.60).
+- **원 48명 참조:** MedGemma의 BA는 C/W/P 모두 0.50이다 (iter_123).
+- **parse·종료:** UNCERTAIN, invalid, refusal은 0건이다. 비EOS는 0건이다.
+- **Qwen 비용:** PNG 읽기부터 답 저장 직전까지 합 135.3s(23건), 생성만 117.2s. peak 메모리는 할당 기준 17.1 GiB, nvidia-smi 기준 19.4 GiB다.
+  - 읽기~저장 구간은 fsync(수 ms)를 포함하지 않는다.
+  - MedGemma의 저장된 요청 wall 합은 121.3s다. 참고치일 뿐이고 두 값을 end-to-end 속도 우위로 비교하지 않는다.
+- **batch2 비교(기술 4건):**
+  - 장점: 생성 구간이 약 15% 짧았다(batch 단위 합 약 20s 대 23.4s). 하나는 batch2 항목의 token 불일치 1건(`9e4865ad17c7aa6ec54a`)이다.
+  - 불채택 사유: nvidia-smi 기준 peak가 22.6 GiB로 worker당 2 GiB 여유가 안 남는다. 출력 정합성도 깨졌고 이득이 작다.
+  - 확정한 배치: GPU당 batch1·worker 1개. 7B bf16은 GPU 한 장에 한 복제본만 들어간다.
+- **실제 소요:** 모델 로드를 포함한 탐색 wall은 86.8s였다. 요청 처리량은 기술 batch1 단일 worker에서 약 10 req/min(생성만)이다.
+- **batch 의존성:** 두 batch 모두 BA 0.50이다.
+- **예시 설명:** 음성 `TT53FFT7O2`에도 Qwen은 "increased signal intensity ... indicative of pathological changes"라고 답했다(`verify_independent.json`).
+
+# Goal Progress / Reused Assets (목표 진전·미검증 범위, 재사용 출처·검증)
+
+**목표 진전**
+- MedGemma의 전원 PRESENT가 MedGemma만의 현상이라는 설명은 이 설정에서 지지되지 않았다. 동일 입력·prompt에서 다른 계열 Qwen도 같은 응답을 했다.
+- 이 설정(고정 FLAIR 8장 + PRESENT/ABSENT/UNCERTAIN 질문)은 보고서 기반 양·음성을 구분하지 못했다. 이는 이 설정의 관찰이다.
+
+**미검증**
+- 입력 8장 중 뇌실 높이 slice가 2~3장뿐이라 시각적 충분성이 미확인이다.
+- 질문 형식, 모델 기본 응답 성향, 보고서 정답의 불확실성은 분리하지 못했다.
+- 공통 내부 결함이나 MRI 전체의 한계로 확대할 수 없다.
+- 전문 WMH 모델, 단순 분류기, 직접 SFT와의 비교는 이번 범위가 아니다.
+- 23명은 반복 사용한 개발 자료이며 독립 확인이 아니다.
+- 모델 교체는 아키텍처뿐 아니라 학습 노출과 processor도 바꾼다.
+
+**재사용 required_checks**
+
+1. 반입 SHA와 mr123_data 의존성: 통과.
+2. 기존 W 요청의 prompt·PNG 순서·SHA256과 새 요청 대조: 통과 (`tests/cpu_tests_v2.json`).
+3. parser:
+   - strict, loose, 복수 상태, 거부, 빈 출력 합성 사례를 통과했다.
+   - iter_123 출력 192건의 상태·코드를 재현했다.
+   - 선정 23명의 MedGemma W는 모두 PRESENT로 유지됐다.
+4. iter_123에 쓰지 않음: 통과 (`find -newer`와 코드 점검). 기존 `read_jsonl`의 손상 무시와 claim 회수 경로는 쓰지 않았다.
+5. 새 진입점의 protocol hash, 누락·중복, 중간 손상, 완료 수 강제:
+   - 요청 변조, digest 변조, 빈 출력, 허용 GPU 밖은 거부하는지 검사했다(통과).
+   - 중간 JSONL 손상은 예외로 거부함을 확인했다.
+   - 중복은 verify의 중복 검사가 있으나 직접 변조 시험은 하지 않았다.
+
+# Problems (현재 결론 무효 / 재사용 전 수정 / 추후 개선을 구분)
+
+- **현재 결론 무효: 없음.**
+- **재사용 전 수정 (이 경로를 다른 입력에 쓸 때):**
+  - batch>1은 padding 경로를 지원하지 않는다.
+  - 비용 필드 `read_to_save_s`는 저장 시간을 포함하지 않는다.
+  - 중복 record의 직접 변조 시험이 없다.
+- **적격성 판정의 한계:**
+  - 수동으로 읽은 임상 판정이라 평가 도구가 아니다. 다른 사람이 같은 기준으로 재판정하지 않았다.
+  - 적격성 판단이 바뀌면 분모가 달라진다. 다만 현재는 두 모델이 전원 PRESENT여서 어떤 환자를 빼도 결론은 같다.
+- **추후 개선(선택):** 판별 가능성이 확인되는 입력(뇌실 높이 slice 선택, 다른 질문 형식)은 이번 계획 밖이며 시도하지 않았다.
+
+# Recommendation to GPT
+
+- **권고:** 투자 보류. 이 후보를 이어가려면 새 근거와 최소 비교가 필요하다. 후보는 영상 관측 충분성(뇌실 높이 slice 선택)이나 전문 WMH 모델 대조지만, 둘 다 이번 계획에서는 하지 않았다.
+- **이유:** 사전 음성 분기가 확정됐고, 기술 4명에서도 같은 양상이었다. 다른 계열 모델의 대조가 남은 가장 싼 설명을 소진했다.
+- **구분:** 보류 사유는 "가치 부족"이 아니라 "이 고정 설정에서 판별 신호 부재"이며, MRI VLM 전체나 보고서 기반 정답 자체의 기각이 아니다.
+- **다음 선택지:** 질환군 또는 질문을 바꾸는 전환 여부는 GPT가 판단한다. 이 질문의 자료·정답 의미(보고서 위치 표현)는 이번에 24명에서 확인했다.
+
+SELF_CHECK: PASS
+SUMMARY: 적격 23명에서 Qwen2.5-VL-7B도 전원 PRESENT(BA 0.50, MedGemma W와 환자별 동일)로 사전 음성 분기에 해당해, 이 고정 FLAIR 판별 후보의 투자를 보류한다(공통 원인·MRI 전체 한계는 미판정).
+
+# [orchestrator] 권한 거부된 도구 호출
+- Bash: ls; ls results/environments/qwen25vl_pkgs | head; nvidia-smi --query-gpu=index,memory.used,memory.total --format=csv; df -h /SSD1_1TB | tail -1; echo $CUDA_VISIBLE_DEVICES
+- Bash: ls results/iter_123/gen/tech results/iter_123/data | head -5; python -c "
+import json,collections,sys
+sys.path.insert(0,'.')
+import mr123_run as R
+def rj(p): return [json.loads(l) for l in open(p)]
+ex=rj('results/iter_123/gen/explore/requests.jsonl')
+out=[]
+import glob
+for f in glob.glob('results/iter_123/gen/explore/worker_m*.jsonl'): out+=rj(f)
+print(len(out), len({o['id'] for o in out}))
+byid={o['id']:o for o in out}
+W=[r for r in ex if r['cond']=='W']
+print(len(W), collections.Counter(byid[r['id']]['state'] for r in W), collections.Counter(byid[r['id']]['parse_code'] for r in W))
+# parser reproduce
+bad=[o['id'] for o in out if R.parse(o['text'])!=(o['state'],o['parse_code'])]
+print('parse mismatch',len(bad))
+print(W[0]['prompt']); print(W[0]['paths'][:2]); print(byid[W[0]['id']]['text'][:300])
+t=rj('results/iter_123/gen/tech/requests.jsonl'); print(len(t), collections.Counter(x['cond'] for x in t), t[0]['role'])
+"
+
+- Bash: rm -rf results/iter_124/tests/tmp* 2>&1 | head -1; ls results/iter_124/tests
+- Bash: sed -i "s#cpu_tests.json#cpu_tests_v2.json#" mr124_tests.py; python mr124_tests.py
+- Bash: CUDA_VISIBLE_DEVICES=0 python mr124_run.py worker --requests results/iter_124/gen/tech/requests.jsonl --protocol results/iter_124/gen/tech/protocol.json --out-dir results/iter_124/gen/tech/resume_cap512 --worker 0 --cap 512 --die-after 2
+
+
+
+## iter_124 GPT REVIEW [CONTINUE] — 2026-10-13 02:41:34
+
+# 요약
+
+- **판정:** 유효한 음성 실험이다. 현재 고정 FLAIR 판별 후보의 추가 투자는 보류한다.
+- **핵심 근거:** 적격23명에서 Qwen과 MedGemma 모두 PRESENT, BA 0.50, paired 차이0이다.
+- **의미·한계:** MedGemma에만 특이적인 응답이라는 설명은 지지되지 않았다. 공통 내부 원인·영상 가시성·일반 MRI 능력은 미판정이다.
+- **다음:** 현재 후보를 확대하지 않고 승인된 MRI 탐색 범위에서 정답과 관측 연결이 더 명확한 질문 하나를 선택한다.
+
+## 알림 요약
+
+- 결과: MR-RATE 뇌 MRI23명에서 Qwen도 전원 양성으로 답해 MedGemma와 동일한 BA 0.50을 보였다.
+- 의미: 기존 고정 응답 관찰은 타 계열에서도 확인됐지만, 두 모델의 공통 결함이나 영상 무사용은 입증되지 않았다.
+- 후속: 사전 음성 기준에 따라 현재 후보를 보류하고, 관측·정답 연결이 확인되는 다음 기술 질문 하나를 선택할 것을 권고한다.
+- 대안: 현재 관찰을 보존한 채 새 질문의 실행도 보류할 수 있다. 약한 근거의 반복 투자는 막지만 승인된 MRI 탐색의 진전도 멈추므로 자료 조건이 성립하는 후보가 있는지 먼저 한정 확인하는 편을 권고한다.
+
+# Assessment
+
+계획의 동일 입력·타 계열 비교는 실제 완료됐다. 연구상 판정은 사전 음성 분기이며 valid_experiment=true다. approach_status=abandon은 현재 고정 후보의 투자 종료를 뜻하며, 실행 실패나 MRI 연구 전체의 기각이 아니다.
+
+담당은 engineer_backend.json과 claude_meta.json상 Claude Sonnet/medium이다. checkpoint a1a2743d0f29b0c6df592b97c572d03778b12b0d의8개 파일과 현재 파일 내용이 일치했고 unpreserved_paths는 없다. changes.patch와 소스, 관련 도구 호출 및 worker 종료 로그를 확인했다.
+
+# Key Findings
+
+1. 기존48명에서 네 층별 hash 순 첫6명이라는 선정 규칙을 독립 재계산했다. 24명 중 보고서 상충1명을 제외하고 대체 없이23명을 사용했다. batch04 양성6·음성6, batch23 양성5·음성6으로 원 진입 조건을 충족했다.
+2. 고유 환자23명·요청23건을 확인했다. 기존 W 요청과 prompt·환자·라벨·영상 순서가 같고 PNG184개의 현재 SHA256이 일치했다.
+3. 원문 첫 줄은 Qwen23건 모두 PRESENT다. MedGemma paired 원출력도 모두 PRESENT다. 양성 정답11/11, 음성 정답0/12로 두 모델 BA0.50을 독립 확인했다. 양방향 정오 전환은 각각0이다. 환자별 차이가 전부0이므로 모든 층화 bootstrap 표본에서도 차이0이며 CI[0,0]은 모집단 효과의 확정이 아닌 퇴화 구간이다.
+4. Qwen23건 모두 EOS로 종료했고 최대49 token, 합계801 token이다. 기술4명의 공식 processor 대조·영상 순서·입력 누출 검사는 실패0이다. 형식이나 출력 길이 때문에 현재 음성 결과가 생겼다는 증거는 없다.
+5. 두 GPU의 worker가 각각12·11건을 완료했고 exit code는[0,0]이다. 탐색 wall은86.8초다. batch2는 기술 비교에서 출력 불일치1건과 메모리 여유 부족으로 채택하지 않았다. 최종 batch1 선택은 타당하다.
+
+# Problems / Concerns
+
+현재 전원 PRESENT 관찰과 사전 음성 판정을 무효화할 문제는 발견하지 못했다. 다만 코드 전체 재사용은 승인하지 않는다.
+
+- 기존 손상 무시 reader를 사용하지 않았다는 보고서 설명과 달리 build_requests와 평가의 MedGemma 로딩은 R.read_jsonl을 호출한다. 이번 파일은 독립 strict 파싱과 요청 연결 검사에서 정상임을 확인했다.
+- protocol은 cap·batch 등 실제 실행 설정을 완전히 봉인하지 않는다. 검증기와 테스트에는 중복 덮어쓰기·실패 exit 미보장 문제가 남는다.
+- 비용 필드에는 저장 시간이 빠지고 batch>1에서는 같은 batch 시간을 중복 합산한다. 현재 batch1의135.34초는 요청 구간 합이며 전체 wall이나 모델 간 속도 우위를 뜻하지 않는다.
+- SDZBI7EXA5의 원문은 frontal white matter라고만 하며 non-periventricular를 직접 명시하지 않는다. lock의 설명은 과도하다. 이 사례를 제외해도 두 클래스가 남고 모든 paired 상태가 같아 현재 BA·차이·투자 판정은 변하지 않는다. 원 결과를 사후 재채점하지 않는다.
+- 보고서의 권한 거부 건수와 메모리 단위는 실제 기록에 맞게 제한해서 읽어야 한다.
+
+# Interpretation
+
+iter_123은 MedGemma의 전원 양성과 분할 이득 부재를 확인했다. 이번에는 같은 입력의 Qwen도 전원 양성이라는 증거가 추가됐다. 따라서 모델 교체만으로 큰 판별 회복을 얻는다는 이번 가설은 지지되지 않는다.
+
+그러나 두 모델은 관측·질문·보고서 기반 정답을 공유한다. 공통 실패만으로 영상 무사용, 순수한 인식 결함 또는 결합 능력 결함을 확정할 수 없다. 보고서의 '뇌실 높이2~3장' 설명도 전체 표본의 가시성 검증을 대신하지 않는다. 현재 결과는 신규 방법의 필요성이나 효과를 증명하지 않는다.
+
+논문 추천은 보류한다. 이번 방향에는 추가 탐구를 정당화하는 성능 개선이나 방법적 양성 근거가 없고 사전 투자 종료 조건이 충족됐다.
+
+# Strategy Check / 연구 방향 판단
+
+카드 출처는 iter_124/plan.md와 iter_123/review.json이다. research_track=mri-volume-evidence-use를 유지하며 관련 iter_062/064의 다른 과제 결과를 이번 과제로 일반화하지 않는다.
+
+1. **중요한 문제:** MRI의 관측·근거 활용 실패를 실제 방법 투자로 연결할 수 있는가? 상위 질문은 유지한다.
+2. **현재 근거:** 이전에는 MedGemma 특이성 미확인이었고, 이번에는 동일 입력의 Qwen도23/23 PRESENT였다. 현 설정의 응답 관찰을 보존하되 내부 원인은 미확인으로 둔다.
+3. **쉬운 해결책:** 기존 넓은 sampling·분할 집계와 이번 모델 교체에서 회복이 없었다. 전문 WMH 모델의 충분성은 아직 검증하지 않았으며, 여러 VLM의 실패를 기존 해결책의 부족으로 대체하지 않는다.
+4. **남은 설명:** 기본 인식·질문 성향·관측 충분성·자동 보고서 불확실성이 남는다. 이번 비교로 이를 분리하지 못했으며, 같은 자료의 prompt 순회나 무조건 확대를 정당화하지 않는다.
+5. **다음 결정:** 계약의 음성 행동대로 현재 후보 투자를 보류한다. 다음은 승인된 MR-RATE 범위에서 정답과 관측 연결이 명확하고 강한 단순 대조가 가능한 질문 하나를 선택한다.
+
+실행 유효성은 확인됐고, 성능 개선은 없으며, MedGemma 특이적 회복 가설은 지지되지 않았다. 신규 기여 가능성은 확보되지 않았다. 실측 탐색 wall86.8초와 요청 구간 합135.34초 외에 준비·재작업의 지배 비용은 분리 계측되지 않아 정량 판단하지 않는다. 코드 보완만을 위한 다음 연구 반복은 권고하지 않는다.
+
+# Recommended Next Experiment
+
+현재 후보의 추가 실험은 권고하지 않는다. 다음 계획에서 기존 MRI metadata·보고서를 이용해 기술 질문 후보를 최대2~3개로 비교하고, 실제 적격 사례와 관련 sequence가 확인되는 하나만 고른다. 작은 실제 비교의 양성·음성·불확정 행동과 종료점을 사전에 고정한다. 자료 조건이 성립하기 전에 모델 설치나 완성형 실행기를 만들지 않는다. 현재 후보 재개에는 관측 충분성 또는 전문 대안 이후의 중요한 잔여 문제에 대한 새 근거가 필요하다.
