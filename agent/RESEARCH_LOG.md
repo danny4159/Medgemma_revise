@@ -44304,3 +44304,377 @@ K는 동일 영상에서 나온 이진 답으로 추가 임상 문맥을 담은 
 재개에는 기존 G/M/S 이후 남는 중요한 실패 조건, GT 없이 작동할 구체적인 개입 가설, 강한 단순 대조와 결과별 종료 조건이 필요하다. 완전한 원인·신규성·타 모델 일반화의 증명을 선행조건으로 요구하는 것은 아니다. 현재는 그 최소 설계의 근거가 충분하지 않다는 판단이다.
 
 같은 자료의 parser 정비·추가 기술표·초안 무시 prompt·새 학습으로 자동 연장하지 않는다. 결과와 보류 이유를 보고하고 `--confirm-each-iter` 사용자 승인·피드백을 기다린다.
+
+
+## iter_120 GPT PLAN [영상 간 대상 대응의 투자 적합성 판단 / proceed] — 2026-10-12 22:32:51
+
+# 요약
+
+- **이번에 할 일:** CT의 같은 target 영상에서 reference에 따라 다른 대상을 찾는 진단을 수행한다. 공개 관계쌍이 성립할 때만 실제 모델 비교로 진행한다.
+- **필요한 이유:** 과거 SPIDER 결과는 좌표 복사와 약한 기본 localization 때문에 대상 대응 능력을 구분하지 못했다. 이번에는 공식 대응 모델과 단순 분해를 함께 둔다.
+- **확인할 기준:** 같은 target pixels·서로 다른 공식 정답·case 연결을 확인하고, 직접 대응의 실패가 기본 인식 또는 단순 대안으로 설명되는지 판단한다.
+- **주의·다음:** 신규성·일반 한계는 미확정이다. 새 학습 없이 종료하고, 후속은 full review 뒤 사용자 승인을 받는다.
+
+## 알림 맥락
+
+- 연구: 영상 간 대상 근거 연결
+- 데이터: 흉부 X-ray RSNA 초안 교정 → MedSG Task3의 CT 직교 view, 한 원천만 사용
+- 모델: frozen MedSeq-Grounder와 Qwen2.5-VL-7B-Instruct
+- 과제: 참고 영상의 지정 영역을 보고 다른 view의 같은 target 영상에서 대응 영역을 출력
+- 가설: 기본 위치 찾기는 가능해도 reference의 대상 정보 전달에서 손실이 남을 수 있으며 단순 언어 분해가 이를 설명할 수 있음
+- 질문: 참고 영역이 바뀌면 모델도 올바른 다른 대상을 찾는가?
+- 변경: 방향 전환
+- 연결: iter_119 자연 초안 교정은 근거 부족으로 보류하며, 과거 iter_021에서 구분하지 못한 대상 대응을 더 식별 가능한 조건에서 한정 검토
+- 작업: 공개 관계쌍 확인 후 성립하면 직접 대응·단순 분해·기본 localization을 비교해 추가 개입 필요성을 판단
+
+# Current Understanding
+
+iter_118의 합성 초안 손상과 iter_119의 제한된 자연 답 상보성을 보존한다. RSNA 교차표·parser·초안 무시 prompt·selector·CURE 오류 검토는 재개하지 않는다.
+
+이번은 초안 손상의 원인 분석이 아니라 다른 질문의 재선별이다. 다만 대상 대응은 iter_019/021에서 이미 다뤘으므로 새 이력으로 초기화하지 않는다. 당시 MedSG는 실제 관계 연결 미확인이었고 SPIDER에서는 좌표 복사가 유리했다. 이번에는 공식 Task3의 대응 입력과 직접 적응 모델을 사용하며, 과거 point oracle 대신 정답 대상명을 이용한 기본 localization 진단을 둔다.
+
+실제 Task3 bytes와 적격 수는 아직 확인하지 못했다. 이것은 자료 부재의 증거가 아니다. 이번 계획의 첫 단계에서 한정 확인하며, 성립하지 않는 비교를 평균 benchmark 점수로 바꾸지 않는다.
+
+# Strategy Check / 연구 방향 판단
+
+**기술 질문 → 실패 조건 → 공개 정답 비교 → 주장 범위:** reference가 제공하는 대상 정보를 다른 view로 전달할 수 있는가 → 같은 target에서 reference를 바꿔도 잘못된 대상에 머무는 조건 → 동일 target pixels와 두 공식 정답 영역을 연결한 paired 비교 → 선택한 CT 원천의 해부학적 대상 연결에 한정한다. 임상 진단·시간 변화·병변 동일성의 일반 주장은 하지 않는다.
+
+후보는 두 개만 비교했다.
+
+1. **대상 대응:** 과거 식별 실패라는 구체적 반대 근거가 있고, 현재 작은 공식 parquet와 전용 모델을 통해 이를 해결할 가능성이 있다. 기존 MedSeq-Grounder와 언어 매개 분해가 다루는 범위는 인정한다. 남는 질문은 기본 localization이 가능한 사례에서도 두 경로가 함께 대상 정보를 잃는가다. 지배 비용 후보는 자료 연결과 두 7B 모델 준비·추론이며 아직 미측정이다.
+2. **시간 변화:** 중요한 질문이지만 iter_022/055의 영상 접근·정답 연결 문제를 해결한 새 근거가 없다. 순서 정규화로 해결되는 일관성만 다시 측정할 가치는 낮아 이번에는 선택하지 않는다.
+
+**시험 설정:** frozen 모델의 한 원천·한 관계 비교만 실행한다. **연구 관찰:** 기존 관찰을 보존하며 새 실패는 아직 없다. **연구 질문:** 관계 자료와 강한 대조가 성립하면 한정 탐색할 가치가 있다. 자료가 성립하지 않으면 모델 가설을 기각하지 않고 현재 실행 설계를 보류한다.
+
+이전보다 달라지는 것은 Task3 metadata를 다시 읽는 일이 아니라 실제 pixels 수준의 관계 연결과 공식 적응 모델 비교다. 이 두 조건을 충족하지 못하면 재진입 근거가 없으므로 종료한다.
+
+# Hypothesis
+
+직접 대응 모델에서 reference 대상 정보가 손실될 수 있다. 경쟁 설명은 다음과 같다.
+
+- 원자료가 동일 target·다른 대상 관계를 실제로 제공하지 않는다.
+- 대상 자체를 localization하지 못한다.
+- 좌표 prior 또는 영상 패턴 매칭만으로 충분하다.
+- reference를 설명한 뒤 target을 찾는 단순 분해로 해결된다.
+- 출력 형식·좌표 변환·generation cap이 비교를 가린다.
+
+실패를 미리 가정하지 않는다. 단순 대안의 성공도 이번 의사결정의 유효한 결과다.
+
+# Limitation Evidence / Correct Usage Checks
+
+`mri-reference-interface-sensitivity`는 과거 식별 문제를 연결하는 observed 근거이며 이번 CT 실패의 근거나 method gate가 아니다. iter_021의 O pair success 0/48, J_TR 좌표 복사 79/96과 정상 사용 미완료 범위를 유지한다.
+
+공식 출처는 [MedSG 저장소](https://github.com/Yuejingkun/MedSG-Bench), [Task3 parquet](https://huggingface.co/datasets/MedSG-Bench/MedSG-Bench-parquet/tree/main), [평가 코드](https://raw.githubusercontent.com/Yuejingkun/MedSG-Bench/main/eval/MedSG_Bench.py), [모델 카드](https://huggingface.co/MedSG-Bench/MedSeq-Grounder)다. 구현 전에 실제 revision과 이용 조건을 고정한다. 카드의 학습 노출 상세 미기재를 미노출로 해석하지 않는다.
+
+공식 직접 조건은 원문 질문·영상 순서·reference 표시·모델별 좌표 규약을 유지한다. 실제 PNG 크기, metadata size, 출력 좌표 canvas와 processor resize를 대조한다. 모든 영상을 336×336으로 가정하지 않는다. target 정답 box·대상명·파일명은 일반 생성 worker에 제공하지 않는다. 대상명 진단 요청만 privileged 조건으로 분리한다.
+
+# Contribution Path / Baselines / Reuse
+
+신규 contribution은 미확정이다. MedSeq-Grounder의 직접 적응을 가까운 강한 기존 방법으로 실행한다. 그 base Qwen2.5-VL-7B를 함께 비교해 한 모델의 낮은 기본 수행을 일반 한계로 읽지 않는다. MedGemma를 추가로 실행하지 않는 이유는 이번 질문의 공식 지원 경로와 가장 가까운 전용 대조가 Qwen 계열이기 때문이다.
+
+각 모델에 다음 조건을 둔다.
+
+- **직접 대응:** 공식 reference와 target 입력으로 target box 생성.
+- **언어 매개 분해:** reference 영상·지정 영역만 보고 대상을 한 문장으로 기술하고, 그 원문과 target 영상으로 box 생성. 중간 설명을 GT로 수정하거나 대체하지 않는다. reference 좌표는 target 단계에 넘기지 않는다.
+- **대상명 진단:** 공식 metadata가 명확히 제공하는 대상명과 target만 입력한다. target 정답 좌표는 주지 않는다. 이는 privileged 기본 localization 대조이며 실용 정확도 순위에서 제외한다.
+- **좌표 복사:** reference box의 원본 정규화 좌표를 target 크기로 옮긴다.
+- **NCC:** 고정 세 scale의 영상 template matching. 단순 대조이며 학습된 대응 모델의 충분성을 대표하지 않는다.
+
+분해는 직접 조건과 원정보가 같지만 호출 수가 두 배다. 정확도와 함께 단계 전체 latency·생성 token·실패율을 보고한다. 직접 SFT를 새로 학습하지 않는다. 공식 적응 모델이 이번의 강한 학습 baseline이며 동일 학습 예산의 방법 효과 비교는 아니다.
+
+재사용 기반은 승인된 iter_082다. `reuse_assets`에 지정한 iter_021의 세 파일만 반입해 NCC·좌표 계산에 쓴다. 기존 SPIDER loader와 생성기는 새 과제의 입력·모델 규약이 달라 호출하지 않는다. 새 Task3 loader와 공식 Qwen adapter는 이 차이에 필요한 범위로 작성한다. 기존 rsna_diag 좌표를 Qwen 좌표로 그대로 재사용하지 않는다.
+
+# Proposed Experiment
+
+## 1. 한정 자료 적합성 확인
+
+`bench_task3.parquet` 한 파일과 대응 설명만 확보한다. 전체 benchmark·MedSG-188K 영상·원천 volume은 다운로드하지 않는다. 필요한 학습 overlap 확인은 해당 Task의 공개 metadata 범위로 제한하고, 확인되지 않으면 노출 불명으로 남긴다.
+
+CT 직교 view 항목만 후보로 삼는다. 같은 원천·case·target decoded-pixel hash를 공유하면서 reference가 지정하는 두 대상과 공식 target box가 다른 쌍을 찾는다. target의 표시·crop·view가 다르면 같은 target으로 합치지 않는다. filename의 장기명만으로 정답을 새로 만들지 않고 공식 행의 대상 의미와 연결한다. 서로 다른 두 GT box의 IoU가 0.1 이하인 쌍만 사용해 어느 대상을 선택했는지 구분한다. 이는 겹치는 해부구조 전체에 대한 평가가 아님을 보고한다.
+
+원천별 적격 case 수를 모델 출력 전에 집계한다. 이용 조건·case 단위·대상명 의미가 성립한 원천 중 적격 case가 가장 많은 하나를 선택하고 동률은 원천명 사전순으로 정한다. 자료 이름을 바꿔 모델 실패를 찾지 않는다. case마다 유효 쌍 하나를 행 ID 사전순으로 선택한다. 적격 전체와 제외 사유, 좌표 복사 성공 여부를 보존하며 복사가 실패한 사례만 본표본으로 고르지 않는다.
+
+적격 관계가 없거나 이용 조건·정답 의미를 확인하지 못하면 여기서 종료한다. 다른 Task·MRI·temporal 자료로 자동 이동하지 않는다. 모델 다운로드도 하지 않는다.
+
+## 2. 동작 확인
+
+case hash의 고정 순서로 최대 4 case를 TECH에 배정하고 나머지는 MAIN 후보로 보존한다. TECH에서 양 대상·세 조건·두 모델을 실행한다. 정확도 100%는 진입 조건이 아니다.
+
+필수 검사는 영상 순서·reference 표식·GT canvas·비정사각 변환, 공식 processor와 wrapper의 input_ids 및 pixel_values 대응, 정답 파일 비접근, 생성 suffix·EOS·cap, 원시 출력과 request ID 연결이다. 분해의 두 번째 요청은 첫 출력 digest를 기록한다. 좌표 fixture는 정답/다른 대상/영상 밖/중복 box/형식 실패를 포함한다.
+
+bbox parser는 공식 Qwen 형식을 기준으로 하나만 고정한다. 추가 설명에 유일한 유효 box가 있는 경우의 처리도 TECH 전에 정하고 전체에 동일 적용한다. 여러 box·비유한 값·역전 좌표는 invalid로 남긴다. 결과를 본 뒤 유리한 parser를 추가하지 않는다. 기본 max_new_tokens는 256, greedy decoding이다. TECH에서 cap 문제가 있으면 전체 조건을 512로 고정해 TECH를 한 번 다시 확인할 수 있으나, 이 재생성은 추가 검사 32회 한도에 포함하며 부족하면 MAIN을 보류한다.
+
+## 3. 가능성 탐색과 최대 규모
+
+MAIN은 최대 32개의 서로 다른 case다. case당 두 reference 요청이므로 모델·조건별 64개 target box를 얻는다. 초기 성능을 보고 조기 종료하거나 표본을 바꾸지 않고 잠긴 집단을 한 번 평가한다. 32 case는 case 단위 사건 하나가 약 3.1pp이며 흔한 실패 조건을 탐색하는 규모다. 작은 효과의 확증용 power를 주장하지 않는다.
+
+적격 자료가 적으면 가용 MAIN 전체를 쓰되 8 case 미만에서는 빈도·투자 문턱 판정을 하지 않고 사례 기반 적합성 결과로 종료한다. 8은 확증 gate가 아니라 한두 사례를 반복 현상으로 부르지 않기 위한 제한이다. 8–31 case 결과도 저정밀 탐색으로 표시한다.
+
+두 모델 각각 case당 직접 2회, 분해 4회, 대상명 진단 2회다. TECH+MAIN 최대 36 case에서 총 576회이며, 처리량·안전 재개 검사는 최대 32회 추가해 전체 608회다. 학습·seed 탐색·prompt 탐색은 없다. 이번 MAIN이 본비교의 최대 범위다. 독립 확인과 method pilot은 이번에 실행하지 않는다.
+
+## 4. 자원·비용·재개
+
+실행 직전 `nvidia-smi`로 GPU 0,1의 여유와 논리 index 대응을 확인한다. 두 7B 모델은 GPU별 하나를 우선 배정한다. bf16 weight만 약 15–17GB라는 추정이며 activation·KV를 포함한 실제 peak는 TECH에서 측정한다. worker당 최소 2GB 여유를 둔다.
+
+TECH 입력으로 batch1과 batch2의 전체 처리량·peak·긴 출력 지연·출력 정합성을 비교한다. 동일 GPU의 두 bf16 worker는 예상 weight 합계만으로 24GB를 넘으므로 기본 후보에서 제외하고 이 근거를 기록한다. batch2도 안전하지 않거나 느리면 batch1을 유지한다. 모델당 한 장이 불가능하면 허용된 두 GPU에 단일 모델을 분산하고 모델을 순차 실행할 수 있으며 비용 변경을 기록한다. 임의 양자화로 공식 재현 조건을 바꾸지 않는다.
+
+시간은 TECH의 모델별 유효 요청/분과 분해 단계 비용으로 계산한다. 예상 wall-clock은 두 모델 병렬 workload 중 큰 값에 준비·검증 시간을 더해 보고한다. 현재 처리량이 없으므로 수치 시간을 만들지 않는다. 임의 device-minute 상한은 두지 않는다.
+
+새 환경이 필요하면 경로·이유를 먼저 알리고 승인된 격리 환경에서 설치한다. 기본 환경과 hf_cache는 변경하지 않는다. 공식 소스 revision·checkpoint·패키지·다운로드 checksum을 보존한다.
+
+request별 원자적 claim과 worker별 append-only 결과, 성공 상태·종료 코드·digest를 검증하는 completion을 둔다. 통제 중단·재개와 중복 launch 거부를 TECH에서 확인한다. 이미 성공한 요청은 재생성하지 않으며 실패 attempt도 보존한다. 결과는 `research/results/iter_120/`에 저장한다.
+
+# Implementation Tasks for Claude
+
+1. 기준 원문은 이번 계획, iter_120 round_01 노트, iter_021 review의 한계·선별 모듈 승인 범위다. 과거 SPIDER 계획의 표본·gate를 계승하지 않는다.
+2. Task3 한정 자료 연결 보고서를 만들고 성립 여부·선정 원천·case·pixel hash·두 GT·제외 사유를 잠근다. 실패하면 나머지 실행을 하지 않는다.
+3. 공식 모델 adapter와 고정 조건을 구현하고 실제 입력·좌표·정답 분리·중간 출력 연결을 검사한다.
+4. TECH에서 처리량·메모리·재개를 확인하고 실행 구성·예상 시간을 잠근 뒤 MAIN을 한 번 실행한다.
+5. 원시 출력에서 주지표와 실패 사건을 계산하고 별도 검산 코드로 case별 결과·분모·비용을 확인한다. 범용 평가기나 기존 실행기 전수 정비는 하지 않는다.
+6. 보고서는 시험 설정, 연구 관찰, 연구 질문의 판정을 분리한다. 자료 연결만 완료됐으면 새 모델 현상을 발견했다고 쓰지 않는다.
+
+# Evaluation (성공/실패 기준 포함)
+
+## 지표와 사건
+
+전체 MAIN case를 분모로 조건별 두 대상 모두 IoU≥0.5인 pair success, 요청별 mean IoU·Acc@0.5, invalid·cap 비율을 보고한다. 모델 내 직접−분해 차이는 case 단위 paired bootstrap 10,000회 95% 구간으로 제시한다. 이는 개발 탐색의 불확실성 표현이며 독립 확증이 아니다.
+
+명시적 다른 대상 선택은 자기 GT IoU<0.3이고 상대 GT IoU≥0.5일 때다. 단순 부정확한 box와 분리한다. 두 reference에서 같은 box를 냈다는 사실만으로 대상 무사용을 단정하지 않는다.
+
+주요 진단 사건은 대상명 조건이 두 대상을 모두 맞힌 case에서 직접 조건이 적어도 하나를 명시적으로 다른 대상으로 선택하는 경우다. 전체 분모의 빈도와 대상명 성공 집단 내 조건부 빈도를 함께 보고한다. 단순 분해·좌표 복사·NCC가 이 사건을 해결하는지도 같은 case에서 보고한다.
+
+## 양성·음성·불확정과 행동
+
+- **잔여 현상의 양성 탐색:** 전용 MedSeq-Grounder에서 위 사건이 MAIN의 15% 이상이면서 최소 4 case에 나타나고, 직접·분해가 함께 명시적 대상 혼동을 보이는 case가 최소 3개면 개입 필요성을 검토할 근거로 보존한다. 15%는 임상 허용 오류율이 아니라 작은 방법 시험을 검토할 빈도 기준이다. 정밀도·노출·원천 제한을 유지한다. 좌표 복사/NCC가 대부분 해결하거나 자료 결함이 설명하면 이 분기를 승인하지 않는다. 후속 후보는 reference 대상 정보 전달을 보존하는 최소 개입 하나이며 이번에 학습하지 않는다.
+- **단순 대안의 양성:** 분해가 직접 대비 pair success를 10pp 이상 높이면 정확도 회복과 두 단계 비용을 보고한다. 이는 기존 분해의 유용성이지 새 방법의 필요성 증명이 아니다. 남은 공동 실패가 위 기준에 못 미치면 현재 추가 개입 투자는 보류한다. 10pp 미만의 효과도 원수치·구간을 보존한다.
+- **음성:** 전용 직접 모델이 대상 변경에 잘 대응하거나 단순 대안이 오류를 대부분 설명하면 현재 설계의 추가 투자를 보류한다. 일반 대응 문제가 모두 해결됐다고 주장하지 않는다.
+- **불확정:** 기본 대상명 localization 부족, 적격 수 부족, 형식 문제, 모호한 정답 또는 넓은 구간 때문에 구분되지 않으면 근거 부족으로 보류한다. 낮은 기본 성능을 대응 결함으로 바꾸지 않는다. 같은 표본의 조건·문턱을 조정하지 않는다.
+
+위 분기는 효과를 보기 전에 잠근다. 어떤 분기에서도 새 Task·추가 모델·학습을 자동 실행하지 않는다. 다음 사용자 승인 요청에는 선택한 후속 하나와 보류 범위를 명확히 보고한다.
+
+# Risks / Checks
+
+- 공식 Task3에 필요한 같은-target 관계가 없을 수 있다. 이 경우 자료 적합성 실패로 종료하며 metadata 접근 성공을 연구 성과로 과장하지 않는다.
+- anatomy 이름은 instance 추적 정답과 다르다. 이번 주장은 공식 대상 category의 view 간 연결이며 동일 병변의 임상적 추적이 아니다.
+- CT 원천의 이용 조건과 case 의미를 확인한다. 파일명의 case를 근거 없이 환자 ID라고 부르지 않는다.
+- target 정답과 파일명 의미를 일반 입력에 누설하지 않는다. 대상명 조건은 명시적 privileged 진단이다.
+- 공개 전용 모델의 학습 노출이 불명확하면 개발 진단으로 한정한다. 이를 해결하려고 전체 학습 영상 감사를 추가하지 않는다.
+- NCC는 orthogonal view의 강한 대응 모델이 아니다. 실패만으로 VLM의 필요성을 주장하지 않는다. 직접 적응 모델과 언어 매개 분해가 필수 대조다.
+- 정답 대상명 조건도 확장 입력이다. 그 실패는 기본 인식과 인터페이스의 혼합이며, 성공한 사례에서만 제한된 분해 해석을 한다.
+- 대규모 GPU 필요 후보는 다중 영상 대응과 단일 영상 인식을 함께 보존하는 공동 적응이다. 현재 필요성은 미확정이며 이번 실행에 포함하지 않는다.
+- GOAL·원 결과·checkpoint를 보존한다. full review 후 --confirm-each-iter 승인 대기를 유지한다.
+
+# 계획의 근거 (GPT 조사 노트)
+
+## 이번 선택
+
+후보 둘 중 **reference에 따른 영상 간 대상 대응**의 조건부 진단을 선택한다. 시간 변화 후보는 기존 영상 접근·변화 정답 연결을 해결한 새 근거가 없어 실행하지 않는다. 자연 초안 교정과 CURE 오류 검토의 투자 보류는 유지한다.
+
+## 직전 질문에 대한 답
+
+1. **실제 관계쌍 확보 여부:** 아직 확인되지 않았다. 공식 parquet 목록에서 `bench_task3.parquet` 70.4MB를 확인했고 일반 viewer에서 image bytes와 원문 metadata가 있는 배포 구조를 확인했다. Task3 실제 행 조회는 실패했다. 따라서 관계가 성립했다고 쓰지 않으며, 이 한 파일의 bytes·metadata 연결을 구현의 첫 한정 점검으로 둔다. 파일 접근 성공과 연구 적합성은 별개다. [공식 파일 목록](https://huggingface.co/datasets/MedSG-Bench/MedSG-Bench-parquet/tree/main)
+2. **과거와 달라지는 식별 근거:** `iter_019/think/round_02.md`와 `round_03.md` 원문은 과거에도 Task3 metadata·case 이름·비정사각 size를 확인했음을 보여준다. 새로운 발견으로 재포장하지 않는다. 이번 진입은 같은 target pixels에서 두 정답이 구분되는 관계와 공식 적응 모델을 실제로 연결하는 경우에만 정당하다. 단일 관계의 평균 점수 평가로 대체하지 않는다.
+3. **강한 대안과 남는 질문:** MedSeq-Grounder는 Qwen2.5-VL-7B-Instruct를 MedSG-188K로 적응한 공개 모델이다. 현재 카드의 학습·평가 상세에는 미기재 부분이 있어 독립 미노출을 주장할 수 없다. 단순 reference 설명→target grounding도 같은 정보의 실용 대조로 실행한다. 이 대안이 충분하면 추가 방법 투자는 보류한다. [공식 모델 카드](https://huggingface.co/MedSG-Bench/MedSeq-Grounder)
+
+## 출처와 해석 경계
+
+- `agent/runs/iter_120/think/round_01.json` 원문, GOAL, iter_119 리뷰, iter_019 계획·조사 노트, iter_021 리뷰와 code_assets, LIMITATIONS의 해당 항목을 확인했다.
+- iter_021의 O pair success 0/48, J_TR 좌표 복사 79/96은 현재 일반 대응 한계의 증거가 아니다. 이번에도 기본 인식이 약하면 해석을 제한한다.
+- MedSG 논문 Task3은 실제 multi-view와 volume 직교 단면을 함께 다룬다. 여기서는 CT 직교 view의 해부학적 대상 연결로만 좁히며 시간 변화·임상 병변 추적을 주장하지 않는다. [논문 §3.2](https://arxiv.org/html/2505.11852v1)
+- 공식 평가기는 `multi_view`에서 target size를 별도로 처리한다. 원본 PNG·GT canvas·Qwen processor resize의 대응을 검사해야 한다. [공식 평가 코드](https://raw.githubusercontent.com/Yuejingkun/MedSG-Bench/main/eval/MedSG_Bench.py)
+- 현재 research HEAD는 `0846c0834bf179cc9e7ca6044c0cf0f4bd629486`이며 status와 diff에 변경이 없었다. 새 기반 iter_082에는 선택한 rsna_diag 파일이 없어 승인 모듈만 선별 반입한다. 기존 생성기 재사용 문제를 이번 승인으로 해제하지 않는다.
+
+## 대규모 GPU 필요 후보
+
+다중 영상 대응과 단일 영상 인식을 함께 보존하는 공동 적응은 장기 후보로 남긴다. 현재는 잔여 현상과 단순 대안의 부족함이 미확인이라 대규모 학습의 필요성·효과를 주장하지 않는다. 이번에는 frozen 모델 비교만 수행한다.
+
+이전 사고 라운드 노트: agent/runs/iter_120/think/
+
+
+
+## iter_120 CLAUDE IMPLEMENTATION REPORT — 2026-10-12 22:36:05
+
+# 요약
+
+- **핵심 결과:** 계획한 "같은 target 영상에서 reference만 바꾸는" 쌍이 `bench_task3.parquet`에 없었습니다. 그래서 모델 다운로드와 추론 없이 1단계에서 종료했습니다.
+- **근거:** 1148행의 target 영상은 디코딩 pixel hash 기준 1146종입니다. 같은 target을 공유하는 쌍은 2개뿐이고, 둘 다 MRI(ACDC, BraTS2020)입니다. 두 GT의 IoU는 0.82와 1.0이라, 계획의 적격 기준(CT이고 IoU≤0.1)을 충족하는 쌍은 0개입니다.
+- **미검증·주의:** 이번 결과는 자료 적합성 실패이고, 모델 가설은 검증되지 않았습니다. 가설을 기각한 것도 아닙니다. 사후 완화나 다른 Task·MRI로 이동하지 않았습니다.
+- **다음:** 지금 자료 설계로는 같은 질문을 이어갈 근거가 없습니다. 사용자 승인 후 새 후보 선택이 필요합니다.
+
+# Work Performed
+
+- `bench_task3.parquet` 한 파일만 revision `557aa67d…`로 받았습니다. 전체 benchmark와 모델은 받지 않았습니다.
+- 각 행의 reference box와 target 순서를 파싱하고, 디코딩 pixel hash로 target을 묶어 관계를 집계했습니다.
+- 처음에는 정규식이 "first image"를 target으로 잘못 읽어 가짜 쌍 109개가 나왔습니다. `locate this object in the (\w+) image`로 고쳐 다시 집계했고, 바이트 hash와 디코딩 pixel hash 결과가 같았습니다. 최종 수치는 수정 후 값입니다.
+- 수정 전 109쌍은 reference 영상과 box가 모두 같고 정답만 다른 쌍처럼 보였습니다. 이는 target 오파싱의 산물이어서 쓰지 않았습니다.
+- 결정 파일은 실제 시점(2026-10-12T13:35Z)에 잠갔습니다.
+
+# Files Changed
+
+- 새로 만든 코드: `t3_audit.py`, `t3_relation.py`, `t3_decide.py`
+- 반입 3파일: `rsna_diag/__init__.py`, `rsna_diag/geometry.py`, `rsna_diag/mi19_baseline.py`. 이미 반입돼 있었고, git blob이 reuse manifest와 일치합니다.
+- 결과: `results/iter_120/data/`에 `audit_raw.json`, `relation_scan.json`, `eligibility_decision.json`, `hf/…/bench_task3.parquet`이 있습니다. `relation_scan.json`은 오파싱 상태로 만든 파일이라 폐기 대상이며, 결론에 쓰지 않았습니다.
+
+# Commands / Experiments
+
+- `nvidia-smi`: GPU 0·1이 모두 여유였습니다. 디스크는 `/SSD1_1TB`에 18G 남았습니다.
+- `hf_hub_download`와 `t3_audit.py`: 성공했습니다.
+- `t3_relation.py`: 오파싱 상태에서 실행한 탐색입니다. 정규식 수정 후에는 다시 돌리지 않았습니다.
+- `t3_decide.py`: 성공했습니다. `run_models=false`로 기록했습니다.
+- GPU 실험, TECH, MAIN은 실행하지 않았습니다.
+- 첫 시도에서 heredoc과 f-string 중괄호가 셸 확장 검사에 막혔습니다. 우회하지 않고 파일로 작성했습니다.
+
+# Results
+
+- parquet 구성: 3-image 995행, 2-image 153행. target이 두 번째 영상인 행 659개, 세 번째인 행 489개.
+- target 크기는 336×56이 676행, 336×336이 472행입니다.
+- 다음 수치는 모두 `results/iter_120/data/eligibility_decision.json`에 있습니다.
+  - 같은 target pixels 쌍 2개
+  - CT 쌍 0개
+  - 적격 쌍 0개
+  - `run_models=false`
+
+# Goal Progress / Reused Assets
+
+- **시험 설정:** 이 Task3 설계는 reference 대조를 만들 수 없어 현재 실행 설계를 보류합니다.
+- **연구 관찰:** 새 모델 관찰은 없습니다. iter_021의 좌표 복사와 약한 기본 localization 관찰은 그대로 보존합니다.
+- **연구 질문:** 영상 간 대상 대응이 중요한 문제인지는 이번에 판단하지 못했습니다. 이번 결과는 이 공개 파일의 구조 한계입니다.
+- **재사용 자산:** 좌표 변환과 NCC 3파일은 blob 일치만 확인했습니다. 모델 비교가 시작되지 않아 필수 검사(비정사각 fixture 등)는 실행하지 않았고, NCC 재사용은 미승인으로 남습니다.
+
+# Problems
+
+- **현재 결론 무효:** 없습니다. 수정 전 정규식 결과는 폐기했고 최종 수치는 수정 후 값입니다.
+- **재사용 전 수정:** 없습니다. 다만 `t3_decide.py`의 CT 데이터셋 목록은 하드코딩이어서 재사용 전에 일반화해야 합니다.
+- **추후 개선:** `t3_audit.py`의 `unparsed_source` 162행(원천명 정규식 미적용)은 이번 결론에 쓰지 않아 정리하지 않았습니다.
+- **디스크 주의:** 남은 공간이 18G입니다. 후속에서 MedSeq-Grounder(약 16GB)를 받으면 거의 소진됩니다.
+
+# Recommendation to GPT
+
+- Task3는 행마다 reference와 target이 고유한 슬라이스입니다. 평균 bbox 점수는 구할 수 있어도 "reference만 바꾸는" 식별은 불가능합니다. 같은 질문을 이어가려면 이 파일 안에서 설계를 바꾸지 말고, 새 근거(공개 Task3의 case·view 내 다중 대상 관계)로 후보를 다시 비교해야 합니다.
+- 사전 분기대로 다른 Task로 자동 이동하지 않았습니다. 후속 후보 선택은 사용자 승인 후에 하는 것을 권합니다.
+
+SELF_CHECK: PASS
+SUMMARY: Task3 parquet에서 동일 target pixels·다른 reference의 CT 쌍이 0개(전체 2쌍, 모두 MRI·GT 중첩)로 확인돼 모델 실행 없이 자료 적합성 실패로 종료함; 모델 가설은 미검증.
+
+# [orchestrator] 권한 거부된 도구 호출
+- Bash: python - <<'EOF'
+import pyarrow.parquet as pq, json, collections, hashlib, re
+p='results/iter_120/data/hf/datasets--MedSG-Bench--MedSG-Bench-parquet/snapshots/557aa67d13c4cbfe458ca9d1d02f42dfee185d1a/bench_task3.parquet'
+t=pq.read_table(p).to_pylist()
+rows=[]
+for i,r in enumerate(t):
+    n=r['num_images']
+    h=[hashlib.sha256(r[f'image_bytes_{k}']).hexdigest()[:12] for k in range(1,n+1)]
+    paths=json.loads(r['images_json'])
+    m=re.search(r'in the (\w+) image',r['question'])
+    ref=re.search(r'\(\((\d+),(\d+)\),\((\d+),(\d+)\)',r['question'].replace('<|box_start|>','(').replace('<|box_end|>',')')) 
+    rows.append(dict(i=i,n=n,h=h,paths=[x.split('/')[-1] for x in paths],tv=m.group(1) if m else None,ans=r['answer_xyxy'],size=r['extra_json'],q=r['question']))
+src=collections.Counter(re.sub(r'_npy.*','',x['paths'][0].split('_CT_')[0]+'_'+x['paths'][0].split('_CT_')[1].split('_npy')[0]) for x in rows)
+print(src.most_common(40))
+# group by (target pixel hash)
+def tgt(x):
+    k={'first':0,'second':1,'third':2}.get(x['tv']); return x['h'][k] if k is not None and k<x['n'] else None
+g=collections.defaultdict(list)
+for x in rows: g[tgt(x)].append(x)
+print(len(g), collections.Counter(len(v) for v in g.values()))
+for k,v in list(g.items())[:0]: pass
+multi=[v for v in g.values() if len(v)>1]
+print(len(multi))
+for v in multi[:3]:
+    for x in v: print(x['i'],x['paths'][0],x['tv'],x['ans'],x['q'][:150])
+    print()
+print(collections.Counter(x['tv'] for x in rows), collections.Counter(x['size'] for x in rows).most_common(8))
+EOF
+- Bash: python - <<'EOF'
+import json
+r=json.load(open('results/iter_120/data/audit_raw.json'))
+print(len(r['pairs_sample']))
+EOF
+python - <<'EOF'
+import sys
+sys.path.insert(0,'.')
+import t3_audit as a, collections, itertools
+rows=a.load()
+for r in rows:
+    k=a.ORD[r['tv']]; r['tsha']=r['sha'][k]
+g=collections.defaultdict(list)
+for r in rows: g[r['tsha']].append(r)
+c=collections.Counter()
+for v in g.values():
+    for x,y in itertools.combinations(v,2):
+        c[(x['ref']==y['ref'], x['sha'][0]==y['sha'][0], x['ans']==y['ans'], x['tv']==y['tv'])]+=1
+print(c)
+# 같은 case 내 reference가 다른 행 (target 영상 hash 무관): 같은 case/target view, 다른 reference box/organ
+g2=collections.defaultdict(list)
+for r in rows:
+    s=r['src'][0]
+    if s: g2[(s['dataset'],s['case'],r['src'][a.ORD[r['tv']]]['view'] if r['src'][a.ORD[r['tv']]] else None)].append(r)
+print(collections.Counter(len(v) for v in g2.values()))
+n=0
+for k,v in g2.items():
+    if len(v)>1 and len({x['src'][0]['organ'] for x in v})>1 and n<5:
+        n+=1
+        for x in v: print(k,x['i'],x['src'][0]['organ'],x['src'][0]['view'],x['ref'],x['ans'],x['tsha'][:8],x['tv'],x['sizes'])
+EOF
+
+
+
+## iter_120 GPT REVIEW [NEEDS_HUMAN] — 2026-10-12 22:39:49
+
+# 요약
+
+- **판정:** execution_failed, valid_experiment=false. 자료 점검은 끝났지만 모델 실험은 미실행이다.
+- **핵심 근거:** 1,148행에서 target 영상 1,146종과 중복 2쌍을 독립 재현했다. 두 쌍의 GT IoU는 0.8154와 1.0으로 적격 CT 쌍은 0개다.
+- **의미·한계:** 현재 파일로 계획한 대조를 만들 수 없음을 확인했다. 대상 대응 능력이나 방법 필요성은 판단하지 못했다.
+- **다음:** 현재 설계를 보류하고 관계 정답 구성 범위에 대한 사용자 결정을 요청한다.
+
+## 알림 요약
+
+- 결과: CT 참고 영역에 따라 같은 영상의 다른 대상을 찾는 비교는 적격 관계쌍 0개로 추론 전에 종료했다.
+- 의미: 자료 적합성만 확인 — 새 모델 가설 검증은 없으며 기존 과학적 판단은 유지한다.
+- 후속: 같은 표의 재분석은 끝내고, 공개 영상·주석으로 필요한 관계 정답을 구성하는 범위의 한정 계획을 허용할지 확인한다.
+- 대안: 현재 연구를 보류하면 근거 없는 탐색 비용을 막을 수 있지만 대상 대응 질문은 미검증으로 남는다.
+
+# Assessment
+
+계획의 1단계 종료 규칙을 준수했다. 적격 관계가 없으면 모델 다운로드·TECH·MAIN을 하지 않도록 했고 실제로 그 단계에서 끝났다. GPU 미사용은 자원 회피가 아니라 사전 자료 조건 미충족에 따른 것이다. 실행 실패 판정은 모델 가설 검증 미실행을 뜻하며 구현 작업 전체의 실패나 가설 기각을 뜻하지 않는다.
+
+engineer_backend.json과 claude_meta.json에서 Claude, claude-sonnet-5-5, medium 설정을 확인했다. commit.json의 리뷰 대상은 752fba411759a093129c05feadfdff75e4d9a1b3이며 unpreserved_paths는 없다. 변경 코드 6개 파일 모두 해당 SHA와 작업 파일이 일치했다.
+
+# Key Findings
+
+원 parquet를 구현 함수와 별개로 읽어 질문의 target 지시를 1,148행 모두 확인했다. 두 번째 영상 659행, 세 번째 영상 489행이었다. 영상 크기와 decoded RGB hash를 함께 묶어 target 1,146종과 중복 2쌍을 재현했다.
+
+중복은 행 43/807의 ACDC MRI와 299/716의 BraTS2020 MRI였다. 원 answer_xyxy에서 독립 계산한 IoU는 각각 0.8153846154와 1.0이다. 따라서 CT 원천 분류와 무관하게 두 쌍 모두 IoU≤0.1 조건을 충족하지 못한다. 미파싱 원천 162행도 전체 pixel 집계에는 포함됐으므로 그 누락이 현재 0쌍 결론을 만들지는 않았다.
+
+원파일 SHA256은 66583c76d09dcf9e416bdd428e91dc1f54ce2ecc86e3886fec050bf5b04e0133이다. audit_raw.json과 eligibility_decision.json의 핵심 수치는 독립 계산과 일치한다. 모델 다운로드·생성 요청은 실행 로그에 없고 TECH·MAIN도 미실행이다.
+
+# Problems / Concerns
+
+초기 정규식은 reference를 target으로 읽어 가짜 관계를 만들었다. 로그에서 정규식 수정과 audit 재실행을 확인했고 최종 target 추출을 독립 검증했다. 수정 전 relation_scan.json은 최종 근거에서 제외해야 하며 삭제할 필요는 없다.
+
+판정 코드에는 재사용 결함이 있다. pairs_sample은 최대 12개인데 assert의 or 조건 때문에 전체 목록인지 보장하지 않는다. CT 원천 목록도 하드코딩이며 run_models는 eligible pair≥8을 요구한다. 계획의 8은 MAIN case의 해석 제한이지 모든 실행의 진입 gate가 아니다. 현재는 전체 중복이 2쌍이고 적격 0쌍이므로 이 결함들이 종료 결론을 바꾸지 않는다.
+
+geometry/NCC의 비정사각 입력 required_checks는 실행하지 않았다. 자료 단계에서 종료했으므로 이번 결론의 blocker는 아니지만 새 과제 재사용 승인은 할 수 없다. 코드 정비만을 위한 다음 반복도 권고하지 않는다.
+
+# Interpretation
+
+공개 정답으로 확인한 것은 이 파일에서 사전 정의한 동일-target 대조가 성립하지 않는다는 사실이다. 기본 localization 부족, 좌표 복사, 대상 정보 전달 실패, 언어 매개 분해의 충분성은 모두 미검증이다. 파일명 기반 MRI 표기는 관계 정답 전체의 임상적 타당성 증명이 아니며 현재 종료 결론에 필요한 범위로만 사용했다.
+
+실제 모델 관찰이 없으므로 LIMITATIONS를 갱신하지 않는다. 논문 추천과 마일스톤도 보류한다.
+
+# Strategy Check / 연구 방향 판단
+
+**시험 설정:** 현재 Task3 파일을 사용하는 paired 설계는 보류한다. 같은 파일 재집계나 평균 bbox 점수로 대체해도 선택한 질문에 답하지 못한다.
+
+**연구 관찰:** 새 모델 현상은 없다. iter_021의 좌표 복사·기본 localization 혼선, iter_118/119의 제한된 초안 관찰은 그대로 유지한다.
+
+**연구 질문:** 대상 대응의 중요성과 해결 필요성은 이번 결과로 지지되거나 반박되지 않았다. 현재 자료로 판별할 수 없다는 실행 가능성 정보만 추가됐다. 후보 중 시간 변화는 현재 계획에서도 새 연결 근거가 없어 제외됐으므로 자동 대안으로 발주하지 않는다.
+
+**투자 선택:** 같은 파일의 한정 보완은 정보 가치가 낮아 선택하지 않는다. 현재 설계를 보류하고, 공개 주석으로 관계 정답을 구성하는 범위를 검토할지 사용자에게 묻는다. 이는 확정된 새 실험이나 유망성 주장이 아니다. 다른 Task·모델·종료한 초안 교정으로 자동 순회하지 않는다.
+
+실행 유효성은 자료 점검까지만 확보됐고 성능 개선·가설 지지·신규 기여는 평가하지 않았다. 기록상 작업은 자료 확보·파싱 수정·검증에 집중됐으며 모델 GPU 비용은 0이다. claude_meta의 세션 시간은 약 175초지만 작업별 시간은 미측정이므로 세부 비용 비중이나 절감률은 주장하지 않는다.
+
+# Recommended Next Experiment
+
+즉시 실행할 후속 실험은 권고하지 않는다. 공개 영상·주석에서 동일 target의 서로 다른 대상과 reference 관계를 구성하는 범위의 한정 계획을 허용할지, 현재 연구를 보류할지 확인한다. 전자를 선택하면 관계 정답의 출처·구성 가능성·강한 대조·비용·종료점을 먼저 구체화하며 이번 계획의 gate를 소급 완화하지 않는다. --confirm-each-iter 승인 대기를 유지한다.
