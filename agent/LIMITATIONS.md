@@ -334,3 +334,23 @@ RSNA confirm800 중 E600 밖의 개발 양성 환자에서 기술 집단을 제�
 - 미해결: 음성 영상의 오검출·누락·coverage·임상적 소견 부재는 이번 endpoint가 평가하지 않는다.
 - 미해결: MedRegA 학습 노출, 독립 환자·도메인 일반화 및 confidence와 결합했을 때의 조건부 정보는 미검증이다.
 
+## padchest-grounding-confidence-review-gap — observed
+
+반복 개발 PadChest-GR의 자연 다중 영역 47개 소견·36명에서 적응 MedGrounder A_U_e5 threshold 0.8 출력을 고정하고 12개를 검토했을 때, CURE와의 합집합 위치 불일치 순위는 공식 주석 불일치 오류 9개, 최소 box confidence 순위는 6개를 포착했다. 사전 양성 탐색 기준은 충족했지만 순포착 차이의 환자 bootstrap 95% 구간은 [-2, 6]개다. 현재 confidence 순위의 제한된 보완 가능성이며, 보편적 우위·임상 오류 식별·VLM 고유 정보는 입증하지 않는다.
+
+- 적용 목표 시작: iter_003
+- 최신 리뷰: agent/runs/iter_113/review.json
+- 근거: research/results/iter_113/report.json: N=47, 환자 36명, K=12, 공식 주석 오류 15개, 포착 9 대 6.
+- 근거: research/results/iter_113/per_item.json: 불일치 순위만 포착한 오류 7개·7명, confidence만 포착한 오류 4개·4명, 공통 2개, 양쪽 미포착 2개.
+- 근거: 리뷰의 원시 출력·원 manifest 기반 독립 좌표 grid 계산에서 선택 ID와 포착 수가 일치했다.
+- 근거: 리뷰에서 bootstrap 10,000회 배열 전체가 일치했고 주석 모호성 범위 [+2,+7], 환자 제거 차이 [+2,+3]을 재현했다.
+- 사용·평가 검증: 리뷰 SHA 540f63bed8b07775d26b02d69a8a545b2736749d의 6개 소스와 작업 파일·protocol 코드 hash가 일치했다.
+- 사용·평가 검증: protocol 입력 hash와 completion 산출물 hash를 확인하고 원 CURE·MedGrounder 출력 및 annotation 연결 47/47을 재검사했다.
+- 사용·평가 검증: 원 영상 36개의 hash와 CURE 47개 최종 EOS token을 확인했다. malformed·truncated 제외는 없었다.
+- 사용·평가 검증: nr107_geom.py와 nr107_spec.py의 원 출처 blob 일치를 확인했다. 저장 fixture 36/36과 별도 검증 19/19를 코드·도구 로그와 대조했다.
+- 사용·평가 검증: 고정 운영점 0.8, 검토량 ceil(N/4), GT와 무관한 hash 동률 처리, union IoU<0.3 오류 정의를 유지했다.
+- 미해결: 미사용 환자에서 같은 방향과 실용적으로 의미 있는 크기가 재현되는가?
+- 미해결: 일반적인 두 grounder의 ensemble 불일치보다 CURE 조합이 더 유용한가?
+- 미해결: CURE 학습 노출과 모델별 전처리·학습 차이가 결과에 미친 영향은 무엇인가?
+- 미해결: 두 모델의 실제 추론 비용을 포함해 추가 오류 포착이 투자할 가치가 있는가?
+

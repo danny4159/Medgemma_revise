@@ -319,3 +319,19 @@ RSNA grounding 학습의 성과가 MRI 적응에도 도움이 되는지 직접 �
 - 접근법: MRI grounding 적응 전이 대조 (`approach/mri-grounding-transfer`), 시도: iter_071
 - 커밋: 973628fd9852fd558796cffb2dcb60ba24f87bc2
 - 자세히: DECISIONS.md의 iter_071, `agent/runs/iter_071/review.md`
+
+## 🏁 저장 위치 출력의 불일치가 같은 검토량에서 confidence보다 오류를 더 포착했다
+
+*iter_113 · 2026-10-12 13:45 · 판정: CONTINUE / success*
+
+공간 불일치의 제한적 양성 결과로 독립 확인을 검토할 근거가 생겼다.
+**고민:** confidence가 놓친 위치 오류를 다른 모델의 정보로 찾을 수 있는지가 남아 있었다.
+**시도:** RSNA의 전역 존재 판단과 영역 likelihood 순위는 각각 confidence보다 오류를 적게 찾아 종료했다.
+**개발:** 다른 과제인 PadChest-GR에서 저장 CURE·MedGrounder 출력을 연결하고 검토량·오류·동률 규칙을 고정했다.
+**결과:** 36명·47개 소견에서 12개를 검토하자 불일치는 오류 9개, confidence는 6개를 포착했다.
+**한계:** 주석 민감도 범위는 +2~+7개지만 bootstrap 95% 구간은 −2~+6개이며 일반 ensemble 효과와 구별되지 않았다.
+**의미:** 새 방법의 증명이 아닌 양성 탐색이다. 사용자 승인 후 미사용 환자와 일반 grounder 대조의 한정 확인을 권고한다.
+
+- 접근법: 독립 위치 출력의 오류 검토 정보 (`approach/grounding-disagreement-review`), 시도: iter_113
+- 커밋: 540f63bed8b07775d26b02d69a8a545b2736749d
+- 자세히: DECISIONS.md의 iter_113, `agent/runs/iter_113/review.md`

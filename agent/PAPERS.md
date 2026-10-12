@@ -25,3 +25,11 @@
 - 지금 하고 있는 것: 동일 T305 annotation으로 MedGrounder-P를 적응시켰다. 개발 V96 96명·192문장에서 고정 threshold F1@0.3이 0.395313→0.578646으로 개선됐고 차이의 97.5% CI는 [0.113366, 0.254863]이다. A/P device-seconds 비율은 1.009 [0.984, 1.035]였다. 근거는 research/results/iter_046/eval/report.json과 원시 출력·timing이며 리뷰에서 독립 재계산했다.
 - 추천 이유: 복합 비교는 불확정이지만 모듈형 baseline의 직접 적응 효과는 사전 양성 기준을 충족했다. 논문은 이 긍정적 결과를 해석하고 다음 VLM 비교에서 적응·후처리·모듈형 대안을 공정하게 다루는 데 직접 도움이 된다. 현재 결과는 독립 일반화, C 대비 비열등성, 공동 요청·보고서 과제의 이점을 증명하지 않는다.
 - 읽어볼 부분: V-C1과 Table VII에서 사전학습과 target 적응을 구분한 대조를 먼저 보고, V-C2와 Table VIII에서 threshold·WBF의 효과를 확인한다. III-B의 집합 예측 구조를 함께 읽되 논문 지표와 현재 F1@0.3/0.5를 직접 동일시하지 않는다.
+
+## [ ] Simple and Scalable Predictive Uncertainty Estimation using Deep Ensembles (Lakshminarayanan, Pritzel and Blundell, 2017)
+
+- 링크: https://papers.neurips.cc/paper/7219-simple-and-scalable-predictive-uncertainty-estimation-using-deep-ensembles.pdf
+- 추천: iter_113, 2026-10-12
+- 지금 하고 있는 것: iter_113의 PadChest-GR 개발 47개 소견·36명에서 같은 12개 검토 시 CURE–MedGrounder 위치 불일치가 오류 9개, confidence가 6개를 포착했다. 사전 양성 탐색 기준을 충족했으며 report.json과 원시 출력의 독립 재계산이 일치했다. bootstrap 95% 구간은 [-2,6]개다.
+- 추천 이유: 두 모델 출력의 차이를 활용할 제한적 양성 근거가 생겼다. 일반 ensemble의 효과를 강한 단순 대조로 삼아 CURE 조합의 추가 가치를 판단하는 데 도움이 된다. 논문은 현재 의료 bbox 순위의 직접 근거가 아니며 독립 일반화·서비스 비용·VLM 고유 이점은 미검증이다.
+- 읽어볼 부분: §2.4에서 구성 모델의 강도와 예측 상관을 함께 고려하는 이유를 읽고, §3.1과 Figure 2에서 예측 정확도와 불확실성 평가를 구분한 비교를 본다. 이를 참고하되 현재 고정 오류 포착 endpoint를 사후 변경하지 않는다.
