@@ -1,0 +1,564 @@
+diff --git a/mr130_audit.py b/mr130_audit.py
+new file mode 100644
+index 0000000..3a270d1
+--- /dev/null
++++ b/mr130_audit.py
+@@ -0,0 +1,246 @@
++"""고정 BrainTRACE L2.4 자료 조건 감사. 모델 실행이나 임상 정답 생성은 하지 않는다."""
++import csv
++from collections import Counter, defaultdict
++from datetime import datetime, timezone
++import hashlib
++import json
++from pathlib import Path
++import time
++
++import pyarrow.parquet as pq
++
++from mr130_fetch import ROOT, OUT, CODE_REV, HF_REV, PARQUET_SHA, sha
++
++SPLITS = Path('/home/test/.local/share/medgemma/mr_rate/meta/splits.csv')
++
++
++def write(path, value):
++    data = (json.dumps(value, ensure_ascii=False, indent=2) + '\n').encode()
++    path.parent.mkdir(parents=True, exist_ok=True)
++    if path.exists():
++        if path.read_bytes() != data:
++            raise ValueError(f'기존 결과 불일치; 덮어쓰기 거부: {path}')
++        return
++    with path.open('xb') as f:
++        f.write(data)
++
++
++def counts(values):
++    return dict(sorted(Counter(values).items()))
++
++
++def unique_index(rows, key):
++    result = {}
++    for row in rows:
++        k = row[key]
++        if not k or k in result:
++            raise ValueError(f'빈 ID 또는 중복 {key}: {k}')
++        result[k] = row
++    return result
++
++
++def csv_rows(path):
++    with path.open(newline='') as f:
++        return list(csv.DictReader(f))
++
++
++def main():
++    start = time.monotonic()
++    fetch = json.loads((OUT / 'fetch.json').read_text())
++    if fetch['hf_revision'] != HF_REV or fetch['code_revision'] != CODE_REV:
++        raise ValueError('revision 불일치')
++    for entry in fetch['files']:
++        if sha(entry['path']) != entry['sha256']:
++            raise ValueError(f"source 변조: {entry['path']}")
++    if sha(ROOT / 'data/test.parquet') != PARQUET_SHA:
++        raise ValueError('공개 parquet SHA 불일치')
++    table = pq.read_table(ROOT / 'data/test.parquet', filters=[('template', '=', 'L2.4')])
++    rows = sorted(table.to_pylist(), key=lambda r: r['item_id'])
++    items = unique_index(rows, 'item_id')
++    co_study = unique_index(csv_rows(ROOT / 'cohort/braintrace_cohort_studies_7299.csv'), 'study_uid')
++    co_patient = unique_index(csv_rows(ROOT / 'cohort/braintrace_cohort_patients_1778.csv'), 'patient_uid')
++    split = unique_index(csv_rows(SPLITS), 'study_uid')
++    rubric = {}
++    joins = []
++    for row in rows:
++        rub = json.loads(row['rubric_json'])
++        rubric[row['item_id']] = rub
++        assert row['template'] == 'L2.4' and rub['template_id'] == 'L2.4'
++        assert rub['item_id'] == row['item_id']
++        assert rub['gt_value'] == rub['gt_option_text'] == row['gt_value']
++        assert row['options'][rub['gt_option_index']] == row['gt_value']
++        assert len(row['options']) == len(set(row['options'])) == 5
++        assert len(row['study_uids']) == row['n_shown_tps'] == 1
++        for study in row['study_uids']:
++            c, s = co_study[study], split[study]
++            patient = row['patient_id_anon']
++            assert patient == c['patient_uid'] == s['patient_uid']
++            assert patient in co_patient
++            joins.append({'item_id': row['item_id'], 'patient_uid': patient,
++                          'study_uid': study, 'mr_rate_split': s['split'],
++                          'batch_id': s['batch_id'], 'cohort_match': True,
++                          'split_match': True, 'patient_match': True,
++                          'cohort_modalities': c['modalities']})
++    groups = defaultdict(list)
++    for row in rows:
++        groups[row['study_uids'][0]].append(row)
++    multi = {study: group for study, group in groups.items()
++             if len({tuple(row['input_modalities']) for row in group}) > 1}
++    origins = []
++    for row in rows:
++        parent_id = rubric[row['item_id']].get('item_origin_id')
++        if parent_id:
++            parent = items[parent_id]
++            for key in ['patient_id_anon', 'study_uids', 'input_modalities', 'question', 'options', 'gt_value']:
++                assert row[key] == parent[key], (row['item_id'], key)
++            assert rubric[row['item_id']]['evidence_quote'] == rubric[parent_id]['evidence_quote']
++            origins.append({'item_id': row['item_id'], 'item_origin_id': parent_id,
++                            'same_patient_study_modality_question_options_gt_quote': True})
++    schema_groups = defaultdict(list)
++    for row in rows:
++        key = (row['question'], tuple(sorted(rubric[row['item_id']])))
++        schema_groups[key].append(row)
++    representative_ids = set()
++    patterns = []
++    for index, (key, members) in enumerate(sorted(schema_groups.items())):
++        first = members[0]
++        opposite = next((r for r in members if r['gt_value'] != first['gt_value']), None)
++        ids = [first['item_id']] + ([opposite['item_id']] if opposite else [])
++        representative_ids.update(ids)
++        patterns.append({'structure_id': index, 'question': key[0], 'rubric_keys': list(key[1]),
++                         'n_rows': len(members), 'representative_ids': ids,
++                         'counterexample_definition': '같은 질문·rubric 구조의 다른 gt_value; 모델 반례가 아님'})
++    # 원문이 판정을 바꿀 수 있는 명시적 대조 사례. L2.4 밖으로 확장하지 않는다.
++    representative_ids.update(['bulk_v1_L2_4_001', 'bulk_v1_L2_4_002', 'bulk_v1_L2_4_003',
++                               'bulk_v1_L2_4_039', 'bulk_v1_L2_4_057',
++                               'bulk_v1_L2_4_102', 'bulk_v1_L2_4_103', 'bulk_v1_L2_4_106'])
++    for group in multi.values():
++        representative_ids.update(row['item_id'] for row in group)
++    for label in sorted({r['gt_value'] for r in rows}):
++        representative_ids.add(next(r['item_id'] for r in rows if r['gt_value'] == label))
++    representative_rows = [items[i] for i in sorted(representative_ids)]
++    per_item = []
++    for row in rows:
++        rub = rubric[row['item_id']]
++        no_lesion = row['gt_value'] == 'no lesion present'
++        per_item.append({
++            'item_id': row['item_id'], 'study_uid': row['study_uids'][0],
++            'input_modalities': row['input_modalities'], 'gt_value': row['gt_value'],
++            'evidence_source': rub['evidence_source'], 'evidence_quote': rub['evidence_quote'],
++            'sequence_truth': {'published_bucket': '확인',
++                               'sequence_keyed_truth_vector': '미제공',
++                               'reason': 'scalar gt_value와 보고서/diagnostic_class 인용만 있음; sequence별 독립 정답을 역추정하지 않음'},
++            'target_identity': {'question_target': 'no lesion' if no_lesion else 'dominant lesion',
++                                'lesion_instance_id': '미제공', 'lesion_coordinates': '미제공',
++                                'cross_sequence_same_target': '해당 없음(무병변 bucket)' if no_lesion else '미보장'},
++            'observation_link': {'patient_study_join': '확인', 'modality_plane_recipe': '확인',
++                                 'exact_series_id': '미제공', 'lesion_slice_index': '미제공',
++                                 'lesion_visible_in_render': '미검증; 영상 미반입·미표시',
++                                 'slice_selection_rule': row['slice_selection_rule']},
++            'development_confirmation': {'braintrace_role': 'test 유지',
++                                         'mr_rate_split': next(j['mr_rate_split'] for j in joins if j['item_id'] == row['item_id']),
++                                         'used_for_training_or_model_selection': False,
++                                         'independent_model_confirmation': False},
++            'comparison_eligible': False,
++            'exclusion_reason': '공동 sequence 정답·동일 병변의 독립 신호 정답과 관측 연결이 보장되지 않음'
++        })
++    split_patients = {s: sorted({j['patient_uid'] for j in joins if j['mr_rate_split'] == s})
++                      for s in sorted({j['mr_rate_split'] for j in joins})}
++    for a, aa in split_patients.items():
++        for b, bb in split_patients.items():
++            if a != b:
++                assert not set(aa) & set(bb), '환자 split 혼합'
++    stats = {
++        'source_parquet_rows': pq.ParquetFile(ROOT / 'data/test.parquet').metadata.num_rows,
++        'l24_rows': len(rows), 'l24_unique_items': len(items),
++        'l24_unique_patients': len({r['patient_id_anon'] for r in rows}),
++        'l24_unique_studies': len(groups), 'track': counts(r['track'] for r in rows),
++        'modality_combinations': counts('+'.join(r['input_modalities']) for r in rows),
++        'multiple_modalities_in_one_row': sum(len(r['input_modalities']) > 1 for r in rows),
++        'gt_distribution': counts(r['gt_value'] for r in rows),
++        'gt_by_track': {track: counts(r['gt_value'] for r in rows if r['track'] == track)
++                        for track in sorted({r['track'] for r in rows})},
++        'slice_rules': counts(r['slice_selection_rule'] for r in rows),
++        'evidence_sources': counts(rub['evidence_source'] for rub in rubric.values()),
++        'field_empty_or_null': {k: sum(r[k] is None or r[k] == '' or r[k] == [] for r in rows) for k in table.column_names},
++        'rubric_field_presence': counts(k for rub in rubric.values() for k in rub),
++        'question_structures': len({r['question'] for r in rows}),
++        'question_rubric_structures': len(schema_groups),
++        'repeated_study_count': sum(len(v) > 1 for v in groups.values()),
++        'cross_sequence_study_count': len(multi),
++        'cross_sequence_groups': [{'study_uid': study, 'item_ids': [r['item_id'] for r in group],
++                                   'modalities': sorted({m for r in group for m in r['input_modalities']}),
++                                   'gt_values': sorted({r['gt_value'] for r in group}),
++                                   'same_evidence_quote': len({rubric[r['item_id']]['evidence_quote'] for r in group}) == 1}
++                                  for study, group in sorted(multi.items())],
++        'three_d_origin_pairs': len(origins), 'joins_complete': len(joins),
++        'join_mismatch': 0, 'mr_rate_row_splits': counts(j['mr_rate_split'] for j in joins),
++        'mr_rate_unique_study_splits': counts(split[study]['split'] for study in groups),
++        'mr_rate_patient_splits': {s: len(v) for s, v in split_patients.items()},
++        'cohort_patients': len(co_patient), 'cohort_studies': len(co_study),
++        'local_split_studies': len(split),
++        'eligible_joint_independent_comparison_items': 0,
++        'clinical_label_validity_certified': False,
++    }
++    write(OUT / 'l24_rows.json', rows)
++    write(OUT / 'joins.json', joins)
++    write(OUT / 'origin_pairs.json', origins)
++    write(OUT / 'structures_and_representatives.json', {'structures': patterns, 'rows': representative_rows})
++    write(OUT / 'judgment_tables.json', per_item)
++    write(OUT / 'statistics.json', stats)
++    report = {
++        'decision': 'hold_current_l24_joint_independent_design',
++        'data_result': 'negative_for_planned_comparison', 'valid_experiment': False,
++        'reason': '공개 L2.4는 단일 sequence의 scalar bucket이며 동일 병변의 sequence별 정답·관측 연결이 없다',
++        'scope': '현재 revision의 L2.4 공동 대 독립 sequence 비교; BrainTRACE 전체·MRI 전체·모델 능력 판정 아님',
++        'success_action_triggered': False, 'gpu_diagnostic_recommendation': False,
++        'model_or_training_run': False,
++        'exposure': {'full_l24_answers_and_rubrics_read': len(rows),
++                     'other_templates_analyzed': 0,
++                     'incidental_schema_probe': 'schema 점검 중 최초 L1.1 원행 1개가 도구 출력에 노출됨; 분석·선정·실험에 사용하지 않음',
++                     'braintrace_test_converted_to_development': False,
++                     'mr_rate_train_overlap_does_not_restore_test_independence': True,
++                     'future_blind_confirmation': '열람한 L2.4를 설계 선택 후 새 독립 확인 집단이라고 표현할 수 없음; 공식 train/dev 또는 미노출 정답 생성 규칙은 이번 자료에서 확인되지 않음'},
++        'four_decisions': {
++            'sequence_truth': '미충족: 모두 scalar bucket; 선택지 다섯 개는 단일 신호 class이며 sequence 조합 정답 아님',
++            'same_target': '미충족: generic dominant lesion, instance ID·좌표 없음; 3개 cross-sequence study도 신호별 근거를 보장하지 않음',
++            'observation': '부분 확인: 258/258 환자/study join과 renderer 접근 경로는 확인; 실제 series·대상 가시성은 미검증',
++            'development_confirmation': 'test-only; MR-RATE train/val overlap을 새 독립 개발/확인 분리로 사용하지 않음'
++        },
++        'baseline_support': [
++            {'baseline': 'sequence별 독립 VLM 판독 + 결정적 결합',
++             'required': '동일 대상의 sequence별 정답 vector, 동일 영상의 공동 질문 및 고정 결합 규칙',
++             'supported': False, 'reason': '정답 vector·공동 정답/선택지 미제공; 환자별 전형 신호 추론 금지'},
++            {'baseline': '전문 병변 segmentation + 국소 intensity 규칙',
++             'required': '병변 instance mask와 기준 정상 조직, sequence별 정합·가시성',
++             'supported': False, 'reason': '해부학 예측 mask는 병변 정답 아님; 이 release에는 병변 mask·정상 대조 영역 없음; 미설치가 제외 근거 아님'},
++            {'baseline': 'MRI 신호 분류기 + 규칙 / 직접 SFT',
++             'required': '학습용 관측에 연결된 신호 label과 환자 분리 validation',
++             'supported': '미확인', 'reason': '공식 test만 제공; 환자별 관측-정답 연결·학습 자료는 이번 계획에서 성립하지 않음; 설치/학습 미발주'}
++        ],
++        'renderer_notes': {
++            'source': str(ROOT / f'official_code/{CODE_REV}/reproduction/render_images.py'),
++            'series_rule': '169–184: coreg 두 디렉터리에서 modality·plane filename pattern에 맞는 첫 sorted 파일',
++            'broadqa_rule': '211–220,338–365: override 없으면 axial shape[2]//2; lesion 위치 기반 아님',
++            'three_d_rule': '312–331,660–676,870–878: n=16, 전체 axial depth에 균등 index; rule 이름 contiguous와 실제 구현이 다름',
++            'affine_visibility': '원격 영상·렌더링 실행은 없음; 방향/정합/가시성 검증을 통과했다고 보고하지 않음'},
++        'recommendation': '현재 L2.4 분해 비교 투자를 보류한다. 같은 metadata 준비 반복·MRI 반입·자동 학습을 요청하지 않는다.',
++        'new_evidence_needed': '동일 병변 ID와 실제 관측에 연결된 sequence별 원 정답 및 개발/독립 확인 구성; 현재 승인으로 이를 추정 생성하지 않음',
++    }
++    write(OUT / 'decision.json', report)
++    if not (OUT / 'audit_execution.json').exists():
++        write(OUT / 'audit_execution.json', {
++            'finished_at': datetime.now(timezone.utc).isoformat(), 'wall_s': time.monotonic() - start,
++            'inputs': {str(p): sha(p) for p in [ROOT / 'data/test.parquet',
++                       ROOT / 'cohort/braintrace_cohort_studies_7299.csv',
++                       ROOT / 'cohort/braintrace_cohort_patients_1778.csv', SPLITS, OUT / 'fetch.json']},
++            'code': {p: sha(p) for p in ['mr130_fetch.py', 'mr130_audit.py', 'mr130_verify.py']},
++            'output_hashes': {str(p): sha(p) for p in OUT.glob('*.json') if p.name not in ['audit_execution.json', 'completion.json']},
++            'gpu_requests': 0, 'training_updates': 0,
++            'reuse_assets': [], 'seed': '결정적 전체 행 집계; stochastic 실행 없음'})
++    print(json.dumps({'l24_rows': len(rows), 'patients': stats['l24_unique_patients'],
++                      'studies': len(groups), 'decision': report['decision'], 'wall_s': time.monotonic() - start}))
++
++
++if __name__ == '__main__':
++    main()
+diff --git a/mr130_fetch.py b/mr130_fetch.py
+new file mode 100644
+index 0000000..e15d307
+--- /dev/null
++++ b/mr130_fetch.py
+@@ -0,0 +1,137 @@
++"""iter_130: pinned BrainTRACE metadata only; never downloads MRI or models."""
++import argparse
++import hashlib
++import importlib.metadata
++import json
++import os
++from pathlib import Path
++import sys
++import time
++from datetime import datetime, timezone
++from urllib.parse import urlsplit, urlunsplit
++
++import requests
++
++HF_REV = '1861efc91c93e1de87f607c8d4a973dee1f9e898'
++CODE_REV = '7c1d81753e7bfee50917dbb56fcabc5d1ee2679a'
++PARQUET_SHA = '9fb3d82729f4de24e3b9f794496c4bcc50edf45ce9ed0b7f2b9b23c0c731d737'
++ROOT = Path('/home/test/.local/share/medgemma/mr_rate/braintrace') / HF_REV
++OUT = Path('results/iter_130')
++HF_FILES = ['README.md', 'ATTRIBUTION.md', 'cohort/README.md',
++            'cohort/braintrace_cohort_patients_1778.csv',
++            'cohort/braintrace_cohort_studies_7299.csv', 'data/test.parquet']
++CODE_FILES = ['README.md', 'LICENSE', 'DUA_NOTICE.md', 'docs/TAXONOMY.md',
++              'docs/SCORING.md', 'reproduction/README.md',
++              'reproduction/render_images.py', 'reproduction/render_volume_utils.py']
++
++
++def sha(path):
++    return hashlib.sha256(Path(path).read_bytes()).hexdigest()
++
++
++def save(path, value):
++    path.parent.mkdir(parents=True, exist_ok=True)
++    with path.open('x', encoding='utf-8') as f:
++        json.dump(value, f, ensure_ascii=False, indent=2)
++        f.write('\n')
++        f.flush()
++        os.fsync(f.fileno())
++
++
++def clean_url(url):
++    p = urlsplit(url)
++    return urlunsplit((p.scheme, p.netloc, p.path, '', ''))
++
++
++def main():
++    parser = argparse.ArgumentParser()
++    parser.add_argument('--verify', action='store_true')
++    args = parser.parse_args()
++    if (OUT / 'fetch.json').exists():
++        manifest = json.loads((OUT / 'fetch.json').read_text())
++        assert manifest['hf_revision'] == HF_REV and manifest['code_revision'] == CODE_REV
++        for entry in manifest['files']:
++            assert sha(entry['path']) == entry['sha256'], entry['path']
++        assert sha(ROOT / 'data/test.parquet') == PARQUET_SHA
++        print(json.dumps({'state': 'verified_existing', 'n_files': len(manifest['files'])}))
++        return
++    if args.verify:
++        raise RuntimeError('fetch.json missing')
++    start = time.monotonic()
++    attempt = {'started_at': datetime.now(timezone.utc).isoformat(), 'files': [], 'errors': []}
++    OUT.mkdir(parents=True, exist_ok=True)
++    attempt_n = len(list(OUT.glob('fetch_started*.json'))) + 1
++    save(OUT / f'fetch_started_{attempt_n:02d}.json', {'hf_revision': HF_REV, 'code_revision': CODE_REV,
++                                     'source_sha256': sha(__file__), **attempt})
++    session = requests.Session()
++    # Public metadata works without authentication; stored tokens are never read.
++    def get(url):
++        for trial in range(2):
++            try:
++                r = session.get(url, timeout=(15, 90))
++                r.raise_for_status()
++                if len(r.content) > 4_000_000:
++                    raise ValueError('metadata-only per-object budget exceeded')
++                return r
++            except requests.RequestException as e:
++                attempt['errors'].append({'url': clean_url(url), 'trial': trial + 1,
++                                           'error_type': type(e).__name__})
++                if trial == 1:
++                    raise RuntimeError(f'public metadata request failed: {clean_url(url)}') from None
++    api_url = f'https://huggingface.co/api/datasets/lanqz7766/BrainTRACE/revision/{HF_REV}'
++    api = get(api_url).json()
++    assert api['sha'] == HF_REV
++    assert api['cardData']['license'] == 'cc-by-nc-sa-4.0'
++    if (OUT / 'hf_repository.json').exists():
++        assert json.loads((OUT / 'hf_repository.json').read_text()) == api
++    else:
++        save(OUT / 'hf_repository.json', api)
++    total = 0
++    for source, names in [('hf', HF_FILES), ('code', CODE_FILES)]:
++        for name in names:
++            url = (f'https://huggingface.co/datasets/lanqz7766/BrainTRACE/resolve/{HF_REV}/{name}'
++                   if source == 'hf' else
++                   f'https://raw.githubusercontent.com/lanqz7766/BrainTRACE/{CODE_REV}/{name}')
++            t = time.monotonic()
++            r = get(url)
++            content = r.content
++            total += len(content)
++            assert total < 4_000_000, 'total metadata budget exceeded'
++            digest = hashlib.sha256(content).hexdigest()
++            if name == 'data/test.parquet':
++                assert digest == PARQUET_SHA, 'published parquet digest mismatch'
++            dest = ROOT / (name if source == 'hf' else f'official_code/{CODE_REV}/{name}')
++            dest.parent.mkdir(parents=True, exist_ok=True)
++            if dest.exists():
++                assert not dest.is_symlink() and sha(dest) == digest, 'existing asset mismatch'
++                state = 'verified_existing_bytes'
++            else:
++                with dest.open('xb') as f:
++                    f.write(content)
++                    f.flush()
++                    os.fsync(f.fileno())
++                state = 'downloaded'
++            attempt['files'].append({'source': source, 'name': name, 'url': url,
++                                     'final_url_without_signed_query': clean_url(r.url),
++                                     'path': str(dest), 'bytes': len(content), 'sha256': digest,
++                                     'etag': r.headers.get('ETag'), 'state': state,
++                                     'wall_s': time.monotonic() - t})
++    attempt.update({'hf_revision': HF_REV, 'code_revision': CODE_REV, 'total_bytes': total,
++                    'wall_s': time.monotonic() - start, 'source_sha256': sha(__file__),
++                    'finished_at': datetime.now(timezone.utc).isoformat(),
++                    'python': sys.executable, 'cuda_visible_devices': os.getenv('CUDA_VISIBLE_DEVICES'),
++                    'packages': {p: importlib.metadata.version(p) for p in ['requests', 'pyarrow', 'pandas']},
++                    'authentication': 'public requests; token not read',
++                    'license': {'metadata': 'CC-BY-NC-SA-4.0', 'code': 'Apache-2.0',
++                                'imagery_reports_derivatives': 'upstream MR-RATE DUA applies'},
++                    'gpu_requests': 0, 'model_requests': 0, 'mri_download_bytes': 0,
++                    'recovery': [{'attempt': 1, 'error': 'HTTP 404: docs/RUBRICS.md does not exist',
++                                  'fix': 'pinned GitHub tree verified; rubric protocol is docs/SCORING.md; rendering guide is reproduction/README.md',
++                                  'preservation': 'downloaded assets verified against fresh pinned bytes; initial fetch_started.json retained'}]})
++    save(OUT / 'fetch.json', attempt)
++    print(json.dumps({'state': 'complete', 'files': len(attempt['files']), 'bytes': total,
++                      'wall_s': attempt['wall_s']}))
++
++
++if __name__ == '__main__':
++    main()
+diff --git a/mr130_verify.py b/mr130_verify.py
+new file mode 100644
+index 0000000..a2dba6a
+--- /dev/null
++++ b/mr130_verify.py
+@@ -0,0 +1,163 @@
++"""production 감사기를 import하지 않는 원 parquet·CSV 기반 독립 검산."""
++import argparse
++from collections import Counter
++from datetime import datetime, timezone
++import hashlib
++import json
++from pathlib import Path
++import time
++
++import pandas as pd
++
++RESULT = Path('results/iter_130')
++
++
++def digest(path):
++    return hashlib.sha256(Path(path).read_bytes()).hexdigest()
++
++
++def read(name):
++    return json.loads((RESULT / name).read_text())
++
++
++def write_once(path, content):
++    data = (json.dumps(content, ensure_ascii=False, indent=2) + '\n').encode()
++    if path.exists():
++        if path.read_bytes() != data:
++            raise ValueError(f'기존 산출물 덮어쓰기 거부: {path}')
++        return
++    with path.open('xb') as f:
++        f.write(data)
++
++
++def main():
++    parser = argparse.ArgumentParser()
++    parser.add_argument('--seal', action='store_true')
++    args = parser.parse_args()
++    start = time.monotonic()
++    checks = []
++
++    def check(name, condition):
++        checks.append({'name': name, 'pass': bool(condition)})
++        if not condition:
++            raise AssertionError(name)
++
++    fetch = read('fetch.json')
++    files = {e['name']: e for e in fetch['files'] if e['source'] == 'hf'}
++    for entry in fetch['files']:
++        check('source_digest:' + entry['source'] + ':' + entry['name'], digest(entry['path']) == entry['sha256'])
++    check('published_parquet_sha', digest(files['data/test.parquet']['path']) ==
++          '9fb3d82729f4de24e3b9f794496c4bcc50edf45ce9ed0b7f2b9b23c0c731d737')
++    execution = read('audit_execution.json')
++    for kind in ['code', 'inputs', 'output_hashes']:
++        for name, expected in execution[kind].items():
++            check(kind + ':' + name, digest(name) == expected)
++    df = pd.read_parquet(files['data/test.parquet']['path'], filters=[('template', '=', 'L2.4')])
++    original = json.loads(df.to_json(orient='records'))
++    original.sort(key=lambda r: r['item_id'])
++    check('full_original_row_snapshot', original == read('l24_rows.json'))
++    check('item_unique', df.item_id.is_unique)
++    check('single_timepoint_all_rows', df.study_uids.map(len).eq(1).all() and df.n_shown_tps.eq(1).all())
++    check('single_sequence_all_rows', df.input_modalities.map(len).eq(1).all())
++    df['study_uid'] = df.study_uids.map(lambda a: a[0])
++    df['modality'] = df.input_modalities.map(lambda a: a[0])
++    cs = pd.read_csv(files['cohort/braintrace_cohort_studies_7299.csv']['path'], dtype=str)
++    cp = pd.read_csv(files['cohort/braintrace_cohort_patients_1778.csv']['path'], dtype=str)
++    local_split_path = next(p for p in execution['inputs'] if p.endswith('/meta/splits.csv'))
++    sp = pd.read_csv(local_split_path, dtype=str)
++    check('unique_cohort_study_patient_and_split_keys', cs.study_uid.is_unique and cp.patient_uid.is_unique and sp.study_uid.is_unique)
++    joined = df[['item_id', 'patient_id_anon', 'study_uid']].merge(
++        cs[['study_uid', 'patient_uid']], on='study_uid', how='left', validate='many_to_one')
++    joined = joined.merge(sp[['study_uid', 'patient_uid', 'split', 'batch_id']], on='study_uid',
++                          how='left', validate='many_to_one', suffixes=('_cohort', '_split'))
++    check('all_join_keys_present', not joined.isna().any().any())
++    check('exact_patient_match', joined.patient_id_anon.eq(joined.patient_uid_cohort).all() and
++          joined.patient_id_anon.eq(joined.patient_uid_split).all())
++    check('all_patient_manifest_members', joined.patient_id_anon.isin(cp.patient_uid).all())
++    planned_joins = read('joins.json')
++    jj = {r['item_id']: r for r in planned_joins}
++    check('join_unique_and_complete', len(jj) == len(planned_joins) == len(df))
++    check('join_values_independent', all(jj[r.item_id]['patient_uid'] == r.patient_id_anon and
++          jj[r.item_id]['study_uid'] == r.study_uid and jj[r.item_id]['mr_rate_split'] == r.split and
++          jj[r.item_id]['batch_id'] == r.batch_id for r in joined.itertuples()))
++    stats = read('statistics.json')
++    expected = {
++        'l24_rows': len(df), 'l24_unique_items': df.item_id.nunique(),
++        'l24_unique_patients': df.patient_id_anon.nunique(), 'l24_unique_studies': df.study_uid.nunique(),
++        'track': df.track.value_counts().to_dict(), 'gt_distribution': df.gt_value.value_counts().to_dict(),
++        'modality_combinations': df.modality.value_counts().to_dict(),
++        'slice_rules': df.slice_selection_rule.value_counts().to_dict(),
++        'mr_rate_row_splits': joined.split.value_counts().to_dict(),
++        'mr_rate_unique_study_splits': joined.drop_duplicates('study_uid').split.value_counts().to_dict(),
++        'mr_rate_patient_splits': joined.groupby('split').patient_id_anon.nunique().to_dict(),
++        'question_structures': df.question.nunique(), 'cohort_patients': len(cp), 'cohort_studies': len(cs),
++        'local_split_studies': len(sp), 'multiple_modalities_in_one_row': 0,
++    }
++    decoded = [json.loads(s) for s in df.rubric_json]
++    expected['evidence_sources'] = dict(Counter(r['evidence_source'] for r in decoded))
++    expected['rubric_field_presence'] = dict(Counter(k for r in decoded for k in r))
++    expected['three_d_origin_pairs'] = sum('item_origin_id' in r for r in decoded)
++    expected['question_rubric_structures'] = len({(q, tuple(sorted(r))) for q, r in zip(df.question, decoded)})
++    expected['cross_sequence_study_count'] = int(df.groupby('study_uid').modality.nunique().gt(1).sum())
++    expected['repeated_study_count'] = int(df.groupby('study_uid').size().gt(1).sum())
++    for key, val in expected.items():
++        check('statistic:' + key, stats[key] == val)
++    check('patient_split_disjoint', joined.groupby('patient_id_anon').split.nunique().eq(1).all())
++    check('rubric_option_binding', all(rub['item_id'] == row['item_id'] and
++          rub['gt_value'] == rub['gt_option_text'] == row['gt_value'] == row['options'][rub['gt_option_index']]
++          for row, rub in zip(json.loads(df.to_json(orient='records')), decoded)))
++    check('scalar_only_truth_schema', all(set(r) <= {'item_id', 'template_id', 'authored_by', 'authored_at',
++          'gt_value', 'gt_option_text', 'gt_option_index', 'evidence_source', 'evidence_quote', 'item_origin_id'} for r in decoded))
++    rep = read('structures_and_representatives.json')
++    raw_index = {r['item_id']: r for r in original}
++    check('representative_originals', all(raw_index[r['item_id']] == r for r in rep['rows']))
++    check('all_structure_coverage', len(rep['structures']) == expected['question_rubric_structures'] and
++          sum(s['n_rows'] for s in rep['structures']) == len(df))
++    check('structure_members_and_counterexamples', all(
++        (raw_index[i]['question'], sorted(json.loads(raw_index[i]['rubric_json']))) == (s['question'], s['rubric_keys'])
++        for s in rep['structures'] for i in s['representative_ids']))
++    judgments = read('judgment_tables.json')
++    check('four_tables_complete', len(judgments) == len(df) and len({r['item_id'] for r in judgments}) == len(df) and
++          {r['item_id'] for r in judgments} == set(df.item_id))
++    check('judgment_sources_and_splits', all(r['evidence_quote'] == json.loads(raw_index[r['item_id']]['rubric_json'])['evidence_quote']
++          and r['development_confirmation']['mr_rate_split'] == jj[r['item_id']]['mr_rate_split'] for r in judgments))
++    check('no_eligible_claim_from_missing_truth', all(not r['comparison_eligible'] and
++          r['sequence_truth']['sequence_keyed_truth_vector'] == '미제공' for r in judgments))
++    check('no_clinical_visibility_certification', all('미검증' in r['observation_link']['lesion_visible_in_render'] for r in judgments))
++    decision = read('decision.json')
++    check('negative_data_scope_and_no_model_claim', decision['data_result'] == 'negative_for_planned_comparison' and
++          not decision['valid_experiment'] and not decision['model_or_training_run'] and not decision['success_action_triggered'])
++    check('test_role_retained', not decision['exposure']['braintrace_test_converted_to_development'])
++    input_digests = {str(p): digest(p) for p in RESULT.glob('*.json') if p.name not in
++                     ['verification.json', 'completion.json']}
++    content = {'all_pass': True, 'checks': checks, 'n_checks': len(checks),
++               'verified_files': input_digests, 'code': execution['code'],
++               'finished_at': datetime.now(timezone.utc).isoformat(), 'wall_s': time.monotonic() - start,
++               'independence': 'production 감사기 import 없음; pandas parquet/CSV merge와 별도 집계',
++               'scope': '원행·통계·환자/study join·대표 원문 연결 검산; 임상 정답·영상 가시성 검증 아님'}
++    if (RESULT / 'verification.json').exists():
++        old = read('verification.json')
++        check('previous_verification_binding', old['all_pass'] and old['verified_files'] == input_digests and
++              old['code'] == execution['code'])
++    else:
++        write_once(RESULT / 'verification.json', content)
++    if args.seal:
++        if (RESULT / 'completion.json').exists():
++            old = read('completion.json')
++            for path, expected_sha in old['files'].items():
++                check('completion:' + path, digest(path) == expected_sha)
++        else:
++            check('human_report_exists', (RESULT / 'data_audit.md').exists())
++            write_once(RESULT / 'completion.json', {
++                'state': 'metadata_audit_complete', 'valid_experiment': False,
++                'decision': decision['decision'], 'self_check': 'PASS',
++                'finished_at': datetime.now(timezone.utc).isoformat(),
++                'verification_sha256': digest(RESULT / 'verification.json'),
++                'files': {str(p): digest(p) for p in RESULT.iterdir() if p.is_file()},
++                'code': execution['code'], 'gpu_requests': 0, 'mri_download_bytes': 0})
++    print(json.dumps({'all_pass': True, 'n_checks': len(checks), 'wall_s': time.monotonic() - start,
++                      'sealed': args.seal}))
++
++
++if __name__ == '__main__':
++    main()

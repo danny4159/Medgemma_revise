@@ -135,6 +135,7 @@
 - iter_127 [CONTINUE] (deep_medium/standard/normal) <MRI 해부학 관측 선택 대조: execution_failed> 💾20d8bff915b00d2c1578939e4b0a240ddfa85bac MR-RATE 기술8명 중 2명에 비뇌 T2가 연결돼 MedGemma 비교는 미실행이다. 같은 ZIP의 뇌 series는 확인됐으므로 입력 연결의 한정 수정을 권고하며 가설 판정은 유지한다. → 다음: 한정 보완을 권고한다. 같은 ZIP에서 실제 뇌 series가 확인됐으므로 입력 연결을 한 번 수정해 기존 비교를 완료하거나, 기술 조건이 성립하지 않으면 현재 설계를 보류하는 것으로 끝낸다. iter_125~127 계획과 원 결과를 보존하고 별도 계획에서 해부학 적합성 필터를 먼저 고정한다. 고정 환자·역할·보고서 정답을 유지하며 적격 뇌 T2 안에서 기존 spacing→voxel area→series_id 순서를 적용한다. 두 실패 사례만 임의 교체하지 말고 전체60명의 연결을 같은 규칙으로 확인한다. SynthSeg 실패·정확도·fallback을 선정 근거로 사용하지 않는다. 기술8명의 영상 연결과 공식 ICV/QC 검증이 성립하면 원 U/A·prompt·metric·성공 기준으로 기술 생성·처리량→calibration12→탐색40을 같은 조건부 실행에서 완료한다. 성립하지 않으면 추가 환경·prompt 순회나 감사 전용 반복 없이 보류한다.
 - iter_128 [CONTINUE] (deep_medium/standard/normal) <MRI 해부학 관측 선택 대조: abandon> 💾252dd607ec046ec7123f78ae1a832e06c8561293 MR-RATE T2 MRI 40명에서 균등·해부학 선택 모두 전원 양성 응답으로 BA0.50이었다. 현재 frozen 설계는 종료하며, 전문 부피 대조의 BA0.941은 완료35명에 한정된다. → 다음: 투자 보류·전환을 권고한다. 현재 frozen T2 설계는 종료하고, 전문 대안 이후의 잔여 가치가 있는 MRI 질문 또는 최소 적응 대조 하나를 다음 계획에서 선택한다. iter_123/124의 FLAIR 관찰과 이번 T2 관찰은 별도 조건으로 보존한다. 같은40명의 prompt·selector 순회나 S 누락 복구만을 위한 반복은 발주하지 않는다. 기존 자료·지원 조건으로 경쟁 설명을 구분할 개입, 강한 단순 대조, 결과별 종료 행동을 구체화할 때만 새 실제 비교를 승인하며, 성립하지 않으면 해당 후보를 보류한다.
 - iter_129 [CONTINUE] (deep_high/standard/normal) <MRI 정규화의 고정 응답 영향 대조: abandon> 💾4682b4bacadbaf12cf0f379f41a5a4fb1b9cb983 MR-RATE T2 개발40명에서 min–max 정규화도 전원 양성·BA0.50으로 판별을 회복하지 못했다. 현재 정규화 경로는 종료하며 MRI 전체 능력과 경량 적응은 미판정이다. → 다음: 투자 보류·전환을 권고한다. 정규화 단독 회복이 없으므로 현재 frozen T2 이진 설계를 종료하고, 전문 대안 이후의 중요한 잔여 가치가 있는 MRI 비교 하나를 선택하는 것으로 다음 계획을 끝낸다. iter_123/124의 FLAIR 관찰과 iter_128/129의 T2 관찰은 조건별로 보존한다. 최소 적응 대조를 선택하려면 어떤 경쟁 설명을 구분하고 단순 분류·전문 모델 대비 어떤 정확도·비용·질문 대응 가치를 평가할지 명시한다. 다른 MRI 질문을 선택하려면 실제 자료·정답 연결과 강한 단순 대조를 먼저 확인한다. 어느 쪽도 성립하지 않으면 후보를 보류하며 같은40명의 window·prompt·slice·threshold 순회, SynthSeg 누락 복구만을 위한 반복, 자동 LoRA 확대는 발주하지 않는다.
+- iter_130 [CONTINUE] (deep_medium/standard/normal) <MRI 다중 sequence 근거 연결 검토: abandon> 💾c71ad41d9563bc99a7627de31cf6268692163fef BrainTRACE L2.4 258행·187환자를 확인했지만 동일 병변의 sequence별 정답 연결이 부족해 현재 비교를 보류한다. 모델 실험은 미실행이며 MRI 능력은 미판정이다. → 다음: 투자 보류·전환을 권고한다. 현재 L2.4 준비 반복은 종료하고, 실제 정답·관측 연결과 강한 단순 대조가 성립하는 MRI 비교 하나를 선택하거나 근거 부족으로 보류하는 것으로 다음 계획을 끝낸다. 기존 iter_129 판단을 유지하며, 이미 확보한 자료와 관련 원 리뷰에서 다음 투자를 바꿀 경쟁 설명·최소 비교·결과별 종료 조건을 명시한다. L2.4 재개에는 동일 대상의 sequence별 원 정답과 관측 연결, 개발·독립 확인 구성이 달라졌다는 새 근거가 필요하다. 같은 40명의 prompt·window·slice 순회, 동일 metadata 재조회, 자동 LoRA 확대는 발주하지 않는다.
 
 ## 이전 목표들의 접근법 (참고용, 현재 목표의 재평가 횟수에는 안 들어감)
 
@@ -197,11 +198,12 @@
 - MRI 고정 응답의 타 계열 대조 [approach/mri-cross-model-response]: 1회 (iter_124), 유효한 실험 1회, 미분류 0회, 최근 판정: abandon, 커밋: a1a2743d0f29b0c6df592b97c572d03778b12b0d
 - MRI 해부학 관측 선택 대조 [approach/mri-anatomy-observation]: 4회 (iter_125, iter_126, iter_127, iter_128), 유효한 실험 1회, 미분류 0회, 최근 판정: abandon, 커밋: ffcd2a54f246bd0cc48973f0e4c68cdd26d5ca6b, 8c64058b193a9de4a594a3f371c9dba790fc2561, 20d8bff915b00d2c1578939e4b0a240ddfa85bac, 252dd607ec046ec7123f78ae1a832e06c8561293
 - MRI 정규화의 고정 응답 영향 대조 [approach/mri-normalization-control]: 1회 (iter_129), 유효한 실험 1회, 미분류 0회, 최근 판정: abandon, 커밋: 4682b4bacadbaf12cf0f379f41a5a4fb1b9cb983
+- MRI 다중 sequence 근거 연결 검토 [approach/mri-sequence-binding]: 1회 (iter_130), 유효한 실험 0회, 미분류 0회, 최근 판정: abandon, 커밋: c71ad41d9563bc99a7627de31cf6268692163fef
 
-현재 연구 브랜치: approach/mri-normalization-control (코드 위치: /SSD1_1TB/home/milab/daniel/08_medgemma/research)
+현재 연구 브랜치: approach/mri-sequence-binding (코드 위치: /SSD1_1TB/home/milab/daniel/08_medgemma/research)
 
 ### 최근 계획의 대안 순위
 
-1. MRI 정규화의 고정 응답 영향 대조: 실제 코드와 공식 기술 보고서 사이의 확인된 입력 차이를 한 번의 동일 환자 비교로 분리한다.
-2. 최소 직접 적응 대조: SFT와 같은 입력의 encoder+head로 판별 회복을 비교할 수 있으나, 입력 처리 차이와 전문 대안 이후의 가치가 정리되지 않아 이번에는 보류한다.
-3. 다른 MRI 질문 선택: 다중 sequence의 정보 필요성을 평가하는 방향은 가능하지만, 현재 확보 자료에서 정답·관측 관계와 전문 대안 이후의 잔여 조건을 먼저 구체화해야 한다.
+1. MRI 다중 sequence 근거 연결 검토: 정확한 공개 parquet를 한 번 확보하여 비교의 성립 여부를 결정한다.
+2. 현재 MRI 후보 투자 보류: 확보 또는 연결 실패 시 추가 준비·학습 없이 관찰을 보존한다.
+3. T2 최소 직접 적응 대조: 적응 가능성은 볼 수 있지만 전문 대안 이후의 추가 가치가 불명확해 현재 보류한다.
