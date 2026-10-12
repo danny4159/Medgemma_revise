@@ -1,0 +1,2142 @@
+diff --git a/mr128_analysis.py b/mr128_analysis.py
+new file mode 100644
+index 0000000..70dabab
+--- /dev/null
++++ b/mr128_analysis.py
+@@ -0,0 +1,105 @@
++"""calibration12 잠금과 탐색40의 원 계획 지표·비용·종료 판정."""
++import argparse
++from collections import Counter
++from pathlib import Path
++import numpy as np
++from mr128_data import OUT,read,save,sha,verify_files,utc
++from mr128_eval import calibrate,metrics,paired_ci,auroc,decision,states
++from mr128_gen import verify
++
++
++def calibrate_stage():
++    manifest=read(OUT/'evaluation_manifest.json')['records'];rows=[];builds={};missing=[]
++    for m in manifest:
++        if m['role']!='calib':continue
++        p=OUT/'build/remaining'/(m['study_uid']+'.json');b=read(p);builds[str(p)]=sha(p)
++        if b['S'] is None:missing.append(m['study_uid'])
++        else:rows.append(dict(**m,S=b['S']))
++    if len(rows)+len(missing)!=12:raise ValueError('calibration12 set')
++    result=calibrate(rows) if not missing else None
++    # 누락 calibration을 이용한 새로운 보조 threshold를 임의로 적합하지 않는다.
++    candidate=dict(result=result,missing=missing,complete=not missing,
++         manifest_sha256=sha(OUT/'evaluation_manifest.json'),builds=builds,
++         evaluation_lock_sha256=sha(OUT/'evaluation_lock_v2.json'),source_sha256=sha(__file__),
++         before_main_VLM_generation=True,VLM_calibration_requests=0)
++    if (OUT/'calibration_lock.json').exists():
++        previous=read(OUT/'calibration_lock.json')
++        if {k:previous[k] for k in candidate}!=candidate:raise ValueError('calibration reuse differs')
++    else:save(OUT/'calibration_lock.json',dict(created_utc=utc(),**candidate))
++    print('calibration complete',not missing,'threshold',None if result is None else result['chosen']['threshold'])
++
++
++def analyze():
++    cal=read(OUT/'calibration_lock.json');verify_files(cal['builds'])
++    verify_files(read(OUT/'evaluation_lock_v2.json')['code'])
++    comp=read(OUT/'gen/main/completion.json');verify_files(comp['artifacts'])
++    requests,outputs=verify(OUT/'gen/main');lookup={r['id']:r for r in outputs}
++    if len(outputs)!=len(requests) or len(requests)!=80:raise ValueError('main expected80')
++    if len(outputs)!=80 or len({r['id'] for r in outputs})!=80:raise ValueError('main incomplete')
++    bykey={(r['study_uid'],r['cond']):lookup[r['id']] for r in requests}
++    manifest=[m for m in read(OUT/'evaluation_manifest.json')['records'] if m['role']=='explore'];rows=[];builds={}
++    threshold=cal['result']['chosen']['threshold'] if cal['complete'] else None
++    for m in manifest:
++        study=m['study_uid'];p=OUT/'build/remaining'/(study+'.json');b=read(p);builds[str(p)]=sha(p)
++        U,uc=states(bykey[(study,'U')]['text'],bykey[(study,'U')]['eos'])
++        A,ac=states(bykey[(study,'A')]['text'],bykey[(study,'A')]['eos'])
++        S=b['S'];sp='PRESENT' if S is not None and threshold is not None and S>=threshold else 'ABSENT' if S is not None and threshold is not None else None
++        rows.append(dict(**m,U=U,A=A,U_parse_code=uc,A_parse_code=ac,S=S,S_state=sp,
++             A_fallback=b['A_fallback'],A_idx=b['A_idx'],U_idx=b['U_idx'],
++             U_request=bykey[(study,'U')]['id'],A_request=bykey[(study,'A')]['id']))
++    if len(rows)!=40 or len({r['patient_uid'] for r in rows})!=40:raise ValueError('explore40')
++    y=[int(r['label']=='positive') for r in rows]
++    U=metrics(y,[r['U'] for r in rows]);A=metrics(y,[r['A'] for r in rows]);delta=paired_ci(rows,'A','U')
++    avail=[r for r in rows if r['S'] is not None];S_complete=len(avail)==40 and cal['complete']
++    S=metrics(y,[r['S_state'] for r in rows]) if S_complete else None
++    Savailable=metrics([int(r['label']=='positive') for r in avail],[r['S_state'] for r in avail]) if threshold is not None and avail else None
++    roc=auroc([int(r['label']=='positive') for r in avail],[r['S'] for r in avail]) if avail else None
++    Sdiff={k:paired_ci(rows,'S_state',k) for k in ['U','A']} if S_complete else None
++    available_diff={k:paired_ci(avail,'S_state',k) for k in ['U','A']} if threshold is not None and avail and len({r['label'] for r in avail})==2 else None
++    # 실행한 warm 구간은 원 NIfTI 읽기→마지막 답 저장을 포함한다.
++    events=[read(p) for p in (OUT/'gen/main').glob('*.worker*.events.json')]
++    groups=[g for e in events for g in e['groups']];group_lookup={i:g for g in groups for i in g['ids']}
++    if set(group_lookup)!={r['id'] for r in requests}:raise ValueError('cost sidecar missing/extra requests')
++    costs=[]
++    for r in rows:
++        study=r['study_uid'];b=read(OUT/'build/remaining'/(study+'.json'))
++        tpath=OUT/'seg/remaining'/(study+'.timing.json');timing=read(tpath) if tpath.exists() else None
++        warmS=timing['warm_raw_read_to_S_answer_saved_s'] if timing else None
++        coldS=timing['cold_subprocess_to_S_answer_saved_s'] if timing else None
++        ug=group_lookup[r['U_request']];ag=group_lookup[r['A_request']]
++        u=ug['end_after_saved']-ug['start'];a=ag['end_after_saved']-ag['start']
++        warmA=warmS+b['warm_read_to_saved_s']+a if warmS is not None else None
++        costs.append(dict(study_uid=study,U_warm_raw_to_answer_s=u,A_VLM_warm_raw_to_answer_s=a,
++             S_warm_raw_to_score_answer_s=warmS,S_cold_to_score_answer_s=coldS,
++             A_mask_restore_render_s=b['warm_read_to_saved_s'],A_independent_warm_component_sum_s=warmA,
++             A_extra_after_shared_S_s=b['warm_read_to_saved_s']+a,
++             shared_S_once_s=warmS,A_fallback=r['A_fallback']))
++    measured=[c for c in costs if c['S_warm_raw_to_score_answer_s'] is not None]
++    cost_complete=len(measured)==40
++    S_cost=float(np.mean([c['S_warm_raw_to_score_answer_s'] for c in measured])) if cost_complete else None
++    A_cost=float(np.mean([c['A_independent_warm_component_sum_s'] for c in measured])) if cost_complete else None
++    investment=decision(U,A,S,delta,S_complete,A_cost,S_cost)
++    report=dict(created_utc=utc(),n=40,positive_n=sum(y),negative_n=40-sum(y),U=U,A=A,
++         A_minus_U=delta,S_complete=S_complete,S=S,S_available_n=len(avail),S_available_metrics=Savailable,
++         S_AUROC_available=roc,S_minus= Sdiff,calibration=cal,decision=investment,
++         S_available_minus=available_diff,S_available_comparison_scope='available-case supplementary; not primary40 or alternative sufficiency',
++         fallback_n=sum(r['A_fallback'] is not None for r in rows),selector_success_n=sum(r['A_fallback'] is None for r in rows),
++         transitions=dict(Counter(r['U']+' -> '+r['A'] for r in rows)),
++         format_counts={k:dict(Counter(r[k+'_parse_code'] for r in rows)) for k in ['U','A']},
++         costs=dict(complete=cost_complete,S_warm_mean_s=S_cost,A_independent_warm_component_sum_mean_s=A_cost,
++              U_warm_mean_s=float(np.mean([c['U_warm_raw_to_answer_s'] for c in costs])),
++              A_extra_after_shared_S_mean_s=float(np.mean([c['A_extra_after_shared_S_s'] for c in costs])),
++              note_ko='A 독립 비용은 실제 측정한 S warm+mask 복원/render+VLM 구간의 합이다. 연속 단일 프로세스 latency나 steady-state로 측정한 값은 아니다. 검증·중복 원영상 읽기 비용을 포함한다. S/A를 함께 서비스하면 S 전처리는 한 번 공유한다.',
++              model_load_s=[e['load_s'] for e in events]),
++         provenance=dict(main_completion_sha256=sha(OUT/'gen/main/completion.json'),
++              calibration_sha256=sha(OUT/'calibration_lock.json'),evaluation_lock_sha256=sha(OUT/'evaluation_lock_v2.json'),
++              main_requests_sha256=sha(OUT/'explore_requests.json'),builds=builds,
++              all_inputs_sha256=sha(OUT/'all_inputs.json'),source_sha256=sha(__file__)),
++         scope_ko='공식 train 개발40명의 보고서 일치도. 임상 진단 정확도, 외부 일반화, 내부 원인이나 신규 기여를 증명하지 않는다.')
++    save(OUT/'eval/per_patient.json',rows);save(OUT/'eval/per_patient_costs.json',costs);save(OUT/'eval/report.json',report)
++    print('report',U['BA'],A['BA'],None if S is None else S['BA'],investment['investment'])
++
++
++if __name__=='__main__':
++    ap=argparse.ArgumentParser();ap.add_argument('action',choices=['calibrate','analyze']);a=ap.parse_args()
++    calibrate_stage() if a.action=='calibrate' else analyze()
+diff --git a/mr128_anatomy.py b/mr128_anatomy.py
+new file mode 100644
+index 0000000..1e941da
+--- /dev/null
++++ b/mr128_anatomy.py
+@@ -0,0 +1,65 @@
++"""실제 반환된 11개 전체-slice 영상의 해부학 감사 기록과 기술 입력 고정."""
++from collections import defaultdict
++from pathlib import Path
++import nibabel as nib
++import numpy as np
++from PIL import Image, ImageDraw
++import mr123_data as D
++from mr128_data import OUT, read, save, sha, verify_files, utc
++
++# 영상 전체를 view_image로 반환받아 확인한 뒤 기록. 확장 여부는 판정하지 않음.
++JUDGMENTS = {
++ '44dc9047ce42':('eligible',[4,12,20,24],'하부 소뇌/뇌간에서 양측 대뇌와 vertex까지 연속 관측.'),
++ 'd2e39b0f5ab4':('excluded',[0,16,32,39],'경부·척수 중심. 마지막 일부 하부 뇌만 포함하며 양측 대뇌 coverage 없음.'),
++ '05fe486e02c0':('eligible',[2,12,24,29],'소뇌/뇌간, 양측 대뇌, 상부 대뇌·vertex의 연속 coverage.'),
++ '658bd95b7afd':('eligible',[4,16,28,35],'하부 뇌부터 양측 대뇌와 vertex까지 연속 coverage.'),
++ 'e1a69a01f472':('excluded',[0,16,32,42],'몸통·척추 중심. 두개 내 양측 대뇌가 없음.'),
++ '71eff20b8cb9':('eligible',[6,18,30,38],'소뇌/뇌간에서 양측 대뇌와 vertex까지 연속 coverage.'),
++ '20fac58bfd0e':('eligible',[4,12,20,25],'하부 뇌부터 양측 대뇌와 vertex까지 연속 coverage.'),
++ '152f28de2ab5':('excluded',[0,16,32,39],'몸통·척추 중심. 두개 내 양측 대뇌가 없음.'),
++ 'b076ca298c46':('eligible',[5,12,18,23],'하부 뇌부터 양측 대뇌와 상부 vertex까지 연속 coverage.'),
++ '5a75100453b2':('eligible',[4,14,24,31],'하부 뇌부터 양측 대뇌와 vertex까지 연속 coverage.'),
++ 'ad7188716419':('eligible',[4,12,20,24],'하부 뇌부터 양측 대뇌와 vertex까지 연속 coverage.'),
++}
++
++
++def main():
++    candidates=read(OUT/'tech_candidates.json')
++    if candidates['protocol_sha256']!=sha(OUT/'protocol.json'): raise ValueError('protocol')
++    if set(JUDGMENTS)!={r['blind_id'] for r in candidates['records']}: raise ValueError('judgment completeness')
++    groups=defaultdict(list); reviewed=[]
++    for r in candidates['records']:
++        verify_files({r['montage']:r['montage_sha256']})
++        verify_files({v['path']:v['sha256'] for v in r['input']['files'].values()})
++        decision,indices,reason=JUDGMENTS[r['blind_id']]
++        reviewed.append(dict(blind_id=r['blind_id'],decision=decision,evidence_indices=indices,
++           reason_ko=reason,reviewed_utc=utc(),evidence_image=r['montage'],evidence_sha256=r['montage_sha256'],
++           actual_image_returned=True,tool='functions.exec -> tools.view_image -> image(image_url)',
++           scope='해부학 및 coverage 입력 감사. 측뇌실 확장 여부나 임상 정답 판정 아님.'))
++        groups[r['metadata']['study_uid']].append(r)
++    save(OUT/'anatomy_judgments.json',dict(candidates_sha256=sha(OUT/'tech_candidates.json'),judgments=reviewed))
++    prior=read('results/iter_127/data/selection_lock.json')['manifest']; inputs={}; changes=[]
++    for study,rows in groups.items():
++        rank=lambda r:(r['input']['spacing'][2],r['input']['spacing'][0]*r['input']['spacing'][1],r['metadata']['series_id'])
++        ordered=sorted(rows,key=rank)
++        eligible=[r for r in ordered if JUDGMENTS[r['blind_id']][0]=='eligible']
++        if not eligible: raise ValueError(f'no eligible series: {study}')
++        r=eligible[0]; c=r['input']; m=next(m for m in prior if m['study_uid']==study)
++        a,b,info=D.load_case(c['files']['img.nii.gz']['path'],c['files']['brain.nii.gz']['path'])
++        br=D.brain_range(b)
++        if br is None: raise ValueError('brain mask range')
++        u=D.pick(*br,0.05,0.95)
++        if len(set(u))!=8: raise ValueError('U lacks unique 8 slices')
++        if info['canon_axcodes']!='RAS' or not info['affine_match']: raise ValueError('canonical grid')
++        inputs[study]=dict(**c,brain_range=list(br),U_idx=u,blind_id=r['blind_id'])
++        changes.append(dict(study_uid=study,previous_series=m['series_id'],selected_series=r['metadata']['series_id'],
++             changed=m['series_id']!=r['metadata']['series_id'],ranked_candidates=[dict(series=v['metadata']['series_id'],
++             blind_id=v['blind_id'],decision=JUDGMENTS[v['blind_id']][0],reason=JUDGMENTS[v['blind_id']][2]) for v in ordered]))
++    if len(inputs)!=8: raise ValueError('expected technical8')
++    save(OUT/'tech_inputs.json',dict(protocol_sha256=sha(OUT/'protocol.json'),
++         selection_sha256=sha('results/iter_127/data/selection_lock.json'),
++         judgment_sha256=sha(OUT/'anatomy_judgments.json'),inputs=inputs,series_diff=changes))
++    print('tech anatomy: eligible8; excluded candidate series3; series corrections',sum(c['changed'] for c in changes))
++
++
++if __name__=='__main__': main()
+diff --git a/mr128_archive.py b/mr128_archive.py
+new file mode 100644
+index 0000000..4b9fab6
+--- /dev/null
++++ b/mr128_archive.py
+@@ -0,0 +1,64 @@
++"""실행 종료 후 원 기록 불변성과 결과·소스 연결을 확인해 보존한다."""
++import ast
++from collections import Counter
++from pathlib import Path
++import subprocess
++import psutil
++from mr128_data import OUT,read,save,sha,verify_files,utc
++
++
++def main():
++    completed=read(OUT/'pipeline_complete.json');verify_files(completed['artifacts'])
++    verification=read(OUT/'eval/independent_verify.json')
++    if not completed['checks_passed'] or not verification['all_pass']:raise ValueError('final numerical verification incomplete')
++    protocol=read(OUT/'protocol.json')
++    for key in ['inputs','preserved_results','source_before']:verify_files(protocol[key])
++    baseline=read('../agent/runs/iter_128/code_baseline.json')
++    changed=[p for p,v in baseline['files'].items() if not Path(p).is_file() or sha(p)!=v['hash']]
++    if changed:raise ValueError('existing code changed: '+str(changed))
++    current_sha=subprocess.check_output(['git','rev-parse','HEAD'],text=True).strip()
++    if current_sha!=baseline['sha']:raise ValueError('unexpected Git history mutation')
++    locks=['evaluation_lock_v2.json','main_analysis_lock.json']
++    for p in locks:
++        lock=read(OUT/p);verify_files(lock['code'])
++        if 'inputs' in lock:verify_files(lock['inputs'])
++    inputs=read(OUT/'all_inputs.json')
++    input_files={v['path']:v['sha256'] for r in inputs['inputs'].values() for v in r['files'].values()}
++    verify_files(input_files)
++    builds=[read(p) for stage in ['tech','remaining'] for p in (OUT/'build'/stage).glob('*.json')]
++    pngs={v['path']:v['sha256'] for b in builds for v in b['pngs'].values()};verify_files(pngs)
++    for b in builds:
++        if b.get('seg_completion'):verify_files(b['seg_completion']['result']['artifacts'])
++    sources={str(p):sha(p) for p in sorted(Path('.').glob('*mr128*.py'))}
++    for p in sources:ast.parse(Path(p).read_text())
++    main_config=read(OUT/'gen/main/config.json')
++    owned_pids=[]
++    for p in (OUT/'gen/main').glob('*.launch.json'):
++        launch=read(p);owned_pids.extend(launch['pids']+[launch['supervisor_pid']])
++    if any(psutil.pid_exists(pid) and psutil.Process(pid).status()!=psutil.STATUS_ZOMBIE for pid in owned_pids):raise ValueError('owned generation process still active')
++    failures=[dict(study_uid=p.name.split('.')[0],**read(p)) for p in sorted((OUT/'seg/remaining').glob('*.failure.json'))]
++    manifest=read(OUT/'evaluation_manifest.json')['records']
++    report=read(OUT/'eval/report.json')
++    limitations=[]
++    if failures:limitations.append('남은52명 공식 SynthSeg 중 개별 cuDNN scratch allocation 실패. 사전 U fallback과 S 누락을 적용했으며 전문 대안 충분성은 미판정.')
++    pilot=read(OUT/'pilot_comparison.json')
++    pilot_unmeasured='별도 수집하지 않았다' in pilot['b1']['CPU_RAM_IO_note_ko']
++    if pilot_unmeasured:limitations.append('기술 batch 비교의 시스템 CPU/RAM/I/O 세부 peak 미계측. 본80건의 telemetry로 소급 대체하지 않음.')
++    limitations.append('현재40명은 공식 train 개발 자료의 보고서 일치도이며 독립 영상 진단 정답·외부 환자·새 모델·학습 방법은 미검증.')
++    artifacts={str(p):sha(p) for p in sorted(OUT.rglob('*')) if p.is_file() and not p.name.endswith('.lock') and not p.name.startswith('.')}
++    self_check='FAIL' if failures or pilot_unmeasured else 'PASS'
++    save(OUT/'completion.json',dict(created_utc=utc(),status='completed_with_documented_failures' if failures else 'completed',
++         plan_scope_completed=True,valid_U_A_report_agreement_comparison=True,independent_verification_passed=True,
++         self_check=self_check,limitations=limitations,
++         reached_stage='possibility_exploration_40',roles=dict(Counter(r['role'] for r in manifest)),
++         patients=len(manifest),fixed_selection_preserved=True,series_changes=read(OUT/'all_anatomy_gate.json').get('series_diff'),
++         main_requests=80,pilot_requests=32,training_updates=0,official_segmentation_attempts=len(builds),
++         official_segmentation_failure_n=len(failures),failures=failures,
++         results=report['decision'],artifacts=artifacts,sources=sources,
++         external_input_files=input_files,external_png_files=pngs,
++         preserved_previous_results=protocol['preserved_results'],code_baseline_sha=baseline['sha'],existing_source_files_unchanged=len(baseline['files']),
++         source_sha256=sha(__file__),git_commit_push_performed=False,owned_generation_pids_exited=owned_pids))
++    print('archived',len(artifacts),'artifacts;',len(sources),'sources; SELF_CHECK',self_check)
++
++
++if __name__=='__main__':main()
+diff --git a/mr128_build.py b/mr128_build.py
+new file mode 100644
+index 0000000..1af730f
+--- /dev/null
++++ b/mr128_build.py
+@@ -0,0 +1,98 @@
++"""공식 부피/ICV와 native 격자 nearest-neighbor에 연결한 고정 U/A 입력."""
++import argparse
++from pathlib import Path
++import time
++
++import nibabel as nib
++from nibabel.processing import resample_from_to
++import numpy as np
++from PIL import Image
++import mr123_data as D
++from mr128_data import OUT, ROOT, read, save, sha, verify_files
++
++PROMPT = 'You are shown 8 axial T2-weighted slices from one brain MRI examination, ordered from inferior to superior. Is there evidence of enlargement of both lateral ventricles in the images shown? Answer on the first line with exactly one word: PRESENT, ABSENT, or UNCERTAIN. Then give a brief justification in at most two sentences.'
++
++
++def independent_nn(data, affine, shape, target_affine):
++    """scipy를 호출하지 않는 world 좌표 기준 독립 nearest-neighbor 검산."""
++    transform=np.linalg.solve(affine,target_affine)
++    output=np.zeros(shape,dtype=data.dtype)
++    xy=np.indices(shape[:2],dtype=float).reshape(2,-1)
++    for k in range(shape[2]):
++        points=np.vstack([xy,np.full(xy.shape[1],k),np.ones(xy.shape[1])])
++        coords=(transform@points)[:3]
++        inside=np.all((coords>=0)&(coords<=np.array(data.shape)[:,None]-1),axis=0)
++        q=np.floor(coords[:,inside]+0.5).astype(int)
++        plane=np.zeros(xy.shape[1],dtype=data.dtype)
++        plane[inside]=data[q[0],q[1],q[2]]
++        output[:,:,k]=plane.reshape(shape[:2])
++    return output
++
++
++def build(study,inputs,completion,stage):
++    t0=time.monotonic(); c=inputs['inputs'][study]
++    verify_files({v['path']:v['sha256'] for v in c['files'].values()})
++    verify_files(completion['result']['artifacts'])
++    result_path=OUT/'build'/stage/(study+'.json')
++    if result_path.exists():
++        previous=read(result_path)
++        if previous['source_input']!=c or previous['seg_completion']!=completion:raise ValueError('stale build input/config')
++        verify_files({v['path']:v['sha256'] for v in previous['pngs'].values()})
++        verify_files({previous['overlay']:previous['overlay_sha256']})
++        return previous
++    im=nib.load(c['files']['img.nii.gz']['path']); bm=nib.load(c['files']['brain.nii.gz']['path'])
++    seg=nib.load(Path(completion['directory'])/'seg.nii.gz')
++    native=np.asarray(resample_from_to(seg,(im.shape,im.affine),order=0,mode='constant',cval=0).dataobj)
++    reference=independent_nn(np.asarray(seg.dataobj),seg.affine,im.shape,im.affine)
++    mismatch=int(np.count_nonzero(native!=reference))
++    if mismatch: raise ValueError(f'independent nearest neighbor mismatch {study}: {mismatch}')
++    ic=nib.as_closest_canonical(im); bc=nib.as_closest_canonical(bm)
++    sc=nib.as_closest_canonical(nib.Nifti1Image(native,im.affine))
++    a=np.asarray(ic.dataobj,dtype=np.float32); b=np.asarray(bc.dataobj)>0; s=np.asarray(sc.dataobj)
++    if nib.aff2axcodes(ic.affine)!=('R','A','S') or not np.isfinite(a).all():raise ValueError('RAS/finite')
++    br=D.brain_range(b); U=D.pick(*br,0.05,0.95)
++    if U!=c['U_idx'] or len(set(U))!=8:raise ValueError('U changed/lacks 8 slices')
++    area=np.sum(np.isin(s,[4,43]),axis=(0,1)); fallback=None; A=None; arange=None
++    if area.max()>0:
++        keep=np.flatnonzero(area>=0.05*area.max()); arange=[int(keep.min()),int(keep.max())]
++        A=np.rint(np.linspace(*arange,8)).astype(int).tolist()
++        if len(set(A))!=8:A=None;fallback='lt8_unique'
++    else:fallback='no_ventricle_voxels'
++    if A is None:A=U.copy()
++    lo,hi=D.intensity_window(a,b)
++    if not np.isfinite([lo,hi]).all() or hi<=lo:raise ValueError('window')
++    pngs={}; path=ROOT/'png'/stage/study;path.mkdir(parents=True,exist_ok=True)
++    for k in sorted(set(U+A)):
++        p=path/f's{k:03d}.png'; image=D.render_slice(a,k,lo,hi,ic.header.get_zooms()[:3])
++        if p.exists():
++            with Image.open(p) as old:
++                if not np.array_equal(np.asarray(old.convert('RGB')),np.asarray(image)):raise ValueError('stale render')
++        else:
++            tmp=p.with_name(p.stem+'.part.png');image.save(tmp)
++            __import__('os').link(tmp,p);tmp.unlink()
++        pngs[str(k)]=dict(path=str(p),sha256=sha(p))
++    overlay_path=OUT/'overlays'/stage/f'{study}.png';overlay_path.parent.mkdir(parents=True,exist_ok=True)
++    canvas=Image.new('RGB',(896,448))
++    for i,k in enumerate(A):
++        base=np.array(D.render_slice(a,k,lo,hi,ic.header.get_zooms()[:3]))
++        mask=np.array(D.render_slice(np.isin(s,[4,43]).astype(np.float32),k,0,1,ic.header.get_zooms()[:3]))[:,:,0]>127
++        base[mask]=[255,80,20];canvas.paste(Image.fromarray(base).resize((224,224)),(i%4*224,i//4*224))
++    if not overlay_path.exists():canvas.save(overlay_path)
++    vol=completion['result']['volumes_mm3'];vent=vol['left lateral ventricle']+vol['right lateral ventricle'];icv=vol['total intracranial']
++    result=dict(study_uid=study,series_id=c['key']['series_id'],U_idx=U,A_idx=A,A_range=arange,A_fallback=fallback,
++       S=vent/icv,vent_mm3=vent,icv_mm3=icv,icv_source='official soft posterior volume CSV',
++       window_p1_p99=[lo,hi],pngs=pngs,canonical_affine=ic.affine.tolist(),canonical_shape=list(a.shape),
++       source_input=c,seg_completion=completion,nn_mismatches=mismatch,
++       overlay=str(overlay_path),overlay_sha256=sha(overlay_path),warm_read_to_saved_s=time.monotonic()-t0)
++    result['code_sha256']=sha(__file__)
++    save(result_path,result);print('built',study,'fallback',fallback,flush=True)
++    return result
++
++
++if __name__=='__main__':
++    ap=argparse.ArgumentParser();ap.add_argument('--stage',default='tech');ap.add_argument('--inputs',default=str(OUT/'tech_inputs.json'));a=ap.parse_args()
++    inp=read(a.inputs)
++    for study in sorted(inp['inputs']):
++        p=OUT/'seg'/a.stage/(study+'.complete.json')
++        if not p.exists():raise ValueError(f'incomplete official output: {study}')
++        build(study,inp,read(p),a.stage)
+diff --git a/mr128_data.py b/mr128_data.py
+new file mode 100644
+index 0000000..d0b5e3a
+--- /dev/null
++++ b/mr128_data.py
+@@ -0,0 +1,194 @@
++"""iter128: 고정 환자의 출력 독립 뇌 series 감사와 안전한 입력 추출."""
++import argparse
++import fcntl
++import hashlib
++import json
++import os
++from pathlib import Path
++import shutil
++import time
++import uuid
++import zipfile
++
++import nibabel as nib
++import numpy as np
++import pandas as pd
++from PIL import Image, ImageDraw
++import mr123_data as D
++
++OUT = Path('results/iter_128')
++ROOT = Path('/home/test/.local/share/medgemma/mr_rate/iter128')
++META = ROOT.parent / 'meta'
++REV = 'f6e39794e7820c96c18465231a30da424e6d1c69'
++
++
++def sha(p):
++    h = hashlib.sha256()
++    with open(p, 'rb') as f:
++        for b in iter(lambda: f.read(4 << 20), b''): h.update(b)
++    return h.hexdigest()
++
++
++def read(p):
++    def pairs(items):
++        d = {}
++        for k, v in items:
++            if k in d: raise ValueError(f'duplicate key: {k}')
++            d[k] = v
++        return d
++    return json.loads(Path(p).read_text(), object_pairs_hook=pairs)
++
++
++def utc():
++    return time.strftime('%Y-%m-%dT%H:%M:%SZ', time.gmtime())
++
++
++def save(p, value):
++    """원자적 배타 생성. 기존 동일 내용만 재사용, 다른 내용은 거부."""
++    p = Path(p); p.parent.mkdir(parents=True, exist_ok=True)
++    data = json.dumps(value, ensure_ascii=False, indent=2, allow_nan=False).encode()
++    if p.exists():
++        if p.read_bytes() != data: raise ValueError(f'existing output differs: {p}')
++        return
++    tmp = p.with_name(p.name + '.' + uuid.uuid4().hex + '.part')
++    with tmp.open('xb') as f: f.write(data); f.flush(); os.fsync(f.fileno())
++    os.link(tmp, p)
++    tmp.unlink()
++
++
++def verify_files(d):
++    for p, h in d.items():
++        if sha(p) != h: raise ValueError(f'digest mismatch: {p}')
++
++
++def init():
++    if (OUT/'protocol.json').exists():
++        p = read(OUT/'protocol.json'); verify_files(p['inputs']); verify_files(p['source_before']); return
++    before = {}
++    for directory in ['results/iter_125','results/iter_126','results/iter_127']:
++        before.update({str(p):sha(p) for p in Path(directory).rglob('*') if p.is_file()})
++    prov = read('results/iter_127/data/provenance.json')
++    verify_files(prov['inputs'])
++    comp = read('results/iter_127/completion.json')
++    # 원 completion의 schema를 그대로 보존하며 모든 과거 결과도 별도 잠금한다.
++    files = dict(prov['inputs'])
++    for i in [125,126,127,128]:
++        for name in ['plan.md','plan.json']:
++            p = f'../agent/runs/iter_{i}/'+name; files[p] = sha(p)
++    for p in ['results/iter_127/data/selection_lock.json','results/iter_127/data/budget_lock.json',
++              'results/iter_127/fs_assets.json','results/iter_127/environment_record.json',
++              '../agent/runs/iter_125/reuse_manifest.json']:
++        files[p] = sha(p)
++    fs = read('results/iter_127/fs_assets.json'); verify_files(fs['files'])
++    save(OUT/'protocol.json', dict(created_utc=utc(), revision=REV, inputs=files,
++         preserved_results=before, source_before={p:sha(p) for p in ['mr123_data.py','mr125_build.py','mr127_seg.py','mr127_seg_entry.py','mr127_verify_selection.py']},
++         source_current={__file__:sha(__file__)}, rules=dict(
++         eligible='두개 내 양측 대뇌, 하부 뇌부터 상부 대뇌까지 연속 coverage. 3D/finite/affine/brain-grid 검증.',
++         excluded='몸통/경부/척수 중심, localizer, 뇌 일부만 포함한 명백한 제한 coverage, 파일/격자 오류.',
++         uncertain='부위 또는 coverage 판정 불확실. 적격 승격 금지.',
++         ranking=['slice_spacing','in_plane_voxel_area','series_id'],
++         blind_fields=['report','label','role','prior_segmentation','performance'],
++         no_clinical_ground_truth=True),
++         stage_order=['tech_anatomy','tech_synthseg','all_anatomy','tech_generation','calibration','explore'],
++         fixed_patient_count=60, fixed_roles={'tech':8,'calibration':12,'explore':40},
++         seg_version='FreeSurfer SynthSeg2.0 default --vol --qc --noaddctab',
++         calibration_rule={'candidates':'0, adjacent distinct score midpoints, nextafter(max,+inf)',
++                           'positive_operator':'>=', 'tie_break':['BA','specificity','larger_threshold']},
++         stop_rule='적격 입력 또는 공식 기술 조건이 성립하지 않으면 현재 설계를 보류. 추가 환자·환경·prompt 탐색 없음.'))
++    print('protocol locked', sha(OUT/'protocol.json'), flush=True)
++
++
++def extract(zip_path, study, series):
++    directory = ROOT/'inputs'/study/series
++    directory.mkdir(parents=True, exist_ok=True)
++    lock_path = directory/'extract.lock'
++    with lock_path.open('a') as lock:
++        fcntl.flock(lock, fcntl.LOCK_EX|fcntl.LOCK_NB)
++        digest = sha(zip_path)
++        expected = {f'{study}/img/{study}_{series}.nii.gz':'img.nii.gz',
++                    f'{study}/seg/{study}_{series}_brain-mask.nii.gz':'brain.nii.gz'}
++        key = dict(zip_sha256=digest, revision=REV, study_uid=study, series_id=series, members=expected)
++        if (directory/'complete.json').exists():
++            c = read(directory/'complete.json')
++            if c['key'] != key: raise ValueError('stale extraction cache')
++            verify_files({v['path']:v['sha256'] for v in c['files'].values()}); return c
++        files = {}
++        with zipfile.ZipFile(zip_path) as z:
++            for member, name in expected.items():
++                found = [i for i in z.infolist() if i.filename == member]
++                if len(found) != 1: raise ValueError(f'missing/duplicate ZIP member: {member}')
++                info = found[0]
++                if '..' in Path(member).parts or Path(member).is_absolute() or (info.external_attr>>16)&0o170000 == 0o120000:
++                    raise ValueError('unsafe ZIP member')
++                dst = directory/name
++                tmp = directory/(name+'.'+uuid.uuid4().hex+'.part')
++                with z.open(info) as s, tmp.open('xb') as f: shutil.copyfileobj(s, f); f.flush(); os.fsync(f.fileno())
++                if tmp.stat().st_size != info.file_size: raise ValueError('size mismatch')
++                h = sha(tmp)
++                if dst.exists():
++                    if dst.is_symlink() or sha(dst) != h: raise ValueError('partial extraction conflicts')
++                    tmp.unlink()
++                else: os.link(tmp, dst); tmp.unlink()
++                files[name] = dict(path=str(dst),sha256=h,size=info.file_size,member=member,crc=info.CRC)
++        image = nib.load(files['img.nii.gz']['path']); brain = nib.load(files['brain.nii.gz']['path'])
++        if len(image.shape)!=3 or image.shape!=brain.shape or not np.allclose(image.affine,brain.affine,atol=1e-3): raise ValueError('image/mask grid')
++        if not np.isfinite(image.get_fdata()).all() or not np.isfinite(brain.get_fdata()).all(): raise ValueError('nonfinite')
++        if not np.isfinite(image.affine).all() or abs(np.linalg.det(image.affine[:3,:3]))<1e-8: raise ValueError('affine')
++        c = dict(key=key,files=files,shape=list(image.shape),affine=image.affine.tolist(),
++                 spacing=list(map(float,image.header.get_zooms()[:3])),axcodes=''.join(nib.aff2axcodes(image.affine)))
++        save(directory/'complete.json', c); return c
++
++
++def prepare_tech():
++    init()
++    selection = read('results/iter_127/data/selection_lock.json')['manifest']
++    budget = read('results/iter_127/data/budget_lock.json')
++    from huggingface_hub import HfApi
++    os.environ['HF_TOKEN_PATH']='/home/test/.cache/huggingface/token'
++    objects = budget['official_objects']
++    infos = HfApi().get_paths_info('Forithmus/MR-RATE',sorted(objects),repo_type='dataset',revision=REV)
++    if {i.path:(i.size,i.lfs.sha256) for i in infos} != {p:(v['size'],v['sha256']) for p,v in objects.items()}: raise ValueError('official budget changed')
++    if sum(v['size'] for v in objects.values()) != 15552030509: raise ValueError('budget mismatch')
++    existing = budget['verified_existing']
++    for rel,v in existing.items():
++        if Path(v['path']).stat().st_size!=objects[rel]['size'] or sha(v['path'])!=objects[rel]['sha256']: raise ValueError('ZIP bytes')
++    save(OUT/'budget_verified.json',dict(prior_budget_sha256=sha('results/iter_127/data/budget_lock.json'),
++         official_objects=objects,total_zip_count=len(objects),total_bytes=sum(v['size'] for v in objects.values()),
++         existing_verified=len(existing),new_zip_count=budget['new_zip_count'],new_bytes=budget['new_bytes'],
++         free_external=shutil.disk_usage(ROOT.parent).free,free_ssd=shutil.disk_usage('.').free))
++    records = []
++    for batch in ['batch04','batch23']:
++        ids = {m['study_uid'] for m in selection if m['role']=='tech' and m['batch_id']==batch}
++        cols=['study_uid','series_id','classified_modality','acquisition_plane','is_derived','is_localizer','array_shape','array_spacing_mm']
++        df=pd.read_csv(META/'metadata'/f'{batch}_metadata.csv',usecols=cols,low_memory=False)
++        df=df[df.study_uid.isin(ids)&(df.classified_modality=='T2w')&(df.acquisition_plane=='AXIAL')&(~df.is_derived)&(~df.is_localizer)]
++        for m in df.to_dict('records'):
++            study=m['study_uid']; series=m['series_id']; rel=f'mri/{batch}/{study}.zip'
++            c=extract(existing[rel]['path'],study,series)
++            if not np.allclose(c['spacing'],json.loads(m['array_spacing_mm']),atol=1e-3): raise ValueError('metadata spacing')
++            bid=hashlib.sha256((study+'|'+series+'|128').encode()).hexdigest()[:12]
++            im=nib.as_closest_canonical(nib.load(c['files']['img.nii.gz']['path']))
++            a=np.asarray(im.dataobj,dtype=np.float32)
++            v=a[a>0]; lo,hi=np.percentile(v,[1,99])
++            nz=a.shape[2]; tile=144; rows=(nz+7)//8
++            path=OUT/'anatomy'/f'{bid}.png'; path.parent.mkdir(parents=True,exist_ok=True)
++            canvas=Image.new('RGB',(8*tile,rows*(tile+20))); draw=ImageDraw.Draw(canvas)
++            for k in range(nz):
++                s=np.uint8(np.clip((a[:,:,k]-lo)/max(hi-lo,1e-6),0,1)*255).T[::-1,::-1]
++                img=Image.fromarray(s).convert('RGB'); img.thumbnail((tile,tile))
++                x=k%8*tile; y=k//8*(tile+20)
++                canvas.paste(img,(x+(tile-img.width)//2,y)); draw.text((x+4,y+tile),str(k),fill='white')
++            if path.exists(): raise ValueError('existing montage requires completed manifest')
++            canvas.save(path)
++            records.append(dict(blind_id=bid,metadata=m,batch_id=batch,input=c,montage=str(path),montage_sha256=sha(path),
++                                shown_slices=list(range(nz)),canonical_shape=list(a.shape),canonical_affine=im.affine.tolist()))
++    save(OUT/'tech_candidates.json',dict(protocol_sha256=sha(OUT/'protocol.json'),records=records))
++    print('blind anatomy sheets',len(records),flush=True)
++
++
++if __name__=='__main__':
++    ap=argparse.ArgumentParser(); ap.add_argument('action',choices=['init','tech']); args=ap.parse_args()
++    OUT.mkdir(parents=True,exist_ok=True); ROOT.mkdir(parents=True,exist_ok=True)
++    with (OUT/'data.lock').open('a') as f:
++        fcntl.flock(f,fcntl.LOCK_EX|fcntl.LOCK_NB)
++        init() if args.action=='init' else prepare_tech()
+diff --git a/mr128_eval.py b/mr128_eval.py
+new file mode 100644
+index 0000000..666fe2c
+--- /dev/null
++++ b/mr128_eval.py
+@@ -0,0 +1,84 @@
++"""고정 report-agreement BA·층화 환자 bootstrap·calibration/판정. 생성 전 잠금용."""
++from fractions import Fraction
++import numpy as np
++from mr123_run import parse
++
++SEED = 125
++BOOTSTRAPS = 10000
++
++
++def states(text,eos):
++    if not eos:return 'INVALID','truncated'
++    return parse(text)
++
++
++def metrics(labels,predictions):
++    labels=np.asarray(labels,dtype=int);p=np.asarray(predictions)
++    if len(labels)!=len(p) or not set(labels)<=set([0,1]) or not len(labels):raise ValueError('label/prediction array')
++    pos=labels==1;neg=labels==0
++    sensitivity=float(np.mean(p[pos]=='PRESENT')) if pos.any() else None
++    specificity=float(np.mean(p[neg]=='ABSENT')) if neg.any() else None
++    correct=(pos&(p=='PRESENT'))|(neg&(p=='ABSENT'))
++    exact=(Fraction(int(np.sum(p[pos]=='PRESENT')),int(pos.sum()))+Fraction(int(np.sum(p[neg]=='ABSENT')),int(neg.sum())))/2 if pos.any() and neg.any() else None
++    return dict(BA=float(exact) if exact is not None else None,BA_fraction=[exact.numerator,exact.denominator] if exact is not None else None,
++         sensitivity=sensitivity,specificity=specificity,accuracy=float(correct.mean()),
++         positive_n=int(pos.sum()),negative_n=int(neg.sum()),correct_n=int(correct.sum()),
++         uncertain_n=int(np.sum(p=='UNCERTAIN')),invalid_n=int(np.sum(p=='INVALID')))
++
++
++def auroc(labels,scores):
++    y=np.asarray(labels,int);s=np.asarray(scores,float)
++    if not np.isfinite(s).all() or len(s)!=len(y):raise ValueError('finite scores')
++    pos=s[y==1];neg=s[y==0]
++    if not len(pos) or not len(neg):return None
++    return float(np.mean((pos[:,None]>neg[None,:])+0.5*(pos[:,None]==neg[None,:])))
++
++
++def calibrate(rows):
++    """calibration 집단만 전달. 후보·>=·동률 규칙은 protocol.json에 사전 고정."""
++    if any(r['role']!='calib' for r in rows):raise ValueError('calibration-only')
++    y=[int(r['label']=='positive') for r in rows];s=np.asarray([r['S'] for r in rows],float)
++    if not np.isfinite(s).all() or len(set(y))!=2:raise ValueError('calibration data')
++    values=np.unique(s);thresholds=[0.0]+[(float(a)+float(b))/2 for a,b in zip(values,values[1:])]+[float(np.nextafter(values[-1],np.inf))]
++    candidates=[]
++    for t in thresholds:
++        pred=np.where(s>=t,'PRESENT','ABSENT');m=metrics(y,pred)
++        candidates.append(dict(threshold=t,**m))
++    chosen=max(candidates,key=lambda r:(r['BA'],r['specificity'],r['threshold']))
++    return dict(chosen=chosen,candidates=candidates,operator='>=',calibration_n=len(rows),
++         calibration_ids=[r['study_uid'] for r in rows],AUROC=auroc(y,s))
++
++
++def paired_ci(rows,first,second):
++    """batch×label 내 고정 크기 환자 재표집. 두 시스템에 동일 index 적용."""
++    if not rows:raise ValueError('empty bootstrap')
++    y=np.asarray([int(r['label']=='positive') for r in rows])
++    a=np.asarray([r[first] for r in rows]);b=np.asarray([r[second] for r in rows])
++    if len(set(y))!=2:raise ValueError('both labels required')
++    cells={}
++    for i,r in enumerate(rows):cells.setdefault((r['batch_id'],r['label']),[]).append(i)
++    rng=np.random.default_rng(SEED);samples=[]
++    for _ in range(BOOTSTRAPS):
++        ix=np.concatenate([rng.choice(v,len(v),replace=True) for _,v in sorted(cells.items())])
++        samples.append(metrics(y[ix],a[ix])['BA']-metrics(y[ix],b[ix])['BA'])
++    ma=metrics(y,a);mb=metrics(y,b);exact=Fraction(*ma['BA_fraction'])-Fraction(*mb['BA_fraction'])
++    return dict(mean=float(exact),mean_fraction=[exact.numerator,exact.denominator],
++         CI95=np.quantile(samples,[0.025,0.975]).tolist(),seed=SEED,replicates=BOOTSTRAPS,
++         strata={str(k):len(v) for k,v in cells.items()},unit='patient')
++
++
++def decision(U,A,S,delta_A_U,complete_S,A_cost,S_cost):
++    fraction=lambda m:Fraction(*m['BA_fraction']) if m.get('BA_fraction') else Fraction(str(m['BA']))
++    gap=Fraction(*delta_A_U['mean_fraction']) if delta_A_U.get('mean_fraction') else Fraction(str(delta_A_U['mean']))
++    positive=(gap>=Fraction('0.15') and delta_A_U['CI95'][0]>0 and A['BA']>=0.75
++              and A['sensitivity']>=0.65 and A['specificity']>=0.65)
++    sufficient=(complete_S and S is not None and S['BA']>=0.80 and fraction(A)-fraction(S)<Fraction('0.05')
++                and A_cost is not None and S_cost is not None and A_cost>S_cost)
++    negative=U['BA']<=0.60 and A['BA']<=0.60
++    if sufficient:investment='단순 대안 이후 현재 이진 과제 VLM 방법 투자 보류'
++    elif negative:investment='현재 frozen 설계 종료'
++    elif positive:investment='제한된 sampling 관찰 보존; 독립 확인/방법 진입은 GPT의 별도 판단'
++    else:investment='근거 부족으로 현재 설계 보류'
++    return dict(positive_sampling_observation=bool(positive),simple_alternative_sufficient=bool(sufficient),
++         negative_frozen_design=bool(negative),investment=investment,
++         no_automatic_expansion=True,clinical_accuracy_claim=False)
+diff --git a/mr128_finalize_inputs.py b/mr128_finalize_inputs.py
+new file mode 100644
+index 0000000..bf0ef55
+--- /dev/null
++++ b/mr128_finalize_inputs.py
+@@ -0,0 +1,69 @@
++"""전체60명의 같은 규칙 적용·고정 선정 불변·U8 무결성·분리 manifest 봉인."""
++from collections import Counter,defaultdict
++import json
++from pathlib import Path
++import nibabel as nib
++import numpy as np
++import mr123_data as D
++from mr128_data import OUT,read,save,sha,verify_files,utc
++from mr128_remaining import tech_gate
++
++
++def main():
++    tech_gate();parts=sorted(OUT.glob('anatomy_remaining_review_part*.json'))
++    cand=read(OUT/'remaining_candidates.json');judgments={}
++    for p in parts:
++        v=read(p)
++        if v['candidates_sha256']!=sha(OUT/'remaining_candidates.json'):raise ValueError('review source')
++        for j in v['judgments']:
++            if j['blind_id'] in judgments:raise ValueError('duplicate judgment')
++            if not j['actual_image_returned']:raise ValueError('no actual image')
++            judgments[j['blind_id']]=j
++    if set(judgments)!={r['blind_id'] for r in cand['records']}:raise ValueError('review completeness')
++    groups=defaultdict(list)
++    for r in cand['records']:
++        verify_files({r['montage']:r['montage_sha256']})
++        if judgments[r['blind_id']]['montage_sha256']!=r['montage_sha256']:raise ValueError('visual evidence')
++        groups[r['metadata']['study_uid']].append(r)
++    original=read('results/iter_127/data/selection_lock.json')['manifest']
++    tech=read(OUT/'tech_inputs.json');inputs=dict(tech['inputs']);diff=list(tech['series_diff']);failures=[]
++    for study,rows in groups.items():
++        rank=lambda r:(json.loads(r['metadata']['array_spacing_mm'])[2],
++             np.prod(json.loads(r['metadata']['array_spacing_mm'])[:2]),r['metadata']['series_id'])
++        ordered=sorted(rows,key=rank);eligible=[r for r in ordered if judgments[r['blind_id']]['decision']=='eligible']
++        if not eligible:failures.append(dict(study_uid=study,error='no eligible brain T2'));continue
++        r=eligible[0];c=r['input'];m=next(m for m in original if m['study_uid']==study)
++        verify_files({v['path']:v['sha256'] for v in c['files'].values()})
++        a,b,info=D.load_case(c['files']['img.nii.gz']['path'],c['files']['brain.nii.gz']['path'])
++        br=D.brain_range(b)
++        if br is None:failures.append(dict(study_uid=study,error='no valid brain-mask range'));continue
++        u=D.pick(*br,0.05,0.95)
++        if len(set(u))!=8 or info['canon_axcodes']!='RAS' or not info['affine_match']:
++            failures.append(dict(study_uid=study,error='U8/canonical grid'));continue
++        inputs[study]=dict(**c,brain_range=list(br),U_idx=u,blind_id=r['blind_id'])
++        diff.append(dict(study_uid=study,previous_series=m['series_id'],selected_series=r['metadata']['series_id'],
++             changed=m['series_id']!=r['metadata']['series_id'],ranked_candidates=[dict(series=v['metadata']['series_id'],
++             blind_id=v['blind_id'],decision=judgments[v['blind_id']]['decision'],reason=judgments[v['blind_id']]['reason_ko']) for v in ordered]))
++    save(OUT/'all_anatomy_gate.json',dict(created_utc=utc(),passed=not failures and len(inputs)==60,
++         expected=60,verified=len(inputs),failures=failures,review_parts={str(p):sha(p) for p in parts},
++         candidates_sha256=sha(OUT/'remaining_candidates.json'),judgment_counts=dict(Counter(j['decision'] for j in judgments.values())),
++         series_diff=diff,original_selection_sha256=sha('results/iter_127/data/selection_lock.json'),
++         source_sha256=sha(__file__)))
++    if failures:print('STOP fixed input conditions failed',failures);return 2
++    if set(inputs)!={m['study_uid'] for m in original}:raise ValueError('fixed studies')
++    if len({m['patient_uid'] for m in original})!=60:raise ValueError('patient duplicate')
++    roles=Counter(m['role'] for m in original)
++    if roles!={'tech':8,'calib':12,'explore':40}:raise ValueError('fixed roles')
++    body=dict(protocol_sha256=sha(OUT/'protocol.json'),original_selection_sha256=sha('results/iter_127/data/selection_lock.json'),
++              anatomy_gate_sha256=sha(OUT/'all_anatomy_gate.json'),inputs=inputs)
++    save(OUT/'all_inputs.json',body)
++    save(OUT/'remaining_inputs.json',dict(**{k:v for k,v in body.items() if k!='inputs'},
++         inputs={s:c for s,c in inputs.items() if s not in tech['inputs']}))
++    # 평가 전용 정보는 추론 request와 이미지 message에서 분리한다.
++    save(OUT/'evaluation_manifest.json',dict(original_selection_sha256=sha('results/iter_127/data/selection_lock.json'),
++         records=[{k:m[k] for k in ['patient_uid','study_uid','batch_id','label','role']} for m in original],
++         input_sha256=sha(OUT/'all_inputs.json')))
++    print('all inputs locked60; series corrections',sum(d['changed'] for d in diff));return 0
++
++
++if __name__=='__main__':raise SystemExit(main())
+diff --git a/mr128_finish_pipeline.py b/mr128_finish_pipeline.py
+new file mode 100644
+index 0000000..49be77a
+--- /dev/null
++++ b/mr128_finish_pipeline.py
+@@ -0,0 +1,55 @@
++"""고정 단계 완료를 프로그램이 기다린 뒤 calibration→80건→검산을 실행한다."""
++import argparse
++import fcntl
++from pathlib import Path
++import subprocess
++import sys
++import time
++import psutil
++from mr128_data import OUT,read,save,sha,verify_files,utc
++
++
++def main(pid,prepare_pid):
++    with (OUT/'finish_pipeline.lock').open('a') as lock:
++        fcntl.flock(lock,fcntl.LOCK_EX|fcntl.LOCK_NB)
++        print('pipeline supervisor',__import__('os').getpid(),flush=True)
++        while not (OUT/'prepare_outputs_complete.json').exists() or (psutil.pid_exists(pid) and psutil.Process(pid).status()!=psutil.STATUS_ZOMBIE):
++            if not (psutil.pid_exists(prepare_pid) and psutil.Process(prepare_pid).status()!=psutil.STATUS_ZOMBIE) and not (OUT/'prepare_outputs_complete.json').exists():
++                raise RuntimeError('자료 변환 프로그램이 완료 없이 종료됨. 결과와 실패 로그를 검토해야 한다.')
++            time.sleep(15)
++        prepare=read(OUT/'prepare_outputs_complete.json');verify_files(prepare['builds'])
++        if not prepare['complete'] or prepare['expected']!=52:raise ValueError('remaining build complete52')
++        if not read(OUT/'all_input_independent_checks_v2.json')['all_pass'] or not read(OUT/'runtime_tests.json')['all_pass']:raise ValueError('required input/runtime checks')
++        verification_lock=dict(created_utc=utc(),code={p:sha(p) for p in ['mr128_analysis.py','mr128_verify_results.py','mr128_finish_pipeline.py']},
++             inputs={str(OUT/p):sha(OUT/p) for p in ['all_input_independent_checks_v2.json','runtime_tests.json','evaluation_lock_v2.json','prepare_outputs_complete.json']})
++        if not (OUT/'main_analysis_lock.json').exists():save(OUT/'main_analysis_lock.json',verification_lock)
++        else:verify_files(read(OUT/'main_analysis_lock.json')['code']);verify_files(read(OUT/'main_analysis_lock.json')['inputs'])
++        jobs=[([sys.executable,'mr128_analysis.py','calibrate'],'calibration',OUT/'calibration_lock.json'),
++              ([sys.executable,'mr128_gen.py','prepare','explore'],'prepare_requests',OUT/'explore_requests.json'),
++              ([sys.executable,'mr128_gen.py','run','--stage','main','--requests',str(OUT/'explore_requests.json'),'--batch','1','--workers','2','--max-new','512'],'main_generation',OUT/'gen/main/completion.json'),
++              ([sys.executable,'mr128_analysis.py','analyze'],'analysis',OUT/'eval/report.json'),
++              ([sys.executable,'mr128_verify_results.py'],'independent_verify',OUT/'eval/independent_verify.json')]
++        for command,name,artifact in jobs:
++            if artifact.exists() and name in ['analysis','independent_verify']:
++                if name=='analysis':
++                    report=read(artifact);verify_files(report['provenance']['builds'])
++                    if report['provenance']['main_completion_sha256']!=sha(OUT/'gen/main/completion.json') or report['provenance']['calibration_sha256']!=sha(OUT/'calibration_lock.json'):raise ValueError('stale analysis')
++                else:
++                    previous=read(artifact)
++                    if not previous['all_pass'] or previous['report_sha256']!=sha(OUT/'eval/report.json'):raise ValueError('stale independent verification')
++                print('verified existing stage',name,flush=True);continue
++            print('stage',name,flush=True);t0=time.monotonic()
++            p=subprocess.run(command)
++            save(OUT/(name+'_execution_'+__import__('uuid').uuid4().hex+'.json'),dict(command=command,returncode=p.returncode,wall_s=time.monotonic()-t0,created_utc=utc()))
++            if p.returncode!=0:return p.returncode
++        verification=read(OUT/'eval/independent_verify.json')
++        if not verification['all_pass']:raise ValueError('independent verification failed')
++        save(OUT/'pipeline_complete.json',dict(created_utc=utc(),checks_passed=True,
++            artifacts={str(OUT/p):sha(OUT/p) for p in ['calibration_lock.json','explore_requests.json','gen/main/completion.json','eval/report.json','eval/independent_verify.json']},
++            source_sha256=sha(__file__)))
++        print('pipeline complete',flush=True);return 0
++
++
++if __name__=='__main__':
++    ap=argparse.ArgumentParser();ap.add_argument('--pid',type=int,required=True);ap.add_argument('--prepare-pid',type=int,required=True);a=ap.parse_args()
++    raise SystemExit(main(a.pid,a.prepare_pid))
+diff --git a/mr128_gen.py b/mr128_gen.py
+new file mode 100644
+index 0000000..fc7147f
+--- /dev/null
++++ b/mr128_gen.py
+@@ -0,0 +1,327 @@
++"""MR-RATE 고정 영상 질문: 공식 생성, static shard/원자적 claim, 엄격 재개·봉인."""
++import argparse
++import fcntl
++import hashlib
++import json
++import os
++from pathlib import Path
++import signal
++import subprocess
++import sys
++import time
++import uuid
++
++import numpy as np
++from mr128_data import OUT,read,save,sha,verify_files,utc
++from mr128_build import PROMPT
++from mr123_run import MODEL,REV,CACHE,messages_for
++from mr127_seg import gpu_info
++
++CODE=['mr128_gen.py','mr128_data.py','mr128_build.py','mr128_eval.py','mr123_run.py','mr123_data.py','mr127_seg.py']
++
++
++def digest(obj):
++    return hashlib.sha256(json.dumps(obj,sort_keys=True,ensure_ascii=False,allow_nan=False).encode()).hexdigest()
++
++
++def prepare(role):
++    gate=read(OUT/'all_anatomy_gate.json')
++    if not gate['passed']:raise ValueError('all anatomy gate')
++    selection=read(OUT/'evaluation_manifest.json')['records'];inputs=read(OUT/'all_inputs.json')['inputs']
++    requests=[]
++    for m in selection:
++        if m['role']!=role:continue
++        study=m['study_uid'];stage='tech' if role=='tech' else 'remaining'
++        b=read(OUT/'build'/stage/(study+'.json'))
++        for condition in ['U','A']:
++            paths=[b['pngs'][str(k)]['path'] for k in b[condition+'_idx']]
++            hashes=[b['pngs'][str(k)]['sha256'] for k in b[condition+'_idx']]
++            r=dict(study_uid=study,cond=condition,paths=paths,png_sha256=hashes,
++                   prompt=PROMPT,slice_idx=b[condition+'_idx'],native=inputs[study],
++                   window_p1_p99=b['window_p1_p99'],model=MODEL,revision=REV)
++            r['id']=digest(r);requests.append(r)
++    if len(requests)!={'tech':16,'explore':80}[role]:raise ValueError('request count')
++    if len({r['id'] for r in requests})!=len(requests):raise ValueError('duplicate request')
++    save(OUT/(role+'_requests.json'),dict(requests=requests,all_input_sha256=sha(OUT/'all_inputs.json'),
++              source_builds={str(OUT/'build'/('tech' if role=='tech' else 'remaining')/(r['study_uid']+'.json')):
++                            sha(OUT/'build'/('tech' if role=='tech' else 'remaining')/(r['study_uid']+'.json')) for r in requests}))
++    print('prepared',role,len(requests),flush=True)
++
++
++def jsonl(path,repair=False):
++    path=Path(path)
++    if not path.exists():return []
++    data=path.read_bytes();lines=data.splitlines(keepends=True);rows=[];valid=0
++    def unique(items):
++        obj={}
++        for k,v in items:
++            if k in obj:raise ValueError('duplicate JSON key')
++            obj[k]=v
++        return obj
++    def constant(value):raise ValueError('nonfinite/nonstandard JSON constant: '+value)
++    for i,line in enumerate(lines):
++        try:
++            row=json.loads(line,object_pairs_hook=unique,parse_constant=constant)
++            if not isinstance(row,dict):raise ValueError('not object')
++        except json.JSONDecodeError as e:
++            if i!=len(lines)-1 or line.endswith(b'\n') or not repair:raise ValueError(f'corrupt JSONL at {path}:{i+1}') from e
++            backup=path.with_name(path.name+'.torn.'+uuid.uuid4().hex)
++            with backup.open('xb') as f:f.write(data)
++            with path.open('r+b') as f:f.truncate(valid);f.flush();os.fsync(f.fileno())
++            break
++        rows.append(row);valid+=len(line)
++        if not line.endswith(b'\n'):
++            if not repair:raise ValueError('JSONL record missing newline commit marker')
++            backup=path.with_name(path.name+'.newline.'+uuid.uuid4().hex)
++            with backup.open('xb') as f:f.write(data)
++            with path.open('ab') as f:f.write(b'\n');f.flush();os.fsync(f.fileno())
++    if len({r['id'] for r in rows})!=len(rows):raise ValueError('duplicate output IDs')
++    return rows
++
++
++def verify_row(row,request,config_sha):
++    body={k:v for k,v in row.items() if k!='record_digest'}
++    if row.get('record_digest')!=digest(body) or row.get('config_sha256')!=config_sha:raise ValueError('record digest/config')
++    if row.get('request_digest')!=digest(request) or row['id']!=request['id']:raise ValueError('record request')
++    if row['n_img']!=8 or row['max_new'] not in [512,1024]:raise ValueError('generation config')
++
++
++def native_images(r):
++    """실제 원 NIfTI 읽기·window·렌더를 매 요청에서 수행해 PNG와 pixel 대조."""
++    import nibabel as nib
++    from PIL import Image
++    import mr123_data as D
++    files=r['native']['files'];verify_files({v['path']:v['sha256'] for v in files.values()})
++    verify_files(dict(zip(r['paths'],r['png_sha256'])))
++    a,b,info=D.load_case(files['img.nii.gz']['path'],files['brain.nii.gz']['path'])
++    lo,hi=D.intensity_window(a,b)
++    if [lo,hi]!=r['window_p1_p99']:raise ValueError('native window changed')
++    images=[]
++    for k,p in zip(r['slice_idx'],r['paths']):
++        image=D.render_slice(a,k,lo,hi,info['canon_zooms'])
++        with Image.open(p) as saved:
++            if not np.array_equal(np.asarray(image),np.asarray(saved.convert('RGB'))):raise ValueError('native/PNG pixel mismatch')
++        images.append(image)
++    return images
++
++
++def make_messages(r,images):
++    content=[]
++    for i,image in enumerate(images):
++        content.extend([dict(type='text',text=f'Image {i+1}:'),dict(type='image',image=image)])
++    content.append(dict(type='text',text=r['prompt']))
++    return [dict(role='user',content=content)]
++
++
++def worker(directory,wid):
++    import torch
++    import psutil
++    from transformers import AutoProcessor,AutoModelForImageTextToText
++    directory=Path(directory);cfg=read(directory/'config.json');config_sha=sha(directory/'config.json')
++    verify_files(cfg['code']);verify_files(cfg['evaluation_code'])
++    if os.environ.get('CUDA_VISIBLE_DEVICES')!=cfg['gpu_mapping'][str(wid)]:raise ValueError('worker GPU mapping')
++    req_file=Path(cfg['request_file'])
++    if sha(req_file)!=cfg['request_sha256']:raise ValueError('request file changed')
++    requests=read(req_file)['requests'];assigned=requests[wid::cfg['workers']]
++    if any(set(r)&{'label','report','role','selector_success'} for r in requests):raise ValueError('evaluation fields in request')
++    output=directory/f'worker{wid}.jsonl';stop=False
++    def handler(sig,frame):
++        nonlocal stop
++        stop=True
++    signal.signal(signal.SIGTERM,handler);signal.signal(signal.SIGINT,handler)
++    with (directory/f'worker{wid}.lock').open('a') as ownership:
++        fcntl.flock(ownership,fcntl.LOCK_EX|fcntl.LOCK_NB)
++        existing=jsonl(output,repair=True);byid={r['id']:r for r in assigned}
++        for row in existing:
++            if row['id'] not in byid:raise ValueError('unassigned old output')
++            verify_row(row,byid[row['id']],config_sha)
++        done={row['id'] for row in existing};pending=[r for r in assigned if r['id'] not in done]
++        if not pending:return 0
++        torch.manual_seed(125);np.random.seed(125);torch.set_num_threads(4);self_process=psutil.Process()
++        t0=time.monotonic()
++        processor=AutoProcessor.from_pretrained(MODEL,revision=REV,cache_dir=CACHE,local_files_only=True)
++        processor.tokenizer.padding_side='left'
++        model=AutoModelForImageTextToText.from_pretrained(MODEL,revision=REV,cache_dir=CACHE,
++                 local_files_only=True,torch_dtype=torch.bfloat16,device_map={'':0})
++        model.eval();model_mib=torch.cuda.memory_allocated()/2**20;loaded=time.monotonic()
++        attempt=uuid.uuid4().hex;events=dict(wid=wid,pid=os.getpid(),physical_gpu=os.environ['CUDA_VISIBLE_DEVICES'],
++             logical_gpu=0,load_s=loaded-t0,model_mib=model_mib,started_utc=utc(),warm_start=loaded,groups=[])
++        save(directory/f'{attempt}.worker{wid}.loaded.json',events)
++        print('loaded',wid,'model MiB',model_mib,flush=True)
++        eos=set([processor.tokenizer.eos_token_id])
++        x=model.generation_config.eos_token_id;eos.update([x] if isinstance(x,int) else x or [])
++        with output.open('ab') as f:
++            for first in range(0,len(pending),cfg['batch']):
++                if stop:break
++                group=pending[first:first+cfg['batch']];claims=[]
++                try:
++                    claim_dir=directory/'claims';claim_dir.mkdir(exist_ok=True)
++                    for r in group:
++                        h=(claim_dir/(r['id']+'.lock')).open('a');fcntl.flock(h,fcntl.LOCK_EX|fcntl.LOCK_NB);claims.append(h)
++                    ts=time.monotonic();images=[native_images(r) for r in group]
++                    messages=[make_messages(r,im) for r,im in zip(group,images)]
++                    # 공식 single 입력과 tokenize=False→processor 경로의 모든 tensor를 독립 대조한다.
++                    tensor_checks=[]
++                    for msg,im in zip(messages,images):
++                        single=processor.apply_chat_template(msg,add_generation_prompt=True,tokenize=True,return_dict=True,return_tensors='pt')
++                        text=processor.apply_chat_template(msg,add_generation_prompt=True,tokenize=False)
++                        official=processor(text=text,images=im,add_special_tokens=False,return_tensors='pt')
++                        passed=set(single)==set(official) and all(torch.equal(single[k],official[k]) for k in single)
++                        if not passed:raise ValueError('official processor tensor mismatch')
++                        tensor_checks.append(dict(all_tensor_keys=sorted(single),passed=passed,n_img=len(im)))
++                    inp=processor.apply_chat_template(messages[0] if len(group)==1 else messages,
++                         add_generation_prompt=True,tokenize=True,return_dict=True,return_tensors='pt',padding=len(group)>1)
++                    ids_hash=[hashlib.sha256(inp['input_ids'][i].numpy().tobytes()).hexdigest() for i in range(len(group))]
++                    inp=inp.to(model.device);inp['pixel_values']=inp['pixel_values'].to(torch.bfloat16)
++                    prep_done=time.monotonic();torch.cuda.synchronize();gen_start=time.monotonic()
++                    with torch.inference_mode():output_ids=model.generate(**inp,max_new_tokens=cfg['max_new'],do_sample=False)
++                    torch.cuda.synchronize();gen_end=time.monotonic();plen=inp['input_ids'].shape[1]
++                    rows=[]
++                    for i,r in enumerate(group):
++                        tokens=output_ids[i,plen:].tolist();ended=any(t in eos for t in tokens)
++                        while tokens and tokens[-1]==processor.tokenizer.pad_token_id and tokens[-1] not in eos:tokens.pop()
++                        text=processor.tokenizer.decode(tokens,skip_special_tokens=True)
++                        row=dict(id=r['id'],study_uid=r['study_uid'],cond=r['cond'],text=text,tokens=tokens,eos=ended,
++                             n_new=len(tokens),max_new=cfg['max_new'],n_img=8,batch=cfg['batch'],wid=wid,
++                             config_sha256=config_sha,request_digest=digest(r),input_ids_sha256=ids_hash[i],
++                             tensor_check=tensor_checks[i],group_start=ts,gen_start=gen_start,gen_end=gen_end,
++                             prep_s=prep_done-ts,gen_s=gen_end-gen_start,wall_before_save_s=time.monotonic()-ts,
++                             peak_allocated_mib=torch.cuda.max_memory_allocated()/2**20,
++                             peak_reserved_mib=torch.cuda.max_memory_reserved()/2**20,model_mib=model_mib,attempt=attempt)
++                        row['record_digest']=digest(row);f.write((json.dumps(row,ensure_ascii=False,allow_nan=False)+'\n').encode());rows.append(row)
++                    f.flush();os.fsync(f.fileno());saved=time.monotonic()
++                    io=self_process.io_counters();mem=self_process.memory_info();cpu=self_process.cpu_times()
++                    events['groups'].append(dict(ids=[r['id'] for r in group],start=ts,end_after_saved=saved,
++                         gen_start=gen_start,gen_end=gen_end,batch=len(group),rss_bytes=mem.rss,
++                         process_cpu_user_s=cpu.user,process_cpu_system_s=cpu.system,
++                         process_read_bytes=io.read_bytes,process_write_bytes=io.write_bytes,
++                         system_ram_available_bytes=psutil.virtual_memory().available))
++                    save(directory/f'{attempt}.group{first:03d}.worker{wid}.json',events['groups'][-1])
++                    print('saved',wid,len(group),first+len(group),'/',len(pending),flush=True)
++                finally:
++                    for h in claims:h.close()
++        events['end']=time.monotonic();events['stopped']=stop
++        save(directory/f'{attempt}.worker{wid}.events.json',events)
++        return 0
++
++
++def verify_code(cfg,directory,allow_completed_archive=False):
++    for p,h in cfg['code'].items():
++        if sha(p)==h:continue
++        if allow_completed_archive and (Path(directory)/'completion.json').exists() and p=='mr128_gen.py':
++            proofs=read(OUT/'generation_source_registry.json')['records']
++            if any(proof['sha256']==h and sha(proof['source'])==h and proof['config_sha256']==sha(Path(directory)/'config.json') for proof in proofs):continue
++        raise ValueError(f'code changed: {p}')
++
++
++def verify(directory,allow_completed_archive=False):
++    directory=Path(directory);cfg=read(directory/'config.json');config_sha=sha(directory/'config.json')
++    verify_code(cfg,directory,allow_completed_archive);verify_files(cfg['evaluation_code'])
++    if sha(cfg['request_file'])!=cfg['request_sha256']:raise ValueError('changed request input')
++    requests=read(cfg['request_file'])['requests'];lookup={r['id']:r for r in requests};rows=[]
++    for wid in range(cfg['workers']):
++        for row in jsonl(directory/f'worker{wid}.jsonl'):
++            if row['id'] not in lookup:raise ValueError('extra output')
++            verify_row(row,lookup[row['id']],config_sha);rows.append(row)
++    if len({r['id'] for r in rows})!=len(rows):raise ValueError('duplicate output')
++    for r in requests:
++        verify_files(dict(zip(r['paths'],r['png_sha256'])))
++        verify_files({v['path']:v['sha256'] for v in r['native']['files'].values()})
++    return requests,rows
++
++
++def launch(request_file,stage,batch=1,workers=2,max_new=512,pause_after=None,peak_estimate=18000):
++    directory=OUT/'gen'/stage;directory.mkdir(parents=True,exist_ok=True)
++    allowed=os.environ.get('CUDA_VISIBLE_DEVICES','').split(',')
++    if len(set(allowed))!=len(allowed) or not all(g.isdigit() for g in allowed):raise ValueError('allowed GPU set')
++    requests=read(request_file)['requests'];verify_files(read(OUT/'evaluation_lock_v2.json')['code'])
++    initial=[g for g in gpu_info() if g['index'] in allowed];initial.sort(key=lambda g:g['free_mib'],reverse=True)
++    remaining={g['index']:g['free_mib'] for g in initial};mapping={}
++    for i in range(workers):
++        candidates=[g for g in remaining if remaining[g]>=peak_estimate+2048]
++        if not candidates:raise ValueError('worker별 예상 peak+2048MiB 합계가 허용 GPU 여유를 초과')
++        g=max(candidates,key=lambda g:remaining[g]);mapping[str(i)]=g;remaining[g]-=peak_estimate+2048
++    cfg=dict(request_file=str(request_file),request_sha256=sha(request_file),workers=workers,batch=batch,
++         max_new=max_new,seed=125,model=MODEL,revision=REV,dtype='bfloat16',do_sample=False,peak_estimate_mib=peak_estimate,
++         gpu_mapping=mapping,allowed_gpus=allowed,code={p:sha(p) for p in CODE},
++         evaluation_code=read(OUT/'evaluation_lock_v2.json')['code'],evaluation_lock_sha256=sha(OUT/'evaluation_lock_v2.json'))
++    with (directory/'stage.lock').open('a') as ownership:
++        fcntl.flock(ownership,fcntl.LOCK_EX|fcntl.LOCK_NB)
++        if (directory/'completion.json').exists():
++            previous=read(directory/'config.json')
++            fields=['request_sha256','workers','batch','max_new','seed','model','revision','dtype','do_sample','allowed_gpus']
++            if any(previous[k]!=cfg[k] for k in fields):raise ValueError('completed run requested config differs')
++            c=read(directory/'completion.json');verify_files(c['artifacts']);_,rows=verify(directory,allow_completed_archive=True)
++            if len(rows)!=len(requests):raise ValueError('stale completion count')
++            return 0
++        if (directory/'config.json').exists():
++            previous=read(directory/'config.json')
++            # 재개 시 실제 장치 순서가 바뀌어도 원 mapping을 유지하며 허용 집합을 다시 검사한다.
++            cfg['gpu_mapping']=previous['gpu_mapping'];mapping=cfg['gpu_mapping']
++            if previous!=cfg:raise ValueError('resume config differs')
++        else:save(directory/'config.json',cfg)
++        tag=uuid.uuid4().hex;children=[];handles=[];stopped=False;peaks={g:0 for g in allowed};minimum={g:99999 for g in allowed}
++        t0=time.monotonic()
++        def stop(sig,frame):
++            nonlocal stopped
++            stopped=True
++            for p in children:
++                if p.poll() is None:p.terminate()
++        handlers={s:signal.signal(s,stop) for s in [signal.SIGTERM,signal.SIGINT]}
++        try:
++            for wid in range(workers):
++                info=next(g for g in gpu_info() if g['index']==mapping[str(wid)])
++                if info['free_mib']<peak_estimate+2048:raise ValueError('예상 peak+2048MiB 여유 부족')
++                env=dict(os.environ,CUDA_VISIBLE_DEVICES=mapping[str(wid)],PYTHONDONTWRITEBYTECODE='1',PYTHONUNBUFFERED='1',TOKENIZERS_PARALLELISM='false',
++                    CUDA_CACHE_PATH='/home/test/.local/share/medgemma/mr_rate/iter128/cuda_cache',
++                    TORCHINDUCTOR_CACHE_DIR='/home/test/.local/share/medgemma/mr_rate/iter128/torch_cache')
++                h=(directory/f'{tag}.worker{wid}.log').open('x');handles.append(h)
++                p=subprocess.Popen([sys.executable,str(Path(__file__).absolute()),'worker',str(directory),str(wid)],env=env,stdout=h,stderr=subprocess.STDOUT);children.append(p)
++            save(directory/f'{tag}.launch.json',dict(config_sha256=sha(directory/'config.json'),pids=[p.pid for p in children],
++                 supervisor_pid=os.getpid(),initial_gpu=initial,started_utc=utc(),pause_after=pause_after))
++            print('supervisor',os.getpid(),'workers',[(p.pid,mapping[str(i)]) for i,p in enumerate(children)],flush=True)
++            with (directory/f'{tag}.resources.jsonl').open('x') as resource:
++                while any(p.poll() is None for p in children):
++                    import psutil
++                    gs=gpu_info();resource.write(json.dumps(dict(utc=utc(),gpus=gs,
++                         cpu_percent=psutil.cpu_percent(),ram=psutil.virtual_memory()._asdict(),disk_io=psutil.disk_io_counters()._asdict()))+'\n');resource.flush()
++                    for g in gs:
++                        if g['index'] in peaks:peaks[g['index']]=max(peaks[g['index']],g['used_mib']);minimum[g['index']]=min(minimum[g['index']],g['free_mib'])
++                    if any(p.poll() not in [None,0] for p in children):stop(None,None)
++                    if pause_after is not None and not stopped:
++                        count=len({rid for p in directory.glob('*.group*.worker*.json') for rid in read(p)['ids']})
++                        if count>=pause_after and count<len(requests):stop(None,None)
++                    time.sleep(1)
++            rc=[p.wait() for p in children]
++        except Exception as e:
++            stop(None,None)
++            save(directory/f'{tag}.launch_error.json',dict(error=str(e),config_sha256=sha(directory/'config.json'),
++                 owned_pids=[p.pid for p in children],gpus=gpu_info(),created_utc=utc()))
++            raise
++        finally:
++            for p in children:
++                if p.poll() is None:p.terminate()
++                p.wait()
++            for h in handles:h.close()
++            for s,h in handlers.items():signal.signal(s,h)
++        requests,rows=verify(directory);ok=len(rows)==len(requests) and all(r==0 for r in rc)
++        result=dict(config_sha256=sha(directory/'config.json'),wall_s=time.monotonic()-t0,child_exit_codes=rc,
++              count=len(rows),expected=len(requests),stopped=stopped,complete=ok,peak_gpu_total_mib=peaks,min_gpu_free_mib=minimum)
++        save(directory/f'{tag}.result.json',result)
++        if ok:
++            artifacts={str(p):sha(p) for p in directory.glob('*') if p.is_file() and p.name not in ['stage.lock','completion.json'] and not p.name.endswith('.lock')}
++            save(directory/'completion.json',dict(count=len(rows),expected=len(requests),config_sha256=sha(directory/'config.json'),artifacts=artifacts))
++        print('generation',stage,'complete',ok,'rows',len(rows),'/',len(requests),flush=True)
++        return 0 if ok else (75 if stopped and all(r==0 for r in rc) else 2)
++
++
++if __name__=='__main__':
++    ap=argparse.ArgumentParser();sub=ap.add_subparsers(dest='action',required=True)
++    p=sub.add_parser('prepare');p.add_argument('role',choices=['tech','explore'])
++    p=sub.add_parser('worker');p.add_argument('directory');p.add_argument('wid',type=int)
++    p=sub.add_parser('run');p.add_argument('--requests',default=str(OUT/'tech_requests.json'));p.add_argument('--stage',required=True)
++    p.add_argument('--batch',type=int,default=1);p.add_argument('--workers',type=int,default=2);p.add_argument('--max-new',type=int,default=512);p.add_argument('--pause-after',type=int);p.add_argument('--peak-estimate',type=int,default=18000)
++    a=ap.parse_args()
++    if a.action=='prepare':prepare(a.role)
++    elif a.action=='worker':raise SystemExit(worker(a.directory,a.wid))
++    else:raise SystemExit(launch(a.requests,a.stage,a.batch,a.workers,a.max_new,a.pause_after,a.peak_estimate))
+diff --git a/mr128_pilot.py b/mr128_pilot.py
+new file mode 100644
+index 0000000..cb65300
+--- /dev/null
++++ b/mr128_pilot.py
+@@ -0,0 +1,61 @@
++"""기술 두 구성의 실제 출력·재개 prefix·warm/cold 처리량과 선택 근거."""
++from collections import Counter
++import math
++from pathlib import Path
++from mr128_data import OUT,read,save,sha,utc,verify_files
++from mr128_gen import verify
++from mr128_eval import states
++
++
++def intervals_union(intervals):
++    end=None;total=0
++    for a,b in sorted(intervals):
++        if end is None or a>end:total+=b-a
++        elif b>end:total+=b-end
++        end=b if end is None else max(end,b)
++    return total
++
++
++def profile(directory):
++    directory=Path(directory);_,rows=verify(directory,allow_completed_archive=True)
++    events=[read(p) for p in directory.glob('*.worker*.events.json')]
++    groups=[g for e in events for g in e['groups']]
++    emitted=[i for g in groups for i in g['ids']]
++    if sorted(emitted)!=sorted(r['id'] for r in rows):raise ValueError('timing coverage differs from completed requests')
++    results=[read(p) for p in directory.glob('*.result.json')]
++    warm=intervals_union([(g['start'],g['end_after_saved']) for g in groups])
++    return dict(count=len(rows),cold_wall_s_including_resume=sum(r['wall_s'] for r in results),
++         warm_active_union_s=warm,warm_requests_per_minute=len(rows)*60/warm,
++         raw_read_to_saved_p95_s=__import__('numpy').quantile([g['end_after_saved']-g['start'] for g in groups],0.95).item(),
++         peak_gpu_total_mib={gpu:max(r['peak_gpu_total_mib'][gpu] for r in results) for gpu in ['0','1']},
++         min_gpu_free_mib={gpu:min(r['min_gpu_free_mib'][gpu] for r in results) for gpu in ['0','1']},
++         model_loads=len(events),state_counts=dict(Counter(states(r['text'],r['eos'])[0] for r in rows)),
++         parser_codes=dict(Counter(states(r['text'],r['eos'])[1] for r in rows)),
++         EOS=sum(r['eos'] for r in rows),max_tokens=max(r['n_new'] for r in rows),
++         all_processor_checks=all(r['tensor_check']['passed'] for r in rows),
++         CPU_RAM_IO_note_ko='원 NIfTI 읽기·window·render·processor·생성·저장 시간은 warm 구간에 포함. 시스템 CPU/RAM/I/O 세부 peak는 이 두 trial에서 별도 수집하지 않았다.')
++
++
++def main():
++    _,b1=verify(OUT/'gen/tech_b1',allow_completed_archive=True);_,b2=verify(OUT/'gen/tech_b2')
++    lookup={r['id']:r for r in b1};other={r['id']:r for r in b2}
++    if set(lookup)!=set(other) or len(lookup)!=16:raise ValueError('comparison requests')
++    prefix=read(OUT/'gen/tech_b2/prefix_preserved.json')
++    preserved=all(other[r['id']]==r for r in prefix['rows'])
++    if not preserved:raise ValueError('completed prefix changed during resume')
++    token_mismatches=[r['id'] for r in b2 if r['tokens']!=lookup[r['id']]['tokens']]
++    state_mismatches=[r['id'] for r in b2 if states(r['text'],r['eos'])[0]!=states(lookup[r['id']]['text'],lookup[r['id']]['eos'])[0]]
++    a=profile(OUT/'gen/tech_b1');b=profile(OUT/'gen/tech_b2')
++    save(OUT/'pilot_comparison.json',dict(created_utc=utc(),b1=a,b2=b,token_mismatches=token_mismatches,
++         token_mismatch_count=len(token_mismatches),state_mismatch_count=len(state_mismatches),
++         partial_rows_preserved=prefix['count'],prefix_unchanged=preserved,
++         adopted=dict(batch=1,workers=2,max_new_tokens=512),
++         adopted_reason_ko='batch2의 실제 greedy token이 baseline과 10/16 다르므로 출력 정합성을 보장하는 batch1을 유지한다. 첫 줄 상태는 같지만 더 큰 입력에서의 답 안정성은 확인되지 않았다.',
++         concurrency_note_ko='worker 수와 GPU 수를 분리해 같은 GPU에 여러 worker를 매핑할 수 있다. 비교16건은 batch2 및 부분재개 검증에 사용했다. GPU당2 worker는 새 출력 비교를 하지 않았으므로 본실험에 채택하지 않는다.',
++         cost_note_ko='batch2는 재개 때문에 모델을4번 적재했다. 전체 cold 시간의 차이를 순수 batch 효과로 해석하지 않는다. warm 처리 구간의 합집합을 따로 제공한다.',
++         artifacts={str(p):sha(p) for p in [OUT/'gen/tech_b1/completion.json',OUT/'gen/tech_b2/completion.json',OUT/'gen/tech_b2/prefix_preserved.json']},
++         source_sha256=sha(__file__)))
++    print('pilot token mismatches',len(token_mismatches),'state mismatches',len(state_mismatches),'adopt batch1/workers2')
++
++
++if __name__=='__main__':main()
+diff --git a/mr128_prepare_outputs.py b/mr128_prepare_outputs.py
+new file mode 100644
+index 0000000..521db7d
+--- /dev/null
++++ b/mr128_prepare_outputs.py
+@@ -0,0 +1,61 @@
++"""감독 프로그램이 완료한 volume만 순차적으로 원격자 변환·렌더. 모델 polling 없음."""
++import argparse
++import fcntl
++from pathlib import Path
++import time
++import nibabel as nib
++import numpy as np
++import psutil
++import mr123_data as D
++from mr128_data import OUT,ROOT,read,save,sha,verify_files,utc
++from mr128_build import build
++
++
++def fallback(study,inputs,failure):
++    t0=time.monotonic();c=inputs['inputs'][study]
++    verify_files({v['path']:v['sha256'] for v in c['files'].values()})
++    a,b,info=D.load_case(c['files']['img.nii.gz']['path'],c['files']['brain.nii.gz']['path'])
++    U=D.pick(*D.brain_range(b),0.05,0.95)
++    if U!=c['U_idx'] or len(set(U))!=8:raise ValueError('fallback U changed')
++    lo,hi=D.intensity_window(a,b);pngs={};directory=ROOT/'png/remaining'/study;directory.mkdir(parents=True,exist_ok=True)
++    for k in U:
++        p=directory/f's{k:03d}.png'
++        if not p.exists():D.render_slice(a,k,lo,hi,info['canon_zooms']).save(p)
++        pngs[str(k)]=dict(path=str(p),sha256=sha(p))
++    result=dict(study_uid=study,series_id=c['key']['series_id'],U_idx=U,A_idx=U,A_range=None,
++         A_fallback='official_segmentation_failed',S=None,vent_mm3=None,icv_mm3=None,
++         window_p1_p99=[lo,hi],pngs=pngs,source_input=c,seg_failure=failure,
++         canonical_shape=list(a.shape),nn_mismatches=None,overlay=None,overlay_sha256=None,
++         warm_read_to_saved_s=time.monotonic()-t0,code_sha256=sha(__file__))
++    save(OUT/'build/remaining'/(study+'.json'),result)
++    return result
++
++
++def main(pid):
++    inputs=read(OUT/'remaining_inputs.json');expected=set(inputs['inputs']);done=set()
++    with (OUT/'prepare_outputs.lock').open('a') as lock:
++        fcntl.flock(lock,fcntl.LOCK_EX|fcntl.LOCK_NB)
++        while done!=expected:
++            for study in sorted(expected-done):
++                output=OUT/'build/remaining'/(study+'.json')
++                complete=OUT/'seg/remaining'/(study+'.complete.json');failed=OUT/'seg/remaining'/(study+'.failure.json')
++                if output.exists():
++                    r=read(output);verify_files({v['path']:v['sha256'] for v in r['pngs'].values()});done.add(study);continue
++                if psutil.virtual_memory().available<4*1024**3:break
++                if complete.exists():build(study,inputs,read(complete),'remaining');done.add(study)
++                elif failed.exists():fallback(study,inputs,read(failed));done.add(study)
++            alive=psutil.pid_exists(pid) and psutil.Process(pid).status()!=psutil.STATUS_ZOMBIE
++            if done==expected:break
++            if not alive:
++                missing=sorted(expected-done)
++                save(OUT/'prepare_outputs_incomplete.json',dict(missing=missing,done=sorted(done),created_utc=utc()))
++                print('prepare incomplete',missing,flush=True);return 2
++            time.sleep(15)
++        paths={str(OUT/'build/remaining'/(s+'.json')):sha(OUT/'build/remaining'/(s+'.json')) for s in sorted(done)}
++        save(OUT/'prepare_outputs_complete.json',dict(created_utc=utc(),builds=paths,expected=52,complete=len(done)==52,
++             source_sha256=sha(__file__),remaining_inputs_sha256=sha(OUT/'remaining_inputs.json')))
++        print('remaining builds complete52',flush=True);return 0
++
++
++if __name__=='__main__':
++    ap=argparse.ArgumentParser();ap.add_argument('--pid',type=int,required=True);a=ap.parse_args();raise SystemExit(main(a.pid))
+diff --git a/mr128_remaining.py b/mr128_remaining.py
+new file mode 100644
+index 0000000..c98fc5d
+--- /dev/null
++++ b/mr128_remaining.py
+@@ -0,0 +1,105 @@
++"""공식 기술8명 통과 후에만 고정 나머지52 study의 다운로드·눈가림 입력표 준비."""
++import argparse
++from concurrent.futures import ThreadPoolExecutor
++import fcntl
++import hashlib
++import io
++import os
++from pathlib import Path
++import time
++
++import nibabel as nib
++import numpy as np
++import pandas as pd
++from PIL import Image,ImageDraw
++from mr128_data import OUT,ROOT,META,REV,read,save,sha,verify_files,extract,utc
++
++
++def tech_gate():
++    expected=read(OUT/'tech_inputs.json')['inputs']
++    config=OUT/'seg/tech/config.json'
++    if len(expected)!=8:raise ValueError('tech8')
++    for study in expected:
++        p=OUT/'seg/tech'/(study+'.complete.json');c=read(p)
++        if c['config_sha256']!=sha(config) or c['returncode']!=0:raise ValueError('technical completion')
++        verify_files(c['result']['artifacts'])
++    return {str(OUT/'seg/tech'/(s+'.complete.json')):sha(OUT/'seg/tech'/(s+'.complete.json')) for s in expected}
++
++
++def download():
++    gate=tech_gate();budget=read(OUT/'budget_verified.json')
++    from huggingface_hub import hf_hub_download
++    os.environ['HF_TOKEN_PATH']='/home/test/.cache/huggingface/token'
++    selected=read('results/iter_127/data/selection_lock.json')['manifest']
++    records=[m for m in selected if m['role']!='tech']
++    if len(records)!=52:raise ValueError('remaining52')
++    authorization=dict(tech_gate=gate,budget_sha256=sha(OUT/'budget_verified.json'),
++         selected_studies=[m['study_uid'] for m in records])
++    if (OUT/'remaining_authorization.json').exists():
++        previous=read(OUT/'remaining_authorization.json')
++        if {k:previous[k] for k in authorization}!=authorization:raise ValueError('changed remaining authorization')
++    else:save(OUT/'remaining_authorization.json',dict(**authorization,created_utc=utc()))
++    prior=read('results/iter_127/data/budget_lock.json')['verified_existing']
++    def fetch(m):
++        study=m['study_uid'];rel=f"mri/{m['batch_id']}/{study}.zip";obj=budget['official_objects'][rel]
++        target=OUT/'downloads'/(study+'.json')
++        if target.exists():
++            v=read(target)
++            if v['revision']!=REV or v['sha256']!=obj['sha256'] or Path(v['path']).stat().st_size!=obj['size'] or sha(v['path'])!=v['sha256']:raise ValueError('stale download')
++            return v
++        t0=time.monotonic()
++        if rel in prior:p=prior[rel]['path']
++        else:p=hf_hub_download('Forithmus/MR-RATE',rel,repo_type='dataset',revision=REV,
++              local_dir=str(ROOT/'raw'),cache_dir=str(ROOT/'cache'))
++        if Path(p).stat().st_size!=obj['size'] or sha(p)!=obj['sha256']:raise ValueError('download digest')
++        v=dict(path=p,size=obj['size'],sha256=obj['sha256'],revision=REV,study_uid=study,
++               reused=rel in prior,wall_s=time.monotonic()-t0)
++        save(target,v);print('download verified',study,obj['size'],flush=True);return v
++    with ThreadPoolExecutor(max_workers=2) as pool:ledger=list(pool.map(fetch,records))
++    save(OUT/'remaining_downloads.json',dict(records=ledger,authorization_sha256=sha(OUT/'remaining_authorization.json')))
++
++
++def sheets():
++    tech_gate()
++    if (OUT/'remaining_candidates.json').exists():
++        previous=read(OUT/'remaining_candidates.json')
++        if previous['protocol_sha256']!=sha(OUT/'protocol.json'):raise ValueError('stale candidates')
++        verify_files({r['montage']:r['montage_sha256'] for r in previous['records']})
++        verify_files({v['path']:v['sha256'] for r in previous['records'] for v in r['input']['files'].values()})
++        return
++    downloads={v['study_uid']:v for v in read(OUT/'remaining_downloads.json')['records']}
++    selected=read('results/iter_127/data/selection_lock.json')['manifest'];out=[]
++    for batch in ['batch04','batch23']:
++        ids={m['study_uid'] for m in selected if m['role']!='tech' and m['batch_id']==batch}
++        cols=['study_uid','series_id','classified_modality','acquisition_plane','is_derived','is_localizer','array_shape','array_spacing_mm']
++        df=pd.read_csv(META/'metadata'/f'{batch}_metadata.csv',usecols=cols,low_memory=False)
++        df=df[df.study_uid.isin(ids)&(df.classified_modality=='T2w')&(df.acquisition_plane=='AXIAL')&(~df.is_derived)&(~df.is_localizer)]
++        for m in df.to_dict('records'):
++            study=m['study_uid'];series=m['series_id'];c=extract(downloads[study]['path'],study,series)
++            if not np.allclose(c['spacing'],__import__('json').loads(m['array_spacing_mm']),atol=1e-3):raise ValueError('spacing')
++            bid=hashlib.sha256((study+'|'+series+'|128').encode()).hexdigest()[:12]
++            im=nib.as_closest_canonical(nib.load(c['files']['img.nii.gz']['path']));a=np.asarray(im.dataobj,dtype=np.float32)
++            lo,hi=np.percentile(a[a>0],[1,99]);nz=a.shape[2];tile=144
++            canvas=Image.new('RGB',(tile*8,((nz+7)//8)*(tile+20)));draw=ImageDraw.Draw(canvas)
++            for k in range(nz):
++                s=np.uint8(np.clip((a[:,:,k]-lo)/max(hi-lo,1e-6),0,1)*255).T[::-1,::-1]
++                image=Image.fromarray(s).convert('RGB');image.thumbnail((tile,tile));x=k%8*tile;y=k//8*(tile+20)
++                canvas.paste(image,(x+(tile-image.width)//2,y));draw.text((x+4,y+tile),str(k),fill='white')
++            p=OUT/'anatomy_remaining'/(bid+'.png');p.parent.mkdir(parents=True,exist_ok=True)
++            buffer=io.BytesIO();canvas.save(buffer,format='PNG');data=buffer.getvalue()
++            if p.exists():
++                if p.read_bytes()!=data:raise ValueError('existing montage differs')
++            else:
++                with p.open('xb') as f:f.write(data)
++            out.append(dict(blind_id=bid,metadata=m,batch_id=batch,input=c,montage=str(p),montage_sha256=sha(p),
++                            shown_slices=list(range(nz)),canonical_shape=list(a.shape),canonical_affine=im.affine.tolist()))
++            print('sheet',bid,flush=True)
++    if {r['metadata']['study_uid'] for r in out}!=set(downloads):raise ValueError('candidate completeness')
++    save(OUT/'remaining_candidates.json',dict(protocol_sha256=sha(OUT/'protocol.json'),records=out))
++
++
++if __name__=='__main__':
++    ap=argparse.ArgumentParser();ap.add_argument('action',choices=['download','sheets']);a=ap.parse_args()
++    with (OUT/'remaining.lock').open('a') as f:
++        fcntl.flock(f,fcntl.LOCK_EX|fcntl.LOCK_NB)
++        download() if a.action=='download' else sheets()
+diff --git a/mr128_resources.py b/mr128_resources.py
+new file mode 100644
+index 0000000..c13fc40
+--- /dev/null
++++ b/mr128_resources.py
+@@ -0,0 +1,52 @@
++"""완료한 실행의 실제 자원·비용 계측을 연구 결과와 별도로 요약한다."""
++from collections import Counter
++import json
++import numpy as np
++from mr128_data import OUT,read,save,sha,utc
++
++
++def main():
++    main_dir=OUT/'gen/main'
++    if not (main_dir/'completion.json').exists():raise ValueError('main not complete')
++    stages={}
++    for stage in ['tech','remaining']:
++        paths=sorted((OUT/'seg'/stage).glob('*.result.json'))
++        stages['SynthSeg_'+stage]=[dict(path=str(p),**read(p)) for p in paths]
++    for stage in ['tech_b1','tech_b2','main']:
++        stages['MedGemma_'+stage]=[dict(path=str(p),**read(p)) for p in sorted((OUT/'gen'/stage).glob('*.result.json'))]
++    samples=[json.loads(line) for p in sorted(main_dir.glob('*.resources.jsonl')) for line in p.read_text().splitlines()]
++    events=[read(p) for p in sorted(main_dir.glob('*.worker*.events.json'))]
++    groups=[g for e in events for g in e['groups']]
++    raw=[json.loads(line) for p in sorted(main_dir.glob('worker*.jsonl')) for line in p.read_text().splitlines()]
++    if len(raw)!=80 or len(groups)!=80:raise ValueError('batch1 main resource80')
++    cost=read(OUT/'eval/per_patient_costs.json')
++    complete_cost=[c for c in cost if c['S_warm_raw_to_score_answer_s'] is not None]
++    def describe(values):
++        return dict(n=len(values),mean=float(np.mean(values)),p95=float(np.quantile(values,.95)),maximum=float(max(values))) if values else dict(n=0)
++    resource=dict(system_cpu_percent_peak=max(r['cpu_percent'] for r in samples),
++         system_available_RAM_min_bytes=min(r['ram']['available'] for r in samples),
++         observed_worker_RSS_max_bytes=max(g['rss_bytes'] for g in groups),
++         worker_cpu_user_system_cumulative=[dict(user_s=e['groups'][-1]['process_cpu_user_s'],system_s=e['groups'][-1]['process_cpu_system_s']) for e in events],
++         worker_IO_cumulative_bytes=[dict(read=e['groups'][-1]['process_read_bytes'],write=e['groups'][-1]['process_write_bytes']) for e in events],
++         total_system_disk_read_delta_bytes=samples[-1]['disk_io']['read_bytes']-samples[0]['disk_io']['read_bytes'],
++         total_system_disk_write_delta_bytes=samples[-1]['disk_io']['write_bytes']-samples[0]['disk_io']['write_bytes'],
++         note_ko='공유 시스템 CPU/RAM/disk 수치는 다른 사용자 작업을 포함하며 우리 작업의 인과적 경합량이 아니다. worker RSS는 group 종료 시점 관측치이며 연속 최대값 보장은 없다. 페이지 cache hit는 read_bytes에 반영되지 않을 수 있다.')
++    durations=[g['end_after_saved']-g['start'] for g in groups]
++    paired_cost=dict(available_complete_S_cost_n=len(complete_cost),
++         S_warm=describe([c['S_warm_raw_to_score_answer_s'] for c in complete_cost]),
++         S_cold=describe([c['S_cold_to_score_answer_s'] for c in complete_cost]),
++         A_independent_component_sum=describe([c['A_independent_warm_component_sum_s'] for c in complete_cost]),
++         A_extra_after_shared_S=describe([c['A_extra_after_shared_S_s'] for c in cost]),
++         U_warm=describe([c['U_warm_raw_to_answer_s'] for c in cost]),
++         note_ko='누락 S 비용을 0으로 채우지 않는다. 비용 표본이 전체40명보다 작으면 available-case 보조 기록이며 전체 대안 충분성의 근거가 아니다. A 독립 값은 실제 구간들의 합이며 단일 uninterrupted service latency가 아니다.')
++    save(OUT/'resource_summary.json',dict(created_utc=utc(),stages=stages,main_system=resource,
++         main_raw_to_saved_s=describe(durations),paired_service_costs=paired_cost,
++         main_EOS=sum(r['eos'] for r in raw),main_max_new_tokens=max(len(r['tokens']) for r in raw),
++         states=dict(Counter(r['cond'] for r in raw)),source_sha256=sha(__file__),
++         pilot_comparison_sha256=sha(OUT/'pilot_comparison.json'),
++         pilot_system_peaks_measured=False,installation_and_anatomy_selection_wall_s=None,
++         unmeasured_ko='기술 batch 비교의 CPU/RAM/I/O 세부 peak와 전체 설치·해부학 수동 선정·복구 wall-clock은 측정하지 않았다. 기록 시각 차이를 실제 작업 시간으로 환산하지 않는다.'))
++    print('resources summarized; complete S cost',len(complete_cost),'/',len(cost))
++
++
++if __name__=='__main__':main()
+diff --git a/mr128_seg.py b/mr128_seg.py
+new file mode 100644
+index 0000000..efa892d
+--- /dev/null
++++ b/mr128_seg.py
+@@ -0,0 +1,182 @@
++"""iter128 고정 FreeSurfer SynthSeg2.0: manifest 기반 감독·실패 보존·검증 재개."""
++import argparse
++import csv
++import fcntl
++import os
++from pathlib import Path
++import signal
++import subprocess
++import time
++import uuid
++
++import nibabel as nib
++import numpy as np
++from mr128_data import OUT, ROOT, read, save, sha, verify_files, utc
++from mr127_seg import gpu_info
++
++FS = ROOT.parent/'iter127/freesurfer'
++PYTHON = ROOT.parent/'iter127/env_freesurfer/bin/python'
++LIMIT = 20000
++RESERVE = 2048
++QC = ['general white matter','general grey matter','general csf','cerebellum','brainstem','thalamus','putamen+pallidum','hippocampus+amygdala']
++
++
++def csv_values(p, required=None):
++    with open(p,newline='') as f: rows=list(csv.reader(f))
++    if len(rows)!=2 or len(rows[0])!=len(rows[1]) or rows[1][0]!='img': raise ValueError(f'CSV target/schema: {p}')
++    header=rows[0][1:]
++    if not header or len(set(header))!=len(header): raise ValueError('missing/duplicate CSV columns')
++    if required is not None and header!=required: raise ValueError(f'QC schema mismatch: {header}')
++    vals={k:float(v) for k,v in zip(header,rows[1][1:])}
++    if not np.isfinite(list(vals.values())).all(): raise ValueError('nonfinite CSV')
++    return vals
++
++
++def verify_result(directory):
++    vol=csv_values(directory/'vol.csv'); qc=csv_values(directory/'qc.csv',QC)
++    names=['left lateral ventricle','right lateral ventricle','total intracranial']
++    if any(k not in vol or vol[k]<=0 for k in names): raise ValueError(f'nonpositive official volume: { {k:vol.get(k) for k in names} }')
++    if not all(0<=v<=1 for v in qc.values()): raise ValueError('QC out of range')
++    seg=nib.load(directory/'seg.nii.gz'); a=np.asarray(seg.dataobj)
++    if len(a.shape)!=3 or not np.isfinite(a).all() or not np.isfinite(seg.affine).all() or abs(np.linalg.det(seg.affine[:3,:3]))<1e-8: raise ValueError('seg grid')
++    if not np.allclose(seg.header.get_zooms()[:3],1,atol=1e-5): raise ValueError('not 1mm')
++    counts={str(k):int((a==k).sum()) for k in [4,43]}
++    if not all(counts.values()): raise ValueError(f'missing left/right hard mask: {counts}')
++    return dict(volumes_mm3=vol,qc_scores=qc,S=(vol[names[0]]+vol[names[1]])/vol[names[2]],
++         foreground_voxels=int(np.count_nonzero(a)),ventricle_voxels=counts,
++         shape=list(a.shape),affine=seg.affine.tolist(),
++         artifacts={str(directory/n):sha(directory/n) for n in ['seg.nii.gz','vol.csv','qc.csv','official.log']})
++
++
++def main(input_path,stage):
++    fs_assets=read('results/iter_127/fs_assets.json'); verify_files(fs_assets['files'])
++    inputs=read(input_path)
++    if inputs['protocol_sha256']!=sha(OUT/'protocol.json'): raise ValueError('protocol changed')
++    if stage!='tech':
++        from mr128_remaining import tech_gate
++        tech_gate()
++        all_inputs=read(OUT/'all_inputs.json')['inputs']
++        tech_inputs=read(OUT/'tech_inputs.json')['inputs']
++        if set(inputs['inputs'])!=set(all_inputs)-set(tech_inputs):raise ValueError('fixed remaining52 set')
++    verify_files({v['path']:v['sha256'] for c in inputs['inputs'].values() for v in c['files'].values()})
++    allowed=os.environ.get('CUDA_VISIBLE_DEVICES','').split(',')
++    if len(set(allowed))!=len(allowed) or not all(g.isdigit() for g in allowed): raise ValueError('allowed GPU set')
++    cfg=dict(input_sha256=sha(input_path),assets_sha256=sha('results/iter_127/fs_assets.json'),
++         environment_sha256=sha('results/iter_127/environment_record.json'),
++         code={p:sha(p) for p in ['mr128_seg.py','mr128_data.py','mr127_seg.py','mr127_seg_entry.py','mr128_seg_entry.py']},
++         official_flags=['--vol','--qc','--threads','4','--noaddctab'],version='SynthSeg2.0 default',
++         gpu_limit_mib=LIMIT,reserve_per_worker_mib=RESERVE,allowed_physical_gpus=allowed,
++         qc_required=QC,expected_studies=sorted(inputs['inputs']))
++    directory=OUT/'seg'/stage; directory.mkdir(parents=True,exist_ok=True)
++    with (directory/'stage.lock').open('a') as lock:
++        fcntl.flock(lock,fcntl.LOCK_EX|fcntl.LOCK_NB)
++        if (directory/'config.json').exists():
++            if read(directory/'config.json')!=cfg: raise ValueError('stale stage config')
++        else: save(directory/'config.json',cfg)
++        done={}; pending=[]; prior_failures={}
++        for study in sorted(inputs['inputs']):
++            p=directory/(study+'.complete.json')
++            if p.exists():
++                c=read(p)
++                if c['config_sha256']!=sha(directory/'config.json'): raise ValueError('stale completion')
++                verify_files(c['result']['artifacts']); verify_result(Path(c['directory']))
++                if stage!='tech':
++                    timing=read(directory/(study+'.timing.json'))
++                    if timing['answer_sha256']!=sha(p):raise ValueError('stale timing answer')
++                done[study]=c
++            elif (directory/(study+'.failure.json')).exists():
++                c=read(directory/(study+'.failure.json'))
++                if c['config_sha256']!=sha(directory/'config.json'):raise ValueError('stale failed result')
++                prior_failures[study]=c
++            else: pending.append(study)
++        tag=uuid.uuid4().hex; active={}; failures=dict(prior_failures); peak={g:0 for g in allowed}; minfree={g:99999 for g in allowed}; stopped=False
++        t0=time.monotonic()
++        def stop(signum,frame):
++            nonlocal stopped
++            stopped=True
++            for a in active.values(): a['process'].terminate()
++        handlers={s:signal.signal(s,stop) for s in [signal.SIGTERM,signal.SIGINT]}
++        log=directory/(tag+'.resources.jsonl')
++        with log.open('x') as resource:
++            try:
++                while pending or active:
++                    gs=gpu_info()
++                    resource.write(__import__('json').dumps(dict(utc=utc(),gpus=gs))+'\n'); resource.flush()
++                    for g in gs:
++                        if g['index'] in peak:
++                            peak[g['index']]=max(peak[g['index']],g['used_mib']); minfree[g['index']]=min(minfree[g['index']],g['free_mib'])
++                    occupied={a['gpu'] for a in active.values()}
++                    for g in sorted(gs,key=lambda g:g['free_mib'],reverse=True):
++                        if stopped or (stage=='tech' and failures) or not pending: break
++                        if g['index'] not in allowed or g['index'] in occupied: continue
++                        # TF limit에 worker당 2GiB와 device 외부 할당 256MiB를 추가한다.
++                        if g['free_mib']<LIMIT+RESERVE+256: continue
++                        study=pending.pop(0); c=inputs['inputs'][study]
++                        target=ROOT/'seg'/stage/study/tag; target.mkdir(parents=True,exist_ok=False)
++                        entry='mr127_seg_entry.py' if stage=='tech' else 'mr128_seg_entry.py'
++                        cmd=[str(PYTHON),str(Path(entry).absolute()),str(FS/'mri_synthseg.py'),
++                             '--i',c['files']['img.nii.gz']['path'],'--o',str(target/'seg.nii.gz'),
++                             '--vol',str(target/'vol.csv'),'--qc',str(target/'qc.csv'),'--threads','4','--noaddctab']
++                        env=dict(os.environ,CUDA_VISIBLE_DEVICES=g['index'],FREESURFER_HOME=str(FS),
++                             TF_USE_LEGACY_KERAS='1',TF_FORCE_GPU_ALLOW_GROWTH='true',SYNTHSEG_GPU_LIMIT_MIB=str(LIMIT),
++                             TF_CPP_MIN_LOG_LEVEL='1',PYTHONDONTWRITEBYTECODE='1',PYTHONUNBUFFERED='1')
++                        base=Path('results/environments/synthseg125').absolute()
++                        libs=sorted(str(p) for p in base.glob('lib/python*/site-packages/nvidia/*/lib'))
++                        env['LD_LIBRARY_PATH']=':'.join(libs+[str(base/'lib'),env.get('LD_LIBRARY_PATH','')])
++                        save(target/'execution.json',dict(command=cmd,started_utc=utc(),physical_gpu=g['index'],logical_gpu=0,
++                             admission=g,input=c,config_sha256=sha(directory/'config.json'),
++                             environment={k:env[k] for k in ['CUDA_VISIBLE_DEVICES','FREESURFER_HOME','TF_USE_LEGACY_KERAS','LD_LIBRARY_PATH']}))
++                        h=(target/'official.log').open('x'); proc=subprocess.Popen(cmd,env=env,stdout=h,stderr=subprocess.STDOUT)
++                        active[study]=dict(process=proc,handle=h,gpu=g['index'],directory=target,start=time.monotonic())
++                        occupied.add(g['index']); print('started',study,'GPU',g['index'],'pid',proc.pid,flush=True)
++                    if pending and not active and not failures and not stopped:
++                        failures['admission']=dict(error='허용 GPU의 limit+2GiB+외부256MiB 여유 부족',gpus=gs)
++                    for study,a in list(active.items()):
++                        rc=a['process'].poll()
++                        if rc is None: continue
++                        a['handle'].close()
++                        try:
++                            if rc!=0: raise ValueError(f'official exit {rc}')
++                            result=verify_result(a['directory'])
++                            timing=[]
++                            if stage!='tech':
++                                lines=(a['directory']/'official.log').read_text().splitlines()
++                                timing=[__import__('json').loads(s.split(' ',1)[1]) for s in lines if s.startswith('SYNTHSEG_TIMING ')]
++                                if len(timing)!=1 or 'warm_start_monotonic' not in timing[0]:raise ValueError('missing warm boundary')
++                            c=dict(config_sha256=sha(directory/'config.json'),result=result,returncode=rc,
++                                  directory=str(a['directory']),physical_gpu=a['gpu'],wall_s=time.monotonic()-a['start'])
++                            save(directory/(study+'.complete.json'),c)
++                            answer_end=time.monotonic()
++                            if stage!='tech':
++                                save(directory/(study+'.timing.json'),dict(official=timing[0],answer_saved_monotonic=answer_end,
++                                     warm_raw_read_to_S_answer_saved_s=answer_end-timing[0]['warm_start_monotonic'],
++                                     cold_subprocess_to_S_answer_saved_s=answer_end-a['start'],
++                                     answer_sha256=sha(directory/(study+'.complete.json'))))
++                            done[study]=c; print('verified',study,flush=True)
++                        except Exception as e:
++                            failures[study]=dict(error=str(e),returncode=rc,directory=str(a['directory']),config_sha256=sha(directory/'config.json'))
++                            save(directory/(study+'.failure.json'),failures[study])
++                            print('failed',study,str(e),flush=True)
++                        del active[study]
++                    if (stage=='tech' and failures) or 'admission' in failures or stopped:
++                        pending=[]
++                        for a in active.values():
++                            if a['process'].poll() is None: a['process'].terminate()
++                    if active: time.sleep(1)
++            finally:
++                for a in active.values():
++                    if a['process'].poll() is None: a['process'].terminate()
++                    a['process'].wait(); a['handle'].close()
++                for s,h in handlers.items(): signal.signal(s,h)
++        ok=set(done)==set(inputs['inputs']) and not failures and not stopped
++        save(directory/(tag+'.result.json'),dict(checks_passed=ok,status='complete' if ok else 'failed',
++             done=done,failures=failures,stopped=stopped,peak_gpu_total_mib=peak,min_gpu_free_mib=minfree,
++             wall_s=time.monotonic()-t0,resource_log=str(log),resource_sha256=sha(log),
++             config_sha256=sha(directory/'config.json'),expected_studies=cfg['expected_studies']))
++        print('stage complete',ok,'done',len(done),'wall',time.monotonic()-t0,flush=True)
++        return 0 if ok else 2
++
++
++if __name__=='__main__':
++    ap=argparse.ArgumentParser(); ap.add_argument('--inputs',default=str(OUT/'tech_inputs.json')); ap.add_argument('--stage',default='tech')
++    a=ap.parse_args(); raise SystemExit(main(a.inputs,a.stage))
+diff --git a/mr128_seg_entry.py b/mr128_seg_entry.py
+new file mode 100644
+index 0000000..5b4bf53
+--- /dev/null
++++ b/mr128_seg_entry.py
+@@ -0,0 +1,38 @@
++"""공식 연산은 그대로 실행하며 모델 구성 후 원 NIfTI 읽기 시작을 계측한다."""
++import json
++import os
++from pathlib import Path
++import runpy
++import sys
++import time
++
++import tensorflow as tf
++
++script=str(Path(sys.argv[1]).resolve())
++gpus=tf.config.list_physical_devices('GPU')
++if len(gpus)!=1:raise RuntimeError('single allowed GPU required')
++limit=int(os.environ['SYNTHSEG_GPU_LIMIT_MIB'])
++tf.config.set_logical_device_configuration(gpus[0],[tf.config.LogicalDeviceConfiguration(memory_limit=limit)])
++print('GPU_ENVIRONMENT',json.dumps(dict(python=sys.executable,tensorflow=tf.__version__,
++     visible=os.environ.get('CUDA_VISIBLE_DEVICES'),memory_limit_mib=limit)),flush=True)
++events={}
++
++
++def profile(frame,event,arg):
++    if frame.f_code.co_filename!=script:return
++    name=frame.f_code.co_name
++    if name=='preprocess' and event=='call' and 'warm_start_monotonic' not in events:
++        events['warm_start_monotonic']=time.monotonic()
++        events['raw_input']=frame.f_locals.get('path_image')
++    if name=='write_csv' and event=='return' and 'warm_start_monotonic' in events:
++        events['last_csv_saved_monotonic']=time.monotonic()
++
++
++sys.argv=sys.argv[1:]
++sys.setprofile(profile)
++try:runpy.run_path(script,run_name='__main__')
++finally:
++    sys.setprofile(None)
++    events['process_end_monotonic']=time.monotonic()
++    events['boundary_ko']='공식 모델 구성 후 preprocess 호출 직전부터 실제 원 NIfTI를 읽는다. 첫 predict tracing을 포함하며 steady-state 반복 처리량으로 해석하지 않는다.'
++    print('SYNTHSEG_TIMING',json.dumps(events,ensure_ascii=False),flush=True)
+diff --git a/mr128_verify_inputs.py b/mr128_verify_inputs.py
+new file mode 100644
+index 0000000..13e94e2
+--- /dev/null
++++ b/mr128_verify_inputs.py
+@@ -0,0 +1,76 @@
++"""전체 고정 환자·원 metadata·split·decoded volume·U8의 독립 읽기 전용 검산."""
++import hashlib
++import json
++from collections import Counter
++from pathlib import Path
++import nibabel as nib
++import numpy as np
++import pandas as pd
++from mr128_data import OUT,META,read,save,sha,utc
++
++
++def patients(obj):
++    result=set()
++    if isinstance(obj,dict):
++        if 'patient_uid' in obj:result.add(int(obj['patient_uid']))
++        for v in obj.values():result|=patients(v)
++    elif isinstance(obj,list):
++        for v in obj:result|=patients(v)
++    return result
++
++
++def main(suffix):
++    manifest=read(OUT/'evaluation_manifest.json')['records'];inputs=read(OUT/'all_inputs.json')['inputs']
++    original=read('results/iter_127/data/selection_lock.json')['manifest'];old=set()
++    for p in ['results/iter_123/data/selection_lock.json','results/iter_124/data/eligibility_lock.json','results/iter_124/data/candidates.json']:
++        if Path(p).exists():old|=patients(read(p))
++    metadata={b:pd.read_csv(META/'metadata'/f'{b}_metadata.csv',low_memory=False,
++        usecols=['study_uid','series_id','patient_uid','array_shape','array_spacing_mm','classified_modality','acquisition_plane','is_derived','is_localizer']) for b in ['batch04','batch23']}
++    splits=pd.read_csv(META/'splits.csv');checks=[];volumes={}
++    def check(name,condition):checks.append(dict(name=name,passed=bool(condition)))
++    check('fixed_records',manifest==[{k:m[k] for k in ['patient_uid','study_uid','batch_id','label','role']} for m in original])
++    check('patient_unique60',len({m['patient_uid'] for m in manifest})==60)
++    check('old_patients_excluded',not ({m['patient_uid'] for m in manifest}&old))
++    check('roles',Counter(m['role'] for m in manifest)=={'tech':8,'calib':12,'explore':40})
++    for m in manifest:
++        study=m['study_uid'];c=inputs[study];series=c['key']['series_id'];df=metadata[m['batch_id']]
++        matched=df[(df.study_uid==study)&(df.series_id==series)]
++        check(study+':unique_metadata',len(matched)==1)
++        if len(matched)!=1:continue
++        r=matched.iloc[0]
++        check(study+':patient_link',int(r.patient_uid)==m['patient_uid'])
++        check(study+':T2_axial_nonderived',r.classified_modality=='T2w' and r.acquisition_plane=='AXIAL' and not r.is_derived and not r.is_localizer)
++        split=splits[(splits.batch_id==m['batch_id'])&(splits.study_uid==study)]
++        check(study+':official_train',len(split)==1 and split.iloc[0].split=='train')
++        image=nib.load(c['files']['img.nii.gz']['path']);mask=nib.load(c['files']['brain.nii.gz']['path'])
++        check(study+':metadata_shape',list(image.shape)==json.loads(r.array_shape))
++        check(study+':metadata_spacing',np.allclose(image.header.get_zooms()[:3],json.loads(r.array_spacing_mm),atol=1e-3))
++        check(study+':mask_grid',image.shape==mask.shape and np.allclose(image.affine,mask.affine,atol=1e-3))
++        can=nib.as_closest_canonical(image);bm=nib.as_closest_canonical(mask)
++        a=np.asarray(can.dataobj,dtype=np.float32);b=np.asarray(bm.dataobj)>0
++        check(study+':finite_RAS',np.isfinite(a).all() and nib.aff2axcodes(can.affine)==('R','A','S'))
++        area=b.sum(axis=(0,1));valid=area>=area.max()*0.05;runs=[];start=None
++        for i,v in enumerate(list(valid)+[False]):
++            if v and start is None:start=i
++            if not v and start is not None:runs.append((start,i-1));start=None
++        lo,hi=max(runs,key=lambda r:r[1]-r[0])
++        # 유지할 원 U의 IEEE-754 계산 순서와 Python ties-to-even round를 독립 재구성한다.
++        positions=[lo+(hi-lo)*(0.05+(0.95-0.05)*i/7) for i in range(8)]
++        indices=[round(p) for p in positions]
++        check(study+':U8',indices==c['U_idx'] and len(set(indices))==8)
++        z=[(can.affine@np.array([0,0,k,1]))[2] for k in indices]
++        check(study+':inferior_superior',all(bb>aa for aa,bb in zip(z,z[1:])))
++        h=hashlib.sha256();h.update(str(a.shape).encode());h.update(a.tobytes());volumes[study]=h.hexdigest()
++    check('decoded_volume_unique60',len(volumes)==len(set(volumes.values()))==60)
++    ok=all(c['passed'] for c in checks)
++    save(OUT/('all_input_independent_checks'+suffix+'.json'),dict(created_utc=utc(),all_pass=ok,checks=checks,
++         source_sha256=sha(__file__),all_inputs_sha256=sha(OUT/'all_inputs.json'),decoded_float32_volume_sha256=volumes,
++         scope_ko='원 metadata의 환자·series·shape·spacing, train, 기존 환자 제외, decoded volume 중복, 독립 U8·방향 검산. 임상 판독이나 보고서 정답을 새로 만들지 않음.'))
++    print('independent inputs',sum(c['passed'] for c in checks),'/',len(checks))
++    return 0 if ok else 2
++
++
++if __name__=='__main__':
++    import argparse
++    ap=argparse.ArgumentParser();ap.add_argument('--suffix',default='_v2');a=ap.parse_args()
++    raise SystemExit(main(a.suffix))
+diff --git a/mr128_verify_results.py b/mr128_verify_results.py
+new file mode 100644
+index 0000000..cad50cb
+--- /dev/null
++++ b/mr128_verify_results.py
+@@ -0,0 +1,157 @@
++"""production metric/parser를 import하지 않는 원 출력·부피 기반 독립 재계산."""
++from fractions import Fraction
++import csv
++import json
++from pathlib import Path
++import re
++import numpy as np
++import nibabel as nib
++from nibabel.processing import resample_from_to
++from mr128_data import OUT,read,save,sha,utc,verify_files
++
++
++def answer(row):
++    if not row['eos']:return 'INVALID'
++    lines=[l for l in row['text'].strip().splitlines() if l.strip()]
++    if not lines:return 'INVALID'
++    first=re.sub(r'[*_`#>\-:.\[\]()"]',' ',lines[0]).strip()
++    found=[s for s in ['PRESENT','ABSENT','UNCERTAIN'] if re.search(r'\b'+s+r'\b',first,re.I)]
++    return found[0] if len(found)==1 else 'INVALID'
++
++
++def ba(y,p):
++    positives=[i for i,v in enumerate(y) if v];negatives=[i for i,v in enumerate(y) if not v]
++    return (Fraction(sum(p[i]=='PRESENT' for i in positives),len(positives))+
++            Fraction(sum(p[i]=='ABSENT' for i in negatives),len(negatives)))/2
++
++
++def volume_score(study):
++    c=read(OUT/'seg/remaining'/(study+'.complete.json'))
++    p=Path(c['directory'])/'vol.csv'
++    with p.open(newline='') as f:table=list(csv.reader(f))
++    v={k:float(n) for k,n in zip(table[0][1:],table[1][1:])}
++    return (v['left lateral ventricle']+v['right lateral ventricle'])/v['total intracranial']
++
++
++def main():
++    report=read(OUT/'eval/report.json');saved=read(OUT/'eval/per_patient.json');cal=read(OUT/'calibration_lock.json')
++    verify_files(report['provenance']['builds']);c=read(OUT/'gen/main/completion.json');verify_files(c['artifacts'])
++    records=[]
++    for p in sorted((OUT/'gen/main').glob('worker*.jsonl')):
++        for line in p.read_text().splitlines():records.append(json.loads(line))
++    if len(records)!=80 or len({r['id'] for r in records})!=80:raise ValueError('main raw complete80')
++    lookup={(r['study_uid'],r['cond']):r for r in records};manifest=read(OUT/'evaluation_manifest.json')['records']
++    rows=[];checks=[]
++    def check(name,ok):checks.append(dict(name=name,passed=bool(ok)))
++    for m in manifest:
++        if m['role']!='explore':continue
++        study=m['study_uid'];U=answer(lookup[(study,'U')]);A=answer(lookup[(study,'A')]);old=next(r for r in saved if r['study_uid']==study)
++        check(study+':raw_states',U==old['U'] and A==old['A'])
++        score=volume_score(study) if (OUT/'seg/remaining'/(study+'.complete.json')).exists() else None
++        check(study+':official_S',score==old['S'])
++        sp='PRESENT' if score is not None and cal['complete'] and score>=cal['result']['chosen']['threshold'] else 'ABSENT' if score is not None and cal['complete'] else None
++        rows.append(dict(**m,U=U,A=A,S_state=sp,S=score))
++    y=[int(r['label']=='positive') for r in rows];U=[r['U'] for r in rows];A=[r['A'] for r in rows]
++    check('U_BA',float(ba(y,U))==report['U']['BA']);check('A_BA',float(ba(y,A))==report['A']['BA'])
++    cells={}
++    for i,r in enumerate(rows):cells.setdefault((r['batch_id'],r['label']),[]).append(i)
++    comparisons=[('A','U',report['A_minus_U'])]
++    if report['S_complete']:
++        S=[r['S_state'] for r in rows];check('S_BA',float(ba(y,S))==report['S']['BA'])
++        comparisons.extend([('S_state',k,report['S_minus'][k]) for k in ['U','A']])
++        scores=[r['S'] for r in rows];pos=[s for s,v in zip(scores,y) if v];neg=[s for s,v in zip(scores,y) if not v]
++        roc=sum((1 if a>b else .5 if a==b else 0) for a in pos for b in neg)/(len(pos)*len(neg))
++        check('S_AUROC',roc==report['S_AUROC_available'])
++    available=[r for r in rows if r['S'] is not None]
++    if available:
++        pos=[r['S'] for r in available if r['label']=='positive'];neg=[r['S'] for r in available if r['label']=='negative']
++        roc=sum((1 if a>b else .5 if a==b else 0) for a in pos for b in neg)/(len(pos)*len(neg)) if pos and neg else None
++        check('available_S_AUROC',roc==report['S_AUROC_available'])
++        if cal['complete']:
++            check('available_S_BA',float(ba([int(r['label']=='positive') for r in available],[r['S_state'] for r in available]))==report['S_available_metrics']['BA'])
++    for first,second,old in comparisons:
++        rng=np.random.default_rng(125);values=[]
++        a=[r[first] for r in rows];b=[r[second] for r in rows]
++        for _ in range(10000):
++            ix=[]
++            for cell in sorted(cells):ix.extend(rng.choice(cells[cell],len(cells[cell]),replace=True).tolist())
++            yy=[y[i] for i in ix];aa=[a[i] for i in ix];bb=[b[i] for i in ix]
++            values.append(float(ba(yy,aa)-ba(yy,bb)))
++        check(first+'-'+second+':mean',float(ba(y,a)-ba(y,b))==old['mean'])
++        check(first+'-'+second+':CI95',np.allclose(np.quantile(values,[.025,.975]),old['CI95'],atol=1e-12))
++    if report['S_available_minus']:
++        cells_available={}
++        for i,r in enumerate(available):cells_available.setdefault((r['batch_id'],r['label']),[]).append(i)
++        for second,old in report['S_available_minus'].items():
++            rng=np.random.default_rng(125);values=[]
++            yy=[int(r['label']=='positive') for r in available];ss=[r['S_state'] for r in available];other=[r[second] for r in available]
++            for _ in range(10000):
++                ix=[i for cell in sorted(cells_available) for i in rng.choice(cells_available[cell],len(cells_available[cell]),replace=True).tolist()]
++                values.append(float(ba([yy[i] for i in ix],[ss[i] for i in ix])-ba([yy[i] for i in ix],[other[i] for i in ix])))
++            check('available_S-'+second,float(ba(yy,ss)-ba(yy,other))==old['mean'] and np.allclose(np.quantile(values,[.025,.975]),old['CI95'],atol=1e-12))
++    if cal['complete']:
++        calibration=[dict(m,S=volume_score(m['study_uid'])) for m in manifest if m['role']=='calib']
++        ys=[int(r['label']=='positive') for r in calibration];scores=[r['S'] for r in calibration];v=sorted(set(scores))
++        candidates=[0.0]+[(a+b)/2 for a,b in zip(v,v[1:])]+[float(np.nextafter(v[-1],np.inf))]
++        def rank(t):
++            p=['PRESENT' if s>=t else 'ABSENT' for s in scores]
++            spec=sum(not y and z=='ABSENT' for y,z in zip(ys,p))/sum(not y for y in ys)
++            return ba(ys,p),spec,t
++        chosen=max(candidates,key=rank)
++        check('calibration_only_threshold',chosen==cal['result']['chosen']['threshold'])
++    # production 비용/분기 함수를 사용하지 않고 실제 stage sidecar를 다시 연결한다.
++    costs=read(OUT/'eval/per_patient_costs.json')
++    check('cost_patient_set',len(costs)==40 and {r['study_uid'] for r in costs}=={r['study_uid'] for r in rows})
++    groups=[g for p in sorted((OUT/'gen/main').glob('*.worker*.events.json')) for g in read(p)['groups']]
++    group_pairs=[(i,g) for g in groups for i in g['ids']]
++    check('cost_request_set',len(group_pairs)==80 and {i for i,g in group_pairs}=={r['id'] for r in records})
++    group_lookup=dict(group_pairs);cost_lookup={r['study_uid']:r for r in costs}
++    for row in saved:
++        study=row['study_uid'];build=read(OUT/'build/remaining'/(study+'.json'));cost=cost_lookup[study]
++        cpath=OUT/'seg/remaining'/(study+'.complete.json')
++        if cpath.exists():
++            seg=read(cpath);verify_files(seg['result']['artifacts'])
++            native=nib.load(build['source_input']['files']['img.nii.gz']['path'])
++            mask=nib.load(Path(seg['directory'])/'seg.nii.gz')
++            restored=nib.as_closest_canonical(resample_from_to(mask,(native.shape,native.affine),order=0,mode='constant',cval=0))
++            areas=np.sum(np.isin(np.asarray(restored.dataobj),[4,43]),axis=(0,1))
++            keep=np.flatnonzero(areas>=.05*areas.max()) if areas.max()>0 else []
++            selected=np.rint(np.linspace(int(keep[0]),int(keep[-1]),8)).astype(int).tolist() if len(keep) else []
++            fallback=None if len(set(selected))==8 else 'lt8_unique' if len(keep) else 'no_ventricle_voxels'
++            expected=selected if fallback is None else build['U_idx']
++            check(study+':native_A_fallback',row['A_fallback']==fallback and row['A_idx']==expected)
++        else:
++            check(study+':seg_failure_fallback',row['A_fallback'] is not None and row['A_idx']==row['U_idx'] and row['S'] is None)
++        ug=group_lookup[row['U_request']];ag=group_lookup[row['A_request']]
++        u=ug['end_after_saved']-ug['start'];a=ag['end_after_saved']-ag['start'];render=build['warm_read_to_saved_s']
++        check(study+':VLM_cost',cost['U_warm_raw_to_answer_s']==u and cost['A_VLM_warm_raw_to_answer_s']==a and u>0 and a>0)
++        check(study+':shared_extra_cost',cost['A_extra_after_shared_S_s']==render+a and cost['A_mask_restore_render_s']==render)
++        tp=OUT/'seg/remaining'/(study+'.timing.json')
++        if tp.exists():
++            t=read(tp);s=t['answer_saved_monotonic']-t['official']['warm_start_monotonic']
++            check(study+':S_cost',s==t['warm_raw_read_to_S_answer_saved_s']==cost['S_warm_raw_to_score_answer_s'] and t['answer_sha256']==sha(cpath) and s>0)
++            check(study+':A_component_cost',cost['A_independent_warm_component_sum_s']==s+render+a)
++    check('fallback_count',sum(r['A_fallback'] is not None for r in saved)==report['fallback_n'])
++    check('U_cost_mean',float(np.mean([r['U_warm_raw_to_answer_s'] for r in costs]))==report['costs']['U_warm_mean_s'])
++    if report['costs']['complete']:
++        s_cost=float(np.mean([r['S_warm_raw_to_score_answer_s'] for r in costs]));a_cost=float(np.mean([r['A_independent_warm_component_sum_s'] for r in costs]))
++        check('S_A_cost_means',s_cost==report['costs']['S_warm_mean_s'] and a_cost==report['costs']['A_independent_warm_component_sum_mean_s'])
++    else:s_cost=a_cost=None
++    gap=ba(y,A)-ba(y,U);a_ba=ba(y,A);u_ba=ba(y,U)
++    sensitivity=sum(v and z=='PRESENT' for v,z in zip(y,A))/sum(y)
++    specificity=sum(not v and z=='ABSENT' for v,z in zip(y,A))/sum(not v for v in y)
++    positive=gap>=Fraction('0.15') and report['A_minus_U']['CI95'][0]>0 and a_ba>=Fraction('.75') and sensitivity>=.65 and specificity>=.65
++    sufficient=report['S_complete'] and ba(y,S)>=Fraction('.80') and a_ba-ba(y,S)<Fraction('.05') and a_cost is not None and s_cost is not None and a_cost>s_cost
++    negative=u_ba<=Fraction('.60') and a_ba<=Fraction('.60')
++    investment='단순 대안 이후 현재 이진 과제 VLM 방법 투자 보류' if sufficient else '현재 frozen 설계 종료' if negative else '제한된 sampling 관찰 보존; 독립 확인/방법 진입은 GPT의 별도 판단' if positive else '근거 부족으로 현재 설계 보류'
++    check('original_decision_contract',report['decision']==dict(positive_sampling_observation=bool(positive),simple_alternative_sufficient=bool(sufficient),negative_frozen_design=bool(negative),investment=investment,no_automatic_expansion=True,clinical_accuracy_claim=False))
++    check('pre_generation_source_lock',verify_files(read(OUT/'main_analysis_lock.json')['code']) is None)
++    ok=all(c['passed'] for c in checks)
++    save(OUT/'eval/independent_verify.json',dict(created_utc=utc(),all_pass=ok,checks=checks,
++         source_sha256=sha(__file__),report_sha256=sha(OUT/'eval/report.json'),
++         per_patient_sha256=sha(OUT/'eval/per_patient.json'),main_completion_sha256=sha(OUT/'gen/main/completion.json'),
++         scope_ko='원시 문자열·공식 CSV로 상태/BA/AUROC/threshold/10,000회 paired CI와 native mask fallback·비용 sidecar·원 분기를 재계산. 임상 의미 정답의 독립 검증은 아니다.'))
++    print('independent results',sum(c['passed'] for c in checks),'/',len(checks));return 0 if ok else 2
++
++
++if __name__=='__main__':raise SystemExit(main())
+diff --git a/test_mr128.py b/test_mr128.py
+new file mode 100644
+index 0000000..d50b252
+--- /dev/null
++++ b/test_mr128.py
+@@ -0,0 +1,83 @@
++"""실제 입력 및 extraction/CSV 보호 경로의 필요한 회귀 검사."""
++import csv
++import json
++from pathlib import Path
++import shutil
++import tempfile
++import zipfile
++
++import nibabel as nib
++import numpy as np
++import mr128_data as D
++from mr128_seg import csv_values, QC
++
++
++def main():
++    checks=[]
++    def check(name,ok):
++        checks.append(dict(name=name,passed=bool(ok)))
++    def rejects(name,fn):
++        try: fn()
++        except (ValueError,RuntimeError,FileNotFoundError,BlockingIOError): check(name,True)
++        else: check(name,False)
++    inp=D.read(D.OUT/'tech_inputs.json'); candidates=D.read(D.OUT/'tech_candidates.json')
++    for study,c in inp['inputs'].items():
++        im=nib.load(c['files']['img.nii.gz']['path']); bm=nib.load(c['files']['brain.nii.gz']['path'])
++        check(study+':grid',im.shape==bm.shape and np.allclose(im.affine,bm.affine,atol=1e-3))
++        can=nib.as_closest_canonical(im); bcan=nib.as_closest_canonical(bm)
++        check(study+':RAS',nib.aff2axcodes(can.affine)==('R','A','S'))
++        areas=np.sum(np.asarray(bcan.dataobj)>0,axis=(0,1)); valid=areas>=areas.max()*0.05
++        runs=[]; start=None
++        for k,ok in enumerate(list(valid)+[False]):
++            if ok and start is None:start=k
++            if not ok and start is not None:runs.append((start,k-1));start=None
++        lo,hi=max(runs,key=lambda r:r[1]-r[0])
++        expected=np.rint(np.linspace(lo+(hi-lo)*0.05,lo+(hi-lo)*0.95,8)).astype(int).tolist()
++        check(study+':U8_independent',c['U_idx']==expected and len(set(expected))==8)
++        z_world=[float((can.affine@np.array([0,0,k,1]))[2]) for k in expected]
++        check(study+':inferior_superior',all(b>a for a,b in zip(z_world,z_world[1:])))
++        xyz=np.array([[0,0,0,1],[im.shape[0]-1,im.shape[1]-1,im.shape[2]-1,1],[3,7,11,1]],float).T
++        check(study+':world_roundtrip',np.allclose(np.linalg.inv(im.affine)@(im.affine@xyz),xyz,atol=1e-8))
++    # 실제 입력과 분리한 소유 fixture 경로에서 부분 추출 재개와 cache 변조를 검사한다.
++    with tempfile.TemporaryDirectory(dir=D.OUT,prefix='fixture_') as t:
++        root=Path(t); original=D.ROOT; D.ROOT=root/'external'; D.ROOT.mkdir()
++        try:
++            images=[]
++            for name,a in [('img.nii.gz',np.ones((8,9,10),np.float32)),('brain.nii.gz',np.ones((8,9,10),np.uint8))]:
++                p=root/name; nib.save(nib.Nifti1Image(a,np.diag([1,1,4,1])),p); images.append(p)
++            archive=root/'study.zip'
++            with zipfile.ZipFile(archive,'w') as z:
++                z.write(images[0],'s/img/s_t2.nii.gz');z.write(images[1],'s/seg/s_t2_brain-mask.nii.gz')
++            dest=D.ROOT/'inputs/s/t2'; dest.mkdir(parents=True)
++            shutil.copyfile(images[0],dest/'img.nii.gz')
++            c=D.extract(archive,'s','t2'); check('partial_extraction_resume',len(c['files'])==2)
++            check('completed_extraction_identical',D.extract(archive,'s','t2')==c)
++            (dest/'img.nii.gz').write_bytes(b'tamper')
++            rejects('completed_cache_tamper_rejected',lambda:D.extract(archive,'s','t2'))
++            with zipfile.ZipFile(archive,'a') as z:z.writestr('extra',b'changed')
++            rejects('changed_zip_rejected',lambda:D.extract(archive,'s','t2'))
++        finally:D.ROOT=original
++        p=root/'immutable.json';D.save(p,{'a':1});D.save(p,{'a':1})
++        rejects('output_overwrite_rejected',lambda:D.save(p,{'a':2}))
++        p.write_text('{"a":1,"a":2}')
++        rejects('duplicate_json_rejected',lambda:D.read(p))
++        p=root/'qc.csv'
++        def qc(header,values,subject='img'):
++            with p.open('w',newline='') as f:
++                w=csv.writer(f);w.writerow(['subject']+header);w.writerow([subject]+values)
++        qc(QC,[0.8]*8);check('complete_qc_schema',len(csv_values(p,QC))==8)
++        qc([],[]);rejects('empty_qc_rejected',lambda:csv_values(p,QC))
++        qc(QC[:-1],[0.8]*7);rejects('missing_qc_rejected',lambda:csv_values(p,QC))
++        qc(QC+[QC[0]],[0.8]*9);rejects('duplicate_qc_rejected',lambda:csv_values(p,QC))
++        qc(QC,['nan']+[0.8]*7);rejects('nonfinite_qc_rejected',lambda:csv_values(p,QC))
++        qc(QC,[0.8]*8,'other');rejects('wrong_subject_rejected',lambda:csv_values(p,QC))
++    D.verify_files(D.read(D.OUT/'protocol.json')['preserved_results'])
++    check('past_results_unchanged',True)
++    out=dict(created_utc=D.utc(),checks=checks,all_pass=all(c['passed'] for c in checks),
++             inputs_sha256=D.sha(D.OUT/'tech_inputs.json'),code_sha256=D.sha(__file__))
++    D.save(D.OUT/'tests.json',out)
++    print('checks',sum(c['passed'] for c in checks),'/',len(checks))
++    return 0 if out['all_pass'] else 2
++
++
++if __name__=='__main__':raise SystemExit(main())
+diff --git a/test_mr128_eval.py b/test_mr128_eval.py
+new file mode 100644
+index 0000000..a86d715
+--- /dev/null
++++ b/test_mr128_eval.py
+@@ -0,0 +1,56 @@
++"""생성 전에 고정하는 사건·calibration·평가·판정 경계 검증."""
++import numpy as np
++from mr128_eval import metrics,auroc,calibrate,paired_ci,decision,states
++from mr128_data import OUT,save,sha,utc
++
++
++def main(suffix):
++    checks=[]
++    def check(name,ok):checks.append(dict(name=name,passed=bool(ok)))
++    y=[1,1,0,0];m=metrics(y,['PRESENT','UNCERTAIN','ABSENT','INVALID'])
++    check('uncertain_invalid_denominators',m['BA']==0.5 and m['sensitivity']==0.5 and m['specificity']==0.5 and m['uncertain_n']==1 and m['invalid_n']==1)
++    check('truncated_invalid',states('PRESENT',False)==('INVALID','truncated'))
++    check('ambiguous_first_line',states('PRESENT or ABSENT',True)[0]=='INVALID')
++    check('uncertain_not_correct',metrics([0,1],['UNCERTAIN','UNCERTAIN'])['BA']==0)
++    check('auroc_perfect',auroc(y,[4,3,2,1])==1)
++    check('auroc_all_ties',auroc(y,[1,1,1,1])==0.5)
++    rows=[dict(study_uid=str(i),role='calib',label='positive' if a else 'negative',S=float(b)) for i,(a,b) in enumerate(zip(y,[4,3,2,1]))]
++    c=calibrate(rows)
++    check('calibration_midpoint_operator',c['chosen']['threshold']==2.5 and c['operator']=='>=' and c['chosen']['BA']==1)
++    ties=[dict(r,S=1.0) for r in rows];c=calibrate(ties)
++    check('calibration_tie_specificity_larger_threshold',c['chosen']['specificity']==1 and c['chosen']['threshold']>1)
++    try:calibrate([dict(rows[0],role='explore')]+rows[1:])
++    except ValueError:check('explore_calibration_rejected',True)
++    else:check('explore_calibration_rejected',False)
++    rs=[dict(batch_id='b'+str(i%2),label='positive' if a else 'negative',A='PRESENT' if a else 'ABSENT',U='ABSENT' if a else 'PRESENT') for i,a in enumerate(y)]
++    ci=paired_ci(rs,'A','U');check('paired_all_correct_vs_wrong',ci['mean']==1 and ci['CI95']==[1,1])
++    rs=[dict(r,U=r['A']) for r in rs];ci=paired_ci(rs,'A','U');check('paired_identical_degenerate',ci['mean']==0 and ci['CI95']==[0,0])
++    U=dict(BA=0.60,sensitivity=0.60,specificity=0.60);A=dict(BA=0.75,sensitivity=0.65,specificity=0.85)
++    delta=dict(mean=0.15,CI95=[0.001,0.3]);d=decision(U,A,None,delta,False,2,1)
++    check('positive_exact_boundaries',d['positive_sampling_observation'])
++    check('CI_zero_fails_positive',not decision(U,A,None,dict(mean=0.15,CI95=[0,0.3]),False,2,1)['positive_sampling_observation'])
++    check('both_BA_060_negative',decision(U,U,None,dict(mean=0,CI95=[0,0]),False,2,1)['negative_frozen_design'])
++    S=dict(BA=0.80,sensitivity=0.8,specificity=0.8)
++    check('simple_sufficient',decision(U,A,S,delta,True,2,1)['simple_alternative_sufficient'])
++    check('missing_S_no_sufficiency',not decision(U,A,S,delta,False,2,1)['simple_alternative_sufficient'])
++    check('unknown_cost_no_sufficiency',not decision(U,A,S,delta,True,None,1)['simple_alternative_sufficient'])
++    check('cheaper_A_no_cost_sufficiency',not decision(U,A,S,delta,True,1,2)['simple_alternative_sufficient'])
++    A85=dict(BA=0.85,sensitivity=0.85,specificity=0.85,BA_fraction=[17,20]);S80=dict(S,BA_fraction=[4,5])
++    check('exact_005_gain_not_insufficient',not decision(U,A85,S80,delta,True,2,1)['simple_alternative_sufficient'])
++    A95=dict(BA=0.95,sensitivity=0.95,specificity=0.95,BA_fraction=[19,20])
++    check('exact_015_gain_positive',decision(S80,A95,None,dict(mean=0.95-0.80,mean_fraction=[3,20],CI95=[0.01,0.3]),False,2,1)['positive_sampling_observation'])
++    ok=all(c['passed'] for c in checks)
++    fixtures=OUT/('evaluation_fixtures'+suffix+'.json');lock=OUT/('evaluation_lock'+suffix+'.json')
++    save(fixtures,dict(all_pass=ok,checks=checks,created_utc=utc(),
++         source_sha256=sha(__file__),evaluation_sha256=sha('mr128_eval.py')))
++    save(lock,dict(created_utc=utc(),code={p:sha(p) for p in ['mr128_eval.py','test_mr128_eval.py','mr123_run.py']},
++         fixtures_sha256=sha(fixtures),before_any_VLM_generation=True,
++         note_ko='현재 기술8명의 segmentation만 실행. VLM 출력은 아직 없음. 판정 코드와 사건을 실제 시점에 잠금.'))
++    print('evaluation fixtures',sum(c['passed'] for c in checks),'/',len(checks))
++    return 0 if ok else 2
++
++
++if __name__=='__main__':
++    import argparse
++    ap=argparse.ArgumentParser();ap.add_argument('--suffix',default='_v2');a=ap.parse_args()
++    raise SystemExit(main(a.suffix))
+diff --git a/test_mr128_runtime.py b/test_mr128_runtime.py
+new file mode 100644
+index 0000000..25e546d
+--- /dev/null
++++ b/test_mr128_runtime.py
+@@ -0,0 +1,90 @@
++"""실제 저장 record·실행기 보호 경로·JSONL 재개·CPU 공식 batch 입력 대조."""
++import fcntl
++import json
++import os
++from pathlib import Path
++import shutil
++import tempfile
++from unittest.mock import patch
++
++from mr128_data import OUT,read,save,sha,utc
++import mr128_gen as G
++
++
++def main():
++    checks=[]
++    def check(name,ok):checks.append(dict(name=name,passed=bool(ok)))
++    def rejects(name,fn):
++        try:fn()
++        except (ValueError,BlockingIOError,FileNotFoundError):check(name,True)
++        else:check(name,False)
++    request=read(OUT/'tech_requests.json')['requests'][0]
++    _,rows=G.verify(OUT/'gen/tech_b2',allow_completed_archive=True)
++    row=next(r for r in rows if r['id']==request['id'])
++    cfg_sha=sha(OUT/'gen/tech_b2/config.json')
++    G.verify_row(row,request,cfg_sha);check('real_record_provenance',True)
++    rejects('changed_request_rejected',lambda:G.verify_row(row,dict(request,prompt=request['prompt']+' changed'),cfg_sha))
++    rejects('changed_output_rejected',lambda:G.verify_row(dict(row,text='ABSENT'),request,cfg_sha))
++    rejects('changed_config_rejected',lambda:G.verify_row(row,request,'0'*64))
++    with tempfile.TemporaryDirectory(dir=OUT/'gen',prefix='cpu_runtime_') as t:
++        root=Path(t);p=root/'torn.jsonl';valid=b'{"id":"one"}\n'
++        p.write_bytes(valid+b'{"id":')
++        check('torn_tail_repaired',G.jsonl(p,repair=True)==[{'id':'one'}] and p.read_bytes()==valid)
++        check('torn_original_preserved',len(list(root.glob('torn.jsonl.torn.*')))==1)
++        p.write_bytes(valid+b'BAD\n'+b'{"id":"two"}\n');rejects('middle_corruption_rejected',lambda:G.jsonl(p,repair=True))
++        p.write_bytes(b'{"id":"one","id":"two"}\n');rejects('duplicate_keys_rejected',lambda:G.jsonl(p,repair=True))
++        p.write_bytes(b'{"id":"one","score":NaN}\n');rejects('NaN_rejected',lambda:G.jsonl(p))
++        p.write_bytes(valid+valid);rejects('duplicate_ID_rejected',lambda:G.jsonl(p))
++        p.write_bytes(b'{"id":"one"}');rejects('missing_newline_uncommitted',lambda:G.jsonl(p))
++        check('complete_unterminated_preserved',G.jsonl(p,repair=True)==[{'id':'one'}] and p.read_bytes()==valid)
++        with p.open('ab') as f:f.write(b'{"id":"two"}\n')
++        check('append_after_tail_resume',len(G.jsonl(p))==2)
++        # 실제 launch 함수의 lock 및 완료/변조 분기. GPU 자식 생성은 반드시 차단한다.
++        virtual=[dict(index=g,uuid='fixture-'+g,total_mib=200000,used_mib=0,free_mib=200000) for g in os.environ['CUDA_VISIBLE_DEVICES'].split(',')]
++        with (root/'stage.lock').open('a') as f:
++            fcntl.flock(f,fcntl.LOCK_EX|fcntl.LOCK_NB)
++            with patch.object(G,'gpu_info',return_value=virtual),patch.object(G.subprocess,'Popen',side_effect=AssertionError('GPU process must not start')):
++                rejects('actual_launch_owner_rejected',lambda:G.launch(OUT/'tech_requests.json',root.name,batch=2))
++        src=OUT/'gen/tech_b2'
++        for name in ['config.json','worker0.jsonl','worker1.jsonl']:
++            shutil.copyfile(src/name,root/name)
++        c=read(src/'completion.json');c['artifacts']={str(root/n):sha(root/n) for n in ['config.json','worker0.jsonl','worker1.jsonl']}
++        save(root/'completion.json',c)
++        before={str(root/n):sha(root/n) for n in ['config.json','worker0.jsonl','worker1.jsonl','completion.json']}
++        with patch.object(G,'gpu_info',return_value=virtual),patch.object(G.subprocess,'Popen',side_effect=AssertionError('completed run must not spawn')):
++            check('actual_completed_launch_noop',G.launch(OUT/'tech_requests.json',root.name,batch=2)==0)
++            check('completed_files_unchanged',all(sha(p)==h for p,h in before.items()))
++            rejects('completed_wrong_batch_rejected',lambda:G.launch(OUT/'tech_requests.json',root.name,batch=1))
++            worker=root/'worker0.jsonl';worker.write_bytes(worker.read_bytes()[:-10])
++            rejects('completed_output_tamper_rejected',lambda:G.launch(OUT/'tech_requests.json',root.name,batch=2))
++    # AutoProcessor의 실제 batch tensor를 single 입력의 명시적 stack/concat과 대조한다.
++    os.environ['CUDA_VISIBLE_DEVICES']=''
++    import torch
++    from transformers import AutoProcessor
++    processor=AutoProcessor.from_pretrained(G.MODEL,revision=G.REV,cache_dir=G.CACHE,local_files_only=True)
++    processor.tokenizer.padding_side='left';requests=read(OUT/'tech_requests.json')['requests']
++    routing=[]
++    for wid in [0,1]:
++        assigned=requests[wid::2]
++        for k in range(0,len(assigned),2):
++            group=assigned[k:k+2];messages=[G.make_messages(r,G.native_images(r)) for r in group]
++            singles=[processor.apply_chat_template(m,add_generation_prompt=True,tokenize=True,return_dict=True,return_tensors='pt') for m in messages]
++            batch=processor.apply_chat_template(messages,add_generation_prompt=True,tokenize=True,return_dict=True,return_tensors='pt',padding=True)
++            ok=set(batch)==set(singles[0])==set(singles[1])
++            details={}
++            for key in batch:
++                if isinstance(batch[key],torch.Tensor):
++                    expected=torch.cat([s[key] for s in singles],dim=0)
++                    details[key]=torch.equal(batch[key],expected)
++                else:details[key]=batch[key]==singles[0][key]+singles[1][key]
++            ok=ok and all(details.values());routing.append(dict(ids=[r['id'] for r in group],all_equal=ok,details=details))
++    check('all16_batch_tensor_routing',len(routing)==8 and all(r['all_equal'] for r in routing))
++    ok=all(c['passed'] for c in checks)
++    save(OUT/'runtime_tests.json',dict(created_utc=utc(),all_pass=ok,checks=checks,batch_routing=routing,
++         source_sha256=sha(__file__),generation_sha256=sha('mr128_gen.py'),GPU_model_calls=0,
++         scope_ko='JSONL·변조·실제 launch 소유권/완료 분기와 CPU 공식 batch tensor 대조. GPU 부분재개는 tech_b2의 실제12→16건 기록으로 별도 확인.'))
++    print('runtime checks',sum(c['passed'] for c in checks),'/',len(checks))
++    return 0 if ok else 2
++
++
++if __name__=='__main__':raise SystemExit(main())

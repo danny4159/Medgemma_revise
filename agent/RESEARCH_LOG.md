@@ -46968,3 +46968,309 @@ weight 검사 로그에는 CPU 검사 설명과 달리 양 GPU device 초기화�
 기술8명의 실제 영상 적합성·공식 출력·좌표 연결을 먼저 확인한다. 통과하면 원 계획의 생성 설정·처리량 비교·calibration12·탐색40 비교까지 한 실행에 묶는다. 성립하지 않으면 현재 설계를 보류하며 추가 설치·모델·prompt 순회로 연장하지 않는다. 이번 결과나 과거 중단 판정을 다시 쓰지 않는다.
 
 논문 추천은 보류한다. 이번에는 유효한 성능 개선이나 재현된 모델 진단 결과가 없다.
+
+
+## iter_128 GPT PLAN [MRI 해부학 관측 선택 대조 / proceed] — 2026-10-13 04:22:15
+
+# 요약
+
+- 이번에 할 일: 고정60명의 뇌 T2 연결을 수정하고 기존 관측 선택 비교를 완료한다.
+- 필요한 이유: iter_127은 기술8명 중2명에 비뇌 영상이 연결되어 중단했다. 같은 ZIP의 뇌 영상이 확인됐다.
+- 확인할 기준: 전체 입력의 해부학 적합성, 공식 ICV/QC, 실제 생성과 원 BA·비용 기준이다.
+- 주의·다음: 환자·역할·정답을 바꾸지 않는다. 기술 조건이 다시 실패하면 현재 설계를 보류한다.
+
+## 알림 맥락
+
+- 연구: MRI 관측과 근거 활용
+- 데이터: 뇌 MRI MR-RATE의 axial T2와 측뇌실 크기 보고서
+- 모델: frozen MedGemma 1.5, 전문 대조 SynthSeg
+- 과제: T2 영상8장을 받아 양측 측뇌실 확장 여부를 출력한다
+- 가설: 같은 영상 예산에서 관측할 위치를 바꾸면 판별이 달라질 수 있다
+- 질문: 필요한 구조가 보이도록 영상을 고르면 답이 나아지며 전문 모델보다 남는 가치가 있는가?
+- 변경: 실행 복구
+- 연결: iter_127에서 비뇌 series 연결 확인 → 환자를 유지하고 뇌 series 적합성 조건을 먼저 적용한다
+- 작업: 입력 연결과 기술 검증 후 기존40명 비교를 완료하거나 현재 설계를 보류한다
+
+# Current Understanding
+
+기준 문서는 `agent/runs/iter_125/plan.md`, `iter_126/plan.md`, `iter_127/plan.md`다. SHA256은 각각 `477a1c817abfe198e25c14f64a487fbd6f53d5ab0c4a7e5fab91e36f2b705a47`, `632a6090c0246dde0e0d8d80c18fee007d3f0625bae6d4320ffe1d67972e4070`, `f32a776a7502227366c7b10a86571506d7708f714cfb6398b2091313ea01b1fb`다. 구현 담당은 원문과 iter_127/review.json을 읽는다.
+
+유지: iter_127 selection_lock의60명·study·역할·보고서 정답, 두 batch 공식 train, seed125와 이전 환자 제외, 기술8/calibration12/탐색40, U/A·prompt·metric·판정 기준이다. 보고서98명 검토와 선정 검산을 처음부터 반복하지 않고 원 hash·선정 불변성을 검증한다.
+
+변경: 뇌 적합성 필터를 series 순위보다 먼저 적용한다. 이번 amendment는 과거 SynthSeg 출력 이후 발견한 입력 결함의 명시적 수정이며 과거 입력·실패 판정을 소급 변경하지 않는다. 새 결과는 `research/results/iter_128/`, 큰 데이터·cache는 `/home/test/.local/share/medgemma/mr_rate/iter128/`에 둔다.
+
+미완료: 적합한 뇌 입력에서 공식 기술8명 검증, 좌표·실제 processor·생성·처리량, calibration12와 탐색40 비교다. 기존 FLAIR 후보 및 위치 연구의 보류는 유지한다.
+
+# Strategy Check / 연구 방향 판단
+
+출처는 iter_127/review.md의 질문 카드다. 유효 실험0회를 반복 반증으로 세지 않는다.
+
+1. 중요한 문제: 제한된 MRI 관측에서 필요한 구조를 선택하면 판단이 회복되는가?
+2. 현재 근거: 입력 부위 오류와 같은 study의 대체 뇌 영상이 확인됐다. T2 VLM 성능 관찰은 아직 없다.
+3. 쉬운 해결책: 올바른 뇌 series 연결 후 자동 slice 선택과 전문 부피+threshold를 비교한다.
+4. 남은 설명: 올바른 입력의 segmentation, native slice 충분성, 기본 인식, sampling, 약한 정답의 영향이다.
+5. 다음 결정: 실제 비교를 완료해 선택 효과 보존/단순 대안 이후 투자 보류/근거 부족 보류 중 하나를 선택한다. 기술 실패 시 준비 반복을 종료한다.
+
+# Hypothesis
+
+A가 U보다 높으면 관측 sampling의 기여를 지지한다. S만 높으면 단순 관측 선택으로 해결되지 않는 모델·입력 문제가 남는다. S도 낮으면 자료·보고서·전문 모델 적합성을 구분하지 못한다. A의 개선을 내부 선택 능력의 순수 인과 증명으로 해석하지 않는다.
+
+# Limitation Evidence / Correct Usage Checks
+
+새 T2 과제의 observed limitation은 없으므로 limitation_ids는 비운다. 기존 FLAIR 고정 응답은 별도 조건의 배경이며 method 진입 근거가 아니다.
+
+보고서 정답은 iter_127에서 고정한 명시적 양측/복수 측뇌실 확장 또는 정상 크기·폭/확장 부재다. 일반 normal·미표기·자동 라벨0을 음성으로 새로 인정하지 않는다. 이번에 확장 여부를 영상으로 재판독하거나 LLM 합의로 정답을 보충하지 않는다.
+
+공식 processor·chat template·고정 revision·실제 pixel tensor·8장 순서·생성 설정을 기술 입력으로 검사한다. 보고서·정답·식별자·selector 성공 여부는 messages에 넣지 않는다.
+
+# Contribution Path / Baselines / Reuse
+
+신규 기여는 미확정이다. 기존 도구의 정상 연결을 확인하고 단순 대안 이후 잔여 문제가 있는지 판단하는 것이 이번 가치다. U/A는 동일8장, S는 같은 T2 전체 volume이다. A의 segmentation 비용과 S의 정보량 이점을 함께 보고한다. 직접 SFT는 향후 방법 검토의 대안이며 이번 학습량은0이다.
+
+현재 브랜치 `approach/mri-anatomy-observation`, HEAD `20d8bff915b00d2c1578939e4b0a240ddfa85bac`를 이어간다. 필요한 파일이 현재 브랜치에 있어 reuse_assets는 비운다. 전체 스냅샷은 재사용 미승인이다.
+
+- `mr127_verify_selection.py`: 저장 선정의 순서·역할·hash 검산만 제한 승인이다. 해부학 인증으로 사용하지 않는다.
+- `mr127_select.py`, `mr127_judgments.py`, `mr125_select.py`: 환자 선정 기록은 보존한다. 이번 series 연결은 별도 manifest로 분리하며 후보 재선정을 실행하지 않는다.
+- `mr127_data.py`, `mr125_fetch.py`, `mr123_fetch.py`: 새 결과 경로, ZIP 실제 SHA, 선택 member, 원자적 추출·재개를 보완한다.
+- `mr127_seg.py`, `mr127_seg_entry.py`: 환자·stage 하드코딩을 manifest에 연결하고 GPU 안전 여유·필수 QC·완료 재사용을 수정한다.
+- `mr127_assets.py`, `mr127_weight_check.py`: 기존 공식 source·weight·환경 hash를 재사용한다. 설치 main을 재실행하지 않는다. weight 검사가 필요하면 TensorFlow 초기화 전에 CPU-only로 설정하며 기존 검증과 동일한 배열 검사를 반복할 이유가 없으면 생략한다.
+- `mr125_build.py`, `mr123_data.py`: 공식 CSV ICV·부피 연결, 원격자 변환·방향·원 U/A·렌더링을 검증한다. hard-mask ICV 경로를 사용하지 않는다.
+- `mr123_run.py`: 실제 설정, strict JSONL, 중복·누락·worker별 출력·재개를 보완한다. iter_125/reuse_manifest.json의 해당 required_checks를 계승한다.
+- `mr127_finish.py`의 사례별 하드코딩 봉인은 이번 자동 인증기로 사용하지 않는다.
+
+# Proposed Experiment
+
+## 1. 입력 수정 규칙 고정
+
+첫 신규 segmentation 전에 protocol과 해부학 판정 규칙을 저장한다. 원 환자·study·role·label은 변경 불가다. 두 실패 환자만 예외 처리하지 않고 전체60명에 같은 규칙을 적용한다.
+
+각 study의 metadata에서 T2w·AXIAL·비derived·비localizer 후보를 열거한다. 원영상의 전체 z 범위를 빠짐없이 보여주는 저해상도 montage와 필요한 원본 단면을 사용해, 보고서·label·role·과거 segmentation·성능을 숨긴 입력 검토표를 만든다. 정해진 판단은 다음과 같다.
+
+- 적격: 두개 내 양측 대뇌를 포함한 axial 뇌 관측이며 하부 뇌부터 상부 대뇌까지 연속 coverage가 확인된다. 원파일·metadata 연결, 3D·finite·비특이 affine와 대응 brain mask 격자가 유효하다.
+- 부적격: 몸통·경부/척수 중심 영상, localizer, 뇌 일부만 포함한 명백한 제한 coverage, 파일/격자 연결 오류다.
+- 불확정: 부위·coverage를 확실히 판단할 수 없는 경우다. 정답이나 SynthSeg를 이용해 적격으로 바꾸지 않는다.
+
+판정자는 확장 정도·영상 난이도·예상 성공률을 선정 기준으로 쓰지 않는다. StudyDescription이나 brain mask 존재만으로 적격 판정을 하지 않는다. 판정 근거 단면·원 member·hash·검토 시점과 사유를 남긴다. 이는 해부학적 입력 감사이며 임상 판독 인증이 아니다.
+
+적격 series 중 작은 slice spacing→작은 in-plane voxel area→series_id 순으로 하나를 선택한다. 전후 series diff와 모든 선행 후보의 제외 근거를 저장한다. 고정 환자에게 적격 series가 없거나 원 U의 고유8장 입력이 성립하지 않으면 환자를 교체하지 않고 현재 설계를 보류한다.
+
+먼저 보유 기술8명에 적용한다. 이들의 공식 기술 검증이 통과하면 필요한 나머지52 study ZIP을 확보해 같은 검사를 완료한다. 전체60명 입력 manifest를 잠그기 전 calibration·탐색 예측을 생성하지 않는다. 이미 고정한 입력은 segmentation 실패·fallback·정확도를 보고 바꾸지 않는다.
+
+## 2. 공식 비교군과 동작 확인
+
+기존 공식 FreeSurfer 호환 배포·격리 환경의 source/weight/config hash를 확인해 하나의 실행 경로를 고정한다. iter_127의 정상 의존성 복구를 계승하며 UCL/FreeSurfer 모드 순회나 v1·robust·fast 탐색을 하지 않는다. 기존 환경 경로와 Python은 assets/environment 기록에서 확인한다.
+
+기술8명의 올바른 입력에 SynthSeg2.0 기본 모드의 `--vol`·`--qc`를 적용한다. 공식 고정 소스와 label/name 자산으로 필수 QC column 집합을 실행 전에 확정한다. 빈 dict, 필수 column 누락·중복, nonfinite, 범위 이탈, 대상 행 불일치는 실패다. 품질 점수의 사후 cutoff로 환자를 제거하지 않는다.
+
+공식 좌우 측뇌실·total intracranial 부피의 이름·단위와 양수·finite 여부, mask·affine·1mm 격자·입력 연결을 검사한다. hard-mask 비배경 합은 ICV 대체물이 아니다. 공식 기술 출력이 성립하지 않으면 남은 다운로드·본평가를 중단하고 보류한다.
+
+원 T2→world→SynthSeg 격자 변환과 nearest-neighbor 원격자 복원을 독립 기준 변환으로 대조한다. RAS 재정렬, inferior-to-superior 순서, 비등방 spacing, label4/43의 고정 배포상 의미를 확인한다. native slice가 부족한 것을 재보간·복제로 감추지 않는다.
+
+## 3. 유지할 입력·생성·calibration
+
+U는 원 T2 brain-mask 유효 구간5–95%의 등간격 고유8장이다. A는 양측 측뇌실 mask를 원격자로 옮긴 뒤 최대 면적의5% 이상인 slice의 최소–최대 구간에서 등간격 고유8장을 선택한다. A가 고유8장을 얻지 못하거나 segmentation이 실패하면 U로 fallback하고 원인을 보고한다. 전문 출력 실패를 유효한 S로 대체하지 않는다.
+
+동일 원본 해상도·brain percentile1–99 window·896 canvas·방향·8장·생성 설정을 유지한다. mask overlay는 검사용이고 모델 입력이 아니다.
+
+고정 prompt:
+`You are shown 8 axial T2-weighted slices from one brain MRI examination, ordered from inferior to superior. Is there evidence of enlargement of both lateral ventricles in the images shown? Answer on the first line with exactly one word: PRESENT, ABSENT, or UNCERTAIN. Then give a brief justification in at most two sentences.`
+
+bf16·greedy·max_new_tokens512로 기술16요청을 수행한다. cap 도달 시에만 기술 전체16건을1024로 한 번 재검사하고 최종 cap을 잠근다. 기술 정확도가 낮다는 이유만으로 탐색을 취소하거나 prompt를 변경하지 않는다.
+
+S는 공식 좌우 측뇌실 부피 합/공식 ICV다. calibration12에서 BA 최대 threshold 하나를 고정하고 동률은 specificity, 이후 큰 threshold 순으로 결정한다. threshold 후보 구성·경계 비교 연산·동률 처리를 calibration 전에 명시한다. calibration에 VLM 생성은 하지 않는다.
+
+## 4. 가능성 탐색·규모 확대·독립 확인
+
+입력·실행 검증 후 탐색40명의 U/A80요청을 완료한다. selector fallback도 primary 분모에 유지한다. S 누락이 있으면 available-case 수치를 보조로만 제시하며 S 충분성을 판정하지 않는다. 실행 중 환자 교체는 없다.
+
+이번 본실행 범위는 탐색40명까지다. 개발 자료이며 독립 확인이 아니다. 추가 학습·seed·공식 test·새 환자는 실행하지 않는다. 선택 효과와 전문 대안 이후 가치가 함께 남을 때만 후속 계획에서 독립 확인 또는 method pilot을 판단한다.
+
+## 자원·비용·재개
+
+기존 합집합114 ZIP·15,552,030,509 bytes, 미확보52 ZIP·7,159,760,618 bytes를 실행 전 고정 revision·공식 객체와 대조한다. 환자를 유지하므로 study 집합 확대는 없다. 원10GiB 초기 예산 이후 iter_127에서 명시한 조정량을 계승한다. 실제 압축 해제 member 크기·중간 출력·환경·기존 공간을 포함해 외부 경로와 SSD 여유를 다시 확인한다. 전체 snapshot은 받지 않는다. HF_TOKEN_PATH만 사용하며 토큰 내용과 hf_cache를 건드리지 않는다.
+
+실행 직전 nvidia-smi로 허용 GPU0,1의 논리/물리 매핑과 실제 여유를 확인한다. 독립 환자를 두 GPU에 배정한다. 총 점유 예상치에는 다른 프로세스·각 worker peak·worker당 최소2GiB 여유를 포함한다. SynthSeg 한도를20000MiB로 유지하면 최소22048MiB 여유와 GPU 외부 할당 여유까지 필요하므로 단순 free>=20000 검사로 시작하지 않는다. 기술 실측 후 안전한 메모리 설정을 확정한다.
+
+MedGemma는 기술16요청의 GPU당 worker1을 기준으로 추가16요청 안에서 batch2를 우선 비교한다. 부적합하면 남은 비교 예산에서 GPU당 worker2를 메모리 조건에 따라 검토한다. 요청/분·GPU별 전체 peak·긴 출력 지연·출력 정합성·OOM·CPU/RAM/I/O 경합을 기록한다. 빠르고 안전한 구성을 선택하고 worker1 유지 시 이유를 남긴다. 큰 TensorFlow worker와 VLM을 같은 GPU에 무리하게 겹치지 않는다.
+
+유효한 뇌 입력의 처리량은 아직 미측정이다. iter_127의 실패 단계246.05초를60명 예상 시간으로 외삽하지 않는다. 기술 단계에서 다운로드·추출·segmentation·render·생성·저장을 계측하고 남은52 volume과80요청의 예상 wall-clock을 병렬 처리량으로 산출한다. 임의 시간 상한은 없다.
+
+입력/series/revision/weight/config/source hash 기반 완료 재사용, 부분 추출의 임시 경로와 원자적 완료, 고유 request ID·worker별 출력·stage lock을 구현한다. 정상 종료 후 미완료만 재개하고 실행 중 claim을 지우지 않는다. 학습 checkpoint 대신 단계 manifest·원시 출력·완료 seal을 보존한다. 기존 실패 산출물은 덮어쓰지 않는다.
+
+# Implementation Tasks for Claude
+
+현재 구현 담당 Codex에 적용한다.
+
+1. 기준 plan·현재 source blob·iter_127 선정 및 원 결과 hash를 확인하고 amendment를 저장한다.
+2. 뇌 적합성 검토표와 결정적 series 순위를 연결한다. 기술8명부터 확인하고 통과 후 전체60명을 같은 규칙으로 고정한다.
+3. 사용 경로에 한해 QC 필수 schema, 공식 ICV, GPU 안전 여유·peak 집계, 원자적 추출·완료 재사용을 수정한다.
+4. 기술8명 공식 실행·좌표·processor·생성·처리량을 검증한다. 기술 조건 불성립 시 현재 설계를 보류한다.
+5. calibration12 threshold를 잠그고 탐색40명의 U/A/S 비교를 수행한다.
+6. 별도 계산 경로로 환자별 정오·BA·AUROC·paired CI·fallback·비용·분기를 검산한다. 중복·누락·손상 JSONL·stale cache·부분 재개 회귀 검사도 완료한다.
+
+# Evaluation (성공/실패 기준 포함)
+
+Primary는 탐색40명의 report-agreement BA다. UNCERTAIN·INVALID·거부는 정답으로 세지 않고 각각 보고한다. sensitivity는 전체 양성 중 정답 PRESENT 비율, specificity는 전체 음성 중 정답 ABSENT 비율로 계산해 유보를 분모에서 제거하지 않는다. batch×label 층화 환자 bootstrap10000회로 paired95% CI를 구한다. U/A 전환표, S AUROC·BA·차이, fallback 및 실패 건수도 보고한다.
+
+- 양성 관측: A−U BA≥0.15, paired CI 하한>0, A BA≥0.75, sensitivity·specificity 각각≥0.65. 제한된 sampling 효과를 보존한다.
+- 단순 대안 충분성: S BA≥0.80이고 A가 S를0.05 이상 개선하지 못하며 더 비싸면 현재 이진 과제의 VLM 방법 투자를 보류한다. 작은 calibration과 CI 한계를 병기한다.
+- 음성: U/A 모두 BA≤0.60이면 현재 frozen 설계를 종료한다. S만 높으면 단순 sampling으로 회복되지 않았다고 한정한다.
+- 불확정: 나머지 성능·높은 fallback·상충·정밀도 부족은 근거 부족으로 보류한다. 사후 threshold·prompt·selector를 조정하지 않는다.
+- 실행 실패: 고정 입력·공식 기술 비교군·필수 무결성이 성립하지 않으면 valid_experiment=false다. MRI 능력이나 sampling 가설의 기각이 아니다.
+
+양성 관측과 다음 투자 판단은 분리한다. 비용은 cold-start와 warm NIfTI→답 저장을 나누고 A/S 공유 전처리와 독립 실행 비용을 함께 제시한다. 설치·선정·복구 비용도 따로 기록하며 미계측 과거 비용을 추정 사실로 쓰지 않는다. 모든 결과에서 이번 한정 비교를 종료한다.
+
+# Risks / Checks
+
+뇌 입력 검토에서 임상 확장 여부를 새 정답으로 만들지 않는다. 해부학 판단은 label·role·모델 출력과 분리하고 모든 series 선정 근거를 재현 가능하게 보존한다. 같은 study의 부위 혼합은 metadata 이름만으로 해결됐다고 가정하지 않는다.
+
+보고서는 약한 정답이며 실제 영상 진단 정확도와 구분한다. mild·위축 관련 양성을 제외하거나 수두증 진단으로 재명명하지 않는다. A와 S는 같은 예측 segmentation을 공유하며 임상 정답 mask가 아니다. 모델 노출·외부 일반화는 미검증이다.
+
+공식 기술 출력의 실패와 이후 개별 환자의 fallback을 구분한다. 실패 환자를 제거해 정확도를 높이지 않으며, S 누락 시 대안 충분성은 보류한다. 새 입력의 자동 cache 연결과 이전 비뇌 산출물의 재사용 차단을 반드시 검사한다.
+
+## 대규모 GPU 필요 후보
+
+전체3D 다중 sequence 표현과 질문별 관측을 공동 적응하는 후보를 보존한다. 현재 단순 대안 이후 잔여 문제와 신규성이 확인되기 전에는 실행하지 않는다. 필요한 자원량은 미산정이다.
+
+# 계획의 근거 (GPT 조사 노트)
+
+원문 GOAL.md, iter_125~127 계획, iter_127 review.md/review.json·claude_report.md, CODE_ASSETS의 해당 항목, 현재 소스와 저장 입력 결함 기록을 확인했다. research HEAD는 20d8bff915b00d2c1578939e4b0a240ddfa85bac이다.
+
+기준 plan SHA256: iter_125=477a1c817abfe198e25c14f64a487fbd6f53d5ab0c4a7e5fab91e36f2b705a47, iter_126=632a6090c0246dde0e0d8d80c18fee007d3f0625bae6d4320ffe1d67972e4070, iter_127=f32a776a7502227366c7b10a86571506d7708f714cfb6398b2091313ea01b1fb.
+
+저장 diagnostics/other_series_metadata.json에는 두 실패 study의 t2w-raw-axi가 각각560×560×25/26, spacing 약0.411×0.411×6mm로 기록돼 있다. 원 리뷰는 해당 대체 영상의 뇌 단면을 직접 확인했다. 이번 계획에서는 영상 자체를 새로 판독하지 않았으며 기록의 관찰과 구분한다. StudyDescription은 비뇌 series에서도 뇌 검사로 나타나므로 study 명칭만으로 필터링할 수 없다.
+
+mr125_build.py에는 hard-mask 비배경 부피를 ICV로 쓰는 경로가 실제로 남아 있다. mr127_seg.py는 QC 빈 dict를 허용하고 free>=20000MiB만 검사하며, 단계별 환자와 경로를 하드코딩한다. mr127_data.py의 exist_ok=False 추출은 부분 실행 재개를 보완해야 한다. 이들은 원 리뷰의 needs_fix와 일치한다. 선정 검산 모듈의 제한 승인을 전체 실행기 승인으로 확대하지 않는다.
+
+새 문헌·방법 선택을 하지 않는 한정 복구다. 공식 지원 조건은 기존 계획의 조사와 로컬 고정 공식 소스를 계승하며, 미확인 QC 필수 schema는 구현 시작 시 고정 배포의 label/name 자산에서 확정한다. 다운로드·파일 생성·모델 실행은 수행하지 않았다.
+
+
+
+## iter_128 CODEX IMPLEMENTATION REPORT — 2026-10-13 06:56:33
+
+# 요약
+
+- **핵심 결과:** 탐색 40명의 U/A 80건이 모두 PRESENT였습니다. 두 입력의 BA는 0.50으로, 사전 기준상 현재 frozen 설계 종료에 해당합니다.
+- **근거:** SynthSeg 완료 35명의 부피 기준 BA는 0.941이었습니다. 결과·fallback·비용·판정의 독립 검산 285/285가 통과했습니다.
+- **미검증·주의:** SynthSeg 5명은 메모리 오류로 실패했습니다. 전체 대안 충분성과 임상 진단 정확도는 주장하지 않습니다.
+- **다음:** 관찰을 보존하고 GPT 독립 리뷰로 넘깁니다. 모든 소유 프로세스는 종료됐습니다.
+
+# Work Performed
+
+고정 60명의 환자·역할·보고서 정답을 유지하면서 뇌 series 연결 3건을 수정했습니다. 전체 입력 검증 후 기술8명, calibration12명, 탐색40명을 실행했습니다. 학습과 추가 환자 실험은 수행하지 않았습니다.
+
+# Files Changed
+
+연구 폴더에 신규 소스 20개를 작성했습니다. 입력 구성, 공식 SynthSeg 실행, 안전한 생성·재개, 평가·독립 검산·보존을 포함합니다.
+
+주요 파일은 [mr128_gen.py](/SSD1_1TB/home/milab/daniel/08_medgemma/research/mr128_gen.py), [mr128_analysis.py](/SSD1_1TB/home/milab/daniel/08_medgemma/research/mr128_analysis.py), [mr128_verify_results.py](/SSD1_1TB/home/milab/daniel/08_medgemma/research/mr128_verify_results.py)입니다. 전체 목록과 digest는 [completion.json](/SSD1_1TB/home/milab/daniel/08_medgemma/research/results/iter_128/completion.json)에 있습니다.
+
+기존 소스 59개와 이전 결과 75개는 불변을 확인했습니다. Git commit·push는 하지 않았습니다.
+
+# Commands / Experiments (실제 실행한 명령과 성공/실패)
+
+- `python mr128_seg.py --inputs results/iter_128/remaining_inputs.json --stage remaining`: exit 2. 47명 완료, 5명 cuDNN scratch allocation 실패.
+- 격리 Python으로 `mr128_finish_pipeline.py --pid 2279392 --prepare-pid 2295903`: exit 0. calibration 잠금 → 80건 생성 → 평가·독립 검산 완료.
+- 격리 Python으로 `mr128_resources.py`, `mr128_archive.py`: 모두 exit 0.
+- 자료·실행 검사 53/53, 평가 fixture 20/20, 재개·tensor 검사 19/19, 전체 입력 검산 605/605 통과.
+- 기본 환경을 보존하고 격리 환경에 SciPy 1.15.3을 설치·실입력 검증했습니다. [환경 기록](/SSD1_1TB/home/milab/daniel/08_medgemma/research/results/iter_128/coordinate_environment.json)에 명령과 버전을 보존했습니다.
+
+# Results (수치와 결과 파일 경로)
+
+| 조건 | 평가 환자 | BA | sensitivity | specificity |
+|---|---:|---:|---:|---:|
+| U: 넓은 구간 8장 | 40 | 0.500 | 1.000 | 0.000 |
+| A: 측뇌실 기반 선택 8장 | 40 | 0.500 | 1.000 | 0.000 |
+| S: 전문 부피 기준, 완료 사례만 | 35 | 0.941 | 0.882 | 1.000 |
+
+- A−U = 0, paired 95% CI [0, 0]. 모든 paired 상태가 같아서 생긴 퇴화 구간이며 모집단 효과의 정확한 영점을 뜻하지 않습니다.
+- A는 12명에서 입력이 달라졌습니다. 23명은 고유 slice 부족, 5명은 segmentation 실패로 fallback했습니다.
+- S available-case AUROC는 0.990입니다. 5명 누락 때문에 전체 40명의 대안 충분성은 미판정입니다.
+- 본 생성은 **80/80 EOS**, 최대 27 token, wall-clock **194.84초**였습니다. 첫 줄 형식은 strict 40건·loose 40건으로 구분했습니다.
+- GPU 전체 peak는 SynthSeg **20,375/20,303 MiB**, MedGemma 본실험 **9,775/9,703 MiB**였습니다.
+- batch2는 기술 출력 token이 10/16 달라 채택하지 않았습니다. 본실험은 batch1·GPU당 worker1을 유지했습니다.
+
+[평가 결과](/SSD1_1TB/home/milab/daniel/08_medgemma/research/results/iter_128/eval/report.json), [독립 검산](/SSD1_1TB/home/milab/daniel/08_medgemma/research/results/iter_128/eval/independent_verify.json), [자원·비용 기록](/SSD1_1TB/home/milab/daniel/08_medgemma/research/results/iter_128/resource_summary.json)에 상세 수치를 보존했습니다.
+
+# Goal Progress / Reused Assets (목표 진전·미검증 범위, 재사용 출처·검증)
+
+입력 연결 오류를 해결하고 실제 T2 출력 비교까지 완료했습니다. 현재 조건에서는 단순 slice 선택으로 고정 양성 응답이 회복되지 않았습니다. 높은 fallback과 약한 보고서 정답 때문에 일반 MRI 능력이나 내부 원인은 확정하지 않습니다.
+
+기존 선정 기록, `mr123_data.py`의 렌더링·U 구성, 고정 parser, 공식 SynthSeg 자산을 필요한 범위에서 검증해 재사용했습니다.
+
+# Problems (현재 결론 무효 / 재사용 전 수정 / 추후 개선을 구분)
+
+- **현재 결론 제한:** U/A 한정 비교는 검산됐지만, S 5명 누락으로 전체 대안 충분성은 판단할 수 없습니다.
+- **재사용 전 보완:** SynthSeg 메모리 실패 경로와 기술 batch 비교의 CPU·RAM·I/O 세부 계측이 남았습니다. 미계측 값을 본실험 기록으로 소급 대체하지 않았습니다.
+- **미검증:** 전문의 영상 정답, 독립 환자, 타 모델·학습 방법의 결과는 없습니다.
+
+# Recommendation to GPT
+
+사전 음성 기준에 따라 **현재 frozen T2 이진 설계의 투자를 종료**하고 방법 개발 진입은 보류할 것을 권고합니다. S의 좋은 available-case 결과는 보존하되 전체 충분성으로 승인하지 말아야 합니다. 실행 실패와 미계측 항목이 있으므로 독립 리뷰가 필요합니다.
+
+SELF_CHECK: FAIL
+SUMMARY: MRI 40명에서 U/A 모두 BA 0.50; SynthSeg 완료 35명은 BA 0.941이나 5명 실패로 전체 대안 충분성은 미판정.
+
+
+## iter_128 GPT REVIEW [CONTINUE] — 2026-10-13 06:59:19
+
+# 요약
+
+- 판정: **abandon / valid_experiment=true**. 현재 frozen T2 이진 설계의 투자를 종료한다.
+- 핵심 근거: 개발40명의 U/A80응답이 모두 PRESENT이며 두 BA는0.50이다.
+- 의미·한계: 입력 복구 후 실제 음성 결과를 얻었다. 선택 변경은12명이고, 전문 대조는5명 누락되어 일반 원인과 전체 대안 충분성은 미확정이다.
+- 다음: 같은 설정의 정비를 반복하지 않고 MRI 범위에서 다음 투자 하나를 선택한다.
+
+## 알림 요약
+
+- 결과: 뇌 MRI MR-RATE40명에서 균등8장과 해부학 선택8장 모두 전원 양성 응답이었다. 전문 부피 기준은 완료35명에서 BA0.941이었다.
+- 의미: 이전 입력 오류 단계에서 유효한 출력 관찰로 진전했다. 현재 선택 정책은 응답을 회복하지 못했지만 MRI 전체 능력의 기각은 아니다.
+- 후속: 사전 음성 기준에 따라 현재 frozen 설계를 종료하고, 전문 대안 이후의 잔여 가치가 있는 다음 MRI 비교를 선택할 것을 권고한다.
+- 대안: 전문 출력 실패5명만 복구하면 대안 비교의 완결성은 높아진다. 다만 U/A 종료 판정을 바꾸지 않으므로 지금 독립 반복으로 투자할 가치는 낮다.
+
+# Assessment
+
+계획·구조화 계획·보고서·구현 로그·diff·원시 생성·공식 CSV와 평가 코드를 확인했다. 담당은 Codex gpt-6.1-sol/high다. 체크포인트는 `252dd607ec046ec7123f78ae1a832e06c8561293`이며 신규20개 소스의 작업 파일과 Git blob이 모두 일치한다. unpreserved_paths는 없다. 변경 목록에 환경 파일이 다수 표시됐지만 실제 체크포인트 diff는 연구 소스20개다.
+
+기술8명 이후 개별 segmentation 실패를 U fallback·S 누락으로 처리하는 것은 원 계획에 명시돼 있다. 따라서5명 실패와 SELF_CHECK: FAIL을 전체 VLM 실험 무효로 확대하지 않는다. 이번 투자 종료는 반복 횟수가 아니라 실제 U/A 음성 기준에 따른다.
+
+# Key Findings
+
+1. 고정60명은 고유 환자60명이며 기술8·calibration12·탐색40의 역할을 유지했다. 전체 입력 검토 기록과 수정된 PCKMK46BRL montage를 확인했다. 해당 montage는 하부 뇌부터 상부 대뇌까지 포함한다.
+2. 원시 worker JSONL에는 고유80응답이 있다. 모두 EOS로 종료했고 최대27 token이다. strict 첫 줄40건과 문장이 이어지는 loose40건 모두 명시적 PRESENT다. 내용 판단을 parser 오류로 설명할 근거는 없다.
+3. 탐색 양성20·음성20에서 두 조건 모두 sensitivity1.0, specificity0, BA0.50이다. 환자별 상태가 모두 같으므로 A−U와 재표집 차이는 항상0이다. CI[0,0]은 이 표본의 퇴화 구간이며 모집단 효과가 정확히0이라는 증거가 아니다.
+4. 저장 index를 별도로 집계한 실제 선택 변경은12명이다.23명은 고유 slice 부족,5명은 공식 segmentation 실패로 U를 사용했다. 이는 정책 전체의 무개선 근거이며 충분한 관측 개입 전반의 반증은 아니다.
+5. 공식 volume CSV47건의 좌우 측뇌실 합/ICV를 저장 S와 대조해 모두 일치했다. 탐색 완료35명에서 양성15/17·음성18/18 정답, BA0.941176, AUROC0.990196을 독립 재계산했다. calibration threshold는0.022531036482646698이며 본 생성 전에 잠겼다.
+6. 평가 fixture20개, runtime19개, 입력·추출 검사53개의 통과 기록을 확인했다. 구현 로그의 finish pipeline은 exit0이며 완료 산출물이 연결된다. 리뷰에서는 파일을 생성하거나 모델 실험을 실행하지 않았다.
+
+# Problems / Concerns
+
+현재 제한된 U/A 결론을 무효화하는 blocker는 확인하지 못했다. 다만 전문 출력5명 누락으로 전체40명의 정확도·비용 복합 충분성을 승인할 수 없다. available-case35명을 전체 표본처럼 해석해서는 안 된다.
+
+SynthSeg 공식 로그에서 실제 cuDNN scratch allocation 실패를 확인했다. 실행기의 admission 실패 처리는 기존 failures가 있을 때 pending·active 상태에 따라 대기가 지속될 가능성이 있어 재사용 전에 보완해야 한다. 이 분기는 완료된 이번 U/A 수치를 바꾸지 않는다.
+
+해부학 판단은 입력 적합성 감사이며 임상 확장 여부의 새 정답이 아니다. 보고서는 약한 정답이고 전문 모델은 전체 volume, VLM은8장을 사용한다. S의 우위를 같은 정보량에서의 모델 우위나 일반 임상 정확도로 해석하지 않는다.
+
+# Interpretation
+
+iter_127의 판단은 비뇌 입력 때문에 성능 미검증이었다. 이번에는 입력을 수정하고 실제40명 비교를 완료해, 현재 frozen 정책의 개선 부재라는 유효 관찰로 바뀌었다. 이전 FLAIR 전원 양성 관찰은 유지하지만 과제·sequence가 다르므로 한 일반 결함의 확증으로 합치지 않는다.
+
+실행 유효성은 충족했고 성능 개선은 없다. 현재 A 정책으로 응답을 회복한다는 가설은 지지되지 않았다. 높은 fallback 때문에 sampling 일반 효과와 내부 원인 해석은 남는다. 새 방법의 필요성과 신규 기여는 미확정이다.
+
+두 GPU를 사용했고 batch1·batch2 기술 비교도 수행했다. warm 처리량은22.16→24.22요청/분이지만 token10/16이 달라 batch1을 유지했다. 본 생성 wall-clock은194.84초, GPU 전체 peak는9,775/9,703MiB다. SynthSeg peak20,375/20,303MiB와5명 실패를 함께 보고했다. 기술 비교의 CPU/RAM/I/O 상세 계측 부재는 후속 운영 개선 사항이다. 전체 설치·선정·재작업 비용은 미계측이므로 추론 비용만으로 지배 비용을 단정하지 않는다.
+
+# Strategy Check / 연구 방향 판단
+
+연결: `mri-volume-evidence-use`, iter_123~128 및 iter_127 원 리뷰. 입력 복구의 필요성은 해결됐고, 기본 인식·입력·질문 형식과 전문 대안 이후의 가치가 남았다.
+
+1. 중요한 문제: 제한된 MRI 관측에서 필요한 구조를 선택하면 판단이 회복되는가? 중요성은 유지되지만 이번 정책의 회복 근거는 없다.
+2. 현재 근거: U/A 전원 양성과 완료35명의 높은 전문 점수가 실제 관찰이다. 공통 내부 결함과 새로운 방법의 필요성은 가설이다.
+3. 쉬운 해결책: 전문 부피+threshold는 강한 후보지만5명 누락과 전체 volume 정보 이점이 남는다. 단순 선택 정책은 이번 조건에서 충분하지 않았다.
+4. 남은 설명: 기본 인식 부족,8장 표현의 한계,질문 인터페이스,높은 fallback,보고서 의미 차이다. 이번 결과만으로 하나를 선택할 수 없다.
+5. 다음 결정: 현재 frozen 설계는 종료한다. 새 최소 적응 대조 또는 다른 MRI 질문은 전문 대안 이후의 가치와 결과별 투자 변화가 구체적일 때만 선택한다. 같은 자료의 준비·prompt 순회를 자동 연장하지 않는다.
+
+# Recommended Next Experiment
+
+다음 계획은 현재 설계의 복구가 아니라 연구 투자 선택에 집중한다. 현재 관찰을 설명할 최소 개입과 다른 MRI 질문 중 근거 있는 후보만 비교하고 하나를 고른다. 실제 지원 자료, 강한 단순 대조, 양성·음성·불확정의 종료 조건이 없으면 실행으로 넘기지 않는다. 추가 LoRA·seed·환자 확대는 자동 승인하지 않는다.
+
+이번 방향은 투자 종료이며 방법의 유망성이 확인되지 않았으므로 논문 추천은 보류한다. 제한된 음성 기준점은 보존하되 큰 일반화 결론이나 신규 contribution으로 강조하지 않는다.
