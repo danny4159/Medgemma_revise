@@ -1,0 +1,845 @@
+diff --git a/ed117_analyze.py b/ed117_analyze.py
+new file mode 100644
+index 0000000..f45ce48
+--- /dev/null
++++ b/ed117_analyze.py
+@@ -0,0 +1,136 @@
++"""iter_117 본 분석 (iter_116 평가 산술 그대로 재사용): 검증된 MAIN completion → 환자별 표, 그룹별 report, 사전 투자 분기. 결과는 새 경로에만 쓴다 ('x' 모드).
++사용: python ed116_analyze.py --gen results/iter_116/gen/MAIN --requests ... --protocol ... --out results/iter_116/eval
++"""
++import argparse
++import json
++import os
++import sys
++
++import ed116_eval as EV
++import ed116_spec as ES
++import ev109_extract as X
++import pg43_run as RUN
++
++PROV = "results/iter_116/provenance"
++LOCKDIR = "results/iter_116/lock"
++EVALLOCK = "results/iter_117/lock/eval_lock.json"
++
++
++def observations(patients, per_patient, byid):
++    """본생성 전 고정한 네 집단과 대조 교차표. 임상 의미 재판정은 하지 않는다."""
++    out = dict(strata={}, paired={}, category_transitions={}, auxiliary_T=True,
++               note="반복 개발 RSNA의 사전 선택 집단. 표의 차이를 인과 효과·신규성으로 해석하지 않는다.")
++    for g, pats in patients.items():
++        for kc in (True, False):
++            sub = [p for p in pats if (p['base']['K'] == p['y']) == kc]
++            counts = {q: dict(correct=sum(p['base'][q] == p['y'] for p in sub),
++                              wrong=sum(p['base'][q] is not None and p['base'][q] != p['y'] for p in sub),
++                              unresolved=sum(p['base'][q] is None for p in sub)) for q in EV.POL}
++            out['strata'][g + ('_Kcorrect' if kc else '_Kwrong')] = dict(group=g, K_correct=kc, n=len(sub),
++                                                                                    ids=[p['id'] for p in sub], policies=counts)
++        def state(p, q):
++            return 'unresolved' if p['base'][q] is None else 'correct' if p['base'][q] == p['y'] else 'wrong'
++        out['paired'][g] = {}
++        for q in ('N', 'E'):
++            cells = {f'{r}/{c}': [p['id'] for p in pats if state(p, 'R') == r and state(p, q) == c]
++                     for r in ('correct', 'wrong', 'unresolved') for c in ('correct', 'wrong', 'unresolved')}
++            out['paired'][g]['R_vs_' + q] = {k: dict(n=len(ids), ids=ids) for k, ids in cells.items()}
++        out['category_transitions'][g] = {}
++        for cat in ('opacity', 'normal', 'not_normal_no_opacity'):
++            sub = [p for p in pats if p['cat'] == cat]
++            out['category_transitions'][g][cat] = dict(n=len(sub), policies={
++                q: dict(to_yes=sum(p['base']['K'] == 'no' and p['base'][q] == 'yes' for p in sub),
++                        to_no=sum(p['base']['K'] == 'yes' and p['base'][q] == 'no' for p in sub),
++                        unresolved=sum(p['base'][q] is None for p in sub)) for q in EV.POL})
++    gt = json.load(open(f"{PROV}/gt.json"))
++    for r in per_patient:
++        source = byid[r['id']]
++        r['K_correct'] = r['correct']['K']
++        r['B_correct'] = r['correct']['B']
++        r['correction'] = {q: bool(not r['K_correct'] and r['correct'][q]) for q in EV.POL}
++        r['resolved_harm'] = {q: bool(r['K_correct'] and r['answers'][q] is not None and not r['correct'][q]) for q in EV.POL}
++        r['wrong_advice_adopted_R'] = bool(r['group'] == 'mismatch' and r['K_correct'] and r['answers']['R'] == r['answers']['B'])
++        r['useful_advice_not_adopted_R'] = bool(r['group'] == 'mismatch' and not r['K_correct'] and r['answers']['R'] == r['answers']['K'])
++        r['image'] = source['image']
++        r['image_sha256'] = source['file_sha256']
++        r['draft_source_request_id'] = source['O']['request_id']
++        r['detector_packet'] = ES.packet_text(source)
++        r['detector_boxes_xyxy_px'] = [b for s, b in ES.det_boxes(source)]
++        r['gt_boxes_yxyx_norm'] = gt[r['id']]['gt_yxyx_norm']
++    return out
++
++
++def load_inputs():
++    rows = json.load(open(f"{PROV}/ledger_nogt.json"))["rows"]
++    gt = json.load(open(f"{PROV}/gt.json"))
++    sel = json.load(open(f"{LOCKDIR}/selection.json"))
++    return {r["id"]: r for r in rows}, gt, sel
++
++
++def model_answers(recs):
++    """records → {patient: {cond: (answer|None, resolve dict, record)}}"""
++    out = {}
++    for r in recs:
++        res = X.resolve("O", r["suffix_text_raw"], r["ended_eos"])
++        out.setdefault(r["patient"], {})[r["cond"]] = (res["answer"], res, r)
++    return out
++
++
++def main():
++    ap = argparse.ArgumentParser()
++    ap.add_argument("--gen", required=True)
++    ap.add_argument("--requests", required=True)
++    ap.add_argument("--protocol", required=True)
++    ap.add_argument("--out", required=True)
++    a = ap.parse_args()
++    lock = json.load(open(EVALLOCK))
++    bad = [f for f, h in lock["files"].items() if RUN.file_sha(f) != h]
++    if bad:
++        sys.exit(f"평가 잠금 파일이 변경됨: {bad}")
++    recs = RUN.verify_completion(a.gen, a.requests, a.protocol)  # 요청 집합·record digest·영상 hash·보호 필드 재검증
++    byid, gt, sel = load_inputs()
++    ma = model_answers(recs)
++    groups = {"mismatch": sel["mismatch"], "control": sel["control"]}
++    for g, ids in groups.items():
++        for i in ids:
++            if set(ma.get(i, {})) != set(ES.COND_ORDER):
++                sys.exit(f"조건 누락: {g} {i}")
++    if set(ma) != set(sel["mismatch"]) | set(sel["control"]):
++        sys.exit("분석 대상 외 환자 record가 있다")
++    patients, per_patient = {}, []
++    for g, ids in groups.items():
++        patients[g] = []
++        for i in ids:
++            p = EV.make_patient(byid[i], gt[i], {c: ma[i][c][0] for c in ES.COND_ORDER})
++            patients[g].append(p)
++            pt = EV.point_scalars(p)
++            per_patient.append(dict(id=i, group=g, category=p["cat"], gt=p["y"], answers=p["base"],
++                                    correct={q: p["base"][q] == p["y"] for q in EV.POL},
++                                    resolve={c: dict(source=ma[i][c][1]["source"], reason=ma[i][c][1]["reason"], rule=ma[i][c][1]["rule"]) for c in ES.COND_ORDER},
++                                    raw={c: ma[i][c][2]["suffix_text_raw"] for c in ES.COND_ORDER},
++                                    ended_eos={c: ma[i][c][2]["ended_eos"] for c in ES.COND_ORDER},
++                                    joint03={q: pt[f"joint03_{q}"] for q in EV.JOINT_POL}, n_det=p["n_det"], n_gt=p["n_gt"],
++                                    tp03=p["tp03"], request_ids={c: ma[i][c][2]["request_id"] for c in ES.COND_ORDER}))
++    rep_mm = EV.group_report(patients["mismatch"])
++    rep_ag = EV.group_report(patients["control"])
++    dec = EV.decide(rep_mm, rep_ag)
++    fmt = {}
++    for g, ids in groups.items():
++        fmt[g] = EV.format_report({c: [ma[i][c][2] for i in ids] for c in ES.COND_ORDER})
++    comp = json.load(open(os.path.join(a.gen, "completion.json")))
++    obs = observations(patients, per_patient, byid)
++    unresolved = [dict(id=i, raw=byid[i]["O"]["raw"], request_id=byid[i]["O"]["request_id"]) for i in sel["unresolved"]]
++    report = dict(spec_version=ES.SPEC_VERSION, eval_lock_sha256=RUN.file_sha(EVALLOCK), protocol_sha256=RUN.file_sha(a.protocol),
++                  requests_sha256=RUN.file_sha(a.requests), n_records=len(recs), mismatch=rep_mm, control=rep_ag, decision=dec, format=fmt,
++                  cost=comp["cost"], cost_this_attempt=comp.get("cost_this_attempt"), wall_s=comp["wall_s"], workers=comp["workers"],
++                  mapping=comp["mapping"], unresolved_excluded_E600_K=unresolved,
++                  note="불일치 87명은 K/B 중 하나가 맞는 구조로 선정한 집단이다. 자연 모집단 오류율·실용 이득으로 외삽하지 않는다.")
++    os.makedirs(a.out, exist_ok=True)
++    for name, obj in (("report.json", report), ("per_patient.json", per_patient), ("observations.json", obs)):
++        with open(os.path.join(a.out, name), "x") as f:
++            json.dump(obj, f, indent=1, sort_keys=True)
++    print(json.dumps(dict(label=dec["label"], point=dec["point"], worst=dec["worst"]), indent=1))
++
++
++if __name__ == "__main__":
++    main()
+diff --git a/ed117_processor.py b/ed117_processor.py
+new file mode 100644
+index 0000000..3a42306
+--- /dev/null
++++ b/ed117_processor.py
+@@ -0,0 +1,61 @@
++"""기존 직접 대조와 같은 TECH 4입력의 processor tensor 비교. 모델 생성 없음."""
++import hashlib
++import json
++import os
++from pathlib import Path
++
++os.environ.setdefault('HF_HUB_OFFLINE', '1')
++os.environ.setdefault('HF_HUB_DISABLE_TELEMETRY', '1')
++import torch
++import transformers
++from rsna_diag import generate as G
++from ed116_directcheck import indep_pad
++
++
++def main():
++    from pg43_run import read_requests, read_records
++    rows = read_requests('results/iter_116/requests/TECH.jsonl')
++    byk = {(r['patient'], r['cond']): r for r in rows}
++    pats = sorted({r['patient'] for r in rows})
++    pick = [byk[pats[0], 'R'], byk[pats[1], 'N'], byk[pats[0], 'T'], byk[pats[2], 'T']]
++    records = {r['request_id']: r for fn in Path('results/iter_116/gen/TECH_w2').glob('gen_worker*.jsonl') for r in read_records(fn)}
++    proc = transformers.AutoProcessor.from_pretrained(G.MODEL_ID, revision=G.MODEL_REVISION, local_files_only=True)
++    config = transformers.AutoConfig.from_pretrained(G.MODEL_ID, revision=G.MODEL_REVISION, local_files_only=True)
++    result = []
++    for row in pick:
++        if row['modality'] == 'image':
++            image, affine, px = G.load_image(row['image'])
++            worker = G.build_inputs(proc, image, row['prompt'])
++            independent_image, independent_sha = indep_pad(row['image'])
++            content = [{'type': 'image', 'image': independent_image}, {'type': 'text', 'text': row['prompt']}]
++            assert px == independent_sha == row['input_pixel_sha256']
++        else:
++            worker = G.build_inputs_text(proc, row['prompt'])
++            content = [{'type': 'text', 'text': row['prompt']}]
++        official = proc.apply_chat_template([{'role': 'user', 'content': content}], add_generation_prompt=True,
++                                           tokenize=True, return_dict=True, return_tensors='pt')
++        checks = {}
++        for k in set(worker) | set(official):
++            checks[k] = k in worker and k in official and worker[k].shape == official[k].shape and worker[k].dtype == official[k].dtype and torch.equal(worker[k], official[k])
++        ids = worker['input_ids'][0].tolist()
++        rec = records[row['request_id']]
++        image_count = ids.count(config.image_token_index)
++        checks['input_ids_equal_old_record'] = hashlib.sha256(json.dumps(ids).encode()).hexdigest() == rec['input_ids_sha256']
++        checks['text_no_image_or_image_present'] = (image_count > 0 and 'pixel_values' in worker) if row['modality'] == 'image' else (
++            image_count == 0 and not any(k.startswith('pixel') or 'image' in k for k in worker))
++        checks['bf16_pixel_values_equal'] = row['modality'] != 'image' or torch.equal(worker['pixel_values'].to(torch.bfloat16), official['pixel_values'].to(torch.bfloat16))
++        result.append(dict(request_id=row['request_id'], cond=row['cond'], checks=checks,
++                           tensors={k: dict(shape=list(v.shape), dtype=str(v.dtype), sha256=hashlib.sha256(v.contiguous().numpy().tobytes()).hexdigest()) for k, v in worker.items()}))
++    out = dict(all_pass=all(all(r['checks'].values()) for r in result), n=len(result), results=result,
++               model_loaded=False, new_generate_requests=0, torch=torch.__version__, transformers=transformers.__version__,
++               note='공식 processor CPU tensor 및 bf16 pixel cast 대조. 기존 padding hash 검사와 구분.')
++    path = Path('results/iter_117/tests/processor.json')
++    path.parent.mkdir(parents=True, exist_ok=True)
++    with path.open('x') as f:
++        json.dump(out, f, indent=1)
++    print('processor all_pass', out['all_pass'])
++    raise SystemExit(0 if out['all_pass'] else 1)
++
++
++if __name__ == '__main__':
++    main()
+diff --git a/ed117_run.py b/ed117_run.py
+new file mode 100644
+index 0000000..554e9eb
+--- /dev/null
++++ b/ed117_run.py
+@@ -0,0 +1,264 @@
++"""iter_117 한정 복구: 원 자산 확인 → 새 평가 잠금 → MAIN 감독 → 검증 봉인.
++
++생성 pg43_run과 모든 기존 산출물을 변경하지 않는다. 원 평가·관찰 규약을
++본생성 이전에 잠그고 실제 실행 경로에서 확인한다.
++"""
++import argparse
++import json
++import os
++from pathlib import Path
++import signal
++import subprocess
++import sys
++import time
++
++import ed116_build as BUILD
++import ed116_link as LINK
++import ed116_spec as SPEC
++import ed116_eval as EV
++import pg43_run as RUN
++from ed117_verify import sha
++
++ROOT = Path('results/iter_117')
++SOURCE_SHA = '66cd4542720d0efe69b2fbbdfabbe24ebe0253a0'
++PLAN116 = '../agent/runs/iter_116/plan.md'
++PLANHASH = 'be752099da4cd90c2b14fe16ac4659b054de1cb114111364c8dcf8b93a46d009'
++REQ = 'results/iter_116/requests/MAIN.jsonl'
++PROTO = str(ROOT / 'protocol/MAIN.json')
++GEN = str(ROOT / 'gen/MAIN')
++CODE = list(dict.fromkeys(BUILD.EVAL_CODE + ['ed116_verify.py', 'ed116_directcheck.py', 'ed116_baselines.py',
++    'ed116_verify_selection.py', 'ed117_run.py', 'ed117_verify.py', 'ed117_analyze.py', 'ed117_processor.py', 'test_ed117.py']))
++
++
++def read(p):
++    return json.loads(Path(p).read_text())
++
++
++def write(p, obj):
++    p = Path(p)
++    p.parent.mkdir(parents=True, exist_ok=True)
++    with p.open('x') as f:
++        json.dump(obj, f, indent=1, ensure_ascii=False)
++
++
++def event(name, **kw):
++    ROOT.mkdir(exist_ok=True)
++    with (ROOT / 'events.jsonl').open('a') as f:
++        f.write(json.dumps(dict(event=name, epoch=time.time(), **kw)) + '\n')
++
++
++def technical_gate(recs, ids):
++    # 원 문턱과 원 완전성 검사를 유지. T의 응답 성공만 보조 조건으로 분리한다.
++    old = EV.tech_gate(recs, ids)
++    required = {c: old['per_condition'][c]['passes'] for c in 'NER'}
++    complete = len(ids) == 12 and len(recs) == 48 and len({(r['patient'], r['cond']) for r in recs}) == 48
++    complete = complete and all(old['per_condition'][c]['n_missing'] == 0 and old['per_condition'][c]['n_records'] == 12 for c in 'NERT')
++    return dict(run=bool(complete and all(required.values())), per_condition=old['per_condition'],
++                min_resolved_required=6, required_response_conditions=list('NER'), all_four_inputs_complete=complete,
++                auxiliary_T=True, original_gate_run=old['run'])
++
++
++def prepare():
++    t0 = time.monotonic()
++    assert sha(PLAN116) == PLANHASH
++    original = read('results/iter_116/RESULT_MANIFEST.json')
++    inputs = {}
++    def check(p, expected=None):
++        current = sha(p)
++        if expected is not None and current != expected:
++            raise RuntimeError(f'출처 hash 변경: {p}')
++        inputs[str(p)] = current
++    for p, h in read('results/iter_116/lock/eval_lock.json')['files'].items():
++        check(p, h)
++    for p, h in original['outputs'].items():
++        check(p, h)
++    prov = read('results/iter_116/provenance/provenance.json')
++    paths = dict(sets=LINK.SETS, labels=LINK.LABELS, infer=LINK.INFER, det_lock=LINK.DET_LOCK,
++                 det_sel=LINK.DET_SEL, sft_reuse=LINK.SFT_REUSE, det_raw=LINK.DET_DIR + '/raw_preds.json',
++                 det_completion=LINK.DET_DIR + '/completion.json')
++    for k, p in paths.items():
++        check(p, prov['inputs'][k])
++    for stage, d in prov['O'].items():
++        check(LINK.O_PROTO[stage], d['protocol']['protocol_sha256'])
++        check(LINK.O_REQ[stage], d['requests_sha256'])
++        for fn, h in d['worker_files'].items():
++            check(LINK.O_STAGES[stage] + '/' + fn, h)
++    check(LINK.SFT_PROTO, prov['SFT']['protocol']['protocol_sha256'])
++    for fn, h in prov['SFT']['worker_files'].items():
++        check(LINK.SFT_DIR + '/' + fn, h)
++    # 기존 검증된 protocol의 입력은 불변 hash 근거를 연결한다. 전수 임상/코드 감사를 반복하지 않는다.
++    for p in [LINK.SFT_PROTO, *LINK.O_PROTO.values()]:
++        locked = read(p)['locked']
++        for f, h in locked['files'].items():
++            if not f.endswith('.py'):
++                check(f, h)
++    sel = read('results/iter_116/lock/selection.json')
++    rows = read('results/iter_116/provenance/ledger_nogt.json')['rows']
++    assert SPEC.select(rows) == {k: sel[k] for k in SPEC.select(rows)}
++    req = RUN.read_requests(REQ)
++    group_of = {**{i: 'mismatch' for i in sel['mismatch']}, **{i: 'control' for i in sel['control']}}
++    expected = BUILD.make_rows(rows, sel['mismatch'] + sel['control'], 'MAIN', group_of)
++    assert req == expected and len(req) == 696
++    assert len({r['patient'] for r in req}) == 174
++    source_code = {}
++    for f in list(dict.fromkeys(BUILD.EVAL_CODE + ['ed116_directcheck.py', 'ed116_verify_selection.py', 'ed116_baselines.py'])):
++        blob = subprocess.run(['git', 'show', SOURCE_SHA + ':' + f], capture_output=True, check=True).stdout
++        assert blob == Path(f).read_bytes(), f
++        source_code[f] = sha(f)
++    # 실제 가중치 내용 대조. 원 캐시에 쓰지 않는다.
++    weights = read('results/iter_116/lock/weights_check.json')
++    for name, d in weights['files'].items():
++        path = Path(weights['snapshot']) / name
++        assert path.stat().st_size == d['size'] and sha(path) == d['sha256'], name
++    techs = {}
++    for stage, reqname in [('TECH_w2', 'TECH'), ('TECH_w4', 'TECH'), ('RESUME8', 'RESUME8')]:
++        techs[stage] = RUN.verify_completion('results/iter_116/gen/' + stage,
++            'results/iter_116/requests/' + reqname + '.jsonl', 'results/iter_116/protocol/protocol_' + reqname + '.json')
++    a = {r['request_id']: r['suffix_ids'] for r in techs['TECH_w2']}
++    b = {r['request_id']: r['suffix_ids'] for r in techs['TECH_w4']}
++    assert a == b and len(a) == 48
++    for r in techs['RESUME8']:
++        assert r['suffix_ids'] == a[r['request_id']]
++    gate = technical_gate(techs['TECH_w2'], sel['tech'])
++    assert gate['run']
++    assert {c: gate['per_condition'][c]['n_resolved'] for c in 'NERT'} == dict(N=12, E=9, R=9, T=5)
++    write(ROOT / 'tech/gate.json', gate)
++    write(ROOT / 'reuse_manifest.json', dict(original_source_sha=SOURCE_SHA, original_plan_sha256=PLANHASH,
++        original_plan=PLAN116, current_plan_sha256=sha('../agent/runs/iter_117/plan.md'), inputs=inputs, source_code=source_code,
++        source_generation_protocol='results/iter_116/protocol/protocol_TECH.json',
++        source_tech_counts={k: len(v) for k, v in techs.items()}, generation_sources_unchanged=True,
++        required_checks='원 출력 hash·현재 입력·원 요청 재구성·TECH 완료/동등성·전체 가중치 hash 통과',
++        elapsed_s=time.monotonic() - t0, new_generate_requests=0))
++    event('prepare_complete', wall_s=time.monotonic() - t0)
++    print('재사용 입력과 TECH 확인 완료. 본요청 696, gate=True')
++
++
++def verify_lock():
++    lock = read(ROOT / 'lock/eval_lock.json')
++    for p, h in lock['files'].items():
++        if sha(p) != h:
++            raise RuntimeError(f'평가 잠금 불일치 {p}')
++    for p, h in read(ROOT / 'reuse_manifest.json')['inputs'].items():
++        if sha(p) != h:
++            raise RuntimeError(f'현재 원본 불일치 {p}')
++    return lock
++
++
++def lock():
++    tests = ['tests/fixtures_inherited.json', 'tests/fixtures_amendment.json', 'tests/processor.json']
++    for p in tests:
++        d = read(ROOT / p)
++        assert d.get('all_pass', d.get('n_pass') == d.get('n')) is True, p
++    assert read(ROOT / 'tech/gate.json')['run'] is True
++    inputs = read(ROOT / 'reuse_manifest.json')['inputs']
++    paths = list(dict.fromkeys(CODE + list(inputs) + [str(ROOT / x) for x in tests] +
++        [str(ROOT / 'reuse_manifest.json'), str(ROOT / 'tech/gate.json'), PLAN116,
++         '../agent/runs/iter_117/plan.md', '../agent/runs/iter_117/plan.json']))
++    t = time.time()
++    d = dict(locked_at_epoch=t, locked_at_utc=time.strftime('%Y-%m-%dT%H:%M:%SZ', time.gmtime(t)),
++             files={p: sha(p) for p in paths}, original_plan_sha256=PLANHASH, original_source_sha=SOURCE_SHA,
++             amendment='T 응답 성공만 보조 조건으로 분리; 원 사건·성능 부등식·parser·표본 유지',
++             observation_contract=dict(strata=['mismatch_Kcorrect', 'mismatch_Kwrong', 'control_Kcorrect', 'control_Kwrong'],
++                 policies=list(EV.POL), paired=['R_vs_N', 'R_vs_E'], categories=['opacity', 'normal', 'not_normal_no_opacity'],
++                 new_numeric_gates=False),
++             best_range_note='개별 지표별 best는 동시에 실현 가능한 성공의 증명이 아니며 불확정 후보이다.')
++    write(ROOT / 'lock/eval_lock.json', d)
++    RUN.make_protocol(REQ, PROTO, gate=str(ROOT / 'tech/gate.json'),
++                      lock=[str(ROOT / 'lock/eval_lock.json'), *CODE, *inputs],
++                      extra=dict(iteration=117, original_plan_sha256=PLANHASH, original_source_sha=SOURCE_SHA,
++                                 source_tech_protocol_sha256=sha('results/iter_116/protocol/protocol_TECH.json')))
++    verify_lock()
++    event('evaluation_locked', locked_at_utc=d['locked_at_utc'])
++    print('사전 평가 잠금', d['locked_at_utc'])
++
++
++def launch():
++    verify_lock()
++    t0 = time.monotonic()
++    write(ROOT / 'execution_start.json', dict(epoch=time.time(), pid=os.getpid(), python=sys.executable,
++        inherited_cuda_visible_devices=os.environ.get('CUDA_VISIBLE_DEVICES'), protocol_sha256=sha(PROTO),
++        expected_requests=696, expected_patients=174, peak_gb_assumed=9.0,
++        worker_choice='기존 TECH 48요청에서 2→4worker wall 105.43→60.30초, token 48/48 같음. peak 8.268GiB에 여유를 둔 9GiB admission.'))
++    allowed = RUN.allowed_gpus()
++    free = RUN.gpu_free_mib()
++    workers = 4 if all(free[g] >= 2 * 11 * 1024 for g in allowed) and len(allowed) == 2 else 2
++    root_log = ROOT / 'launch'
++    root_log.mkdir(exist_ok=True)
++    def stop(proc):
++        if proc.poll() is None:
++            os.killpg(proc.pid, signal.SIGTERM)
++            try:
++                proc.wait(timeout=30)
++            except subprocess.TimeoutExpired:
++                os.killpg(proc.pid, signal.SIGKILL)
++                proc.wait()
++    for attempt in range(2):
++        with (root_log / f'attempt{attempt}.stdout').open('x') as out, (root_log / f'attempt{attempt}.stderr').open('x') as err:
++            cmd = [sys.executable, '-u', 'pg43_run.py', 'launch', '--requests', REQ, '--protocol', PROTO,
++                   '--out-dir', GEN, '--workers', str(workers), '--peak-gb', '9']
++            proc = subprocess.Popen(cmd, stdout=out, stderr=err, start_new_session=True)
++            event('launch', child_pid=proc.pid, workers=workers, argv=cmd, free_mib=RUN.gpu_free_mib())
++            unsafe = False
++            try:
++                with (root_log / f'monitor{attempt}.jsonl').open('x') as log:
++                    while proc.poll() is None:
++                        try:
++                            proc.wait(timeout=15)
++                        except subprocess.TimeoutExpired:
++                            pass
++                        data = subprocess.run(['nvidia-smi', '--query-gpu=index,memory.used,memory.free,utilization.gpu',
++                                               '--format=csv,noheader,nounits'], capture_output=True, text=True, check=True).stdout
++                        live = subprocess.run(['nvidia-smi', '--query-compute-apps=gpu_uuid,pid,used_memory',
++                                               '--format=csv,noheader,nounits'], capture_output=True, text=True, check=True).stdout
++                        log.write(json.dumps(dict(epoch=time.time(), gpu=data, processes=live,
++                            cpu_load=os.getloadavg(), meminfo=Path('/proc/meminfo').read_text())) + '\n')
++                        log.flush()
++                        free_now = RUN.gpu_free_mib()
++                        if proc.poll() is None and any(free_now[g] < (workers // len(allowed)) * 2048 for g in allowed):
++                            unsafe = True
++                            event('safety_margin_stop', free_mib=free_now, workers=workers)
++                            stop(proc)
++                            break
++            except BaseException:
++                stop(proc)
++                raise
++            rc = proc.wait()
++            event('launch_exit', child_pid=proc.pid, exit_code=rc, workers=workers, safety_stop=unsafe)
++        if rc == 0 and not unsafe:
++            recs = RUN.verify_completion(GEN, REQ, PROTO)
++            assert len(recs) == 696
++            event('main_complete', wall_s=time.monotonic() - t0)
++            print('MAIN 완료 696요청', flush=True)
++            return
++        if workers == 4 and (unsafe or any('OutOfMemory' in f.read_text() for f in Path(GEN).glob('worker*.stderr'))):
++            # 우리 프로세스의 부분 결과/claim을 보존한 채 같은 protocol으로 재개한다.
++            workers = 2
++            event('lower_concurrency_resume', reason='OOM 또는 worker당 2GiB 여유 부족')
++        else:
++            raise RuntimeError(f'MAIN 실행 실패 rc={rc}; 원 로그와 부분 결과 보존')
++    raise RuntimeError('안전 동시성 복구 후에도 완료되지 않음')
++
++
++def seal():
++    verify_lock()
++    recs = RUN.verify_completion(GEN, REQ, PROTO)
++    v = read(ROOT / 'eval/verify.json')
++    assert v['all_pass'] is True
++    for p, h in v['verified_files'].items():
++        assert sha(p) == h, p
++    files = list(v['verified_files']) + [str(ROOT / 'eval/verify.json'), str(ROOT / 'reuse_manifest.json'),
++        str(ROOT / 'execution_start.json'), str(ROOT / 'tech/gate.json')]
++    files += [str(p) for p in (ROOT / 'tests').glob('*.json')]
++    write(ROOT / 'completion.json', dict(complete=True, epoch=time.time(), n_records=len(recs), n_patients=174,
++        original_source_sha=SOURCE_SHA, original_plan_sha256=PLANHASH,
++        files={p: sha(p) for p in files}, verifier_sha256=sha(ROOT / 'eval/verify.json'),
++        performance_label=read(ROOT / 'eval/report.json')['decision']['label'], new_training=False))
++    event('sealed')
++    print('검증 대상 digest와 현재 원본 재확인 후 봉인 완료')
++
++
++if __name__ == '__main__':
++    ap = argparse.ArgumentParser()
++    ap.add_argument('command', choices=['prepare', 'lock', 'launch', 'seal'])
++    a = ap.parse_args()
++    globals()[a.command]()
+diff --git a/ed117_verify.py b/ed117_verify.py
+new file mode 100644
+index 0000000..d0895fe
+--- /dev/null
++++ b/ed117_verify.py
+@@ -0,0 +1,263 @@
++"""iter_117 원시 답·공유 미해결 변수·기하·bootstrap·최종 분기의 독립 검산.
++
++생산 ed116_eval/spec/analyze는 import하지 않는다. 고정 parser만 재사용한다.
++"""
++import argparse
++import hashlib
++import itertools
++import json
++from pathlib import Path
++
++import numpy as np
++import ev108_spec as S
++import ev109_extract as X
++from ed116_verify import max_match
++
++POL = ('K', 'B', 'G', 'M', 'N', 'E', 'R', 'T', 'S')
++JOINT = ('K', 'B', 'N', 'E', 'R', 'T', 'S')
++FREE = ('G', 'N', 'E', 'R', 'T')
++COMP = ('K', 'B', 'G', 'M', 'N', 'E', 'S')
++
++
++def sha(p):
++    h = hashlib.sha256()
++    with open(p, 'rb') as f:
++        for b in iter(lambda: f.read(4 << 20), b''):
++            h.update(b)
++    return h.hexdigest()
++
++
++def policies(base):
++    a = dict(base)
++    k, b, g, e = (a[q] for q in ('K', 'B', 'G', 'E'))
++    a['M'] = k if g is None else ('yes' if (k, b, g).count('yes') >= 2 else 'no')
++    a['S'] = e if e is not None and e == b else k
++    return a
++
++
++def scalar(p, a):
++    y, kc = p['y'], p['base']['K'] == p['y']
++    c = {q: int(a[q] == y) for q in POL}
++    d = {}
++    for q in POL:
++        d.update({f'correct_{q}': c[q], f'correction_{q}': int(not kc) * c[q],
++                  f'harm_{q}': int(kc) * (1 - c[q]),
++                  f'harmwrong_{q}': int(kc and a[q] is not None and a[q] != y),
++                  f'flip_to_yes_{q}': int(a[q] == 'yes' and p['base']['K'] == 'no'),
++                  f'flip_to_no_{q}': int(a[q] == 'no' and p['base']['K'] == 'yes')})
++        if q != 'R':
++            d[f'diff_R_{q}'] = c['R'] - c[q]
++    for q in JOINT:
++        count = p['n_det'] if a[q] == 'yes' else 0
++        for th in ('03', '05'):
++            tp = p['tp' + th] if a[q] == 'yes' else 0
++            d[f'joint{th}_{q}'] = int(a[q] == 'yes' and tp == count == p['n_gt']) if y == 'yes' else int(a[q] == 'no')
++            d[f'fp{th}_{q}'] = count - tp
++            d[f'fn{th}_{q}'] = p['n_gt'] - tp if y == 'yes' else 0
++        d[f'posf1_03_{q}'] = (2 * p['tp03'] / (count + p['n_gt'])) if y == 'yes' and a[q] == 'yes' else 0.0
++    for q in JOINT:
++        if q != 'R':
++            d[f'jdiff03_R_{q}'] = d['joint03_R'] - d[f'joint03_{q}']
++    return d
++
++
++def bounds(p):
++    free = [q for q in FREE if p['base'][q] is None]
++    values = []
++    for combo in itertools.product(('yes', 'no'), repeat=len(free)):
++        a = dict(p['base'])
++        a.update(zip(free, combo))
++        values.append(scalar(p, policies(a)))
++    return ({k: min(v[k] for v in values) for k in values[0]},
++            {k: max(v[k] for v in values) for k in values[0]})
++
++
++def group(patients):
++    pts = [scalar(p, p['base']) for p in patients]
++    rg = [bounds(p) for p in patients]
++    n = len(pts)
++    idx = np.random.default_rng(11617).integers(0, n, size=(10000, n), dtype=np.int32)
++    kc = np.array([int(p['base']['K'] == p['y']) for p in patients])
++    def ci(v, den=None):
++        v = np.asarray(v, float)
++        if den is None:
++            point, samples = v.mean(), v[idx].mean(axis=1)
++        else:
++            den = np.asarray(den, float)
++            if not den.sum():
++                return [None, None, None]
++            ds = den[idx].sum(axis=1)
++            samples = v[idx].sum(axis=1)[ds > 0] / ds[ds > 0]
++            point = v.sum() / den.sum()
++        return [float(point), *map(float, np.percentile(samples, [2.5, 97.5]))]
++    vec = lambda k: [v[k] for v in pts]
++    ci95 = {}
++    for q in POL:
++        if q != 'R':
++            ci95[f'diff_R_{q}'] = ci(vec(f'diff_R_{q}'))
++        ci95[f'accuracy_{q}'] = ci(vec(f'correct_{q}'))
++        ci95[f'correction_rate_{q}'] = ci(vec(f'correction_{q}'), 1 - kc)
++        ci95[f'harm_rate_{q}'] = ci(vec(f'harm_{q}'), kc)
++    for q in JOINT:
++        if q != 'R':
++            ci95[f'jdiff03_R_{q}'] = ci(vec(f'jdiff03_R_{q}'))
++    return dict(n=n, n_K_correct=int(kc.sum()), n_K_wrong=int(n - kc.sum()),
++                point={k: sum(v[k] for v in pts) for k in pts[0]},
++                range_min={k: sum(lo[k] for lo, hi in rg) for k in pts[0]},
++                range_max={k: sum(hi[k] for lo, hi in rg) for k in pts[0]}, ci95=ci95,
++                n_unresolved_cells={q: sum(p['base'][q] is None for p in patients) for q in FREE})
++
++
++def decision(mm, ag):
++    criteria = {}
++    for mode in ('point', 'worst', 'best'):
++        def v(rep, key, high):
++            if mode == 'point':
++                return rep['point'][key]
++            use_min = (mode == 'worst') == high
++            return rep['range_min' if use_min else 'range_max'][key]
++        c = {'R_correction>=10': v(mm, 'correction_R', True) >= 10,
++             'R_harm<=5': v(mm, 'harm_R', False) <= 5,
++             **{f'R_minus_{q}>=5': v(mm, f'diff_R_{q}', True) >= 5 for q in COMP},
++             'agree_harm_rate<=0.05': v(ag, 'harm_R', False) <= .05 * ag['n_K_correct']}
++        criteria[mode] = c
++    pt, worst, best = (all(criteria[m].values()) for m in ('point', 'worst', 'best'))
++    label = ('positive_exploratory' if pt and worst else 'inconclusive_unresolved_flips_criteria' if pt else
++             'inconclusive_unresolved_could_satisfy' if best else 'hold_current_frozen_setting')
++    return dict(label=label, **criteria)
++
++
++def compare_group(expected, actual):
++    checks = []
++    for field in ('n', 'n_K_correct', 'n_K_wrong', 'point', 'range_min', 'range_max', 'ci95', 'n_unresolved_cells'):
++        def eq(x, y):
++            if isinstance(x, dict):
++                return isinstance(y, dict) and set(x) == set(y) and all(eq(v, y[k]) for k, v in x.items())
++            if isinstance(x, list):
++                return isinstance(y, list) and len(x) == len(y) and all(eq(a, b) for a, b in zip(x, y))
++            return x == y if x is None or y is None else abs(x - y) < 1e-10
++        checks.append(dict(name=field, passed=eq(expected[field], actual[field])))
++    return checks
++
++
++def make_patient(row, gt, ans):
++    k = X.resolve('O', row['O']['raw'], row['O']['ended_eos'])['answer']
++    st, _ = S.parse_saved_bbox(row['SFT']['raw'], row['SFT']['ended_eos'])
++    boxes = [b for s, b in zip(row['det']['scores'], row['det']['boxes_xyxy_px']) if s >= .70]
++    top, left, side = row['pad']
++    pred = [[(b[1] + top) * 1000 / side, (b[0] + left) * 1000 / side,
++             (b[3] + top) * 1000 / side, (b[2] + left) * 1000 / side] for b in boxes]
++    base = policies(dict(K=k, B='yes' if boxes else 'no', G={'ok': 'yes', 'empty': 'no'}.get(st), **ans))
++    return dict(id=row['id'], cat=gt['category'], y='yes' if gt['category'] == 'opacity' else 'no', base=base,
++                n_det=len(pred), n_gt=len(gt['gt_yxyx_norm']),
++                tp03=max_match(pred, gt['gt_yxyx_norm'], .3), tp05=max_match(pred, gt['gt_yxyx_norm'], .5))
++
++
++def main():
++    ap = argparse.ArgumentParser()
++    ap.add_argument('--root', default='results/iter_117')
++    a = ap.parse_args()
++    root = Path(a.root)
++    rep = json.loads((root / 'eval/report.json').read_text())
++    pp = json.loads((root / 'eval/per_patient.json').read_text())
++    rows = {r['id']: r for r in json.load(open('results/iter_116/provenance/ledger_nogt.json'))['rows']}
++    gt = json.load(open('results/iter_116/provenance/gt.json'))
++    sel = json.load(open('results/iter_116/lock/selection.json'))
++    recs, checks = {}, []
++    def chk(name, ok):
++        checks.append(dict(name=name, passed=bool(ok)))
++    for fn in sorted((root / 'gen/MAIN').glob('gen_worker*.jsonl')):
++        for ln in fn.read_text().splitlines():
++            r = json.loads(ln)
++            key = (r['patient'], r['cond'])
++            if key in recs:
++                raise ValueError('중복 출력')
++            recs[key] = r
++    selected = sel['mismatch'] + sel['control']
++    chk('exact_record_matrix', set(recs) == {(i, c) for i in selected for c in 'NERT'} and len(recs) == 696)
++    chk('exact_per_patient_matrix', len(pp) == len(selected) and {r['id'] for r in pp} == set(selected))
++    key = lambda i: hashlib.sha256(('iter116|' + rows[i]['patient']).encode()).hexdigest()
++    match, agree, unknown = [], [], []
++    for i, row in rows.items():
++        k = X.resolve('O', row['O']['raw'], row['O']['ended_eos'])['answer']
++        b = 'yes' if any(s >= .70 for s in row['det']['scores']) else 'no'
++        (unknown if k is None else agree if k == b else match).append(i)
++    chk('selection_original', sorted(match, key=key) == sel['mismatch'] and sorted(agree, key=key)[12:99] == sel['control']
++        and sorted(agree, key=key)[:12] == sel['tech'] and sorted(unknown) == sel['unresolved'])
++    patients = {}
++    for i in selected:
++        ma = {c: X.resolve('O', recs[i, c]['suffix_text_raw'], recs[i, c]['ended_eos'])['answer'] for c in 'NERT'}
++        patients[i] = make_patient(rows[i], gt[i], ma)
++    for row in pp:
++        i = row['id']
++        chk(f'patient_{i}', row['answers'] == patients[i]['base'] and row['gt'] == patients[i]['y'] and
++            all(row['raw'][c] == recs[i, c]['suffix_text_raw'] and row['ended_eos'][c] == recs[i, c]['ended_eos'] and
++                row['request_ids'][c] == recs[i, c]['request_id'] for c in 'NERT') and
++            row['n_det'] == patients[i]['n_det'] and row['tp03'] == patients[i]['tp03'] and
++            row['n_gt'] == patients[i]['n_gt'] and row['gt_boxes_yxyx_norm'] == gt[i]['gt_yxyx_norm'])
++        p = patients[i]
++        kc = p['base']['K'] == p['y']
++        chk(f'events_{i}', row['K_correct'] == kc and row['B_correct'] == (p['base']['B'] == p['y']) and
++            all(row['correction'][q] == (not kc and p['base'][q] == p['y']) and
++                row['resolved_harm'][q] == (kc and p['base'][q] is not None and p['base'][q] != p['y']) for q in POL) and
++            row['wrong_advice_adopted_R'] == (i in sel['mismatch'] and kc and p['base']['R'] == p['base']['B']) and
++            row['useful_advice_not_adopted_R'] == (i in sel['mismatch'] and not kc and p['base']['R'] == p['base']['K']))
++    independent = {}
++    for g in ('mismatch', 'control'):
++        independent[g] = group([patients[i] for i in sel[g]])
++        checks.extend(dict(name=g + '_' + c['name'], passed=c['passed']) for c in compare_group(independent[g], rep[g]))
++    dec = decision(independent['mismatch'], independent['control'])
++    chk('decision_all_original_inequalities_and_label', all(dec[k] == rep['decision'][k] for k in dec))
++    obs = json.loads((root / 'eval/observations.json').read_text())
++    # 사전 고정 집단의 3개 상태(정답/확정 오답/미해결)와 R-N/R-E 교차표.
++    for name, table in obs['strata'].items():
++        ids = table['ids']
++        want = [i for i in sel[table['group']] if (patients[i]['base']['K'] == patients[i]['y']) == table['K_correct']]
++        chk(name + '_ids_denominator', ids == want and table['n'] == len(want))
++        for q in POL:
++            want_counts = dict(correct=sum(patients[i]['base'][q] == patients[i]['y'] for i in ids),
++                               wrong=sum(patients[i]['base'][q] is not None and patients[i]['base'][q] != patients[i]['y'] for i in ids),
++                               unresolved=sum(patients[i]['base'][q] is None for i in ids))
++            chk(name + '_' + q, table['policies'][q] == want_counts)
++    for g in ('mismatch', 'control'):
++        def state(i, q):
++            a, y = patients[i]['base'][q], patients[i]['y']
++            return 'unresolved' if a is None else 'correct' if a == y else 'wrong'
++        for q in ('N', 'E'):
++            for cell, saved in obs['paired'][g]['R_vs_' + q].items():
++                r, c = cell.split('/')
++                ids = [i for i in sel[g] if state(i, 'R') == r and state(i, q) == c]
++                chk(g + '_R_vs_' + q + '_' + cell, saved == dict(n=len(ids), ids=ids))
++        for cat in ('opacity', 'normal', 'not_normal_no_opacity'):
++            ids = [i for i in sel[g] if gt[i]['category'] == cat]
++            saved = obs['category_transitions'][g][cat]
++            want = dict(n=len(ids), policies={q: dict(
++                to_yes=sum(patients[i]['base']['K'] == 'no' and patients[i]['base'][q] == 'yes' for i in ids),
++                to_no=sum(patients[i]['base']['K'] == 'yes' and patients[i]['base'][q] == 'no' for i in ids),
++                unresolved=sum(patients[i]['base'][q] is None for i in ids)) for q in POL})
++            chk(g + '_' + cat + '_all_transitions', saved == want)
++        for c in 'NERT':
++            raw = [recs[i, c] for i in sel[g]]
++            resolved = [X.resolve('O', r['suffix_text_raw'], r['ended_eos']) for r in raw]
++            sources = {src: sum(r['source'] == src for r in resolved) for src in {r['source'] for r in resolved}}
++            reasons = {why: sum(r['source'] == 'unresolved' and r['reason'] == why for r in resolved)
++                       for why in {r['reason'] for r in resolved if r['source'] == 'unresolved'}}
++            fmt = rep['format'][g][c]
++            chk(g + '_' + c + '_format_sources_eos_attempts', fmt['n'] == len(raw) and fmt['source'] == sources and
++                fmt['unresolved_reasons'] == reasons and fmt['eos'] == sum(r['ended_eos'] for r in raw) and
++                fmt['strict_valid'] == sum(S.strict('O', r['suffix_text_raw'], r['ended_eos'])[0] == 'valid' for r in raw) and
++                fmt['retry'] == sum(len(r['attempts']) > 1 for r in raw))
++    targets = [root / 'eval/report.json', root / 'eval/per_patient.json', root / 'eval/observations.json']
++    targets += sorted((root / 'gen/MAIN').glob('gen_worker*.jsonl'))
++    targets += [root / 'gen/MAIN/completion.json', root / 'protocol/MAIN.json', root / 'lock/eval_lock.json']
++    result = dict(all_pass=all(c['passed'] for c in checks), n=len(checks), n_pass=sum(c['passed'] for c in checks),
++                  checks=checks, independent=independent, decision=dec, verified_files={str(f): sha(f) for f in targets},
++                  note='best 지표별 최선값은 동일 배정의 동시 실현 가능성을 보장하지 않는다.')
++    with (root / 'eval/verify.json').open('x') as f:
++        json.dump(result, f, indent=1)
++    print(result['n_pass'], '/', result['n'])
++    raise SystemExit(0 if result['all_pass'] else 1)
++
++
++if __name__ == '__main__':
++    main()
+diff --git a/test_ed117.py b/test_ed117.py
+new file mode 100644
+index 0000000..e09599c
+--- /dev/null
++++ b/test_ed117.py
+@@ -0,0 +1,91 @@
++"""이번 변경의 독립 범위·분기·gate·관찰표 회귀 검사. 생성/임상 판정 없음."""
++import copy
++import itertools
++import json
++import random
++from pathlib import Path
++
++import ed116_eval as EV
++import ed117_verify as V
++from ed117_run import technical_gate
++from ed117_analyze import observations
++
++
++def main():
++    checks = []
++    def check(name, ok):
++        checks.append(dict(name=name, passed=bool(ok)))
++        print(('PASS ' if ok else 'FAIL ') + name)
++    rng = random.Random(11617)
++    pats = []
++    for i in range(8):
++        base = EV.derive(rng.choice(['yes', 'no']), rng.choice(['yes', 'no']),
++                         *[rng.choice(['yes', 'no', None]) for _ in range(5)])
++        p = dict(id=str(i), cat='opacity', y='yes', base=base, n_det=2, n_gt=3, tp03=2, tp05=1)
++        pats.append(p)
++        check('shared_scalar_' + str(i), EV.point_scalars(p) == V.scalar(p, base))
++        lo, hi = EV.range_scalars(p)
++        vl, vh = V.bounds(p)
++        check('independent_all_bounds_' + str(i), lo == vl and hi == vh)
++    actual, expected = EV.group_report(pats), V.group(pats)
++    check('all_counts_ranges_ci_unresolved', all(x['passed'] for x in V.compare_group(expected, actual)))
++    altered = copy.deepcopy(actual)
++    altered['n_unresolved_cells']['E'] += 1
++    check('unresolved_count_tamper_detected', not all(x['passed'] for x in V.compare_group(expected, altered)))
++    altered = copy.deepcopy(actual)
++    altered['range_min']['diff_R_S'] += 1
++    check('shared_range_tamper_detected', not all(x['passed'] for x in V.compare_group(expected, altered)))
++    check('E_shared_with_S', V.policies(dict(K='no', B='yes', G='no', N='no', E='yes', R='yes', T='no'))['S'] == 'yes'
++          and V.policies(dict(K='no', B='yes', G='no', N='no', E='no', R='yes', T='no'))['S'] == 'no')
++    check('G_shared_with_M', V.policies(dict(K='yes', B='no', G='no', N='no', E='yes', R='yes', T='no'))['M'] == 'no'
++          and V.policies(dict(K='yes', B='no', G='yes', N='no', E='yes', R='yes', T='no'))['M'] == 'yes')
++    def synth(cor=10, harm=5, diff=5, ag_harm=4, ag_den=80):
++        pt = dict(correction_R=cor, harm_R=harm, **{f'diff_R_{q}': diff for q in V.COMP})
++        mm = dict(point=pt.copy(), range_min=pt.copy(), range_max=pt.copy())
++        ag = dict(n_K_correct=ag_den, point=dict(harm_R=ag_harm), range_min=dict(harm_R=ag_harm), range_max=dict(harm_R=ag_harm))
++        return mm, ag
++    cases = [('exact_boundary', {}, 'positive_exploratory'),
++             ('correction_9', dict(cor=9), 'hold_current_frozen_setting'),
++             ('harm_6', dict(harm=6), 'hold_current_frozen_setting'),
++             ('diff_4', dict(diff=4), 'hold_current_frozen_setting'),
++             ('agreement_rate_above5pct', dict(ag_harm=5), 'hold_current_frozen_setting'),
++             ('agreement_actual_denominator', dict(ag_den=79), 'hold_current_frozen_setting')]
++    for name, kw, label in cases:
++        mm, ag = synth(**kw)
++        d, v = EV.decide(mm, ag), V.decision(mm, ag)
++        check(name, all(d[k] == v[k] for k in v) and v['label'] == label)
++    mm, ag = synth()
++    mm['range_min']['correction_R'] = 9
++    d, v = EV.decide(mm, ag), V.decision(mm, ag)
++    check('inconclusive_point_pass_worst_fails', v['label'] == 'inconclusive_unresolved_flips_criteria' and all(d[k] == v[k] for k in v))
++    mm, ag = synth(cor=9)
++    mm['range_max']['correction_R'] = 10
++    d, v = EV.decide(mm, ag), V.decision(mm, ag)
++    check('inconclusive_component_best_only', v['label'] == 'inconclusive_unresolved_could_satisfy' and all(d[k] == v[k] for k in v))
++    recs = []
++    for fn in Path('results/iter_116/gen/TECH_w2').glob('gen_worker*.jsonl'):
++        recs += [json.loads(l) for l in fn.read_text().splitlines()]
++    sel = json.load(open('results/iter_116/lock/selection.json'))
++    gate = technical_gate(recs, sel['tech'])
++    check('T_response_auxiliary_only', gate['run'] and not gate['original_gate_run'] and gate['per_condition']['T']['n_resolved'] == 5)
++    check('T_missing_input_still_blocks', not technical_gate([r for r in recs if r['cond'] != 'T'], sel['tech'])['run'])
++    bad = copy.deepcopy(recs)
++    for r in bad:
++        if r['cond'] == 'N':
++            r['suffix_text_raw'] = 'Cannot answer.'
++    check('NER_response_gate_still_required', not technical_gate(bad, sel['tech'])['run'])
++    check('duplicate_tech_still_blocks', not technical_gate(recs + [recs[0]], sel['tech'])['run'])
++    obs = observations(dict(mismatch=pats, control=pats), [], {})
++    check('observation_denominators_full', all(sum(t['policies'][q].values()) == t['n'] for t in obs['strata'].values() for q in V.POL))
++    check('paired_state_partitions_full', all(sum(t['n'] for t in cells.values()) == len(pats) for g in obs['paired'].values() for cells in g.values()))
++    out = dict(all_pass=all(c['passed'] for c in checks), n=len(checks), n_pass=sum(c['passed'] for c in checks), checks=checks)
++    p = Path('results/iter_117/tests/fixtures_amendment.json')
++    p.parent.mkdir(parents=True, exist_ok=True)
++    with p.open('x') as f:
++        json.dump(out, f, indent=1)
++    print(out['n_pass'], '/', out['n'])
++    raise SystemExit(0 if out['all_pass'] else 1)
++
++
++if __name__ == '__main__':
++    main()

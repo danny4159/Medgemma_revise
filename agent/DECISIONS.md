@@ -3162,5 +3162,26 @@ Claude 계정의 /usage 또는 Settings > Usage에서 제한을 확인한 뒤 �
 - ⏳ 사용 한도 도달 (Claude 구현/실험) → 대기
 - 💾 **개발 이력 체크포인트** `66cd4542720d0efe69b2fbbdfabbe24ebe0253a0`: interrupted (검증 승인 아님)
 - ⏹ 중단: Ctrl+C (Claude 구현/실험 중)
+- 💾 **개발 이력 체크포인트** `66cd4542720d0efe69b2fbbdfabbe24ebe0253a0`: before_engineer_handoff (검증 승인 아님)
+- 🔄 **같은 iter 구현 인계**: claude → codex (연구 계획 유지)
+  - 지시: 사용자 요청으로 iter_117의 Claude 5시간 한도 대기를 종료하고 같은 iter를 Codex에 인계. Claude는 plan 읽기만 수행했고 구현/본생성은 시작하지 않음. 인계 전 자식 프로세스와 GPU compute 작업 없음, research 작업트리 clean 확인. 재사용 코드 HEAD 66cd454(iter_116 implementation_finished 미검증); iter_116 TECH 출력 및 iter_117 plan/표본/성공 기준 보존. 기존 verifier 필수 보완 후 미실행 174명 696요청 본비교만 수행. 원 결과 덮어쓰기·기완료 기술 생성 반복 금지. standard는 현재 gpt-6.1-sol high 적용. 리뷰 뒤 confirm-each-iter 사용자 승인 유지. · 원본: /SSD1_1TB/home/milab/daniel/08_medgemma/agent/runs/iter_117/engineer_handoffs/20261012_163145_2e463211
+- ↻ 재실행: 'Codex 구현' 단계부터 이어서 (orchestrator 4391ffa+수정)
+- ▶ **결정**: 자동 진행 (smart) — 1순위로 진행
+- 💾 **개발 이력 체크포인트** `ae15ee5bde73c415715f127720ffdcf24f60d2cc`: implementation_finished (검증 승인 아님)
+- 🔧 **Codex** (standard): 174명·696요청과 독립 검산을 완료했으나 R 교정 0/40명·미해결 43/87건으로 불확정이며, worker의 GT hash 접근 조건 불일치를 리뷰에 전달한다. [자체 검증 FAIL, 파일 754개 변경]
+  - 브랜치 `approach/noisy-evidence-correction`에서 계속
+- 🔍 **리뷰** (GPT normal): [CONTINUE / inconclusive] 흉부 X-ray 불일치 87명에서 R은 교정 0/40·미해결 43/87로 불확정이었다. 초안 없는 E의 8개 교정도 R에서 유지되지 않았지만, 초안 영향과 평가·기초 수행의 분리는 미완료다.
+  - 접근법 판단: 본비교는 유효하게 완료했으나 R의 unresolved 43/87로 원 성능 판정이 불확정이며 현재 frozen 설정 확대는 보류한다.
+  - 목표 진전: 미실행 본비교를 완료해 해석 가능한 실제 출력 근거를 확보했다. 성능 성공 기준은 충족하지 않았고 unresolved 배정 때문에 원 판정은 불확정이다. resolved R의 초안 유지와 E의 8개 교정이 R에서 사라진 제한적 관찰을 확인했지만, 기초 수행·초안 영향·표현 및 평가 영향을 분리하지 못했다. 새로운 방법의 필요성·효과·신규 기여는 미입증이다.
+  - 판정 범위: MedGemma 1.5 고정 revision·bf16·greedy·adapter=None, RSNA E600에서 선정한 K/B 불일치 87명과 일치 대조 87명, 고정 N/E/R/T prompt 및 ev109_extract_v1의 성능 판정 불확정이다. 새 학습·독립 환자 확인·자유 판독·위치 supervision의 인과 효과는 검증하지 않았다.
+  - 재사용 전 수정: ed117_run.py가 평가 전용 GT/labels까지 worker locked_files에 전달한다. 생성 입력 잠금과 부모의 평가 provenance 검증을 분리해야 한다.
+  - 재사용 전 수정: ed117_run launch는 execution_start.json이 있으면 재호출을 거부한다. 실제 재사용 시 검증된 부분 결과를 보존하는 재개 진입 경로를 명시하고 시험해야 한다.
+  - 재사용 전 수정: 전체 스냅샷에는 이번에 승인하지 않은 과거 실행·adapter 경로가 포함된다. 모듈별 승인 범위를 전체 코드 승인으로 확대하지 않는다.
+  - 추후 개선: SIGKILL·동시 소유권 충돌·worker 수 변경을 포함한 범용 재개 보장은 미검증이다.
+  - 추후 개선: GPU 전체 메모리는 15초 간격 관측이므로 순간 peak의 상한을 보장하지 않는다.
+  - 추후 개선: I/O 경합, 구현 전체 시간과 기존 초안·detector·SFT를 포함한 서비스 전체 비용은 미측정이다.
+  - 추후 개선: 고정 parser의 hedge 규칙은 명시적인 yes/no와 유보 설명이 함께 있는 응답도 unresolved로 분류한다. 현재 점수는 유지하며 이를 내용상 거부율이나 교정 불능으로 해석하지 않는다.
+  - 다음: 현재 frozen R 확대는 보류하고, 사용자 승인 후 독립 자료에서 초안 내용의 영향을 분리하는 한정 비교 하나의 성립 여부를 판단할 것을 권고한다. 근거는 E가 교정한 8명 모두에서 R 원문이 잘못된 초안 방향을 유지한 점이며, 이번 점수를 재채점하거나 일반 anchoring 결함으로 승격하지 않는다. 영상·자동 근거·지시문을 같게 두고 초안 없음/맞는 초안/틀린 초안만 비교하는 설계를 검토하되, 공개 정답의 범위와 기초 수행을 확인하고 M/S 같은 단순 대안 이후 무엇을 배울지 먼저 고정한다. 양성이면 독립 조건의 초안 민감성 관찰로 한정하고 방법 투자는 별도 판단한다. 차이가 없거나 기초 수행·응답 불확실성으로 판별하지 못하면 이 후보를 보류한다. 현재 자료의 prompt/parser 순회·추가 학습·일괄 재생성은 권고하지 않는다. 판별 가능한 자료와 대조가 성립하지 않으면 iter_115의 CURE 특화 투자 보류를 유지하며 자동 재개할 실험은 없다. --confirm-each-iter 사용자 승인 전에는 다음 반복을 시작하지 않는다.
+- ⏹ 중단: Ctrl+C (다음 반복 승인 대기 중)
 - 📁 원본: `agent/runs/iter_117/`
 

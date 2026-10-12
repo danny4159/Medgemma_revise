@@ -352,3 +352,23 @@ iter_113의 포착 9 대 6과 iter_114의 68명·87개에서 동일 22개 검토
 - 미해결: 빈 출력·면적·개수·기본 정확도의 인과적 설명력은 검증하지 않았다.
 - 미해결: 공개 위치 주석 불일치를 임상 오류·자유 판독 정확성으로 확대할 수 없다.
 
+## rsna-noisy-evidence-draft-retention — observed
+
+반복 개발 RSNA E600에서 직접 답과 detector17 threshold0.70이 불일치한 고정 87명을 평가했다. frozen MedGemma 1.5의 영상+초안+자동 근거 R은 고정 ev109_extract_v1에서 교정 0/40, 확정 오답 손상 0/47, unresolved 43/87이었고 resolved 44건은 모두 초안을 유지했다. 초안 없는 E는 8/40을 교정했지만 같은 8명의 R은 1건 오답·7건 unresolved였다. 현재 입력·평가에서의 제한된 관찰이며 일반적 교정 불능, 내부 anchoring 원인 또는 위치 학습 효과는 입증하지 않는다.
+
+- 적용 목표 시작: iter_003
+- 최신 리뷰: agent/runs/iter_117/review.json
+- 근거: research/results/iter_117/gen/MAIN/gen_worker*.jsonl: 고정 174명·696개 고유 출력, 698 attempts.
+- 근거: research/results/iter_117/eval/report.json: 불일치 집단 보수적 정답 K/B/G/M/N/E/R/S=47/40/54/54/34/29/26/53.
+- 근거: research/results/iter_117/eval/per_patient.json 및 observations.json: E가 교정한 8명과 동일 환자 R 원문 연결.
+- 근거: 리뷰에서 원출력 기반 계수와 paired bootstrap을 재계산하고 주요 결과를 재현했다.
+- 사용·평가 검증: 696개 요청의 prompt를 원 ledger와 고정 명세로 재구성해 모두 일치함을 확인했다.
+- 사용·평가 검증: 원 parser·표본·detector 운영점·성공 부등식을 유지했으며 T 응답 성공만 승인된 범위에서 필수 gate에서 분리했다.
+- 사용·평가 검증: processor.json의 기존 TECH 4입력 tensor 대조와 원 생성 경로의 불변성을 확인했다.
+- 사용·평가 검증: 695개 EOS 종료, 1개는 승인된 1000→2000→4000 재시도 후 unresolved로 보존했다.
+- 사용·평가 검증: worker의 GT 접근은 hash 검사였고 생성 입력은 영상과 고정 prompt였다. 읽기 분리 위반은 재사용 결함으로 남긴다.
+- 미해결: 독립 환자에서 영상·자동 근거·지시문을 고정하고 초안 내용만 바꿔도 같은 답변 변화가 생기는가?
+- 미해결: 높은 unresolved 중 내용 불확실성과 고정 추출 규칙의 영향은 얼마나 되는가?
+- 미해결: 단순 합의 S 또는 다수결 M 이후에도 중요한 추가 개선 여지가 있는가?
+- 미해결: 현재 선택 집단 밖의 일반화와 자유 판독·임상 정확성은 미검증이다.
+
