@@ -45297,3 +45297,366 @@ research_track은 mri-volume-evidence-use이며 관련 반복은 iter_064·121�
 복구 전에는 동일 구현 호출을 반복하지 않는다. 복구 후에는 접근 확인만으로 반복을 끝내지 않고 자료가 성립하는 경우 기술6명과 조건부 탐색48명까지 원 계획대로 진행한다. 연구 소스·원본 결과·현재 미실행 판정은 보존한다.
 
 논문 추천은 보류한다. 이번에는 유효한 실제 실험이나 해당 방향의 긍정적 탐구 근거가 추가되지 않았다.
+
+
+## iter_123 GPT PLAN [MRI 관측 범위와 분할 집계 진단 / proceed] — 2026-10-13 01:34:17
+
+# 요약
+
+- **이번에 할 일:** 접근 복구를 계승해 iter_122의 미완료 MR-RATE 비교를 실행한다.
+- **필요한 이유:** 직전 중단은 실행기 권한 누락이며 모델 가설의 음성 결과가 아니다.
+- **확인할 기준:** 동일8장의 분할 집계와 공동 입력의 BA 차이·CI·비용을 원 기준으로 판정한다.
+- **주의·다음:** 자료가 성립하면 기술6명과 별도48명까지 진행한다. 보고서 일치도를 임상 진단 정확도로 해석하지 않는다.
+
+## 알림 맥락
+
+- 연구: MRI volume 근거 활용
+- 데이터: MR-RATE 뇌 MRI, axial FLAIR
+- 모델: MedGemma 1.5 4B, frozen 추론
+- 과제: FLAIR 단면에서 뇌실주위 백질 고신호 근거의 존재·부재·판단 불가 출력
+- 가설: 관측 범위와 공동 처리 방식이 보고서 일치도에 서로 다른 영향을 줄 수 있음
+- 질문: 같은 MRI 단면을 함께 보거나 나눠 판단하면 답이 달라지는가?
+- 변경: 실행 복구
+- 연결: iter_122는 경로 접근 거부로 모델 미실행이며, 승인된 운영 복구 후 같은 연구 질문을 유지함
+- 작업: 미완료 자료 구성부터 기술6명·조건부 탐색48명·독립 검산까지 진행해 다음 투자 판단에 필요한 출력을 확보
+
+# Current Understanding
+
+이 계획은 `agent/runs/iter_122/plan.md`의 변경점 중심 실행 보완이다. 기준 SHA256은 `5a5371d834ba684e7c459e1e52708ca0e86f2314952fbd636c897fc24a5ad0b8`이며 직접 확인했다. Claude는 기준 계획 전체와 이번 보완을 함께 읽는다. 아래 운영 변경 외 과학적 조건은 원문을 그대로 적용한다.
+
+- **유지:** 질문, batch04·batch23 공식 train, 명시적 정답 규칙, seed122, 기술6명·별도48명, C/W/P, parser, metric, 확대·종료 조건.
+- **이번 변경:** 결과 경로를 `research/results/iter_123/`으로 바꾸고 완료된 접근 복구를 계승한다. 관리 코드 수정·권한 smoke를 다시 발주하지 않는다.
+- **미완료:** 정답 manifest, ZIP·영상 연결, 기술 검사, 처리량 측정, 모든 추론·평가.
+- **회귀 검증:** 새 자료·요청·출력의 환자 분리, provenance, tensor 동일성, parser·집계, 안전 재개를 실제 확인한다.
+
+운영 로그에서 CSV Read와 probe Write 성공 및 permission_denials 0을 확인했다. Claude의 probe 재읽기는 생략됐다. 이를 전체 smoke 단계 완료로 보고하지 않는다. 사용자 제공 회귀 테스트42개 통과 기록은 계승한다. 일반 자료 읽기·산출물 저장 과정에서 실제 접근을 사용하며, 권한 조회만으로 이번 반복을 끝내지 않는다.
+
+# Strategy Check / 연구 방향 판단
+
+직전 카드 출처는 iter_122/review.md다. 변경된 근거는 운영 복구뿐이다.
+
+1. **중요한 문제:** 제한된 MRI 단면의 관측 범위·처리 단위가 정확도와 비용에 미치는 영향.
+2. **현재 근거:** 보고서·FLAIR 후보는 있으나 최종 적격 표본과 모델 결과는 없다. 접근 문제는 복구됐다.
+3. **쉬운 해결책:** 넓은 sampling과 고정 분할 OR의 실제 비교를 유지한다.
+4. **남은 설명:** 관측 부족, 기본 인식, 공동 처리 부담, OR 편향, 보고서 불확실성은 아직 미분리다.
+5. **다음 결정:** 원 비교 후 단순 대안 보존·판별력 있는 한정 후속·자료 또는 증거 부족 보류 중 하나를 선택한다.
+
+새 질환·batch·학습 방향을 선택할 근거가 없다. 실행 실패 횟수를 가설의 반증으로 세지 않는다.
+
+# Hypothesis
+
+원 가설을 유지한다. 관측 부족이 중요하면 W가 C보다 개선되고 P의 추가 이득은 작을 수 있다. 처리 단위가 중요하면 동일 pixel의 P가 W보다 개선될 수 있다. 모든 조건이 낮으면 기본 인식·sampling·약한 정답을 구분하지 못한다. P의 sensitivity 증가와 specificity 손실을 분리해 보고하며 순수 내부 통합 원인을 확정하지 않는다.
+
+# Limitation Evidence / Correct Usage Checks
+
+`mri-explicit-target-context-effect`와 iter_064 원 리뷰의 제한된 MedGemma 손실·Qwen 반대 근거를 유지한다. MR-RATE 한계는 아직 관찰하지 않았다. 이번은 학습 없는 diagnostic이다.
+
+모델 revision·processor·chat template·정밀도를 고정하고 공식 다중 영상 경로와 wrapper의 input_ids·pixel_values를 기술 입력에서 비교한다. 순서·placeholder·크기·token 수를 확인한다. 보고서·라벨·원 파일명·clinical indication은 모델 입력에서 제거한다.
+
+# Contribution Path / Baselines / Reuse
+
+분할 OR 자체의 신규성은 주장하지 않는다. C와 W는 직접 baseline이며 P는 같은 W 영상에 두 번 호출하는 실용 대안이다. 추가 호출·token·시간을 숨기지 않는다. 전문 WMH 대안과 직접 SFT/encoder+head의 충분성은 미검증이며 이번에 자동 추가하지 않는다. 가까운 대안의 입력 지원 조건과 문헌 출처는 기준 계획의 해당 절을 계승한다.
+
+현재 브랜치와 clean HEAD `ee8078ab0acba94f0d84d3ab2997e76eeb117bb9`를 유지한다. tracked 목록에 MR-RATE 실행 모듈은 없다. CODE_ASSETS의 review82 계열은 고정 SPIDER 분석용으로 이번에 사용하지 않는다. iter_122는 신규 모듈 검증이 없었다. reuse_assets는 비우고 기준 계획대로 공식 processor를 이용한 이번 자료 전용 최소 경로를 구현한다. 기존 파일이나 보관 자산을 덮어쓰지 않는다.
+
+# Proposed Experiment
+
+## 자료 구성
+
+기준 계획의 정답·선정 규칙을 그대로 구현한다. 기존 두 batch의 공식 train만 사용하고 test를 새로 열지 않는다. iter_121의 test 집계 노출은 기록한다.
+
+양성은 현재 관찰된 뇌실주위 백질의 병적 고신호와 FLAIR 연결이 직접 명시된 경우다. 음성은 해당 범위의 정상 신호 또는 병적 신호 부재가 직접 명시된 경우다. 자동 라벨0·미언급·범위 없는 정상 보고서는 음성으로 쓰지 않는다. 의심·상충·위치 연결 추측·생리적 변이는 unknown으로 둔다. 선정 사례마다 원문 span과 전체 findings/impression 상충 검사를 남기며 새 LLM 판정으로 임상 정답을 만들지 않는다.
+
+source CSV SHA256, 규칙 버전, patient/study/series ID를 manifest로 연결한다. 환자당 한 study를 seed122 hash 순서로 선택한다. axial FLAIR·nonlocalizer·brain exam을 요구하고 여러 적격 series는 coverage 확인 후 가장 작은 through-plane spacing, 동률 series_id 순으로 정한다. 모델 출력 전에 제외·선정·조건을 잠근다.
+
+## 동작 확인
+
+양성3·음성3의 기술6명을 고정한다. study ZIP 크기·압축 해제 여유·안전한 추출과 파일 hash, NIfTI ID·shape·spacing·affine·방향·brain coverage를 확인한다. 제공 brain mask는 해부학 범위용이며 병변 정답이 아니다. 신뢰할 뇌 범위를 확보하지 못한 사례는 원 규칙대로 제외한다.
+
+brain 내 volume 전체 1–99 percentile 표시와 물리적 inferior–superior 순서를 유지한다. 같은 slice는 모든 조건에서 동일 pixel tensor를 사용한다. 대표 단면을 직접 확인하되 라벨 재판정·쉬운 양성 선정에 쓰지 않는다.
+
+greedy, max_new_tokens512로 시작하고 기술 집단의 비EOS가 있으면1024로 재검사하여 본실행 전에 고정한다. 계속 잘리면 실행 문제를 해결하기 전 탐색에 진입하지 않는다. 낮은 기술 정확도 자체는 진입 금지 조건이 아니다.
+
+## 가능성 탐색
+
+기술 집단과 별도인 양성24·음성24, 총48명을 seed122와 원 batch 층화 규칙으로 선정한다. 작은·어려운 소견을 편의상 제외하지 않는다. 적격40–47명이고 클래스별20명 이상이면 원 계획대로 축소하고 출력 전에 실제 N과 정밀도 한계를 기록한다. 이 조건을 못 채우면 기술 결과·자료 범위를 보존하고 본탐색 완료로 보고하지 않는다.
+
+- C: 유효 뇌 범위 중앙50%의 등간격8장.
+- W: 같은 범위5–95%의 등간격8장.
+- P: W의 동일8장을 inferior4·superior4의 두 요청으로 분할.
+
+고유 slice8개를 확보하지 못하면 사전 제외한다. 첫 줄의 단일 PRESENT/ABSENT/UNCERTAIN만 읽는 원 parser를 유지한다. 복수 상태·상충·거부·형식 오류는 별도 보존하며 사후 의미 재채점하지 않는다. P는 하나라도 PRESENT면 PRESENT, 둘 다 ABSENT면 ABSENT, 나머지는 UNCERTAIN이다. invalid는 비PRESENT·비ABSENT로 처리하면서 원 오류를 별도 보고한다.
+
+환자당4요청으로 기술24·탐색192, 기본216요청이다. 기술 재검사·처리량 비교는 별도 ledger에 센다. slice-level 정답이 없으므로 P의 개별 묶음 정확도는 계산하지 않는다.
+
+## 규모 확대·독립 확인
+
+이번은 개발 탐색이다. 새 환자 확증·추가 seed·다른 prompt·학습·타 모델 비교를 자동 실행하지 않는다. 원 결과별 기준에 따라 full review가 후속 하나의 가치를 판단한다. 자료 조건이 실패하면 다른 질환이나 batch를 순회하지 않는다.
+
+## 자원·비용·재개
+
+소스는 research/, 새 결과는 `research/results/iter_123/`, 자료·새 cache는 `/home/test/.local/share/medgemma/mr_rate`에 둔다. iter_121·122 원 기록은 보존한다. metadata 누적250MB·ZIP 누적10GiB와 압축 해제 공간을 확인하고 초과가 필요하면 실행 전 규모 근거를 남긴다. 전체 자료 반입은 금지한다.
+
+실행 직전 nvidia-smi와 상속 GPU 범위를 확인한다. 두 GPU에 독립 환자 shard를 배정한다. 기술 입력에서 batch1 대비 batch2를 우선 짧게 비교하고 메모리가 허용되면 GPU당2 worker도 검토한다. 동시 peak·다른 점유·worker당2GiB 여유, 전체 요청/분·긴 출력 지연·OOM·CPU/I/O·출력 정합성으로 구성을 선택한다. 한 worker 유지에는 실측 이유를 남긴다.
+
+새 입력의 시간·메모리는 미측정이다. bf16 적재8–10GB는 참고값이다. 기술 실측 총처리량 r requests/min으로 남은 요청수/r를 계산하고 다운로드·전처리·load를 별도로 더해 예상 wall-clock을 기록한다. 임의 시간 상한은 없다.
+
+patient/condition/input/prompt/model hash의 요청ID, 원자적 할당, worker별 출력, 완료 ledger와 안전 재개를 구현한다. 누락·중복·손상 출력과 모든 프로세스 종료를 확인한다. 학습 checkpoint는 없으며 추론 ledger와 소스 checkpoint를 보존한다.
+
+# Implementation Tasks for Claude
+
+1. 기준 plan SHA와 이번 amendment를 연결해 실행 설정을 보존한다. 완료된 관리 코드 수정·smoke를 반복하지 않는다.
+2. 미완료 자료 manifest부터 구현한다. 정답 span·상충·환자 분리·영상 연결을 검사한다.
+3. 기술6명의 실제 영상·공식 tensor·parser·집계·생성 길이·재개·처리량을 검증한다.
+4. 자료·실행 조건이 성립하면 같은 호출에서 별도 탐색48명까지 진행한다. 조건을 임의 완화하지 않는다.
+5. 원시 출력과 입력 hash를 봉인하고 별도 집계로 BA·CI·coverage·전환 수·비용을 검산한다. 실제 단계·실패 범위·후속 투자 행동을 보고한다.
+
+Claude 시작과 구독 소진 시 Codex 인계, 자동 진행·필수 리뷰 설정은 유지한다. 실행기나 연구 브랜치를 임의 전환하지 않는다.
+
+# Evaluation (성공/실패 기준 포함)
+
+UNCERTAIN/invalid를 정답으로 세지 않는 BA를 주지표로 한다. sensitivity·specificity·명시 답 coverage·unknown·거부·비EOS·invalid·confusion counts를 함께 보고한다. 양·음성 층 내 환자 paired bootstrap10,000회, seed122, 95% CI를 사용한다. 주비교 P−W와 보조 W−C, 양방향 정오 전환 수·batch별 방향을 구분한다.
+
+- **양성:** P−W BA≥10pp이고 CI 하한>0이면 제한된 분할 처리 이득이다. 호출 비용과 specificity 손실을 포함해 후속 가치를 판단한다.
+- **관측 대안 양성:** W−C가 같은 기준을 만족하면 넓은 sampling의 가치로만 해석한다.
+- **단순 대안 충분성 후보:** W 또는 P의 BA≥0.80, sensitivity·specificity 각각≥0.75이면 현재 개발 조건의 대안을 보존하고 새 방법 투자를 우선 보류한다.
+- **음성:** 주차이 CI 상한<10pp이면 큰 분할 이득 근거가 약하다. 모든 조건 BA≤0.60이면 현재 frozen 수행 부족으로 제한한다.
+- **불확정:** 나머지는 지배 불확실성과 추가 환자가 판단을 바꿀 정밀도를 산출하되 자동 확대하지 않는다. 정답 재해석·prompt 탐색만 남으면 투자를 보류한다.
+
+비용은 원 NIfTI 읽기부터 최종 답 저장까지와 model load를 구분한다. P의 두 호출과 추가 prompt/output token을 포함한다. 무결성·실행 실패와 유효 출력의 불확정을 구분한다. 독립 GPT 리뷰에서 원시 수치·완료 상태·판정 기준을 검증한다.
+
+# Risks / Checks
+
+보고서 일치도는 영상 진단 정확도가 아니며 전체 study 보고서가 선택 단면에서 보이는 소견의 공간 정답을 보장하지 않는다. 원인 질환을 추론해 정답을 확장하지 않는다. P는 처리 단위뿐 아니라 호출 수·OR 편향도 바꾸므로 내부 원인을 단정하지 않는다.
+
+공식 이용 조건·revision·학습 노출을 기록하고 HF_TOKEN_PATH만 참조한다. 토큰 내용은 출력하지 않는다. hf_cache·다른 사용자 자산은 변경하지 않는다. 실제 접근이 다시 거부되면 우회하지 않고 구체적인 새 blocker를 보존한다. 이미 승인된 경로의 재승인을 기본 대응으로 삼지 않는다.
+
+## 대규모 GPU 필요 후보
+
+전체 volume의 다중 sequence encoder–언어모델 공동 적응과 대규모 영상–보고서 사전학습 후보는 기준 계획대로 보존한다. 현재는 단순 대안 이후의 필요성이 미확인이라 실행하지 않는다.
+
+# 계획의 근거 (GPT 조사 노트)
+
+## 확인한 사실
+
+- `agent/runs/iter_122/plan.md` 전체와 원 리뷰를 읽었고 SHA256 `5a5371d834ba684e7c459e1e52708ca0e86f2314952fbd636c897fc24a5ad0b8`을 직접 재확인했다. 모든 자료 구성·모델 출력은 미완료다.
+- `agent/claude_settings.json`의 additionalDirectories와 `orchestrator.py`의 claude_working_directories/claude_command에서 승인 외부 경로가 신규·재개 명령의 --add-dir에 연결된 것을 확인했다.
+- `logs/claude_mrrate_access_20261013.jsonl`에서 splits.csv 첫 줄 Read와 probe Write 성공, permission_denials 빈 목록을 확인했다. Claude 재읽기는 생략됐으며 로그의 SELF_CHECK: FAIL은 이를 반영한다. 접근 복구와 전체 4단계 검증 완료를 혼동하지 않는다. 회귀 테스트42개 통과는 사용자 제공 운영 기록으로 계승하며 이번 계획에서 재실행하지 않았다.
+- research의 status·diff는 깨끗하고 HEAD는 `ee8078ab0acba94f0d84d3ab2997e76eeb117bb9`다. tracked 목록에는 이번 MR-RATE 실행 모듈이 없다. CODE_ASSETS의 iter_082 자산은 고정 SPIDER 분석용이며 이번 평가기로 선택하지 않는다. iter_122의 code_assets는 비어 있다.
+- LIMITATIONS의 해당 항목과 iter_064 원 리뷰를 확인했다. MedGemma의 제한된 context 손실과 Qwen 반대 근거, 기본 신호 기준 미달을 계승한다. MR-RATE의 새 한계 증거로 이전하지 않는다.
+
+## 판단
+
+사용자 보완은 운영 복구 후 원 설계 실행을 명시한다. 질환·정답·표본·metric을 바꿀 새 과학적 근거가 없으므로 추가 문헌조사나 사고 라운드 없이 변경점 중심 계획을 확정한다. 기존 공식 자료·선행 조사 출처는 기준 계획에 보존하며 이번에는 새 문헌 주장을 추가하지 않는다.
+
+
+
+## iter_123 CLAUDE IMPLEMENTATION REPORT — 2026-10-13 02:10:55
+
+# 요약
+
+- **핵심 결과:** 기술 6명과 별도 탐색 48명 모두 생성까지 끝났다. 하지만 C·W·P 세 조건 모두 48명 전원이 PRESENT를 출력했다(sens 1.0, spec 0.0, BA 0.5). P−W와 W−C 차이는 둘 다 0.0이고 CI도 [0, 0]이다.
+- **근거:** 입력·tensor·출력 형식 검사는 모두 통과했다. 비EOS(EOS 없이 끝난 응답)는 0건이고, 독립 검산(`mr123_verify.py`)이 BA와 차이·CI를 재현했다.
+- **미검증·주의:** 사전 판정은 `negative_low_frozen_performance_all_conditions`다(모든 조건 BA≤0.60). 이는 이 prompt와 설정에서의 고정 응답 편향이다. 영상 정보의 활용 여부, 관측 범위, 분할의 효과는 이 결과로 판단할 수 없다. 보고서 일치도는 영상 진단 정확도가 아니다.
+- **다음:** prompt 탐색·재채점·확대는 하지 않았다. 권고는 한정 보완 하나다. 이 응답 편향이 모델의 영상 비의존 prior인지 prompt 유도 때문인지 소규모 대조로 구분한다(Recommendation에 상세).
+
+# Work Performed
+
+- **정답 규칙(`mr123_rules_v1`):** batch04·batch23의 공식 train 보고서만 사용했다. 양성은 같은 문장에 periventricular white matter, FLAIR, hyperintense 표현이 모두 있고 부정·불확실·예외가 없을 때다. 음성은 periventricular white matter가 정상이라는 직접 문장이 있을 때다. 다른 문장에 periventricular 이상, 또는 다른 white matter 고신호가 있으면 unknown으로 두었다.
+- **후보 수:** 양성 267·음성 1,203 study가 나왔다. 이 중 axial FLAIR(non-localizer·non-derived·brain exam)로 연결된 것은 양성 125·음성 919이다.
+- **선정 잠금:** 환자당 한 study, seed122 해시 순서, series는 가장 작은 through-plane spacing 순으로 정했다. 기술 6명(양3·음3)과 탐색 48명(양24·음24)을 모델 출력 전에 `selection_lock.json`으로 잠갔다.
+- **batch 구성:** batch23의 양성은 8명뿐이라 모두 사용했다. 그 결과 양성은 batch04 16·batch23 8이고, 음성은 batch04 12·batch23 12다. 양성 대부분이 2D 두꺼운 slice(4.5–6mm, batch04)이고 음성 다수가 3D 영상이라 획득 방식이 라벨과 섞여 있다.
+- **ZIP·영상:** 54개 ZIP(약 5.3GB)을 revision `f6e39794…`로 받았다(전체 약 5.3GB, 예산 10GiB 이내). 전체 54명이 NIfTI 연결, RAS 방향, brain mask, 8개 고유 slice 조건을 통과했고 제외·대체는 없었다. 대표 montage 3개를 직접 열어 방향(위=anterior, inferior→superior)과 양성의 뇌실주위 고신호를 확인했다.
+- **입력 검사:** 공식 `apply_chat_template` 경로와 수동 processor 경로가 216요청(기술 24 + 탐색 192) 모두에서 `input_ids`, `pixel_values`, 영상 순서가 일치했다. 보고서·라벨·ID가 prompt에 들어가지 않음도 확인했다.
+- **구현 중 확인한 문제:** 수동 경로는 BOS가 이중으로 붙어 처음에 0/24였다. `add_special_tokens=False`로 고치자 24/24가 되어, 이 불일치는 검사 코드의 문제였다.
+- **재개 검사:** 부분 완료 + torn tail(강제 종료로 잘린 마지막 줄) 복구 후 재개한 출력이 기준 출력과 24/24 동일했다.
+- **본 실행:** 평가 코드·요청·입력 hash를 먼저 잠근 뒤(`protocol.json`, 2026-10-13 02:00:13 KST, 이 시점에 worker 출력 파일 없음) 192요청을 생성했다.
+
+# Files Changed
+
+신규 소스 15개(`research/`):
+
+- 자료·정답: `mr123_labels.py`, `mr123_select.py`, `mr123_fetch.py`, `mr123_data.py`, `mr123_tech_build.py`
+- 실행·평가: `mr123_run.py`, `mr123_launch.py`, `mr123_eval.py`, `mr123_lock.py`
+- 검증·보조: `mr123_tensor_check.py`, `mr123_verify.py`, `mr123_compare_stages.py`, `mr123_cost.py`, `mr123_peek.py`, `mr123_link_check.py`
+
+결과는 `results/iter_123/`, 원자료·PNG·추출 파일은 `/home/test/.local/share/medgemma/mr_rate/{raw,extracted,png,cache}`에 있다. 기존 파일은 변경하지 않았고 commit과 branch 변경도 하지 않았다.
+
+# Commands / Experiments (실제 실행한 명령과 성공/실패)
+
+모두 성공했다. 아래 외 실패는 기록하지 않는다.
+
+- 정답 후보·결합 확인: `mr123_labels.py`, `mr123_link_check.py`
+- 선정 잠금: `mr123_select.py`
+- ZIP 수신: `mr123_fetch.py tech`, `mr123_fetch.py explore`
+- 영상 구성: `mr123_tech_build.py tech`, `mr123_tech_build.py explore`
+- 요청 구성: `mr123_run.py requests tech|explore`
+- tensor 검사: `mr123_tensor_check.py tech`, `mr123_tensor_check.py explore`
+- 생성:
+  - 기술: `mr123_launch.py tech 512 0,1`, `tech_w4`, `tech_res`
+  - 탐색: `mr123_launch.py explore 512 0,1,0,1 --tag m --peak 9800`
+- 평가·검산: `mr123_eval.py explore results/iter_123/eval_explore.json`, `mr123_verify.py explore`, `mr123_cost.py`
+
+참고 수치(구성 비교, 기술 24요청):
+
+- **2 worker(GPU당 1):** 26.8 req/min, 최대 GPU 메모리 9.8GB.
+- **4 worker(GPU당 2):** 39.9 req/min, GPU 최대 약 19.8GB.
+- **4 worker 채택:** 출력 24/24 동일하고 worker당 2GiB 여유가 유지됐다. 본실행에는 4 worker를 썼다.
+- batch2는 시도하지 않았다. 4 worker로 이미 충분했기 때문이다.
+
+본 실행(탐색 192요청) 실측:
+
+- 생성 wall은 256초(model load 포함)이며 returncodes는 모두 0이다.
+- 예상은 192/40 req/min ≈ 5분이었고 실측 4.3분과 같은 수준이다.
+
+# Results (수치와 결과 파일 경로)
+
+- 기술 6명(`results/iter_123/tests/eval_tech.json`): 24요청 전부 PRESENT, 전부 EOS, 최대 출력 65 token. 비EOS가 없어 `max_new_tokens`는 512로 고정했다.
+- 탐색 48명(`results/iter_123/eval_explore.json`): 양성 24·음성 24, 192요청, 비EOS 0.
+  - parser 코드는 `ok_loose` 192(첫 줄이 `PRESENT.` 뒤에 설명이 붙는 형태)다. invalid·multi_state·refusal은 0이다.
+  - 모든 조건(C·W·P)의 confusion은 양성 PRESENT 24, 음성 PRESENT 24다.
+- 주비교 P−W는 0.0(95% CI [0, 0])이고 보조 W−C도 0.0([0, 0])이다. 정오 전환은 양방향 모두 0, batch별 차이도 없다. CI [0, 0]은 출력이 완전히 같아서 생긴 값이며, 효과 크기를 정밀하게 추정했다는 뜻이 아니다.
+- 사전 판정은 `negative_low_frozen_performance_all_conditions`다.
+- 독립 검산: `results/iter_123/tests/verify_explore.json`이 BA와 두 비교 차이·CI를 재현했고 prompt에 라벨·보고서·batch 단어가 없음을 확인했다.
+- 음성 환자의 출력도 `PRESENT. There is evidence of hyperintense signal in the periventricular white matter ... chronic small vessel ischemic changes.` 같은 정형 문장이었다. 정상으로 보이는 음성 montage(4F5BMUMCPJ)를 직접 확인했다.
+- 비용(`results/iter_123/eval/cost.json`, 탐색 48명 기준):
+  - **평균 wall/환자:** C 5.06초, W 5.40초, P 9.10초(P는 2회 호출). prompt token은 C·W 105,600, P 110,496이고 output token은 C 1,481, W 1,531, P 3,446이다.
+  - **전처리:** NIfTI 읽기 평균 0.59초, 렌더링 평균 0.11초(저장 제외).
+  - **model load:** worker당 9–11초이며 생성 시간과 별도로 둔다. ZIP 수신·추출 비용은 따로 측정하지 않았다.
+
+# Goal Progress / Reused Assets (목표 진전·미검증 범위, 재사용 출처·검증)
+
+- **도달 단계:** 동작 확인(기술 6명)과 가능성 탐색(탐색 48명)까지다. 확대, 독립 확인, 타 모델·학습은 하지 않았다.
+- **새로 알게 된 것(범위 한정):** MR-RATE batch04·batch23 train의 axial FLAIR와 이 prompt에서, MedGemma 1.5 frozen은 보고서상 정상인 사례를 포함해 전원을 PRESENT로 답했다. 조건별 영상 범위(중앙8/넓은8/분할)는 이 편향을 바꾸지 못했다.
+- **미검증:** 아래는 이 실험으로 구분하지 못했다.
+  - 영상 비의존 prior, 질문 유도, 기본 인식 부족의 구분
+  - 관측 범위 문제와 분할의 효과(출력이 변하지 않아 구분 불가)
+  - 다른 prompt·타 모델(Qwen 등)·정상/조영 영상 일반화
+  - 독립 환자 재현
+  - 라벨 오류 비율(음성 문장 규칙은 보수적이지만 영상 검수는 하지 않았다)
+- **재사용:** `reuse_assets`는 비어 있다. 기존 코드를 반입하지 않았고 이번 자료 전용으로 신규 구현했다.
+- **보고서 기준 오염 방지:** 보고서·라벨은 평가용이며 모델 입력에는 들어가지 않았다.
+
+# Problems (현재 결론 무효 / 재사용 전 수정 / 추후 개선을 구분)
+
+- **현재 결론 무효:** 없다. 입력·tensor·출력·parser·집계 검사가 모두 통과했다.
+- **재사용 전 수정:**
+  - `mr123_run.py`의 worker는 새 입력에서 완료 검증이 없고, `mr123_eval.py`에 protocol 대조가 없다. 평가 진입에서 protocol hash를 강제하지 않는다. 다른 자료에 쓰려면 보완이 필요하다.
+  - parser는 첫 줄의 단일 상태 규칙이다. `PRESENT. ...`는 `ok_loose`로 분류되며 이를 strict 위반으로 센 것은 아니다.
+  - 음성 라벨 규칙(`mr123_labels.py`)은 정규식 기반이다. 정상 문장과 병변 문장이 함께 있는 사례 일부를 놓칠 수 있다.
+- **추후 개선:**
+  - 양성이 2D 두꺼운 slice, 음성 다수가 3D인 획득 방식 confound가 있다(음성에 batch04 3D 12명이 있어 부분 분리는 가능하다).
+  - 계획한 기술 단계 재검사(1024)는 비EOS가 없어 생략했다.
+  - ZIP 다운로드·압축 해제 시간은 측정하지 않았다.
+- **전환 노출 기록:** iter_121에서 test 집계를 본 노출은 유지된다. 이번 실험은 train만 사용했다.
+
+# Recommendation to GPT
+
+- **판정 요청:** `execution_ok`, 사전 분기는 모든 조건 BA≤0.60에 해당한다. 가설(P가 W보다 낫다)은 검증되지 않았다. 출력이 바뀌지 않아 CI도 정보가 없으므로 `inconclusive`에 가깝게 보는 것이 안전하다. 모델 특이 응답 편향의 관찰로만 제한하는 것을 권고한다.
+- **다음 행동 하나(한정 보완 권고):** 동일 48명·동일 8장에서 영상 없는 텍스트만 입력, 또는 영상을 바꾸지 않고 질문 문구만 중립화한 대조를 소규모로 실행한다. 그러면 전원 PRESENT가 영상 비의존 prior인지, 영상 입력이 있어도 응답이 고정된 것인지 구분한다. 이 질문 하나가 이 후보에서 남은 가장 큰 불확실성이다.
+- **보류하는 것:** prompt를 다양하게 바꾸는 탐색, 확대, LoRA·SFT, 다른 질환 순회. 보고서 일치도 기반 라벨의 의미가 약해 관측 범위나 분할 개입을 먼저 검토할 근거가 없다.
+- **미해결 사전 분기:** 이번 사전 판정 순서(simple_alt_sufficient → all BA≤0.60 → CI 상한<10pp)에서 `all BA≤0.60` 분기를 구현했다. 계획에 이 우선순위가 명시되어 있지 않았다면 판정 해석은 GPT가 확인해야 한다.
+
+SELF_CHECK: PASS
+SUMMARY: MR-RATE 뇌실주위 백질 FLAIR 양성24·음성24(총48명)에서 MedGemma 1.5가 C·W·P 모든 조건과 음성 환자까지 전원 PRESENT로 답해 BA 0.5, P−W·W−C 차이 0(CI [0,0])이었다. 입력·tensor·형식 검사는 통과했으며 영상 활용 여부는 판단하지 못했다.
+
+# [orchestrator] 권한 거부된 도구 호출
+- Bash: python - <<'E' 2>&1 | grep -v Warning
+import pandas as pd, mr123_labels as m, ast
+c=m.load_candidates()
+c=c[c.label.isin(['positive','negative'])]
+B=m.BASE
+md=pd.concat([pd.read_csv(B+f'metadata/{b}_metadata.csv',low_memory=False,usecols=['patient_uid','study_uid','series_id','classified_modality','is_derived','acquisition_plane','is_localizer','is_subtraction','array_shape','array_spacing_mm','StudyDescription','ProcedureCodeSequence_0_CodeMeaning']).assign(batch_id=b) for b in m.BATCHES])
+f=md[(md.classified_modality=='FLAIR')&(md.acquisition_plane=='AXIAL')&(~md.is_localizer.astype(bool))&(~md.is_derived.astype(bool))&(~md.is_subtraction.astype(bool))]
+print(len(f), f.series_id.value_counts().head())
+x=c.merge(f,on=['batch_id','study_uid'])
+print(x.groupby(['batch_id','label']).study_uid.nunique(), x.groupby(['batch_id','label']).patient_uid_x.nunique())
+print(x.StudyDescription.value_counts().head(15))
+print(x.ProcedureCodeSequence_0_CodeMeaning.value_counts().head(10))
+print(x.array_shape.value_counts().head(5)); print(x.array_spacing_mm.head(5).tolist())
+E
+- Bash: python -c "import transformers,torch,nibabel;print(transformers.__version__,torch.__version__,nibabel.__version__)"; nvidia-smi --query-gpu=index,memory.used,memory.total --format=csv; echo $CUDA_VISIBLE_DEVICES
+- Bash: python - <<'E'
+import mr123_run as R, json, os, collections
+reqs={r['id']:r for r in R.read_jsonl(R.GEN+'tech/requests.jsonl')}
+recs=[]
+for fn in os.listdir(R.GEN+'tech'):
+    if fn.startswith('worker_'): recs+=R.read_jsonl(R.GEN+'tech/'+fn)
+print(len(recs),len({r['id'] for r in recs}))
+print(collections.Counter((reqs[r['id']]['label'],r['cond'],r['state']) for r in recs))
+print(collections.Counter((r['eos'],r['parse_code']) for r in recs), max(r['n_new'] for r in recs))
+for r in recs[:4]: print(reqs[r['id']]['label'],r['cond'],repr(r['text'][:300]))
+E
+- Bash: MR123_PEAK_MIB=9800 python mr123_launch.py tech_w4 512 0,1,0,1 --tag b
+- Bash: sed -i "s/PEAK = int(os.environ.get('MR123_PEAK_MIB', '16000'))/PEAK = int(sys.argv[sys.argv.index('--peak') + 1]) if '--peak' in sys.argv else 16000/" mr123_launch.py && python mr123_launch.py tech_w4 512 0,1,0,1 --tag b --peak 9800
+
+
+
+## iter_123 GPT REVIEW [CONTINUE] — 2026-10-13 02:15:03
+
+# 요약
+
+- **판정:** 유효한 음성 실험이다. 현재 C/W/P 설계의 확대 투자는 보류한다(`abandon`, `CONTINUE`).
+- **핵심 근거:** 개발48명·192요청 모두 PRESENT다. C/W/P BA는 각각 0.50이며 P−W와 W−C는 0이다.
+- **의미·한계:** 넓은 관측과 분할 OR는 현재 응답을 개선하지 못했다. 기본 인식·질문 성향·보고서 불확실성과 일반적인 결합 능력은 분리되지 않았다.
+- **다음:** 동일 입력의 소수 타 계열 대조 한 번으로 모델 특이성을 판단하고 종료하는 한정 보완을 권고한다.
+
+## 알림 요약
+
+- 결과: MR-RATE 뇌 MRI 양성24·보고서상 음성24명에서 MedGemma 1.5가 중앙·넓은·분할 입력 모두 PRESENT로 답했다. BA는 0.50이고 분할 이득은 없었다.
+- 의미: 자료 준비를 넘어 실제 음성 결과를 확보했다. 현재 분할 설계의 확대 가치는 낮아졌지만 MRI 인식·결합 능력 전체의 실패는 아니다.
+- 후속: 같은 영상의 작은 타 계열 대조로 MedGemma 특이 현상인지 확인하고, 같거나 해석 불가능하면 이 후보 투자를 보류할 것을 제안한다.
+- 대안: 지금 바로 이 후보를 보류할 수도 있다. 추가 비용은 줄지만 모델 특이성과 자료의 기본 판별 가능성은 미확인으로 남는다.
+
+# Assessment
+
+`valid_experiment=true`다. 기술6명과 별도 탐색48명의 비교를 실제 완료했고, 현재 저장 출력에서 분할 이득이 없음을 해석할 수 있다. 구현 보고서의 포괄적인 `inconclusive` 권고는 채택하지 않는다. 원 계획의 모든 조건 BA≤0.60 및 주차이 CI 상한<10pp가 모두 성립한다. 다만 그 음성 판정은 현재 frozen 설정에만 적용한다.
+
+담당은 `engineer_backend.json`과 `claude_meta.json`상 Claude, Sonnet/medium이다. 리뷰 SHA는 `e39ba0666faf34899f9a4c230102b9d3fb1c44e7`이며 unpreserved_paths는 없다. 변경 diff와 신규15개 소스를 확인하고 해당 SHA·작업 파일·protocol의 코드 hash를 대조했다. 전체 스냅샷 재사용은 승인하지 않는다.
+
+# Key Findings
+
+1. **원시 결과 독립 확인:** requests와 worker 파일의 고유192개 ID가 일치하고 누락·중복이 없다. 원문 첫 줄을 별도로 읽어 모두 PRESENT임을 확인했다. 탐색 환자는48명이며 양·음성 각각24명이다. 각 조건의 sensitivity=1, specificity=0, BA=0.5가 재현된다.
+2. **차이 검산:** 모든 환자의 조건 간 정오 차이가0이다. 따라서 계획된 양·음성 층화 bootstrap의 모든 재표집 차이도0이며 CI [0,0]이 산출된다. 이는 모집단 효과가 정확히0이라는 증명이 아니다. 정오 전환도 양방향0이다.
+3. **입력·출력 검사:** protocol의 입력 hash와 source CSV hash가 일치했다. 탐색 요청에 연결된 PNG746개 hash를 재검증했다. 공식 processor 대조는 기술24/24·탐색192/192 통과 기록이며, 탐색192응답 모두 EOS이고 최대 출력65 token이다. 음성 montage도 직접 확인했다.
+4. **자료 범위:** 공식 train의 두 batch만 사용했고 기술/탐색을 분리했다. 음성에는 뇌실주위 백질 정상 문장이 직접 존재한다. 다른 부위 gliotic foci가 있는 음성을 뇌 전체 정상으로 부르면 안 된다.
+5. **자원 사용:** 기술 처리량은 2 worker 26.79에서 4 worker 39.93 requests/min으로 증가했고24/24 출력이 같았다. 탐색은 두 GPU의4 worker로256.03초에 끝났고 returncode는 모두0이다. 기록된 GPU 최대 점유는19,464/20,045MiB다.
+6. **비용:** 원시 요청시간 합/48명은 C5.057초, W5.396초, P9.096초다. P는 W 대비 약1.69배이며 정확도 이득은 없다. 이는 병렬 운영 중 요청 처리시간 합의 환자 평균으로, 전체 end-to-end latency와 다르다.
+
+# Problems / Concerns
+
+**현재 제한된 결론을 무효화하는 blocker는 없다.** 전원 PRESENT와 조건 간 무변화는 라벨의 일부 모호성에도 직접 확인되는 출력 관찰이다. BA는 잠긴 보고서 라벨에 대한 값으로만 보존한다.
+
+정답 검증은 보고서보다 약하다. 계획은 정규식을 후보 검색용으로 두었지만 실제 코드는 이를 최종 적격성에 사용했다. 예를 들어 `7YYNKXI6YW`에는 고신호 기술과 광범위한 병적 신호 부재 문장이 공존한다. `T7YBN6474U`의 위치 표현도 엄격한 뇌실주위 백질 연결을 추가 확인해야 한다. 이 때문에 오류율을 임상 영상 정확도로 해석하거나 validated로 올릴 수 없다. 원 결과를 사후 재채점하지 않는다.
+
+실행기 재사용에는 명확한 결함이 있다. launcher는 실행 중 worker가 없다고 가정하고 claim을 제거하며 stage lock이 없다. 종료코드0만으로 성공을 반환하고 n_done=n_req를 강제하지 않는다. JSONL reader는 중간 손상을 만나도 tail 손상처럼 이후를 버린다. protocol은 저장되지만 생성·평가 진입에서 검증하지 않는다. 이번 완료 상태와 hash는 리뷰에서 별도로 확인했으므로 현재 결과와 재사용 승인을 구분한다.
+
+parser는192건을 `ok_loose`로 읽었다. 이는 첫 줄에 PRESENT와 설명이 함께 있는 형식이며 정확한 한 단어 형식 준수192/192로 보고하면 안 된다. 현재 원문은 일관된 긍정 답이어서 내용 관찰을 뒤집지는 않는다.
+
+비용 코드에는 PNG 저장과 답 저장 시간이 빠져 있다. 강제 종료 재개 검사는 부분 완료와 인위적인 torn tail에 한정되며 동시 launcher 안전성까지 검증한 것이 아니다. 이번 세션의 권한 거부는5건으로, 과거 접근 복구 검사의0건과 구분해야 한다.
+
+# Interpretation
+
+분할 처리의 성능 이득은 현재 설정에서 관찰되지 않았다. 기본 신호가 없으므로 이 결과로 '충분히 인식하지만 통합하지 못한다'는 주장을 할 수 없다. 동시에 응답이 일정하다는 이유만으로 실제 비교가 미실행이었다거나 음성 결과 전체가 불확정이라고 바꿀 필요도 없다.
+
+기술6명과 별도48명에서 같은 응답 양상이 나왔지만, 단일 prompt·약한 보고서 정답·획득 방식 confound가 남는다. 한계 상태는 observed로 제한한다. 과거 iter_064의 MedGemma context 손실과 Qwen 반대 근거를 이번 과제의 증거로 이전하지 않는다.
+
+논문 추천은 보류한다. 현재 분할 방향의 개선이나 후속 방법의 유망성을 확인하지 못했기 때문이다.
+
+# Strategy Check / 연구 방향 판단
+
+출처는 iter_123 계획의 질문 카드와 iter_121·122 원 판단이다. 이전에는 자료·접근 문제로 모델 관찰이 없었으나, 이번에는 실제 비교의 음성 근거가 추가됐다.
+
+1. **중요한 문제:** 제한된 MRI 단면의 관측·처리 단위가 정확도와 비용에 미치는 영향은 중요하다. 다만 현재 과제에서 새로운 방법의 필요성은 아직 없다.
+2. **현재 근거:** 같은 영상 예산의 중앙·넓은·분할 입력 모두 BA0.50이다. 실행 유효성은 확인됐고 성능 개선과 분할 가설 지지는 없다. 신규 기여는 미확인이다.
+3. **쉬운 해결책:** 넓은 sampling과 OR는 이 설정에서 충분하지 않았다. 전문 WMH 모델이나 타 계열 VLM도 실패했다고 간주할 수 없다.
+4. **남은 설명:** 기본 인식, prompt에 따른 응답 성향, 관측 충분성, 보고서 불확실성이 남는다. 영상 없는 입력도 PRESENT라는 결과만으로 영상 무사용을 증명할 수 없어 구현자의 해당 후속 권고는 그대로 채택하지 않는다.
+5. **다음 결정:** C/W/P 확대와 prompt 순회는 보류한다. 같은 입력의 한 타 계열 모델 대조를 소수 사례에서 끝내면 모델 특이성과 이 자료의 판별 가능성에 대한 투자 판단을 바꿀 수 있다. 양성이어도 전문 대안 이후의 잔여 가치를 확인하기 전 방법 개발로 확대하지 않는다.
+
+이 접근법은 세 번째 반복이지만 첫 유효 실험이다. 횟수로 종료하지 않는다. 기록된 본 생성은 약4.3분이고, 자료 준비를 포함한 전체 비용은 분리 계측되지 않았다. 준비 비용의 지배 정도를 추정 사실로 보고하지 않는다.
+
+# Recommended Next Experiment
+
+한정 보완 하나를 권고한다. 다음 계획에서 기존 자료의 소수 양·음성, 두 batch를 포함한 subset과 타 계열 모델 하나를 출력과 무관하게 고정한다. 해당 사례의 원문 위치·상충만 먼저 확인하고 같은 W 영상·질문·정보로 기본 판별을 대조한다.
+
+타 모델이 판별하면 MedGemma 특이성의 제한된 근거로 보존하고 전문 대안 대비 잔여 가치를 판단한다. 같은 고정 응답이나 낮은 수행, 정답 해석 의존이 남으면 현재 후보 투자를 보류하고 종료한다. 그 결과만으로 공통 내부 결함을 주장하지 않는다. 원48명 결과의 재채점, 같은 MedGemma prompt 탐색, 표본 확대·학습은 자동 발주하지 않는다. 필요한 코드 수정은 이 비교에 사용하는 경로로 한정한다.

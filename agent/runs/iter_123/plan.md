@@ -1,0 +1,147 @@
+# 요약
+
+- **이번에 할 일:** 접근 복구를 계승해 iter_122의 미완료 MR-RATE 비교를 실행한다.
+- **필요한 이유:** 직전 중단은 실행기 권한 누락이며 모델 가설의 음성 결과가 아니다.
+- **확인할 기준:** 동일8장의 분할 집계와 공동 입력의 BA 차이·CI·비용을 원 기준으로 판정한다.
+- **주의·다음:** 자료가 성립하면 기술6명과 별도48명까지 진행한다. 보고서 일치도를 임상 진단 정확도로 해석하지 않는다.
+
+## 알림 맥락
+
+- 연구: MRI volume 근거 활용
+- 데이터: MR-RATE 뇌 MRI, axial FLAIR
+- 모델: MedGemma 1.5 4B, frozen 추론
+- 과제: FLAIR 단면에서 뇌실주위 백질 고신호 근거의 존재·부재·판단 불가 출력
+- 가설: 관측 범위와 공동 처리 방식이 보고서 일치도에 서로 다른 영향을 줄 수 있음
+- 질문: 같은 MRI 단면을 함께 보거나 나눠 판단하면 답이 달라지는가?
+- 변경: 실행 복구
+- 연결: iter_122는 경로 접근 거부로 모델 미실행이며, 승인된 운영 복구 후 같은 연구 질문을 유지함
+- 작업: 미완료 자료 구성부터 기술6명·조건부 탐색48명·독립 검산까지 진행해 다음 투자 판단에 필요한 출력을 확보
+
+# Current Understanding
+
+이 계획은 `agent/runs/iter_122/plan.md`의 변경점 중심 실행 보완이다. 기준 SHA256은 `5a5371d834ba684e7c459e1e52708ca0e86f2314952fbd636c897fc24a5ad0b8`이며 직접 확인했다. Claude는 기준 계획 전체와 이번 보완을 함께 읽는다. 아래 운영 변경 외 과학적 조건은 원문을 그대로 적용한다.
+
+- **유지:** 질문, batch04·batch23 공식 train, 명시적 정답 규칙, seed122, 기술6명·별도48명, C/W/P, parser, metric, 확대·종료 조건.
+- **이번 변경:** 결과 경로를 `research/results/iter_123/`으로 바꾸고 완료된 접근 복구를 계승한다. 관리 코드 수정·권한 smoke를 다시 발주하지 않는다.
+- **미완료:** 정답 manifest, ZIP·영상 연결, 기술 검사, 처리량 측정, 모든 추론·평가.
+- **회귀 검증:** 새 자료·요청·출력의 환자 분리, provenance, tensor 동일성, parser·집계, 안전 재개를 실제 확인한다.
+
+운영 로그에서 CSV Read와 probe Write 성공 및 permission_denials 0을 확인했다. Claude의 probe 재읽기는 생략됐다. 이를 전체 smoke 단계 완료로 보고하지 않는다. 사용자 제공 회귀 테스트42개 통과 기록은 계승한다. 일반 자료 읽기·산출물 저장 과정에서 실제 접근을 사용하며, 권한 조회만으로 이번 반복을 끝내지 않는다.
+
+# Strategy Check / 연구 방향 판단
+
+직전 카드 출처는 iter_122/review.md다. 변경된 근거는 운영 복구뿐이다.
+
+1. **중요한 문제:** 제한된 MRI 단면의 관측 범위·처리 단위가 정확도와 비용에 미치는 영향.
+2. **현재 근거:** 보고서·FLAIR 후보는 있으나 최종 적격 표본과 모델 결과는 없다. 접근 문제는 복구됐다.
+3. **쉬운 해결책:** 넓은 sampling과 고정 분할 OR의 실제 비교를 유지한다.
+4. **남은 설명:** 관측 부족, 기본 인식, 공동 처리 부담, OR 편향, 보고서 불확실성은 아직 미분리다.
+5. **다음 결정:** 원 비교 후 단순 대안 보존·판별력 있는 한정 후속·자료 또는 증거 부족 보류 중 하나를 선택한다.
+
+새 질환·batch·학습 방향을 선택할 근거가 없다. 실행 실패 횟수를 가설의 반증으로 세지 않는다.
+
+# Hypothesis
+
+원 가설을 유지한다. 관측 부족이 중요하면 W가 C보다 개선되고 P의 추가 이득은 작을 수 있다. 처리 단위가 중요하면 동일 pixel의 P가 W보다 개선될 수 있다. 모든 조건이 낮으면 기본 인식·sampling·약한 정답을 구분하지 못한다. P의 sensitivity 증가와 specificity 손실을 분리해 보고하며 순수 내부 통합 원인을 확정하지 않는다.
+
+# Limitation Evidence / Correct Usage Checks
+
+`mri-explicit-target-context-effect`와 iter_064 원 리뷰의 제한된 MedGemma 손실·Qwen 반대 근거를 유지한다. MR-RATE 한계는 아직 관찰하지 않았다. 이번은 학습 없는 diagnostic이다.
+
+모델 revision·processor·chat template·정밀도를 고정하고 공식 다중 영상 경로와 wrapper의 input_ids·pixel_values를 기술 입력에서 비교한다. 순서·placeholder·크기·token 수를 확인한다. 보고서·라벨·원 파일명·clinical indication은 모델 입력에서 제거한다.
+
+# Contribution Path / Baselines / Reuse
+
+분할 OR 자체의 신규성은 주장하지 않는다. C와 W는 직접 baseline이며 P는 같은 W 영상에 두 번 호출하는 실용 대안이다. 추가 호출·token·시간을 숨기지 않는다. 전문 WMH 대안과 직접 SFT/encoder+head의 충분성은 미검증이며 이번에 자동 추가하지 않는다. 가까운 대안의 입력 지원 조건과 문헌 출처는 기준 계획의 해당 절을 계승한다.
+
+현재 브랜치와 clean HEAD `ee8078ab0acba94f0d84d3ab2997e76eeb117bb9`를 유지한다. tracked 목록에 MR-RATE 실행 모듈은 없다. CODE_ASSETS의 review82 계열은 고정 SPIDER 분석용으로 이번에 사용하지 않는다. iter_122는 신규 모듈 검증이 없었다. reuse_assets는 비우고 기준 계획대로 공식 processor를 이용한 이번 자료 전용 최소 경로를 구현한다. 기존 파일이나 보관 자산을 덮어쓰지 않는다.
+
+# Proposed Experiment
+
+## 자료 구성
+
+기준 계획의 정답·선정 규칙을 그대로 구현한다. 기존 두 batch의 공식 train만 사용하고 test를 새로 열지 않는다. iter_121의 test 집계 노출은 기록한다.
+
+양성은 현재 관찰된 뇌실주위 백질의 병적 고신호와 FLAIR 연결이 직접 명시된 경우다. 음성은 해당 범위의 정상 신호 또는 병적 신호 부재가 직접 명시된 경우다. 자동 라벨0·미언급·범위 없는 정상 보고서는 음성으로 쓰지 않는다. 의심·상충·위치 연결 추측·생리적 변이는 unknown으로 둔다. 선정 사례마다 원문 span과 전체 findings/impression 상충 검사를 남기며 새 LLM 판정으로 임상 정답을 만들지 않는다.
+
+source CSV SHA256, 규칙 버전, patient/study/series ID를 manifest로 연결한다. 환자당 한 study를 seed122 hash 순서로 선택한다. axial FLAIR·nonlocalizer·brain exam을 요구하고 여러 적격 series는 coverage 확인 후 가장 작은 through-plane spacing, 동률 series_id 순으로 정한다. 모델 출력 전에 제외·선정·조건을 잠근다.
+
+## 동작 확인
+
+양성3·음성3의 기술6명을 고정한다. study ZIP 크기·압축 해제 여유·안전한 추출과 파일 hash, NIfTI ID·shape·spacing·affine·방향·brain coverage를 확인한다. 제공 brain mask는 해부학 범위용이며 병변 정답이 아니다. 신뢰할 뇌 범위를 확보하지 못한 사례는 원 규칙대로 제외한다.
+
+brain 내 volume 전체 1–99 percentile 표시와 물리적 inferior–superior 순서를 유지한다. 같은 slice는 모든 조건에서 동일 pixel tensor를 사용한다. 대표 단면을 직접 확인하되 라벨 재판정·쉬운 양성 선정에 쓰지 않는다.
+
+greedy, max_new_tokens512로 시작하고 기술 집단의 비EOS가 있으면1024로 재검사하여 본실행 전에 고정한다. 계속 잘리면 실행 문제를 해결하기 전 탐색에 진입하지 않는다. 낮은 기술 정확도 자체는 진입 금지 조건이 아니다.
+
+## 가능성 탐색
+
+기술 집단과 별도인 양성24·음성24, 총48명을 seed122와 원 batch 층화 규칙으로 선정한다. 작은·어려운 소견을 편의상 제외하지 않는다. 적격40–47명이고 클래스별20명 이상이면 원 계획대로 축소하고 출력 전에 실제 N과 정밀도 한계를 기록한다. 이 조건을 못 채우면 기술 결과·자료 범위를 보존하고 본탐색 완료로 보고하지 않는다.
+
+- C: 유효 뇌 범위 중앙50%의 등간격8장.
+- W: 같은 범위5–95%의 등간격8장.
+- P: W의 동일8장을 inferior4·superior4의 두 요청으로 분할.
+
+고유 slice8개를 확보하지 못하면 사전 제외한다. 첫 줄의 단일 PRESENT/ABSENT/UNCERTAIN만 읽는 원 parser를 유지한다. 복수 상태·상충·거부·형식 오류는 별도 보존하며 사후 의미 재채점하지 않는다. P는 하나라도 PRESENT면 PRESENT, 둘 다 ABSENT면 ABSENT, 나머지는 UNCERTAIN이다. invalid는 비PRESENT·비ABSENT로 처리하면서 원 오류를 별도 보고한다.
+
+환자당4요청으로 기술24·탐색192, 기본216요청이다. 기술 재검사·처리량 비교는 별도 ledger에 센다. slice-level 정답이 없으므로 P의 개별 묶음 정확도는 계산하지 않는다.
+
+## 규모 확대·독립 확인
+
+이번은 개발 탐색이다. 새 환자 확증·추가 seed·다른 prompt·학습·타 모델 비교를 자동 실행하지 않는다. 원 결과별 기준에 따라 full review가 후속 하나의 가치를 판단한다. 자료 조건이 실패하면 다른 질환이나 batch를 순회하지 않는다.
+
+## 자원·비용·재개
+
+소스는 research/, 새 결과는 `research/results/iter_123/`, 자료·새 cache는 `/home/test/.local/share/medgemma/mr_rate`에 둔다. iter_121·122 원 기록은 보존한다. metadata 누적250MB·ZIP 누적10GiB와 압축 해제 공간을 확인하고 초과가 필요하면 실행 전 규모 근거를 남긴다. 전체 자료 반입은 금지한다.
+
+실행 직전 nvidia-smi와 상속 GPU 범위를 확인한다. 두 GPU에 독립 환자 shard를 배정한다. 기술 입력에서 batch1 대비 batch2를 우선 짧게 비교하고 메모리가 허용되면 GPU당2 worker도 검토한다. 동시 peak·다른 점유·worker당2GiB 여유, 전체 요청/분·긴 출력 지연·OOM·CPU/I/O·출력 정합성으로 구성을 선택한다. 한 worker 유지에는 실측 이유를 남긴다.
+
+새 입력의 시간·메모리는 미측정이다. bf16 적재8–10GB는 참고값이다. 기술 실측 총처리량 r requests/min으로 남은 요청수/r를 계산하고 다운로드·전처리·load를 별도로 더해 예상 wall-clock을 기록한다. 임의 시간 상한은 없다.
+
+patient/condition/input/prompt/model hash의 요청ID, 원자적 할당, worker별 출력, 완료 ledger와 안전 재개를 구현한다. 누락·중복·손상 출력과 모든 프로세스 종료를 확인한다. 학습 checkpoint는 없으며 추론 ledger와 소스 checkpoint를 보존한다.
+
+# Implementation Tasks for Claude
+
+1. 기준 plan SHA와 이번 amendment를 연결해 실행 설정을 보존한다. 완료된 관리 코드 수정·smoke를 반복하지 않는다.
+2. 미완료 자료 manifest부터 구현한다. 정답 span·상충·환자 분리·영상 연결을 검사한다.
+3. 기술6명의 실제 영상·공식 tensor·parser·집계·생성 길이·재개·처리량을 검증한다.
+4. 자료·실행 조건이 성립하면 같은 호출에서 별도 탐색48명까지 진행한다. 조건을 임의 완화하지 않는다.
+5. 원시 출력과 입력 hash를 봉인하고 별도 집계로 BA·CI·coverage·전환 수·비용을 검산한다. 실제 단계·실패 범위·후속 투자 행동을 보고한다.
+
+Claude 시작과 구독 소진 시 Codex 인계, 자동 진행·필수 리뷰 설정은 유지한다. 실행기나 연구 브랜치를 임의 전환하지 않는다.
+
+# Evaluation (성공/실패 기준 포함)
+
+UNCERTAIN/invalid를 정답으로 세지 않는 BA를 주지표로 한다. sensitivity·specificity·명시 답 coverage·unknown·거부·비EOS·invalid·confusion counts를 함께 보고한다. 양·음성 층 내 환자 paired bootstrap10,000회, seed122, 95% CI를 사용한다. 주비교 P−W와 보조 W−C, 양방향 정오 전환 수·batch별 방향을 구분한다.
+
+- **양성:** P−W BA≥10pp이고 CI 하한>0이면 제한된 분할 처리 이득이다. 호출 비용과 specificity 손실을 포함해 후속 가치를 판단한다.
+- **관측 대안 양성:** W−C가 같은 기준을 만족하면 넓은 sampling의 가치로만 해석한다.
+- **단순 대안 충분성 후보:** W 또는 P의 BA≥0.80, sensitivity·specificity 각각≥0.75이면 현재 개발 조건의 대안을 보존하고 새 방법 투자를 우선 보류한다.
+- **음성:** 주차이 CI 상한<10pp이면 큰 분할 이득 근거가 약하다. 모든 조건 BA≤0.60이면 현재 frozen 수행 부족으로 제한한다.
+- **불확정:** 나머지는 지배 불확실성과 추가 환자가 판단을 바꿀 정밀도를 산출하되 자동 확대하지 않는다. 정답 재해석·prompt 탐색만 남으면 투자를 보류한다.
+
+비용은 원 NIfTI 읽기부터 최종 답 저장까지와 model load를 구분한다. P의 두 호출과 추가 prompt/output token을 포함한다. 무결성·실행 실패와 유효 출력의 불확정을 구분한다. 독립 GPT 리뷰에서 원시 수치·완료 상태·판정 기준을 검증한다.
+
+# Risks / Checks
+
+보고서 일치도는 영상 진단 정확도가 아니며 전체 study 보고서가 선택 단면에서 보이는 소견의 공간 정답을 보장하지 않는다. 원인 질환을 추론해 정답을 확장하지 않는다. P는 처리 단위뿐 아니라 호출 수·OR 편향도 바꾸므로 내부 원인을 단정하지 않는다.
+
+공식 이용 조건·revision·학습 노출을 기록하고 HF_TOKEN_PATH만 참조한다. 토큰 내용은 출력하지 않는다. hf_cache·다른 사용자 자산은 변경하지 않는다. 실제 접근이 다시 거부되면 우회하지 않고 구체적인 새 blocker를 보존한다. 이미 승인된 경로의 재승인을 기본 대응으로 삼지 않는다.
+
+## 대규모 GPU 필요 후보
+
+전체 volume의 다중 sequence encoder–언어모델 공동 적응과 대규모 영상–보고서 사전학습 후보는 기준 계획대로 보존한다. 현재는 단순 대안 이후의 필요성이 미확인이라 실행하지 않는다.
+
+# 계획의 근거 (GPT 조사 노트)
+
+## 확인한 사실
+
+- `agent/runs/iter_122/plan.md` 전체와 원 리뷰를 읽었고 SHA256 `5a5371d834ba684e7c459e1e52708ca0e86f2314952fbd636c897fc24a5ad0b8`을 직접 재확인했다. 모든 자료 구성·모델 출력은 미완료다.
+- `agent/claude_settings.json`의 additionalDirectories와 `orchestrator.py`의 claude_working_directories/claude_command에서 승인 외부 경로가 신규·재개 명령의 --add-dir에 연결된 것을 확인했다.
+- `logs/claude_mrrate_access_20261013.jsonl`에서 splits.csv 첫 줄 Read와 probe Write 성공, permission_denials 빈 목록을 확인했다. Claude 재읽기는 생략됐으며 로그의 SELF_CHECK: FAIL은 이를 반영한다. 접근 복구와 전체 4단계 검증 완료를 혼동하지 않는다. 회귀 테스트42개 통과는 사용자 제공 운영 기록으로 계승하며 이번 계획에서 재실행하지 않았다.
+- research의 status·diff는 깨끗하고 HEAD는 `ee8078ab0acba94f0d84d3ab2997e76eeb117bb9`다. tracked 목록에는 이번 MR-RATE 실행 모듈이 없다. CODE_ASSETS의 iter_082 자산은 고정 SPIDER 분석용이며 이번 평가기로 선택하지 않는다. iter_122의 code_assets는 비어 있다.
+- LIMITATIONS의 해당 항목과 iter_064 원 리뷰를 확인했다. MedGemma의 제한된 context 손실과 Qwen 반대 근거, 기본 신호 기준 미달을 계승한다. MR-RATE의 새 한계 증거로 이전하지 않는다.
+
+## 판단
+
+사용자 보완은 운영 복구 후 원 설계 실행을 명시한다. 질환·정답·표본·metric을 바꿀 새 과학적 근거가 없으므로 추가 문헌조사나 사고 라운드 없이 변경점 중심 계획을 확정한다. 기존 공식 자료·선행 조사 출처는 기준 계획에 보존하며 이번에는 새 문헌 주장을 추가하지 않는다.

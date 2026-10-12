@@ -1,0 +1,1156 @@
+diff --git a/mr123_compare_stages.py b/mr123_compare_stages.py
+new file mode 100644
+index 0000000..6a7263a
+--- /dev/null
++++ b/mr123_compare_stages.py
+@@ -0,0 +1,27 @@
++"""iter_123: 두 stage(같은 요청)의 출력 token/text 동일성과 처리량 비교. usage: mr123_compare_stages.py A B"""
++import json, os, sys
++import mr123_run as R
++
++def load(st):
++    d = {}
++    for fn in sorted(os.listdir(R.GEN + st)):
++        if fn.startswith('worker_'):
++            for r in R.read_jsonl(R.GEN + st + '/' + fn):
++                assert r['id'] not in d
++                d[r['id']] = r
++    return d
++
++A, B = load(sys.argv[1]), load(sys.argv[2])
++assert set(A) == set(B)
++same_in = sum(A[k]['input_ids_sha'] == B[k]['input_ids_sha'] for k in A)
++same_txt = sum(A[k]['text'] == B[k]['text'] for k in A)
++same_state = sum(A[k]['state'] == B[k]['state'] for k in A)
++def thr(D):
++    t = [r['t_end'] for r in D.values()]
++    first = min(r['t_end'] - r['wall_s'] for r in D.values())
++    span = max(t) - first
++    return dict(n=len(D), gen_span_s=span, req_per_min=len(D) / span * 60, mean_wall_s=sum(r['wall_s'] for r in D.values()) / len(D),
++                peak_mem_mib=max(r['peak_mem_mib'] for r in D.values()), n_workers=len({r['wid'] for r in D.values()}))
++out = dict(A=sys.argv[1], B=sys.argv[2], n=len(A), same_input_ids=same_in, same_text=same_txt, same_state=same_state, thr_A=thr(A), thr_B=thr(B))
++json.dump(out, open(R.D.RES + f'tests/compare_{sys.argv[1]}_{sys.argv[2]}.json', 'w'), indent=1)
++print(json.dumps(out, indent=1))
+diff --git a/mr123_cost.py b/mr123_cost.py
+new file mode 100644
+index 0000000..8041a9f
+--- /dev/null
++++ b/mr123_cost.py
+@@ -0,0 +1,34 @@
++"""iter_123: 전처리 비용(NIfTI 읽기→slice 렌더링, 저장 제외) 측정 + 생성 비용 요약. 결과: results/iter_123/eval/cost.json"""
++import glob, json, os, time
++import numpy as np
++import mr123_data as D
++import mr123_run as R
++
++b = {}
++for p in ['build_tech.json', 'build_explore.json']:
++    b.update(json.load(open(D.RES + 'data/' + p)))
++rows = []
++for sid, info in b.items():
++    if info.get('exclude') is not None:
++        continue
++    t0 = time.perf_counter()
++    a, m, li = D.load_case(info['files']['img.nii.gz']['path'], info['files']['brain.nii.gz']['path'])
++    lo, hi = D.brain_range(m)
++    lv, hv = D.intensity_window(a, m)
++    t1 = time.perf_counter()
++    ks = sorted(set(info['W_idx']) | set(info['C_idx']))
++    for k in ks:
++        D.render_slice(a, k, lv, hv, li['canon_zooms'])
++    t2 = time.perf_counter()
++    rows.append(dict(study=sid, role=info['role'], read_s=t1 - t0, render_s=t2 - t1, n_slices_rendered=len(ks)))
++rs = [r for r in rows if r['role'] == 'explore']
++gen = {}
++for st in ['explore']:
++    recs = [r for fn in glob.glob(R.GEN + st + '/worker_*.jsonl') for r in R.read_jsonl(fn)]
++    gen = dict(n=len(recs), sum_prep_s=sum(r['prep_s'] for r in recs), sum_gen_s=sum(r['gen_s'] for r in recs), model_load_s=sorted({round(r['load_s'], 1) for r in recs}),
++               peak_mem_mib=max(r['peak_mem_mib'] for r in recs))
++out = dict(preprocess_explore=dict(n=len(rs), mean_read_s=float(np.mean([r['read_s'] for r in rs])), mean_render_s=float(np.mean([r['render_s'] for r in rs]))),
++           note='원 NIfTI 압축 해제 후 읽기→C/W 공통 slice 렌더링(저장 제외). ZIP 추출·PNG 저장·model load는 별도. 한 환자에서 C·W·P는 동일 PNG 재사용.',
++           generation=gen, per_case=rows)
++json.dump(out, open(D.RES + 'eval/cost.json', 'w'), indent=1)
++print(json.dumps({k: v for k, v in out.items() if k != 'per_case'}, indent=1))
+diff --git a/mr123_data.py b/mr123_data.py
+new file mode 100644
+index 0000000..29a5466
+--- /dev/null
++++ b/mr123_data.py
+@@ -0,0 +1,169 @@
++"""iter_123: study ZIP 안전 추출, FLAIR/brain-mask 검사, 뇌 범위 기반 slice 선택·렌더링 (규칙 mr123_rules_v1)."""
++import hashlib, json, os, zipfile
++import numpy as np
++import nibabel as nib
++from PIL import Image
++
++ROOT = '/home/test/.local/share/medgemma/mr_rate/'
++RES = '/SSD1_1TB/home/milab/daniel/08_medgemma/research/results/iter_123/'
++SIDE = 896
++AREA_FRAC = 0.05  # 뇌 범위: slice별 brain-mask 면적이 최대 면적의 5% 이상인 연속 구간 (사전 고정)
++N_SLICE = 8
++
++
++def sha_file(p):
++    d = hashlib.sha256()
++    with open(p, 'rb') as f:
++        for b in iter(lambda: f.read(1 << 22), b''):
++            d.update(b)
++    return d.hexdigest()
++
++
++def extract(zip_path, study, series_id, out_root=ROOT + 'extracted/'):
++    """flair 영상과 brain-mask만 안전 추출. 경로 이탈·symlink 거부, 기존 파일 덮어쓰기 금지."""
++    out = os.path.join(out_root, study)
++    os.makedirs(out, exist_ok=True)
++    want = {f'{study}/img/{study}_{series_id}.nii.gz': 'img.nii.gz',
++            f'{study}/seg/{study}_{series_id}_brain-mask.nii.gz': 'brain.nii.gz'}
++    z = zipfile.ZipFile(zip_path)
++    res = {}
++    for info in z.infolist():
++        if info.filename in want:
++            assert '..' not in info.filename and not info.filename.startswith('/')
++            assert (info.external_attr >> 16) & 0o170000 != 0o120000, 'symlink'
++            dst = os.path.join(out, want[info.filename])
++            if not os.path.exists(dst):
++                with z.open(info) as s, open(dst + '.part', 'wb') as d:
++                    while True:
++                        b = s.read(1 << 22)
++                        if not b:
++                            break
++                        d.write(b)
++                os.replace(dst + '.part', dst)
++            res[want[info.filename]] = dict(path=dst, sha256=sha_file(dst), size=os.path.getsize(dst), zip_member=info.filename)
++    missing = set(want.values()) - set(res)
++    return res, sorted(missing)
++
++
++def load_case(img_path, brain_path):
++    im = nib.load(img_path)
++    bm = nib.load(brain_path)
++    info = dict(orig_axcodes=''.join(nib.aff2axcodes(im.affine)), shape=list(im.shape), zooms=[float(z) for z in im.header.get_zooms()[:3]],
++                brain_shape=list(bm.shape), brain_axcodes=''.join(nib.aff2axcodes(bm.affine)),
++                affine_match=bool(np.allclose(im.affine, bm.affine, atol=1e-3)), ndim=len(im.shape))
++    if len(im.shape) != 3 or tuple(im.shape) != tuple(bm.shape):
++        return None, None, info
++    im = nib.as_closest_canonical(im)
++    bm = nib.as_closest_canonical(bm)
++    a = np.asarray(im.dataobj).astype(np.float32)
++    b = np.asarray(bm.dataobj) > 0
++    info['canon_axcodes'] = ''.join(nib.aff2axcodes(im.affine))
++    info['canon_shape'] = list(a.shape)
++    info['canon_zooms'] = [float(z) for z in im.header.get_zooms()[:3]]
++    return a, b, info
++
++
++def brain_range(b):
++    area = b.sum(axis=(0, 1)).astype(np.float64)
++    if area.max() <= 0:
++        return None
++    ok = area >= AREA_FRAC * area.max()
++    best, s = None, None
++    for i, v in enumerate(list(ok) + [False]):
++        if v and s is None:
++            s = i
++        if not v and s is not None:
++            if best is None or (i - 1 - s) > (best[1] - best[0]):
++                best = (s, i - 1)
++            s = None
++    return best
++
++
++def pick(lo, hi, f0, f1, n=N_SLICE):
++    L = hi - lo
++    pos = [lo + L * (f0 + (f1 - f0) * i / (n - 1)) for i in range(n)]
++    idx = [int(round(p)) for p in pos]
++    return idx
++
++
++def intensity_window(a, b):
++    v = a[b]
++    return float(np.percentile(v, 1)), float(np.percentile(v, 99))
++
++
++def render_slice(a, k, lo_v, hi_v, zooms):
++    s = a[:, :, k]
++    s = np.clip((s - lo_v) / max(hi_v - lo_v, 1e-6), 0, 1)
++    s = (s * 255 + 0.5).astype(np.uint8)
++    img = s.T[::-1, ::-1]  # RAS 정렬 후: 위=anterior, 영상 왼쪽=환자 오른쪽(radiological)
++    h, w = img.shape
++    # 평면내 spacing 보정 (x: 열 방향 zooms[0], y: 행 방향 zooms[1])
++    hh = h * zooms[1]
++    ww = w * zooms[0]
++    scale = SIDE / max(hh, ww)
++    nh, nw = max(1, int(round(hh * scale))), max(1, int(round(ww * scale)))
++    pil = Image.fromarray(img).resize((nw, nh), Image.BICUBIC)
++    canvas = Image.new('L', (SIDE, SIDE), 0)
++    canvas.paste(pil, ((SIDE - nw) // 2, (SIDE - nh) // 2))
++    return canvas.convert('RGB')
++
++
++def build_case(rec, zip_path, out_dir):
++    """returns dict with qc info and rendered PNG paths; None 사유 포함."""
++    ex, missing = extract(zip_path, rec['study_uid'], rec['series_id'])
++    info = dict(study_uid=rec['study_uid'], patient_uid=rec['patient_uid'], series_id=rec['series_id'], files=ex, missing=missing)
++    if missing:
++        info['exclude'] = 'missing_member:' + ','.join(missing)
++        return info
++    a, b, li = load_case(ex['img.nii.gz']['path'], ex['brain.nii.gz']['path'])
++    info.update(li)
++    if a is None:
++        info['exclude'] = 'shape_or_ndim_mismatch'
++        return info
++    if not info['affine_match']:
++        info['exclude'] = 'affine_mismatch'
++        return info
++    if not np.isfinite(a).all():
++        info['exclude'] = 'nonfinite'
++        return info
++    if info['canon_axcodes'] != 'RAS':
++        info['exclude'] = 'orientation_not_RAS'
++        return info
++    br = brain_range(b)
++    if br is None:
++        info['exclude'] = 'no_brain_range'
++        return info
++    lo, hi = br
++    info['brain_slice_range'] = [lo, hi]
++    info['n_brain_slices'] = hi - lo + 1
++    info['brain_voxels'] = int(b.sum())
++    C = pick(lo, hi, 0.25, 0.75)
++    W = pick(lo, hi, 0.05, 0.95)
++    info['C_idx'], info['W_idx'] = C, W
++    if len(set(C)) < N_SLICE or len(set(W)) < N_SLICE:
++        info['exclude'] = 'lt8_unique_slices'
++        return info
++    lo_v, hi_v = intensity_window(a, b)
++    info['window_p1_p99'] = [lo_v, hi_v]
++    if not hi_v > lo_v:
++        info['exclude'] = 'degenerate_window'
++        return info
++    os.makedirs(out_dir, exist_ok=True)
++    pngs = {}
++    for k in sorted(set(C) | set(W)):
++        p = os.path.join(out_dir, f'{rec["study_uid"]}_s{k:03d}.png')
++        im = render_slice(a, k, lo_v, hi_v, info['canon_zooms'])
++        if not os.path.exists(p):
++            im.save(p)
++        pngs[k] = dict(path=p, sha256=sha_file(p))
++    info['pngs'] = {str(k): v for k, v in pngs.items()}
++    info['exclude'] = None
++    return info
++
++
++def montage(info, which, out_path):
++    ims = [Image.open(info['pngs'][str(k)]['path']).resize((224, 224)) for k in info[which + '_idx']]
++    M = Image.new('RGB', (224 * 4, 224 * 2))
++    for i, im in enumerate(ims):
++        M.paste(im, ((i % 4) * 224, (i // 4) * 224))
++    M.save(out_path)
+diff --git a/mr123_eval.py b/mr123_eval.py
+new file mode 100644
+index 0000000..cd7a135
+--- /dev/null
++++ b/mr123_eval.py
+@@ -0,0 +1,153 @@
++"""iter_123: 평가 (BA 주지표). usage: python mr123_eval.py <stage> <out_json> [--protocol protocol.json]
++UNCERTAIN/INVALID는 정답으로 세지 않는다. 양·음성 층 내 환자 paired bootstrap 10,000회, seed122, 95% CI.
++"""
++import hashlib, json, os, sys
++import numpy as np
++import mr123_run as R
++
++SEED = 122
++NB = 10000
++
++
++def load_stage(stage):
++    reqs = R.read_jsonl(R.GEN + stage + '/requests.jsonl')
++    rid = [r['id'] for r in reqs]
++    assert len(set(rid)) == len(rid)
++    recs = {}
++    for fn in sorted(os.listdir(R.GEN + stage)):
++        if fn.startswith('worker_') and fn.endswith('.jsonl'):
++            for r in R.read_jsonl(R.GEN + stage + '/' + fn):
++                assert r['id'] not in recs, 'duplicate id ' + r['id']
++                recs[r['id']] = r
++    missing = set(rid) - set(recs)
++    extra = set(recs) - set(rid)
++    assert not missing and not extra, (len(missing), len(extra))
++    # 요청-출력 연결, 현재 PNG hash 재검증, parser 재적용
++    for q in reqs:
++        r = recs[q['id']]
++        assert r['cond'] == q['cond'] and r['study_uid'] == q['study_uid']
++        for p, h in zip(q['paths'], q['png_sha256']):
++            d = hashlib.sha256(open(p, 'rb').read()).hexdigest()
++            assert d == h, 'png changed ' + p
++        st, code = R.parse(r['text'])
++        assert (st, code) == (r['state'], r['parse_code']), 'parser mismatch'
++    return reqs, recs
++
++
++def patient_table(reqs, recs):
++    pt = {}
++    for q in reqs:
++        r = recs[q['id']]
++        p = pt.setdefault(q['patient_uid'], dict(label=q['label'], batch=q['batch_id'], study=q['study_uid']))
++        p[q['cond']] = r['state']
++        p[q['cond'] + '_eos'] = r['eos']
++        p[q['cond'] + '_code'] = r['parse_code']
++    for p in pt.values():
++        p['P'] = R.agg_P(p['P1'], p['P2'])
++    return pt
++
++
++def conf(pt, cond):
++    out = {}
++    for lab in ['positive', 'negative']:
++        c = {s: 0 for s in ['PRESENT', 'ABSENT', 'UNCERTAIN', 'INVALID']}
++        for p in pt.values():
++            if p['label'] == lab:
++                c[p[cond]] += 1
++        out[lab] = c
++    return out
++
++
++def vec(pt, cond):
++    ids = sorted(pt)
++    lab = np.array([pt[i]['label'] == 'positive' for i in ids])
++    corr = np.array([(pt[i][cond] == 'PRESENT') if pt[i]['label'] == 'positive' else (pt[i][cond] == 'ABSENT') for i in ids])
++    return ids, lab, corr
++
++
++def ba(lab, corr):
++    return 0.5 * (corr[lab].mean() + corr[~lab].mean())
++
++
++def metrics(pt, cond):
++    ids, lab, corr = vec(pt, cond)
++    c = conf(pt, cond)
++    n_pos, n_neg = int(lab.sum()), int((~lab).sum())
++    sens, spec = c['positive']['PRESENT'] / n_pos, c['negative']['ABSENT'] / n_neg
++    expl = sum(1 for p in pt.values() if p[cond] in ('PRESENT', 'ABSENT')) / len(pt)
++    expl_acc = (c['positive']['PRESENT'] + c['negative']['ABSENT']) / max(1, sum(1 for p in pt.values() if p[cond] in ('PRESENT', 'ABSENT')))
++    return dict(BA=0.5 * (sens + spec), sensitivity=sens, specificity=spec, explicit_coverage=expl, explicit_accuracy=expl_acc, confusion=c,
++                n_uncertain=sum(1 for p in pt.values() if p[cond] == 'UNCERTAIN'), n_invalid=sum(1 for p in pt.values() if p[cond] == 'INVALID'))
++
++
++def paired(pt, a, b, rng):
++    ids, lab, ca = vec(pt, a)
++    _, _, cb = vec(pt, b)
++    pos, neg = np.where(lab)[0], np.where(~lab)[0]
++    d = []
++    for _ in range(NB):
++        ip = rng.choice(pos, len(pos)); ineg = rng.choice(neg, len(neg))
++        d.append(0.5 * ((ca[ip].mean() - cb[ip].mean()) + (ca[ineg].mean() - cb[ineg].mean())))
++    d = np.array(d)
++    pt_est = ba(lab, ca) - ba(lab, cb)
++    to_a = int(((~cb) & ca).sum()); to_b = int((cb & (~ca)).sum())  # b에서 오답→a에서 정답 / b 정답→a 오답
++    by_batch = {}
++    for bt in sorted({pt[i]['batch'] for i in ids}):
++        m = np.array([pt[i]['batch'] == bt for i in ids])
++        if m.sum() and lab[m].any() and (~lab[m]).any():
++            by_batch[bt] = dict(n=int(m.sum()), n_pos=int(lab[m].sum()), diff_BA=float(ba(lab[m], ca[m]) - ba(lab[m], cb[m])),
++                                fixed=int(((~cb[m]) & ca[m]).sum()), broken=int((cb[m] & (~ca[m])).sum()))
++        else:
++            by_batch[bt] = dict(n=int(m.sum()), n_pos=int(lab[m].sum()), diff_BA=None,
++                                fixed=int(((~cb[m]) & ca[m]).sum()), broken=int((cb[m] & (~ca[m])).sum()))
++    return dict(diff=float(pt_est), ci95=[float(np.percentile(d, 2.5)), float(np.percentile(d, 97.5))], fixed_by_first=to_a, broken_by_first=to_b,
++                sens_diff=float(ca[lab].mean() - cb[lab].mean()), spec_diff=float(ca[~lab].mean() - cb[~lab].mean()), by_batch=by_batch)
++
++
++def decide(m, pw, wc):
++    flags = {}
++    flags['P_minus_W_positive'] = pw['diff'] >= 0.10 and pw['ci95'][0] > 0
++    flags['W_minus_C_positive'] = wc['diff'] >= 0.10 and wc['ci95'][0] > 0
++    flags['simple_alt_sufficient'] = any(m[c]['BA'] >= 0.80 and m[c]['sensitivity'] >= 0.75 and m[c]['specificity'] >= 0.75 for c in ['W', 'P'])
++    flags['P_minus_W_weak_ci_upper_lt_10pp'] = pw['ci95'][1] < 0.10
++    flags['all_BA_le_0.60'] = all(m[c]['BA'] <= 0.60 for c in ['C', 'W', 'P'])
++    if flags['P_minus_W_positive']:
++        v = 'positive_P_over_W'
++    elif flags['simple_alt_sufficient']:
++        v = 'simple_alternative_sufficient_candidate'
++    elif flags['all_BA_le_0.60']:
++        v = 'negative_low_frozen_performance_all_conditions'
++    elif flags['P_minus_W_weak_ci_upper_lt_10pp']:
++        v = 'negative_no_large_split_gain'
++    else:
++        v = 'inconclusive'
++    return v, flags
++
++
++def main(stage, out_path):
++    reqs, recs = load_stage(stage)
++    pt = patient_table(reqs, recs)
++    rng = np.random.default_rng(SEED)
++    m = {c: metrics(pt, c) for c in ['C', 'W', 'P']}
++    pw = paired(pt, 'P', 'W', rng)
++    wc = paired(pt, 'W', 'C', rng)
++    pc = paired(pt, 'P', 'C', rng)
++    v, flags = decide(m, pw, wc)
++    n_pos = sum(1 for p in pt.values() if p['label'] == 'positive')
++    nonEOS = sum(1 for r in recs.values() if not r['eos'])
++    parse_codes = {}
++    for r in recs.values():
++        parse_codes[r['parse_code']] = parse_codes.get(r['parse_code'], 0) + 1
++    out = dict(stage=stage, n_patients=len(pt), n_pos=n_pos, n_neg=len(pt) - n_pos, n_requests=len(recs), n_non_eos=nonEOS, parse_codes=parse_codes,
++               metrics=m, P_minus_W=pw, W_minus_C=wc, P_minus_C=pc, verdict=v, flags=flags, bootstrap=dict(n=NB, seed=SEED, stratified_by_label=True),
++               per_patient={str(k): v_ for k, v_ in pt.items()})
++    json.dump(out, open(out_path, 'w'), indent=1, default=str)
++    print(json.dumps({k: out[k] for k in ['n_patients', 'n_pos', 'n_neg', 'n_non_eos', 'parse_codes', 'verdict', 'flags']}, indent=1))
++    for c in ['C', 'W', 'P']:
++        print(c, {k: (round(x, 4) if isinstance(x, float) else x) for k, x in m[c].items()})
++    for k, x in [('P-W', pw), ('W-C', wc), ('P-C', pc)]:
++        print(k, round(x['diff'], 4), [round(y, 4) for y in x['ci95']], 'fixed', x['fixed_by_first'], 'broken', x['broken_by_first'])
++
++
++if __name__ == '__main__':
++    main(sys.argv[1], sys.argv[2])
+diff --git a/mr123_fetch.py b/mr123_fetch.py
+new file mode 100644
+index 0000000..749b25d
+--- /dev/null
++++ b/mr123_fetch.py
+@@ -0,0 +1,46 @@
++"""iter_123: 선택 study ZIP 다운로드(공식 revision 고정, 토큰 내용 미기록). usage: python mr123_fetch.py tech|explore|reserve"""
++import hashlib, json, os, sys, warnings
++warnings.filterwarnings('ignore')
++os.environ['HF_TOKEN_PATH'] = '/home/test/.cache/huggingface/token'
++from huggingface_hub import HfApi, hf_hub_download
++
++ROOT = '/home/test/.local/share/medgemma/mr_rate/'
++RES = '/SSD1_1TB/home/milab/daniel/08_medgemma/research/results/iter_123/data/'
++REV = 'f6e39794e7820c96c18465231a30da424e6d1c69'
++BUDGET = 10 * 1024 ** 3
++
++
++def sha(p):
++    d = hashlib.sha256()
++    with open(p, 'rb') as f:
++        for b in iter(lambda: f.read(1 << 22), b''):
++            d.update(b)
++    return d.hexdigest()
++
++
++def main(roles):
++    L = json.load(open(RES + 'selection_lock.json'))
++    items = [r for r in L['manifest'] if r['role'] in roles]
++    api = HfApi()
++    infos = api.get_paths_info('Forithmus/MR-RATE', [r['zip_path'] for r in items], repo_type='dataset', revision=REV)
++    size = {i.path: i.size for i in infos}
++    led_p = RES + 'fetch_ledger.json'
++    led = json.load(open(led_p)) if os.path.exists(led_p) else {}
++    used = sum(v['size'] for v in led.values())
++    need = sum(size[r['zip_path']] for r in items if r['study_uid'] not in led)
++    free = os.statvfs(ROOT).f_bavail * os.statvfs(ROOT).f_frsize
++    print(f'roles={roles} 새 다운로드 {need/1e6:.1f}MB, 누적 {used/1e6:.1f}MB, 예산 {BUDGET/1e9:.1f}GB, 여유 {free/1e9:.0f}GB')
++    assert used + need <= BUDGET and need * 3 < free
++    for r in items:
++        if r['study_uid'] in led:
++            continue
++        p = hf_hub_download('Forithmus/MR-RATE', r['zip_path'], repo_type='dataset', revision=REV, local_dir=ROOT + 'raw',
++                            cache_dir=ROOT + 'cache')
++        assert os.path.getsize(p) == size[r['zip_path']]
++        led[r['study_uid']] = dict(path=p, size=size[r['zip_path']], sha256=sha(p), revision=REV, role=r['role'])
++        json.dump(led, open(led_p, 'w'), indent=1)
++        print('ok', r['study_uid'], size[r['zip_path']])
++
++
++if __name__ == '__main__':
++    main(sys.argv[1:])
+diff --git a/mr123_labels.py b/mr123_labels.py
+new file mode 100644
+index 0000000..cfe30c4
+--- /dev/null
++++ b/mr123_labels.py
+@@ -0,0 +1,105 @@
++"""iter_123: MR-RATE 뇌실주위 백질 FLAIR 고신호 존재/부재 정답 후보 (결정적 규칙 mr123_rules_v1).
++
++기존 batch04·batch23의 공식 train만 사용. 정규식은 문장 후보 검색용이며 선정 사례마다 원문 span을 남긴다.
++"""
++import hashlib, json, re, sys
++import pandas as pd
++
++BASE = '/home/test/.local/share/medgemma/mr_rate/meta/'
++BATCHES = ['batch04', 'batch23']
++RULES = 'mr123_rules_v1'
++SEED = 122
++
++HYPER = re.compile(r'hyperintens|increased signal|high signal|signal increase|hypersignal', re.I)
++UNCERT = re.compile(r'\b(may|might|possible|possibly|probably|suspect|suspicious|suggest|cannot|can not|question|differential|likely|versus|vs\.?|or )\b|\?', re.I)
++NEGW = re.compile(r'\b(no|not|without|absent|nor|neither)\b', re.I)
++EXCEPT = re.compile(r'\b(except|exception|apart from|other than|excluding|excluded|but|however|although|whereas|aside)\b', re.I)
++PERIV = re.compile(r'periventricular|peri-ventricular|paraventricular|periventriculer', re.I)
++WM = re.compile(r'white matter|\bwm\b', re.I)
++ABN_ANY = re.compile(r'gliotic|gliosis|hyperintens|increased signal|high signal|lesion|demyelinat|leukoaraiosis|ischemic|plaque|\bfoci\b|focus|changes|abnormal signal|signal alteration|signal changes|hypointens|encephalomalac|infarct|microangiopath|leukomalacia|edema|dilat|prominen', re.I)
++NORMAL = re.compile(r'\bnormal\b|no (abnormal|pathological|pathologic) (signal|intensity)|no (signal|intensity) (abnormal|alteration|change)|signal (intensity )?(is|was|are|were) (normal|unremarkable)|unremarkable|no (abnormal )?signal (change|alteration|abnormality)', re.I)
++
++
++def sents(text):
++    if not isinstance(text, str):
++        return []
++    out = []
++    for line in re.split(r'\n+', text):
++        for s in re.split(r'(?<=[.!?])\s+(?=[A-Z0-9])', line.strip()):
++            s = s.strip()
++            if s:
++                out.append(s)
++    return out
++
++
++def classify_sentence(s):
++    """returns one of: pos, neg, other_periv (conflict candidate), none"""
++    if not PERIV.search(s):
++        return 'none'
++    has_wm = bool(WM.search(s))
++    if has_wm and 'flair' in s.lower() and HYPER.search(s) and not NEGW.search(s) and not UNCERT.search(s) \
++            and not EXCEPT.search(s) and not re.search(r'perivascular|virchow|physiolog', s, re.I) \
++            and not re.search(r'\bnormal\b', s, re.I):
++        return 'pos'
++    if has_wm and NORMAL.search(s) and not EXCEPT.search(s) and not UNCERT.search(s) \
++            and not re.search(r'normal (variant|for)', s, re.I) \
++            and not re.search(r'\b(lesion|gliotic|gliosis|hyperintens|foci|focus|increased signal)\b', s, re.I) or \
++            (has_wm and re.search(r'\bno (abnormal )?(signal|lesion|hyperintens)', s, re.I) and not EXCEPT.search(s) and not UNCERT.search(s)
++             and not re.search(r'normal (variant|for)', s, re.I)):
++        return 'neg'
++    if ABN_ANY.search(s):
++        return 'other_periv'
++    return 'none'
++
++
++def label_report(findings, impression):
++    ss = [('findings', s) for s in sents(findings)] + [('impression', s) for s in sents(impression)]
++    cls = [(sec, s, classify_sentence(s)) for sec, s in ss]
++    pos = [(sec, s) for sec, s, c in cls if c == 'pos']
++    neg = [(sec, s) for sec, s, c in cls if c == 'neg']
++    oth = [(sec, s) for sec, s, c in cls if c == 'other_periv']
++    # 상충 검사: 다른 periventricular 이상 문장이 있으면 unknown. 같은 문장이 반복되는 것은 허용.
++    allsent = ' '.join(s for _, s, _ in cls)
++    if pos and neg:
++        return 'unknown', 'pos_neg_conflict', pos, neg, oth
++    if pos:
++        if oth:
++            # 동일 소견을 다른 표현으로 반복한 문장(pos 와 같은 방향의 이상 기술)은 허용하지 않고 보수적으로 unknown
++            return 'unknown', 'pos_with_other_periv_sentence', pos, neg, oth
++        return 'positive', 'ok', pos, neg, oth
++    if neg:
++        if oth:
++            return 'unknown', 'neg_with_periv_abnormality', pos, neg, oth
++        for _, sx, _c in cls:
++            if WM.search(sx) and HYPER.search(sx) and not NEGW.search(sx):
++                return 'unknown', 'neg_with_other_wm_hyperintensity', pos, neg, oth
++        # 보고서 어디서든 white matter 병변 이상이 periventricular 외 표현(예: deep white matter)이어도 범위 밖이라 허용
++        return 'negative', 'ok', pos, neg, oth
++    return 'unknown', 'no_explicit', pos, neg, oth
++
++
++def load_candidates():
++    sp = pd.read_csv(BASE + 'splits.csv')
++    sp = sp[sp.batch_id.isin(BATCHES)]
++    rows = []
++    for b in BATCHES:
++        r = pd.read_csv(BASE + f'reports/{b}_reports.csv')
++        r['batch_id'] = b
++        rows.append(r)
++    r = pd.concat(rows)
++    r = r.merge(sp[['batch_id', 'patient_uid', 'study_uid', 'split']], on=['batch_id', 'study_uid'], how='inner')
++    assert (r.split == 'train').sum() > 0
++    r = r[r.split == 'train'].copy()  # test/val 보고서는 라벨링에 쓰지 않는다
++    out = []
++    for t in r.itertuples():
++        lab, why, pos, neg, oth = label_report(t.findings, t.impression)
++        out.append(dict(batch_id=t.batch_id, patient_uid=int(t.patient_uid), study_uid=t.study_uid, split=t.split,
++                        label=lab, reason=why, pos_spans=pos, neg_spans=neg, other_spans=oth))
++    return pd.DataFrame(out)
++
++
++if __name__ == '__main__':
++    c = load_candidates()
++    print(c.groupby(['batch_id', 'label']).size())
++    print(c[c.label != 'unknown'].groupby('reason').size())
++    print(c.groupby('reason').size())
+diff --git a/mr123_launch.py b/mr123_launch.py
+new file mode 100644
+index 0000000..952f694
+--- /dev/null
++++ b/mr123_launch.py
+@@ -0,0 +1,52 @@
++"""iter_123: worker 감독. usage: python mr123_launch.py <stage> <max_new> <gpu_list e.g. 0,1,0,1> [--batch B] [--tag name]
++worker 수는 GPU 수와 분리(같은 GPU에 복수 worker 가능). 상속 CUDA_VISIBLE_DEVICES 안의 장치만 허용.
++"""
++import json, os, subprocess, sys, time
++import mr123_run as R
++
++stage, mx, gpus = sys.argv[1], sys.argv[2], sys.argv[3].split(',')
++batch = sys.argv[sys.argv.index('--batch') + 1] if '--batch' in sys.argv else '1'
++tag = sys.argv[sys.argv.index('--tag') + 1] if '--tag' in sys.argv else 'main'
++allowed = os.environ.get('CUDA_VISIBLE_DEVICES', '0,1').split(',')
++assert all(g in allowed for g in gpus), (gpus, allowed)
++
++def smi():
++    o = subprocess.run(['nvidia-smi', '--query-gpu=index,memory.used,memory.total', '--format=csv,noheader,nounits'], capture_output=True, text=True).stdout
++    return {l.split(',')[0].strip(): (int(l.split(',')[1]), int(l.split(',')[2])) for l in o.strip().split('\n')}
++
++# 시작 전 메모리 확인: worker당 예상 peak(MiB) + 2GiB 여유
++PEAK = int(sys.argv[sys.argv.index('--peak') + 1]) if '--peak' in sys.argv else 16000
++st = smi()
++for g in set(gpus):
++    n = gpus.count(g)
++    used, tot = st[g]
++    assert used + n * (PEAK + 2048) <= tot, f'GPU{g} 메모리 부족: used={used} workers={n}'
++cd = R.GEN + stage + '/claims'
++done = R.done_ids(stage)
++if os.path.isdir(cd):
++    for fn in os.listdir(cd):  # 실행 중 worker가 없으므로 미완료 claim 회수
++        if fn.endswith('.claim') and fn[:-6] not in done:
++            os.remove(os.path.join(cd, fn))
++for fn in os.listdir(R.GEN + stage):  # 이전 강제 종료의 torn tail 복구 (실행 중 worker 없음)
++    if fn.startswith('worker_') and fn.endswith('.jsonl'):
++        R.repair_tail(os.path.join(R.GEN + stage, fn))
++procs = []
++t0 = time.time()
++logd = R.GEN + stage + f'/logs_{tag}_{int(t0)}/'
++os.makedirs(logd)
++for i, g in enumerate(gpus):
++    env = dict(os.environ, CUDA_VISIBLE_DEVICES=g)
++    lf = open(logd + f'w{i}.log', 'w')
++    procs.append((i, g, subprocess.Popen([sys.executable, 'mr123_run.py', 'worker', stage, f'{tag}{i}', mx, '--batch', batch], env=env, stdout=lf, stderr=subprocess.STDOUT)))
++peak = {g: 0 for g in set(gpus)}
++while any(p.poll() is None for _, _, p in procs):
++    time.sleep(15)
++    s = smi()
++    for g in peak:
++        peak[g] = max(peak[g], s[g][0])
++rc = [p.returncode for _, _, p in procs]
++res = dict(stage=stage, tag=tag, gpus=gpus, batch=batch, max_new=mx, wall_s=time.time() - t0, returncodes=rc, peak_gpu_mem_mib=peak,
++           n_done=len(R.done_ids(stage)), n_req=len(R.read_jsonl(R.GEN + stage + '/requests.jsonl')))
++json.dump(res, open(logd + 'launch_result.json', 'w'), indent=1)
++print(json.dumps(res))
++sys.exit(0 if all(c == 0 for c in rc) else 1)
+diff --git a/mr123_link_check.py b/mr123_link_check.py
+new file mode 100644
+index 0000000..151a86c
+--- /dev/null
++++ b/mr123_link_check.py
+@@ -0,0 +1,22 @@
++import warnings
++warnings.filterwarnings('ignore')
++import pandas as pd
++import mr123_labels as m
++
++c = m.load_candidates()
++c = c[c.label.isin(['positive', 'negative'])]
++B = m.BASE
++cols = ['patient_uid', 'study_uid', 'series_id', 'classified_modality', 'is_derived', 'acquisition_plane', 'is_localizer',
++        'is_subtraction', 'array_shape', 'array_spacing_mm', 'StudyDescription', 'ProcedureCodeSequence_0_CodeMeaning']
++md = pd.concat([pd.read_csv(B + f'metadata/{b}_metadata.csv', low_memory=False, usecols=cols).assign(batch_id=b) for b in m.BATCHES])
++print(md.is_localizer.dtype, md.is_derived.dtype)
++f = md[(md.classified_modality == 'FLAIR') & (md.acquisition_plane == 'AXIAL') & (md.is_localizer.astype(str) == 'False')
++       & (md.is_derived.astype(str) == 'False') & (md.is_subtraction.astype(str) == 'False')]
++print(len(f), f.series_id.value_counts().head())
++x = c.merge(f.drop(columns=['patient_uid']), on=['batch_id', 'study_uid'])
++print(x.groupby(['batch_id', 'label']).study_uid.nunique())
++print(x.groupby(['batch_id', 'label']).patient_uid.nunique())
++print(x.StudyDescription.value_counts().head(12))
++print(x.ProcedureCodeSequence_0_CodeMeaning.value_counts().head(8))
++print(x.array_shape.value_counts().head(5))
++print(x.array_spacing_mm.head(5).tolist())
+diff --git a/mr123_lock.py b/mr123_lock.py
+new file mode 100644
+index 0000000..cca3b4a
+--- /dev/null
++++ b/mr123_lock.py
+@@ -0,0 +1,23 @@
++"""iter_123: 본 생성 전 평가·요청 코드/입력 잠금. usage: python mr123_lock.py <stage> <build_json>"""
++import hashlib, json, os, sys, time
++import mr123_run as R
++
++CODE = ['mr123_labels.py', 'mr123_select.py', 'mr123_data.py', 'mr123_run.py', 'mr123_eval.py', 'mr123_launch.py', 'mr123_fetch.py', 'mr123_tech_build.py']
++
++
++def sha(p):
++    return hashlib.sha256(open(p, 'rb').read()).hexdigest()
++
++
++stage, build = sys.argv[1], sys.argv[2]
++p = R.GEN + stage + '/protocol.json'
++assert not os.path.exists(p)
++d = dict(stage=stage, locked_at_unix=time.time(), locked_at=time.strftime('%Y-%m-%d %H:%M:%S %Z'),
++         note='이 잠금은 explore 생성 출력이 존재하기 전에 작성됨. 평가 코드·parser·결정 기준 포함.',
++         code_sha256={c: sha(c) for c in CODE},
++         inputs=dict(requests=sha(R.GEN + stage + '/requests.jsonl'), selection_lock=sha(R.D.RES + 'data/selection_lock.json'),
++                     build=sha(build), fetch_ledger=sha(R.D.RES + 'data/fetch_ledger.json')),
++         model=dict(name=R.MODEL, revision=R.REV, dtype='bfloat16', greedy=True, max_new_tokens=512),
++         existing_outputs=[f for f in os.listdir(R.GEN + stage) if f.startswith('worker_')])
++json.dump(d, open(p, 'w'), indent=1)
++print(d['locked_at'], d['existing_outputs'])
+diff --git a/mr123_peek.py b/mr123_peek.py
+new file mode 100644
+index 0000000..264cf50
+--- /dev/null
++++ b/mr123_peek.py
+@@ -0,0 +1,13 @@
++import mr123_run as R, json, os, collections, sys
++stage = sys.argv[1]
++reqs = {r['id']: r for r in R.read_jsonl(R.GEN + stage + '/requests.jsonl')}
++recs = []
++for fn in sorted(os.listdir(R.GEN + stage)):
++    if fn.startswith('worker_'):
++        recs += R.read_jsonl(R.GEN + stage + '/' + fn)
++print(len(recs), len({r['id'] for r in recs}))
++for k, v in sorted(collections.Counter((reqs[r['id']]['label'], r['cond'], r['state']) for r in recs).items()):
++    print(k, v)
++print(collections.Counter((r['eos'], r['parse_code']) for r in recs), 'max_new_used', max(r['n_new'] for r in recs))
++for r in recs[:int(sys.argv[2]) if len(sys.argv) > 2 else 4]:
++    print(reqs[r['id']]['label'], r['cond'], r['n_new'], repr(r['text'][:260]))
+diff --git a/mr123_run.py b/mr123_run.py
+new file mode 100644
+index 0000000..1795167
+--- /dev/null
++++ b/mr123_run.py
+@@ -0,0 +1,214 @@
++"""iter_123: MedGemma 1.5 frozen 추론 요청 구성/worker/parser. 조건 C(중앙8), W(넓은8), P1/P2(W를 inferior4/superior4로 분할).
++usage:
++  python mr123_run.py requests <stage> <build_json> [<build_json>...]   # 요청 파일 생성(출력 전 잠금)
++  python mr123_run.py worker <stage> <worker_id> <max_new_tokens> [--limit N] [--batch B]
++"""
++import hashlib, json, os, re, sys, time
++import mr123_data as D
++
++MODEL = 'google/medgemma-1.5-4b-it'
++REV = '91850547d9f0b2fdd21aa7c5f4f3d1a8a52c243b'
++CACHE = '/SSD1_1TB/home/milab/daniel/08_medgemma/hf_cache'
++GEN = D.RES + 'gen/'
++STATES = ['PRESENT', 'ABSENT', 'UNCERTAIN']
++
++PROMPT = ('You are shown {n} axial FLAIR MRI slices from one brain MRI examination, {order}. '
++          'Question: Is there evidence of pathological hyperintense signal on FLAIR in the periventricular white matter in the images shown? '
++          'Answer on the first line with exactly one word: PRESENT, ABSENT, or UNCERTAIN. '
++          'Then give a brief justification (at most two sentences).')
++
++
++def sha(s):
++    return hashlib.sha256(s.encode()).hexdigest()
++
++
++def make_requests(builds):
++    reqs = []
++    for b in builds:
++        for sid, info in b.items():
++            if info.get('exclude') is not None:
++                continue
++            W = info['W_idx']
++            conds = {'C': (info['C_idx'], 'ordered from inferior to superior'), 'W': (W, 'ordered from inferior to superior'),
++                     'P1': (W[:4], 'ordered from inferior to superior (lower half of the covered range)'),
++                     'P2': (W[4:], 'ordered from inferior to superior (upper half of the covered range)')}
++            for c, (idx, order) in conds.items():
++                paths = [info['pngs'][str(k)]['path'] for k in idx]
++                hs = [info['pngs'][str(k)]['sha256'] for k in idx]
++                prompt = PROMPT.format(n=len(idx), order=order)
++                rid = sha('|'.join([str(info['patient_uid']), c, ','.join(hs), prompt, REV]))[:20]
++                reqs.append(dict(id=rid, patient_uid=info['patient_uid'], study_uid=sid, cond=c, slice_idx=idx, paths=paths, png_sha256=hs,
++                                 prompt=prompt, model=MODEL, revision=REV, label=info['label'], batch_id=info['batch_id'], role=info['role']))
++    return reqs
++
++
++def messages_for(r):
++    from PIL import Image
++    content = []
++    for i, p in enumerate(r['paths']):
++        content.append({'type': 'text', 'text': f'Image {i + 1}:'})
++        content.append({'type': 'image', 'image': Image.open(p).convert('RGB')})
++    content.append({'type': 'text', 'text': r['prompt']})
++    return [{'role': 'user', 'content': content}]
++
++
++def parse(text):
++    """첫 줄의 단일 상태. return (state, code). state in PRESENT/ABSENT/UNCERTAIN/INVALID"""
++    t = (text or '').strip()
++    lines = [l for l in t.split('\n') if l.strip()]
++    if not lines:
++        return 'INVALID', 'empty'
++    first = re.sub(r'[*_`#>\-:.\[\]()"]', ' ', lines[0]).strip()
++    found = [s for s in STATES if re.search(r'\b' + s + r'\b', first, re.I)]
++    if len(found) == 1:
++        strict = re.fullmatch(r'\s*' + found[0] + r'\s*', first, re.I) is not None
++        return found[0], 'ok_strict' if strict else 'ok_loose'
++    if len(found) > 1:
++        return 'INVALID', 'multi_state'
++    if re.search(r'cannot|unable|can\'?t|not able|I am sorry|sorry', t[:300], re.I):
++        return 'INVALID', 'refusal'
++    return 'INVALID', 'no_state'
++
++
++def agg_P(s1, s2):
++    if 'PRESENT' in (s1, s2):
++        return 'PRESENT'
++    if s1 == 'ABSENT' and s2 == 'ABSENT':
++        return 'ABSENT'
++    return 'UNCERTAIN'
++
++
++def read_jsonl(p):
++    out = []
++    if not os.path.exists(p):
++        return out
++    with open(p, 'rb') as f:
++        data = f.read()
++    for line in data.split(b'\n'):
++        if not line.strip():
++            continue
++        try:
++            out.append(json.loads(line))
++        except Exception:
++            break  # torn tail
++    return out
++
++
++def repair_tail(p):
++    if not os.path.exists(p):
++        return
++    with open(p, 'rb') as f:
++        data = f.read()
++    good = 0
++    pos = 0
++    for line in data.split(b'\n'):
++        end = pos + len(line) + 1
++        if line.strip():
++            try:
++                json.loads(line)
++            except Exception:
++                break
++        good = min(end, len(data))
++        pos = end
++    if good < len(data):
++        with open(p, 'rb+') as f:
++            f.truncate(good)
++
++
++def done_ids(stage):
++    d = GEN + stage
++    ids = set()
++    if os.path.isdir(d):
++        for fn in os.listdir(d):
++            if fn.startswith('worker_') and fn.endswith('.jsonl'):
++                ids |= {r['id'] for r in read_jsonl(os.path.join(d, fn))}
++    return ids
++
++
++def worker(stage, wid, max_new, limit=None, batch=1):
++    import torch
++    from transformers import AutoProcessor, AutoModelForImageTextToText
++    reqs = read_jsonl(GEN + stage + '/requests.jsonl')
++    out_p = GEN + stage + f'/worker_{wid}.jsonl'
++    repair_tail(out_p)
++    cdir = GEN + stage + '/claims'
++    os.makedirs(cdir, exist_ok=True)
++    t0 = time.perf_counter()
++    proc = AutoProcessor.from_pretrained(MODEL, revision=REV, cache_dir=CACHE)
++    model = AutoModelForImageTextToText.from_pretrained(MODEL, revision=REV, cache_dir=CACHE, torch_dtype=torch.bfloat16, device_map={'': 0})
++    model.eval()
++    load_s = time.perf_counter() - t0
++    print(json.dumps(dict(event='loaded', wid=wid, load_s=load_s, gpu=os.environ.get('CUDA_VISIBLE_DEVICES'))), flush=True)
++    done = done_ids(stage)
++    n = 0
++    f = open(out_p, 'a')
++    pending = [r for r in reqs if r['id'] not in done]
++    while pending:
++        group = []
++        for r in pending:
++            if len(group) >= batch:
++                break
++            try:
++                fd = os.open(os.path.join(cdir, r['id'] + '.claim'), os.O_CREAT | os.O_EXCL | os.O_WRONLY)
++                os.write(fd, f'{wid}:{os.getpid()}'.encode()); os.close(fd)
++                group.append(r)
++            except FileExistsError:
++                continue
++        pending = [r for r in pending if r not in group and r['id'] not in done]
++        if not group:
++            break
++        ts = time.perf_counter()
++        msgs = [messages_for(r) for r in group]
++        if batch == 1:
++            inp = proc.apply_chat_template(msgs[0], add_generation_prompt=True, tokenize=True, return_dict=True, return_tensors='pt')
++        else:
++            proc.tokenizer.padding_side = 'left'
++            inp = proc.apply_chat_template(msgs, add_generation_prompt=True, tokenize=True, return_dict=True, return_tensors='pt', padding=True)
++        inp = inp.to(model.device)
++        inp['pixel_values'] = inp['pixel_values'].to(torch.bfloat16)
++        plen = inp['input_ids'].shape[1]
++        te = time.perf_counter()
++        with torch.inference_mode():
++            gen = model.generate(**inp, max_new_tokens=max_new, do_sample=False)
++        tg = time.perf_counter()
++        eos_ids = set([proc.tokenizer.eos_token_id] + ([model.generation_config.eos_token_id] if isinstance(model.generation_config.eos_token_id, int) else list(model.generation_config.eos_token_id or [])))
++        for i, r in enumerate(group):
++            new = gen[i, plen:].tolist()
++            ended = any(t in eos_ids for t in new)
++            while new and new[-1] == proc.tokenizer.pad_token_id:
++                new.pop()
++            text = proc.tokenizer.decode(new, skip_special_tokens=True)
++            st, code = parse(text)
++            rec = dict(id=r['id'], study_uid=r['study_uid'], cond=r['cond'], text=text, state=st, parse_code=code, eos=bool(ended),
++                       n_new=len(new), prompt_tokens=int((inp['attention_mask'][i]).sum()), max_new=max_new, wid=wid, batch=batch,
++                       prep_s=te - ts, gen_s=tg - te, wall_s=tg - ts, n_img=len(r['paths']), t_end=time.time(),
++                       peak_mem_mib=torch.cuda.max_memory_allocated() / 2 ** 20, load_s=load_s, input_ids_sha=hashlib.sha256(inp['input_ids'][i].cpu().numpy().tobytes()).hexdigest())
++            f.write(json.dumps(rec) + '\n')
++        f.flush(); os.fsync(f.fileno())
++        n += len(group)
++        if limit and n >= limit:
++            break
++    f.close()
++    print(json.dumps(dict(event='done', wid=wid, n=n)), flush=True)
++
++
++if __name__ == '__main__':
++    cmd = sys.argv[1]
++    if cmd == 'requests':
++        stage = sys.argv[2]
++        builds = [json.load(open(p)) for p in sys.argv[3:]]
++        reqs = make_requests(builds)
++        d = GEN + stage
++        os.makedirs(d, exist_ok=True)
++        p = d + '/requests.jsonl'
++        assert not os.path.exists(p), 'requests 잠금 존재'
++        assert len({r['id'] for r in reqs}) == len(reqs)
++        with open(p, 'w') as f:
++            for r in reqs:
++                f.write(json.dumps(r) + '\n')
++        print(len(reqs), 'requests', hashlib.sha256(open(p, 'rb').read()).hexdigest())
++    elif cmd == 'worker':
++        stage, wid, mx = sys.argv[2], sys.argv[3], int(sys.argv[4])
++        lim = int(sys.argv[sys.argv.index('--limit') + 1]) if '--limit' in sys.argv else None
++        bs = int(sys.argv[sys.argv.index('--batch') + 1]) if '--batch' in sys.argv else 1
++        worker(stage, wid, mx, lim, bs)
+diff --git a/mr123_select.py b/mr123_select.py
+new file mode 100644
+index 0000000..3e59644
+--- /dev/null
++++ b/mr123_select.py
+@@ -0,0 +1,92 @@
++"""iter_123: 정답·환자·series 선정 manifest 잠금 (모델 출력 전). 결과: results/iter_123/data/"""
++import ast, hashlib, json, os, sys, warnings
++warnings.filterwarnings('ignore')
++import pandas as pd
++import mr123_labels as m
++
++OUT = '/SSD1_1TB/home/milab/daniel/08_medgemma/research/results/iter_123/data/'
++os.makedirs(OUT, exist_ok=True)
++SEED = m.SEED
++
++
++def h(*a):
++    return hashlib.sha256('|'.join(map(str, a)).encode()).hexdigest()
++
++
++def sha_file(p):
++    d = hashlib.sha256()
++    with open(p, 'rb') as f:
++        for b in iter(lambda: f.read(1 << 20), b''):
++            d.update(b)
++    return d.hexdigest()
++
++
++def main():
++    if os.path.exists(OUT + 'selection_lock.json'):
++        print('이미 잠금 존재: 덮어쓰지 않음'); return
++    c = m.load_candidates()
++    cols = ['patient_uid', 'study_uid', 'series_id', 'classified_modality', 'is_derived', 'acquisition_plane', 'is_localizer',
++            'is_subtraction', 'array_shape', 'array_spacing_mm', 'StudyDescription', 'ProcedureCodeSequence_0_CodeMeaning']
++    md = pd.concat([pd.read_csv(m.BASE + f'metadata/{b}_metadata.csv', low_memory=False, usecols=cols).assign(batch_id=b) for b in m.BATCHES])
++    f = md[(md.classified_modality == 'FLAIR') & (md.acquisition_plane == 'AXIAL') & (md.is_localizer.astype(str) == 'False')
++           & (md.is_derived.astype(str) == 'False') & (md.is_subtraction.astype(str) == 'False')].copy()
++    f['brain'] = f.StudyDescription.fillna('').str.contains('BEYIN|Cranial|CRANIAL', regex=True)
++    f = f[f.brain]
++    f['sp'] = f.array_spacing_mm.apply(lambda s: ast.literal_eval(s))
++    f['thick_proxy'] = f.sp.apply(max)
++    ex = c[c.label.isin(['positive', 'negative'])]
++    ex = ex.merge(f.drop(columns=['patient_uid']), on=['batch_id', 'study_uid'])
++    # study당 series 선택: 가장 작은 through-plane(proxy: 최대 spacing), 동률 series_id
++    ex = ex.sort_values(['batch_id', 'study_uid', 'thick_proxy', 'series_id']).drop_duplicates(['batch_id', 'study_uid'])
++    # 환자당 1 study: seed hash 순서 첫 study. 한 환자가 양·음성 모두 가지면 해당 환자는 제외(라벨 상충 방지)
++    lab_per_p = ex.groupby('patient_uid').label.nunique()
++    mixed = set(lab_per_p[lab_per_p > 1].index)
++    ex = ex[~ex.patient_uid.isin(mixed)].copy()
++    ex['h'] = ex.apply(lambda r: h(SEED, r.patient_uid, r.study_uid), axis=1)
++    ex = ex.sort_values('h').drop_duplicates('patient_uid')
++    ex['order_h'] = ex.apply(lambda r: h(SEED, 'order', r.patient_uid), axis=1)
++    ex = ex.sort_values(['label', 'order_h'])
++    sel = {}
++    tech = []
++    for lab in ['positive', 'negative']:
++        t = ex[ex.label == lab].head(3)
++        tech += t.to_dict('records')
++    tech_p = {r['patient_uid'] for r in tech}
++    rest = ex[~ex.patient_uid.isin(tech_p)]
++    plan = {'positive': {'batch23': 12, 'batch04': 12}, 'negative': {'batch04': 12, 'batch23': 12}}
++    explore, reserve = [], []
++    for lab in ['positive', 'negative']:
++        pool = {b: rest[(rest.label == lab) & (rest.batch_id == b)].to_dict('records') for b in m.BATCHES}
++        take = {b: min(plan[lab][b], len(pool[b])) for b in m.BATCHES}
++        short = 24 - sum(take.values())
++        if short > 0:  # 한 batch 부족분은 다른 기존 batch에서만 보충
++            for b in m.BATCHES:
++                room = len(pool[b]) - take[b]
++                add = min(room, short)
++                take[b] += add; short -= add
++        for b in m.BATCHES:
++            explore += pool[b][:take[b]]
++            reserve += pool[b][take[b]:take[b] + 6]
++    def slim(r, role):
++        return dict(role=role, batch_id=r['batch_id'], patient_uid=int(r['patient_uid']), study_uid=r['study_uid'], label=r['label'],
++                    series_id=r['series_id'], array_shape=r['array_shape'], array_spacing_mm=r['array_spacing_mm'],
++                    study_desc=r['StudyDescription'], pos_spans=r['pos_spans'], neg_spans=r['neg_spans'],
++                    zip_path=f"mri/{r['batch_id']}/{r['study_uid']}.zip")
++    man = [slim(r, 'tech') for r in tech] + [slim(r, 'explore') for r in explore] + [slim(r, 'reserve') for r in reserve]
++    lock = dict(rules=m.RULES, seed=SEED, hf_revision='f6e39794e7820c96c18465231a30da424e6d1c69',
++                source_sha256={k: sha_file(m.BASE + k) for k in ['splits.csv', 'reports/batch04_reports.csv', 'reports/batch23_reports.csv',
++                                                                  'metadata/batch04_metadata.csv', 'metadata/batch23_metadata.csv']},
++                code_sha256={k: sha_file(k) for k in ['mr123_labels.py', 'mr123_select.py']},
++                n_label_candidates=c.groupby(['batch_id', 'label']).size().rename(lambda x: str(x)).reset_index().to_dict('records') if False else
++                {f'{a}|{b}': int(n) for (a, b), n in c.groupby(['batch_id', 'label']).size().items()},
++                n_eligible_axial_flair={f'{a}|{b}': int(n) for (a, b), n in ex.groupby(['batch_id', 'label']).size().items()},
++                n_mixed_label_patients_excluded=len(mixed), plan=plan,
++                replacement_rule='데이터 검사(ZIP/영상/뇌범위) 실패 시에만 같은 label·batch의 다음 reserve로 대체; 모델 출력은 사용하지 않음',
++                manifest=man)
++    json.dump(lock, open(OUT + 'selection_lock.json', 'w'), indent=1, default=str)
++    print({r: sum(1 for x in man if x['role'] == r) for r in ['tech', 'explore', 'reserve']})
++    print(pd.DataFrame(man).groupby(['role', 'label', 'batch_id']).size())
++
++
++if __name__ == '__main__':
++    main()
+diff --git a/mr123_tech_build.py b/mr123_tech_build.py
+new file mode 100644
+index 0000000..74444e4
+--- /dev/null
++++ b/mr123_tech_build.py
+@@ -0,0 +1,16 @@
++"""iter_123: 기술 6명 영상 구성 + QC + montage"""
++import json, sys
++import mr123_data as D
++L = json.load(open(D.RES + 'data/selection_lock.json'))
++led = json.load(open(D.RES + 'data/fetch_ledger.json'))
++roles = sys.argv[1:]
++out = {}
++for r in L['manifest']:
++    if r['role'] in roles and r['study_uid'] in led:
++        info = D.build_case(r, led[r['study_uid']]['path'], D.ROOT + 'png/' + r['study_uid'])
++        info.update(label=r['label'], batch_id=r['batch_id'], role=r['role'])
++        out[r['study_uid']] = info
++        print(r['role'], r['label'], r['study_uid'], info.get('exclude'), info.get('canon_axcodes'), info.get('canon_shape'), info.get('canon_zooms'), info.get('brain_slice_range'), info.get('C_idx'), info.get('W_idx'))
++        if info.get('exclude') is None:
++            D.montage(info, 'W', D.RES + f'data/montage_W_{r["study_uid"]}.png')
++json.dump(out, open(D.RES + 'data/build_' + '_'.join(roles) + '.json', 'w'), indent=1)
+diff --git a/mr123_tensor_check.py b/mr123_tensor_check.py
+new file mode 100644
+index 0000000..c99ed7d
+--- /dev/null
++++ b/mr123_tensor_check.py
+@@ -0,0 +1,34 @@
++"""iter_123: 공식 apply_chat_template 경로와 수동 processor(text=, images=) 경로의 input_ids/pixel_values 동일성, 순서·placeholder·token 수 검사."""
++import json, sys, hashlib
++import torch
++import mr123_run as R
++from transformers import AutoProcessor
++
++stage = sys.argv[1]
++reqs = R.read_jsonl(R.GEN + stage + '/requests.jsonl')
++proc = AutoProcessor.from_pretrained(R.MODEL, revision=R.REV, cache_dir=R.CACHE)
++res = []
++bad = 0
++boi = proc.tokenizer.convert_tokens_to_ids('<start_of_image>') if '<start_of_image>' in proc.tokenizer.get_vocab() else None
++img_tok = proc.tokenizer.convert_tokens_to_ids('<image_soft_token>')
++for r in reqs:
++    msgs = R.messages_for(r)
++    a = proc.apply_chat_template(msgs, add_generation_prompt=True, tokenize=True, return_dict=True, return_tensors='pt')
++    text = proc.apply_chat_template(msgs, add_generation_prompt=True, tokenize=False)
++    from PIL import Image
++    imgs = [Image.open(p).convert('RGB') for p in r['paths']]
++    b = proc(text=text, images=imgs, return_tensors='pt', add_special_tokens=False)
++    ids_eq = bool(torch.equal(a['input_ids'], b['input_ids']))
++    pv_eq = bool(torch.equal(a['pixel_values'], b['pixel_values']))
++    n_img_tok = int((a['input_ids'] == img_tok).sum())
++    # 이미지 순서: 개별 이미지 pixel_values가 파일 순서와 일치
++    single = [proc(text='<start_of_image>', images=[im], return_tensors='pt')['pixel_values'][0] for im in imgs]
++    order_ok = all(torch.equal(a['pixel_values'][i], single[i]) for i in range(len(imgs)))
++    ok = ids_eq and pv_eq and order_ok and (n_img_tok == 256 * len(imgs))
++    bad += (not ok)
++    leak = any(k in text for k in [r['study_uid'], str(r['patient_uid']), '.png', r['label'], 'batch'])
++    res.append(dict(id=r['id'], cond=r['cond'], ids_eq=ids_eq, pv_eq=pv_eq, order_ok=order_ok, n_img=len(imgs), n_img_tok=n_img_tok,
++                    seq_len=int(a['input_ids'].shape[1]), pv_shape=list(a['pixel_values'].shape), leak_in_text=leak, ok=ok and not leak))
++out = dict(stage=stage, n=len(res), n_ok=sum(x['ok'] for x in res), results=res, chat_template_head=text[:300])
++json.dump(out, open(R.D.RES + f'tests/tensor_check_{stage}.json', 'w'), indent=1)
++print(out['n'], out['n_ok'], res[0])
+diff --git a/mr123_verify.py b/mr123_verify.py
+new file mode 100644
+index 0000000..11aab62
+--- /dev/null
++++ b/mr123_verify.py
+@@ -0,0 +1,66 @@
++"""iter_123: 독립 검산 (mr123_run/mr123_eval를 import하지 않음). 원시 worker jsonl·requests·selection_lock에서 BA/CI/전환/비용 재계산."""
++import glob, json, re, sys, random
++import numpy as np
++
++stage = sys.argv[1]
++G = f'results/iter_123/gen/{stage}/'
++reqs = [json.loads(l) for l in open(G + 'requests.jsonl')]
++recs = {}
++for fn in glob.glob(G + 'worker_*.jsonl'):
++    for l in open(fn):
++        l = l.strip()
++        if l:
++            r = json.loads(l)
++            assert r['id'] not in recs
++            recs[r['id']] = r
++assert set(recs) == {q['id'] for q in reqs}
++lock = json.load(open('results/iter_123/data/selection_lock.json'))
++lab_by_study = {m['study_uid']: m['label'] for m in lock['manifest']}
++
++def state(text):
++    ls = [l for l in text.split('\n') if l.strip()]
++    if not ls:
++        return 'INVALID'
++    f = re.sub(r'[^A-Za-z ]', ' ', ls[0]).upper().split()
++    hit = {w for w in f if w in ('PRESENT', 'ABSENT', 'UNCERTAIN')}
++    return hit.pop() if len(hit) == 1 else 'INVALID'
++
++pt = {}
++for q in reqs:
++    assert lab_by_study[q['study_uid']] == q['label']
++    pt.setdefault(q['study_uid'], {'label': q['label'], 'batch': q['batch_id']})[q['cond']] = state(recs[q['id']]['text'])
++for p in pt.values():
++    a, b = p['P1'], p['P2']
++    p['P'] = 'PRESENT' if 'PRESENT' in (a, b) else ('ABSENT' if a == b == 'ABSENT' else 'UNCERTAIN')
++ids = sorted(pt)
++lab = np.array([pt[i]['label'] == 'positive' for i in ids])
++def corr(c):
++    return np.array([(pt[i][c] == 'PRESENT') if pt[i]['label'] == 'positive' else (pt[i][c] == 'ABSENT') for i in ids])
++res = {}
++for c in ['C', 'W', 'P']:
++    k = corr(c)
++    res[c] = dict(sens=float(k[lab].mean()), spec=float(k[~lab].mean()), BA=float(0.5 * (k[lab].mean() + k[~lab].mean())),
++                  n_present=sum(pt[i][c] == 'PRESENT' for i in ids), n_absent=sum(pt[i][c] == 'ABSENT' for i in ids))
++rng = np.random.default_rng(122)
++def boot(a, b):
++    ka, kb = corr(a), corr(b)
++    pos, neg = np.where(lab)[0], np.where(~lab)[0]
++    ds = []
++    for _ in range(10000):
++        ip, ineg = rng.choice(pos, len(pos)), rng.choice(neg, len(neg))
++        ds.append(0.5 * (ka[ip].mean() - kb[ip].mean() + ka[ineg].mean() - kb[ineg].mean()))
++    return dict(diff=float(0.5 * (ka[lab].mean() - kb[lab].mean() + ka[~lab].mean() - kb[~lab].mean())), ci=[float(np.percentile(ds, 2.5)), float(np.percentile(ds, 97.5))])
++res['P-W'], res['W-C'] = boot('P', 'W'), boot('W', 'C')
++# 비용 (요청 합)
++cost = {}
++for c in ['C', 'W', 'P']:
++    rs = [recs[q['id']] for q in reqs if (q['cond'] == c or (c == 'P' and q['cond'] in ('P1', 'P2')))]
++    cost[c] = dict(n_requests=len(rs), sum_wall_s=sum(r['wall_s'] for r in rs), prompt_tokens=sum(r['prompt_tokens'] for r in rs),
++                   output_tokens=sum(r['n_new'] for r in rs), mean_wall_per_patient_s=sum(r['wall_s'] for r in rs) / len(ids))
++res['cost'] = cost
++res['all_eos'] = all(r['eos'] for r in recs.values())
++res['n'] = len(ids)
++# 보고서 정답 span과 요청 prompt 비누출: prompt에 label/보고 문구 없음
++res['prompt_leak'] = any(re.search(r'report|positive|negative label|batch', q['prompt'], re.I) for q in reqs)
++json.dump(res, open(f'results/iter_123/tests/verify_{stage}.json', 'w'), indent=1)
++print(json.dumps(res, indent=1))

@@ -373,3 +373,22 @@ iter_118의 RSNA 192명 합성 초안 개입에서 관찰한 순 명시 오답 �
 - 미해결: 일반적인 모델 조합 이후 공간 근거가 별도 가치를 제공하는가?
 - 미해결: 현재 unresolved 규약이 답하지 못하는 내용상 차이는 미확정으로 남는다.
 
+## mrrate-flair-fixed-positive-response — observed
+
+MR-RATE batch04·batch23 공식 train의 개발 48명(보고서 기준 양성24·음성24), 고정 axial FLAIR 입력과 PRESENT/ABSENT/UNCERTAIN prompt에서 MedGemma 1.5는 중앙8장·넓은8장·넓은8장의 두 묶음 분할 요청 모두 PRESENT를 출력했다. 보고서 기준 BA는 모든 조건에서 0.50이고 분할 집계의 개선은 없었다. 이는 현재 설정의 제한된 응답 관찰이며 영상 무사용, 일반적인 MRI 인식 또는 결합 능력의 결함을 확정하지 않는다.
+
+- 적용 목표 시작: iter_003
+- 최신 리뷰: agent/runs/iter_123/review.json
+- 근거: research/results/iter_123/gen/explore/requests.jsonl 및 worker_m0.jsonl–worker_m3.jsonl: 고유 192요청·48환자, 원문 첫 줄 모두 PRESENT.
+- 근거: research/results/iter_123/eval_explore.json: C/W/P sensitivity 1.0, specificity 0.0, BA 0.50; P−W와 W−C 모두 0, paired bootstrap 95% CI [0,0].
+- 근거: 리뷰에서 원시 출력·선정 manifest를 독립 대조했다. 모든 환자의 조건 간 정오 차이가 0이므로 모든 층화 bootstrap 재표집의 차이도 0임을 확인했다.
+- 사용·평가 검증: 리뷰 대상 e39ba0666faf34899f9a4c230102b9d3fb1c44e7의 신규 15개 소스와 작업 파일 내용이 일치했다. protocol에 기록된 코드·입력 hash도 일치했다.
+- 사용·평가 검증: tensor_check_tech.json 24/24 및 tensor_check_explore.json 192/192의 공식 processor 경로·영상 순서 검사 결과를 확인했다.
+- 사용·평가 검증: 탐색 요청에 연결된 고유 PNG 746개의 SHA256을 재검증했다. 192응답 모두 EOS이며 최대 출력은 65 token이었다.
+- 사용·평가 검증: source CSV hash와 선정 사례의 보고서 관련 문장을 대조했다. 정답은 보고서 기반이며 독립 임상 영상 정답이 아니다.
+- 사용·평가 검증: 음성 사례 montage를 직접 확인했다. 시각 검사는 임상 정상 판정이나 라벨 재판정을 대신하지 않는다.
+- 미해결: 기본 영상 인식 부족, 질문에 따른 응답 성향, 제한된 관측과 보고서 불확실성의 상대 기여는 미확인이다.
+- 미해결: 타 계열 모델·독립 환자·다른 입력 방식에서의 재현은 미검증이다.
+- 미해결: 일부 보고서의 넓은 정상 기술과 국소 이상 기술 사이 상충을 정규식만으로 충분히 처리했는지 확인이 필요하다.
+- 미해결: 전문 WMH 대안 이후에도 새로운 VLM 방법이 필요한 잔여 문제가 있는지 미확인이다.
+
