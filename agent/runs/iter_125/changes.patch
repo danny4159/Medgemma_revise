@@ -1,0 +1,1140 @@
+diff --git a/mr123_data.py b/mr123_data.py
+new file mode 100644
+index 0000000..29a5466
+--- /dev/null
++++ b/mr123_data.py
+@@ -0,0 +1,169 @@
++"""iter_123: study ZIP 안전 추출, FLAIR/brain-mask 검사, 뇌 범위 기반 slice 선택·렌더링 (규칙 mr123_rules_v1)."""
++import hashlib, json, os, zipfile
++import numpy as np
++import nibabel as nib
++from PIL import Image
++
++ROOT = '/home/test/.local/share/medgemma/mr_rate/'
++RES = '/SSD1_1TB/home/milab/daniel/08_medgemma/research/results/iter_123/'
++SIDE = 896
++AREA_FRAC = 0.05  # 뇌 범위: slice별 brain-mask 면적이 최대 면적의 5% 이상인 연속 구간 (사전 고정)
++N_SLICE = 8
++
++
++def sha_file(p):
++    d = hashlib.sha256()
++    with open(p, 'rb') as f:
++        for b in iter(lambda: f.read(1 << 22), b''):
++            d.update(b)
++    return d.hexdigest()
++
++
++def extract(zip_path, study, series_id, out_root=ROOT + 'extracted/'):
++    """flair 영상과 brain-mask만 안전 추출. 경로 이탈·symlink 거부, 기존 파일 덮어쓰기 금지."""
++    out = os.path.join(out_root, study)
++    os.makedirs(out, exist_ok=True)
++    want = {f'{study}/img/{study}_{series_id}.nii.gz': 'img.nii.gz',
++            f'{study}/seg/{study}_{series_id}_brain-mask.nii.gz': 'brain.nii.gz'}
++    z = zipfile.ZipFile(zip_path)
++    res = {}
++    for info in z.infolist():
++        if info.filename in want:
++            assert '..' not in info.filename and not info.filename.startswith('/')
++            assert (info.external_attr >> 16) & 0o170000 != 0o120000, 'symlink'
++            dst = os.path.join(out, want[info.filename])
++            if not os.path.exists(dst):
++                with z.open(info) as s, open(dst + '.part', 'wb') as d:
++                    while True:
++                        b = s.read(1 << 22)
++                        if not b:
++                            break
++                        d.write(b)
++                os.replace(dst + '.part', dst)
++            res[want[info.filename]] = dict(path=dst, sha256=sha_file(dst), size=os.path.getsize(dst), zip_member=info.filename)
++    missing = set(want.values()) - set(res)
++    return res, sorted(missing)
++
++
++def load_case(img_path, brain_path):
++    im = nib.load(img_path)
++    bm = nib.load(brain_path)
++    info = dict(orig_axcodes=''.join(nib.aff2axcodes(im.affine)), shape=list(im.shape), zooms=[float(z) for z in im.header.get_zooms()[:3]],
++                brain_shape=list(bm.shape), brain_axcodes=''.join(nib.aff2axcodes(bm.affine)),
++                affine_match=bool(np.allclose(im.affine, bm.affine, atol=1e-3)), ndim=len(im.shape))
++    if len(im.shape) != 3 or tuple(im.shape) != tuple(bm.shape):
++        return None, None, info
++    im = nib.as_closest_canonical(im)
++    bm = nib.as_closest_canonical(bm)
++    a = np.asarray(im.dataobj).astype(np.float32)
++    b = np.asarray(bm.dataobj) > 0
++    info['canon_axcodes'] = ''.join(nib.aff2axcodes(im.affine))
++    info['canon_shape'] = list(a.shape)
++    info['canon_zooms'] = [float(z) for z in im.header.get_zooms()[:3]]
++    return a, b, info
++
++
++def brain_range(b):
++    area = b.sum(axis=(0, 1)).astype(np.float64)
++    if area.max() <= 0:
++        return None
++    ok = area >= AREA_FRAC * area.max()
++    best, s = None, None
++    for i, v in enumerate(list(ok) + [False]):
++        if v and s is None:
++            s = i
++        if not v and s is not None:
++            if best is None or (i - 1 - s) > (best[1] - best[0]):
++                best = (s, i - 1)
++            s = None
++    return best
++
++
++def pick(lo, hi, f0, f1, n=N_SLICE):
++    L = hi - lo
++    pos = [lo + L * (f0 + (f1 - f0) * i / (n - 1)) for i in range(n)]
++    idx = [int(round(p)) for p in pos]
++    return idx
++
++
++def intensity_window(a, b):
++    v = a[b]
++    return float(np.percentile(v, 1)), float(np.percentile(v, 99))
++
++
++def render_slice(a, k, lo_v, hi_v, zooms):
++    s = a[:, :, k]
++    s = np.clip((s - lo_v) / max(hi_v - lo_v, 1e-6), 0, 1)
++    s = (s * 255 + 0.5).astype(np.uint8)
++    img = s.T[::-1, ::-1]  # RAS 정렬 후: 위=anterior, 영상 왼쪽=환자 오른쪽(radiological)
++    h, w = img.shape
++    # 평면내 spacing 보정 (x: 열 방향 zooms[0], y: 행 방향 zooms[1])
++    hh = h * zooms[1]
++    ww = w * zooms[0]
++    scale = SIDE / max(hh, ww)
++    nh, nw = max(1, int(round(hh * scale))), max(1, int(round(ww * scale)))
++    pil = Image.fromarray(img).resize((nw, nh), Image.BICUBIC)
++    canvas = Image.new('L', (SIDE, SIDE), 0)
++    canvas.paste(pil, ((SIDE - nw) // 2, (SIDE - nh) // 2))
++    return canvas.convert('RGB')
++
++
++def build_case(rec, zip_path, out_dir):
++    """returns dict with qc info and rendered PNG paths; None 사유 포함."""
++    ex, missing = extract(zip_path, rec['study_uid'], rec['series_id'])
++    info = dict(study_uid=rec['study_uid'], patient_uid=rec['patient_uid'], series_id=rec['series_id'], files=ex, missing=missing)
++    if missing:
++        info['exclude'] = 'missing_member:' + ','.join(missing)
++        return info
++    a, b, li = load_case(ex['img.nii.gz']['path'], ex['brain.nii.gz']['path'])
++    info.update(li)
++    if a is None:
++        info['exclude'] = 'shape_or_ndim_mismatch'
++        return info
++    if not info['affine_match']:
++        info['exclude'] = 'affine_mismatch'
++        return info
++    if not np.isfinite(a).all():
++        info['exclude'] = 'nonfinite'
++        return info
++    if info['canon_axcodes'] != 'RAS':
++        info['exclude'] = 'orientation_not_RAS'
++        return info
++    br = brain_range(b)
++    if br is None:
++        info['exclude'] = 'no_brain_range'
++        return info
++    lo, hi = br
++    info['brain_slice_range'] = [lo, hi]
++    info['n_brain_slices'] = hi - lo + 1
++    info['brain_voxels'] = int(b.sum())
++    C = pick(lo, hi, 0.25, 0.75)
++    W = pick(lo, hi, 0.05, 0.95)
++    info['C_idx'], info['W_idx'] = C, W
++    if len(set(C)) < N_SLICE or len(set(W)) < N_SLICE:
++        info['exclude'] = 'lt8_unique_slices'
++        return info
++    lo_v, hi_v = intensity_window(a, b)
++    info['window_p1_p99'] = [lo_v, hi_v]
++    if not hi_v > lo_v:
++        info['exclude'] = 'degenerate_window'
++        return info
++    os.makedirs(out_dir, exist_ok=True)
++    pngs = {}
++    for k in sorted(set(C) | set(W)):
++        p = os.path.join(out_dir, f'{rec["study_uid"]}_s{k:03d}.png')
++        im = render_slice(a, k, lo_v, hi_v, info['canon_zooms'])
++        if not os.path.exists(p):
++            im.save(p)
++        pngs[k] = dict(path=p, sha256=sha_file(p))
++    info['pngs'] = {str(k): v for k, v in pngs.items()}
++    info['exclude'] = None
++    return info
++
++
++def montage(info, which, out_path):
++    ims = [Image.open(info['pngs'][str(k)]['path']).resize((224, 224)) for k in info[which + '_idx']]
++    M = Image.new('RGB', (224 * 4, 224 * 2))
++    for i, im in enumerate(ims):
++        M.paste(im, ((i % 4) * 224, (i // 4) * 224))
++    M.save(out_path)
+diff --git a/mr123_fetch.py b/mr123_fetch.py
+new file mode 100644
+index 0000000..749b25d
+--- /dev/null
++++ b/mr123_fetch.py
+@@ -0,0 +1,46 @@
++"""iter_123: 선택 study ZIP 다운로드(공식 revision 고정, 토큰 내용 미기록). usage: python mr123_fetch.py tech|explore|reserve"""
++import hashlib, json, os, sys, warnings
++warnings.filterwarnings('ignore')
++os.environ['HF_TOKEN_PATH'] = '/home/test/.cache/huggingface/token'
++from huggingface_hub import HfApi, hf_hub_download
++
++ROOT = '/home/test/.local/share/medgemma/mr_rate/'
++RES = '/SSD1_1TB/home/milab/daniel/08_medgemma/research/results/iter_123/data/'
++REV = 'f6e39794e7820c96c18465231a30da424e6d1c69'
++BUDGET = 10 * 1024 ** 3
++
++
++def sha(p):
++    d = hashlib.sha256()
++    with open(p, 'rb') as f:
++        for b in iter(lambda: f.read(1 << 22), b''):
++            d.update(b)
++    return d.hexdigest()
++
++
++def main(roles):
++    L = json.load(open(RES + 'selection_lock.json'))
++    items = [r for r in L['manifest'] if r['role'] in roles]
++    api = HfApi()
++    infos = api.get_paths_info('Forithmus/MR-RATE', [r['zip_path'] for r in items], repo_type='dataset', revision=REV)
++    size = {i.path: i.size for i in infos}
++    led_p = RES + 'fetch_ledger.json'
++    led = json.load(open(led_p)) if os.path.exists(led_p) else {}
++    used = sum(v['size'] for v in led.values())
++    need = sum(size[r['zip_path']] for r in items if r['study_uid'] not in led)
++    free = os.statvfs(ROOT).f_bavail * os.statvfs(ROOT).f_frsize
++    print(f'roles={roles} 새 다운로드 {need/1e6:.1f}MB, 누적 {used/1e6:.1f}MB, 예산 {BUDGET/1e9:.1f}GB, 여유 {free/1e9:.0f}GB')
++    assert used + need <= BUDGET and need * 3 < free
++    for r in items:
++        if r['study_uid'] in led:
++            continue
++        p = hf_hub_download('Forithmus/MR-RATE', r['zip_path'], repo_type='dataset', revision=REV, local_dir=ROOT + 'raw',
++                            cache_dir=ROOT + 'cache')
++        assert os.path.getsize(p) == size[r['zip_path']]
++        led[r['study_uid']] = dict(path=p, size=size[r['zip_path']], sha256=sha(p), revision=REV, role=r['role'])
++        json.dump(led, open(led_p, 'w'), indent=1)
++        print('ok', r['study_uid'], size[r['zip_path']])
++
++
++if __name__ == '__main__':
++    main(sys.argv[1:])
+diff --git a/mr123_run.py b/mr123_run.py
+new file mode 100644
+index 0000000..1795167
+--- /dev/null
++++ b/mr123_run.py
+@@ -0,0 +1,214 @@
++"""iter_123: MedGemma 1.5 frozen 추론 요청 구성/worker/parser. 조건 C(중앙8), W(넓은8), P1/P2(W를 inferior4/superior4로 분할).
++usage:
++  python mr123_run.py requests <stage> <build_json> [<build_json>...]   # 요청 파일 생성(출력 전 잠금)
++  python mr123_run.py worker <stage> <worker_id> <max_new_tokens> [--limit N] [--batch B]
++"""
++import hashlib, json, os, re, sys, time
++import mr123_data as D
++
++MODEL = 'google/medgemma-1.5-4b-it'
++REV = '91850547d9f0b2fdd21aa7c5f4f3d1a8a52c243b'
++CACHE = '/SSD1_1TB/home/milab/daniel/08_medgemma/hf_cache'
++GEN = D.RES + 'gen/'
++STATES = ['PRESENT', 'ABSENT', 'UNCERTAIN']
++
++PROMPT = ('You are shown {n} axial FLAIR MRI slices from one brain MRI examination, {order}. '
++          'Question: Is there evidence of pathological hyperintense signal on FLAIR in the periventricular white matter in the images shown? '
++          'Answer on the first line with exactly one word: PRESENT, ABSENT, or UNCERTAIN. '
++          'Then give a brief justification (at most two sentences).')
++
++
++def sha(s):
++    return hashlib.sha256(s.encode()).hexdigest()
++
++
++def make_requests(builds):
++    reqs = []
++    for b in builds:
++        for sid, info in b.items():
++            if info.get('exclude') is not None:
++                continue
++            W = info['W_idx']
++            conds = {'C': (info['C_idx'], 'ordered from inferior to superior'), 'W': (W, 'ordered from inferior to superior'),
++                     'P1': (W[:4], 'ordered from inferior to superior (lower half of the covered range)'),
++                     'P2': (W[4:], 'ordered from inferior to superior (upper half of the covered range)')}
++            for c, (idx, order) in conds.items():
++                paths = [info['pngs'][str(k)]['path'] for k in idx]
++                hs = [info['pngs'][str(k)]['sha256'] for k in idx]
++                prompt = PROMPT.format(n=len(idx), order=order)
++                rid = sha('|'.join([str(info['patient_uid']), c, ','.join(hs), prompt, REV]))[:20]
++                reqs.append(dict(id=rid, patient_uid=info['patient_uid'], study_uid=sid, cond=c, slice_idx=idx, paths=paths, png_sha256=hs,
++                                 prompt=prompt, model=MODEL, revision=REV, label=info['label'], batch_id=info['batch_id'], role=info['role']))
++    return reqs
++
++
++def messages_for(r):
++    from PIL import Image
++    content = []
++    for i, p in enumerate(r['paths']):
++        content.append({'type': 'text', 'text': f'Image {i + 1}:'})
++        content.append({'type': 'image', 'image': Image.open(p).convert('RGB')})
++    content.append({'type': 'text', 'text': r['prompt']})
++    return [{'role': 'user', 'content': content}]
++
++
++def parse(text):
++    """첫 줄의 단일 상태. return (state, code). state in PRESENT/ABSENT/UNCERTAIN/INVALID"""
++    t = (text or '').strip()
++    lines = [l for l in t.split('\n') if l.strip()]
++    if not lines:
++        return 'INVALID', 'empty'
++    first = re.sub(r'[*_`#>\-:.\[\]()"]', ' ', lines[0]).strip()
++    found = [s for s in STATES if re.search(r'\b' + s + r'\b', first, re.I)]
++    if len(found) == 1:
++        strict = re.fullmatch(r'\s*' + found[0] + r'\s*', first, re.I) is not None
++        return found[0], 'ok_strict' if strict else 'ok_loose'
++    if len(found) > 1:
++        return 'INVALID', 'multi_state'
++    if re.search(r'cannot|unable|can\'?t|not able|I am sorry|sorry', t[:300], re.I):
++        return 'INVALID', 'refusal'
++    return 'INVALID', 'no_state'
++
++
++def agg_P(s1, s2):
++    if 'PRESENT' in (s1, s2):
++        return 'PRESENT'
++    if s1 == 'ABSENT' and s2 == 'ABSENT':
++        return 'ABSENT'
++    return 'UNCERTAIN'
++
++
++def read_jsonl(p):
++    out = []
++    if not os.path.exists(p):
++        return out
++    with open(p, 'rb') as f:
++        data = f.read()
++    for line in data.split(b'\n'):
++        if not line.strip():
++            continue
++        try:
++            out.append(json.loads(line))
++        except Exception:
++            break  # torn tail
++    return out
++
++
++def repair_tail(p):
++    if not os.path.exists(p):
++        return
++    with open(p, 'rb') as f:
++        data = f.read()
++    good = 0
++    pos = 0
++    for line in data.split(b'\n'):
++        end = pos + len(line) + 1
++        if line.strip():
++            try:
++                json.loads(line)
++            except Exception:
++                break
++        good = min(end, len(data))
++        pos = end
++    if good < len(data):
++        with open(p, 'rb+') as f:
++            f.truncate(good)
++
++
++def done_ids(stage):
++    d = GEN + stage
++    ids = set()
++    if os.path.isdir(d):
++        for fn in os.listdir(d):
++            if fn.startswith('worker_') and fn.endswith('.jsonl'):
++                ids |= {r['id'] for r in read_jsonl(os.path.join(d, fn))}
++    return ids
++
++
++def worker(stage, wid, max_new, limit=None, batch=1):
++    import torch
++    from transformers import AutoProcessor, AutoModelForImageTextToText
++    reqs = read_jsonl(GEN + stage + '/requests.jsonl')
++    out_p = GEN + stage + f'/worker_{wid}.jsonl'
++    repair_tail(out_p)
++    cdir = GEN + stage + '/claims'
++    os.makedirs(cdir, exist_ok=True)
++    t0 = time.perf_counter()
++    proc = AutoProcessor.from_pretrained(MODEL, revision=REV, cache_dir=CACHE)
++    model = AutoModelForImageTextToText.from_pretrained(MODEL, revision=REV, cache_dir=CACHE, torch_dtype=torch.bfloat16, device_map={'': 0})
++    model.eval()
++    load_s = time.perf_counter() - t0
++    print(json.dumps(dict(event='loaded', wid=wid, load_s=load_s, gpu=os.environ.get('CUDA_VISIBLE_DEVICES'))), flush=True)
++    done = done_ids(stage)
++    n = 0
++    f = open(out_p, 'a')
++    pending = [r for r in reqs if r['id'] not in done]
++    while pending:
++        group = []
++        for r in pending:
++            if len(group) >= batch:
++                break
++            try:
++                fd = os.open(os.path.join(cdir, r['id'] + '.claim'), os.O_CREAT | os.O_EXCL | os.O_WRONLY)
++                os.write(fd, f'{wid}:{os.getpid()}'.encode()); os.close(fd)
++                group.append(r)
++            except FileExistsError:
++                continue
++        pending = [r for r in pending if r not in group and r['id'] not in done]
++        if not group:
++            break
++        ts = time.perf_counter()
++        msgs = [messages_for(r) for r in group]
++        if batch == 1:
++            inp = proc.apply_chat_template(msgs[0], add_generation_prompt=True, tokenize=True, return_dict=True, return_tensors='pt')
++        else:
++            proc.tokenizer.padding_side = 'left'
++            inp = proc.apply_chat_template(msgs, add_generation_prompt=True, tokenize=True, return_dict=True, return_tensors='pt', padding=True)
++        inp = inp.to(model.device)
++        inp['pixel_values'] = inp['pixel_values'].to(torch.bfloat16)
++        plen = inp['input_ids'].shape[1]
++        te = time.perf_counter()
++        with torch.inference_mode():
++            gen = model.generate(**inp, max_new_tokens=max_new, do_sample=False)
++        tg = time.perf_counter()
++        eos_ids = set([proc.tokenizer.eos_token_id] + ([model.generation_config.eos_token_id] if isinstance(model.generation_config.eos_token_id, int) else list(model.generation_config.eos_token_id or [])))
++        for i, r in enumerate(group):
++            new = gen[i, plen:].tolist()
++            ended = any(t in eos_ids for t in new)
++            while new and new[-1] == proc.tokenizer.pad_token_id:
++                new.pop()
++            text = proc.tokenizer.decode(new, skip_special_tokens=True)
++            st, code = parse(text)
++            rec = dict(id=r['id'], study_uid=r['study_uid'], cond=r['cond'], text=text, state=st, parse_code=code, eos=bool(ended),
++                       n_new=len(new), prompt_tokens=int((inp['attention_mask'][i]).sum()), max_new=max_new, wid=wid, batch=batch,
++                       prep_s=te - ts, gen_s=tg - te, wall_s=tg - ts, n_img=len(r['paths']), t_end=time.time(),
++                       peak_mem_mib=torch.cuda.max_memory_allocated() / 2 ** 20, load_s=load_s, input_ids_sha=hashlib.sha256(inp['input_ids'][i].cpu().numpy().tobytes()).hexdigest())
++            f.write(json.dumps(rec) + '\n')
++        f.flush(); os.fsync(f.fileno())
++        n += len(group)
++        if limit and n >= limit:
++            break
++    f.close()
++    print(json.dumps(dict(event='done', wid=wid, n=n)), flush=True)
++
++
++if __name__ == '__main__':
++    cmd = sys.argv[1]
++    if cmd == 'requests':
++        stage = sys.argv[2]
++        builds = [json.load(open(p)) for p in sys.argv[3:]]
++        reqs = make_requests(builds)
++        d = GEN + stage
++        os.makedirs(d, exist_ok=True)
++        p = d + '/requests.jsonl'
++        assert not os.path.exists(p), 'requests 잠금 존재'
++        assert len({r['id'] for r in reqs}) == len(reqs)
++        with open(p, 'w') as f:
++            for r in reqs:
++                f.write(json.dumps(r) + '\n')
++        print(len(reqs), 'requests', hashlib.sha256(open(p, 'rb').read()).hexdigest())
++    elif cmd == 'worker':
++        stage, wid, mx = sys.argv[2], sys.argv[3], int(sys.argv[4])
++        lim = int(sys.argv[sys.argv.index('--limit') + 1]) if '--limit' in sys.argv else None
++        bs = int(sys.argv[sys.argv.index('--batch') + 1]) if '--batch' in sys.argv else 1
++        worker(stage, wid, mx, lim, bs)
+diff --git a/mr125_build.py b/mr125_build.py
+new file mode 100644
+index 0000000..66aed26
+--- /dev/null
++++ b/mr125_build.py
+@@ -0,0 +1,147 @@
++"""iter_125: SynthSeg 결과 -> 원 T2 격자 변환, U/A slice 선택, 렌더링(896 canvas, brain p1-p99), 점수 S(측뇌실 부피/ICV), QC.
++mr123_data.py의 brain_range/intensity_window/render_slice/pick을 재사용(렌더 규칙 동일). usage: python mr125_build.py ROLE"""
++import hashlib, json, os, sys
++import numpy as np
++import nibabel as nib
++from PIL import Image
++import mr123_data as D
++
++RES = 'results/iter_125/'
++LV = (4, 43)  # SynthSeg left/right lateral ventricle (labels table 확인; inferior lateral 5/44 제외)
++FRAC = 0.05
++N = 8
++
++
++def sha(p):
++    return hashlib.sha256(open(p, 'rb').read()).hexdigest()
++
++
++def spread(lo, hi, n=N):
++    return [int(round(lo + (hi - lo) * i / (n - 1))) for i in range(n)]
++
++
++def resample_nn(vol, vaff, shape, aff):
++    """nearest-neighbor: 목표 격자 voxel -> world -> 원 seg voxel 인덱스 (scipy 없이)."""
++    M = np.linalg.inv(vaff) @ aff
++    out = np.zeros(shape, dtype=vol.dtype)
++    ii, jj = np.meshgrid(np.arange(shape[0]), np.arange(shape[1]), indexing='ij')
++    for k in range(shape[2]):
++        p = M[:3, 0, None] * ii.ravel()[None] + M[:3, 1, None] * jj.ravel()[None] + (M[:3, 2, None] * k + M[:3, 3, None])
++        q = np.rint(p).astype(np.int64)
++        ok = np.all((q >= 0) & (q < np.array(vol.shape)[:, None]), axis=0)
++        v = np.zeros(ii.size, dtype=vol.dtype)
++        v[ok] = vol[q[0, ok], q[1, ok], q[2, ok]]
++        out[:, :, k] = v.reshape(shape[0], shape[1])
++    return out
++
++
++def build(m, prov, out_png):
++    f = prov['files']
++    im = nib.load(f['img.nii.gz']['path'])
++    bm = nib.load(f['brain.nii.gz']['path'])
++    seg = nib.load(prov['seg'])
++    info = dict(study_uid=m['study_uid'], patient_uid=m['patient_uid'], label=m['label'], batch_id=m['batch_id'], role=m['role'], series_id=m['series_id'],
++                orig_axcodes=''.join(nib.aff2axcodes(im.affine)), shape=list(im.shape), zooms=[float(z) for z in im.header.get_zooms()[:3]],
++                seg_shape=list(seg.shape), seg_axcodes=''.join(nib.aff2axcodes(seg.affine)), seg_zooms=[float(z) for z in seg.header.get_zooms()[:3]])
++    if len(im.shape) != 3 or im.shape != bm.shape or not np.allclose(im.affine, bm.affine, atol=1e-3):
++        info['exclude'] = 'img_brain_mismatch'
++        return info
++    # 1mm seg -> 원 T2 격자 (nearest). 원 T2 grid 위 mask
++    sd_native = np.rint(np.asarray(seg.dataobj)).astype(np.int16)
++    sd = resample_nn(sd_native, seg.affine, im.shape, im.affine)
++    # canonical RAS 정렬
++    ic = nib.as_closest_canonical(im)
++    bc = nib.as_closest_canonical(bm)
++    sc = nib.as_closest_canonical(nib.Nifti1Image(sd, im.affine))
++    a = np.asarray(ic.dataobj).astype(np.float32)
++    b = np.asarray(bc.dataobj) > 0
++    s = np.asarray(sc.dataobj)
++    info['canon_axcodes'] = ''.join(nib.aff2axcodes(ic.affine))
++    info['canon_zooms'] = [float(z) for z in ic.header.get_zooms()[:3]]
++    if info['canon_axcodes'] != 'RAS' or not np.isfinite(a).all():
++        info['exclude'] = 'orientation_or_nonfinite'
++        return info
++    br = D.brain_range(b)
++    if br is None:
++        info['exclude'] = 'no_brain_range'
++        return info
++    lo, hi = br
++    info['brain_slice_range'] = [lo, hi]
++    vent = np.isin(s, LV)
++    # 부피(1mm native seg 기준) / ICV = native seg 비배경 voxel 합 (SynthSeg의 total intracranial 정의)
++    vz = float(np.prod(seg.header.get_zooms()[:3]))
++    v_vent = float(np.isin(sd_native, LV).sum() * vz)
++    icv = float((sd_native > 0).sum() * vz)
++    info['vent_mm3'] = v_vent
++    info['icv_mm3'] = icv
++    info['S'] = v_vent / icv if icv > 0 else None
++    info['vent_voxels_in_T2_grid'] = int(vent.sum())
++    info['vent_in_brainmask_frac'] = float((vent & b).sum() / max(vent.sum(), 1))
++    info['vent_vol_ratio_T2grid_vs_native'] = float(vent.sum() * np.prod(info['canon_zooms']) / max(v_vent, 1))
++    area = vent.sum(axis=(0, 1)).astype(float)
++    info['vent_area_by_slice'] = area.tolist()
++    # U
++    U = D.pick(lo, hi, 0.05, 0.95)
++    info['U_idx'] = U
++    # A
++    info['A_fallback'] = None
++    A = None
++    if area.max() > 0:
++        ok = np.where(area >= FRAC * area.max())[0]
++        alo, ahi = int(ok.min()), int(ok.max())
++        info['A_range'] = [alo, ahi]
++        A = spread(alo, ahi)
++        if len(set(A)) < N:
++            A = None
++            info['A_fallback'] = 'lt8_unique'
++    else:
++        info['A_fallback'] = 'no_ventricle_voxels'
++    if A is None:
++        A = list(U)
++    info['A_idx'] = A
++    if len(set(U)) < N:
++        info['exclude'] = 'U_lt8_unique'
++        return info
++    lo_v, hi_v = D.intensity_window(a, b)
++    info['window_p1_p99'] = [lo_v, hi_v]
++    os.makedirs(out_png, exist_ok=True)
++    pngs = {}
++    for k in sorted(set(U) | set(A)):
++        p = os.path.join(out_png, f'{m["study_uid"]}_s{k:03d}.png')
++        if not os.path.exists(p):
++            D.render_slice(a, k, lo_v, hi_v, info['canon_zooms']).save(p)
++        pngs[str(k)] = dict(path=p, sha256=sha(p))
++    info['pngs'] = pngs
++    # QC 확인용(모델 입력 아님): 측뇌실 outline overlay montage
++    ov = []
++    for k in A:
++        base = np.array(D.render_slice(a, k, lo_v, hi_v, info['canon_zooms']))
++        mk = D.render_slice(np.where(np.arange(a.shape[2])[None, None, :] == k, vent.astype(np.float32), 0), k, 0, 1, info['canon_zooms'])
++        mk = np.array(mk)[:, :, 0] > 127
++        base[mk, 0] = 255
++        ov.append(Image.fromarray(base).resize((224, 224)))
++    M = Image.new('RGB', (224 * 4, 224 * 2))
++    for i, x in enumerate(ov):
++        M.paste(x, ((i % 4) * 224, (i // 4) * 224))
++    M.save(os.path.join(RES, 'qc', f'overlayA_{m["study_uid"]}.png'))
++    info['exclude'] = None
++    return info
++
++
++def main(role):
++    L = json.load(open(RES + 'data/selection_lock.json'))
++    prov = json.load(open(RES + f'seg/prov_{role}.json'))
++    os.makedirs(RES + 'qc', exist_ok=True)
++    out = {}
++    for m in L['manifest']:
++        if m['role'] == role:
++            out[m['study_uid']] = build(m, prov[m['study_uid']], os.path.join('/home/test/.local/share/medgemma/mr_rate/png125', m['study_uid']))
++            i = out[m['study_uid']]
++            print(m['study_uid'], m['label'], i.get('exclude'), 'S=%.4f' % (i.get('S') or -1), 'A_fb', i.get('A_fallback'), 'U', i.get('U_idx'), 'A', i.get('A_idx'))
++    p = RES + f'seg/build_{role}.json'
++    assert not os.path.exists(p)
++    json.dump(out, open(p, 'w'), indent=1)
++
++
++if __name__ == '__main__':
++    main(sys.argv[1])
+diff --git a/mr125_fetch.py b/mr125_fetch.py
+new file mode 100644
+index 0000000..83ed7bc
+--- /dev/null
++++ b/mr125_fetch.py
+@@ -0,0 +1,73 @@
++"""iter_125: 선택 study ZIP 다운로드(mr123_fetch.py 수정본; 출처 e39ba0666faf). 공식 revision 고정, LFS sha256으로 기존/신규 ZIP 모두 검증, 누적 예산 선계산, 원자적 ledger. 토큰 내용 미출력.
++usage: python mr125_fetch.py ROLE[,ROLE] [--dry]"""
++import hashlib, json, os, sys, warnings
++warnings.filterwarnings('ignore')
++os.environ['HF_TOKEN_PATH'] = '/home/test/.cache/huggingface/token'
++from huggingface_hub import HfApi, hf_hub_download
++
++ROOT = '/home/test/.local/share/medgemma/mr_rate/'
++RES = 'results/iter_125/data/'
++OLD_LEDGERS = ['results/iter_123/data/fetch_ledger.json']
++REV = 'f6e39794e7820c96c18465231a30da424e6d1c69'
++BUDGET = 10 * 1024 ** 3  # 누적 ZIP 예산(기존 iter_123 54개 포함)
++
++
++def sha(p):
++    d = hashlib.sha256()
++    with open(p, 'rb') as f:
++        for b in iter(lambda: f.read(1 << 22), b''):
++            d.update(b)
++    return d.hexdigest()
++
++
++def atomic_json(obj, p):
++    with open(p + '.tmp', 'w') as f:
++        json.dump(obj, f, indent=1)
++    os.replace(p + '.tmp', p)
++
++
++def main(roles, dry):
++    L = json.load(open(RES + 'selection_lock.json'))
++    assert L['manifest']
++    items = [r for r in L['manifest'] if r['role'] in roles]
++    old = {}
++    for p in OLD_LEDGERS:
++        old.update(json.load(open(p)))
++    api = HfApi()
++    led_p = RES + 'fetch_ledger.json'
++    led = json.load(open(led_p)) if os.path.exists(led_p) else {}
++    # 기존 ZIP: 크기·공식 sha256 검증
++    zp = lambda r: f'mri/{r["batch_id"]}/{r["study_uid"]}.zip'
++    paths = [zp(r) for r in items] + [v['path'].split('raw/')[-1] for v in old.values()]
++    info = {i.path: i for i in api.get_paths_info('Forithmus/MR-RATE', paths, repo_type='dataset', revision=REV)}
++    old_total = 0
++    for k, v in old.items():
++        rel = v['path'].split('raw/')[-1]
++        i = info[rel]
++        assert os.path.getsize(v['path']) == i.size == v['size'], ('old size', k)
++        assert v['sha256'] == i.lfs.sha256, ('old sha', k)
++        old_total += i.size
++    new_need = sum(info[zp(r)].size for r in items if r['study_uid'] not in led)
++    used_new = sum(v['size'] for v in led.values())
++    free = os.statvfs(ROOT).f_bavail * os.statvfs(ROOT).f_frsize
++    print(f'roles={roles} 기존 {old_total/1e9:.2f}GB(54) + 이번 이전 {used_new/1e9:.2f}GB + 새로 {new_need/1e9:.2f}GB = {(old_total+used_new+new_need)/1e9:.2f}GB / 예산 {BUDGET/1e9:.2f}GB, 디스크 여유 {free/1e9:.0f}GB')
++    if old_total + used_new + new_need > BUDGET or new_need * 3 > free:
++        print('BUDGET_EXCEEDED: 다운로드 중단')
++        sys.exit(3)
++    if dry:
++        return
++    for r in items:
++        if r['study_uid'] in led:
++            continue
++        i = info[zp(r)]
++        p = hf_hub_download('Forithmus/MR-RATE', zp(r), repo_type='dataset', revision=REV, local_dir=ROOT + 'raw', cache_dir=ROOT + 'cache')
++        assert os.path.getsize(p) == i.size
++        h = sha(p)
++        assert h == i.lfs.sha256, ('sha mismatch', r['study_uid'])
++        led[r['study_uid']] = dict(path=p, size=i.size, sha256=h, revision=REV, role=r['role'], official_lfs_sha256=i.lfs.sha256)
++        atomic_json(led, led_p)
++        print('ok', r['study_uid'], i.size)
++
++
++if __name__ == '__main__':
++    main(sys.argv[1].split(','), '--dry' in sys.argv)
+diff --git a/mr125_handoff_audit.py b/mr125_handoff_audit.py
+new file mode 100644
+index 0000000..26c4e39
+--- /dev/null
++++ b/mr125_handoff_audit.py
+@@ -0,0 +1,188 @@
++"""iter_125 인계 감사: 원 산출물을 변경하지 않고 예산 중단과 미완료 범위를 보존한다."""
++import argparse
++from collections import Counter
++import hashlib
++import importlib.metadata
++import json
++import os
++from pathlib import Path
++import subprocess
++import sys
++import time
++import zipfile
++
++import nibabel as nib
++import numpy as np
++from PIL import Image
++from scipy.ndimage import affine_transform
++
++
++ROOT = Path('results/iter_125')
++REV = 'f6e39794e7820c96c18465231a30da424e6d1c69'
++SS = Path('results/external/synthseg_src/SynthSeg-2a2aa3bbfccb83f8253a51ca8b329b9938a2646d')
++
++
++def sha(path):
++    d = hashlib.sha256()
++    with open(path, 'rb') as f:
++        for b in iter(lambda: f.read(4 << 20), b''):
++            d.update(b)
++    return d.hexdigest()
++
++
++def main():
++    ap = argparse.ArgumentParser()
++    ap.add_argument('--out', required=True)
++    args = ap.parse_args()
++    out = Path(args.out)
++    if out.exists():
++        raise FileExistsError(out)
++    started = time.time()
++    before = {str(p): sha(p) for p in ROOT.rglob('*') if p.is_file()}
++    lock = json.loads((ROOT / 'data/selection_lock.json').read_text())
++    old = json.loads(Path('results/iter_123/data/fetch_ledger.json').read_text())
++    current = json.loads((ROOT / 'data/fetch_ledger.json').read_text())
++    prov = json.loads((ROOT / 'seg/prov_tech.json').read_text())
++    build = json.loads((ROOT / 'seg/build_tech.json').read_text())
++    checks = []
++
++    def check(name, ok, detail=None):
++        checks.append({'name': name, 'pass': bool(ok), 'detail': detail})
++
++    check('selection_60_unique_patients', len(lock['manifest']) == 60 and
++          len({m['patient_uid'] for m in lock['manifest']}) == 60)
++    roles = Counter(m['role'] for m in lock['manifest'])
++    cells = Counter(f"{m['role']}|{m['batch_id']}|{m['label']}" for m in lock['manifest'])
++    check('fixed_role_cell_sizes', roles == {'tech': 8, 'calib': 12, 'explore': 40} and
++          all(n == {'tech': 2, 'calib': 3, 'explore': 10}[k.split('|')[0]] for k, n in cells.items()))
++    for rel, h in lock['source_sha256'].items():
++        check('metadata:' + rel, sha(Path('/home/test/.local/share/medgemma/mr_rate/meta') / rel) == h)
++    for rel, h in lock['code_sha256'].items():
++        check('selection_code:' + rel, sha(rel) == h)
++    reuse = json.loads(Path('../agent/runs/iter_125/reuse_manifest.json').read_text())
++    for rel, item in reuse['files'].items():
++        blob = subprocess.check_output(['git', 'hash-object', '--', rel], text=True).strip()
++        check('reuse_blob:' + rel, blob == item['blob'], {'actual': blob, 'expected': item['blob']})
++
++    os.environ['HF_TOKEN_PATH'] = '/home/test/.cache/huggingface/token'
++    from huggingface_hub import HfApi
++    paths = {f"mri/{m['batch_id']}/{m['study_uid']}.zip" for m in lock['manifest']}
++    paths.update(v['path'].split('/raw/')[-1] for v in old.values())
++    infos = {i.path: i for i in HfApi().get_paths_info('Forithmus/MR-RATE', sorted(paths),
++                                                   repo_type='dataset', revision=REV)}
++    check('official_path_set_complete', set(infos) == paths)
++    for origin, led in [('old', old), ('current', current)]:
++        for study, v in led.items():
++            rel = v['path'].split('/raw/')[-1]
++            i = infos[rel]
++            h = sha(v['path'])
++            check(f'{origin}_zip:{study}', h == v['sha256'] == i.lfs.sha256 and
++                  Path(v['path']).stat().st_size == v['size'] == i.size and v['revision'] == REV)
++    old_paths = {v['path'].split('/raw/')[-1] for v in old.values()}
++    current_paths = {v['path'].split('/raw/')[-1] for v in current.values()}
++    selected_paths = {f"mri/{m['batch_id']}/{m['study_uid']}.zip" for m in lock['manifest']}
++    needed_paths = selected_paths - old_paths - current_paths
++    total_bytes = sum(infos[p].size for p in old_paths | current_paths | selected_paths)
++    budget = dict(revision=REV, limit_bytes=10 * 1024 ** 3,
++                  old_zip_count=len(old_paths), current_zip_count=len(current_paths),
++                  old_bytes=sum(infos[p].size for p in old_paths),
++                  current_bytes=sum(infos[p].size for p in current_paths - old_paths),
++                  remaining_zip_count=len(needed_paths), remaining_bytes=sum(infos[p].size for p in needed_paths),
++                  planned_cumulative_bytes=total_bytes, exceeded=total_bytes > 10 * 1024 ** 3,
++                  official_objects={p: dict(size=infos[p].size, sha256=infos[p].lfs.sha256) for p in sorted(paths)})
++    budget['excess_bytes'] = max(0, total_bytes - budget['limit_bytes'])
++    # 예산 실패는 원 계획의 실행 중단 조건이다. 실패를 모델의 음성 결과로 바꾸지 않는다.
++    check('planned_cumulative_zip_budget', not budget['exceeded'], budget)
++
++    import mr123_data as render
++    from mr125_build import resample_nn
++    technical = []
++    for m in lock['manifest']:
++        study = m['study_uid']
++        if m['role'] != 'tech':
++            continue
++        p = prov[study]
++        b = build[study]
++        with zipfile.ZipFile(current[study]['path']) as z:
++            for kind, f in p['files'].items():
++                matches = [i for i in z.infolist() if i.filename == f['zip_member']]
++                check(f'unique_member:{study}:{kind}', len(matches) == 1)
++                with z.open(matches[0]) as member:
++                    d = hashlib.sha256()
++                    for chunk in iter(lambda: member.read(4 << 20), b''):
++                        d.update(chunk)
++                check(f'extracted_sha:{study}:{kind}', d.hexdigest() == sha(f['path']) == f['sha256'])
++        check('seg_sha:' + study, sha(p['seg']) == p['seg_sha256'])
++        im = nib.load(p['files']['img.nii.gz']['path'])
++        brain = nib.load(p['files']['brain.nii.gz']['path'])
++        seg = nib.load(p['seg'])
++        sd = np.rint(np.asarray(seg.dataobj)).astype(np.int16)
++        check('input_grid:' + study, len(im.shape) == 3 and im.shape == brain.shape and
++              np.allclose(im.affine, brain.affine, atol=1e-3) and np.isfinite(im.get_fdata()).all())
++        check('seg_1mm:' + study, np.allclose(seg.header.get_zooms()[:3], 1))
++        mapping = np.linalg.inv(seg.affine) @ im.affine
++        independent = affine_transform(sd, mapping[:3, :3], offset=mapping[:3, 3], output_shape=im.shape,
++                                       order=0, mode='grid-constant', cval=0, prefilter=False)
++        actual = resample_nn(sd, seg.affine, im.shape, im.affine)
++        check('nearest_resampling_vs_scipy:' + study, np.array_equal(actual, independent),
++              {'differing_voxels': int(np.count_nonzero(actual != independent))})
++        a = np.asarray(nib.as_closest_canonical(im).dataobj).astype(np.float32)
++        bm = np.asarray(nib.as_closest_canonical(brain).dataobj) > 0
++        window = render.intensity_window(a, bm)
++        check('window:' + study, np.allclose(window, b['window_p1_p99']))
++        check('ras:' + study, ''.join(nib.aff2axcodes(nib.as_closest_canonical(im).affine)) == 'RAS')
++        for idx, entry in b['pngs'].items():
++            img = render.render_slice(a, int(idx), *window, b['canon_zooms'])
++            check(f'png:{study}:{idx}', sha(entry['path']) == entry['sha256'] and
++                  np.array_equal(np.asarray(img), np.asarray(Image.open(entry['path']))) and img.size == (896, 896))
++        has_foreground = bool(np.any(sd))
++        technical.append(dict(study_uid=study, label=m['label'], seconds=p['seconds'],
++                              foreground_voxels=int(np.count_nonzero(sd)),
++                              lateral_ventricle_voxels=int(np.isin(sd, [4, 43]).sum()),
++                              segmentation_nonempty=has_foreground, A_fallback=b['A_fallback'],
++                              U_idx=b['U_idx'], A_idx=b['A_idx'],
++                              vol_csv_exists=Path(p['vol_csv']).exists(),
++                              provisional_S=b['S']))
++    code = (SS / 'SynthSeg/predict_synthseg.py').read_text()
++    check('official_v1_no_total_icv_branch_identified', "if not v1:" in code and
++          "np.array(['total intracranial'])" in code)
++    invalid_baseline = {
++        'implementation': 'SynthSeg --v1; hard-label nonbackground voxel count used as ICV',
++        'official': 'predict_synthseg.py adds total intracranial output only when not v1; volumes sum posterior probabilities',
++        'status': '미검증',
++        'reason_ko': '현재 hard mask 비배경 부피는 계획의 공식 ICV와 동등성이 검증되지 않았음',
++        'missing_v2_weights': not (SS / 'models/synthseg_2.0.h5').exists(),
++        'missing_qc_weights': not (SS / 'models/synthseg_qc_2.0.h5').exists(),
++        'zero_segmentations': [v['study_uid'] for v in technical if not v['segmentation_nonempty']],
++    }
++    envpy = Path('results/environments/synthseg125/bin/python').resolve()
++    freeze = subprocess.run([str(envpy), '-m', 'pip', 'freeze'], capture_output=True, text=True)
++    check('isolated_environment_freeze', freeze.returncode == 0)
++    check('inherited_outputs_unchanged', all(sha(p) == h for p, h in before.items()))
++    report = dict(iteration=125, created_utc=time.strftime('%Y-%m-%dT%H:%M:%SZ', time.gmtime()),
++                  elapsed_s=time.time() - started, checkpoint='adb8d637bace1f0ad30f48df78a58befee78f836',
++                  sys_executable=sys.executable, CUDA_VISIBLE_DEVICES=os.environ.get('CUDA_VISIBLE_DEVICES'),
++                  source_sha256=sha(__file__), checks=checks, roles=dict(roles), cells=dict(cells), budget=budget,
++                  technical=technical, baseline_blocker=invalid_baseline,
++                  inherited_files_before_sha256=before,
++                  official_source_sha256={str(p): sha(p) for p in [SS / 'README.md', SS / 'LICENSE.txt',
++                      SS / 'data/labels table.txt', SS / 'SynthSeg/predict_synthseg.py',
++                      SS / 'scripts/commands/SynthSeg_predict.py', SS / 'models/synthseg_1.0.h5']},
++                  synthseg_environment_python=str(envpy), synthseg_pip_freeze=freeze.stdout,
++                  medgemma_packages={k: importlib.metadata.version(k) for k in ['torch','transformers','numpy','nibabel','Pillow','huggingface_hub']},
++                  valid_experiment=False, decision='execution_blocked_before_VLM',
++                  pending=['budget_replanning', 'official_ICV_QC_baseline', 'full_report_eligibility_validation',
++                           'technical_MedGemma_outputs', 'throughput_comparison', 'strict_runtime_tests',
++                           'pregeneration_eval_lock', 'calibration12', 'explore40', 'independent_evaluation'],
++                  summary_ko='누적 ZIP 예산 초과로 사전 중단. 기존 기술8명 자산은 보존했으나 공식 ICV 전문 대조와 VLM 비교는 미완료.')
++    out.parent.mkdir(parents=True, exist_ok=True)
++    with out.open('x') as f:
++        json.dump(report, f, ensure_ascii=False, indent=2)
++    print(json.dumps(dict(output=str(out), checks=len(checks), failed=[c['name'] for c in checks if not c['pass']],
++                          budget={k:v for k,v in budget.items() if k != 'official_objects'},
++                          baseline_blocker=invalid_baseline), ensure_ascii=False))
++    return 2 if budget['exceeded'] or invalid_baseline['status'] == '미검증' or any(not c['pass'] for c in checks) else 0
++
++
++if __name__ == '__main__':
++    raise SystemExit(main())
+diff --git a/mr125_lock.py b/mr125_lock.py
+new file mode 100644
+index 0000000..eab7661
+--- /dev/null
++++ b/mr125_lock.py
+@@ -0,0 +1,68 @@
++"""iter_125: 사례별 수동 검토 결과(출력 전)를 고정. 정규식은 후보 검색만 했고 아래 선택은 hash 순서 + 수동 적격성 판정.
++적격 조건: 양측/복수 측뇌실의 크기 기술이 명시(양성: 확장·prominent·widen 등, 음성: 정상 크기/폭). 단수 'lateral ventricle', 편측, 상충은 unknown.
++usage: python mr125_lock.py show | lock"""
++import hashlib, json, re, sys
++
++import pandas as pd
++
++M = '/home/test/.local/share/medgemma/mr_rate/meta/'
++RES = 'results/iter_125/data/'
++# (cell) -> 최종 환자 순서(= hash 순서 중 적격만). 앞2 tech, 다음3 calib, 나머지10 explore
++SEL = {
++    'batch04|positive': [14670, 14967, 3405, 14550, 1967, 18291, 17804, 15758, 14950, 17759, 14770, 17564, 15179, 7790, 16347],
++    'batch23|positive': [69340, 68412, 68807, 70842, 67665, 68616, 68389, 70433, 69253, 70116, 70707, 70654, 70911, 70531, 69184],
++    'batch04|negative': [16576, 17117, 16714, 16713, 17201, 16623, 17856, 16764, 16614, 17185, 16463, 10914, 16451, 15764, 15453],
++    'batch23|negative': [36505, 353, 70814, 68800, 70189, 69066, 70113, 70291, 68654, 68298, 69946, 69573, 68622, 41333, 36182],
++}
++EXCLUDED_AFTER_REVIEW = {
++    # patient: reason (hash 순서에서 건너뛴 사례; 모두 선정 전 원문 검토)
++    17182: 'singular lateral ventricle (ambiguous side)', 16645: 'unilateral left only', 15831: 'unilateral', 16126: 'unilateral',
++    14766: 'narrowing', 16246: 'ventricular system, size compatible with age (hedged)', 16029: 'size compatible with age (hedged)',
++    70917: 'singular', 70362: 'unilateral', 70259: 'normal/enlarged conflict', 68783: 'singular', 70042: 'singular',
++    68414: 'unilateral+generic mix', 70379: 'conflict', 70005: 'singular', 68702: 'unilateral variant', 68627: 'normal ventricles (regex mislabel)',
++    68528: 'singular',
++}
++
++
++def sents(t):
++    t = re.sub(r'\s+', ' ', str(t))
++    return [s.strip() for s in re.split(r'(?<=[.;])\s+(?=[A-Z])', t) if s.strip()]
++
++
++def main(mode):
++    C = json.load(open(RES + 'ordered_candidates.json'))
++    by = {c['patient_uid']: c for v in C.values() for c in v}
++    rep = {}
++    for b in ['batch04', 'batch23']:
++        r = pd.read_csv(M + f'reports/{b}_reports.csv')
++        rep.update({x.study_uid: x for x in r.itertuples()})
++    man = []
++    for cell, ids in SEL.items():
++        b, lab = cell.split('|')
++        for i, pid in enumerate(ids):
++            c = by[pid]
++            assert c['batch_id'] == b and c['cand_label'] == lab
++            role = 'tech' if i < 2 else 'calib' if i < 5 else 'explore'
++            r = rep[c['study_uid']]
++            ven = [(k, s) for k in ['findings', 'impression'] for s in sents(getattr(r, k)) if re.search(r'ventric', s, re.I) and not re.fullmatch(r'.*4th ventricle.*', s) ]
++            man.append(dict(role=role, batch_id=b, label=lab, patient_uid=pid, study_uid=c['study_uid'], series_id=c['series_id'], array_shape=c['array_shape'],
++                            array_spacing_mm=c['array_spacing_mm'], span_key=c['pos'] if lab == 'positive' else c['neg'], all_ventricle_sentences=ven))
++    if mode == 'show':
++        for m in man:
++            print(m['label'][:3], m['batch_id'], m['patient_uid'], m['study_uid'])
++            for k, s in m['all_ventricle_sentences']:
++                print('    ', k[:3], s[:230])
++        return
++    assert len({m['patient_uid'] for m in man}) == 60
++    src = {f: hashlib.sha256(open(M + f, 'rb').read()).hexdigest() for f in ['splits.csv', 'metadata/batch04_metadata.csv', 'metadata/batch23_metadata.csv', 'reports/batch04_reports.csv', 'reports/batch23_reports.csv']}
++    L = dict(seed=125, rule='per batch x label: SHA256("125|patient") order, manual eligibility review, first 15 eligible: 2 tech, 3 calib, 10 explore',
++             source_sha256=src, code_sha256={f: hashlib.sha256(open(f, 'rb').read()).hexdigest() for f in ['mr125_select.py', 'mr125_order.py', 'mr125_lock.py']},
++             excluded_after_review=EXCLUDED_AFTER_REVIEW, manifest=man)
++    import os
++    assert not os.path.exists(RES + 'selection_lock.json')
++    json.dump(L, open(RES + 'selection_lock.json', 'w'), indent=1)
++    print('locked', len(man))
++
++
++if __name__ == '__main__':
++    main(sys.argv[1])
+diff --git a/mr125_order.py b/mr125_order.py
+new file mode 100644
+index 0000000..e13c959
+--- /dev/null
++++ b/mr125_order.py
+@@ -0,0 +1,33 @@
++"""iter_125: batch x 후보라벨 층별 SHA256(seed125|patient) 순서 고정 후, 검토용 문장 출력. usage: python mr125_order.py N"""
++import hashlib, json, sys
++
++N = int(sys.argv[1]) if len(sys.argv) > 1 else 22
++C = json.load(open('results/iter_125/data/candidates_raw.json'))
++order = {}
++for c in C:
++    if c['pos'] and not c['neg']:
++        lab = 'positive'
++    elif c['neg'] and not c['pos']:
++        lab = 'negative'
++    else:
++        continue
++    c['cand_label'] = lab
++    c['h'] = hashlib.sha256(f'125|{c["patient_uid"]}'.encode()).hexdigest()
++    order.setdefault((c['batch_id'], lab), []).append(c)
++res = {}
++for k, v in sorted(order.items()):
++    v.sort(key=lambda c: c['h'])
++    res['|'.join(k)] = v
++json.dump(res, open('results/iter_125/data/ordered_candidates.json', 'w'), indent=1)
++S0 = int(sys.argv[2]) if len(sys.argv) > 2 else 0
++ONLY = sys.argv[3] if len(sys.argv) > 3 else ''
++for k, v in res.items():
++    if ONLY not in k:
++        continue
++    print('=====', k, len(v))
++    for i, c in enumerate(v[:N]):
++        if i < S0:
++            continue
++        print(f'[{i}] {c["patient_uid"]} {c["study_uid"]} {c["series_id"]} {c["array_shape"]}')
++        for sec, s in c['hits']:
++            print('   ', sec[:3], s[:300])
+diff --git a/mr125_seg.py b/mr125_seg.py
+new file mode 100644
+index 0000000..426ebd7
+--- /dev/null
++++ b/mr125_seg.py
+@@ -0,0 +1,73 @@
++"""iter_125: 선택 T2 안전 추출(study/series/revision별 경로, member·파일 sha 기록) + SynthSeg 실행.
++usage: python mr125_seg.py ROLE GPU_INDEX   (SynthSeg 공식 commit 2a2aa3b, 번들 synthseg_1.0.h5; 2.0 가중치는 접근 불가)"""
++import hashlib, json, os, subprocess, sys, time, zipfile
++
++ROOT = '/home/test/.local/share/medgemma/mr_rate/e125/'
++RES = 'results/iter_125/'
++REV = 'f6e39794e7820c96c18465231a30da424e6d1c69'
++ENVPY = os.path.abspath('results/environments/synthseg125/bin/python')
++SS = os.path.abspath('results/external/synthseg_src/SynthSeg-2a2aa3bbfccb83f8253a51ca8b329b9938a2646d')
++
++
++def sha_file(p):
++    d = hashlib.sha256()
++    with open(p, 'rb') as f:
++        for b in iter(lambda: f.read(1 << 22), b''):
++            d.update(b)
++    return d.hexdigest()
++
++
++def extract(m, zip_path):
++    out = os.path.join(ROOT, REV[:8], m['study_uid'], m['series_id'])
++    os.makedirs(out, exist_ok=True)
++    want = {f'{m["study_uid"]}/img/{m["study_uid"]}_{m["series_id"]}.nii.gz': 'img.nii.gz',
++            f'{m["study_uid"]}/seg/{m["study_uid"]}_{m["series_id"]}_brain-mask.nii.gz': 'brain.nii.gz'}
++    z = zipfile.ZipFile(zip_path)
++    res = {}
++    for info in z.infolist():
++        if info.filename in want:
++            assert '..' not in info.filename and not info.filename.startswith('/')
++            assert (info.external_attr >> 16) & 0o170000 != 0o120000
++            dst = os.path.join(out, want[info.filename])
++            if not os.path.exists(dst):
++                with z.open(info) as s, open(dst + '.part', 'wb') as d:
++                    for b in iter(lambda: s.read(1 << 22), b''):
++                        d.write(b)
++                os.replace(dst + '.part', dst)
++            h = sha_file(dst)
++            assert os.path.getsize(dst) == info.file_size
++            res[want[info.filename]] = dict(path=dst, sha256=h, size=info.file_size, zip_member=info.filename, zip_crc=info.CRC)
++    assert set(res) == set(want.values()), 'missing member'
++    return out, res
++
++
++def main(role, gpu):
++    L = json.load(open(RES + 'data/selection_lock.json'))
++    led = json.load(open(RES + 'data/fetch_ledger.json'))
++    prov_p = RES + f'seg/prov_{role}.json'
++    os.makedirs(RES + 'seg', exist_ok=True)
++    prov = json.load(open(prov_p)) if os.path.exists(prov_p) else {}
++    env = dict(os.environ, CUDA_VISIBLE_DEVICES=str(gpu), TF_FORCE_GPU_ALLOW_GROWTH='true', TF_CPP_MIN_LOG_LEVEL='2')
++    for m in L['manifest']:
++        if m['role'] != role or m['study_uid'] in prov:
++            continue
++        zp = led[m['study_uid']]['path']
++        assert sha_file(zp) == led[m['study_uid']]['sha256']
++        out, files = extract(m, zp)
++        so = os.path.join(out, 'synthseg1.nii.gz')
++        volcsv = os.path.join(out, 'synthseg1_vol.csv')
++        t0 = time.time()
++        if not os.path.exists(so):
++            r = subprocess.run([ENVPY, SS + '/scripts/commands/SynthSeg_predict.py', '--i', files['img.nii.gz']['path'], '--o', so + '.tmp.nii.gz', '--v1', '--threads', '4'],
++                               env=env, capture_output=True, text=True, cwd=SS)
++            open(os.path.join(out, 'synthseg1.log'), 'w').write(r.stdout[-4000:] + '\n---\n' + r.stderr[-4000:])
++            assert r.returncode == 0, (m['study_uid'], r.stderr[-1500:])
++            os.replace(so + '.tmp.nii.gz', so)
++        prov[m['study_uid']] = dict(files=files, seg=so, seg_sha256=sha_file(so), vol_csv=volcsv, seconds=time.time() - t0, gpu=gpu)
++        json.dump(prov, open(prov_p + '.tmp', 'w'), indent=1)
++        os.replace(prov_p + '.tmp', prov_p)
++        print('ok', m['study_uid'], round(time.time() - t0, 1), flush=True)
++
++
++if __name__ == '__main__':
++    main(sys.argv[1], sys.argv[2])
+diff --git a/mr125_select.py b/mr125_select.py
+new file mode 100644
+index 0000000..fdc1e80
+--- /dev/null
++++ b/mr125_select.py
+@@ -0,0 +1,69 @@
++"""iter_125: 측뇌실 크기 기술 후보 검색(정규식은 후보 검색만; 최종 적격성은 mr125_lock.py의 사례별 검토). 출력 전 규칙 고정, seed125."""
++import json, os, re
++import pandas as pd
++
++M = '/home/test/.local/share/medgemma/mr_rate/meta/'
++RES = 'results/iter_125/data/'
++SEED = 125
++LV = re.compile(r'lateral\s+ventric', re.I)
++ENL = re.compile(r'(enlarg|dilat|ectas|prominen|widen|expan|hydroceph|ventriculomegal)', re.I)
++NEGENL = re.compile(r'\b(no|not|without|non)\b[^.]{0,30}(enlarg|dilat|ectas|prominen|widen)', re.I)
++NORM = re.compile(r'(normal|within normal|nonectatic|non-ectatic)', re.I)
++
++
++def sents(txt):
++    txt = re.sub(r'\s+', ' ', str(txt))
++    return [s.strip() for s in re.split(r'(?<=[.;])\s+(?=[A-Z])', txt) if s.strip()]
++
++
++def old_patients():
++    s = set()
++    L = json.load(open('results/iter_123/data/selection_lock.json'))
++    s |= {int(r['patient_uid']) for r in L['manifest']}
++    for p in ['results/iter_124/data/eligibility_lock.json', 'results/iter_124/data/candidates.json']:
++        if os.path.exists(p):
++            s |= {int(x) for x in re.findall(r'"patient_uid":\s*(\d+)', open(p).read())}
++    return s
++
++
++def main():
++    sp = pd.read_csv(M + 'splits.csv')
++    old = old_patients()
++    rows = []
++    for b in ['batch04', 'batch23']:
++        m = pd.read_csv(M + f'metadata/{b}_metadata.csv', usecols=['patient_uid', 'study_uid', 'series_id', 'classified_modality', 'acquisition_plane', 'is_derived', 'is_localizer', 'array_shape', 'array_spacing_mm'], low_memory=False)
++        t = m[(m.classified_modality == 'T2w') & (m.acquisition_plane == 'AXIAL') & (m.is_derived.astype(str) == 'False') & (m.is_localizer.astype(str) == 'False')].copy()
++        sp_ = t.array_spacing_mm.map(json.loads)
++        t['dz'] = sp_.map(lambda v: v[2])
++        t['area'] = sp_.map(lambda v: v[0] * v[1])
++        t = t.sort_values(['study_uid', 'dz', 'area', 'series_id']).groupby('study_uid').head(1)
++        t = t.merge(sp[sp.batch_id == b][['study_uid', 'split']], on='study_uid')
++        t = t[t.split == 'train']
++        r = pd.read_csv(M + f'reports/{b}_reports.csv')
++        t = t.merge(r, on='study_uid')
++        t['batch_id'] = b
++        rows.append(t)
++    d = pd.concat(rows)
++    d = d[~d.patient_uid.isin(old)]
++    d = d.sort_values(['patient_uid', 'study_uid']).groupby('patient_uid').head(1)
++    out = []
++    for _, x in d.iterrows():
++        hits = []
++        for k in ['findings', 'impression']:
++            for s in sents(x[k]):
++                if LV.search(s):
++                    hits.append((k, s))
++        if not hits:
++            continue
++        pos = [h for h in hits if ENL.search(h[1]) and not NEGENL.search(h[1])]
++        neg = [h for h in hits if h not in pos and (NORM.search(h[1]) or NEGENL.search(h[1]))]
++        out.append(dict(batch_id=x.batch_id, patient_uid=int(x.patient_uid), study_uid=x.study_uid, series_id=x.series_id, array_shape=x.array_shape,
++                        array_spacing_mm=x.array_spacing_mm, hits=hits, pos=pos, neg=neg))
++    json.dump(out, open(RES + 'candidates_raw.json', 'w'), indent=1)
++    for b in ['batch04', 'batch23']:
++        o = [c for c in out if c['batch_id'] == b]
++        print(b, len(o), 'pos-only', sum(1 for c in o if c['pos'] and not c['neg']), 'neg-only', sum(1 for c in o if c['neg'] and not c['pos']), 'both', sum(1 for c in o if c['pos'] and c['neg']))
++
++
++if __name__ == '__main__':
++    main()
