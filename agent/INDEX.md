@@ -127,6 +127,7 @@
 - iter_119 [CONTINUE] (deep_medium/standard/normal) <오류 혼합 근거의 선택적 교정 진단: inconclusive> 💾0846c0834bf179cc9e7ca6044c0cf0f4bd629486 RSNA 불일치 87명에서 초안만 정답으로 집계된 10명 중 9명은 상대 응답이 unresolved였고 단순 규칙이 보존했다. 명시적 잔여 1명은 남지만 새 교정 방법의 필요성은 불확정으로 투자를 보류한다. → 다음: 현재 자연 초안 교정 묶음의 추가 투자를 근거 부족으로 보류하고 사용자 피드백을 기다린다. 같은 저장 자료의 추가 준비 분석·parser 정비, 합성 초안 반복, frozen R 확대·학습은 발주하지 않는다. 재개에는 기존 G/M/S 이후의 중요한 실패 조건과 이를 GT 없이 구분할 구체적인 개입 가설·강한 대조·종료 조건이 필요하다. 구현자가 제안한 K≠G 오류 검토 전환도 현재는 선택하지 않는다. 선택 집단의 불일치율만으로 confidence 이후 검토 이득을 입증하지 못했고 공간적 추가 가치도 확인되지 않았기 때문이다. iter_115의 CURE 특화 투자 보류를 유지하며 자동 복귀 실험은 없다. --confirm-each-iter에 따라 다음 실험은 사용자 승인 후 별도 계획으로만 진행한다.
 - iter_120 [사용자 보완으로 전환 → iter_121] 기존 기록 보존, 성공·실패 판정 아님 (다음 반복 승인 대기)
 - iter_121 [CONTINUE] (deep_medium/standard/normal) <MRI 관측 범위와 분할 집계 진단: execution_failed> 💾ee8078ab0acba94f0d84d3ab2997e76eeb117bb9 MR-RATE 두 batch의 8,503 study에서 DWI·ADC metadata를 식별하지 못해 모델 실험을 중단했다. 자료 조건의 실패이며 전체 데이터의 부재나 MedGemma 한계를 입증하지 않는다. → 다음: 한정 보완을 권고한다. 확보한 두 batch의 보고서와 제공 sequence를 연결해 관측 비교가 성립하는 과제 하나를 정하고, 성립 여부를 확인하면 자료 준비 반복을 끝낸다. 기존 plan의 환자 분리·약한 정답 해석·동일 영상 예산·고정 집계·출력 검증 원칙은 유지한다. DWI–ADC 급성 경색 설계는 현재 범위에서 보류하고, 대체 질환·sequence는 보고서의 명시적 양성·음성·unknown과 영상 연결 근거를 확인한 뒤 별도 계획으로 고정한다. 자동 라벨 0을 음성으로 쓰거나 탈수초 질환을 즉시 유망 후보로 선언하지 않는다. 자료가 성립하면 같은 계획에서 소수 실제 영상 확인과 조건부 MedGemma 탐색까지 연결하고, 성립하지 않으면 해당 후보를 보류하며 batch 전수 반입·질환 순회를 하지 않는다. 승인된 외부 경로의 실행 권한 설정도 정상화한다.
+- iter_122 [CONTINUE] (deep_medium/standard/normal) <MRI 관측 범위와 분할 집계 진단: execution_failed> 💾ee8078ab0acba94f0d84d3ab2997e76eeb117bb9 MR-RATE 외부 경로 접근이 차단돼 모델 출력은 0건이다. 실행기의 경로 설정 누락을 확인했으며, 가설 판정 없이 설정 복구 후 기존 비교를 이어갈 것을 권고한다. → 다음: 한정 보완을 권고한다. 승인된 외부 경로를 구현 실행기에 반영하고 실제 세션의 접근 검증을 통과하면 운영 복구를 끝내고 기존 실험으로 이어간다. 상위 관리 코드의 별도 수정·검증 경로에서 orchestrator.py의 Claude 실행 인자와 관련 권한 설정에 /home/test/.local/share/medgemma/mr_rate를 명시적으로 연결한다. 구현 세션에서 정상 목록 조회·기존 CSV 읽기·전용 결과 경로 쓰기를 확인하고 기존 보호 경로의 제한을 유지한다. Python이나 symlink로 거부를 우회하지 않는다. 기준은 agent/runs/iter_122/plan.md(SHA256 5a5371d834ba684e7c459e1e52708ca0e86f2314952fbd636c897fc24a5ad0b8)이며 질문·두 batch train·정답 규칙·기술6명과 별도48명·216요청·parser·성공/중단 기준을 유지한다. 모든 자료 구성과 추론은 미완료다. 새로운 결과 경로와 복구 기록을 남기고 원 기록은 보존한다. 설정 변경만으로 복구를 선언하거나 같은 접근 검사만 하는 연구 반복을 다시 만들지 않는다. 정상 설정 후에도 외부 정책이 접근을 차단하고 관리 경로에서 해결할 수 없다는 근거가 생길 때만 구체적인 운영 조치를 사람에게 요청한다.
 
 ## 이전 목표들의 접근법 (참고용, 현재 목표의 재평가 횟수에는 안 들어감)
 
@@ -185,12 +186,12 @@
 - 독립 위치 출력의 오류 검토 정보 [approach/grounding-disagreement-review]: 3회 (iter_113, iter_114, iter_115), 유효한 실험 3회, 미분류 0회, 최근 판정: inconclusive, 커밋: 540f63bed8b07775d26b02d69a8a545b2736749d, d1c504459467b578b170d4316675757ffe67106a, 5e825563e85b4eceb93c2cf3b4a6c47b5359228d
 - 오류 혼합 근거의 선택적 교정 진단 [approach/noisy-evidence-correction]: 4회 (iter_116, iter_117, iter_118, iter_119), 유효한 실험 3회, 미분류 0회, 최근 판정: inconclusive, 커밋: 66cd4542720d0efe69b2fbbdfabbe24ebe0253a0, ae15ee5bde73c415715f127720ffdcf24f60d2cc, 87b672866ae9be7b4d8c261b30f755f7fcaa97cf, 0846c0834bf179cc9e7ca6044c0cf0f4bd629486
 - 영상 간 대상 대응의 투자 적합성 판단 [approach/cross-image-target-use]: 1회 (iter_120), 유효한 실험 0회, 미분류 0회, 최근 판정: execution_failed, 커밋: 752fba411759a093129c05feadfdff75e4d9a1b3
-- MRI 관측 범위와 분할 집계 진단 [approach/mri-coverage-aggregation]: 1회 (iter_121), 유효한 실험 0회, 미분류 0회, 최근 판정: execution_failed, 커밋: ee8078ab0acba94f0d84d3ab2997e76eeb117bb9
+- MRI 관측 범위와 분할 집계 진단 [approach/mri-coverage-aggregation]: 2회 (iter_121, iter_122), 유효한 실험 0회, 미분류 0회, 최근 판정: execution_failed, 커밋: ee8078ab0acba94f0d84d3ab2997e76eeb117bb9, ee8078ab0acba94f0d84d3ab2997e76eeb117bb9
 
 현재 연구 브랜치: approach/mri-coverage-aggregation (코드 위치: /SSD1_1TB/home/milab/daniel/08_medgemma/research)
 
 ### 최근 계획의 대안 순위
 
-1. MRI 관측 범위와 분할 집계 진단: 자료 조건이 성립하면 동일 예산의 실제 출력을 얻어 관측 변경과 단순 대안의 가치를 판단한다.
-2. 전문 volume 모델 직접 대조: NeuroVFM의 label·접근·노출 조건을 확인한 뒤 강한 기준선을 확보하지만 현재 핵심 자료 조건보다 먼저 대규모 구성을 시작하지 않는다.
-3. 다중 sequence 통합 진단: 수막종·탈수초 후보는 조영 구분과 정답 의미의 추가 불확실성 때문에 이번에는 실행하지 않는다.
+1. MRI 관측 범위와 분할 집계 진단: 확보한 보고서의 명시적 FLAIR 소견과 실제 제공 sequence를 연결해 같은 영상의 공동·분할 처리를 비교한다.
+2. DWI–ADC 후보 보류 유지: 원래 급성 경색 질문은 보존하지만 새로운 제공 근거가 없으므로 batch 확대나 재검색을 실행하지 않는다.
+3. 전문 WMH 모델 우선 비교: 강한 실용 대안이지만 T1 연결·전처리·출력 의미 확인이 추가로 필요하므로 최초 VLM 관찰 후 투자 여부를 판단한다.
