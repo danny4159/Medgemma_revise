@@ -394,18 +394,22 @@ iter_123의 MedGemma 1.5 개발48명 전원 PRESENT 관찰은 유지된다. 그�
 
 ## mrrate-t2-ventricle-fixed-positive-response — observed
 
-MR-RATE batch04·batch23 공식 train의 개발40명(보고서상 양성20·음성20)에서 frozen MedGemma 1.5의 고정 양측 측뇌실 확장 질문은 균등 T2 8장 U와 해부학 선택·fallback 정책 A 모두 전원 PRESENT였다. 두 조건의 보고서 기준 BA는 0.50이다. A의 실제 slice 선택 변경은 12명이며 28명은 fallback했다. 현재 정책의 개선 부재는 관찰됐으나 일반 MRI 인식·영상 무사용·순수 관측 선택 실패는 확정하지 않는다.
+MR-RATE batch04·batch23 공식 train의 반복 개발40명(보고서상 양성20·음성20)에서 frozen MedGemma 1.5의 고정 측뇌실 확장 질문은 기존 percentile 정규화와 전체 volume min–max 정규화 모두 전원 PRESENT였다. 동일 T2·균등8장 조건에서 두 BA는 0.50, 차이는 0이었다. iter_128의 해부학 선택 정책 무개선 관찰도 유지한다. 이번 결과는 정규화 변경만으로 판별이 회복된다는 설명을 지지하지 않으며 일반 MRI 인식·영상 무사용·내부 원인을 확정하지 않는다.
 
 - 적용 목표 시작: iter_003
-- 최신 리뷰: agent/runs/iter_128/review.json
-- 근거: research/results/iter_128/gen/main/worker0.jsonl 및 worker1.jsonl: 고유 출력80건, 모두 PRESENT·EOS, 최대27 token을 리뷰에서 직접 확인.
-- 근거: research/results/iter_128/eval/report.json 및 build/remaining/*.json: U/A BA=0.50, 선택 변경12명, 고유 slice 부족23명·segmentation 실패5명을 독립 집계.
-- 근거: SynthSeg 완료35명은 양성15/17·음성18/18 정답, BA=0.941176 및 AUROC=0.990196을 독립 재계산했다. 전체40명의 충분성 근거는 아니다.
-- 사용·평가 검증: 고정 revision 91850547d9f0b2fdd21aa7c5f4f3d1a8a52c243b, bf16·greedy·max_new_tokens512와 공식 processor tensor 대조 기록을 확인.
-- 사용·평가 검증: all_anatomy_gate.json의 전체60명 입력 연결과 수정된 PCKMK46BRL montage의 뇌 coverage를 확인.
-- 사용·평가 검증: 원시 응답의 strict40건·loose40건 모두 명시적 PRESENT이며, 형식 실패와 내용 오답을 구분했다.
-- 사용·평가 검증: 공식 volume CSV47건에서 좌우 측뇌실 합/ICV와 저장 점수의 일치를 독립 검산.
-- 미해결: 높은 fallback 때문에 충분한 해부학 선택 개입의 일반적인 효과는 미확정이다.
-- 미해결: 보고서 약한 정답과 영상 일부의 관측 가능성, 기본 인식과 질문 형식의 기여가 분리되지 않았다.
-- 미해결: 독립 환자·타 모델·경량 적응 및 전체 전문 대안의 정확도·비용 충분성은 미검증이다.
+- 최신 리뷰: agent/runs/iter_129/review.json
+- 근거: research/results/iter_129/gen/main/worker0.jsonl 및 worker1.jsonl: M40건 모두 명시적 PRESENT·EOS, 최대34 token을 직접 확인했다.
+- 근거: research/results/iter_128/gen/main/worker0.jsonl 및 worker1.jsonl의 U40건을 재사용했다. 원시 출력에서 P/M sensitivity=1, specificity=0, BA=0.50을 독립 재계산했다.
+- 근거: batch×label 층화 환자 bootstrap10,000회·seed125를 별도 계산해 M−P=0, CI95=[0,0]을 재현했다.
+- 근거: research/results/iter_129/technical_regression.json과 원시 기술 출력: P token8/8 재현.
+- 근거: iter_128의 전문 부피 대조 BA0.941176은 완료35명에 한정되며 이번에 새로 평가하지 않았다.
+- 사용·평가 검증: 평가 잠금의 code·inputs SHA256과 리뷰 대상 4682b4bacadbaf12cf0f379f41a5a4fb1b9cb983의 실제 소스 일치를 확인했다.
+- 사용·평가 검증: 정규화 구현에서 M은 전체 volume min/max를 사용하며 mask·보고서·label이 범위 계산에 들어가지 않는다.
+- 사용·평가 검증: 동일 환자·series·slice·prompt·revision·greedy·max_new_tokens512를 유지하고 저장 PNG와 실제 processor tensor를 대조한 기록을 확인했다.
+- 사용·평가 검증: 원시 응답 내용은 모두 명시적 양성이다. M의 loose 형식40건을 내용 오류와 구분했다.
+- 사용·평가 검증: 기존 결과700개 hash 불변, 신규 기술16·재개16·본실험40건의 고유 출력 수를 확인했다.
+- 미해결: 반복 개발 집단이므로 독립 환자 재현에 해당하지 않는다.
+- 미해결: 8장 관측의 충분성, 기본 인식, 질문 인터페이스, 보고서 약한 정답의 기여는 분리되지 않았다.
+- 미해결: CI[0,0]은 관찰된 환자별 차이가 모두0인 bootstrap 결과이며 모집단 효과의 불확실성이 없다는 뜻이 아니다.
+- 미해결: 타 모델의 동일 T2 정규화 대조와 경량 적응의 효과·추가 가치는 미검증이다.
 
