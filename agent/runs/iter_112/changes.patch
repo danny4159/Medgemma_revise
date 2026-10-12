@@ -1,0 +1,1366 @@
+diff --git a/mr112_checks.py b/mr112_checks.py
+new file mode 100644
+index 0000000..2cabac1
+--- /dev/null
++++ b/mr112_checks.py
+@@ -0,0 +1,67 @@
++"""iter_112 동작 확인(기술 집단 앞 3명): scoring의 shift/mask를 공식 forward(labels) 경로와 독립 대조, 생성 첫 token과 logits argmax 대조,
++결정성, ViT feature 캐시 동치, 영상 대체 민감도, 이미지/프롬프트 token이 평균에서 제외되는지. GT 미사용."""
++import hashlib
++import json
++import time
++
++import torch
++
++import mr112_model as MM
++import mr112_spec as S
++
++
++@torch.no_grad()
++def run_checks(model, tok, man, out_path):
++    rows = {r["id"]: r for r in man["rows"]}
++    reg = [q for q in man["requests"] if q["group"] == "tech" and q["kind"] == "region"][:3]
++    full = {q["id"]: q for q in man["requests"] if q["group"] == "tech" and q["kind"] == "full"}
++    res = []
++
++    def chk(name, ok, info=""):
++        res.append(dict(name=name, ok=bool(ok), info=str(info)))
++        print("PASS" if ok else "FAIL", name, info, flush=True)
++
++    pvs = {q["id"]: MM.load_image(rows[q["id"]]["image"]) for q in reg}
++    for q in reg:
++        pid = q["id"]
++        pv = pvs[pid]
++        vit = MM.vit_features(model, pv)
++        chk(f"{pid} image token 수", vit.shape[1] == model.num_image_token == 256, tuple(vit.shape))
++        s1 = MM.score(model, tok, q["prompt"], vit)
++        s2 = MM.score(model, tok, q["prompt"], MM.vit_features(model, pv))  # 캐시 없이 재계산
++        chk(f"{pid} 결정성/ViT 재계산 동치", s1["token_logprobs"] == s2["token_logprobs"], (s1["mean_logprob"], s2["mean_logprob"]))
++        # 공식 forward(labels) 경로: prompt 위치를 -100으로 마스크 -> loss = -mean(target token logprob)
++        query = MM.build_query(model, tok, q["prompt"])
++        full_ids, n, ok = MM.target_split(tok, query, S.TARGET)
++        chk(f"{pid} tokenization prefix 경계", ok, tok.convert_ids_to_tokens(full_ids[0, n:]))
++        labels = full_ids.clone()
++        labels[:, :n] = -100
++        dev = model.language_model.get_input_embeddings().weight.device
++        out = model(pixel_values=pv.to(next(model.vision_model.parameters()).device, torch.bfloat16), input_ids=full_ids.to(dev),
++                    attention_mask=torch.ones_like(full_ids).to(dev), image_flags=torch.ones(1, 1, dtype=torch.long),
++                    labels=labels.to(dev), use_cache=False, return_dict=True)
++        off = -float(out.loss)
++        chk(f"{pid} 공식 forward CE vs 평균 logprob", abs(off - s1["mean_logprob"]) < 5e-3, (off, s1["mean_logprob"]))
++        # 첫 target token: 수동 shift 계산과 대조 (logits[n-1] -> target[0])
++        lg = MM.forward_logits(model, full_ids, vit)
++        manual = float(torch.log_softmax(lg[0, n - 1].float(), -1)[full_ids[0, n]])
++        chk(f"{pid} 수동 첫 token logprob", abs(manual - s1["token_logprobs"][0]) < 1e-6, (manual, s1["token_logprobs"][0]))
++        chk(f"{pid} 평균에 prompt/image token 미포함", s1["n_target_tokens"] == full_ids.shape[1] - n and s1["target_ids"] == [int(x) for x in full_ids[0, n:]],
++            (s1["n_target_tokens"], int(full_ids.shape[1]), int(n)))
++        # 생성 첫 token == prompt-only logits argmax
++        pre = tok(query, return_tensors="pt")["input_ids"]
++        lg0 = MM.forward_logits(model, pre, vit)
++        am = int(lg0[0, -1].argmax())
++        t0 = time.time()
++        gen = MM.generate(model, tok, q["prompt"], pv, max_new_tokens=1)
++        chk(f"{pid} 생성 첫 token == argmax", tok.decode([am], skip_special_tokens=True).strip() == gen.strip(), (tok.convert_ids_to_tokens([am]), gen))
++        # 영상 대체 민감도 (다른 환자 영상으로 같은 prompt)
++        other = [x for x in pvs if x != pid][0]
++        s3 = MM.score(model, tok, q["prompt"], MM.vit_features(model, pvs[other]))
++        chk(f"{pid} 다른 환자 영상으로 바꾸면 score 변화", abs(s3["mean_logprob"] - s1["mean_logprob"]) > 1e-4, (s1["mean_logprob"], s3["mean_logprob"]))
++        # region vs full box
++        sf = MM.score(model, tok, full[pid]["prompt"], vit)
++        chk(f"{pid} region/full 입력 prompt 다름", q["prompt"] != full[pid]["prompt"] and sf["mean_logprob"] != s1["mean_logprob"],
++            (s1["mean_logprob"], sf["mean_logprob"]))
++    json.dump(res, open(out_path, "w"), indent=1)
++    return all(r["ok"] for r in res)
+diff --git a/mr112_data.py b/mr112_data.py
+new file mode 100644
+index 0000000..c1ee1cb
+--- /dev/null
++++ b/mr112_data.py
+@@ -0,0 +1,135 @@
++"""iter_112: confirm800 중 E600 밖 200명을 detector17 저장 출력·GT·영상과 연결하고 요청 manifest를 만든다.
++GT는 gt.json에 분리하고 요청에는 넣지 않는다. 문제가 있으면 manifest 없이 problems.json만 쓰고 종료코드 1. 덮어쓰기 금지."""
++import hashlib
++import json
++import os
++import sys
++
++import numpy as np
++from PIL import Image
++
++import mr112_spec as S
++
++R = "results"
++OUT = f"{R}/iter_112/data"
++CONFIRM = f"{R}/iter_010/manifests/confirm_ids.json"
++TRAIN = f"{R}/iter_010/manifests/train_ids.json"
++VAL = f"{R}/iter_010/manifests/validation_ids.json"
++GT = f"{R}/iter_010/manifests/gt_manifest.json"
++INFER = f"{R}/iter_010/manifests/infer_manifest.jsonl"
++SETS = f"{R}/iter_016/manifests/sets.json"
++DET_DIR = f"{R}/iter_035/confirm800/det17"
++DET_LOCK = f"{R}/iter_035/select/LOCK.json"
++DET_SEL = f"{R}/iter_035/select/seed17/v400_selection.json"
++
++
++def fsha(p):
++    h = hashlib.sha256()
++    with open(p, "rb") as f:
++        for c in iter(lambda: f.read(1 << 20), b""):
++            h.update(c)
++    return h.hexdigest()
++
++
++def main():
++    os.makedirs(OUT, exist_ok=True)
++    if os.path.exists(f"{OUT}/manifest.json") or os.path.exists(f"{OUT}/problems.json"):
++        sys.exit("exists")
++    P = []
++    confirm = json.load(open(CONFIRM))
++    gt = json.load(open(GT))
++    infer = {}
++    for l in open(INFER):
++        r = json.loads(l)
++        infer[r["id"]] = r
++    e600 = {i for v in json.load(open(SETS))["E600"].values() for i in v}
++    train = set(json.load(open(TRAIN)))
++    val = set(json.load(open(VAL)))
++    ids = sorted(set(confirm) - e600)
++    if len(confirm) != 800 or len(e600) != 600 or not e600 <= set(confirm) or len(ids) != 200:
++        P.append(f"confirm/E600 구성 {len(confirm)} {len(e600)} {len(ids)}")
++    # detector 출처 검증 (ev111_link 규약과 동일한 내용 hash 대조)
++    comp = json.load(open(f"{DET_DIR}/completion.json"))
++    sel = json.load(open(DET_SEL))
++    lock = json.load(open(DET_LOCK))
++    if fsha(f"{DET_DIR}/raw_preds.json") != comp["raw_preds_sha256"]:
++        P.append("det raw_preds hash")
++    for fn, h in comp["shard_sha256"].items():
++        if fsha(f"{DET_DIR}/{fn}") != h:
++            P.append(f"det shard {fn}")
++    if lock["files"]["seed17"]["sha256"] != fsha(DET_SEL):
++        P.append("LOCK-selection hash")
++    if sel["selected"]["epoch"] != S.EPOCH or sel["selected"]["threshold"] != S.THR:
++        P.append("epoch/threshold")
++    if comp["checkpoint_sha256"] != sel["selected_checkpoint_sha256"] or fsha(comp["checkpoint"]) != comp["checkpoint_sha256"]:
++        P.append("checkpoint hash")
++    if comp["manifest_path"].split("research/")[-1] != CONFIRM:
++        P.append("completion manifest path")
++    det = json.load(open(f"{DET_DIR}/raw_preds.json"))
++    # 환자 분리: 이 200명과 train/validation/E600의 id·patient·pixel hash 교집합
++    pat = {i: gt[i]["patient"] for i in gt}
++    bad_pat = {pat[i] for i in ids} & {pat[i] for i in (train | val | e600) if i in pat}
++    pix_other = {infer[i]["pixel_sha256"] for i in (train | val | e600) if i in infer}
++    bad_pix = [i for i in ids if infer[i]["pixel_sha256"] in pix_other]
++    if bad_pat or bad_pix or set(ids) & (train | val | e600):
++        P.append(f"환자/영상 중복 pat={sorted(bad_pat)[:5]} pix={bad_pix[:5]}")
++    if len({pat[i] for i in ids}) != 200:
++        P.append("id-patient 1:1 아님")
++    rows, gts, boxes_all = [], {}, []
++    for i in ids:
++        g, inf, d = gt[i], infer[i], det[i]
++        p = inf["image"]
++        if fsha(p) != inf["file_sha256"]:
++            P.append(f"file hash {i}")
++        im = Image.open(p)
++        w, h = im.size
++        if hashlib.sha256(np.asarray(im).tobytes()).hexdigest() != inf["pixel_sha256"]:
++            P.append(f"pixel hash {i}")
++        if g["pixel_sha256"] != inf["pixel_sha256"] or list(d["img_hw"]) != [h, w]:
++            P.append(f"gt/det 연결 {i}")
++        if (g["category"] == "opacity") != bool(g["boxes"]):
++            P.append(f"category-box {i}")
++        keep = [(k, b, s) for k, (b, s, l) in enumerate(zip(d["boxes_xyxy_px"], d["scores"], d["labels"])) if l == 1 and s >= S.THR]
++        gts[i] = dict(category=g["category"], boxes_xyxy_px=[b["xyxy_px"] for b in g["boxes"]], ann_ids=[b["ann_id"] for b in g["boxes"]])
++        rows.append(dict(id=i, patient=pat[i], image=p, size_wh=[w, h], file_sha256=inf["file_sha256"], pixel_sha256=inf["pixel_sha256"],
++                         tech_key=S.tech_key(pat[i]), boxes=[dict(det_index=k, xyxy_px=b, score=s, medrega=list(S.box_to_medrega(b, w, h)))
++                                                            for k, b, s in keep]))
++    elig = sorted([r for r in rows if r["boxes"]], key=lambda r: r["tech_key"])
++    tech = [r["id"] for r in elig[:S.TECH_N]]
++    main_ids = sorted(r["id"] for r in elig[S.TECH_N:])
++    by = {r["id"]: r for r in rows}
++    req = []
++    for i in tech:  # 최고 confidence box 하나(동률은 낮은 det_index)
++        b = sorted(by[i]["boxes"], key=lambda x: (-x["score"], x["det_index"]))[0]
++        req.append(dict(group="tech", id=i, det_index=b["det_index"], kind="region", box=b["medrega"]))
++        req.append(dict(group="tech", id=i, det_index=b["det_index"], kind="full", box=list(S.FULL_BOX)))
++    for i in main_ids:
++        for b in by[i]["boxes"]:
++            req.append(dict(group="main", id=i, det_index=b["det_index"], kind="region", box=b["medrega"]))
++        req.append(dict(group="main", id=i, det_index=-1, kind="full", box=list(S.FULL_BOX)))
++    for q in req:
++        q["prompt"] = S.prompt(q["box"])
++        q["target"] = S.TARGET
++        q["request_id"] = hashlib.sha256(json.dumps([q["group"], q["id"], q["det_index"], q["kind"], q["box"]]).encode()).hexdigest()[:16]
++    if len({q["request_id"] for q in req}) != len(req):
++        P.append("request_id 중복")
++    if P:
++        json.dump(P, open(f"{OUT}/problems.json", "w"), indent=1)
++        print("PROBLEMS", P[:10])
++        sys.exit(1)
++    json.dump(gts, open(f"{OUT}/gt.json", "w"), indent=1, sort_keys=True)
++    main_boxes = sum(len(by[i]["boxes"]) for i in main_ids)
++    man = dict(spec=dict(prompt_head=S.HEAD, prompt_tail=S.TAIL, target=S.TARGET, thr=S.THR, epoch=S.EPOCH, k_frac=S.K_FRAC),
++               inputs={k: fsha(v) for k, v in dict(confirm=CONFIRM, gt=GT, infer=INFER, sets=SETS, det_lock=DET_LOCK, det_sel=DET_SEL,
++                                                    det_raw=f"{DET_DIR}/raw_preds.json", det_completion=f"{DET_DIR}/completion.json",
++                                                    spec="mr112_spec.py", train=TRAIN, val=VAL).items()},
++               counts=dict(non_e600=len(ids), nonempty=len(elig), tech_patients=len(tech), main_patients=len(main_ids), main_boxes=main_boxes,
++                           main_region_requests=main_boxes, main_full_requests=len(main_ids), tech_requests=2 * len(tech),
++                           n_requests=len(req), all_boxes=sum(len(r["boxes"]) for r in rows)),
++               tech_ids=tech, main_ids=main_ids, rows=rows, requests=req)
++    open(f"{OUT}/manifest.json", "w").write(json.dumps(man, sort_keys=True, indent=1))
++    print("OK", man["counts"])
++
++
++if __name__ == "__main__":
++    main()
+diff --git a/mr112_devmap_diag.py b/mr112_devmap_diag.py
+new file mode 100644
+index 0000000..50923f7
+--- /dev/null
++++ b/mr112_devmap_diag.py
+@@ -0,0 +1,32 @@
++"""iter_112: 8-bit 적재 device_map 진단 (meta device, GPU/가중치 미사용). 모듈별 int8/bf16 크기와 auto device_map 결과를 기록."""
++import json
++import sys
++
++import torch
++from accelerate import infer_auto_device_map, init_empty_weights
++from accelerate.utils import get_balanced_memory
++
++import mr112_model as MM
++
++MM.ensure_weight_dir()
++from internvl.model.internvl_chat import InternVLChatConfig, InternVLChatModel
++
++cfg = InternVLChatConfig.from_pretrained(MM.WDIR)
++cfg.llm_config._attn_implementation_internal = "sdpa"
++with init_empty_weights():
++    m = InternVLChatModel(cfg)
++tot = sum(p.numel() for p in m.parameters())
++print("params B", tot / 1e9)
++sizes = {}
++for n, c in m.named_children():
++    sizes[n] = sum(p.numel() for p in c.parameters())
++print({k: round(v / 1e9, 3) for k, v in sizes.items()})
++lm = m.language_model.base_model.model
++print("embed+lm_head B", (lm.model.embed_tokens.weight.numel() + lm.lm_head.weight.numel()) / 1e9)
++for mem in (22, 23):
++    mm = {0: f"{mem}GiB", 1: f"{mem}GiB"}
++    dm = infer_auto_device_map(m, max_memory=mm, no_split_module_classes=m._no_split_modules, dtype=torch.int8)
++    cpu = [k for k, v in dm.items() if v in ("cpu", "disk")]
++    print(mem, "GiB: n_cpu_disk", len(cpu), cpu[:6])
++    mb = get_balanced_memory(m, max_memory=mm, no_split_module_classes=m._no_split_modules, dtype=torch.int8, low_zero=False)
++    print("  balanced", mb)
+diff --git a/mr112_envrun.py b/mr112_envrun.py
+new file mode 100644
+index 0000000..f9fd4db
+--- /dev/null
++++ b/mr112_envrun.py
+@@ -0,0 +1,14 @@
++"""iter_112: 격리 환경(results/environments/medrega112)의 Python으로 인자를 그대로 실행하는 얇은 launcher.
++사용: python mr112_envrun.py script.py args...  |  python mr112_envrun.py -c "code" """
++import os
++import subprocess
++import sys
++
++PY = os.path.abspath("results/environments/medrega112/bin/python")
++env = dict(os.environ)
++env["PYTHONPATH"] = os.getcwd() + (":" + env["PYTHONPATH"] if env.get("PYTHONPATH") else "")
++env["HF_HOME"] = os.path.abspath("results/environments/medrega112_hfhome")
++env["TRANSFORMERS_CACHE"] = env["HF_HOME"]
++env["HF_HUB_OFFLINE"] = "1"
++env["TOKENIZERS_PARALLELISM"] = "false"
++sys.exit(subprocess.call([PY] + sys.argv[1:], env=env))
+diff --git a/mr112_eval.py b/mr112_eval.py
+new file mode 100644
+index 0000000..0e76054
+--- /dev/null
++++ b/mr112_eval.py
+@@ -0,0 +1,160 @@
++"""iter_112 평가. 모델 출력(scores)과 GT를 이 단계에서만 결합한다. 규칙은 plan의 Evaluation 그대로이며 결과를 보고 바꾸지 않는다.
++검토 단위=예측 box, 오류=환자 GT box와의 최대 IoU<0.3 (GT 없는 환자는 최대 IoU=0 -> 오류), 검토량 K=ceil(0.25N), 낮은 값부터 검토."""
++import json
++import math
++import sys
++
++import numpy as np
++
++import mr112_spec as S
++from rsna_diag import metrics as M
++
++import os
++D = os.environ.get("MR112_DIR", "results/iter_112")  # 합성 dry-run 검증용 override
++
++
++def build_table(man, gt, sc):
++    """sc: request_id -> record (mean_logprob). 환자 full score는 그 환자의 모든 box에 복제."""
++    full = {}
++    for q in man["requests"]:
++        if q["group"] == "main" and q["kind"] == "full":
++            full[q["id"]] = sc[q["request_id"]]["mean_logprob"]
++    rows = {r["id"]: r for r in man["rows"]}
++    T = []
++    for q in man["requests"]:
++        if q["group"] != "main" or q["kind"] != "region":
++            continue
++        r = rows[q["id"]]
++        b = next(x for x in r["boxes"] if x["det_index"] == q["det_index"])
++        g = gt[q["id"]]["boxes_xyxy_px"]
++        mi = M.max_iou_all([b["xyxy_px"]], g)
++        T.append(dict(id=q["id"], det_index=q["det_index"], conf=b["score"], region=sc[q["request_id"]]["mean_logprob"],
++                      full=full[q["id"]], max_iou=mi, err3=mi < S.IOU_MAIN, err5=mi < S.IOU_AUX, gt_pos=bool(g)))
++    T.sort(key=lambda t: (t["id"], t["det_index"]))
++    return T
++
++
++def order(T, which):
++    """검토 순서 index (낮은 값부터). 동률: 낮은 confidence, patient id, box index (GT 미사용)."""
++    key = {"conf": lambda t: (t["conf"], t["id"], t["det_index"]),
++           "region": lambda t: (t["region"], t["conf"], t["id"], t["det_index"]),
++           "full": lambda t: (t["full"], t["conf"], t["id"], t["det_index"])}[which]
++    return sorted(range(len(T)), key=lambda i: key(T[i]))
++
++
++def captured(T, which, err="err3"):
++    K = S.n_review(len(T))
++    top = order(T, which)[:K]
++    return sum(T[i][err] for i in top), top
++
++
++def summary(T, err="err3"):
++    N = len(T)
++    out = dict(N=N, K=S.n_review(N), n_err=sum(t[err] for t in T), n_patients=len({t["id"] for t in T}))
++    tops = {}
++    for w in ("conf", "region", "full"):
++        c, top = captured(T, w, err)
++        out["captured_" + w] = c
++        tops[w] = set(top)
++    out["diff_region_conf"] = (out["captured_region"] - out["captured_conf"]) / N
++    out["diff_region_full"] = (out["captured_region"] - out["captured_full"]) / N
++    out["diff_full_conf"] = (out["captured_full"] - out["captured_conf"]) / N
++    for a, b in (("region", "conf"), ("region", "full")):
++        ea = {i for i in tops[a] if T[i][err]}
++        eb = {i for i in tops[b] if T[i][err]}
++        out[f"{a}_vs_{b}"] = dict(common=len(ea & eb), added=len(ea - eb), lost=len(eb - ea),
++                                  added_patients=len({T[i]["id"] for i in ea - eb}), lost_patients=len({T[i]["id"] for i in eb - ea}))
++    # confidence 대비 환자별 순이득
++    gain = {}
++    for i in range(len(T)):
++        e = T[i][err]
++        if e:
++            gain[T[i]["id"]] = gain.get(T[i]["id"], 0) + (i in tops["region"]) - (i in tops["conf"])
++    out["patients_net_gain_vs_conf"] = sum(v > 0 for v in gain.values())
++    out["patients_net_loss_vs_conf"] = sum(v < 0 for v in gain.values())
++    return out
++
++
++def bootstrap(T, B=10000, seed=112017, err="err3"):
++    ids = sorted({t["id"] for t in T})
++    by = {p: [t for t in T if t["id"] == p] for p in ids}
++    rng = np.random.default_rng(seed)
++    d1, d2 = [], []
++    for _ in range(B):
++        pick = rng.integers(0, len(ids), len(ids))
++        Tb = []
++        for c, k in enumerate(pick):
++            for t in by[ids[k]]:
++                Tb.append(dict(t, copy=c))
++        # 동률 처리에 복제 index를 마지막 키로 추가
++        N = len(Tb)
++        K = S.n_review(N)
++
++        def cap(which):
++            if which == "conf":
++                key = lambda t: (t["conf"], t["id"], t["det_index"], t["copy"])
++            else:
++                key = lambda t: (t[which], t["conf"], t["id"], t["det_index"], t["copy"])
++            return sum(t[err] for t in sorted(Tb, key=key)[:K])
++        c0, c1, c2 = cap("conf"), cap("region"), cap("full")
++        d1.append((c1 - c0) / N)
++        d2.append((c1 - c2) / N)
++    q = lambda a: [float(np.percentile(a, 2.5)), float(np.percentile(a, 97.5))]
++    return dict(B=B, seed=seed, diff_region_conf_ci=q(d1), diff_region_full_ci=q(d2))
++
++
++def leave_one_patient_out(T, err="err3"):
++    ids = sorted({t["id"] for t in T})
++    res = []
++    for p in ids:
++        s = summary([t for t in T if t["id"] != p], err)
++        res.append((p, s["diff_region_conf"], s["diff_region_full"]))
++    return dict(min_diff_region_conf=min(r[1] for r in res), max_diff_region_conf=max(r[1] for r in res),
++                min_diff_region_full=min(r[2] for r in res), max_diff_region_full=max(r[2] for r in res))
++
++
++def decide(s):
++    pos = s["diff_region_conf"] >= 0.05 and s["diff_region_full"] >= 0.05 and s["patients_net_gain_vs_conf"] >= 3
++    if s["diff_region_conf"] <= 0:
++        return "negative: confidence 대비 추가 포착 없음 (현재 고정 scoring 경로 종료)"
++    if pos:
++        return "positive_exploratory: 양성 탐색 (독립 확인만 후속 제안)"
++    if s["diff_region_full"] <= 0:
++        return "unsupported_vs_full: 영역 조건화의 추가 가치 미지지 (전체 영역 대조로 설명 가능)"
++    return "inconclusive: 양의 차이가 5pp 미만이거나 기여 환자 3명 미만"
++
++
++def main(out, d=None):
++    global D
++    D = d or D
++    man =json.load(open(f"{D}/data/manifest.json"))
++    gt = json.load(open(f"{D}/data/gt.json"))
++    sc = {}
++    for l in open(f"{D}/scores/main_scores.jsonl"):
++        r = json.loads(l)
++        sc[r["request_id"]] = r
++    need = [q["request_id"] for q in man["requests"] if q["group"] == "main"]
++    miss = [x for x in need if x not in sc]
++    if miss:
++        sys.exit(f"누락 score {len(miss)}: 주 판정 보류")
++    for x in need:
++        if not math.isfinite(sc[x]["mean_logprob"]):
++            sys.exit(f"비유한 score {x}: 주 판정 보류")
++    T = build_table(man, gt, sc)
++    rep = dict(primary=summary(T), aux_iou05=summary(T, "err5"), boot=bootstrap(T), loo=leave_one_patient_out(T))
++    rep["decision"] = decide(rep["primary"])
++    pos = [t for t in T if t["gt_pos"]]
++    if pos:
++        rep["secondary_gt_positive_patients_only"] = summary(pos)
++    rep["score_stats"] = {k: dict(min=float(min(t[k] for t in T)), max=float(max(t[k] for t in T)), n_unique=len({t[k] for t in T}))
++                          for k in ("conf", "region", "full")}
++    ra = lambda k: np.argsort(np.argsort([t[k] for t in T], kind="stable"), kind="stable").astype(float)
++    rep["spearman_region_vs_conf"] = float(np.corrcoef(ra("region"), ra("conf"))[0, 1])  # 순위 상관(동률은 안정 정렬 순위, 기술 통계)
++    rep["spearman_region_vs_full"] = float(np.corrcoef(ra("region"), ra("full"))[0, 1])
++    json.dump(rep, open(out, "w"), indent=1)
++    json.dump(T, open(out.replace("report", "table"), "w"), indent=1)
++    print(json.dumps(rep["primary"], indent=1), rep["decision"])
++
++
++if __name__ == "__main__":
++    main(sys.argv[1], sys.argv[2] if len(sys.argv) > 2 else None)
+diff --git a/mr112_fetch.py b/mr112_fetch.py
+new file mode 100644
+index 0000000..440115e
+--- /dev/null
++++ b/mr112_fetch.py
+@@ -0,0 +1,55 @@
++"""iter_112: MedRegA 공식 코드(고정 SHA)와 HF 모델 metadata/소형 파일 확보. 대용량 가중치는 mr112_weights.py가 받는다."""
++import hashlib, json, os, sys, urllib.request
++
++GH_SHA = "f003c701b0b146e5ca7233ccfd627ee5f9eb3993"
++HF_REPO = "Luxuriant16/medrega"
++HF_REV = "ec1d98335322b2200f93b35562b681e05fc3a194"
++OUT = "results/iter_112/external"
++GH_FILES = ["LICENSE", "README.md", "demo_data/data_file.jsonl", "src/demo.py",
++            "src/internvl/conversation.py", "src/internvl/model/__init__.py",
++            "src/internvl/model/internvl_chat/__init__.py",
++            "src/internvl/model/internvl_chat/configuration_intern_vit.py",
++            "src/internvl/model/internvl_chat/configuration_internvl_chat.py",
++            "src/internvl/model/internvl_chat/modeling_intern_vit.py",
++            "src/internvl/model/internvl_chat/modeling_internvl_chat.py",
++            "src/internvl/model/internlm2/configuration_internlm2.py",
++            "src/internvl/model/internlm2/modeling_internlm2.py",
++            "src/internvl/model/internlm2/tokenization_internlm2.py",
++            "src/internvl/model/internlm2/tokenization_internlm2_fast.py",
++            "src/internvl/train/constants.py", "src/internvl/train/dataset.py",
++            "src/tools/convert_to_int8.py"] + [f"demo_data/images/demo_0{i}.jpg" for i in range(1, 10)]
++HF_SMALL = ["README.md", "added_tokens.json", "config.json", "configuration_intern_vit.py",
++            "configuration_internlm2.py", "configuration_internvl_chat.py", "generation_config.json",
++            "model.safetensors.index.json", "modeling_intern_vit.py", "modeling_internvl_chat.py",
++            "special_tokens_map.json", "tokenizer.model", "tokenizer_config.json"]
++
++
++def get(url, dst):
++    if os.path.exists(dst):
++        raise FileExistsError(dst)
++    os.makedirs(os.path.dirname(dst), exist_ok=True)
++    d = urllib.request.urlopen(url, timeout=120).read()
++    with open(dst + ".tmp", "wb") as f:
++        f.write(d)
++    os.replace(dst + ".tmp", dst)
++    return hashlib.sha256(d).hexdigest(), len(d)
++
++
++def main():
++    man = {"github": {"repo": "xmed-lab/MedRegA", "sha": GH_SHA, "files": {}},
++           "hf": {"repo": HF_REPO, "revision": HF_REV, "files": {}}}
++    for p in GH_FILES:
++        url = f"https://raw.githubusercontent.com/xmed-lab/MedRegA/{GH_SHA}/{p}"
++        man["github"]["files"][p] = dict(zip(("sha256", "bytes"), get(url, f"{OUT}/MedRegA/{p}")), url=url)
++    for p in HF_SMALL:
++        url = f"https://huggingface.co/{HF_REPO}/resolve/{HF_REV}/{p}"
++        man["hf"]["files"][p] = dict(zip(("sha256", "bytes"), get(url, f"{OUT}/hf_small/{p}")), url=url)
++    tree = json.load(urllib.request.urlopen(f"https://huggingface.co/api/models/{HF_REPO}/tree/{HF_REV}", timeout=60))
++    man["hf"]["tree"] = tree
++    with open(f"{OUT}/fetch_manifest.json", "w") as f:
++        json.dump(man, f, indent=1)
++    print("ok", len(man["github"]["files"]), len(man["hf"]["files"]))
++
++
++if __name__ == "__main__":
++    main()
+diff --git a/mr112_lock.py b/mr112_lock.py
+new file mode 100644
+index 0000000..09d8124
+--- /dev/null
++++ b/mr112_lock.py
+@@ -0,0 +1,21 @@
++"""iter_112 평가 코드·규칙 잠금. 잠금 시점에 scores 출력이 하나도 없음을 함께 기록한다. 덮어쓰기 금지."""
++import hashlib
++import json
++import os
++import sys
++import time
++
++FILES = ["mr112_spec.py", "mr112_data.py", "mr112_model.py", "mr112_run.py", "mr112_checks.py", "mr112_eval.py", "mr112_verify.py",
++         "mr112_test_cpu.py", "results/iter_112/data/manifest.json", "results/iter_112/data/gt.json",
++         "rsna_diag/metrics.py", "rsna_diag/geometry.py"]
++OUT = "results/iter_112/lock/" + (sys.argv[1] if len(sys.argv) > 1 else "eval_lock.json")
++os.makedirs(os.path.dirname(OUT), exist_ok=True)
++if os.path.exists(OUT):
++    sys.exit("exists")
++sc = [p for p in (os.listdir("results/iter_112/scores") if os.path.isdir("results/iter_112/scores") else []) if p.endswith(".jsonl")]
++lock = dict(locked_at=time.strftime("%Y-%m-%d %H:%M:%S %Z"), epoch_s=time.time(), model_score_files_existing=sc,
++            files={f: hashlib.sha256(open(f, "rb").read()).hexdigest() for f in FILES},
++            rules=dict(error="max IoU(box, patient GT boxes) < 0.3 (GT 없으면 0)", K="ceil(0.25 N)", order="낮은 값부터; 동률 confidence↑, patient id, det_index",
++                       positive="region−conf ≥ 5pp AND region−full ≥ 5pp AND confidence 대비 순이득 환자 ≥ 3", bootstrap="환자 cluster 10000, seed 112017, percentile 95%"))
++json.dump(lock, open(OUT, "w"), indent=1)
++print(lock["locked_at"], sc)
+diff --git a/mr112_model.py b/mr112_model.py
+new file mode 100644
+index 0000000..38291ae
+--- /dev/null
++++ b/mr112_model.py
+@@ -0,0 +1,130 @@
++"""iter_112: MedRegA(공식 InternVLChatModel, 고정 revision) 적재, 공식 chat() 생성, 고정 문자열 teacher-forced likelihood.
++실행은 results/environments/medrega112/bin/python. 공식 코드와 다른 점은 README/보고서에 기록한다:
++ - LLM attention backend: 공식 config는 flash_attention_2 (flash_attn 미설치) -> sdpa로 지정(수학적으로 동일, 수치 잡음만).
++ - 8-bit 적재는 공식 demo의 --load-in-8bit 경로 + device_map(두 GPU 분산)만 추가.
++"""
++import json
++import os
++import sys
++import time
++
++import torch
++from PIL import Image
++
++import mr112_spec as S
++
++EXT = "results/iter_112/external"
++SRC = f"{EXT}/MedRegA/src"
++WDIR = "results/environments/medrega112_weights"
++sys.path.insert(0, os.path.abspath(SRC))
++N_GPU0_LAYERS = 23
++IMG_START, IMG_END, IMG_CTX ="<img>", "</img>", "<IMG_CONTEXT>"
++
++
++def ensure_weight_dir():
++    """가중치 dir에 config/tokenizer/index 등 소형 파일을 심볼릭 링크 (원본 보존)."""
++    for n in os.listdir(f"{EXT}/hf_small"):
++        d = f"{WDIR}/{n}"
++        if not os.path.lexists(d):
++            os.symlink(os.path.abspath(f"{EXT}/hf_small/{n}"), d)
++
++
++def load(max_memory=None, load_in_8bit=True):
++    from internvl.model.internvl_chat import InternVLChatConfig, InternVLChatModel
++    from transformers import AutoTokenizer, BitsAndBytesConfig
++
++    ensure_weight_dir()
++    tok = AutoTokenizer.from_pretrained(WDIR, trust_remote_code=True, use_fast=False)
++    cfg = InternVLChatConfig.from_pretrained(WDIR)
++    cfg.llm_config._attn_implementation_internal = "sdpa"
++    kw = dict(config=cfg, low_cpu_mem_usage=True, torch_dtype=torch.bfloat16)
++    if load_in_8bit:
++        # 자동 device_map은 balanced 예산(GPU0 19.4GiB)에서 CPU offload로 떨어져 거부됨 -> 수동 분할(int8 ~40.2GB, 각 GPU ~19.4GiB).
++        lm = "language_model.base_model.model"
++        dm = {"vision_model": 0, "mlp1": 0, f"{lm}.model.embed_tokens": 0}
++        for i in range(60):
++            dm[f"{lm}.model.layers.{i}"] = 0 if i < N_GPU0_LAYERS else 1
++        dm[f"{lm}.model.norm"] = 1
++        dm[f"{lm}.lm_head"] = 0  # HF greedy_search는 logits과 input_ids(embedding 장치)가 같은 장치여야 한다
++        # 공식 checkpoint는 미병합 LoRA(lora_A/B)를 포함한다. 기본 8-bit 변환은 lora_A/B까지 int8로 만들어 peft forward가
++        # x를 int8로 cast하며 실패('addmm_cuda' Char). lora_A/B(0.12B)는 bf16 유지.
++        # lm_head(0.46B)도 bf16 유지: int8 outlier 분해가 어휘 64007 x 수천 열의 1.5GiB 임시 텐서를 만들어 GPU1 OOM, likelihood 정밀도에도 유리.
++        kw.update(quantization_config=BitsAndBytesConfig(load_in_8bit=True, llm_int8_skip_modules=["lora_A", "lora_B", "mlp1.3", "lm_head"]),
++                  device_map=dm)
++    t0 = time.time()
++    model = InternVLChatModel.from_pretrained(WDIR, **kw).eval()
++    return model, tok, time.time() - t0
++
++
++def load_image(path):
++    from internvl.train.dataset import build_transform
++    im = Image.open(path).convert("RGB")
++    t = build_transform(is_train=False, input_size=448)
++    return t(im).unsqueeze(0)  # 공식: dynamic 미사용, 448 bicubic resize + ImageNet 정규화
++
++
++def build_query(model, tok, prompt):
++    """공식 chat()과 동일한 query 문자열/ids를 만든다."""
++    from internvl.conversation import get_conv_template
++    model.img_context_token_id = tok.convert_tokens_to_ids(IMG_CTX)
++    tpl = get_conv_template(model.template)
++    tokens = IMG_START + IMG_CTX * model.num_image_token + IMG_END
++    q = prompt.replace("<image>", tokens)
++    tpl.append_message(tpl.roles[0], q)
++    tpl.append_message(tpl.roles[1], None)
++    return tpl.get_prompt()
++
++
++@torch.no_grad()
++def vit_features(model, pixel_values):
++    dev = next(model.vision_model.parameters()).device
++    return model.extract_feature(pixel_values.to(dev, torch.bfloat16))
++
++
++@torch.no_grad()
++def forward_logits(model, input_ids, vit_embeds):
++    """generate()와 동일한 embedding 치환 후 language_model 전체 logits(1,N,V)."""
++    emb_layer = model.language_model.get_input_embeddings()
++    ids = input_ids.to(emb_layer.weight.device)
++    emb = emb_layer(ids).clone()
++    B, N, C = emb.shape
++    emb = emb.reshape(B * N, C)
++    sel = ids.reshape(B * N) == model.img_context_token_id
++    assert int(sel.sum()) == vit_embeds.reshape(-1, C).shape[0], "image token 수 불일치"
++    emb[sel] = vit_embeds.reshape(-1, C).to(emb.device, emb.dtype)
++    emb = emb.reshape(B, N, C)
++    mask = torch.ones_like(ids)
++    out = model.language_model(inputs_embeds=emb, attention_mask=mask, use_cache=False, return_dict=True)
++    return out.logits
++
++
++def target_split(tok, query, target):
++    """query+target 전체 tokenization이 query tokenization을 prefix로 가지는지 확인하고 (ids, n_prefix) 반환."""
++    pre = tok(query, return_tensors="pt")["input_ids"]
++    full = tok(query + target, return_tensors="pt")["input_ids"]
++    n = pre.shape[1]
++    ok = bool(full.shape[1] > n and torch.equal(full[0, :n], pre[0]))
++    return full, n, ok
++
++
++@torch.no_grad()
++def score(model, tok, prompt, vit_embeds, target=S.TARGET):
++    """EOS 제외, target token들의 평균 log-prob. 이미지/프롬프트 token은 평균에 들어가지 않는다."""
++    q = build_query(model, tok, prompt)
++    full, n, ok = target_split(tok, q, target)
++    if not ok:
++        raise RuntimeError("target tokenization이 prefix 경계를 깨뜨림")
++    logits = forward_logits(model, full, vit_embeds)
++    lp = torch.log_softmax(logits[0, n - 1:-1].float(), dim=-1)
++    tgt = full[0, n:].to(lp.device)
++    tl = lp.gather(1, tgt[:, None])[:, 0]
++    return dict(mean_logprob=float(tl.mean()), sum_logprob=float(tl.sum()), token_logprobs=[float(x) for x in tl],
++                n_target_tokens=int(tgt.numel()), target_ids=[int(x) for x in tgt], n_prompt_tokens=int(n))
++
++
++@torch.no_grad()
++def generate(model, tok, prompt, pixel_values, max_new_tokens=S.GEN_MAX_NEW_TOKENS):
++    """공식 chat(): greedy(num_beams=1, total_params>20 분기와 동일), min_new_tokens=1."""
++    dev = next(model.vision_model.parameters()).device
++    gc = dict(num_beams=1, max_new_tokens=max_new_tokens, min_new_tokens=1, do_sample=False, temperature=0.0)
++    return model.chat(tokenizer=tok, pixel_values=pixel_values.to(dev, torch.bfloat16), question=prompt, generation_config=gc)
+diff --git a/mr112_overlay.py b/mr112_overlay.py
+new file mode 100644
+index 0000000..67c3190
+--- /dev/null
++++ b/mr112_overlay.py
+@@ -0,0 +1,27 @@
++"""iter_112: 기술 집단의 모델 입력 box(MedRegA 0-999 좌표를 영상으로 되돌림, 적색)와 GT(녹색), 원 detector box(황색 점선 대신 얇은 선)를 겹친 확인용 montage."""
++import json
++
++from PIL import Image, ImageDraw
++
++man = json.load(open("results/iter_112/data/manifest.json"))
++gt = json.load(open("results/iter_112/data/gt.json"))
++rows = {r["id"]: r for r in man["rows"]}
++reg = [q for q in man["requests"] if q["group"] == "tech" and q["kind"] == "region"][:12]
++tiles = []
++for q in reg:
++    r = rows[q["id"]]
++    im = Image.open(r["image"]).convert("RGB")
++    w, h = im.size
++    d = ImageDraw.Draw(im)
++    for g in gt[q["id"]]["boxes_xyxy_px"]:
++        d.rectangle(g, outline=(0, 255, 0), width=4)
++    b = next(x for x in r["boxes"] if x["det_index"] == q["det_index"])
++    d.rectangle(b["xyxy_px"], outline=(255, 255, 0), width=1)
++    x1, y1, x2, y2 = q["box"]
++    d.rectangle((x1 / 1000 * w, y1 / 1000 * h, x2 / 1000 * w, y2 / 1000 * h), outline=(255, 0, 0), width=3)
++    tiles.append(im.resize((340, 340)))
++W = Image.new("RGB", (340 * 4, 340 * 3))
++for i, t in enumerate(tiles):
++    W.paste(t, ((i % 4) * 340, (i // 4) * 340))
++W.save("results/iter_112/data/overlay_tech12.png")
++print("ok", len(tiles))
+diff --git a/mr112_run.py b/mr112_run.py
+new file mode 100644
+index 0000000..67104c4
+--- /dev/null
++++ b/mr112_run.py
+@@ -0,0 +1,108 @@
++"""iter_112 실행기: 한 프로세스가 모델을 두 GPU에 분산해 manifest 요청을 순서대로 처리한다.
++--mode tech: region 요청은 공식 생성(greedy, max_new_tokens400)+scoring, full 요청은 scoring. --mode main: scoring만.
++기록은 요청 단위 JSONL 한 줄(원자적 append+fsync). 같은 protocol digest의 완료 요청만 재사용한다. GT는 읽지 않는다."""
++import argparse
++import fcntl
++import hashlib
++import json
++import os
++import sys
++import time
++
++import torch
++
++import mr112_model as MM
++import mr112_spec as S
++
++D = "results/iter_112"
++CODE = ["mr112_spec.py", "mr112_model.py", "mr112_run.py"]
++
++
++def fsha(p):
++    return hashlib.sha256(open(p, "rb").read()).hexdigest()
++
++
++def protocol_digest(man_path):
++    d = {p: fsha(p) for p in CODE}
++    d["manifest"] = fsha(man_path)
++    d["weights_manifest"] = fsha(f"{D}/weights_manifest.json")
++    return hashlib.sha256(json.dumps(d, sort_keys=True).encode()).hexdigest(), d
++
++
++def peak_mib():
++    return [round(torch.cuda.max_memory_allocated(i) / 2**20) for i in range(torch.cuda.device_count())]
++
++
++def main():
++    ap = argparse.ArgumentParser()
++    ap.add_argument("--mode", required=True, choices=["tech", "main"])
++    ap.add_argument("--limit", type=int, default=0)
++    ap.add_argument("--tag", default="")
++    ap.add_argument("--checks", action="store_true")
++    a = ap.parse_args()
++    man_path = f"{D}/data/manifest.json"
++    man = json.load(open(man_path))
++    pd, files = protocol_digest(man_path)
++    out_dir = f"{D}/scores"
++    os.makedirs(out_dir, exist_ok=True)
++    out = f"{out_dir}/{a.mode}{a.tag}_scores.jsonl"
++    lock = open(out + ".lock", "w")
++    fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)  # 동일 출력 단일 소유
++    done = set()
++    if os.path.exists(out):
++        for l in open(out):
++            try:
++                r = json.loads(l)
++            except json.JSONDecodeError:
++                continue  # torn tail
++            if r["protocol_digest"] != pd:
++                sys.exit("기존 출력의 protocol digest 불일치: 재사용 거부")
++            done.add(r["request_id"])
++    reqs = [q for q in man["requests"] if q["group"] == a.mode]
++    if a.limit:
++        reqs = reqs[:a.limit]
++    todo = [q for q in reqs if q["request_id"] not in done]
++    print(f"mode={a.mode} total={len(reqs)} done={len(done)} todo={len(todo)}", flush=True)
++    if not todo:
++        return
++    rows = {r["id"]: r for r in man["rows"]}
++    model, tok, load_s = MM.load()
++    print(f"loaded {load_s:.0f}s peak_MiB={peak_mib()}", flush=True)
++    if a.checks:
++        import mr112_checks
++        os.makedirs(f"{D}/tech", exist_ok=True)
++        ok = mr112_checks.run_checks(model, tok, man, f"{D}/tech/checks{a.tag}.json")
++        print("checks_ok", ok, "peak_MiB", peak_mib(), flush=True)
++    cache = {}
++    for q in todo:
++        r = rows[q["id"]]
++        # 영상 로딩 시 file/pixel hash 재검증 (manifest 연결)
++        if q["id"] not in cache:
++            if hashlib.sha256(open(r["image"], "rb").read()).hexdigest() != r["file_sha256"]:
++                raise RuntimeError(f"영상 hash 불일치 {q['id']}")
++            cache.clear()
++            pv = MM.load_image(r["image"])
++            cache[q["id"]] = (pv, MM.vit_features(model, pv))
++        pv, vit = cache[q["id"]]
++        t0 = time.time()
++        rec = dict(request_id=q["request_id"], id=q["id"], group=q["group"], kind=q["kind"], det_index=q["det_index"], box=q["box"],
++                   protocol_digest=pd, prompt_sha256=hashlib.sha256(q["prompt"].encode()).hexdigest(), target=q["target"],
++                   file_sha256=r["file_sha256"], pixel_values_sha256=hashlib.sha256(pv.numpy().tobytes()).hexdigest())
++        rec.update(MM.score(model, tok, q["prompt"], vit, q["target"]))
++        rec["score_s"] = time.time() - t0
++        if a.mode == "tech" and q["kind"] == "region":
++            t1 = time.time()
++            txt = MM.generate(model, tok, q["prompt"], pv)
++            rec["generated"] = txt
++            rec["gen_s"] = time.time() - t1
++        rec["peak_mib"] = peak_mib()
++        rec["wall_s"] = time.time() - t0
++        with open(out, "a") as f:
++            f.write(json.dumps(rec) + "\n")
++            f.flush()
++            os.fsync(f.fileno())
++        print(q["request_id"], q["kind"], round(rec["mean_logprob"], 4), f"{rec['wall_s']:.1f}s", rec["peak_mib"], flush=True)
++
++
++if __name__ == "__main__":
++    main()
+diff --git a/mr112_spec.py b/mr112_spec.py
+new file mode 100644
+index 0000000..c180afa
+--- /dev/null
++++ b/mr112_spec.py
+@@ -0,0 +1,39 @@
++"""iter_112 고정 규칙 (결과를 보기 전 lock). 순수 함수만 둔다. GT는 여기서 다루지 않는다.
++MedRegA 좌표는 원 영상 기준 xyxy 0-999 정수, 기존 평가 좌표(yxyx 0-1000 canvas)와 혼용하지 않는다."""
++import hashlib
++import math
++
++HEAD = ("You are a helpful medical assistant. Your task is object recognition. You are required to recognize "
++        "the object in the given region. The region is represented in the form of bounding box, [x1, y1, x2, y2], "
++        "with integers ranging from 0 to 999. These values correspond to the top left x, top left y, bottom right x, "
++        "and bottom right y. <image>\n")
++# 공식 demo_data id=7 (CT)의 영역 식별 template. modality 어구만 'CT scan' -> 'chest X-ray scan'.
++TAIL = "What is <ref>this</ref><box>[[{x1}, {y1}, {x2}, {y2}]]</box> in this chest X-ray scan?"
++TARGET = "lung opacity"
++FULL_BOX = (0, 0, 999, 999)
++THR, EPOCH = 0.70, 18
++GEN_MAX_NEW_TOKENS = 400
++TECH_N = 12
++K_FRAC = 0.25
++IOU_MAIN, IOU_AUX = 0.3, 0.5
++
++
++def q999(v, size):
++    return min(999, max(0, int(round(v / size * 1000))))
++
++
++def box_to_medrega(box_px, w, h):
++    x1, y1, x2, y2 = box_px
++    return (q999(x1, w), q999(y1, h), q999(x2, w), q999(y2, h))
++
++
++def prompt(box):
++    return HEAD + TAIL.format(x1=box[0], y1=box[1], x2=box[2], y2=box[3])
++
++
++def tech_key(patient):
++    return hashlib.sha256(("iter112:" + patient).encode()).hexdigest()
++
++
++def n_review(n):
++    return math.ceil(K_FRAC * n)
+diff --git a/mr112_test_cpu.py b/mr112_test_cpu.py
+new file mode 100644
+index 0000000..3579b61
+--- /dev/null
++++ b/mr112_test_cpu.py
+@@ -0,0 +1,86 @@
++"""iter_112 CPU fixture: 좌표 변환(비정사각 포함), pixel-mask 독립 IoU 대조, 평가 규칙 toy 사례, 반입 blob 확인."""
++import hashlib
++import json
++import subprocess
++import sys
++
++import numpy as np
++
++import mr112_spec as S
++from rsna_diag import metrics as M
++import mr112_eval as E
++
++res = []
++
++
++def chk(name, ok, info=""):
++    res.append(dict(name=name, ok=bool(ok), info=str(info)))
++    print("PASS" if ok else "FAIL", name, info)
++
++
++# 1) 반입 blob
++exp = {"rsna_diag/__init__.py": "e69de29bb2d1d6434b8b29ae775ad8c2e48c5391",
++       "rsna_diag/geometry.py": "3d6521177f2ed3a081bf27be743597ac8750b836",
++       "rsna_diag/metrics.py": "33c5131f7696fe9b0a1cb4266ecfc8b48f2e1fb8"}
++for p, b in exp.items():
++    got = subprocess.check_output(["git", "hash-object", "--", p]).decode().strip()
++    chk(f"blob {p}", got == b, got)
++
++# 2) 좌표 변환: 정사각/비정사각, 반올림, 범위
++rng = np.random.default_rng(112)
++bad = 0
++for (w, h) in [(1024, 1024), (512, 512), (1000, 700), (333, 1024), (2048, 1500)]:
++    for _ in range(300):
++        x1, y1 = rng.uniform(0, w - 20), rng.uniform(0, h - 20)
++        x2, y2 = rng.uniform(x1 + 5, w), rng.uniform(y1 + 5, h)
++        m = S.box_to_medrega((x1, y1, x2, y2), w, h)
++        assert all(0 <= v <= 999 for v in m)
++        back = (m[0] / 1000 * w, m[1] / 1000 * h, m[2] / 1000 * w, m[3] / 1000 * h)
++        # 왕복 오차는 반 픽셀 격자(size/1000/2) 이내, 단 999 clip 경계는 한 격자
++        tol = [w / 1000 * 0.51, h / 1000 * 0.51, w / 1000 * 0.51, h / 1000 * 0.51]
++        if x2 / w * 1000 > 999.5 or y2 / h * 1000 > 999.5:
++            tol = [t * 2.1 for t in tol]
++        if any(abs(a - b) > t for a, b, t in zip(back, (x1, y1, x2, y2), tol)):
++            bad += 1
++chk("roundtrip tolerance (5 sizes x 300)", bad == 0, bad)
++chk("full box", S.FULL_BOX == (0, 0, 999, 999))
++chk("axis order x,y (비정사각)", S.box_to_medrega((100, 10, 200, 20), 1000, 500) == (100, 20, 200, 40), S.box_to_medrega((100, 10, 200, 20), 1000, 500))
++
++# 3) pixel-mask 독립 IoU 대조 (정수 격자 box 에서 정확히 일치)
++bad = 0
++for _ in range(500):
++    def rb():
++        x1, y1 = rng.integers(0, 80, 2)
++        return [int(x1), int(y1), int(x1 + rng.integers(1, 20)), int(y1 + rng.integers(1, 20))]
++    a, b = rb(), rb()
++    ma, mb = np.zeros((100, 100), bool), np.zeros((100, 100), bool)
++    ma[a[1]:a[3], a[0]:a[2]] = True
++    mb[b[1]:b[3], b[0]:b[2]] = True
++    u = (ma | mb).sum()
++    iou = (ma & mb).sum() / u
++    if abs(iou - M.iou(a, b)) > 1e-12:
++        bad += 1
++chk("M.iou == pixel mask IoU (xyxy 정수 격자)", bad == 0, bad)
++chk("max_iou_all 빈 GT -> 0", M.max_iou_all([[0, 0, 5, 5]], []) == 0.0)
++
++# 4) 평가 규칙 toy: 동률, K, 오류 정의
++T = [dict(id=f"p{i}", det_index=0, conf=0.7 + 0.01 * i, region=-i * 1.0, full=-0.5, max_iou=0.1 if i >= 4 else 0.9,
++          err3=i >= 4, err5=i >= 4, gt_pos=True) for i in range(8)]
++chk("K=ceil(.25N)", S.n_review(8) == 2 and S.n_review(240) == 60 and S.n_review(9) == 3)
++o = E.order(T, "region")
++chk("region 순위: 낮은 likelihood 먼저", [T[i]["id"] for i in o[:2]] == ["p7", "p6"])
++o = E.order(T, "full")  # 전부 동률 -> 낮은 confidence 먼저
++chk("full 동률 -> confidence 오름차순", [T[i]["id"] for i in o[:3]] == ["p0", "p1", "p2"])
++s = E.summary(T)
++chk("toy summary", s["captured_region"] == 2 and s["captured_conf"] == 0 and abs(s["diff_region_conf"] - 0.25) < 1e-12, s["diff_region_conf"])
++chk("decide toy: 기여 환자 2명 -> inconclusive", E.decide(s).startswith("inconclusive"), E.decide(s))
++
++# 5) request/manifest 구조: 요청에 GT 키가 없다
++man = json.load(open("results/iter_112/data/manifest.json"))
++bad = [q for q in man["requests"] if set(q) - {"group", "id", "det_index", "kind", "box", "prompt", "target", "request_id"}]
++chk("요청 필드에 GT/confidence 없음", not bad)
++chk("prompt에 'lung opacity' 정답/score 문자열 없음", all(("opacity" not in q["prompt"]) for q in man["requests"]))
++chk("main 요청 수", man["counts"]["main_region_requests"] == 240 and man["counts"]["main_full_requests"] == 140)
++json.dump(res, open("results/iter_112/tests_cpu.json", "w"), indent=1)
++print(sum(r["ok"] for r in res), "/", len(res))
++sys.exit(0 if all(r["ok"] for r in res) else 1)
+diff --git a/mr112_verify.py b/mr112_verify.py
+new file mode 100644
+index 0000000..3626e9d
+--- /dev/null
++++ b/mr112_verify.py
+@@ -0,0 +1,97 @@
++"""iter_112 독립 재계산: mr112_eval.py / rsna_diag.metrics를 import하지 않고 원시 scores·manifest·gt에서 주요 수치와 bootstrap CI를 다시 계산한다.
++(같은 규칙·같은 seed 고정, 구현은 numpy lexsort 기반.) 결과 파일과 비교해 PASS/FAIL을 기록한다."""
++import json
++import math
++import sys
++
++import numpy as np
++
++import os
++D = os.environ.get("MR112_DIR", "results/iter_112")
++
++
++def iou(a, b):
++    ix = max(0.0, min(a[2], b[2]) - max(a[0], b[0]))
++    iy = max(0.0, min(a[3], b[3]) - max(a[1], b[1]))
++    i = ix * iy
++    u = (a[2] - a[0]) * (a[3] - a[1]) + (b[2] - b[0]) * (b[3] - b[1]) - i
++    return i / u if u > 0 else 0.0
++
++
++def main(report_path, out_path, d=None):
++    global D
++    D = d or D
++    man =json.load(open(f"{D}/data/manifest.json"))
++    gt = json.load(open(f"{D}/data/gt.json"))
++    sc = {}
++    for l in open(f"{D}/scores/main_scores.jsonl"):
++        r = json.loads(l)
++        assert r["request_id"] not in sc, "중복 record"
++        sc[r["request_id"]] = r["mean_logprob"]
++    rows = {r["id"]: r for r in man["rows"]}
++    full = {q["id"]: sc[q["request_id"]] for q in man["requests"] if q["group"] == "main" and q["kind"] == "full"}
++    pid, di, conf, reg, fl, err = [], [], [], [], [], []
++    for q in man["requests"]:
++        if q["group"] != "main" or q["kind"] != "region":
++            continue
++        b = [x for x in rows[q["id"]]["boxes"] if x["det_index"] == q["det_index"]][0]
++        m = max([iou(b["xyxy_px"], g) for g in gt[q["id"]]["boxes_xyxy_px"]] or [0.0])
++        pid.append(q["id"]); di.append(q["det_index"]); conf.append(b["score"]); reg.append(sc[q["request_id"]]); fl.append(full[q["id"]])
++        err.append(m < 0.3)
++    N = len(pid)
++    uniq = sorted(set(pid))
++    pidx = np.array([uniq.index(p) for p in pid])
++    pstr = np.array([int(p.split("_")[1]) for p in pid])  # id 숫자부분: 사전식 정렬과 동일 순서(고정 자릿수)
++    di = np.array(di); conf = np.array(conf); reg = np.array(reg); fl = np.array(fl); err = np.array(err)
++
++    def cap(sel, K, which):
++        s, c = conf[sel], None
++        keys = {"conf": (di[sel], pstr[sel], conf[sel]),
++                "region": (di[sel], pstr[sel], conf[sel], reg[sel]),
++                "full": (di[sel], pstr[sel], conf[sel], fl[sel])}[which]
++        o = np.lexsort(keys)  # 마지막 key가 1차
++        return int(err[sel][o[:K]].sum()), o[:K]
++
++    allidx = np.arange(N)
++    K = math.ceil(0.25 * N)
++    c_conf, _ = cap(allidx, K, "conf")
++    c_reg, _ = cap(allidx, K, "region")
++    c_full, _ = cap(allidx, K, "full")
++    got = dict(N=N, K=K, n_err=int(err.sum()), captured_conf=c_conf, captured_region=c_reg, captured_full=c_full,
++               diff_region_conf=(c_reg - c_conf) / N, diff_region_full=(c_reg - c_full) / N)
++    # bootstrap (같은 rng 호출 순서)
++    rng = np.random.default_rng(112017)
++    by = {u: np.where(pidx == i)[0] for i, u in enumerate(uniq)}
++    d1, d2 = [], []
++    for _ in range(10000):
++        pick = rng.integers(0, len(uniq), len(uniq))
++        sel = np.concatenate([by[uniq[k]] for k in pick])
++        copy = np.concatenate([np.full(len(by[uniq[k]]), c) for c, k in enumerate(pick)])
++        n = len(sel)
++        Kb = math.ceil(0.25 * n)
++        res = []
++        for which in ("conf", "region", "full"):
++            base = {"conf": (di[sel], pstr[sel], conf[sel]), "region": (di[sel], pstr[sel], conf[sel], reg[sel]),
++                    "full": (di[sel], pstr[sel], conf[sel], fl[sel])}[which]
++            o = np.lexsort((copy,) + base)
++            res.append(int(err[sel][o[:Kb]].sum()))
++        d1.append((res[1] - res[0]) / n)
++        d2.append((res[1] - res[2]) / n)
++    got["diff_region_conf_ci"] = [float(np.percentile(d1, 2.5)), float(np.percentile(d1, 97.5))]
++    got["diff_region_full_ci"] = [float(np.percentile(d2, 2.5)), float(np.percentile(d2, 97.5))]
++    rep = json.load(open(report_path))
++    p, b = rep["primary"], rep["boot"]
++    chk = {
++        "N/K/n_err": (p["N"], p["K"], p["n_err"]) == (got["N"], got["K"], got["n_err"]),
++        "captured": (p["captured_conf"], p["captured_region"], p["captured_full"]) == (c_conf, c_reg, c_full),
++        "diffs": abs(p["diff_region_conf"] - got["diff_region_conf"]) < 1e-12 and abs(p["diff_region_full"] - got["diff_region_full"]) < 1e-12,
++        "ci_conf": max(abs(x - y) for x, y in zip(b["diff_region_conf_ci"], got["diff_region_conf_ci"])) < 1e-12,
++        "ci_full": max(abs(x - y) for x, y in zip(b["diff_region_full_ci"], got["diff_region_full_ci"])) < 1e-12,
++    }
++    json.dump(dict(independent=got, checks=chk, all_pass=all(chk.values())), open(out_path, "w"), indent=1)
++    print(chk, got)
++    sys.exit(0 if all(chk.values()) else 1)
++
++
++if __name__ == "__main__":
++    main(sys.argv[1], sys.argv[2], sys.argv[3] if len(sys.argv) > 3 else None)
+diff --git a/mr112_weights.py b/mr112_weights.py
+new file mode 100644
+index 0000000..c4e9bd1
+--- /dev/null
++++ b/mr112_weights.py
+@@ -0,0 +1,73 @@
++"""iter_112: MedRegA 가중치를 고정 revision으로 results/environments/medrega112_weights에 받고 크기/sha256을 기록한다.
++기존 파일은 덮어쓰지 않고, 크기가 같은 파일만 건너뛴다. hf_cache는 건드리지 않는다."""
++import hashlib, json, os, sys, time, urllib.request
++
++REPO = "Luxuriant16/medrega"
++REV = "ec1d98335322b2200f93b35562b681e05fc3a194"
++DST = "results/environments/medrega112_weights"
++LOG = "results/iter_112/weights_download.log"
++
++
++def log(m):
++    with open(LOG, "a") as f:
++        f.write(time.strftime("%H:%M:%S ") + m + "\n")
++
++
++def fetch(name, size):
++    dst = f"{DST}/{name}"
++    part = dst + ".part"
++    if os.path.exists(dst):
++        assert os.path.getsize(dst) == size, (name, "size mismatch")
++        return
++    url = f"https://huggingface.co/{REPO}/resolve/{REV}/{name}"
++    have = os.path.getsize(part) if os.path.exists(part) else 0
++    req = urllib.request.Request(url, headers={"Range": f"bytes={have}-"} if have else {})
++    r = urllib.request.urlopen(req, timeout=120)
++    if have:
++        assert r.status == 206, r.status
++        cr = r.headers["Content-Range"]
++        assert cr.startswith(f"bytes {have}-") and cr.endswith(f"/{size}"), cr
++    with open(part, "ab") as f:
++        while True:
++            b = r.read(1 << 24)
++            if not b:
++                break
++            f.write(b)
++    assert os.path.getsize(part) == size, (name, os.path.getsize(part), size)
++    os.replace(part, dst)
++
++
++def main():
++    os.makedirs(DST, exist_ok=True)
++    tree = json.load(open("results/iter_112/external/fetch_manifest.json"))["hf"]["tree"]
++    files = [(t["path"], t["size"]) for t in tree if t["path"].endswith(".safetensors")]
++    for n, s in files:
++        for attempt in range(8):
++            try:
++                t0 = time.time()
++                fetch(n, s)
++                log(f"ok {n} {s} {time.time()-t0:.0f}s")
++                break
++            except Exception as e:
++                log(f"retry {n} attempt{attempt} {e!r}")
++                time.sleep(10)
++        else:
++            log(f"FAIL {n}")
++            sys.exit(1)
++    man = {}
++    for n, s in files:
++        h = hashlib.sha256()
++        with open(f"{DST}/{n}", "rb") as f:
++            for b in iter(lambda: f.read(1 << 24), b""):
++                h.update(b)
++        man[n] = {"bytes": s, "sha256": h.hexdigest()}
++    lfs = {t["path"]: (t.get("lfs") or {}).get("oid") for t in tree}
++    for n in man:
++        man[n]["hf_lfs_oid"] = lfs[n]
++        man[n]["sha256_matches_hf"] = man[n]["sha256"] == lfs[n]
++    json.dump(man, open("results/iter_112/weights_manifest.json", "w"), indent=1)
++    log("DONE all " + str(all(v["sha256_matches_hf"] for v in man.values())))
++
++
++if __name__ == "__main__":
++    main()
+diff --git a/rsna_diag/__init__.py b/rsna_diag/__init__.py
+new file mode 100644
+index 0000000..e69de29
+diff --git a/rsna_diag/geometry.py b/rsna_diag/geometry.py
+new file mode 100644
+index 0000000..3d65211
+--- /dev/null
++++ b/rsna_diag/geometry.py
+@@ -0,0 +1,87 @@
++"""전처리(정사각 padding)와 좌표 변환.
++
++좌표 규약
++- 원본/pixel bbox: xyxy = [x0, y0, x1, y1] (pixel, 원본 canvas).
++- 모델 출력/GT 정규화 bbox: [y0, x0, y1, x1] in [0, 1000], padding된 정사각 전체 영상 기준.
++padding: 중앙 정렬, 위/왼쪽에 floor(d/2), 아래/오른쪽에 나머지 (공식 notebook pad_image_to_square와 동일).
++"""
++import numpy as np
++from PIL import Image
++
++
++def pad_offsets(h, w):
++    """returns (top, left, side)."""
++    side = max(h, w)
++    top = (side - h) // 2 if h < w else 0
++    left = (side - w) // 2 if w < h else 0
++    return top, left, side
++
++
++def to_uint8_rgb_preserving(arr, mode=None):
++    """값 보존 경로: uint8 L/RGB는 밝기 유지(gray는 채널 복제), RGBA는 흰 배경 alpha 합성(반올림).
++
++    uint8이 아닌 dtype은 지원하지 않는다 (임의 정규화 금지) -> ValueError.
++    """
++    a = np.asarray(arr)
++    if a.dtype != np.uint8:
++        raise ValueError(f"unsupported dtype {a.dtype}")
++    if a.ndim == 2:
++        return np.repeat(a[:, :, None], 3, axis=2)
++    if a.ndim == 3 and a.shape[2] == 1:
++        return np.repeat(a, 3, axis=2)
++    if a.ndim == 3 and a.shape[2] == 3:
++        return a.copy()
++    if a.ndim == 3 and a.shape[2] == 4:
++        af = a[:, :, 3:4].astype(np.float64) / 255.0
++        rgb = a[:, :, :3].astype(np.float64)
++        out = rgb * af + 255.0 * (1.0 - af)
++        return np.floor(out + 0.5).astype(np.uint8)
++    raise ValueError(f"unsupported shape {a.shape}")
++
++
++def pad_square(rgb):
++    """검은 padding, 중앙, 위/왼쪽 floor. returns (padded, (top, left, side))."""
++    h, w = rgb.shape[:2]
++    top, left, side = pad_offsets(h, w)
++    out = np.zeros((side, side, rgb.shape[2]), dtype=rgb.dtype)
++    out[top:top + h, left:left + w] = rgb
++    return out, (top, left, side)
++
++
++def notebook_pad_emulation(arr):
++    """공식 notebook의 preprocess를 numpy로 모사한다 (skimage 미설치, pip 불가 -> 근사 emulation).
++
++    skimage.util.img_as_ubyte(uint8) = 항등. gray2rgb: 채널 복제(uint8 유지).
++    rgba2rgb: img_as_float(x/255) 후 흰 배경 alpha 합성 -> float64 [0,1]. 그 뒤 `* 255` 후 astype(uint8):
++      - float 경로(RGBA 입력): 값 x/255*255 를 uint8로 truncation (부동소수 오차로 1 LSB 감소 가능).
++      - uint8 경로(L/RGB 입력): uint8 * 255 는 uint8에서 modulo 256 wrap (v -> (255*v) mod 256).
++    """
++    a = np.asarray(arr)
++    if a.dtype != np.uint8:
++        raise ValueError("emulation only for uint8 input")
++    if a.ndim == 2:
++        a = np.repeat(a[:, :, None], 3, axis=2)
++    if a.shape[2] == 4:
++        f = a.astype(np.float64) / 255.0
++        alpha = f[:, :, 3:4]
++        a = f[:, :, :3] * alpha + 1.0 * (1.0 - alpha)
++    padded, aff = pad_square(a)
++    return (padded * 255).astype(np.uint8), aff
++
++
++def canvas_to_norm(box_xyxy, top, left, side):
++    """원본 pixel xyxy -> padding canvas 기준 [y0,x0,y1,x1] (0-1000, float)."""
++    x0, y0, x1, y1 = box_xyxy
++    return [(y0 + top) * 1000.0 / side, (x0 + left) * 1000.0 / side,
++            (y1 + top) * 1000.0 / side, (x1 + left) * 1000.0 / side]
++
++
++def norm_to_canvas(box_yxyx, top, left, side):
++    """padding canvas 기준 [y0,x0,y1,x1] (0-1000) -> 원본 pixel xyxy (clipping 없음)."""
++    y0, x0, y1, x1 = box_yxyx
++    return [x0 * side / 1000.0 - left, y0 * side / 1000.0 - top,
++            x1 * side / 1000.0 - left, y1 * side / 1000.0 - top]
++
++
++def to_pil(rgb):
++    return Image.fromarray(rgb)
+diff --git a/rsna_diag/metrics.py b/rsna_diag/metrics.py
+new file mode 100644
+index 0000000..33c5131
+--- /dev/null
++++ b/rsna_diag/metrics.py
+@@ -0,0 +1,136 @@
++"""bbox 평가 (iter_009). 모든 box는 [y0,x0,y1,x1] (0-1000, padding canvas)."""
++import itertools
++import math
++
++import numpy as np
++
++
++def area(b):
++    return max(0.0, b[2] - b[0]) * max(0.0, b[3] - b[1])
++
++
++def inter(a, b):
++    return max(0.0, min(a[2], b[2]) - max(a[0], b[0])) * max(0.0, min(a[3], b[3]) - max(a[1], b[1]))
++
++
++def iou(a, b):
++    i = inter(a, b)
++    u = area(a) + area(b) - i
++    return i / u if u > 0 else 0.0
++
++
++def union_area(boxes):
++    """겹친 면적을 한 번만 세는 직사각형 합집합 면적 (좌표 압축)."""
++    boxes = [b for b in boxes if area(b) > 0]
++    if not boxes:
++        return 0.0
++    ys = sorted({v for b in boxes for v in (b[0], b[2])})
++    tot = 0.0
++    for y0, y1 in zip(ys[:-1], ys[1:]):
++        iv = sorted((b[1], b[3]) for b in boxes if b[0] <= y0 and b[2] >= y1)
++        cur_s = cur_e = None
++        length = 0.0
++        for s, e in iv:
++            if cur_e is None or s > cur_e:
++                if cur_e is not None:
++                    length += cur_e - cur_s
++                cur_s, cur_e = s, e
++            else:
++                cur_e = max(cur_e, e)
++        if cur_e is not None:
++            length += cur_e - cur_s
++        tot += length * (y1 - y0)
++    return tot
++
++
++def union_iou(pred, gt):
++    if not pred and not gt:
++        return 0.0
++    up, ug = union_area(pred), union_area(gt)
++    # 교집합 면적 = up + ug - union(all)
++    ia = up + ug - union_area(list(pred) + list(gt))
++    u = up + ug - ia
++    return ia / u if u > 0 else 0.0
++
++
++def match(pred, gt, thr):
++    """threshold thr 이상 IoU 쌍의 최대 cardinality one-to-one matching.
++    동률은 총 IoU 최대, 이후 (gt index 순의) pred index tuple 사전순 최소. returns list[(gi, pi)]."""
++    mat = [[iou(p, g) for p in pred] for g in gt]
++    best = {"key": None, "pairs": []}
++
++    def rec(gi, used, pairs, tot):
++        if gi == len(gt):
++            key = (len(pairs), tot)
++            cur = best["key"]
++            if cur is None or key[0] > cur[0] or (key[0] == cur[0] and key[1] > cur[1] + 1e-12):
++                best["key"], best["pairs"] = key, list(pairs)
++            return
++        # 사전순 최소 tie-break: pred index 오름차순으로 탐색하고 엄격히 더 좋을 때만 갱신 (none 분기는 마지막)
++        for pi in range(len(pred)):
++            if pi not in used and mat[gi][pi] >= thr:
++                pairs.append((gi, pi))
++                rec(gi + 1, used | {pi}, pairs, tot + mat[gi][pi])
++                pairs.pop()
++        rec(gi + 1, used, pairs, tot)
++
++    rec(0, frozenset(), [], 0.0)
++    return best["pairs"]
++
++
++def patient_metrics(pred, gt, thr):
++    pairs = match(pred, gt, thr)
++    tp = len(pairs)
++    prec = tp / len(pred) if pred else 0.0
++    rec = tp / len(gt) if gt else 0.0
++    f1 = 2 * prec * rec / (prec + rec) if prec + rec > 0 else 0.0
++    return {"tp": tp, "n_pred": len(pred), "n_gt": len(gt), "precision": prec, "recall": rec, "f1": f1,
++            "unmatched_gt": len(gt) - tp, "unmatched_pred": len(pred) - tp}
++
++
++def max_iou_all(pred, gt):
++    return max((iou(p, g) for p in pred for g in gt), default=0.0)
++
++
++def wilson(k, n, z=1.959964):
++    if n == 0:
++        return (float("nan"), float("nan"))
++    p = k / n
++    d = 1 + z * z / n
++    c = (p + z * z / (2 * n)) / d
++    h = z * math.sqrt(p * (1 - p) / n + z * z / (4 * n * n)) / d
++    return (c - h, c + h)
++
++
++def bootstrap_indices(n, B=10000, seed=20260924):
++    rng = np.random.default_rng(seed)
++    return rng.integers(0, n, size=(B, n), dtype=np.int32)
++
++
++def paired_boot_ci(a, b, idx):
++    """a,b: 같은 환자 순서의 값. 차이 a-b 평균의 percentile 95% CI. returns (mean_diff, lo, hi)."""
++    d = np.asarray(a, float) - np.asarray(b, float)
++    m = d[idx].mean(axis=1)
++    return float(d.mean()), float(np.percentile(m, 2.5)), float(np.percentile(m, 97.5))
++
++
++def derangement(n, seed):
++    """Sattolo: 고정점이 없는 순열 (단일 순환)."""
++    rng = np.random.default_rng(seed)
++    p = list(range(n))
++    for i in range(n - 1, 0, -1):
++        j = int(rng.integers(0, i))
++        p[i], p[j] = p[j], p[i]
++    assert all(p[i] != i for i in range(n))
++    return p
++
++
++def medoid_box(dev_gt_boxes_per_image):
++    """dev 양성 GT box 후보 중 (영상별 best IoU)의 평균이 최대인 실제 box. 동률은 입력 순서(고정 ID 순)."""
++    cands = [b for boxes in dev_gt_boxes_per_image for b in boxes]
++    best, best_s = None, -1.0
++    for c in cands:
++        s = float(np.mean([max(iou(c, g) for g in boxes) for boxes in dev_gt_boxes_per_image]))
++        if s > best_s + 1e-12:
++            best, best_s = c, s
++    return best, best_s

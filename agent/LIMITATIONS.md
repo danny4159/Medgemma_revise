@@ -315,3 +315,22 @@ PadChest-GR 공식 train의 반복 개발 E32에서 고정 CURE와 단일 phrase
 - 미해결: 영역을 직접 검사하는 검증기가 confidence 이후 유용한 정보를 제공하는지는 이번 비교로 판단하지 않았다.
 - 미해결: 오류 포착을 실제 임상 교정이나 시각 근거의 인과적 사용으로 해석할 수 없다.
 
+## medrega-region-likelihood-review-value — observed
+
+RSNA confirm800 중 E600 밖의 개발 양성 환자에서 기술 집단을 제외한 140명·240개 detector17 예측 box를 평가했다. 수정된 8-bit MedRegA의 공식 영역 식별 형식과 고정 문자열 lung opacity 평균 token likelihood를 사용하는 낮은 점수 순위는 같은 60개 검토량에서 주석 불일치 오류를 confidence보다 적게 포착했다(16 대 24). 전체 영역 likelihood는 17개였다. 현재 고정 순위의 추가 가치는 지지되지 않으며, 영역 이해 전체나 다른 점수 결합 방식의 정보 부재를 뜻하지 않는다.
+
+- 적용 목표 시작: iter_003
+- 최신 리뷰: agent/runs/iter_112/review.json
+- 근거: research/results/iter_112/eval/report.json 및 scores/main_scores.jsonl: 140명·240 box, 최대 GT IoU<0.3 오류 53개, 검토량 60개.
+- 근거: 리뷰 독립 재계산: region−confidence −0.0333333, 환자 bootstrap 10,000회 95% CI [−0.07500247, −0.00388883].
+- 근거: 리뷰 독립 재계산: region−full −0.0041667, 95% CI [−0.03734440, 0.02869148].
+- 사용·평가 검증: 리뷰 SHA 576b9317d57eb34cd353ec8fbd880b67b2dd56f1의 대상 17파일과 작업 파일이 일치했다.
+- 사용·평가 검증: 380개 주 요청의 누락·중복이 없고 요청 필드·prompt hash·protocol digest 연결이 일치했다. 입력 영상 200개의 file hash도 일치했다.
+- 사용·평가 검증: 공식 소스의 저장 hash가 fetch_manifest.json과 일치하며 chat template·영상 token 치환·전처리 연결을 확인했다.
+- 사용·평가 검증: tests_cpu.json의 16개 및 tech/checks.json의 27개 통과 기록을 코드·실행 로그와 대조했다. scoring은 target token만 평균하며 공식 forward CE와의 대조를 포함한다.
+- 사용·평가 검증: 최초 lock 이후 mr112_model.py만 변경됐으며 본평가 전 amendment의 전체 hash가 현재 파일과 일치했다.
+- 미해결: 고정 문자열의 언어 prior와 실제 영역 정합성 신호를 분리하지 못했다.
+- 미해결: 수정된 8-bit 적재·sdpa 경로와 공식 기본 실행의 수치 동치는 미검증이다.
+- 미해결: 음성 영상의 오검출·누락·coverage·임상적 소견 부재는 이번 endpoint가 평가하지 않는다.
+- 미해결: MedRegA 학습 노출, 독립 환자·도메인 일반화 및 confidence와 결합했을 때의 조건부 정보는 미검증이다.
+

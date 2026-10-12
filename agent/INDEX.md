@@ -117,6 +117,7 @@
 - iter_109 [CONTINUE] (deep_medium/standard/normal) <국소 근거의 판단 가치: success> 💾ba6cdae9e66497b28cad778c02000b6543456f86 RSNA 236명에서 명시적 답을 읽자 crop의 표적 차이는 복제 대비 −2.97→−0.42pp로 줄었지만 투자 보류는 유지됐다. 전체 비정상 판단의 내용 효과는 여전히 불확정이다. → 다음: 현재 crop 설정의 추가 투자와 동일 저장 출력의 parser 분석을 종료하고 사용자 승인·피드백을 기다린다. 명시적 답 추출 후에도 실질적 표적 이득과 단순 대안 이후의 가치가 확인되지 않아 추가 prompt·crop·seed·학습을 권고하지 않는다. 전체 비정상 판단은 기각하지 않고 미확정으로 보존한다. 이를 후속으로 선택하려면 현재 대안이 놓치는 중요한 사용 문제와 공개 정답으로 판별할 고정 응답·독립 자료 비교의 정보 가치를 먼저 구체화해야 한다. 그 근거 없이 같은 분석이나 전략 검토만의 반복을 시작하지 않는다.
 - iter_110 [사용자 보완으로 전환 → iter_111] 기존 기록 보존, 성공·실패 판정 아님 (계획 확인)
 - iter_111 [CONTINUE] (deep_medium/standard/normal) <소견 판단의 위치 오류 식별 가치: abandon> 💾7776d92ff7761cb88d111f5cae344fee98b0ac5d RSNA detector 양성 출력 226명에서 같은 41명을 검토할 때 존재 판단은 오류 30건, confidence는 38건을 찾았다. 현재 후보는 종료하며, 영역별 검증의 가치는 미검증이다. → 다음: 현재 전역 존재 판단을 위치 검증으로 사용하는 후보의 추가 투자를 종료하고 사용자 승인·피드백을 기다린다. 같은 E600에서 parser·순위·검토율·threshold를 바꾸는 후속이나 독립 확대는 권고하지 않는다. 영역별 검증은 별도 미검증 질문으로 보존하되, 실제 지원되는 검증 입력과 공개 위치 정답, confidence 이후의 잔여 가치 가설이 구체화될 때만 별도 한정 비교의 재개 근거로 삼는다. 이번 코드 보완만을 위한 새 연구 반복은 만들지 말고 실제 재사용이 선택될 때 필요한 결함만 수정한다.
+- iter_112 [CONTINUE] (deep_medium/standard/normal) <예측 영역의 직접 정합 검증: abandon> 💾576b9317d57eb34cd353ec8fbd880b67b2dd56f1 RSNA 양성 140명·240개 box에서 60개를 검토하자 영역 likelihood는 오류 16개, confidence는 24개를 찾았다. 현재 순위 경로는 종료하며 영역 검증 전체의 가치는 미확정이다. → 다음: 현재 고정 likelihood 경로를 종료하고 위치 오류 검토 묶음의 추가 실행을 보류한 뒤 사용자 승인·피드백을 기다린다. 같은 자료에서 문자열·순위·검토율을 바꾸거나 음성 결과의 독립 확대를 권고하지 않는다. 대안인 독립 재-grounding은 경계 정합성을 직접 겨냥하지만, 이번 결과는 그 유망성을 뒷받침하지 않는다. 재개하려면 기존 공식 grounding 자산에서 confidence가 놓친 오류를 구분할 구체적 근거와 동일 정보의 단순 대조, 공개 정답 범위, 최소 비교의 종료 조건을 제시해야 한다. 그 근거 없이 새 모델 확보·출력 생성·코드 정비 반복을 발주하지 않는다.
 
 ## 이전 목표들의 접근법 (참고용, 현재 목표의 재평가 횟수에는 안 들어감)
 
@@ -171,10 +172,11 @@
 - 국소 근거의 판단 가치 [approach/regional-evidence-value]: 2회 (iter_108, iter_109), 유효한 실험 2회, 미분류 0회, 최근 판정: success, 커밋: c2602f4b237ec9a90b7e04c99474ea7a0003bfb0, ba6cdae9e66497b28cad778c02000b6543456f86
 - 생성 소견–위치 근거 일치 진단 [approach/report-evidence-consistency]: 1회 (iter_110), 유효한 실험 0회, 미분류 0회, 최근 판정: 사용자 보완으로 전환 (검증 미완료), 커밋: 없음
 - 소견 판단의 위치 오류 식별 가치 [approach/presence-evidence-verification]: 1회 (iter_111), 유효한 실험 1회, 미분류 0회, 최근 판정: abandon, 커밋: 7776d92ff7761cb88d111f5cae344fee98b0ac5d
+- 예측 영역의 직접 정합 검증 [approach/region-evidence-verification]: 1회 (iter_112), 유효한 실험 1회, 미분류 0회, 최근 판정: abandon, 커밋: 576b9317d57eb34cd353ec8fbd880b67b2dd56f1
 
-현재 연구 브랜치: approach/presence-evidence-verification (코드 위치: /SSD1_1TB/home/milab/daniel/08_medgemma/research)
+현재 연구 브랜치: approach/region-evidence-verification (코드 위치: /SSD1_1TB/home/milab/daniel/08_medgemma/research)
 
 ### 최근 계획의 대안 순위
 
-1. 소견 판단의 위치 오류 식별 가치: 공개 존재·위치 정답과 저장 출력을 연결해 confidence 이후 추가 정보가 있는지 한 번 비교한다.
-2. 지정 소견의 공동 답변·좌표 생성: 실제 사용 경로지만 형식 적응의 영향을 다시 만들 수 있고 iter_048 이후의 잔여 근거가 부족해 이번에는 선택하지 않는다.
+1. 예측 영역의 직접 정합 검증: 공식 영역 식별 입력의 고정 likelihood를 confidence·전체 영역 대조와 비교한다.
+2. 독립 재-grounding 일치 대조: 경계 불일치에 직접 대응하지만 영역 내용 신호라는 현재 질문과 다르므로 이번에는 보류한다.
