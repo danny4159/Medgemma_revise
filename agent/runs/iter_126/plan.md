@@ -1,0 +1,172 @@
+# 요약
+
+- 이번에 할 일: iter_125의 ZIP 예산과 공식 SynthSeg ICV·QC 경로를 복구하고 기존 MRI 비교를 완료한다.
+- 필요한 이유: 기술8명 준비 이후 멈췄으며 MedGemma 관측 선택 효과는 아직 검증하지 못했다.
+- 확인할 기준: 공식 전문 대조와 자료·실행 검증을 통과한 뒤 원래의 BA·비용 기준으로 판단한다.
+- 주의·다음: 표본·prompt·selector·판정 기준은 유지한다. 복구 불가이면 실행 근거 부족으로 보류한다.
+
+## 알림 맥락
+
+- 연구: MRI 관측과 근거 활용
+- 데이터: 뇌 MRI MR-RATE의 axial T2와 측뇌실 크기 보고서
+- 모델: frozen MedGemma 1.5, 전문 대조 SynthSeg
+- 과제: T2 영상8장을 받아 양측 측뇌실 확장 여부를 출력한다
+- 가설: 같은 영상 예산에서 관측할 위치를 바꾸면 판별이 달라질 수 있다
+- 질문: 필요한 구조가 보이도록 영상을 고르면 답이 나아지며 전문 모델보다 남는 가치가 있는가?
+- 변경: 실행 복구
+- 연결: iter_125의 비교 미실행 → 표본과 질문을 유지하고 예산·공식 전문 비교군을 복구한다
+- 작업: 기술 검증 후 균등 선택·해부학 선택·전문 부피 점수를 비교해 투자 여부를 결정한다
+
+# Current Understanding
+
+기준 문서는 `agent/runs/iter_125/plan.md`, SHA256 `477a1c817abfe198e25c14f64a487fbd6f53d5ab0c4a7e5fab91e36f2b705a47`이다. 구현 담당은 이 원문과 iter_125/review.json을 읽는다. 본 계획은 실행 복구 amendment이며 아래 변경 외의 연구 조건은 상속한다.
+
+**유지:** 고정60명, seed125, 공식 train·두 batch·환자 분리, 기술8/calibration12/탐색40, T2 series 선택, U/A8장 규칙, 원 prompt, 보고서 일치도 metric, 성공·음성 기준, 개발 자료라는 해석.
+
+**변경:** 선택 ZIP 누적 예산을10GiB에서15,274,018,253 bytes로 조정한다. 임시 v1 실행물을 공식 SynthSeg 2.0 부피·ICV·QC로 대체하고 결과는 새 경로에 쓴다. 캐시·재개·설정 검증의 필요한 경로만 수정한다.
+
+**미완료:** 전체 보고서 적격성·hash 순서 검증, 공식 전문 비교군, 기술 MedGemma 출력과 처리량 비교, calibration12, 탐색40, 독립 검산.
+
+**보존:** iter_125 원문·ZIP·임시 segmentation·PNG·감사 결과를 덮어쓰지 않는다. v1 임시 S는 최종 전문 점수로 사용하지 않는다. 기존 FLAIR 후보의 보류와 다른 연구의 보류를 유지한다.
+
+# Strategy Check / 연구 방향 판단
+
+출처는 iter_125 원 계획과 review의 질문 카드다. 추가 근거는 전용 외부 저장공간의 여유와 공식 ICV·QC 지원 경로이며 모델 판단은 달라지지 않았다.
+
+1. 중요한 문제: 제한된 MRI 관측 예산에서 관련 해부학 선택만으로 판단을 회복할 수 있는가?
+2. 현재 근거: 새 T2 과제의 VLM 출력은 없다. 기술8명의 fallback6명은 실행·표본 조건의 관찰이다.
+3. 쉬운 해결책: 공식 SynthSeg 부피+calibration threshold를 강한 단순 대조로 유지한다.
+4. 남은 설명: segmentation 오류와 native slice 부족을 먼저 구분한 뒤 관측 선택·기본 인식·보고서 의미를 비교한다.
+5. 다음 결정: 한정 복구 후 원 비교를 완료하거나, 공식 비교군·자료 조건이 성립하지 않으면 실행 근거 부족으로 보류한다.
+
+현재 selector 개선이나 다른 후보 전환보다 미실행 비교의 복구를 우선한다. 높은 fallback을 이유로 성공 기준을 완화하지 않는다.
+
+# Hypothesis
+
+원 가설을 유지한다. sampling이 중요한 병목이면 A가 U보다 높다. 공식 S만 판별한다면 단순 관측 선택 이후에도 모델·입력 문제가 남는다. S까지 낮으면 정답·자료·전문 모델 적합성 설명이 남는다. A의 이득을 내부 선택 능력의 순수 인과 효과로 주장하지 않는다.
+
+# Limitation Evidence / Correct Usage Checks
+
+새 구조 과제는 observed limitation이 없으므로 limitation_ids는 비운다. 이번은 diagnostic이며 method 개발이 아니다.
+
+공식 SynthSeg의 `--vol` 출력에서 좌우 측뇌실 부피와 `total intracranial`을 이름으로 연결한다. hard-mask 비배경 합은 ICV 대체물이 아니다. 공식 소스·가중치·label table·환경 버전을 기록하고 QC의 실제 출력과 의미를 확인한다. [공식 FreeSurfer 문서](https://surfer.nmr.mgh.harvard.edu/fswiki/SynthSeg)는 soft 부피와 hard voxel-count가 다름을 명시한다.
+
+QC는 기술 실패 설명에 사용한다. 결과에 맞춘 QC cutoff·환자 제외는 금지한다. 명백한 zero/nonfinite/출력 누락은 유효한 전문 점수로 취급하지 않는다. 기술8명에서 해결되지 않는 공식 출력 결함은 본실행 진입을 막는다. 이후 개별 실패가 발생하면 원 표본의 실패로 보존하고 비교군 충분성 주장을 보류한다.
+
+보고서·정답·환자ID·selector 성공 여부는 모델 입력에서 분리한다. 공식 processor·chat template, 실제 pixel tensor·영상 순서·생성 설정을 기술 입력으로 검사한다.
+
+# Contribution Path / Baselines / Reuse
+
+신규 contribution은 미확정이다. 관측 선택의 효과가 있어도 전문 대안 이후 잔여 가치가 없으면 새 방법 투자를 하지 않는다. U/A는 동일8장 예산, S는 동일 T2 전체 volume을 사용하며 정보량 차이를 명시한다. 직접 SFT는 후속 학습 후보의 대조로 남기고 이번에는 실행하지 않는다.
+
+현재 브랜치 `approach/mri-anatomy-observation`, HEAD `ffcd2a54f246bd0cc48973f0e4c68cdd26d5ca6b`를 이어간다. 별도 반입 없이 다음 기존 파일을 보완한다.
+
+- `mr125_fetch.py`, `mr123_fetch.py`: 실제 ZIP bytes의 SHA·revision·size 검증, 예산 인자와 재개 ledger.
+- `mr125_seg.py`: 공식2.0·vol/QC, 설정별 캐시, 허용 GPU 매핑, 실패 반환.
+- `mr125_build.py`, `mr123_data.py`: 공식 부피 연결, 원영상 격자 변환, 불변 selector와 새 PNG 경로.
+- `mr125_select.py`, `mr125_order.py`, `mr125_lock.py`: 고정60명과 선정 전 후보의 전체 보고서·제외·hash 순서 검증.
+- `mr123_run.py`: strict JSONL, 실제 설정 봉인, 중복·누락·재개 검증. 과거 launcher의 claim 삭제 경로는 사용하지 않는다.
+- `mr125_handoff_audit.py`: 기존 감사 근거를 활용하되 고정된 미검증 문자열을 현재 검사 결과로 대체한다.
+
+모든 관련 모듈은 needs_fix다. iter_125/reuse_manifest.json의 필수 검사는 이번 실행 경로에서 완료한다. 무관한 과거 실행기 복구는 하지 않는다.
+
+# Proposed Experiment
+
+## 1. 한정 복구와 동작 확인
+
+먼저 고정 selection_lock과 원 CSV hash를 검증한다. 양측 측뇌실 확장 또는 명시적 정상 크기라는 원 기준을 전체 보고서에 대조하고 선택 이전 후보의 제외 근거·순서를 완결한다. 고정60명에 적격성 위반이 발견되면 조용히 교체하지 않고 본 비교를 보류한다.
+
+기존 기술8명의 ZIP·추출 T2는 실제 hash 검증 후 재사용한다. 공식 SynthSeg 저장소 README의 UCL 모델 배포를 우선 확인하고, 실패하면 공식 FreeSurfer 배포의 대응 모델·명령을 확인한다. 접근권한 우회나 비공식 가중치 대체는 하지 않는다. 기존 기본 환경은 수정하지 않으며 호환 격리 환경과 실제 Python 경로를 기록한다.
+
+공식2.0 기본 모드, `--vol`·`--qc`를 사용한다. v1·robust·fast를 성능에 따라 순회하지 않는다. 모델·QC 가중치와 label table의 출처·SHA를 고정한다. 공식 실행과 현재 wrapper의 같은 입력 연결을 확인하고 기술8명을 새 경로에서 처리한다. 같은 모델이 아닌 v1 결과를 새 캐시로 인정하지 않는다.
+
+전부0인 기존2건은 입력 intensity·affine·원본 연결·가중치 로딩·공식 직접 실행·후처리 로그를 비교한다. 다른4건은 native spacing, 측뇌실 구간의 고유 slice 수, 1mm→native 변환을 확인한다. 임의 재보간 영상 추가·slice 복제·범위 확장으로8장을 채우지 않는다. 원 A→U fallback을 유지한다. 높은 fallback 자체로 환자나 selector를 바꾸지 않는다.
+
+공식 ICV·QC와 기술 입력이 성립하면 MedGemma 기술16건을 수행한다. 낮은 기술 정확도는 본평가 중단 기준이 아니다. bf16·greedy·max_new_tokens512를 유지하며 cap 도달 시에만 기술 전체16건을1024로 한 번 재검사하고 최종 cap을 잠근다.
+
+## 2. 데이터 예산과 반입 순서
+
+기존 포함 예정 ZIP은114개·15,274,018,253 bytes다. 확보된62개를 보존하고 남은52개·6,881,748,362 bytes만 추가한다. 이번 예산 변경은 이 고정 목록에만 적용한다. 전체 snapshot_download는 하지 않는다.
+
+계획 시 전용 외부 파일시스템 여유는2,576,426,119,168 bytes였고 SSD 여유는13,258,027,008 bytes였다. 실행 직전 재측정한다. 새 데이터·다운로드 cache·큰 중간 결과는 `/home/test/.local/share/medgemma/mr_rate` 아래 iter126 전용 경로에 둔다. 연구 소스와 작은 실행 manifest는 research/에 둔다.
+
+공식 비교군의 기술8명 검증 전에는 나머지52 ZIP을 받지 않는다. 이후 내려받은 ZIP의 필요한 T2·brain-mask member만 추출한다. ZIP central directory의 uncompressed 크기, 기술8명의 segmentation·PNG·임시파일 peak, 모델·환경 설치 크기를 합산하여 잔여 실행 공간을 산정한다. 파일시스템별 여유가 필요한 peak를 충족하는지 검사한다. 기존 자산·hf_cache를 삭제하지 않는다. HF_TOKEN_PATH만 참조하고 토큰은 출력하지 않는다.
+
+## 3. 가능성 탐색
+
+원 U는 brain-mask 유효 axial 구간5–95%의 고유8장이다. 원 A는 예측 좌우 측뇌실 합집합의 slice 면적이 최대의5% 이상인 최소–최대 구간에서 고유8장을 선택한다. 불가능하거나 segmentation이 실패하면 U로 fallback한다. 같은 원본 T2·RAS·brain percentile1–99 window·896 canvas를 사용한다.
+
+원 prompt를 byte 단위로 유지한다:
+
+`You are shown 8 axial T2-weighted slices from one brain MRI examination, ordered from inferior to superior. Is there evidence of enlargement of both lateral ventricles in the images shown? Answer on the first line with exactly one word: PRESENT, ABSENT, or UNCERTAIN. Then give a brief justification in at most two sentences.`
+
+S는 공식 CSV의 좌우 측뇌실 부피 합/공식 ICV다. calibration12명에서 BA 최대 threshold를 고정한다. 동률은 specificity, 이어서 큰 threshold 순이다. calibration의 VLM 생성은 하지 않는다.
+
+threshold·입력·생성 설정·평가기 봉인 후 탐색40명의 U/A80건을 생성한다. 모두 primary intent-to-process 분모에 유지하고 fallback·실패를 별도 표시한다. 전문 출력이 빠진 경우 available-case 결과만으로 S 충분성을 판정하지 않는다.
+
+## 4. 규모 확대와 독립 확인
+
+이번은 탐색40명까지이며 학습·다중 seed·공식 test·독립 환자 추가는 없다. 양성 관측과 전문 대안 이후의 가치가 함께 남을 때 다음 별도 계획에서 독립 확인 또는 method pilot을 선택한다.
+
+## GPU·비용·재개
+
+각 실행 직전 nvidia-smi로 여유와 상속된 허용 GPU의 논리/물리 대응을 확인한다. 두 GPU에 독립 환자를 분배한다. TensorFlow 메모리 선점을 제한하며 MedGemma와의 동시 배치는 실측 peak와 worker당2GiB 여유를 만족할 때만 사용한다.
+
+기술16요청을 GPU당 worker1 구성과 batch2 구성으로 비교한다. 추가 비교는16요청이다. batch2가 부적합할 때만 메모리가 허용하는 GPU당 worker2를 대안으로 삼아 같은 비교 예산 안에서 선택한다. 동일 요청의 출력 정합성, 요청/분, GPU 전체 peak, 긴 출력 latency, OOM·CPU/I/O 경합을 기록한다. 더 빠르고 안전한 구성을 선택하며1 worker 유지 시 근거를 쓴다.
+
+v1 기록588.91초는 v2 전체 비용 추정으로 사용하지 않는다. 기술 단계에서 실제 다운로드 bytes/초, 추출·segmentation·render·VLM·저장 처리량을 측정한다. 남은 ZIP bytes와52 volume·80요청을 유효 병렬 처리량으로 나눠 예상 wall-clock을 갱신한다. 현재 총시간은 미측정이며 임의 시간 상한은 없다.
+
+cold-start와 NIfTI 읽기부터 최종 답 저장까지 warm 비용을 분리한다. A 비용에는 segmentation과 선택을 포함한다. S와 A가 전처리를 공유한 실제 workload 비용 및 각 대안의 독립 실행 비용을 구분한다. 다운로드·설치·복구 비용도 별도 기록한다.
+
+stage lock, 고유 request ID, 원자적 할당, worker별 결과, 완료 수·설정 hash 검사, 안전 종료 후 미완료 재개를 구현한다. 실행 중 claim을 지우지 않는다.
+
+# Implementation Tasks for Claude
+
+현재 구현 담당 Codex에 적용한다.
+
+1. 기준 plan hash·HEAD·기존 결과 hash와 고정 표본을 기록하고 `results/iter_126/`에 amendment/protocol을 저장한다.
+2. 자료 적격성·선정 순서와 공식2.0 ICV·QC 기술 경로부터 검증한다. 실패하면 본 실행기를 전부 만들거나 남은 ZIP을 받지 않는다.
+3. fetch/seg/build의 설정별 캐시·실제 파일 hash·GPU 매핑을 수정하고 필요한 경로에 회귀 검사를 추가한다.
+4. zero mask와 native slice 부족을 구분한다. 기존 U/A 규칙·fallback을 유지하고 모든 변경·미완료를 기록한다.
+5. strict JSONL·중복/누락/중간 손상 실패 반환·동시 launch 거부·부분 완료 재개·실제 processor와 generation 설정 검사를 수행한다.
+6. 기술 출력과 처리량 검증 후 남은 자료, calibration, 탐색을 완료한다. 독립 코드로 정오·BA·AUROC·paired CI·비용·최종 분기를 재계산한다.
+
+# Evaluation (성공/실패 기준 포함)
+
+Primary는 탐색40명의 report-agreement BA다. UNCERTAIN·INVALID·거부는 정답으로 세지 않고 각 비율을 보고한다. sensitivity·specificity, paired 전환, S AUROC·BA, batch×label 층화 환자 bootstrap10,000회의95% CI를 유지한다.
+
+- 양성 관측: A−U BA≥0.15, paired CI 하한>0, A BA≥0.75, sensitivity·specificity 각각≥0.65. 제한된 선택 효과를 보존하되 자동 방법 확대는 없다.
+- 단순 대안 충분성: S BA≥0.80이고 A가 S를0.05 이상 개선하지 못하며 더 비싸면 현재 이진 구조 과제의 VLM 방법 투자를 보류한다.
+- 음성: U/A 모두 BA≤0.60이면 현재 frozen 설계를 종료한다. S가 높으면 sampling만으로 회복되지 않았다는 범위만 보존한다.
+- 불확정: 나머지 성능·높은 fallback·정답 상충·넓은 CI는 근거 부족으로 보류한다. selector 성공 부분집단은 보조 분석일 뿐 primary를 대체하지 않는다.
+- 실행 실패: 공식 ICV/QC·자료 적격성·무결성 검사가 성립하지 않으면 valid_experiment=false로 종료한다. MRI 또는 관측 선택 가설의 반증으로 쓰지 않는다.
+
+복구 자체는 연구 성공이 아니다. 원 비교 완료 또는 한정 복구 실패 중 하나로 이번 반복을 끝낸다. 같은 자료의 prompt·threshold·selector 조정이나 세 번째 모델 추가로 연장하지 않는다.
+
+# Risks / Checks
+
+보고서 기반 약한 정답이며 실제 영상 진단 정확도와 구분한다. mild·위축 관련 확장을 원 기준대로 유지하고 수두증 진단으로 재명명하지 않는다. A와 S는 같은 예측 segmentation을 공유한다. 전문 mask는 임상 정답이 아니다.
+
+공식2.0 지원은 실제 환경 실행 성공의 보장이 아니다. 공식 UCL 경로와 FreeSurfer 배포의 한정 확인 및 호환 환경 복구 후에도 실패하면 오류·시도·남은 blocker를 남기고 멈춘다. 기술 결과를 보면서 robust 등 다른 모델을 계속 탐색하지 않는다.
+
+회귀 검증은 기존 원본 불변, 환자/split 불변, selector fixture, 좌표 왕복, stale-cache 거부, 전문 CSV의 단위·이름 연결, calibration 외 threshold 선택 금지에 집중한다. 미사용 코드의 전수 정비는 하지 않는다.
+
+## 대규모 GPU 필요 후보
+
+전체3D 다중 sequence 표현과 질문별 관측을 공동 학습하는 적응을 장기 후보로 보존한다. 현재 단순 대안 이후의 잔여 문제와 신규성이 확인되기 전에는 실행하지 않는다.
+
+# 계획의 근거 (GPT 조사 노트)
+
+## 확인한 근거
+
+- `agent/GOAL.md`, iter_125의 원 plan·review.json·구현 보고서·reuse_manifest, CODE_ASSETS의 관련 항목, LIMITATIONS의 MR-RATE 항목 및 실제 segmentation/build/선정 코드를 확인했다.
+- 기준 `agent/runs/iter_125/plan.md` SHA256은 `477a1c817abfe198e25c14f64a487fbd6f53d5ab0c4a7e5fab91e36f2b705a47`이다.
+- 현재 research HEAD는 `ffcd2a54f246bd0cc48973f0e4c68cdd26d5ca6b`, 작업 트리는 깨끗하다. 필요한 mr125 및 mr123 파일은 현재 브랜치에 있어 선별 반입은 필요하지 않다. 모듈 상태는 needs_fix이며 커밋 존재를 승인으로 해석하지 않는다.
+- iter_125 리뷰는 기술8명 중 nonempty segmentation6명, fallback6명(전부0인 mask2명·고유8장 부족4명), segmentation 기록시간 합588.91초를 확인했다. MedGemma·calibration·탐색은 미실행이다.
+- 계획 단계의 `df -B1` 결과, 전용 외부 경로 파일시스템 여유는2,576,426,119,168 bytes, research가 있는 SSD 여유는13,258,027,008 bytes였다. 실행 직전에 재확인해야 한다. 남은 ZIP6,881,748,362 bytes와 누적15,274,018,253 bytes는 선택 표본에 한정된 예산 조정으로 수용할 수 있다.
+- 로컬 공식 소스 `SynthSeg-2a2aa3bbfccb83f8253a51ca8b329b9938a2646d`는 non-v1에서 total intracranial을 출력하며 posterior 합으로 부피를 계산한다. 기존 mr125_build.py의 hard-mask 비배경 합과 같지 않다.
+- [SynthSeg 공식 저장소](https://github.com/BBillot/SynthSeg)는 2.0의 ICV·QC와 공식 UCL 모델 다운로드 링크를 제공한다. [FreeSurfer 공식 문서](https://surfer.nmr.mgh.harvard.edu/fswiki/SynthSeg)는 대체 공식 배포 경로, `--vol`·`--qc`, soft segmentation 부피와 hard voxel-count의 차이를 명시한다. 실제 가중치 다운로드·현재 환경 GPU 실행 성공은 아직 검증하지 않았다.
+
+## 판단
+
+새 후보 탐색보다 기존 비교의 한정 복구를 선택한다. 다운로드 예산은 조정하되 공식 비교군의 기술 검증을 남은52개 ZIP 확보보다 앞에 둔다. 높은 fallback은 그대로 보고하며 selector를 개선하거나 환자를 교체해 숨기지 않는다. 새 과제의 observed limitation이 없으므로 limitation_ids는 비운다. 기존 FLAIR 관찰은 배경이며 이 과제의 method 진입 근거가 아니다.

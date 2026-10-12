@@ -1,0 +1,186 @@
+diff --git a/mr126_preflight.py b/mr126_preflight.py
+new file mode 100644
+index 0000000..48d3f67
+--- /dev/null
++++ b/mr126_preflight.py
+@@ -0,0 +1,180 @@
++"""iter_126 고정 표본의 사전 중단 근거를 보존한다. 임상 정답 추출기가 아니다.
++
++일반 'normal'을 명시적 정상 크기/폭으로 확장하지 않는다. 원 계획 및
++iter_125 선정/출력은 변경하지 않으며, 이 파일은 모델 실행을 하지 않는다.
++"""
++import argparse
++from collections import Counter
++import hashlib
++import json
++import os
++from pathlib import Path
++import re
++import subprocess
++import sys
++import time
++
++import pandas as pd
++
++
++META = Path('/home/test/.local/share/medgemma/mr_rate/meta')
++OLD = Path('results/iter_125')
++BASE_SHA = 'ffcd2a54f246bd0cc48973f0e4c68cdd26d5ca6b'
++BASE_PLAN_SHA = '477a1c817abfe198e25c14f64a487fbd6f53d5ab0c4a7e5fab91e36f2b705a47'
++# 이번 원문 검토의 한정 판정. 다른 사례나 새 자료에 자동 적용하지 않는다.
++REVIEWED_BLOCKERS = {
++    '733FDTIWMU': (16714, 'calib', 'Bilateral lateral ventricles are normal.'),
++    'SSPA3OR6PD': (16713, 'calib', 'Bilateral lateral ventricles are normal.'),
++    '2PXSAQ2SE5': (17856, 'explore', 'Third and lateral ventricles and sulci are normal.'),
++}
++
++
++def sha(path):
++    digest = hashlib.sha256()
++    with open(path, 'rb') as handle:
++        for chunk in iter(lambda: handle.read(4 << 20), b''):
++            digest.update(chunk)
++    return digest.hexdigest()
++
++
++def read(path):
++    return json.loads(Path(path).read_text())
++
++
++def save(path, obj):
++    with Path(path).open('x') as handle:
++        json.dump(obj, handle, ensure_ascii=False, indent=2, allow_nan=False)
++
++
++def main():
++    parser = argparse.ArgumentParser()
++    parser.add_argument('--out', required=True)
++    args = parser.parse_args()
++    out = Path(args.out)
++    if not out.resolve().is_relative_to(Path('results/iter_126').resolve()):
++        raise ValueError('이번 결과 경로 밖 쓰기 거부')
++    out.mkdir(parents=True, exist_ok=False)
++    started = time.monotonic()
++    before = {str(p): sha(p) for p in OLD.rglob('*') if p.is_file()}
++    lock = read(OLD / 'data/selection_lock.json')
++    ordered = read(OLD / 'data/ordered_candidates.json')
++    inherited_audit = read(OLD / 'handoff_codex/audit.json')
++    baseline = read('../agent/runs/iter_126/code_baseline.json')
++    checks = []
++
++    def check(name, ok, detail=None):
++        checks.append(dict(name=name, passed=bool(ok), detail=detail))
++
++    head = subprocess.check_output(['git', 'rev-parse', 'HEAD'], text=True).strip()
++    check('baseline_head', head == BASE_SHA == baseline['sha'])
++    check('inherited_plan', sha('../agent/runs/iter_125/plan.md') == BASE_PLAN_SHA)
++    for path, expected in inherited_audit['inherited_files_before_sha256'].items():
++        check('original_output:' + path, sha(path) == expected)
++    for rel, expected in lock['source_sha256'].items():
++        check('locked_metadata:' + rel, sha(META / rel) == expected)
++    for rel, expected in lock['code_sha256'].items():
++        check('locked_selection_code:' + rel, sha(rel) == expected)
++    for rel in baseline['files']:
++        if rel.startswith(('mr123_', 'mr125_')):
++            check('baseline_source:' + rel, sha(rel) == baseline['files'][rel]['hash'])
++
++    manifest = lock['manifest']
++    ids = {m['patient_uid'] for m in manifest}
++    studies = {m['study_uid'] for m in manifest}
++    cells = Counter((m['role'], m['batch_id'], m['label']) for m in manifest)
++    check('fixed_60_unique', len(manifest) == len(ids) == len(studies) == 60)
++    expected_cells = {(role, batch, label): n for role, n in [('tech', 2), ('calib', 3), ('explore', 10)]
++                      for batch in ['batch04', 'batch23'] for label in ['positive', 'negative']}
++    check('fixed_role_cell_counts', cells == expected_cells)
++    splits = pd.read_csv(META / 'splits.csv')
++    report_rows = {}
++    for batch in ['batch04', 'batch23']:
++        reports = pd.read_csv(META / f'reports/{batch}_reports.csv').fillna('')
++        check('report_study_unique:' + batch, not reports.study_uid.duplicated().any())
++        report_rows[batch] = {r['study_uid']: r for r in reports.to_dict('records')}
++
++    excluded_order = []
++    for cell, rows in ordered.items():
++        hashes = [hashlib.sha256(f"125|{r['patient_uid']}".encode()).hexdigest() for r in rows]
++        check('candidate_hash_order:' + cell, hashes == sorted(hashes) and
++              all(r['h'] == h for r, h in zip(rows, hashes)))
++        selected = [r['patient_uid'] for r in rows if r['patient_uid'] in ids]
++        expected = [m['patient_uid'] for m in manifest if f"{m['batch_id']}|{m['label']}" == cell]
++        check('selected_relative_order:' + cell, selected == expected)
++        last = max(i for i, r in enumerate(rows) if r['patient_uid'] in ids)
++        for rank, row in enumerate(rows[:last + 1]):
++            if row['patient_uid'] not in ids:
++                reason = lock['excluded_after_review'].get(str(row['patient_uid']))
++                excluded_order.append(dict(cell=cell, rank_zero_based=rank,
++                    patient_uid=row['patient_uid'], study_uid=row['study_uid'],
++                    original_exclusion_reason=reason, original_hits=row['hits'],
++                    full_report=report_rows[row['batch_id']][row['study_uid']],
++                    status='original_record' if reason else 'original_reason_missing'))
++
++    full_reports = []
++    blockers = []
++    for m in manifest:
++        matches = splits[(splits.study_uid == m['study_uid']) & (splits.batch_id == m['batch_id'])]
++        check('official_train:' + m['study_uid'], len(matches) == 1 and matches.iloc[0]['split'] == 'train')
++        row = report_rows[m['batch_id']][m['study_uid']]
++        # 원 선정 코드는 sents()에서 공백을 정규화했다. 줄바꿈 차이는 출처 오류가 아니다.
++        check('selection_quotes:' + m['study_uid'], all(
++            re.sub(r'\s+', ' ', q).strip() in re.sub(r'\s+', ' ', row[section]).strip()
++            for section, q in m['span_key']))
++        full_reports.append(dict(selection=m, source_report=row,
++            semantic_review_status='blocked_explicit_size_not_established' if m['study_uid'] in REVIEWED_BLOCKERS
++                                   else 'not_certified_by_this_limited_audit'))
++        if m['study_uid'] in REVIEWED_BLOCKERS:
++            pid, role, quote = REVIEWED_BLOCKERS[m['study_uid']]
++            check('blocker_identity:' + m['study_uid'], m['patient_uid'] == pid and m['role'] == role and m['label'] == 'negative')
++            anchors = {}
++            for section in ['findings', 'report']:
++                start = row[section].find(quote)
++                check('blocker_quote:' + m['study_uid'] + ':' + section, start >= 0)
++                anchors[section] = dict(start=start, end=start + len(quote), quote=quote)
++            blockers.append(dict(study_uid=m['study_uid'], patient_uid=pid, role=role, label='negative',
++                source_path=str(META / f"reports/{m['batch_id']}_reports.csv"), anchors=anchors,
++                source_row_sha256=hashlib.sha256(json.dumps(row, sort_keys=True).encode()).hexdigest(),
++                status='explicit_normal_size_width_or_absence_not_established',
++                reason_ko='전체 원문에서 측뇌실의 일반 정상 기술만 확인됨. 원 계획의 명시적 정상 크기·폭/확장 부재로 확장할 근거는 미확인. 실제 영상상 양성 또는 임상 오라벨이라고 판정하지 않음.'))
++
++    # 보고서의 의미 판정과 기계 무결성 검사의 통과 여부를 구분한다.
++    check('all_fixed_patients_explicit_eligibility_established', not blockers,
++          {'unverified_patients': [b['patient_uid'] for b in blockers]})
++    check('original_exclusion_reasons_complete', all(r['original_exclusion_reason'] for r in excluded_order),
++          {'missing': [r['patient_uid'] for r in excluded_order if not r['original_exclusion_reason']]})
++    check('original_results_unchanged', all(sha(path) == digest for path, digest in before.items()))
++    save(out / 'full_report_snapshot.json', {'selected': full_reports, 'skipped_before_last_selected': excluded_order})
++    inputs = {str(p): sha(p) for p in [
++        Path('../agent/runs/iter_125/plan.md'), Path('../agent/runs/iter_126/plan.md'),
++        Path('../agent/runs/iter_126/plan.json'), Path('../agent/runs/iter_126/code_baseline.json'),
++        Path('../agent/runs/iter_125/reuse_manifest.json'), OLD / 'data/selection_lock.json',
++        OLD / 'data/ordered_candidates.json', OLD / 'handoff_codex/audit.json',
++        *[META / rel for rel in lock['source_sha256']]]}
++    result = dict(iteration=126, created_utc=time.strftime('%Y-%m-%dT%H:%M:%SZ', time.gmtime()),
++        elapsed_s=time.monotonic() - started, head=head, sys_executable=sys.executable,
++        CUDA_VISIBLE_DEVICES=os.environ.get('CUDA_VISIBLE_DEVICES'), source_sha256=sha(__file__),
++        input_sha256=inputs, original_results_before_sha256=before,
++        checks=checks, blocker_cases=blockers, fixed_patients=60,
++        roles=dict(Counter(m['role'] for m in manifest)), skipped_count=len(excluded_order),
++        missing_original_exclusion_reasons=[r['patient_uid'] for r in excluded_order if not r['original_exclusion_reason']],
++        valid_experiment=False, decision='execution_blocked_before_official_baseline_and_VLM',
++        stop_rule_source='../agent/runs/iter_126/plan.md:77',
++        gpu_runs=0, new_mri_download_bytes=0, install_performed=False,
++        evaluator_locked=False, calibration_threshold_selected=False,
++        pending=['remaining_full_eligibility_and_selection_certification', 'official_SynthSeg_2_ICV_QC',
++                 'technical_generation_and_runtime_checks', 'throughput_pilot', 'remaining_download',
++                 'evaluation_lock', 'calibration12', 'explore40', 'independent_metrics_and_cost'],
++        summary_ko='고정 음성3명의 일반 정상 기술은 명시적 크기 정답으로 확인되지 않았다. 원 계획의 사전 보류 분기로 중단하며 연구 가설은 미검증이다.')
++    save(out / 'audit.json', result)
++    save(out / 'completion.json', dict(status='blocked', valid_experiment=False,
++        artifacts={str(out / name): sha(out / name) for name in ['audit.json', 'full_report_snapshot.json']},
++        source_sha256=sha(__file__), input_sha256=inputs))
++    print(json.dumps(dict(output=str(out), checks=len(checks),
++        failed=[r['name'] for r in checks if not r['passed']], blocker_patients=[b['patient_uid'] for b in blockers],
++        valid_experiment=False), ensure_ascii=False))
++    return 2 if any(not r['passed'] for r in checks) else 0
++
++
++if __name__ == '__main__':
++    raise SystemExit(main())
