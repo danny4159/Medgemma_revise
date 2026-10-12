@@ -42674,3 +42674,488 @@ CURE-only 3개에서는 CURE가 빈 출력을 냈다. 이는 고정 불일치 �
 적합성이 없거나 기존 대안이 충분하면 준비·평가기 정비를 반복하지 않고 종료한다. 복귀 대상은 이미 보류한 CURE 특화 투자 판단이며 존재하지 않는 후속 실험을 만들어 재개하지 않는다. 새 방법 학습과 한정 검증의 연장은 자동 승인하지 않는다. 모든 다음 반복은 --confirm-each-iter 사용자 승인을 기다린다.
 
 이번 결과는 특화 방향의 긍정적 후속 탐구 근거를 확립하지 못했으므로 논문 추천은 보류한다.
+
+
+## iter_116 GPT PLAN [오류 혼합 근거의 선택적 교정 진단 / proceed] — 2026-10-12 15:16:35
+
+# 요약
+
+- **이번에 할 일:** RSNA의 직접 판단과 자동 위치 근거가 충돌한 87명 및 일치 대조 87명에서 교정과 보존을 비교한다.
+- **필요한 이유:** 저장표에는 고칠 수 있는 초안 40명과 잘못된 근거를 거부해야 하는 초안 47명이 함께 있다. 초안 유지가 항상 정답이던 이전 표본과 다르다.
+- **확인할 기준:** 실제 교정이 초안 유지·근거만의 재판단·단순 합의보다 유용한지, 맞던 답을 얼마나 손상하는지 함께 본다.
+- **주의·다음:** 반복 개발 자료의 한 소견 진단이다. 새 방법·자유 판독 정확성은 미확정이며 한 번의 비교 뒤 다음 사용자 승인을 기다린다.
+
+## 알림 맥락
+
+- 연구: 위치 근거와 의료 VLM 판단의 연결
+- 데이터: 흉부 X-ray RSNA 개발 E600의 고정 부분집단
+- 모델: frozen MedGemma 1.5, 저장 detector17 및 grounding SFT 출력; 새 학습 없음
+- 과제: 영상·이전 yes/no 판단·자동 위치 근거를 받아 지정 opacity의 최종 yes/no를 출력한다
+- 가설: 유용한 근거 선택이 가능할 수도 있지만 초안 고수·근거 추종·단순 합의로 충분할 수도 있다
+- 질문: 틀릴 수 있는 자동 근거를 보고 잘못된 답만 고칠 수 있는가?
+- 변경: 방향 전환
+- 연결: PadChest-GR의 CURE 특화 오류 검토는 보류 → 사용자 승인에 따라 RSNA 공개 정답으로 교정·보존 후보 하나를 한정 확인한다
+- 작업: 자연 충돌과 일치 대조에서 실제 수정·손상을 비교해 독립 확인의 투자 가치를 판단한다
+
+# Current Understanding
+
+iter_115의 복귀 기준은 CURE 특화 오류 검토 투자 보류다. 자동 재개할 불일치 후속 실험은 없다. 이번 삽입 후보는 iter_115/next_iteration_decision.json에서 승인됐다.
+
+iter_047/053의 본평가는 미실행이다. 그 oracle 기준을 소급 변경하지 않는다. iter_088/098~103의 관찰과 정답·형식 한계도 보존한다. 자유 보고서 전체의 의미 판정을 다시 정비하지 않는다.
+
+RSNA의 표적은 기존 Q_O인 pulmonary opacity suspicious for pneumonia다. pneumonia 임상 진단이나 모든 폐 이상을 뜻하지 않는다. E600에는 opacity, normal, not_normal_no_opacity 각 200명이 있다. 후자의 두 범주는 표적 음성이지만 모두 임상 정상인 것은 아니다.
+
+저장 per_patient 표에서 직접 답이 resolved인 592명 중 detector의 고정 존재 규칙과 다른 환자는 87명이다. 직접 답이 맞고 detector가 틀린 경우 47명, 반대 40명이다. 일치 505명 중 둘 다 정답은 427명, 둘 다 오답은 78명이다. unresolved 8명은 별도 분모로 보존한다. 이 숫자는 계획용 저장표 집계이며 원 출력 검증 후 확정한다.
+
+# Strategy Check / 연구 방향 판단
+
+**기술 질문 → 실패 조건 → 공개 정답 비교 → 주장 범위:** 오류가 섞인 자동 근거의 선택적 활용 → 직접 판단과 detector가 충돌할 때 맹목적 변경 또는 고수가 발생하는 조건 → 명시적 존재 정답으로 교정/손상, 양성 box로 근거 정합성을 평가 → 현재 frozen 모델·단일 소견·반복 개발 자료에 한정한다.
+
+직전 리뷰가 선택한 후보를 구체화한다. 자유 문장 교정은 원 reference가 전체 사실을 판별하지 못해 선택하지 않는다. 현재 비교는 명시적 정답과 양방향 자연 충돌을 갖추므로 한정 실행의 정보 가치가 있다. 단순 점수 순위나 종료한 crop 설정의 재시험은 아니다.
+
+**시험 설정:** LoRA·새 학습·새 검증기 개발 없이 고정된 네 입력 조건을 비교한다. 기본 모델의 정확도가 부족하면 해당 모델·과제의 적합성 부족으로 제한한다.
+
+**연구 관찰:** iter_017의 근거 전달 민감성과 좌표 추가 이득 미확인, iter_101의 강한 초안 유지, iter_102/103의 정답 연결 부족을 반대 근거로 계승한다. 이번 자료 연결이 이전 현상의 독립 재현을 뜻하지 않는다.
+
+**연구 질문:** 자동 근거에 따라 고칠 대상을 구별하는 잔여 가치가 단순 합의 이후에도 있는지가 남는다. 관찰이 양성이어도 신규성은 별도다. 음성·불확정이면 현재 설정을 보류하고 같은 자료의 prompt·threshold 순회로 연장하지 않는다.
+
+지배 비용은 현재 미측정이다. 이전 긴 교정의 생성 비용과 의미 감사 비용을 그대로 예측값으로 쓰지 않는다. 이번에는 생성·연결·검증 시간을 나눠 기록한다.
+
+# Hypothesis
+
+R: 영상+초안+자동 근거의 교정은 유용한 detector 조언을 받아들이고 잘못된 조언은 거부할 수 있다.
+
+경쟁 설명은 다음과 같다. K의 초안 유지로 충분하다. B의 detector 판단으로 교체하면 충분하다. 초안을 보지 않은 E의 재판단으로 충분하다. 여러 독립 출력의 다수결 또는 보수적 합의 S로 충분하다. R−T 차이가 있더라도 단순 영상 조건 반응이며 정확한 선택 효과는 없을 수 있다.
+
+# Limitation Evidence / Correct Usage Checks
+
+관련 limitation은 rsna-evidence-interface-sensitivity와 padchest-regional-report-concatenation-conflict다. 원문과 iter_017/088 리뷰를 확인했다. 둘 다 observed이며 이번 교정 실패가 이미 확인됐다는 근거는 아니다. 역할은 diagnostic, method_stage=none이다.
+
+MedGemma 1.5 revision 91850547d9f0b2fdd21aa7c5f4f3d1a8a52c243b, bf16, eval, greedy, adapter 없음으로 고정한다. 공식 chat template과 실제 tensor를 대조한다. T에는 image token/pixel_values가 없어야 한다. R/T의 텍스트는 완전히 같아야 한다.
+
+원 label 의미·환자·영상·좌표·원 출력·checkpoint·선택점의 연결을 검증한다. 정답은 평가 전용 파일에 두며 생성 worker가 읽지 않는다. GT box는 어떤 일반 입력에도 제공하지 않는다. 모델 오답이나 oracle 비완전성을 보편적 기술 gate로 쓰지 않는다.
+
+# Contribution Path / Baselines / Reuse
+
+기여는 미확정이다. [Anatomically-Grounded Fact Checking](https://arxiv.org/abs/2412.02177)과 [FC-guided correction](https://razi-mahmood.github.io/reports/NeurIPSHealthcareWorkshop.pdf)은 이미 검증과 선택적 수정을 다룬다. 이번 단일 소견 비교는 그 시스템의 재현이나 우위 검증이 아니다. 새로운 기여의 후보가 되려면 자연 근거 오류에서 단순 대안 이후의 잔여 문제가 있고, 이후 독립 자료·강한 기존 시스템 비교로 이어져야 한다.
+
+필수 대조:
+
+- K: 기존 원본 영상 Q_O 직접 답을 유지한다. 초안 없는 직접 판단과 동일한 저장 출력이다.
+- B: detector17 epoch18, threshold0.70에서 box가 있으면 Yes, 없으면 No인 기존 규칙이다.
+- G: iter_012 seed17의 고정 concise grounding 출력에서 유효 box 유무를 사용하는 규칙이다. 빈 출력은 규칙상 No이며 임상 부재 증명이 아니다.
+- M: K/B/G의 다수결. G invalid이면 K 유지다.
+- N: 영상+초안, 자동 근거 없이 교정한다.
+- E: 영상+자동 근거, 초안 없이 답한다.
+- R: 영상+초안+자동 근거로 교정한다. 주 조건이다.
+- T: R에서 영상만 제거한다. 텍스트·지시는 동일하다.
+- S: E가 resolved이고 B와 같으면 E로 교체하고, 아니면 K를 유지한다. E 생성 이후 추가 모델 호출은 없다.
+
+K/B/G/M/S는 강한 단순 대안이며 새 방법으로 제안하지 않는다. 서로 다른 학습량·데이터의 모델 순위를 위치 supervision 효과로 해석하지 않는다. 직접 SFT 교정 학습은 이번 질문의 선행 조건이 아니며 후속 방법 투자 시 별도 검토한다.
+
+새 브랜치는 승인 기반 iter_082에서 시작하고 reuse_assets의 파일만 선별 반입한다. pg43_run 및 ev111_link의 needs_fix를 실제 경로에서 해결한다. CODE_FILES의 과거 미사용 의존 항목을 현재 adapter=None 호출 경로와 구분하고 실제 사용 소스 전체를 잠근다. legacy CLI·crop·과거 분석기의 전수 복구는 하지 않는다.
+
+# Proposed Experiment
+
+## 1. 자료 연결과 표본 잠금
+
+입력은 iter_016/manifests/{sets.json,labels.json,infer_manifest.jsonl}, iter_016/gen/{e180_plain__M0,e600x_plain__M0}의 Q_O, iter_035/confirm800/det17 원 출력·completion·select LOCK, iter_015/reuse/bbox_B0_concise.jsonl 및 iter_012 원 출처다. iter_111의 ledger와 per_patient는 색인·회귀 대조용으로 사용한다.
+
+원 label·box·영상 대응과 현재 내용 hash를 확인한다. protocol digest 문자열만 복사하지 않는다. 저장표와 원 출력의 87/505/8 분모가 다르면 원인과 영향부터 보고하며 임의 다른 표본으로 대체하지 않는다.
+
+주집단은 ev109_extract_v1로 resolved이고 K≠B인 87명 전원이다. GT나 신생성 결과로 일부를 고르지 않는다. 일치 집단 505명에서 SHA256('iter116|'+patient_id) 오름차순으로 처음 12명은 기술용, 다음 87명은 일치 대조용으로 잠근다. 본평가 174명과 기술 12명은 환자·영상이 겹치지 않는다. 일치 대조의 실제 정답 구성은 그대로 보고하며 양성 비율을 맞추려고 교체하지 않는다.
+
+unresolved 8명은 제외 이유와 원문을 보존하며 E600 전체 성능으로 외삽하지 않는다. 174명의 합산 정확도를 E600 대표 정확도로 부르지 않고 두 집단을 따로 평가한다.
+
+## 2. 입력과 응답 고정
+
+초안은 K의 canonical Yes/No 한 항목이다. 원 설명을 임상적으로 재작성하지 않는다. 자동 근거 packet은 고정 detector의 threshold 이상 후보만 포함한다. 후보 수, score, 원본 영상 기준 정규화 xyxy 좌표를 score 내림차순·좌표 동률 순으로 제공한다. 후보가 없으면 'No candidate met the detector threshold; this does not establish absence.'로 표시한다. GT로 후보를 제거하거나 정렬하지 않는다.
+
+공통 지시는 자동 초안과 근거 모두 틀릴 수 있으며, 이용 가능한 입력으로 지정된 Q_O에 최종 Yes/No를 답하라는 내용이다. R/T 텍스트는 동일하다. N은 detector packet만 없고 E는 초안만 없다. 없는 필드를 정답을 암시하는 문장으로 대체하지 않는다. 정확한 문자열과 packet serializer는 기술 출력 전에 protocol에 잠근다. prompt 후보를 여러 개 시험하지 않는다.
+
+생성 cap은 1000→2000→4000이며 비EOS 상한 도달에서만 동일 요청을 재시도한다. parser는 기존 ev109_extract_v1, 질문 O로 고정한다. unresolved·비EOS를 No나 정답으로 변환하지 않는다. strict 형식 준수는 별도 보고하며 사후 유리한 parser를 선택하지 않는다.
+
+## 3. 동작 확인
+
+기술 12명의 네 조건 48요청으로 ID·입력·GT 분리·응답 저장·자원 사용을 확인한다. 공식 processor와 직접 generate 대조, R/T 텍스트 동일성, text-only 영상 부재, 실제 부분 완료 후 재개를 검사한다.
+
+기술 검사 통과는 정확도 문턱이나 100% oracle 정답을 뜻하지 않는다. 올바른 입력에서 틀린 답은 내용 관찰이다. 네 조건 중 하나라도 12명 중 절반 미만만 resolved이면 해당 고정 응답 경로로 본 비교의 판별력이 부족하다고 보고 본생성을 보류한다. parser·prompt를 현장에서 바꾸지 않는다. 이는 현재 조건의 사전 형식 분기이며 일반적 모델 능력의 gate가 아니다.
+
+## 4. 가능성 탐색과 종료 규모
+
+기술 연결이 성립하면 같은 호출에서 174명×4조건=696요청을 실행한다. 표본 확대나 중간 유의성 점검 없이 모두 마친 뒤 평가한다. 87명은 사용 가능한 자연 충돌 전원이고, 일치 대조 87명은 동일 규모의 보존 대조다. 확증 power를 확보했다는 뜻은 아니다.
+
+본격 확대·독립 확인·새 학습은 이번 반복에 포함하지 않는다. 새 환자·다른 모델·다른 detector 운영점은 자동 후속이 아니다.
+
+## 5. 자원·비용·재개
+
+실행 직전 nvidia-smi와 상속된 허용 GPU 집합을 확인한다. 여유 메모리가 큰 장치부터 배치한다. 기술 48요청을 두 GPU의 총 2 worker와 총 4 worker로 비교한다. 실측 peak 합계에 worker당 2GiB 여유와 타 프로세스 점유를 더해 안전한 경우에만 4 worker를 사용한다. throughput·긴 출력 지연·OOM·CPU/I/O 경합·출력 정합성으로 선택한다.
+
+iter_108의 짧은 입력은 2 worker 58.2 req/min, peak reserved 8.41GiB였으나 이번 길이의 실측이 아니다. 이 처리량이면 696요청 생성은 약 12분이나 교정 설명이 길어지면 크게 늘 수 있다. 준비를 제외한 초기 예상은 수십 분 수준으로만 두고 기술 단계 후 남은 요청량/실측 처리량과 loading으로 wall-clock을 갱신한다. 시간 상한으로 사용하지 않는다.
+
+고유 request ID·원자적 claim·worker별 파일·원 attempt별 GPU mapping을 유지한다. 완료 행을 보존한 상태에서 중단·재개하고 입력·소스·설정 hash가 다르면 재사용을 거부한다. 결과와 로그는 results/iter_116에만 저장한다. 원본 캐시·기본 환경은 변경하지 않는다.
+
+서비스 비용은 초안 생성, detector/SFT 생성, 교정 추가 비용을 구분한다. 저장 자산의 이번 재사용 비용이 낮다는 이유로 배포 비용을 0으로 쓰지 않는다. 과거 비용이 없으면 미측정으로 둔다.
+
+# Implementation Tasks for Claude
+
+1. 지정 원 리뷰·code_assets와 반입 manifest를 읽고 실제 호출 경로만 연결한다.
+2. ev111_link의 protocol/pixel 검증 결함을 보완해 원시 입력에서 600명 연결을 재확인한다. 새 산출물만 작성한다.
+3. 표본·packet·네 prompt·parser·metric·성공 분기·비용 범위를 기술 생성 전에 잠근다.
+4. pg43_run의 실제 의존성 목록과 0건/재개 비용 경로를 수정한다. 원 생성기 전체를 재구현하지 않는다.
+5. 기술 12명, 병렬 비교, 부분 재개와 공식 생성 대조를 수행하고 사전 분기에 따라 696요청으로 진행한다.
+6. 환자별 원문·추출값·초안/근거 정오·수정/손상·box 정합성을 연결한 표를 작성한다.
+7. 별도 계산으로 교정 수·손상 수·각 baseline·공동 지표와 bootstrap을 검산한다. 불변 경로는 출처를 연결해 재사용한다.
+8. 실제 사용량, 형식/내용 오류, 시험 설정/관찰/질문 판단과 종료 이유를 보고하고 full 리뷰 뒤 사용자 승인을 기다린다.
+
+# Evaluation (성공/실패 기준 포함)
+
+## 주 지표
+
+불일치 87명에서 correction은 K 오답 40명 중 최종 정답 수, harm은 K 정답 47명 중 최종 오답 수다. unresolved는 별도이며 주 보수적 점수에서는 정답으로 세지 않는다. 정답 수, correction rate, harm rate, 순교정 수를 함께 보고한다. K/B 및 그 정오를 실제 생성 입력에 노출하지 않는다.
+
+일치 대조에서는 K 정답 환자 중 손상률과 K 오답 환자의 회복을 별도로 보고한다. 일치 집단을 모두 정답 보존 집단으로 가정하지 않는다. 각 원 GT 범주와 Yes→No/No→Yes 전환도 분해한다.
+
+R−N은 자동 근거 추가, R−E는 초안 제공, R−T는 영상 제공의 조건부 차이다. 각각의 차이를 위치 인식·내부 추론의 인과적 증명으로 해석하지 않는다.
+
+## 위치 근거와 공동 지표
+
+최종 No이면 제공 box를 제거하고 Yes이면 고정 detector box를 유지하는 동일 규칙으로 K/N/E/R/T/S의 답변–근거 공동 지표를 보조 평가한다. 양성은 Yes 및 IoU0.3 최대 일대일 matching에서 TP=n_GT=n_pred, 음성은 No 및 빈 box를 공동 성공으로 정의한다. IoU0.5, 양성 F1, FP/FN은 보조다. 반드시 gate 적용 후 box로 계산한다.
+
+이 규칙은 누락 box를 생성하거나 잘못된 경계를 고치지 못한다. 판단 개선만으로 grounding 개선이나 임상적 안전성을 주장하지 않는다. M/G의 고유 box 사용 비교는 별도 표시하고 주 교정 비교와 섞지 않는다.
+
+## 불확실성
+
+두 집단을 분리한 환자 paired bootstrap 10,000회, seed11617로 주요 차이의 95% CI를 보고한다. 이는 개발 탐색의 불확실성 기술이며 확증 검정이 아니다. 양성 gate에 CI 하한>0을 추가하지 않는다. 여러 대조 중 유리한 것만 선택하지 않고 필수 대조 전부를 보고한다.
+
+unresolved의 가능한 Yes/No 배정을 이용해 교정·손상과 paired 차이의 보수적 범위를 계산한다. 같은 출력이 S 등 여러 정책에 사용되면 공유 변수로 처리한다. 미해결 배정에 따라 결론이 바뀌면 양성/음성보다 불확정을 우선한다.
+
+## 사전 투자 분기
+
+**양성 탐색:** R이 40명 중 최소 10명 교정, 47명 중 최대 5명 손상, 불일치 집단에서 K/B/G/M/N/E/S 각 대조보다 최소 5명 많은 정답을 얻고, 일치 대조의 원 정답 손상률이 5% 이하일 때다. G unresolved는 그 대조의 정답으로 세지 않으며 별도 범위도 제시한다. unresolved의 보수적 범위에서도 조건이 유지돼야 한다. 5명은 한두 사례 변동을 넘어 추가 모델 호출의 가치를 검토할 최소 차이로 정하며 임상 기준이 아니다. 독립 확인을 제안할 근거로만 사용한다.
+
+**현재 설정 보류:** 단순 대조가 같거나 좋거나, R의 교정이 근거 추종에 따른 손상과 함께 나타나 위 기준을 충족하지 못하면 현 frozen 설정 확대를 권하지 않는다. 단순 대안의 모집단 수준 충분성까지 확증했다고 표현하지 않는다.
+
+**불확정:** 유망한 차이가 있으나 표본 변동·형식 미해결·조건별 반대 사례로 기준 충족이 불명확하면 그 원인을 보존한다. 새 parser·추가 표본·다른 모델을 이번에 붙이지 않는다.
+
+모든 분기는 한정 비교 종료와 full 리뷰로 끝난다. 추가 가치가 없으면 iter_115의 투자 보류로 복귀하며 가상의 후속 실험을 만들어 진행하지 않는다.
+
+# Risks / Checks
+
+- E600은 반복 개발 자료다. detector·SFT 학습/선택 split과의 프로젝트 내부 중복 및 공개 base 사전학습 노출 미확인을 분리한다.
+- 불일치로 선정한 집단에서는 두 이진 판단 중 하나가 맞는 구조다. 이를 자연 모집단 오류율이나 실용 이득으로 외삽하지 않는다.
+- 동일 모델의 저장 직접 답을 초안으로 쓰므로 독립 전문가 초안 교정으로 부르지 않는다.
+- detector의 빈 출력은 음성 정답이 아니다. GT 음성은 원 label에서만 얻는다.
+- 자연 오류의 존재는 잔여 방법 가치의 증거가 아니다. 강한 단순 대조 이후의 차이를 우선한다.
+- 텍스트-only의 실패는 정상 사용 범위의 해당 입력 관찰이며 의료 영상 이해 실패로 확대하지 않는다.
+- provenance 복구·테스트 통과와 새 과학적 관찰을 구분한다. 사용하지 않는 과거 모듈은 정비하지 않는다.
+- 대규모 GPU 필요 후보: 다기관 verifier/editor 공동 post-training을 장기 노트로 보존하되 이번 결과 전에 발주하지 않는다.
+- GOAL·원 판정·checkpoint·완료 결과를 보존한다. 구현은 Claude, 다음 반복은 --confirm-each-iter 승인을 유지한다.
+
+# 계획의 근거 (GPT 조사 노트)
+
+## 확인한 사실
+
+- agent/GOAL.md, iter_115/review.md와 next_iteration_decision.json을 확인했다. 후속 후보는 approved이며 2026-10-12 15:09:12 승인 기록이 있다. 이번 계획은 재승인 질문 없이 구체화하되 다음 반복 경계 승인은 유지한다.
+- iter_047/053 원 리뷰는 본평가 미실행이다. iter_053의 oracle 183/192 실패를 교정 가설의 음성 결과로 읽지 않는다.
+- iter_088 및 iter_098~103 원문을 확인했다. 영역 정보 회복·충돌은 제한된 관찰이고, 자유 문장 정답 연결과 형식이 핵심 제약이었다. iter_101의 초안 유지 6명 대 영상 교정 3명은 양성 편중·의미 규약 한계가 있어 일반 효과로 쓰지 않는다.
+- agent/LIMITATIONS.md의 두 관련 항목과 iter_017 원 리뷰를 확인했다. 기존 RSNA 근거 전달의 인터페이스 의존성과 좌표 추가 이득 미확인은 반대 근거로 유지한다.
+- research/results/iter_111/provenance/ledger.json의 실제 필드는 원 Q_O 응답·request ID, detector box/score, SFT 원문, GT box, 영상 경로·hash를 포함한다. 저장 per_patient.json을 읽어 집계하면 resolved 592명, unresolved 8명이다. 불일치 87명 중 직접 판단 정답/detector 오답 47명, 직접 판단 오답/detector 정답 40명이다. 일치 505명은 둘 다 정답 427명·둘 다 오답 78명이다. 이 수치는 저장표의 계획용 집계이며 구현에서 원 출력부터 다시 연결한다. 과거 리뷰의 다른 대상 집합 unresolved 수와 혼합하지 않는다.
+- 현재 research HEAD는 5e825563e85b4eceb93c2cf3b4a6c47b5359228d이고 git status/diff에 변경이 없었다. 현재 브랜치에는 pg43_run.py와 기본 생성 코드가 있으나 새 승인 기반 iter_082에는 필요한 경로가 없어 선별 반입을 명시했다. 각 반입 파일의 실제 commit blob과 import를 확인했다. pg43_run의 과거 CODE_FILES 목록 일부는 iter_108 commit에 없으므로 adapter 없는 실제 의존성에 맞춘 한정 수정이 필요하다.
+
+## 선행과 의미
+
+[Anatomically-Grounded Fact Checking](https://arxiv.org/abs/2412.02177)은 소견·위치 오류 검증과 교정을 이미 다룬다. [후속 FC-guided correction](https://razi-mahmood.github.io/reports/NeurIPSHealthcareWorkshop.pdf)은 오류 문장을 선택적으로 수정하고 유효 문장을 보존하는 구성을 제시한다. 따라서 선택적 수정 자체는 신규성이 아니다. 공식 후속 PDF와 기존 iter_102의 상세 검토를 연결했다. 이번 단순 합의 대조는 논문 시스템의 재현이 아니다.
+
+[CorBenchX](https://arxiv.org/abs/2505.12057)는 합성 보고서 오류와 교정 benchmark를 다룬다. 이번 자연 발생 단일 소견 충돌은 다른 평가 범위이며 자유 보고서 교정의 우위를 주장하지 않는다. [Phrase-grounded Fact-checking](https://arxiv.org/abs/2509.21356) 역시 가까운 선행으로 보존한다.
+
+## 선택
+
+사용자가 승인한 교정 후보 하나를 구체화한다. 자유 문장 교정은 기존 정답 문제를 반복하므로 선택하지 않는다. RSNA의 한 소견에서 자연 근거 충돌을 선택하되 종료한 crop·순위 최적화와 구별한다. 핵심 비교는 새 위치 점수 순위가 아니라 실제 답변 수정과 보존이다. 다른 모델 계열 비교는 이번 최소 분해에 포함하지 않는다. 기본 능력 부족이 확인되면 현재 모델의 적합성 부족으로 제한하고 자동 모델 순회 대신 후속 승인에서 대안을 판단한다.
+
+## 대규모 GPU 필요 후보
+
+대규모 다기관 자료로 근거 신뢰도와 교정·보존을 공동 학습하는 verifier/editor post-training은 장기 후보로 남긴다. 현재 잔여 문제·필요성이 확인되지 않았으며, 모든 경량 학습이 두 RTX 3090에서 불가능하다는 뜻은 아니다.
+
+
+
+## iter_116 CLAUDE IMPLEMENTATION REPORT — 2026-10-12 15:35:22
+
+# 요약
+
+- **핵심 결과:** 본 비교(불일치 87명 + 일치 대조 87명, 696요청)는 **실행하지 않았다.** 사전 형식 분기(기술 12명 중 한 조건이라도 resolved가 6명 미만이면 본생성 보류)에서 T(텍스트만, 영상 없음) 조건이 resolved 5/12여서 `run=false`가 됐다. 정확도 평가, 교정·손상 수, 투자 분기 판정은 모두 없다.
+- **근거:** T는 12명 중 7명에서 "I am unable to answer…"로 답을 거부했다. E와 R은 각각 9/12 resolved였고, 미해결 3건은 모두 답을 먼저 쓰고 설명에 could 같은 표현이 있어 고정 hedge 규칙에 걸린 것이다. N은 12/12였다. 파서와 prompt는 바꾸지 않았다.
+- **미검증·주의:** 교정이 유용한지는 전혀 판단하지 못했다. "한 조건이라도 미달이면 보류"가 영상 없는 대조군 T에도 적용되는지는 계획 문구가 문자 그대로만 정한다. 나는 문자 그대로 따랐고, 이 해석은 GPT 리뷰가 판단해야 한다.
+- **다음:** 사용자 승인 후 선택지는 두 가지다. (a) T를 보고용 대조에서 빼고 본비교를 진행한다. (b) 현 분기대로 이 설정을 종료한다. 별도 관찰로 생성 없는 단순 대조 M(K/B/G 다수결)이 불일치 87명에서 이미 54/87을 맞힌다(아래 Results).
+
+# Work Performed
+
+- 반입 파일은 `reuse_manifest`의 상태가 `pending_validation`이었고, required_checks를 실제 호출 경로 기준으로 수행했다.
+- `pg43_run.py`를 수정했다.
+  - `CODE_FILES`를 adapter 없는 경로의 실제 의존성(5개)으로 줄였다. pg39·lora 등 미사용 파일은 제외했다.
+  - 출력 0건 비용 집계가 죽지 않도록 `cost_summary`/`occupancy`를 보완했다.
+  - record에 `physical_gpu`를 기록하고, 재개 전후 GPU 귀속은 record 값을 쓰도록 했다.
+  - attempt별 `launch_children.a{N}.json`을 보존하고, 이번 attempt 비용(`cost_this_attempt`)과 누적 비용을 분리했다.
+- `ed116_link.py`는 `ev111_link`의 결함을 보완한 새 파일이다. `ev111_link.py` 자체는 수정하지 않았다.
+  - 원 protocol *내용*에서 `sha256(canon(locked))`를 재계산해 completion digest와 대조한다. 비-코드 잠금 파일의 현재 hash가 다르면 거부한다.
+  - worker 파일의 record 수를 `completion.per_file`과 대조한다.
+  - decoded pixel hash가 다르면 거부한다.
+  - 정답이 없는 `ledger_nogt.json`과 평가 전용 `gt.json`으로 분리해 쓴다.
+  - iter_111 ledger와의 내용 회귀 대조는 600행 모두 일치했다.
+- `ed116_spec.py`에 선택, 입력 문구, 근거 packet, 정책(K/B/G/M/N/E/R/T/S)을 정의했다.
+- `ed116_eval.py`에 평가 지표를 정의했다.
+  - 공동 지표, 미해결 변수 전수 열거 범위, 환자 bootstrap, 사전 분기 `decide`, 기술 게이트가 들어 있다.
+  - 계획에 없는 사건 수 문턱은 추가하지 않았다.
+- 평가 코드 잠금은 TECH 생성 전인 **2026-10-12T06:26:11Z**에 했다. 잠금 파일 26개가 지금도 모두 일치한다.
+- `ed116_analyze.py`와 `ed116_verify.py`는 MAIN 분석용이다. 잠금에는 포함했지만 MAIN을 실행하지 않아 실제 데이터로는 한 번도 돌려보지 못했다.
+
+# Files Changed
+
+- 새 파일(연구 코드)
+  - `ed116_spec.py`, `ed116_eval.py`, `ed116_link.py`, `ed116_build.py`, `ed116_analyze.py`, `ed116_verify.py`
+  - `ed116_verify_selection.py`, `ed116_baselines.py`, `ed116_directcheck.py`
+  - `test_ed116.py`, `test_ed116_runtime.py`
+- 선별 반입 후 수정: `pg43_run.py`
+- 반입, 무수정: `ev109_extract.py`, `ev108_spec.py`, `test_ev109_extract.py`, `ev111_link.py`, `rsna_diag/{__init__,generate,geometry,parse,prompts,qa_spec,metrics}.py`
+- 결과는 `results/iter_116/`에만 저장했다: `provenance`, `lock`, `requests`, `protocol`, `gen`, `tech`, `tests`, `eval_partial`.
+- 잠금 이후에 추가한 파일(`ed116_baselines.py`, `ed116_directcheck.py`, `ed116_verify_selection.py`, `test_ed116_runtime.py`)은 `RESULT_MANIFEST.json`에 hash를 기록했다.
+
+# Commands / Experiments
+
+| 단계 | 결과 |
+|---|---|
+| `ed116_link.py` | 성공. 600행, pixel hash 재현 600/600, 문제 0건 |
+| `test_ed116.py` | 32/32. 비정사각 좌표 fixture, 열거식 독립 matching(600건), 미해결 범위 전수 교차곱 일치, ev109 fixture 유지 포함 |
+| `ed116_build.py` select, requests, weights, lock, protocol | 성공. 가중치 12파일은 iter_108 lock과 차이 0 |
+| TECH 2 worker(48요청) | 성공. wall 105.4초 |
+| TECH 4 worker(48요청) | 성공. wall 60.3초 |
+| RESUME8 | 1 worker 3건 후 중단(exit 1), 꼬리 부분 행을 일부러 붙여 2 worker로 재개해 완료 |
+| `test_ed116_runtime.py` | v1은 27/28이었다. 실패 1건은 내 기대식 오류였다(R−T 길이 차이에 영상 표식 토큰 3개가 더해짐). v2에서 28/28. v1 결과 파일도 보존했다 |
+| `ed116_directcheck.py` | 4건 모두 일치. 공식 방식 입력 token, 독립 padding pixel hash, 생성 token이 같았고 text-only에는 영상 입력이 없었다 |
+| `ed116_verify_selection.py` | 원시 출력에서 분모와 표본이 잠금과 일치 |
+| `ed116_baselines.py` | 성공. 생성 없는 K/B/G/M 기술 |
+
+- 병렬 구성 선택: 4 worker를 채택 후보로 기록했다.
+  - 2 worker 대비 wall이 105초에서 60초로 줄었다.
+  - 48요청의 출력 token이 모두 일치했다.
+  - GPU당 peak 17.7GB로 2GiB 여유 조건을 만족했다.
+  - MAIN은 보류라 실제 적용하지는 않았다.
+- 실행 전후 GPU는 모두 비어 있었다(87/15 MiB).
+
+# Results
+
+- 분모 재계산(원시 출력 기준)
+  - E600 600명 중 unresolved 8, 불일치 87, 일치 505.
+  - 불일치 87명에서 K 정답 47, B 정답 40.
+  - 일치 505명에서 둘 다 정답 427, 둘 다 오답 78.
+  - 불일치 87명의 category 구성: opacity 36, normal 9, not_normal_no_opacity 42.
+  - 일치 대조 87명의 구성: opacity 26, normal 30, not_normal_no_opacity 31. K 정답은 76.
+  - 기술 12명과 대조 87명은 서로 겹치지 않는다.
+- 기술 게이트(`results/iter_116/tech/tech_gate.json`): `run=false`.
+
+| 조건 | resolved(12명 중) |
+|---|---|
+| N | 12 |
+| E | 9 |
+| R | 9 |
+| T | **5** |
+
+  - MAIN protocol 생성은 게이트가 막는다. 실제로 시도해 거부됐고 파일은 만들어지지 않았다.
+- 응답 형식 관찰(기술 12명, 내용 정확도 아님)
+  - 모두 EOS로 끝났고 재시도는 0건이다.
+  - 최대 peak reserved는 8.27GiB였다.
+  - T의 resolved 5건은 모두 "Yes"였고, 7건은 답 거부였다.
+- 생성 없는 단순 대조(`eval_partial/baselines_no_generation.json`, 저장 출력 기반)
+
+| 불일치 87명 | K | B | G | M |
+|---|---|---|---|---|
+| 정답 수 | 47 | 40 | 54 | 54 |
+| 교정(K 오답 40명 중) | 0 | 40 | 20 | 20 |
+| 손상(K 정답 47명 중) | 0 | 47 | 13 | 13 |
+
+  - 불일치에서는 K≠B라서 M이 G와 같아진다(54).
+  - 이 표는 계획한 비교에 필요한 단순 대조의 일부다. 분기 판정에는 쓰지 않았다.
+- 비용: TECH 2 worker는 GPU 점유 185.8 device-초(적재 포함), 4 worker는 104.4, RESUME8은 60.3이었다. 직접 대조 1회는 모델 적재와 생성 4건이다.
+
+# Goal Progress / Reused Assets
+
+- **시험 설정:** 현 frozen MedGemma 1.5 + 이 고정 prompt/parser 조합은 T에서 형식 게이트를 통과하지 못해 본비교로 진행하지 못했다. 교정·보존 능력의 음성 결과가 아니다.
+- **연구 관찰:** 영상 없이 초안과 근거만 주면 모델이 7/12 거부한다. R의 미해결 3건은 hedge 규칙 때문이고, 답 자체는 문두에 있었다. 이 부분은 가설 검증이 아니라 형식 관찰이다.
+- **연구 질문:** "틀릴 수 있는 자동 근거 아래 선택적 교정"은 미검증이다. 새로 알게 된 사실은 불일치 87명에서 K/B/G 다수결 M(54/87, 교정 20, 손상 13)이 이미 단순 대조로 존재한다는 것이다. 이는 더 강한 비교 기준을 뜻하며, 질문을 기각하는 근거는 아니다.
+- **운영 복구와 과학적 증거 구분:** 이번에 한 일은 대부분 실행 경로 정비다(고정 의존성 목록, 0건·재개 비용, provenance 강화).
+- 반입 required_checks 수행 현황
+  - 호출 의존성·source manifest: 완료.
+  - 0건 비용·재개 GPU 귀속: 완료.
+  - 공식 tensor와 직접 generate 4건: 완료.
+  - 부분 재개·변조 거부: 완료(아래 한계 참고).
+  - 2/4 worker 처리량·peak VRAM·정합성: 완료.
+  - ev111_link의 protocol/pixel 강제는 새 파일 `ed116_link.py`에서 수행했다. 원 파일은 미수정이다.
+  - 비정사각 좌표 fixture와 독립 matching: 완료.
+  - gate 적용 후 box 기준 공동 지표: 구현과 fixture는 검증했지만, 실제 MAIN 데이터에서는 미실행이다.
+
+# Problems
+
+- **현재 결론에 영향:**
+  - MAIN이 보류되어 교정·손상·공동 지표 결과가 없다.
+  - 게이트 규칙 해석 미정: T는 비교 지표가 아닌 영상 제거 대조인데, 규칙은 "네 조건 중 하나라도"로 적혀 있다. 나는 임의로 완화하지 않았다.
+  - 표본 변동에 따른 "불확정" 판정은 계획에 수치 기준이 없다. 그래서 `decide`는 CI를 쓰지 않고, 미해결 배정 범위만 쓴다. MAIN이 실행되면 CI는 서술로 보고해야 한다.
+- **재사용 전 수정:**
+  - `ed116_analyze.py`와 `ed116_verify.py`는 실제 MAIN 출력으로 돌려보지 못했다. 잠금 후 오류가 발견되면 amendment로 기록해야 하며 새 과학 기준 변경이 아니다.
+  - 변조 거부 검사는 `verify_completion`을 대상으로 한다. 실행 중 worker 경로의 동시 소유권(flock)은 별도로 시험하지 않았다.
+  - 강제 SIGKILL 재개는 시험하지 않았다. 꼬리 부분 행을 인위적으로 붙여 정상 종료 후 재개하는 검사로 대체했고, 실제 프로세스 강제 종료 시나리오는 미검증이다.
+- **추후 개선:** `results/iter_116/tests_resume_before_sha.txt`는 `tests/` 밖에 만든 임시 파일이다. 내용은 재개 검사의 기준 hash 하나다.
+
+# Recommendation to GPT
+
+1. 게이트 해석을 먼저 판단해야 한다. T 부분 미달을 "본생성 보류"로 확정할지, 영상 없는 대조 T를 보고용으로만 두고 N/E/R 본비교를 진행할지 정해야 한다. 후자라면 파서·prompt·기준은 현 상태 그대로 두는 것이 좋다.
+2. 본비교를 진행한다면, M이 이미 54/87을 맞히므로 성공 기준 "각 대조보다 5명 이상 많이"가 실질적으로 R ≥ 59/87을 요구한다는 점을 계획에 명시해 판단 근거로 삼는 편이 좋다. 이 값은 이미 정해진 기준에서 산출되는 것이고 기준을 바꾼 것은 아니다.
+3. 4 worker가 처리량과 정합성 면에서 유리하다. 본실험 시 약 696요청에 약 10분 안팎으로 추정된다(추정치이며 TECH 48요청 60초 기준).
+4. 현 설정을 종료한다면 iter_115의 CURE 특화 투자 보류로 복귀하는 것이 계획에 이미 정해져 있다. 그 경우 오류 검토 묶음의 남은 후보는 없다.
+
+SELF_CHECK: FAIL
+SUMMARY: 불일치 87명 vs 일치 대조 87명 교정·보존 비교의 본생성(696요청)은 사전 기술 게이트에서 T 조건 resolved 5/12로 보류됐고, 연결·잠금·재개·공식 대조 검증은 완료했으며 정확도 판정은 없다.
+
+# [orchestrator] 권한 거부된 도구 호출
+- Bash: git ls-tree -r --name-only c2602f4b237ec9a90b7e04c99474ea7a0003bfb0 | grep -E "^(ev108|pg43|pg39|rsna_diag|test_ev108)"
+- Bash: git ls-tree -r --name-only c2602f4b237ec9a90b7e04c99474ea7a0003bfb0 -- ev108_run.py ev108_build.py pg39_spec.py pg39_data.py rsna_diag
+- Bash: python - <<'EOF'
+import json
+L=json.load(open('results/iter_111/provenance/ledger.json'))['rows']
+r=L[0]; print({k:(v if k not in('O','SFT','det') else '...') for k,v in r.items()})
+print(r['O'].keys(), r['SFT'].keys(), r['det'])
+print(sum(x['id']==x['patient'] for x in L), set(tuple(x['size_hw']) for x in L))
+print(L[0]['O']['raw'][:100], L[0]['SFT']['raw'][:200])
+EOF
+nvidia-smi --query-gpu=index,memory.used,memory.total --format=csv,noheader
+echo $CUDA_VISIBLE_DEVICES
+- Bash: python - <<'EOF'
+import json
+L=json.load(open('results/iter_111/provenance/ledger.json'))['rows']
+print([(x['id'],x['patient']) for x in L[:3]])
+P=json.load(open('results/iter_111/eval/per_patient.json'))
+import collections
+# regression: det_nonempty from scores>=0.7
+n=0;bad=0
+byid={x['id']:x for x in L}
+for p in P:
+    d=byid[p['id']]['det']
+    ne=any(s>=0.70 for s in d['scores'])
+    n+=1; bad+= (ne!=p['det_nonempty'])
+print(n,bad)
+print(collections.Counter(p['ans_source'] for p in P), collections.Counter(p['ans'] for p in P))
+EOF
+- Bash: python - <<'EOF'
+import json,hashlib
+c=json.load(open('results/iter_012/confirm_sft_seed17/completion.json'))
+print({k:(v if not isinstance(v,(dict,list)) else '...') for k,v in c.items()}.keys() if False else list(c.keys()))
+p=json.load(open('results/iter_012/protocols/main_protocol.json'))
+print(list(p.keys()))
+t=c['protocol_digest']
+def cands(o):
+    yield 'sk', json.dumps(o,sort_keys=True)
+    yield 'ska', json.dumps(o,sort_keys=True,ensure_ascii=False,default=str)
+    yield 'skc', json.dumps(o,sort_keys=True,separators=(',',':'))
+for name,o in [('all',p)]+[(k,p[k]) for k in p]:
+    for n,s in cands(o):
+        if hashlib.sha256(s.encode()).hexdigest()==t: print('MATCH',name,n)
+print(hashlib.sha256(open('results/iter_012/protocols/main_protocol.json','rb').read()).hexdigest()==t, t)
+print(c.get('n_expected'), c.get('per_file'))
+EOF
+- Bash: echo "CVD=$CUDA_VISIBLE_DEVICES"; python pg43_run.py launch --requests results/iter_116/requests/TECH.jsonl --protocol results/iter_116/protocol/protocol_TECH.json --out-dir results/iter_116/gen/TECH_w2 --workers 2 --peak-gb 12
+- Bash: CUDA_VISIBLE_DEVICES=0 python ed116_directcheck.py results/iter_116/gen/TECH_w2 results/iter_116/tests/direct_check.json
+- Bash: python - <<'EOF'
+import json, os
+import ed116_eval as EV, ed116_spec as ES
+rows=dict((r['id'],r) for r in json.load(open('results/iter_116/provenance/ledger_nogt.json'))['rows'])
+gt=json.load(open('results/iter_116/provenance/gt.json'))
+sel=json.load(open('results/iter_116/lock/selection.json'))
+out={}
+for g,ids in (('mismatch',sel['mismatch']),('control',sel['control'])):
+    ps=[EV.make_patient(rows[i],gt[i],{}) for i in ids]
+    pt=[EV.point_scalars(p) for p in ps]
+    d={}
+    d['n']=len(ps)
+    d['correct']={q:sum(x['correct_'+q] for x in pt) for q in ('K','B','G','M')}
+    d['correction']={q:sum(x['correction_'+q] for x in pt) for q in ('K','B','G','M')}
+    d['harm']={q:sum(x['harm_'+q] for x in pt) for q in ('K','B','G','M')}
+    d['joint03']={q:sum(x['joint03_'+q] for x in pt) for q in ('K','B')}
+    d['joint05']={q:sum(x['joint05_'+q] for x in pt) for q in ('K','B')}
+    d['by_category_correct']={}
+    for c in ('opacity','normal','not_normal_no_opacity'):
+        idx=[k for k,p in enumerate(ps) if p['cat']==c]
+        d['by_category_correct'][c]=dict(n=len(idx),**{q:sum(pt[k]['correct_'+q] for k in idx) for q in ('K','B','G','M')})
+    out[g]=d
+os.makedirs('results/iter_116/eval_partial',exist_ok=True)
+json.dump(dict(note='생성 없는 저장 출력 기반 단순 대조(K/B/G/M). 평가 잠금 코드 사용. N/E/R/T/S는 MAIN 미생성으로 없음.',**out),open('results/iter_116/eval_partial/baselines_no_generation.json','x'),indent=1)
+print(json.dumps(out,indent=1))
+EOF
+
+
+
+## iter_116 GPT REVIEW [CONTINUE] — 2026-10-12 15:39:25
+
+# 요약
+
+- **판정:** execution_failed, valid_experiment=false. 기술 생성은 완료했지만 본 가설 비교는 미실행이다.
+- **핵심 근거:** 기술 12명에서 N/E/R/T의 resolved는 12/9/9/5였다. 원 계획의 최소6명 기준을 T가 충족하지 못했다.
+- **의미·한계:** 중단은 계획에 부합한다. 교정 효과·손상·단순 대안 이후의 가치는 판단할 수 없다.
+- **다음:** 사용자 승인 후 T의 응답 성공을 필수 진입 조건에서 분리한 한정 비교를 제안한다. 원 평가 기준과 이번 실패 기록은 보존한다.
+
+## 알림 요약
+
+- 결과: 흉부 X-ray 기술 12명에서 영상 없는 조건은 7명에게 답변을 거부했다. 사전 분기에 따라 본평가 174명·696요청은 실행하지 않았다.
+- 의미: 실행 경로와 저장 단순 대조를 확인했지만, 오류가 섞인 근거로 잘못된 답을 고치고 맞는 답을 지키는지는 아직 모른다.
+- 후속: 영상 없는 조건의 응답 성공을 보조 해석으로 분리하고, 같은 표본·prompt·성공 기준의 비교를 한 번 수행하는 안을 제안한다.
+- 대안: 현재 설정을 종료하고 iter_115의 투자 보류로 복귀할 수 있다. 비용은 줄지만 교정 질문은 미검증으로 남는다. 다음 반복은 승인 후 진행한다.
+
+# Assessment
+
+구현 담당은 engineer_backend.json의 Claude이며 claude_meta.json에는 claude-sonnet-5-5가 기록돼 있다. 리뷰 대상은 66cd4542720d0efe69b2fbbdfabbe24ebe0253a0이다. commit.json의 23개 파일과 작업 파일이 모두 일치하고 unpreserved_paths는 없다. changes.patch와 선별 반입 원본 대비 pg43_run.py 변경을 확인했다.
+
+원 계획은 '네 조건 중 하나라도 12명 중 절반 미만만 resolved이면 본생성을 보류'한다고 명시한다. T가 주 성능 대조가 아니라는 이유로 구현 중 제외할 여지는 없다. Claude의 중단은 올바르며 gate 해석 자체는 미정이 아니다. 이를 바꾸려면 별도 후속 계획이 필요하다.
+
+# Key Findings
+
+리뷰에서 원시 TECH 출력을 다시 읽고 고정 추출 규칙을 적용해 N/E/R/T의 12/9/9/5를 재현했다. T의 미해결 7건은 답변 거부였다. E/R의 미해결에는 명시적 Yes/No 뒤의 유보 표현이 포함된다. 특히 R의 한 응답은 No 뒤에 확신 부족을 명시하므로 전부를 무해한 설명 문구로 간주해 구제해서는 안 된다.
+
+TECH_w2 48건, TECH_w4 48건, RESUME8 8건의 완료 파일과 실제 worker 출력 수·hash를 확인했다. verify_completion도 쓰기 없이 실행해 모두 통과했다. 두 병렬 구성의 48개 생성 token은 모두 같았다. 본평가 요청 파일은 존재하지만 MAIN protocol과 본생성 결과는 없다. 직접 생성 대조 4건은 별도 기술 검사다.
+
+iter_016 원 응답, iter_035 detector 예측, iter_012 SFT 원문에서 분모와 단순 대조를 독립 재계산했다. unresolved8·불일치87·일치505와 선택 표본이 일치했다. 불일치87명의 K/B/G/M 정답 수는 47/40/54/54이며 G/M의 교정20·손상13도 재현됐다. 이것은 신규 교정 성능이 아니다.
+
+평가 잠금 26개 파일의 현재 hash가 일치한다. 기술 검사 결과는 fixtures_cpu.json 32/32, runtime_checks_v2.json 28/28이다. 최초 runtime 검사 실패는 R/T token 수 차이에 영상 표식3개가 포함되는 기대식 문제였고, 원 실패 기록이 보존돼 있다.
+
+# Problems / Concerns
+
+현재 가설 판정을 막는 것은 본평가 미실행이다. GPU 장애나 자료 부재 때문에 멈춘 것은 아니며 선택적 교정의 음성 결과로 해석하지 않는다.
+
+재사용 전 보완은 실제 경로로 제한한다. ed116_verify.py는 unresolved 수 검사에 무조건 True를 사용하고 범위·최종 분기를 독립 대조하지 않는다. ed116_directcheck.py의 pixel 비교는 padding 영상 hash이며 processor의 pixel_values tensor 직접 비교는 아니다. 공식 입력 token과 생성 token 일치는 유효한 근거지만 검증 범위를 과장하지 않는다.
+
+부분 재개는 제한 종료 뒤 인위적 부분 행을 추가한 시험이다. SIGKILL 복구나 동시 소유권 검증을 완료했다고 표현하지 않는다. 이 미검증은 현재 gate 실패를 뒤집는 문제가 아니다.
+
+# Interpretation
+
+공개 RSNA 정답은 사전 지정 opacity 판단과 위치 정합성을 평가할 수 있다. 자유 판독문의 임상 진위나 위치 supervision의 인과 효과를 평가하는 설계는 아니다. E600은 반복 개발 자료이며 불일치로 선정한87명의 정확도를 자연 모집단 성능으로 외삽할 수 없다.
+
+초안 고수, detector 추종, 근거만 받은 재판단, 단순 합의의 충분성은 아직 구분하지 못했다. 현재 확인한 것은 영상 없는 입력의 응답 적합성 문제와 저장 baseline의 수준이다. 기존 limitation을 변경할 새 가설 검증이 없어 limitation_updates는 비운다.
+
+# Strategy Check / 연구 방향 판단
+
+**시험 설정:** 현재 네 조건 모두의 응답 성공을 요구하는 설계는 사전 분기에서 종료됐다. 본평가 성능 실패와 구분한다.
+
+**연구 관찰:** N/E/R의 응답 경로는 각각12/9/9명에서 resolved였고, T는7명에게 거부했다. 이는 T를 이용한 영상 제거 대조의 해석을 제한한다. 실제 선택적 교정의 이득이나 손상을 보여주지는 않는다.
+
+**연구 질문:** R의 교정·보존과 강한 단순 대안 이후의 가치라는 질문은 여전히 공개 정답으로 판별 가능하다. T의 내용 응답이 부족하다는 사실만으로 이 비교 전체를 포기할 필요는 없다.
+
+후보는 두 개다. 첫째, T의 응답 성공을 필수 진입 조건에서 분리하고 기존 표본과 기준으로 한 번 비교한다. 영상 제거의 인과 해석은 보류하지만 R 대 단순 대안의 실용적 차이를 확인할 수 있다. 둘째, 현재 설정을 종료하고 iter_115의 CURE 특화 투자 보류로 복귀한다. 후자는 비용을 줄이지만 실행 실패 외에 교정 후보의 가치를 낮출 새 증거는 없다. 따라서 첫째를 사용자 승인 대상으로 권고한다. parser 변경·prompt 순회·새 모델 탐색은 선택하지 않는다.
+
+실행 유효성은 기술 단계에 한정되고 성능 개선·핵심 가설 지지·신규 기여는 모두 미검증이다. 가까운 기존 교정 연구와의 차별성도 이번 결과로 진전되지 않았다. 양성 근거가 없어 새 논문 추천은 보류한다.
+
+비용 기록상 TECH48건의 wall-clock은 2 worker105.43초, 4 worker60.30초다. 두 GPU에서 여유가 큰 GPU1부터 배치했고 4 worker의 가정 peak8.5GiB와 worker당2GiB 여유를 반영했다. 출력 정합성을 유지한 처리량 개선은 확인됐다. 보고된 작업은 실행 경로 정비 비중이 크지만 연결·검증별 시간이 분리되지 않아 지배 비용의 정확한 비율은 미측정이다. 본평가 시간은 추정일 뿐이며 낮은 GPU 사용을 실패 사유로 삼지 않는다.
+
+# Recommended Next Experiment
+
+사용자 승인 후 동일 표본·prompt·parser·운영점·성공 기준을 유지하는 한정 보완 계획을 작성한다. 변경은 T의 응답 성공을 본평가 필수 gate에서 분리하고 그 해석을 보조로 제한하는 것이다. 원 iter_116의 gate 실패를 소급 수정하지 않는다.
+
+기존 기술 생성은 재사용하고, 평가 verifier의 필수 누락만 보완한 뒤 최대 기존696요청을 한 번 수행하는 안을 제시한다. M의54/87을 기준으로 원 성공 조건상 R은 최소59/87이 필요하며, 교정≥10·손상≤5·일치 대조 손상률≤5%와 다른 필수 대조·unresolved 보수적 범위도 모두 유지한다. 양성은 독립 확인 제안, 음성·불확정은 현 설정 보류로 연결한다. 추가 학습이나 반복 평가기 정비를 자동 발주하지 않는다.
+
+연장을 승인하지 않으면 iter_115의 투자 보류로 복귀한다. 당시 자동 재개할 불일치 후속 실험은 없었으므로 가상의 복귀 실험을 만들지 않는다.
