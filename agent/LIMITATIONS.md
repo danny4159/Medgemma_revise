@@ -336,21 +336,21 @@ RSNA confirm800 중 E600 밖의 개발 양성 환자에서 기술 집단을 제�
 
 ## padchest-grounding-confidence-review-gap — observed
 
-반복 개발 PadChest-GR의 자연 다중 영역 47개 소견·36명에서 적응 MedGrounder A_U_e5 threshold 0.8 출력을 고정하고 12개를 검토했을 때, CURE와의 합집합 위치 불일치 순위는 공식 주석 불일치 오류 9개, 최소 box confidence 순위는 6개를 포착했다. 사전 양성 탐색 기준은 충족했지만 순포착 차이의 환자 bootstrap 95% 구간은 [-2, 6]개다. 현재 confidence 순위의 제한된 보완 가능성이며, 보편적 우위·임상 오류 식별·VLM 고유 정보는 입증하지 않는다.
+iter_113의 반복 개발 36명·47개에서 CURE–MedGrounder 불일치가 confidence보다 오류를 더 포착한 관찰(9 대 6)은 유지한다. iter_114의 우리 파이프라인 미사용 PadChest-GR 환자 68명·87개에서는 동일 22개 검토 시 CURE 불일치 16개, 의료 적응 MSPC 불일치 15개, confidence 13개를 포착했다. confidence 대비 차이는 +3.45pp, MSPC 대비 +1.15pp이며 두 비교 모두 사전 양성 기준과 정밀도 목표를 충족하지 못했다. 유용한 우위와 일반 대조의 충분성은 모두 불확정이며, 보편적 confidence 한계나 VLM 고유 가치는 입증되지 않았다.
 
 - 적용 목표 시작: iter_003
-- 최신 리뷰: agent/runs/iter_113/review.json
-- 근거: research/results/iter_113/report.json: N=47, 환자 36명, K=12, 공식 주석 오류 15개, 포착 9 대 6.
-- 근거: research/results/iter_113/per_item.json: 불일치 순위만 포착한 오류 7개·7명, confidence만 포착한 오류 4개·4명, 공통 2개, 양쪽 미포착 2개.
-- 근거: 리뷰의 원시 출력·원 manifest 기반 독립 좌표 grid 계산에서 선택 ID와 포착 수가 일치했다.
-- 근거: 리뷰에서 bootstrap 10,000회 배열 전체가 일치했고 주석 모호성 범위 [+2,+7], 환자 제거 차이 [+2,+3]을 재현했다.
-- 사용·평가 검증: 리뷰 SHA 540f63bed8b07775d26b02d69a8a545b2736749d의 6개 소스와 작업 파일·protocol 코드 hash가 일치했다.
-- 사용·평가 검증: protocol 입력 hash와 completion 산출물 hash를 확인하고 원 CURE·MedGrounder 출력 및 annotation 연결 47/47을 재검사했다.
-- 사용·평가 검증: 원 영상 36개의 hash와 CURE 47개 최종 EOS token을 확인했다. malformed·truncated 제외는 없었다.
-- 사용·평가 검증: nr107_geom.py와 nr107_spec.py의 원 출처 blob 일치를 확인했다. 저장 fixture 36/36과 별도 검증 19/19를 코드·도구 로그와 대조했다.
-- 사용·평가 검증: 고정 운영점 0.8, 검토량 ceil(N/4), GT와 무관한 hash 동률 처리, union IoU<0.3 오류 정의를 유지했다.
-- 미해결: 미사용 환자에서 같은 방향과 실용적으로 의미 있는 크기가 재현되는가?
-- 미해결: 일반적인 두 grounder의 ensemble 불일치보다 CURE 조합이 더 유용한가?
-- 미해결: CURE 학습 노출과 모델별 전처리·학습 차이가 결과에 미친 영향은 무엇인가?
-- 미해결: 두 모델의 실제 추론 비용을 포함해 추가 오류 포착이 투자할 가치가 있는가?
+- 최신 리뷰: agent/runs/iter_114/review.json
+- 근거: research/results/iter_114/analysis_r1/result_final/report.json: N=87, 환자 68명, K=22, 공식 주석 오류 37개, 포착 16/15/13개.
+- 근거: 98.75% 환자 bootstrap 구간: A [-0.059524, 0.120879], B [-0.086962, 0.080466].
+- 근거: 주석·동률 보수 범위: A [-3,12]개, B [-7,9]개. 주석 미확정 42/87개.
+- 근거: 리뷰에서 원시 출력 기반 독립 verifier를 파일 쓰기 없이 실행하여 초기·최종 각 21개 검사와 bootstrap 20,000회 배열 일치를 재현했다.
+- 사용·평가 검증: 리뷰 SHA d1c504459467b578b170d4316675757ffe67106a의 대상 파일과 작업 파일, protocol 소스 hash가 일치했다.
+- 사용·평가 검증: 초기·확대의 세 모델 출력은 각각 47·41개이며 중복 요청이 없었다. CURE 88개 모두 최종 EOS이고 추가 cap 재시도는 없었다.
+- 사용·평가 검증: 원 영상 hash, 단계별 원시 입력 hash, completion 산출물 hash를 재확인했다.
+- 사용·평가 검증: 개발 MG 회귀의 최대 box 차이 7.73e-6, MSPC 적합성 40/47, CURE 기술 입력 4개의 token·pixel·생성 회귀 일치 기록을 확인했다.
+- 사용·평가 검증: 대상 MG 범위 밖 box 1건의 공통 제외는 상속한 규칙의 복구이며 r0와 정정 경위를 보존했다.
+- 미해결: 최소 유용 효과 5pp의 존재와 부재 모두 확정하지 못했다.
+- 미해결: MSPC와 대상 MG의 공유 구조·사전학습, CURE와의 학습 노출 차이가 남는다.
+- 미해결: 공개 모델 미노출·독립 도메인·임상 오류 식별·자유 판독 정확성은 검증하지 않았다.
+- 미해결: 전체 서비스 비용은 미측정이며 현재 비용은 모델 처리 구간에 한정한다.
 

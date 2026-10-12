@@ -41905,3 +41905,453 @@ SUMMARY: 저장된 CURE·MedGrounder 출력 47개 소견(36명)에서 불일치 
 - 추천 이유: 두 모델 출력의 차이를 활용할 제한적 양성 근거가 생겼다. 일반 ensemble의 효과를 강한 단순 대조로 삼아 CURE 조합의 추가 가치를 판단하는 데 도움이 된다. 논문은 현재 의료 bbox 순위의 직접 근거가 아니며 독립 일반화·서비스 비용·VLM 고유 이점은 미검증이다.
 - 읽어볼 부분: §2.4에서 구성 모델의 강도와 예측 상관을 함께 고려하는 이유를 읽고, §3.1과 Figure 2에서 예측 정확도와 불확실성 평가를 구분한 비교를 본다. 이를 참고하되 현재 고정 오류 포착 endpoint를 사후 변경하지 않는다.
 
+
+
+## iter_114 GPT PLAN [독립 위치 출력의 오류 검토 정보 / proceed] — 2026-10-12 14:03:15
+
+# 요약
+
+- **이번에 할 일:** CURE–MedGrounder 위치 불일치의 오류 검토 이득을 새 환자에서 확인하고, 의료 적응 MedGrounder MSPC 대조와 비교한다.
+- **필요한 이유:** iter_113은 같은 12개 검토에서 오류 9 대 6의 양성 신호를 보였지만 환자 변동과 일반 ensemble 설명은 남았다.
+- **확인할 기준:** confidence 대비 재현 A와 일반 대조 이후 가치 B를 각각 판정한다. 초기 예비 규모는 36명·47개, 조건부 최대는 69명·88개다.
+- **주의·다음:** 최대 규모도 5pp 효과를 정밀하게 판정하지 못할 수 있다. 새 학습은 없으며 종료 후 full review와 사용자 승인을 거친다.
+
+## 알림 맥락
+
+- 연구: 독립 위치 출력의 오류 검토 정보
+- 데이터: 흉부 X-ray PadChest-GR의 양성 다중 영역 소견
+- 모델: 고정 CURE, 적응 MedGrounder A_U_e5, 공개 MedGrounder MSPC; 새 학습 없음
+- 과제: 같은 영상·소견의 위치 출력으로 MG 오류를 우선 검토할 항목을 고른다
+- 가설: 공간 불일치의 이득이 새 환자에서도 남으며 일반 grounder 조합과 다른 가치가 있을 수 있다
+- 질문: 같은 수를 검토할 때 confidence보다 오류를 더 찾고, 일반 grounder 조합보다도 유용한가?
+- 변경: 구체화
+- 연결: 기존 개발 36명·47개의 양성 신호에서 미사용 환자의 재현성과 일반 대조 비교로 이어간다
+- 작업: 자료·대조 적합성을 확인한 뒤 고정 순위 세 개를 비교하고 추가 투자 여부를 판단한다
+
+# Current Understanding
+
+iter_113의 valid_experiment=true, blocking_issues=[]와 원 success 판정을 유지한다. 47개 소견·36명에서 K=12, 오류 포착은 CURE 불일치 9개 대 confidence 6개였다. 환자 bootstrap 95% 구간 [-2,+6]은 재현 불확실성을 남긴다. 주석 민감도 [+2,+7]과 환자 제거 [+2,+3]은 이 개발 표본의 방향이 특정 주석·환자 하나만으로 설명되지는 않음을 보여준다.
+
+이번은 같은 현상의 후속 diagnostic이다. validated 주장이 필요한 confirmatory나 방법 개발로 표시하지 않는다. 우리의 미사용 환자에서 확인하되 모델 사전학습 미노출·독립 도메인으로 부르지 않는다.
+
+직전 사용자 승인에 따라 CPU-only 제한과 단순한 '불확정이면 즉시 보류' 분기를 변경한다. 원 점수·운영점·평가·과거 결과는 보존하고, 사전 정의한 한정 확대만 허용한다.
+
+# Strategy Check / 연구 방향 판단
+
+- **기술 질문 → 실패 조건 → 공개 비교 → 주장 범위:** confidence가 위치 주석 불일치를 놓치는 조건에서 다른 모델의 공간 불일치가 추가 정보를 주는가? 같은 MG 예측과 검토량을 고정하고 confidence/CURE/MSPC 순위의 오류 포착을 비교한다. 결론은 양성 phrase의 공개 영역 주석 정합성 검토에 한정한다.
+- **시험 설정:** 기존 규칙을 그대로 새 환자에 적용한다. LoRA·prompt·score·threshold를 구제하는 실험이 아니다.
+- **연구 관찰:** iter_113의 양성 신호는 보존한다. iter_111/112 및 MRI iter_082의 음성은 다른 과제·조건의 결과이며 합치거나 뒤집지 않는다.
+- **연구 질문:** 표본 변동과 일반 ensemble 상보성이 남은 설명이다. A와 B를 나누면 신호의 재현과 특수 방법 투자 필요성을 구분할 수 있다.
+- **선택:** 직전 리뷰와 사용자 승인대로 한정 확인을 택한다. 대안은 관찰만 보존하고 보류하는 것이다. 새 본요청 최대 264개로 경쟁 설명을 줄일 수 있어 현재 정보 가치가 더 높다. 전수 후보 재검토는 반복하지 않는다.
+- **비용:** 이전 CPU 분석은 0.611초였으나 전체 연결·검증 시간은 미측정이었다. 이번에는 다운로드·준비·추론·분석을 구분해 기록한다. 실행 복구만 끝나면 새 과학적 관찰로 보고하지 않는다.
+
+# Hypothesis
+
+A: 새 환자에서 CURE 불일치 순위의 순포착 이득 ΔA가 confidence 대비 양수이며 최소 유용 효과 0.05에 도달할 수 있다.
+
+B: CURE 불일치 순위의 순포착 이득 ΔB가 의료 적응 MSPC 불일치 대비 0.05 이상일 수 있다. 반대 설명은 일반 grounder 조합으로 충분하다는 것이다.
+
+0.05는 모든 대상 100개당 같은 25개 검토에서 오류를 5개 더 포착하는 투자 기준이다. K/N≈0.25이므로 검토 precision 약 20pp 차이에 해당한다. 개발 효과 3/47≈6.38pp보다 낮지만 작은 순위 차이를 곧바로 방법 기여로 해석하지 않기 위한 기준이다. 결과 후 바꾸지 않는다.
+
+# Limitation Evidence / Correct Usage Checks
+
+대상은 `padchest-grounding-confidence-review-gap`의 observed 근거다. `agent/runs/iter_113/review.json`의 evidence와 usage_checks를 계승한다. 원문은 47/47 연결, 영상 hash, CURE EOS, 고정 MG 운영점, 기하·순위 독립 재계산을 확인했다.
+
+유지할 규칙은 다음과 같다.
+
+- 대상 MG: A_U_e5, `results/iter_046/train/U/weights_e5.pth`, SHA256 `b9c2bccd04dde8b7445aa5f60e082a0c93f1f2412af8a583a4ca5ee207c8718a`, threshold 0.8.
+- 오류: 공식 GT와 MG 예측 합집합의 union IoU<0.3. 빈 MG는 오류다.
+- confidence 위험: 1−최소 유지 box score; MG empty는 1.
+- 공간 위험: 1−두 예측 합집합 IoU; 둘 다 empty는 0, 한쪽 empty는 1.
+- 검토량: K=ceil(N/4). 동률은 `sha256('iter113|item_key')`와 bootstrap 복제 순번으로 처리한다. 새 item_key도 기존 생성 규칙을 따른다.
+- CURE parser·최종 EOS·no_box/invalid 구분은 원 규약을 유지한다. invalid는 공통 제외하되 원 분모·이유·조건부 해석을 보존하고 환자를 대체하지 않는다.
+- 두 번째 판독자 주석 부재·오류 정의 불일치는 미확정으로 둔다. 임상 정상이나 오진으로 바꾸지 않는다.
+
+# Contribution Path / Baselines / Reuse
+
+일반 대조는 결과 전에 공개 `medgrounder_finetune_mspc.pth` 하나로 확정한다. [공식 저장소](https://github.com/aehrc/MedGrounder)의 MSPC config·가중치 배포와 [원논문](https://arxiv.org/html/2512.01085v1)의 복수 영역 평가를 근거로 선택한다. 자연영상 비적응 모델이나 단일 box 모델로 약한 대조를 만들지 않는다.
+
+MSPC는 대상 MG와 같은 구조·공통 사전학습을 공유한다. 따라서 충분한 대조 결과는 CURE 특수 투자를 보류할 근거지만, CURE 우위는 VLM 고유성의 증명이 아니다. CURE와 MSPC의 학습량·자료·전처리도 다르다. 직접 SFT·추가 seed 학습은 이번 순위 재현 질문에 필요하지 않아 실행하지 않는다.
+
+현재 브랜치의 `nr113_core.py`, `nr113_run.py`, `nr113_verify.py`, `nr113_tests.py`, `nr107_geom.py`, `nr107_spec.py`를 재사용한다. 승인 범위는 기존 입력의 수치 계산에 한정된다. 새 schema·빈 집단·MSPC 비교를 별도 검증한다. 외부 반입은 JSON의 reuse_assets를 따른다. 보관본 실행기를 새로 재구현하지 말고 고정 경로를 매개변수화하거나 새 iter_114 entry point에 연결한다.
+
+필수 수정은 검증 대상 digest에 연결된 seal, 부분 분석 산출물의 검증 후 재개, verifier와 production의 원 float 순위 일치다. 독립 verifier의 기하 계산 독립성은 유지한다. 기존 결과를 다시 봉인하거나 수정하지 않는다.
+
+# Proposed Experiment
+
+## 1. 자료 적합성과 표본 잠금
+
+원 metadata는 `results/datasets/padchest_gr/raw/grounded_reports_20240819.json`과 `master_table.csv.zip`이다. 기존 pinned hash·환자/study/영상/split 검사를 유지한다.
+
+`pg39_data.image_pool(..., 'test')`의 기존 seed 20260930, eligibility, 시간 문구 제외, 서로 다른 문장쌍 hash 선택, 환자당 영상 hash 선택을 그대로 사용한다. 선택된 두 문장 중 공식 box≥2인 항목만 포함한다. 좋은 사례·두 판독자 합의 사례만 선택하지 않는다.
+
+읽기 전용 집계에서는 80명·100개가 적격이었다. 과거 selection/manifest와 연결된 11명을 제외하면 69명·88개다. 특히 iter_089/090의 학습·선택 기록과 recovery E128 연결을 빠뜨리지 않는다. iter_039/040/042/048/085/086/089/090/093~097/100/101/105~113의 실제 사용·선택 manifest를 따라 exclusion ledger를 만들고, 원천 ID·StudyID·ImageID와 확보한 영상 pixel hash 중복을 검사한다. metadata 후보 열람과 모델 학습/선택/출력 사용은 구분하되 불분명한 환자는 보수적으로 제외한다.
+
+최대 집단은 이번에 확인한 69명·88개 후보 안에서만 구성한다. 추가 검사로 제외되면 규모를 줄이고 이유를 기록한다. 다른 split·새 환자로 채우지 않는다. 기존 보호 validation F와 과거 보호 기록은 유지한다.
+
+환자 순서를 `sha256('iter114|PatientID')` 오름차순으로 고정한다. 초기 집단은 첫 min(36,Pmax)명이고 최종 집단은 나머지를 포함한 전체다. 현재 예비 수는 초기 36명·47개, 최대 69명·88개다. 모든 적격 소견을 환자와 함께 배정하며 같은 환자를 단계 간 나누지 않는다. 영상 추출·CRC·pixel 검사 후 최종 manifest와 두 단계 ID, 제외 ledger, 평가 규칙을 모델 본출력 전에 잠근다.
+
+이 환자들은 우리의 해당 작업 이력에서 제외한 집단이다. 공개 모델의 논문상 train/validation 노출과 알 수 없는 base 사전학습 노출은 별도로 기록한다. MSPC 배포본이 test로 학습·선택된 증거가 나오면 B의 미사용 평가 주장은 성립하지 않는다. 불명확한 실제 학습 이력은 불명확하다고 쓰고 논문·코드가 제공하는 근거 수준을 넘지 않는다.
+
+## 2. 개발 자료에서 대조·동작 확인
+
+기존 iter_113의 47개·36명을 개발 자료로 사용한다. MG와 CURE 저장 출력은 재사용하고 MSPC만 47개 생성한다. 새 test 출력은 아직 열지 않는다.
+
+공식 다운로드 링크에서 MSPC를 확보해 별도 결과 경로에 두고 출처·digest·config·이용 조건을 기록한다. 논문 라이선스를 코드·가중치 이용 조건으로 대신하지 않는다. 기존 격리 환경을 우선 사용하고 필요한 설치·버전 조정은 별도 환경에서 수행한다.
+
+MSPC는 threshold 0.8, WBF IoU 0.1로 고정한다. 기초 위치 적합성은 같은 47개에서 union IoU>=0.3 비율이 대상 MG보다 0.10 넘게 낮지 않은 것으로 정한다. 현재 대상 MG의 통과 수는 32/47이므로 MSPC는 최소 28/47이다. 이는 약한 대조를 피하는 개발 점검이며 통계적 비열등성의 증명은 아니다. 평균 union IoU·box recall·empty 비율도 기술한다. 이 기준에 실패하면 좌표·checkpoint·공식 입력 연결의 구체적 오류만 수정할 수 있고 threshold·모델을 바꾸지 않는다. 실제 기본 성능이 부족하거나 자산 연결이 성립하지 않으면 본평가를 열지 않고 비교 미성립으로 종료한다.
+
+기술 입력은 기존 47개 중 hash로 고른 4개이며 비정사각·복수 box 입력을 포함한다. CURE 공식 입력 tensor·token, MG 좌표·score 회귀, GT 비노출, strict loading을 확인한다. 높은 정답률이나 100% oracle 정확도를 기술 gate로 삼지 않는다.
+
+## 3. 초기 실제 비교와 한정 확대
+
+통과 후 초기 새 환자의 세 모델 출력을 생성한다. 학습은 없고 seed17·greedy 및 기존 정밀도를 유지한다. CURE는 기존 base revision `290cda5eeccbee130f987c4ad74a59ae6f196408`, adapter revision `4bb5dc5a5025a854d1f25e475769949915b08b44`, 공식 CLAHE 448과 PG prompt를 사용한다. MedGemma 1.5에 CURE adapter를 로드하지 않는다. cap 1024→2048→4096은 비EOS일 때만 순서대로 적용한다.
+
+세 순위는 동일 MG 대상과 동일 분석 항목에서 비교한다. MSPC의 비유한/잘못된 box는 empty로 숨기지 않고 기술 오류로 처리한다. CURE의 최종 invalid는 원 규칙대로 공통 제외하고, A를 위한 CURE-valid 전체와 세 조건 공통 집단이 다르면 각각의 분모를 명시한다. 주비교는 세 조건 공통 집단이며 선택적 제외가 결론에 미치는 한계를 별도로 보고한다.
+
+초기 평가 후 Evaluation의 확장 규칙만 적용한다. 확대하면 나머지 잠긴 환자를 한 번 생성하고 누적 집단에서 K와 세 순위를 다시 계산한다. 초기·최종 집단의 결과를 모두 보존한다. 추가 평가 시점은 만들지 않는다.
+
+## 4. 자원·비용·재개
+
+고유 본요청은 초기 47×3=141, 최대 88×3=264개다. 개발 MSPC 47개와 기술·처리량 재실행은 별도 ledger에 기록한다. CURE 최대 cap 재시도는 고유 요청 수와 실제 호출 수를 구분한다.
+
+기존 M47 wall-clock 352.33초의 선형 추정은 최대 CURE 88개 약 660초다. 이는 적재·다운로드·전처리·검증을 포함하지 않는다. MG의 과거 약 944문장/분도 다른 배치의 참고값일 뿐이다. 이번 개발 입력에서 모델별 처리량·적재 시간·전체 device-seconds를 측정해 `남은 요청/실측 처리량`으로 wall-clock과 비용을 갱신한다. 최대 비용은 잠긴 요청·고정 cap·기술 복구 범위로 제한하며 임의 1시간 상한을 두지 않는다.
+
+시작 직전 nvidia-smi와 CUDA_VISIBLE_DEVICES의 논리/물리 대응을 확인한다. 두 GPU의 독립 작업을 병렬 배정한다. CURE의 과거 실제 점유 약 10GB는 참고값이며 worker마다 총 장치 점유를 포함한 2GB 여유를 확보한다. 개발 입력에서 우선 GPU당 1 worker 대비 메모리가 허용하는 2 worker 또는 유망한 batch 확대 하나를 비교한다. MG는 batch4→8을 우선 검토한다. 전체 처리량·peak allocated/reserved·장치 점유·긴 출력 지연·OOM·출력 정합성을 기록하고 test 성능을 보지 않고 배치를 선택한다. 안전 여유가 부족하거나 느려지면 낮은 동시성을 유지한다.
+
+서비스 비용은 원 영상·문장부터 순위 산출까지 같은 workload에서 MG+CURE와 MG+MSPC를 측정한다. MG 공유 비용과 추가 모델 비용, cold loading과 warm 실행을 분리한다. 비용만으로 CURE 우위를 선언하지 않으며, 이번의 주 B 판정은 포착 정확도다.
+
+요청별 원자적 claim과 worker별 출력, 완료 행 검증, 손상 tail 보존·복구, 정확한 요청 집합 검사를 갖춘다. 원 입력·소스·모델·출력 digest가 검증 PASS와 일치할 때만 completion을 만든다. 분석 중단은 이미 맞게 저장된 산출물을 검증해 이어가며 오래된 PASS나 기존 결과 덮어쓰기를 허용하지 않는다.
+
+## 5. 독립 확인의 위치
+
+이번은 새 환자에서의 한정 재현 diagnostic이다. 정밀도·모델 노출·동일 원천의 한계 때문에 논문 수준의 확증으로 부르지 않는다. 별도 도메인·다른 모델 계열·방법 학습은 이번 범위 밖이며 다음 사용자 승인 대상으로만 제안할 수 있다.
+
+# Implementation Tasks for Claude
+
+1. 지정한 보관 파일을 manifest로 반입하고 원 blob·현재 파일·실제 의존성을 확인한다. 기존 결과 경로의 실행 entry point를 호출하지 않는다.
+2. `results/iter_114/`에 출처·노출·제외 ledger, 개발 집단, 최대/초기 새 환자 manifest를 구성한다. 공식 metadata·영상 연결과 과거 사용 중복을 검사한다.
+3. MSPC 공식 자산을 확보하고 개발 적합성을 확인한다. 실패 사유를 기술 오류와 기본 성능 부족으로 나눈다. 모델 순회는 하지 않는다.
+4. nr107 CURE 경로와 mg45 wrapper를 새 요청·출력 경로에 연결한다. source/model/protocol 잠금, 실제 부분 재개·변조·동시 실행 검사를 수행한다.
+5. nr113 계산을 세 순위와 두 단계로 확장한다. 원 점수·parser·동률 규칙을 보존하고 검증기 float 차이를 해소한다. seal과 부분 분석 재개를 수정한다.
+6. 개발 처리량 측정 뒤 표본·통계·배치 잠금을 완료하고 초기 비교 및 사전 조건의 확대를 실행한다.
+7. 원 출력에서 독립 기하·순위·포착·bootstrap·주석 민감도를 재계산한다. 원 규칙 fixture, near-tie, 두 empty, no_box/invalid, 환자 복제, 중복 요청, stale PASS 거부를 확인한다.
+8. A/B 판정·실제 규모·호출 수·비용·미실행·비교 한계를 분리해 보고한다. 원 결과와 checkpoint를 보존하고 full review 뒤 사용자 승인을 기다린다.
+
+# Evaluation (성공/실패 기준 포함)
+
+## 주지표와 불확실성
+
+ΔA=(CURE 불일치가 포착한 오류 수−confidence가 포착한 오류 수)/N, ΔB=(CURE 불일치가 포착한 오류 수−MSPC 불일치가 포착한 오류 수)/N이다. 포착 수·K·precision과 추가 포착/놓친 오류의 환자 분포도 함께 보고한다. 두 순위의 합집합 포착을 같은 K의 성능으로 제시하지 않는다.
+
+환자 bootstrap 20,000회, seed113을 사용한다. 모든 소견을 환자 단위로 재표집하고 매번 N/K와 세 순위를 다시 계산한다. 초기와 최대 두 평가 시점, A/B 두 비교에 대해 각 양측 98.75% percentile 구간을 사용한다. 이는 네 구간의 다중 평가를 보수적으로 반영하지만 작은 표본·순위 통계의 bootstrap 근사 자체를 정확 검정으로 만들지는 않는다. 원 95% 구간은 설명용으로만 병기한다.
+
+정밀도 목표는 보정 구간 반폭<=0.05다. iter_113 변동의 거친 규모 환산상 최대 69명에서도 약 7.8pp 반폭일 수 있다. 따라서 목표 미달 가능성을 사전에 인정한다. CI가 넓다는 이유로 표본을 이 최대 집단 밖으로 늘리지 않는다.
+
+주석 모호성과 동률 경계의 보수적 순이득 범위, 환자 제거 분석을 A/B 각각 계산한다. 서로 다른 GT 배정을 비교별로 유리하게 선택하지 않는다. 원 float 순위와 동일 동률 규칙을 사용한다.
+
+## 초기→최대 확대
+
+초기 평가에서 A 또는 B 중 하나라도 보정 구간 상한>=0.05이고 반폭>0.05이면 최대 집단까지 한 번 확대한다. 효과가 유망하지만 저정밀인 경우를 포함하며 작은 음의 점추정치만으로 자동 탈락시키지 않는다. 남은 환자가 없으면 종료한다.
+
+두 비교 모두 이 조건이 아니면 초기에서 종료한다. 즉 유용 효과가 배제됐거나 목표 정밀도에 도달한 비교 때문에 계속 생성하지 않는다. 양성 유의성이 나올 때까지 반복 평가하거나 샘플을 바꾸지 않는다. 결과를 보고 confidence와 불일치 점수를 결합하지 않는다.
+
+## 최종 투자 판정
+
+- **A 양성:** ΔA>=0.05, 보정 구간 하한>0, 주석·동률 보수 범위>0, 환자 제거에서 음의 방향으로 바뀌지 않는다. confidence 대비 새 환자 재현의 제한적 근거다.
+- **B 양성:** ΔB에 같은 기준을 적용한다. 이 대조 이후 추가 포착 가치이며 VLM 고유성·동일 학습 조건 방법 효과의 증명은 아니다.
+- **A만 양성:** 유용한 재현 관찰을 보존한다. 특수 방법 개발로 자동 전환하지 않는다.
+- **유용 효과 배제:** 해당 보정 구간 상한<0.05이면 이번 설정의 최소 유용 효과를 배제한 것으로 보고 그 투자를 보류한다. 상한<=0이면 방향상 반대 근거도 함께 명시한다.
+- **일반 대조 충분:** B 상한<0.05이고 MSPC 조합의 측정 비용이 CURE 조합 이하이면 특수 CURE 검토 방법 투자를 보류한다. 불일치 정보 전체를 기각하지 않는다. 비용이 불확정이면 정확도와 비용의 판단을 분리한다.
+- **불확정:** 그 밖의 경우와 주석·동률·제외 민감성이 방향을 바꾸는 경우다. 최대 규모에서도 남으면 그대로 보고하고 현재 추가 투자를 보류한다. 신규 근거 없이 새 모델·점수·표본을 발주하지 않는다.
+- **실행 미성립:** 자료·가중치·좌표·대조 적합성 문제는 가설 음성과 구분한다. 구체적 blocker와 완료된 작업만 보고한다.
+
+A/B가 모두 지지되더라도 새 학습을 실행하지 않는다. 실제 효과·비용·노출 한계를 근거로 원인 분석 또는 최소 method pilot의 가치를 다음 사용자 승인에 제안한다.
+
+# Risks / Checks
+
+- 공식 test라는 이름만으로 미사용·미노출을 선언하지 않는다. 이번에 발견한 11명처럼 과거 선택·학습 자료와 중복될 수 있다. manifest 검사와 실제 이미지 연결을 모두 수행한다.
+- 같은 문장쌍 선택 규칙을 유지한 모집단은 전체 다중 영역 소견을 대표하지 않는다. 169명 예비 상한과 69명 최대 집단을 혼동하지 않는다.
+- MSPC의 같은 구조·공통 사전학습은 오류 상관을 높일 수 있다. 다른 계열 ensemble 전체에 대한 결론은 유보한다.
+- CURE invalid 공통 제외는 조건부 모집단을 만든다. 원 모집단·제외율과 결론 범위를 숨기지 않으며 정상 empty와 혼동하지 않는다.
+- 공개 위치 주석 불일치는 임상 오진·소견 존재 판단·자유 판독 오류가 아니다. 양성 문장을 입력하는 정보 조건을 유지한다.
+- 공식 자산·기본 환경·hf_cache는 수정하지 않는다. 설치가 필요하면 별도 환경·캐시·출처 기록을 사용한다. 다른 사용자의 프로세스는 건드리지 않는다.
+- 필수 검증은 실제 사용 경로에 집중한다. 과거 모든 실행기나 종료된 crop/likelihood 경로를 다시 정비하지 않는다.
+
+## 대규모 GPU 필요 후보
+
+향후 같은 학습 자료·예산에서 의료 VLM과 비생성 grounder를 각각 여러 독립 seed로 학습해 오류 상관과 검토 가치를 비교하는 후보를 보존한다. 현재 공개 checkpoint 비교의 학습 노출·계열 차이를 줄일 수 있지만 학습 비용이 크고 아직 잔여 가치가 확인되지 않았으므로 이번에는 발주하지 않는다.
+
+# 계획의 근거 (GPT 조사 노트)
+
+## 새로 확인한 것
+
+- 직전 `agent/runs/iter_114/think/round_01.json` 원문과 iter_113 review.json, iter_046/084/105/107의 관련 code_assets, 현재 코드와 GOAL을 확인했다. 현재 research HEAD는 `540f63bed8b07775d26b02d69a8a545b2736749d`이며 작업 변경은 없다.
+- 원 metadata에 기존 `pg39_data.image_pool`의 적격성·문장쌍·환자당 영상 선택을 그대로 적용하면 공식 test의 다중 영역 후보는 **80명·100개**다. 앞 라운드 169명·217개는 문장쌍·시간 문구 등을 적용하기 전 상한이므로 최종 규모로 사용하지 않는다.
+- 과거 결과의 manifest/selection/request 계열 88개 파일을 읽기 전용으로 검사했다. 후보와 중복된 11명은 `iter_089/data/selection.json`, `iter_090/data/selection.json`, `iter_090/recovery/data/E128/manifest.json`에 연결됐다. 이들을 제외하면 **69명·88개**다. `sha256('iter114|PatientID')` 순서의 첫 36명은 **47개**다. 이 집계는 실행 시 전체 출처 ledger·영상 pixel 중복·파일 연결을 재검증해야 하며 완전한 미노출 인증은 아니다.
+- 기존과 같은 문장쌍 선택을 유지하면 표본은 작아지지만 모집단 변경을 줄인다. 전체 다중 영역 소견을 새로 모두 넣어 정밀도를 인위적으로 늘리지 않는다. 기존 보호 validation 집단도 이번에 개방하지 않는다.
+- [MedGrounder 공식 저장소](https://github.com/aehrc/MedGrounder)는 MSPC를 MS-CXR+PadChest 적응본으로 제공하고 공식 다운로드 폴더를 연결한다. 실제 다운로드·가중치 digest·가중치 이용 조건은 구현 단계에서 확인한다. 논문 라이선스를 가중치 라이선스로 대신하지 않는다.
+- [MedGrounder 원논문](https://arxiv.org/html/2512.01085v1)의 Table II는 PadChest train/val/test 3185/455/915 영상을, Table III는 다중 영역 평가를 보고한다. 로컬 공식 dataset 코드는 split 필터를 사용하며 MSPC config는 두 데이터셋을 지정한다. 논문·코드상 학습 split과 실제 배포 가중치의 개별 환자 학습 이력은 같은 수준의 증거가 아니다.
+- 현재 브랜치에는 nr113 계열과 nr107_geom/spec만 있다. nr107 실행기의 실제 의존성을 확인해 필요한 파일과 MG wrapper를 reuse_assets에 명시했다. rsna_diag.generate의 사용하지 않는 CLI 안에 있는 lock_protocol import는 CURE worker 경로의 의존성이 아니며 그 CLI를 호출하지 않는다.
+
+## 정밀도와 투자 판단
+
+iter_113 구간 폭 8/47의 절반을 단순 규모 환산하면 69명에서 95% 반폭은 약 6.15pp다. 두 비교·두 평가 시점을 고려한 98.75% 구간의 정규근사 반폭은 약 7.83pp다. 이는 비대칭·재순위·환자 의존성을 충분히 모델링하지 않은 계획 참고치이며 power 보장이 아니다. 최대 규모도 5pp 효과를 명확히 판정하지 못할 수 있다. 그럼에도 최대 새 본요청 264개로 양성 신호의 방향·크기와 일반 대조 충분성을 함께 확인할 정보 가치는 있다. 큰 확증이나 학습으로 확대하지 않는다.
+
+## 유지·변경
+
+MG 대상/운영점, 오류·점수·parser·동률 salt·25% 검토율은 유지한다. 새 환자·MSPC 대조와 결과별 한정 확대만 추가한다. CPU-only 제한은 최신 사용자 승인으로 종료됐다. seal digest·부분 분석 재개·verifier float 차이는 실제 재사용 경로에서만 보완한다. 기존 결과는 수정하지 않는다.
+
+이전 사고 라운드 노트: agent/runs/iter_114/think/
+
+
+
+## iter_114 CLAUDE IMPLEMENTATION REPORT — 2026-10-12 14:44:56
+
+# 요약
+
+- **핵심 결과:** 새 환자 68명·87개 소견에서 CURE 불일치가 놓치지 않은 오류는 16개, 의료 적응 MSPC 불일치는 15개, MG confidence는 13개였다(검토 22개). A(confidence 대비 재현)와 B(MSPC 대비 추가 가치)는 모두 사전 기준 미달이어서 **불확정**이다.
+- **근거:** ΔA=+3/87(+3.4pp), 98.75% 구간 [−6.0, +12.1]pp이고 ΔB=+1/87(+1.1pp), 구간 [−8.7, +8.0]pp다. 둘 다 최소 유용 효과 5pp에 못 미치고, 구간 하한이 0 아래이며, 주석·동률 보수 범위도 0 이하(A [−3,+12], B [−7,+9])다.
+- **미검증·주의:**
+  - 최대 규모에서도 5pp 효과를 정밀하게 판정하지 못했다(반폭 9.0pp, 8.4pp).
+  - 87개 중 42개는 주석 상태가 미확정이다.
+  - MSPC의 학습 이력은 논문과 코드 수준의 근거만 있다.
+  - 새 학습은 하지 않았다.
+- **다음:** 방법 개발은 제안하지 않고, 신규 근거 없는 추가 표본·모델 발주도 하지 않는다. 사용자 승인을 기다린다.
+
+# Work Performed
+
+- 계획의 원 기준(표본 규칙·운영점 0.8·K=ceil(N/4)·ΔA/ΔB·확대 규칙)은 바꾸지 않고 구현해 실행했다.
+- 자료 적합성: pinned metadata에 기존 `image_pool('test')` 규칙을 그대로 적용해 80명·100개를 얻었다.
+  - results/ 전체 json/csv/txt/md/jsonl 내용과 파일명, 영상 hash 스캔으로 과거 사용 11명을 제외했다.
+  - 최종 69명·88개, 초기 36명·47개로 모델 출력 전에 잠갔다.
+  - 이는 계획의 예상과 정확히 일치한다.
+- MSPC 확보: 공식 Drive 폴더에서 `medgrounder_finetune_mspc.pth`(sha256 `ec33f4a6…95c2`)를 받았다.
+  - 저장소 스냅샷에 LICENSE 파일이 없어, 가중치 이용 조건은 확인되지 않았다고 기록한다.
+- 개발 47개 점검(결과 비공개 전):
+  - 대상 MG A_U_e5를 새 경로로 재실행하면 저장된 iter_046 출력과 박스 차이 최대 7.7e-6이다.
+  - MSPC의 union IoU≥0.3 항목은 40/47(A는 32/47)이어서 하한 28/47을 넘는다.
+  - 단, 이 47개는 PadChest-GR train split이라 MSPC가 학습에 썼을 수 있다. 자산·좌표 연결과 하한 확인일 뿐 비편향 성능이 아니다.
+- CURE는 T4 4개 요청에서 입력 token, pixel hash, 생성 token, parser 결과가 iter_107과 전부 일치했다.
+- 실행기 신규 작성:
+  - `nr114_mg.py`는 MG 공식 소스를 그대로 호출하는 worker와 launcher다.
+  - `nr114_cure.py`는 nr107 실행기를 새 입력·경로에 맞춰 분리한 판본이다.
+  - 둘 다 정적 분할, flock, record digest, 손상 tail 복구, 정확한 요청 집합 검사, protocol 잠금을 갖췄다.
+- 분석 코드: `nr114_core.py`가 세 순위와 ΔA/ΔB, 보수적 범위, 환자 bootstrap 20,000회(seed 113)를 계산한다.
+  - `nr114_run.py`는 단계 잠금, 부분 산출물 방지, digest 연결 seal을 담당한다.
+  - `nr114_verify.py`는 독립 재계산이다(포함-배제 면적, 원 float 순위, 같은 bootstrap 절차).
+- 실행 순서와 확대 결정:
+  1. 코드·규칙을 잠근다.
+  2. 초기 36명을 생성한다.
+  3. 초기 분석을 한다.
+  4. 사전 확대 규칙으로 확대를 결정한다.
+  5. 나머지 33명을 생성한다.
+  6. 누적 분석을 하고 독립 검증, 비용 집계, 판정, seal을 마친다.
+  - 초기 분석에서 A는 상한 0.143, B는 상한 0.109이고 반폭이 모두 0.05를 넘어, 규칙대로 최대 집단까지 한 번 확대했다.
+
+# Files Changed
+
+- 반입: `mg45_mg.py`, `nr107_run.py`, `nr107_data.py`, `report86_common.py`, `pg39_data.py`, `pg39_spec.py`, `pg43_run.py`, `rsna_diag/*`
+  - 14개 파일의 blob이 manifest와 일치함을 `git hash-object`로 확인했다.
+  - `mg45_mg.py`, `nr107_data.py`는 수정하지 않았다. `nr107_data.py`의 모집단 생성은 실행하지 않았다.
+- 신규(`research/`):
+  - 자료·자산: `nr114_data.py`, `nr114_weights.py`
+  - 실행: `nr114_mg.py`, `nr114_cure.py`
+  - 분석: `nr114_core.py`, `nr114_run.py`, `nr114_verify.py`, `nr114_cost.py`
+  - 점검: `nr114_devcheck.py`, `nr114_mgcompare.py`, `nr114_curecheck.py`, `nr114_mgtests.py`, `nr114_curetests.py`, `nr114_tests.py`
+- 결과: `results/iter_114/` 아래.
+  - `data/`, `external/weights/`, `protocol/`, `dev/`, `mg/`, `cure/`, `tests/`
+  - `analysis/`(r0, 대체된 기록)
+  - `analysis_r1/`(최종 판정과 seal)
+
+# Commands / Experiments
+
+모두 성공했다. 실패와 정정은 "Problems"에 따로 적는다.
+
+- **MG 실행 경로 검사 (`nr114_mgtests.py`):**
+  - 중단 후 재개와 손상 tail 복구(처음 10행 보존, 비중단 대비 최대 차이 1.1e-5)
+  - 동시 launcher 거부
+  - 변조 6종 거부
+  - 허용 GPU 밖 배치 거부
+- **CURE 실행 경로 검사 (`nr114_curetests.py`):**
+  - 같은 항목에 대해 재개 후 생성 token이 일치했다.
+  - 위와 같은 거부 검사를 통과했다.
+- **분석 fixture:** 43개 전부 통과(`fixtures_core_r1.json`). 소형 무작위 60건에서 보수적 범위를 전수 열거와 대조한 검사를 포함한다.
+- **본 실행:**
+  - MG A와 MSPC는 INIT 47개·EXPAND 41개를 각 2 worker×batch 4로 생성했다.
+  - CURE는 INIT 262초, EXPAND는 약 35분 이내에 생성했다. 비EOS 재시도는 0건이다.
+- **자원 구성 비교:**
+  - MG는 worker 1개와 2개, batch 4와 8을 비교했다. 개발 47개에서 박스 최대 차이는 2e-5 이하다. 처리량은 4.3→4.7(batch 8)→5.7(2 worker) items/s이다.
+  - MG의 peak는 batch 4에서 1.3GiB, batch 8에서 1.8GiB로 모두 작아, 전체 비용에서 MG는 지배 비용이 아니다.
+  - CURE는 GPU당 1 worker로 고정했다. 실측 점유가 약 10.07GB여서, 2 worker/GPU는 2×(10,100+2,048)=24,296MiB로 free 24,039MiB를 넘는다.
+- **비용 (실측, 적재 포함/제외):**
+
+| 모델 | warm | cold |
+|---|---|---|
+| CURE | 901.6s | 986.8s |
+| MSPC | 31.0s | 59.6s |
+| A(공통) | 31.5s | 61.2s |
+
+  - 세 번째 열은 적재 시간을 더한 값이며, A의 비용은 두 조합에 공통이다.
+  - 영상 입력부터 순위까지의 전체 서비스 비용이 아니라 모델 처리 구간만 포함한다.
+
+# Results
+
+- 초기 평가(`analysis_r1/result_init/report.json`): N=46, K=12, 환자 35명, 포착은 CURE/MSPC/confidence 모두 7로 같다. ΔA=ΔB=0이다.
+  - 98.75% 구간은 A [−15.6, +14.3]pp, B [−17.0, +10.9]pp.
+- 최종 누적(`result_final/report.json`): N=87, K=22, 환자 68명, 공식 주석 오류 37.
+
+| 순위 | 포착 | precision |
+|---|---|---|
+| CURE 불일치 | 16 | 72.7% |
+| MSPC 불일치 | 15 | 68.2% |
+| confidence | 13 | 59.1% |
+
+- 최종 구간(98.75%, 설명용 95% 병기):
+
+| 비교 | Δ | 98.75% 구간 | 95% 구간 | 반폭 |
+|---|---|---|---|---|
+| ΔA | +3.4pp | [−6.0, +12.1] | [−3.7, +10.3] | 9.0pp |
+| ΔB | +1.1pp | [−8.7, +8.0] | [−6.8, +6.3] | 8.4pp |
+
+- 보수적 범위(동률+주석 모호성): A [−3,+12]개, B [−7,+9]개. 환자 제거에서 음수로 바뀌는 경우는 없었다(A 최소 +2, B 최소 +1).
+- 상보성(A): CURE만 잡은 오류 9개(9명), confidence만 잡은 오류 6개(6명), 공통 7개, 둘 다 놓침 15개.
+- 상보성(B): CURE만 7개, MSPC만 6개, 공통 9개, 둘 다 놓침 15개.
+- 독립 verifier: 21개 검사 전부 PASS(init, final 각각). 위험 값의 최대 차이는 8.9e-16이고, bootstrap 배열이 동일하다.
+- 판정(`analysis_r1/judge.json`): A는 불확정, B는 불확정이다. MSPC 비용이 CURE보다 낮지만 B 상한(0.080)이 0.05 이상이어서 "일반 대조 충분"은 성립하지 않는다. seal(`completion.json`) 완료.
+
+# Goal Progress / Reused Assets
+
+- **시험 설정:** iter_113의 12/47(포착 9 대 6)에서 출발한 신호가 새 환자 87개로 늘리자 3개 차이(+3.4pp)로 줄었다. 최소 유용 효과에 이르지 못했고 정밀도도 부족하다. 이 설정은 더 확대하지 않고 보류하는 쪽이 합리적이다.
+- **연구 관찰:**
+  - iter_113의 양성 신호는 이번 표본에서 재현 방향(양)이지만 크기가 작고 구간이 0을 포함한다.
+  - MSPC 조합은 CURE 조합과 거의 같았다(15 대 16). 일반 grounder 조합이 같은 정보를 대부분 설명할 가능성을 배제하지 못했고, CURE 특수 이득도 확인하지 못했다.
+- **연구 질문:** 불일치 정보 전체의 가치는 기각하지 않는다. 같은 설정의 추가 표본·점수·모델 순회는 정보 가치가 낮아 권하지 않는다.
+- **미검증:**
+  - 공개 정답 위치 주석에 대한 오류 검토이며 임상 오진이나 자유 판독 정확성이 아니다.
+  - MSPC와 대상 MG는 구조와 사전학습을 공유한다.
+  - CURE와 MSPC의 학습 이력은 같은 수준의 증거로 확인되지 않았다.
+  - 새 환자는 "우리 파이프라인 미사용"일 뿐 공개 모델 미노출이 아니다.
+- **재사용 검증:**
+  - 반입 14개 blob 일치, 실제 import, CURE 공식 chat template 일치(token 일치)
+  - uint16→uint8 영상 변환, 환자·study·영상·pixel 중복 제외(스캔 일치 0)
+  - 변조·재개·동시 실행 검사
+  - 새 protocol digest에 실행 소스, 가중치, 요청 hash 연결
+  - 비정사각 좌표는 개발 입력의 MG 회귀로 확인했다.
+
+# Problems
+
+- **현재 결론 무효:** 없음.
+- **정정 (구현 오류, 투명하게 기록):**
+  - 첫 분석(r0)의 link가 대상 MG 박스의 범위 검사를 빠뜨렸다. iter_113의 `check_boxes("mg")` 규칙에서 누락된 것이다. 독립 verifier가 initial에서 y 범위를 벗어난 A 박스 1개(item 5cc1e30b95c41696, y∈[−0.0088, 1.078])를 발견했다.
+  - 원 규칙 구현 오류 수정이며 새로운 과학적 기준이 아니다. r0 INIT 결과(N=47, ΔA=0, ΔB=−1/47)는 `results/iter_114/analysis/`에 보존하고, 판정·확대에는 쓰지 않았다.
+  - r1을 INIT 출력 이후, r0 점추정을 본 뒤에 잠갔다(`protocol.json`의 `amendment`에 기록). EXPAND 출력은 r1 잠금 이후에 생성했다. 확대 결정은 두 버전(r0, r1) 모두에서 같다.
+- **재사용 전 수정:**
+  - `nr114_cure.py`의 PEAK_MIB를 T4 이후 10100으로 바꿨다. T4 검사는 이전 상수의 코드로 수행했고, 생성 로직과는 무관하다.
+  - nr107 실행기에서 이어받은 일반화 결함은 이번 경로에서만 보완했다.
+- **추후 개선:** CURE 비용은 모델 처리 구간 한정이며 영상 입력부터 순위까지의 서비스 비용은 미측정이다. MG HF 캐시는 iter_045 경로를 읽기 전용으로 사용했다.
+
+# Recommendation to GPT
+
+- **다음 투자:** 이번 한정 확인에서는 A와 B 모두 불확정이다. 새 학습·방법 pilot은 제안하지 않는다. 같은 설정에서 표본을 더 늘리지 않는다(최대 집단이 소진됐다).
+- **보류 범위:** CURE 불일치 순위의 오류 검토 투자만 보류한다. 불일치 정보 전체나 일반 grounder ensemble의 가치는 기각하지 않는다.
+- **대안:** (a) 이 묶음 종료·보존 후 다른 잔여 질문으로 이동. (b) 서로 다른 계열 grounder 쌍의 불일치를 보는 후속은 새 모델 도입이 필요하므로 사용자 결정 대상이다.
+
+SELF_CHECK: PASS
+SUMMARY: 새 환자 68명·87개에서 CURE 불일치 포착 16, MSPC 불일치 15, confidence 13(검토 22개); ΔA +3.4pp[−6.0,+12.1], ΔB +1.1pp[−8.7,+8.0]로 A·B 모두 불확정이며, 구현 오류 정정(r0→r1)·독립 검증·seal을 마쳤다.
+
+# [orchestrator] 권한 거부된 도구 호출
+- Bash: cat results/iter_113/protocol.json | head -c 5000; echo; cat results/iter_113/ledger.json | head -c 1500; ls results/environments/; ls -d results/iter_045/env/* ; grep -rl medgrounder_iter045 results/iter_045/logs 2>/dev/null | head -3; ls ~/.conda/envs 2>/dev/null; which python
+- Bash: git show bab147379dde1bcd68550e298cc596ee15091e99:mg45_vrun.py; cd results/iter_045/external/MedGrounder/conf; cat conf_finetune_mspc.yaml conf_pretrain_imagenome.yaml; diff conf_finetune_ms.yaml conf_finetune_mspc.yaml; cat datasets.yaml | head -50
+- Bash: python -c "import gdown;print(gdown.__version__)"; ls results/environments/medgrounder_iter045/bin | head -5; results/environments/medgrounder_iter045/bin/python -c "import torch;print(torch.__version__, torch.cuda.is_available())"; df -h results | tail -1; head -30 results/iter_045/external/weights/download.log | cut -c1-200
+- Bash: results/environments/medgrounder_iter045/bin/python -c "import torch;print(torch.__version__, torch.cuda.is_available())"
+- Bash: python nr114_mg.py launch --stage DEV4 --model A --workers 1 --batch 4; echo rc=$?
+- Bash: python - <<'EOF'
+import json, math
+from pathlib import Path
+R=Path('results/iter_114')
+runs=json.load(open(R/'analysis/runs_init.json'))
+items=[it for it in json.load(open(R/'data/items.json')) if it['stage']=='init']
+def rd(d,pat):
+    rows=[]
+    for p in sorted(Path(d).glob(pat)):
+        rows+= [json.loads(l) for l in open(p) if l.strip()]
+    return rows
+A={r['item_key']:r for r in rd(runs['A'],'raw_worker*.jsonl')}
+P={r['item_key']:r for r in rd(runs['MSPC'],'raw_worker*.jsonl')}
+def good(b): return len(b)==4 and all(isinstance(v,(int,float)) and math.isfinite(v) for v in b) and 0<=b[0]<b[2]<=1 and 0<=b[1]<b[3]<=1
+for it in items:
+    for nm,D in (('A',A),('P',P)):
+        d=D[it['item_key']]['detection']
+        for b,s in zip(d['boxes_orig_xyxy'],d['scores']):
+            if not good(b) or s<0.8: print(nm,it['item_key'],b,s)
+EOF
+
+
+
+## iter_114 GPT REVIEW [CONTINUE] — 2026-10-12 14:48:20
+
+# 요약
+
+- 판정: 유효한 실험이며 A·B 모두 불확정이다. 현재 고정 순위의 추가 투자는 보류한다.
+- 핵심 근거: 새 환자 68명·87개에서 같은 22개 검토 시 오류 포착은 CURE 불일치 16개, MSPC 불일치 15개, confidence 13개였다.
+- 의미·한계: confidence 대비 재현과 일반 ensemble 이후 가치 모두 확정하지 못했다. 일반 대조가 충분하다는 결론도 성립하지 않는다.
+- 다음: 추가 학습·표본·모델 순회를 시작하지 않고 사용자 피드백을 기다린다. 전체 코드 재사용은 승인하지 않는다.
+
+## 알림 요약
+
+- 결과: 흉부 X-ray 위치 오류 검토에서 CURE 불일치 16개, 의료 적응 MSPC 불일치 15개, confidence 13개를 포착했다(68명·87개, 검토 22개).
+- 의미: 이전 개발 자료의 양성 신호는 새 환자에서 양의 방향으로 남았지만 재현 기준은 미달했다. 일반 ensemble 대비 추가 가치도 불확정이다.
+- 후속: 최대 표본과 주석 민감도까지 확인했으므로 현재 순위의 확대·방법 개발을 보류할 것을 권고한다.
+- 대안: 다른 계열 grounder 대조는 공유 구조라는 설명을 줄일 수 있지만 새 준비 비용이 들고 주석·정밀도 문제는 남는다. 현재 근거만으로 자동 실행하지 않는다.
+
+# Assessment
+
+`valid_experiment=true`, `approach_status=inconclusive`로 판정한다. Claude가 실제 세 모델 추론을 완료했으며 새 학습은 없었다. `engineer_backend.json`은 Claude, `claude_meta.json`은 Sonnet/medium과 실제 `claude-sonnet-5-5` 사용을 기록한다.
+
+계획·구조화 기록·보고서·diff·리뷰 SHA `d1c504459467b578b170d4316675757ffe67106a`와 관련 도구 로그를 대조했다. 커밋 대상 파일과 작업 파일, protocol의 소스 hash가 일치하고 unpreserved_paths는 없다. 준비·코드 검사만 완료한 반복이 아니다.
+
+# Key Findings
+
+초기 추론은 36명·47개, 최종 누적 추론은 69명·88개다. 대상 MG의 범위 밖 box 1건을 세 순위에서 공통 제외하여 초기 평가는 35명·46개, 최종 평가는 68명·87개다. 초기 포착은 세 순위 모두 7개였다. 두 비교의 구간 상한과 반폭이 사전 확대 조건을 충족해 나머지 33명으로 한 번 확대했다.
+
+최종 공식 주석 오류는 37개다. A=(CURE−confidence)/N는 3/87=3.45pp, B=(CURE−MSPC)/N는 1/87=1.15pp다. 98.75% 환자 bootstrap 구간은 각각 [-5.95,+12.09]pp와 [-8.70,+8.05]pp이며 반폭은 9.02pp와 8.37pp다. 최소 유용 효과 5pp 및 정밀도 목표를 충족하지 못했다. 양성도 유용 효과 배제도 성립하지 않는다.
+
+주석 미확정은 42/87개로, 판독자 불일치 26개와 대체 주석 부재 16개다. 보수적 순포착 범위는 A [-3,+12]개, B [-7,+9]개다. 동률만으로는 각각 [3,3], [1,1]이므로 현재 민감도의 주된 원인은 동률이 아니라 주석이다. 환자 제거 후 최소 차이는 A +2개, B +1개였지만 이것만으로 우위를 확정할 수 없다.
+
+리뷰에서 production 분석과 독립적인 기하 계산을 사용하는 `nr114_verify.py`를 읽고, 파일 저장 부분 없이 초기·최종을 재계산했다. 각 21개 검사, 선택 ID, 포착 수, 주석 범위, 환자 제거 결과 및 20,000회 bootstrap 배열이 일치했다. 단계별 원시 출력 hash와 completion hash, 원 영상 hash도 별도 확인했다. 세 모델은 각각 88개 고유 요청을 완료했고 CURE는 88개 모두 EOS, cap 재시도 0건이다.
+
+개발 점검에서 MG 기존 출력 대비 box 최대 차이는 7.73e-6이었다. MSPC의 union IoU 통과는 40/47로 사전 하한 28/47을 충족했다. CURE 4개 기술 입력의 token·pixel·생성 회귀는 일치했다. 개발 자료는 MSPC 학습 노출 가능성이 있어 이 점검을 비편향 성능 증거로 해석하지 않는다.
+
+# Problems / Concerns
+
+현재 주수치를 무효화하는 문제는 발견하지 못했다. 초기 r0가 대상 MG box 범위 검사를 누락한 것은 실제 구현 결함이었다. r1은 상속한 규칙을 복구했고 r0·원 출력·정정 이유를 보존했다. r1 잠금은 초기 결과를 본 뒤였으므로 처음부터 완전한 사전 잠금이었다고 표현하면 안 된다. 확대 출력은 r1 잠금 후 생성됐고 확대 결정은 정정 전후 동일했다.
+
+재사용 문제는 남는다. seal은 검증된 결과 파일의 변경을 확인하지만 현재 원시 입력을 stage_lock에 다시 대조하지 않는다. verifier의 verified_files에도 원시 입력 자체가 포함되지 않는다. 이번 입력은 리뷰에서 별도 확인해 일치했으므로 현 결론의 blocker는 아니다. 부분 stage_lock 생성의 재개 경로와 비용 집계의 빈 이벤트 처리도 보완해야 한다. 기존 seal fixture는 보고서 변조를 시험하며 이 원시 입력 변경 경로를 검증하지 않는다.
+
+계획한 전체 서비스 비용은 측정하지 않았다. 기록으로 재집계한 추가 모델 warm/cold 시간은 CURE 901.6/986.8초, MSPC 31.0/59.6초이며 공통 대상 MG는 31.5/61.2초다. 이는 worker 처리 시간 합으로, 전체 시스템 wall-clock 또는 원 영상부터 순위까지의 비용이 아니다. 실제 CURE EXPAND launcher wall-clock은 292.04초였다.
+
+두 GPU를 사용했고 MG batch/worker 비교와 출력 회귀를 수행했다. CURE는 실측 점유에 worker당 2GiB 여유를 더하면 GPU당 두 worker가 허용 메모리를 넘는다는 근거로 한 worker씩 배치했다. 낮은 utilization이나 실행 시간 때문에 실험을 기각할 이유는 없다.
+
+# Interpretation
+
+이번 평가는 주어진 양성 소견 문장의 위치 예측이 공개 주석과 어긋나는지를 검토한 것이다. 소견 존재 판단, 임상 오진, 자유 판독 정확성이나 위치 supervision의 인과 효과를 측정하지 않았다.
+
+이전 개발 표본의 양성 신호는 폐기하지 않는다. 다만 새 환자에서 효과 크기와 정밀도가 충분하지 않아 validated로 승격하지 않는다. MSPC 포착 수가 CURE에 가깝고 모델 처리 비용이 작다는 관찰은 특수 방법 투자를 신중하게 만드는 근거다. B 구간 상한이 5pp보다 크므로 일반 대조의 충분성을 증명한 것은 아니다. 같은 구조·사전학습을 공유하는 대조 하나로 모든 ensemble을 대표하지도 않는다.
+
+# Strategy Check / 연구 방향 판단
+
+- 실행 유효성: 표본 잠금, 실제 출력, 원 규칙 복구와 독립 재계산을 확인했다. 새 과학적 비교가 추가됐다.
+- 성능 개선: 포착 점추정치는 높지만 사전 유용 효과·불확실성·주석 민감도 기준은 미달이다.
+- 가설 지지: confidence 대비 새 환자 재현과 일반 grounder 이후 추가 가치가 모두 불확정이다. 개발 표본 변동과 일반 ensemble 상보성이라는 경쟁 설명을 배제하지 못했다.
+- 신규 기여: VLM 고유 정보·학습 원리·실용적 방법의 추가 가치는 입증되지 않았다.
+
+시험 설정은 최대 집단에서 종료·보류한다. 연구 관찰은 제한적으로 보존한다. 불일치 정보라는 연구 질문 전체는 기각하지 않되 현재 설정을 계속 살리는 투자는 권하지 않는다.
+
+선택지는 현재 설정 보류와 다른 계열 grounder의 한정 비교 두 가지다. 후자는 공유 구조의 영향을 줄일 수 있지만 새로운 준비 비용과 미확정 주석을 그대로 부담한다. 현재는 보류를 선택한다. 추가 표본으로 유의성을 얻을 가능성만으로 연장하지 않는다. 모델 처리 구간의 지배 비용은 CURE였으며, 전체 구현·감사·재작업의 단계별 시간은 분리 계측되지 않아 비용 비율을 추정하지 않는다.
+
+논문 추천은 보류한다. 이번 결과는 불확정이며 이전 양성 탐색을 이해할 ensemble 논문은 iter_113에서 이미 추천했다.
+
+# Recommended Next Experiment
+
+지금은 새 실험을 권고하지 않는다. 현재 고정 순위의 확대와 방법 학습을 보류하고 `--confirm-each-iter`에 따라 사용자 피드백을 기다린다. 재개하려면 주석 불확실성 또는 일반 대조 이후 가치를 실제로 구분할 새로운 근거와 종료 조건이 필요하다. 동일 출력의 점수·threshold 최적화, 새 모델 순회, 코드 정비만의 반복은 발주하지 않는다. 목표와 원 결과·체크포인트는 유지한다.
