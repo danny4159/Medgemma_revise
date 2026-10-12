@@ -1,0 +1,528 @@
+diff --git a/ed119_analyze.py b/ed119_analyze.py
+new file mode 100644
+index 0000000..9c6997a
+--- /dev/null
++++ b/ed119_analyze.py
+@@ -0,0 +1,306 @@
++"""iter_119: iter_117 저장 출력(174명)의 정보 상보성 사후 분석. 새 추론·재채점 없음, CPU 전용.
++
++규칙(결과 집계 전에 `lock` 단계가 results/iter_119/lock/analysis_spec.json 으로 고정):
++ - 상태: correct / wrong(명시 답이 정답과 다름) / unresolved(None). unresolved를 wrong으로 합치지 않는다.
++ - 원 answers는 iter_117 per_patient 저장값을 그대로 쓰고, K/B/G는 ledger에서 원 함수(ed116_spec)로, E/N/R/T는 MAIN record 원문에서
++   원 resolver(ev109_extract.resolve)로 일치 확인만 한다(재채점 아님, 불일치 시 해당 비교 미확정).
++ - 정책: M=K/B/G 다수결(G None이면 K), S=E가 resolved이고 B와 같으면 E, 그 외 K. 원 정의 그대로.
++ - unresolved 범위는 환자 내 공유 변수(G→M, E→S) 전수 배정; 지표별 최선/최악을 동시에 가능한 성능으로 합치지 않는다.
++사용: python ed119_analyze.py lock | analyze
++"""
++import hashlib
++import itertools
++import json
++import os
++import sys
++import time
++
++import ed116_eval as EV
++import ed116_spec as ES
++import ev109_extract as X
++
++OUT = "results/iter_119"
++P117 = "results/iter_117"
++P116 = "results/iter_116"
++READ = {}  # 전체 경로 → sha256
++
++
++def rd(path):
++    b = open(path, "rb").read()
++    READ[os.path.abspath(path)] = hashlib.sha256(b).hexdigest()
++    return b
++
++
++def jl(path):
++    return json.loads(rd(path))
++
++
++def wx(path, obj):
++    os.makedirs(os.path.dirname(path), exist_ok=True)
++    with open(path, "x") as f:  # 기존 파일 덮어쓰기 금지
++        json.dump(obj, f, ensure_ascii=False, indent=1, sort_keys=True)
++
++
++def state(ans, y):
++    return "unresolved" if ans is None else "correct" if ans == y else "wrong"
++
++
++ALT = ("B", "G", "E", "M", "S", "N", "R")  # K 대비 대안 (T는 영상 없는 보조)
++STATES = ("correct", "wrong", "unresolved")
++
++
++def cross(pats, a):
++    cells = {f"{k}/{c}": [] for k in STATES for c in STATES}
++    for p in pats:
++        cells[f"{state(p['answers']['K'], p['gt'])}/{state(p['answers'][a], p['gt'])}"].append(p["id"])
++    return {k: dict(n=len(v), ids=v) for k, v in cells.items()}
++
++
++def flows(pats, a):
++    """K 대비 대안 a의 정답 수 이동 분해. 순변화 = gained - lost_explicit - lost_unresolved."""
++    f = dict(gained=0, lost_explicit=0, lost_unresolved=0, kwrong_to_unresolved=0)
++    for p in pats:
++        sk, sa = state(p["answers"]["K"], p["gt"]), state(p["answers"][a], p["gt"])
++        f["gained"] += sk != "correct" and sa == "correct"
++        f["lost_explicit"] += sk == "correct" and sa == "wrong"
++        f["lost_unresolved"] += sk == "correct" and sa == "unresolved"
++        f["kwrong_to_unresolved"] += sk == "wrong" and sa == "unresolved"
++    f["net_correct_change"] = f["gained"] - f["lost_explicit"] - f["lost_unresolved"]
++    f["n_correct"] = sum(state(p["answers"][a], p["gt"]) == "correct" for p in pats)
++    f["K_correct"] = sum(state(p["answers"]["K"], p["gt"]) == "correct" for p in pats)
++    return f
++
++
++def patient_assignments(p):
++    """환자 내 미해결 변수(G,N,E,R,T)의 모든 yes/no 배정에서 정책 답을 재도출(공유 변수 유지)."""
++    a = p["answers"]
++    free = [q for q in EV.FREE if a[q] is None]
++    for combo in itertools.product(("yes", "no"), repeat=len(free)):
++        v = dict(zip(free, combo))
++        yield EV.derive(a["K"], a["B"], v.get("G", a["G"]), v.get("N", a["N"]), v.get("E", a["E"]),
++                        v.get("R", a["R"]), v.get("T", a["T"]))
++
++
++def ranges(pats):
++    """정책별 정답 수의 [최소, 최대] (환자 독립 합산)과, 지표별 극값이 서로 다른 배정에서 나옴을 명시."""
++    out = {}
++    for q in EV.POL:
++        lo = hi = 0
++        for p in pats:
++            c = [int(d[q] == p["gt"]) for d in patient_assignments(p)]
++            lo += min(c)
++            hi += max(c)
++        out[q] = [lo, hi]
++    # 쌍 차이 A−K (같은 배정에서 계산)
++    diffs = {}
++    for a in ("E", "G", "M", "S"):
++        lo = hi = 0
++        for p in pats:
++            c = [int(d[a] == p["gt"]) - int(d["K"] == p["gt"]) for d in patient_assignments(p)]
++            lo += min(c)
++            hi += max(c)
++        diffs[a + "-K"] = [lo, hi]
++    return dict(correct_range=out, paired_diff_range=diffs,
++                note="환자 내 공유 변수로 배정, 정책별·차이별 극값은 동시에 실현되는 성능이 아니다.")
++
++
++def load_all():
++    pp = jl(f"{P117}/eval/per_patient.json")
++    ledger = {r["id"]: r for r in jl(f"{P116}/provenance/ledger_nogt.json")["rows"]}
++    gt = jl(f"{P116}/provenance/gt.json")
++    sel = jl(f"{P116}/lock/selection.json")
++    comp = jl(f"{P117}/completion.json")
++    ver = jl(f"{P117}/eval/verify.json")
++    jl(f"{P117}/lock/eval_lock.json")
++    recs = {}
++    for w in range(4):
++        for line in rd(f"{P117}/gen/MAIN/gen_worker{w}.jsonl").decode().splitlines():
++            if line.strip():
++                r = json.loads(line)
++                recs.setdefault(r["request_id"], []).append(r)
++    return pp, ledger, gt, sel, comp, ver, recs
++
++
++def link_checks(pp, ledger, gt, sel, comp, ver, recs):
++    """입력 연결. 불일치는 problems에 남기고 영향받는 비교를 미확정으로 표시한다(임의 재채점 금지)."""
++    prob = []
++    ids = [p["id"] for p in pp]
++    if len(set(ids)) != len(ids) or len(ids) != 174:
++        prob.append("id_unique_174")
++    for g in ("mismatch", "control"):
++        if sorted(p["id"] for p in pp if p["group"] == g) != sorted(sel[g]):
++            prob.append(f"selection_{g}")
++    dup = [k for k, v in recs.items() if len(v) != 1]
++    if dup:
++        prob.append(f"dup_request_ids:{len(dup)}")
++    n_mod = 0
++    for p in pp:
++        i = p["id"]
++        if gt[i]["category"] != p["category"] or ("yes" if p["category"] == "opacity" else "no") != p["gt"]:
++            prob.append(f"gt:{i}")
++        a = p["answers"]
++        L = ledger[i]
++        for q, f in (("K", ES.answer_K), ("B", ES.answer_B), ("G", ES.answer_G)):
++            if f(L) != a[q]:
++                prob.append(f"{q}:{i}")
++        if L["file_sha256"] != p["image_sha256"]:
++            prob.append(f"image_sha:{i}")
++        for c in "NERT":
++            rid = p["request_ids"][c]
++            r = recs.get(rid, [None])[0]
++            if r is None:
++                prob.append(f"missing_record:{c}:{i}")
++                continue
++            n_mod += 1
++            if r["patient"] != i or r["cond"] != c or r["suffix_text_raw"] != p["raw"][c] or r["ended_eos"] != p["ended_eos"][c]:
++                prob.append(f"record_raw:{c}:{i}")
++            res = X.resolve("O", r["suffix_text_raw"], r["ended_eos"])  # 원 resolver, 일치 확인만
++            if res["answer"] != a[c]:
++                prob.append(f"resolve:{c}:{i}")
++        d = EV.derive(a["K"], a["B"], a["G"], a["N"], a["E"], a["R"], a["T"])
++        for q in EV.POL:
++            if d[q] != a[q]:
++                prob.append(f"policy:{q}:{i}")
++        # 불일치 집단 정의: K, B 모두 resolved이고 다름 / 대조: 같음
++        if (p["group"] == "mismatch") != (a["K"] != a["B"]):
++            prob.append(f"group_def:{i}")
++    return dict(problems=prob, n_patients=len(pp), n_model_records_checked=n_mod, completion_complete=comp.get("complete"),
++                completion_n_records=comp.get("n_records"), verify_all_pass=ver.get("all_pass"), verify_n=ver.get("n"))
++
++
++def key_flags(pats):
++    """핵심 사례 포함 규칙: 불일치 집단 중 K정답 또는 K 오답 환자 중 (K≠E 상태이거나 E·G·M·S 중 K와 상태가 다른 경우);
++    일치 대조는 K와 E/G/M/S 상태가 하나라도 다른 환자 전원. 불일치 34명은 사용자 점검 대상(K정답/E 명시오답 2, E정답/K오답 8, K정답/E unresolved 24)."""
++    keys = {}
++    for p in pats:
++        sk = state(p["answers"]["K"], p["gt"])
++        diff = [q for q in ("E", "G", "M", "S") if state(p["answers"][q], p["gt"]) != sk]
++        tags = []
++        if p["group"] == "mismatch":
++            se = state(p["answers"]["E"], p["gt"])
++            if sk == "correct" and se == "wrong":
++                tags.append("Kc_Ewrong")
++            if sk == "wrong" and se == "correct":
++                tags.append("Kw_Ecorrect")
++            if sk == "correct" and se == "unresolved":
++                tags.append("Kc_Eunres")
++        elif diff:
++            tags.append("control_state_differs:" + "".join(diff))
++        keys[p["id"]] = tags
++    return keys
++
++
++def case_row(p, tags):
++    a = p["answers"]
++    return dict(id=p["id"], group=p["group"], category=p["category"], gt=p["gt"], tags=tags,
++                answers=a, states={q: state(a[q], p["gt"]) for q in EV.POL},
++                resolve_reason={c: p["resolve"][c]["reason"] for c in p["resolve"]},
++                n_det=p["n_det"], n_gt=p["n_gt"], tp03=p["tp03"], joint03=p["joint03"],
++                request_ids=p["request_ids"])
++
++
++def build(pp):
++    by = {g: [p for p in pp if p["group"] == g] for g in ("mismatch", "control")}
++    keys = key_flags(pp)
++    tabs = {}
++    for g, pats in by.items():
++        tabs[g] = dict(n=len(pats),
++                       state_counts={q: {s: sum(state(p["answers"][q], p["gt"]) == s for p in pats) for s in STATES} for q in EV.POL},
++                       K_vs={a: cross(pats, a) for a in ALT}, flows={a: flows(pats, a) for a in ALT},
++                       ranges=ranges(pats))
++    m = by["mismatch"]
++    kc = [p for p in m if p["answers"]["K"] == p["gt"]]
++    kw = [p for p in m if p["answers"]["K"] != p["gt"]]
++    # K 정답 사례에서 대안별 비정답(명시 오답/unresolved) 교집합, 독점성 판단
++    def nonc(p, q):
++        return state(p["answers"][q], p["gt"])
++    excl = dict(
++        Kc_n=len(kc),
++        Kc_E_wrong_and_B_G_wrong=[p["id"] for p in kc if nonc(p, "E") == "wrong" and nonc(p, "B") == "wrong" and nonc(p, "G") == "wrong"],
++        Kc_E_notcorrect_and_G_notcorrect=[p["id"] for p in kc if nonc(p, "E") != "correct" and nonc(p, "G") != "correct"],
++        Kc_E_notcorrect_G_correct=[p["id"] for p in kc if nonc(p, "E") != "correct" and nonc(p, "G") == "correct"],
++        Kc_E_notcorrect_G_unres_or_wrong_by_S_M=dict(
++            S_correct=[p["id"] for p in kc if nonc(p, "E") != "correct" and nonc(p, "S") == "correct"],
++            M_correct=[p["id"] for p in kc if nonc(p, "E") != "correct" and nonc(p, "M") == "correct"]),
++        Kw_n=len(kw),
++        Kw_E_correct=[p["id"] for p in kw if nonc(p, "E") == "correct"],
++        Kw_E_correct_G_correct=[p["id"] for p in kw if nonc(p, "E") == "correct" and nonc(p, "G") == "correct"],
++        Kw_E_correct_G_not=[p["id"] for p in kw if nonc(p, "E") == "correct" and nonc(p, "G") != "correct"],
++        Kw_E_correct_S_correct=[p["id"] for p in kw if nonc(p, "E") == "correct" and nonc(p, "S") == "correct"],
++        Kw_E_correct_M_correct=[p["id"] for p in kw if nonc(p, "E") == "correct" and nonc(p, "M") == "correct"],
++        # 진단 상한(oracle): GT로 정답 모델을 고른 합집합. 사용 가능한 selector 아님.
++        oracle_union_correct={"K|E": sum(p["answers"]["K"] == p["gt"] or p["answers"]["E"] == p["gt"] for p in m),
++                              "K|B": sum(p["answers"]["K"] == p["gt"] or p["answers"]["B"] == p["gt"] for p in m),
++                              "K|G": sum(p["answers"]["K"] == p["gt"] or p["answers"]["G"] == p["gt"] for p in m),
++                              "B|G|E": sum(any(p["answers"][q] == p["gt"] for q in "BGE") for p in m),
++                              "K|B|G|E": sum(any(p["answers"][q] == p["gt"] for q in "KBGE") for p in m)},
++    )
++    # R/N (자연 초안 포함 출력)의 원 상태: 핵심 사례 한정
++    cases = [case_row(p, keys[p["id"]]) for p in pp]
++    rn = {t: {c: {} for c in ("N", "R")} for t in ("Kc_Ewrong", "Kw_Ecorrect", "Kc_Eunres")}
++    for r in cases:
++        for t in r["tags"]:
++            if t in rn:
++                for c in ("N", "R"):
++                    rn[t][c][r["states"][c]] = rn[t][c].get(r["states"][c], 0) + 1
++    # 공간 관련 기술(고정 detector packet 범위): 핵심 사례의 n_det / n_gt / tp03
++    sp = {}
++    for t in rn:
++        rr = [r for r in cases if t in r["tags"]]
++        sp[t] = dict(n=len(rr), n_det_zero=sum(r["n_det"] == 0 for r in rr), n_gt_mean=sum(r["n_gt"] for r in rr) / max(len(rr), 1),
++                     tp03_ge1=sum(r["tp03"] >= 1 for r in rr), by_category={c: sum(r["category"] == c for r in rr) for c in ("opacity", "normal", "not_normal_no_opacity")})
++    # 일치 대조: K/B 모두 정답 vs 모두 오답
++    ctrl = by["control"]
++    cstrata = {}
++    for name, sub in (("KB_both_correct", [p for p in ctrl if p["answers"]["K"] == p["gt"]]),
++                      ("KB_both_wrong", [p for p in ctrl if p["answers"]["K"] != p["gt"]])):
++        cstrata[name] = dict(n=len(sub), ids=[p["id"] for p in sub],
++                             state_counts={q: {s: sum(state(p["answers"][q], p["gt"]) == s for p in sub) for s in STATES} for q in EV.POL})
++    return tabs, excl, rn, sp, cstrata, cases, keys
++
++
++def main_lock():
++    spec = dict(
++        locked_at_utc=time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()), locked_at_epoch=time.time(),
++        note="실제 집계(analyze) 이전에 고정. 이미 알려진 수치를 가진 사후 분석이며 사전등록·눈가림이 아니다.",
++        script_sha256=hashlib.sha256(open(__file__, "rb").read()).hexdigest(),
++        states=STATES, alternatives=ALT, groups=["mismatch(87)", "control(87)"],
++        tables=["state_counts", "K_vs_alt 3x3 cross with ids", "flows(gained/lost_explicit/lost_unresolved)", "ranges with shared vars",
++                "exclusivity & oracle union (diagnostic only)", "N/R original states on key cases", "spatial descriptors n_det/n_gt/tp03"],
++        key_case_rule="mismatch: tags Kc_Ewrong, Kw_Ecorrect, Kc_Eunres; control: any state difference between K and E/G/M/S; full 174-row table also written",
++        branches=dict(
++            positive="명시 답 사례에서 유용한 K 정보 + 반대 오류가 확인되고 G/B/E, M/S 이후 중요한 잔여 조건이 설명되며 GT 없이 시험할 개입이 구체화 -> 최소 pilot 하나 제안",
++            negative="상보성이 단일 대안 또는 M/S로 처리되고 구체적 정확도·보존·비용 문제가 없으면 가치 부족으로 보류",
++            inconclusive="잔여 가치가 unresolved 재해석·GT 기반 선택·출처 미확인에 의존하면 근거 부족으로 보류"),
++        no_new_threshold=True)
++    wx(f"{OUT}/lock/analysis_spec.json", spec)
++    print("locked", spec["locked_at_utc"])
++
++
++def main_analyze():
++    t0 = time.time()
++    spec_p = f"{OUT}/lock/analysis_spec.json"
++    spec = json.load(open(spec_p))
++    cur = hashlib.sha256(open(__file__, "rb").read()).hexdigest()
++    if spec["script_sha256"] != cur:
++        sys.exit("script changed after lock; refuse (record as amendment instead)")
++    pp, ledger, gt, sel, comp, ver, recs = load_all()
++    link = link_checks(pp, ledger, gt, sel, comp, ver, recs)
++    if link["problems"]:
++        wx(f"{OUT}/eval/link_problems.json", link)
++        sys.exit(f"link problems: {link['problems'][:5]}")
++    tabs, excl, rn, sp, cstrata, cases, keys = build(pp)
++    report = dict(link=link, tables=tabs, exclusivity=excl, natural_draft_states_key_cases=rn, spatial_descriptors=sp,
++                  control_strata=cstrata, locked_at_utc=spec["locked_at_utc"],
++                  scope="iter_117 저장 출력 174명 사후 분석. 합성 초안(iter_118)과 합산하지 않음. oracle 합집합은 진단 상한.")
++    wx(f"{OUT}/eval/report.json", report)
++    wx(f"{OUT}/eval/cases174.json", cases)
++    wx(f"{OUT}/eval/key_cases.json", [c for c in cases if c["tags"]])
++    inputs = dict(READ)
++    wx(f"{OUT}/eval/input_digests.json", dict(files=inputs, cpu_wall_s=time.time() - t0,
++       script_sha256=cur, gpu_used=False, new_inference=False))
++    print("done", round(time.time() - t0, 2), "s;", len(inputs), "files")
++
++
++if __name__ == "__main__":
++    {"lock": main_lock, "analyze": main_analyze}[sys.argv[1]]()
+diff --git a/ed119_extra.py b/ed119_extra.py
+new file mode 100644
+index 0000000..38a7f3d
+--- /dev/null
++++ b/ed119_extra.py
+@@ -0,0 +1,60 @@
++"""iter_119 잠금 이후 추가 기술표(amendment). 새 정책·문턱·재채점 없음, 저장 per_patient의 상태만 교차 집계.
++ (1) draft-free(B/G/E) 모두 정답이 아닌 K정답 사례(초안 고유 정보 진단), (2) K≠G 불일치 중재표, (3) E unresolved reason 분포.
++analyze 이후에 추가했음을 결과에 명시한다. 결과는 새 파일에만 쓴다."""
++import json
++import time
++
++import ed119_analyze as A
++
++pp = json.load(open("results/iter_117/eval/per_patient.json"))
++digest = A.hashlib.sha256(open("results/iter_117/eval/per_patient.json", "rb").read()).hexdigest()
++m = [p for p in pp if p["group"] == "mismatch"]
++c = [p for p in pp if p["group"] == "control"]
++st = lambda p, q: A.state(p["answers"][q], p["gt"])  # noqa: E731
++
++out = dict(amendment="잠금(analysis_spec.json) 이후 추가된 기술표. 사후 분석, 정책 최적화 아님.", per_patient_sha256=digest,
++           created_utc=time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()))
++
++# (1) 초안 고유 정보 진단: K 정답이고 B/G/E 모두 정답이 아닌 사례
++uniq = [p for p in m if st(p, "K") == "correct" and all(st(p, q) != "correct" for q in "BGE")]
++out["draft_unique"] = dict(
++    n=len(uniq), ids=[p["id"] for p in uniq],
++    E_state={s: sum(st(p, "E") == s for p in uniq) for s in A.STATES},
++    G_state={s: sum(st(p, "G") == s for p in uniq) for s in A.STATES},
++    S_correct=sum(st(p, "S") == "correct" for p in uniq), M_correct=sum(st(p, "M") == "correct" for p in uniq),
++    N_state={s: sum(st(p, "N") == s for p in uniq) for s in A.STATES}, R_state={s: sum(st(p, "R") == s for p in uniq) for s in A.STATES},
++    by_category={k: sum(p["category"] == k for p in uniq) for k in ("opacity", "normal", "not_normal_no_opacity")},
++    note="K/B 이진·불일치 선정 구조상 oracle 진단. 사용 가능한 selector 아님. 무엇이 이 사례를 정답으로 만들었는지(영상 인식 vs 우연)는 미판별.")
++
++# (2) K≠G 불일치 중재 (mismatch에서 G는 항상 resolved)
++kg = [p for p in m if p["answers"]["K"] != p["answers"]["G"]]
++rows = {}
++for side in ("K_right", "G_right"):
++    sub = [p for p in kg if (p["answers"]["K"] == p["gt"]) == (side == "K_right")]
++    rows[side] = dict(n=len(sub), E_state={s: sum(st(p, "E") == s for p in sub) for s in A.STATES},
++                      S_correct=sum(st(p, "S") == "correct" for p in sub), M_correct=sum(st(p, "M") == "correct" for p in sub))
++out["K_vs_G_disagreement"] = dict(n=len(kg), sides=rows,
++    note="E가 resolved인 경우에만 draft-free 중재 가능. 이 표는 기술 통계이며 새 결합 규칙의 선택이 아니다.")
++out["K_vs_G_control"] = dict(n=sum(p["answers"]["K"] != p["answers"]["G"] for p in c),
++    G_gain=sum(st(p, "K") != "correct" and st(p, "G") == "correct" for p in c),
++    G_loss=sum(st(p, "K") == "correct" and st(p, "G") != "correct" for p in c))
++
++# (3) E unresolved reason (저장된 원 resolver 결과)
++rs = {}
++for g, sub in (("mismatch", m), ("control", c)):
++    rs[g] = {}
++    for cond in ("E", "N", "R"):
++        for p in sub:
++            if p["answers"][cond] is None:
++                k = f"{cond}:{p['resolve'][cond]['reason']}"
++                rs[g][k] = rs[g].get(k, 0) + 1
++out["unresolved_reasons"] = rs
++
++# (4) 반대 방향 오류 위험: draft-free 정답을 K가 틀리게 하는 경우 vs 반대
++out["opposing"] = dict(
++    K_correct_G_wrong=sum(st(p, "K") == "correct" and st(p, "G") == "wrong" for p in m),
++    K_wrong_G_correct=sum(st(p, "K") == "wrong" and st(p, "G") == "correct" for p in m),
++    S_vs_G_mismatch=dict(S_correct_G_wrong=sum(st(p, "S") == "correct" and st(p, "G") == "wrong" for p in m),
++                         S_wrong_G_correct=sum(st(p, "S") != "correct" and st(p, "G") == "correct" for p in m)))
++A.wx("results/iter_119/eval/extra_tables.json", out)
++print(json.dumps(out, ensure_ascii=False, indent=1)[:3500])
+diff --git a/ed119_verify.py b/ed119_verify.py
+new file mode 100644
+index 0000000..75ad242
+--- /dev/null
++++ b/ed119_verify.py
+@@ -0,0 +1,78 @@
++"""iter_119 독립 검산: per_patient.json 의 answers/gt만 읽어 분석 모듈(ed119_*)·ed116 함수를 쓰지 않고 단순 반복문으로 재계산해 report/extra와 대조."""
++import json
++
++pp = json.load(open("results/iter_117/eval/per_patient.json"))
++rep = json.load(open("results/iter_119/eval/report.json"))
++ext = json.load(open("results/iter_119/eval/extra_tables.json"))
++checks = []
++
++
++def ck(name, ok):
++    checks.append(dict(name=name, passed=bool(ok)))
++
++
++def S(a, y):
++    if a is None:
++        return "u"
++    return "c" if a == y else "w"
++
++
++for g in ("mismatch", "control"):
++    sub = [p for p in pp if p["group"] == g]
++    ck(f"{g}_n87", len(sub) == 87)
++    for q in "KBGEMNRST":
++        c = w = u = 0
++        for p in sub:
++            s = S(p["answers"][q], p["gt"])
++            c += s == "c"
++            w += s == "w"
++            u += s == "u"
++        sc = rep["tables"][g]["state_counts"][q]
++        ck(f"{g}_{q}_counts", (c, w, u) == (sc["correct"], sc["wrong"], sc["unresolved"]) and c + w + u == 87)
++    for a in "BGEMSNR":
++        cells = {}
++        for p in sub:
++            k = S(p["answers"]["K"], p["gt"]) + S(p["answers"][a], p["gt"])
++            cells[k] = cells.get(k, 0) + 1
++        names = {"c": "correct", "w": "wrong", "u": "unresolved"}
++        got = {k: v["n"] for k, v in rep["tables"][g]["K_vs"][a].items() if v["n"]}
++        mine = {names[k[0]] + "/" + names[k[1]]: v for k, v in cells.items()}
++        ck(f"{g}_cross_K_{a}", got == mine and sum(mine.values()) == 87)
++    # 정책 재도출 (M, S) from K,B,G,E 저장값
++    ok = True
++    for p in sub:
++        a = p["answers"]
++        votes = [a["K"], a["B"], a["G"]]
++        m = a["K"] if a["G"] is None else max(votes, key=votes.count)
++        s = a["E"] if (a["E"] is not None and a["E"] == a["B"]) else a["K"]
++        ok = ok and m == a["M"] and s == a["S"]
++    ck(f"{g}_M_S_rederived", ok)
++
++mm = [p for p in pp if p["group"] == "mismatch"]
++ck("user_check_Kc_Ewrong_2", sum(S(p["answers"]["K"], p["gt"]) == "c" and S(p["answers"]["E"], p["gt"]) == "w" for p in mm) == 2)
++ck("user_check_Kw_Ec_8", sum(S(p["answers"]["K"], p["gt"]) == "w" and S(p["answers"]["E"], p["gt"]) == "c" for p in mm) == 8)
++ck("user_check_Kc_Eu_24", sum(S(p["answers"]["K"], p["gt"]) == "c" and S(p["answers"]["E"], p["gt"]) == "u" for p in mm) == 24)
++ck("orig_counts_K47_B40_G54_M54_E29_S53",
++   [sum(p["answers"][q] == p["gt"] for p in mm) for q in "KBGMES"] == [47, 40, 54, 54, 29, 53])
++# 범위: 전수 배정 독립 구현 (E 미해결 환자의 E∈{yes,no}에서 S, G 미해결에서 M)
++lo = hi = 0
++for p in mm:
++    a = p["answers"]
++    opts = ["yes", "no"] if a["E"] is None else [a["E"]]
++    vals = [(1 if (e if e == a["B"] else a["K"]) == p["gt"] else 0) for e in opts]
++    lo += min(vals)
++    hi += max(vals)
++ck("S_range_independent", [lo, hi] == rep["tables"]["mismatch"]["ranges"]["correct_range"]["S"])
++# extra
++u = [p for p in mm if p["answers"]["K"] == p["gt"] and all(p["answers"][q] != p["gt"] for q in "BGE")]
++ck("draft_unique_ids", sorted(p["id"] for p in u) == sorted(ext["draft_unique"]["ids"]) and len(u) == 10)
++ck("draft_unique_S9", sum(p["answers"]["S"] == p["gt"] for p in u) == ext["draft_unique"]["S_correct"] == 9)
++kg = [p for p in mm if p["answers"]["K"] != p["answers"]["G"]]
++ck("KG_disagree_33_13_20", len(kg) == 33 and sum(p["answers"]["K"] == p["gt"] for p in kg) == 13)
++ck("KG_E_resolved_9", sum(p["answers"]["E"] is not None for p in kg) == 9)
++ck("key_case_count", sum(1 for _ in json.load(open("results/iter_119/eval/key_cases.json"))) >= 34)
++ck("cases174_unique", len({c["id"] for c in json.load(open("results/iter_119/eval/cases174.json"))}) == 174)
++res = dict(all_pass=all(c["passed"] for c in checks), n=len(checks), n_pass=sum(c["passed"] for c in checks), checks=checks)
++import ed119_analyze as A  # 쓰기 도우미만 사용
++A.wx("results/iter_119/eval/verify.json", res)
++print(res["n_pass"], "/", res["n"], [c["name"] for c in checks if not c["passed"]])
+diff --git a/test_ed119.py b/test_ed119.py
+new file mode 100644
+index 0000000..7b0cb0d
+--- /dev/null
++++ b/test_ed119.py
+@@ -0,0 +1,60 @@
++"""iter_119 한정 fixture: unresolved≠wrong, 3x3 합, G→M·E→S 공유 변수 범위, 누락/중복 거부. 결과는 새 경로에만 쓴다."""
++import json
++import os
++import sys
++
++import ed119_analyze as A
++
++res = []
++
++
++def chk(name, ok):
++    res.append(dict(name=name, passed=bool(ok)))
++
++
++def P(i, gt, K, B, G, E, N="yes", R="yes", T=None, grp="mismatch"):
++    return dict(id=i, gt=gt, group=grp, category="opacity" if gt == "yes" else "normal",
++                answers=dict(K=K, B=B, G=G, E=E, N=N, R=R, T=T, M=None, S=None))
++
++
++def fin(p):
++    from ed116_eval import derive
++    a = p["answers"]
++    d = derive(a["K"], a["B"], a["G"], a["N"], a["E"], a["R"], a["T"])
++    p["answers"] = d
++    return p
++
++
++chk("state_unresolved_not_wrong", A.state(None, "yes") == "unresolved" and A.state("no", "yes") == "wrong" and A.state("yes", "yes") == "correct")
++pats = [fin(P("a", "yes", "yes", "no", "yes", None)),   # K정답 E unresolved
++        fin(P("b", "yes", "yes", "no", "no", "no")),    # K정답 E 명시오답
++        fin(P("c", "yes", "no", "yes", "yes", "yes"))]  # K오답 E정답
++cr = A.cross(pats, "E")
++chk("cross_sum_and_cells", sum(v["n"] for v in cr.values()) == 3 and cr["correct/unresolved"]["ids"] == ["a"]
++    and cr["correct/wrong"]["ids"] == ["b"] and cr["wrong/correct"]["ids"] == ["c"])
++f = A.flows(pats, "E")
++chk("flows", f["gained"] == 1 and f["lost_explicit"] == 1 and f["lost_unresolved"] == 1 and f["net_correct_change"] == -1)
++# 공유 변수: G unresolved → M 이 G와 같은 변수에 의존, E unresolved → S
++q = fin(P("d", "yes", "no", "yes", None, None))   # K no, B yes, G None, E None
++asg = list(A.patient_assignments(q))
++chk("assignments_enumerate_G_E_N_R_T_free", len(asg) == 2 ** 5 - 0 or len(asg) == 2 ** len([x for x in "GENRT" if q["answers"][x] is None]))
++chk("shared_G_to_M", all((d["M"] == d["G"]) or d["G"] not in ("yes", "no") for d in asg if d["K"] != d["B"]))
++chk("shared_E_to_S", all(d["S"] == (d["E"] if d["E"] == d["B"] else d["K"]) for d in asg))
++r = A.ranges([q])
++chk("range_lo_le_hi", all(lo <= hi for lo, hi in r["correct_range"].values()))
++chk("range_M_equals_G_choice_possible", r["correct_range"]["M"] == [0, 1])
++# K unresolved 불허 구조는 없으나 중복 거부는 link_checks 소관: 합성 recs 중복 탐지
++recs = {"x": [1, 2], "y": [1]}
++chk("dup_detect", [k for k, v in recs.items() if len(v) != 1] == ["x"])
++# 덮어쓰기 거부
++p = "results/iter_119/tests/_probe.json"
++os.makedirs(os.path.dirname(p), exist_ok=True)
++try:
++    open(p, "x").close()
++    A.wx(p, {})
++    chk("overwrite_refused", False)
++except FileExistsError:
++    chk("overwrite_refused", True)
++A.wx("results/iter_119/tests/fixtures.json", dict(all_pass=all(x["passed"] for x in res), n=len(res), checks=res))
++print(sum(x["passed"] for x in res), "/", len(res))
++sys.exit(0 if all(x["passed"] for x in res) else 1)

@@ -354,23 +354,22 @@ iter_113의 포착 9 대 6과 iter_114의 68명·87개에서 동일 22개 검토
 
 ## rsna-noisy-evidence-draft-retention — observed
 
-iter_117의 제한된 초안 유지 관찰은 보존한다. iter_118의 RSNA 개발 192명에서 frozen MedGemma 1.5에 동일 영상·자동 detector 근거·공통 지시를 제공하고 합성 초안만 바꾸자, 초안 없음 E의 정답→틀린 초안 W의 명시 오답 전환은 39명, 반대 전환은 2명이었다. 전체 분모의 순전환 H_W는 0.192708, 95% CI [0.135417, 0.250000]이었다. 동시에 hedge 동반 응답은 21→85명, unknown은 0→1명으로 증가했다. 이는 고정 합성 개입의 답 방향 민감성이며 일반적인 교정 불능, 내부 anchoring 기전, 자연 초안의 순효용 또는 위치 학습 효과를 입증하지 않는다.
+iter_118의 RSNA 192명 합성 초안 개입에서 관찰한 순 명시 오답 전환 37/192와 hedge 증가의 제한적 관찰은 유지한다. iter_119는 iter_117의 기존 불일치 87명·일치 대조 87명을 재채점 없이 분석했다. 불일치 집단에서 K 정답/E 명시 오답은 2명, 반대는 8명, K 정답/E unresolved는 24명이었다. K가 정답이고 B/G/E 모두 정답으로 집계되지 않은 10명 중 9명은 E unresolved였고 기존 S가 보존했다. B/G/E가 모두 명시 오답인 나머지 1명은 S도 잃었다. 제한된 상보성은 확인되지만 자연 초안 보존 방법의 실용적 추가 가치, 공간 근거의 고유 역할, 일반적인 교정 결함은 미확정이다.
 
 - 적용 목표 시작: iter_003
-- 최신 리뷰: agent/runs/iter_118/review.json
-- 근거: research/results/iter_118/gen/MAIN/gen_worker*.jsonl: 192명·576개 고유 출력, 592 attempts.
-- 근거: research/results/iter_118/eval/report.json 및 per_patient.json: E/C/W 명시 정답 163/171/125명, 명시 오답 29/14/66명, unknown 0/7/1명.
-- 근거: 리뷰의 별도 원문 답 추출과 category 내 환자 bootstrap 10,000회(seed11817)에서 E/C/W 계수 및 H_W·H_C의 점추정치와 CI를 재현했다.
-- 근거: H_C=-0.078125, 95% CI [-0.119792, -0.041667]. 확정 응답 전환 지표 H_confirmed(W)=0.052083.
-- 근거: 기존 근거 agent/runs/iter_117/review.json과 해당 696개 출력의 원 판정은 변경하지 않았다.
-- 사용·평가 검증: 576개 MAIN prompt를 고정 명세·detector ledger·합성 초안 매핑으로 재구성해 불일치 0을 확인했다.
-- 사용·평가 검증: 198개 영상의 file hash 일치와 raw pixel hash 198개 고유성을 확인했다.
-- 사용·평가 검증: 평가 잠금·completion의 파일 digest 및 리뷰 SHA 87b672866ae9be7b4d8c261b30f755f7fcaa97cf의 대상 소스와 작업 파일이 일치했다.
-- 사용·평가 검증: MAIN worker 4개의 접근 기록에서 private·GT manifest·labels·annotation 경로 접근과 거부 시도는 없었다.
-- 사용·평가 검증: 생성 전 fixture 62/62, TECH의 2/4 worker token 일치와 정상 부분 종료 후 재개 결과가 기록돼 있다.
-- 사용·평가 검증: 기존 사용 이력 제외는 지정 manifest 범위에서 확인됐으며 legacy 익명 영상까지 완전한 미사용은 입증되지 않았다.
-- 미해결: 자연 발생 초안에서 초안 제거보다 유리한 정보가 얼마나 있으며, 그 이득을 보존하면서 손상을 줄일 필요가 있는가?
-- 미해결: 다른 모델·질문·도메인에서도 같은 효과가 나타나는가?
-- 미해결: 일반적인 조언 민감성 연구 이후 구별되는 기술적 문제가 남는가?
-- 미해결: 고정 hedge·refusal 규칙의 수치를 임상적 확신이나 거부의 정확한 빈도로 해석할 수 있는가?
+- 최신 리뷰: agent/runs/iter_119/review.json
+- 근거: agent/runs/iter_118/review.json: 합성 초안 개입의 원 판정·수치·한계를 유지한다.
+- 근거: research/results/iter_119/eval/report.json: 집단별 상태 교차표와 전체 분모.
+- 근거: research/results/iter_119/eval/extra_tables.json: K 정답/BGE 비정답 10명, E unresolved 9명·명시 오답 1명, S 보존 9명.
+- 근거: research/results/iter_117/eval/per_patient.json 및 gen/MAIN/gen_worker*.jsonl: 기존 174명·696개 출력.
+- 근거: 리뷰 독립 계산에서 불일치 K/B/G/M/E/S 정답 47/40/54/54/29/53과 일치 대조 76/76/75/76/67/76을 재현했다.
+- 사용·평가 검증: 174명의 ledger 기반 K/B/G, 공개 category 정답, 기존 정책 정의를 대조했다.
+- 사용·평가 검증: 696개 저장 원문의 request ID·환자·조건·EOS 연결과 원 resolver의 answer/source/reason/rule 일치를 확인했다. 재채점하지 않았다.
+- 사용·평가 검증: iter_119 입력 11개 digest, iter_117 completion의 파일 digest 및 실제 재사용 평가 의존성의 기존 잠금 hash가 일치했다.
+- 사용·평가 검증: 리뷰에서 양 집단의 전체 교차표 ID와 공유 변수를 유지한 모든 정책 정답 범위를 독립 재계산했다.
+- 사용·평가 검증: 추가 기술표는 잠금 이후 사후 분석으로 표시되어 있으며 새 정책이나 문턱을 선택하지 않았다.
+- 미해결: 기존 대안 이후의 오류를 GT 없이 구분하는 실용적 신호와 최소 개입의 추가 가치가 있는가?
+- 미해결: 한정된 명시 답 상보성이 다른 환자·질문에서도 중요한 빈도와 크기로 나타나는가?
+- 미해결: 일반적인 모델 조합 이후 공간 근거가 별도 가치를 제공하는가?
+- 미해결: 현재 unresolved 규약이 답하지 못하는 내용상 차이는 미확정으로 남는다.
 
