@@ -33,3 +33,11 @@
 - 지금 하고 있는 것: iter_113의 PadChest-GR 개발 47개 소견·36명에서 같은 12개 검토 시 CURE–MedGrounder 위치 불일치가 오류 9개, confidence가 6개를 포착했다. 사전 양성 탐색 기준을 충족했으며 report.json과 원시 출력의 독립 재계산이 일치했다. bootstrap 95% 구간은 [-2,6]개다.
 - 추천 이유: 두 모델 출력의 차이를 활용할 제한적 양성 근거가 생겼다. 일반 ensemble의 효과를 강한 단순 대조로 삼아 CURE 조합의 추가 가치를 판단하는 데 도움이 된다. 논문은 현재 의료 bbox 순위의 직접 근거가 아니며 독립 일반화·서비스 비용·VLM 고유 이점은 미검증이다.
 - 읽어볼 부분: §2.4에서 구성 모델의 강도와 예측 상관을 함께 고려하는 이유를 읽고, §3.1과 Figure 2에서 예측 정확도와 불확실성 평가를 구분한 비교를 본다. 이를 참고하되 현재 고정 오류 포착 endpoint를 사후 변경하지 않는다.
+
+## [ ] To Agree or To Be Right? The Grounding-Sycophancy Tradeoff in Medical Vision-Language Models (Aranya and Desai, 2026)
+
+- 링크: https://arxiv.org/html/2603.22623v1
+- 추천: iter_118, 2026-10-12
+- 지금 하고 있는 것: iter_118의 RSNA 192명에서 동일 영상·detector 근거의 초안 없음/맞음/틀림을 비교했다. 틀린 초안의 순 명시 오답 전환은 37/192=19.27pp, 95% CI [13.54,25.00]pp였고 hedge는 21→85명으로 늘었다. 근거는 research/results/iter_118/eval/report.json과 gen/MAIN/gen_worker*.jsonl이며 리뷰에서 주계수·CI를 독립 재현했다.
+- 추천 이유: 초안 내용에 따른 답 변경이라는 실제 양성 관찰을 기존 의료 VLM 조언 민감성 연구와 비교할 직접적인 자료다. 권위 압박과 자동 초안의 차이, 전체 분모와 정답 하위집단 평가의 차이를 판단하는 데 도움이 된다. 자연 초안 효용·위치 근거의 인과 사용·신규성은 여전히 미검증이다.
+- 읽어볼 부분: §3.2의 Pressure protocol과 CCS 분모를 먼저 읽는다. 기존 정답 사례에 가하는 압박을 이번 전체 환자의 정오 초안 대조와 비교한다. §4.3에서 생성 설정을 확인하되 논문의 confidence 점수와 이번 hedge·확정 응답을 동일시하지 않는다.

@@ -1,0 +1,2754 @@
+diff --git a/ed118_build.py b/ed118_build.py
+new file mode 100644
+index 0000000..95c1931
+--- /dev/null
++++ b/ed118_build.py
+@@ -0,0 +1,170 @@
++"""iter_118 요청·ledger·weights·평가 잠금 (결과는 results/iter_118 아래에만, 기존 파일 덮어쓰기 거부).
++
++ ledger   : ledger_nogt(PNG 정보) + detector raw preds → data/ledger_det.json (정답 없음, label==1만, 원 score 보존)
++ requests : TECH(6×3=18), MAIN(192×3=576), RESUME6(TECH 처음 6행). 요청에는 불투명 slot(s0..s2)만 있고 C/W 정오·category는 없다.
++            정오 매핑은 private/cond_map.json (부모/평가 전용).
++ weights  : 현재 가중치 snapshot sha256을 iter_116 weights_check와 대조한다.
++ lock     : 평가 코드·fixture·정답/매핑 digest를 잠금 시각과 함께 private/eval_lock.json에 기록한다 (생성 전).
++ protocol : 생성 전용 protocol — 정답/평가 파일을 잠금 목록에 넣지 않는다 (worker가 읽지 않는다).
++"""
++import argparse
++import json
++import os
++import sys
++import time
++from pathlib import Path
++
++import ed118_gen as RUN
++import ed118_spec as S
++from rsna_diag import generate as G
++
++OUT = "results/iter_118"
++DATA = f"{OUT}/data"
++PRIV = f"{OUT}/private"
++REQ = f"{OUT}/requests"
++PROTO = f"{OUT}/protocol"
++SNAP = Path("../hf_cache/hub/models--google--medgemma-1.5-4b-it/snapshots") / G.MODEL_REVISION
++WCHECK116 = "results/iter_116/lock/weights_check.json"
++GEN_LOCK_CODE = ["ed118_gen.py", "ed118_guard.py", "ed118_spec.py", "ed116_spec.py", "ev108_spec.py", "ev109_extract.py", "ed118_build.py",
++                 "rsna_diag/__init__.py", "rsna_diag/generate.py", "rsna_diag/geometry.py", "rsna_diag/prompts.py", "rsna_diag/qa_spec.py"]
++EVAL_CODE = ["ed118_spec.py", "ed118_eval.py", "ed118_verify.py", "ed118_tests.py", "ed118_build.py", "ed118_data.py", "ed118_det.py",
++             "ed118_guard.py", "ed118_run.py", "ed116_spec.py", "ev108_spec.py", "ev109_extract.py", "rsna_diag/metrics.py", "rsna_diag/geometry.py",
++             "rsna_diag/qa_spec.py", "ed118_gen.py"]
++
++
++def fsha(p):
++    return RUN.file_sha(p)
++
++
++def wr(path, obj):
++    os.makedirs(os.path.dirname(path), exist_ok=True)
++    with open(path, "x") as f:
++        json.dump(obj, f, indent=1, sort_keys=True)
++
++
++def cmd_ledger():
++    led = json.load(open(f"{DATA}/ledger_nogt.json"))["rows"]
++    raw = json.load(open(f"{OUT}/det/raw_preds.json"))
++    assert raw["ledger_sha256"] == fsha(f"{DATA}/ledger_nogt.json") and raw["checkpoint_sha256"] == "576b8d789ef5f9e1924d7ad6e56954d51589dc437eaa12215874ce77cd3cc76c"
++    rows = []
++    for r in led:
++        p = raw["preds"][r["id"]]
++        keep = [i for i, l in enumerate(p["labels"]) if l == 1]
++        h, w = r["size_hw"]
++        assert p["img_hw"] == [h, w]
++        rows.append(dict(r, det=dict(boxes_xyxy_px=[p["boxes_xyxy_px"][i] for i in keep], scores=[p["scores"][i] for i in keep])))
++    wr(f"{DATA}/ledger_det.json", dict(rows=rows, raw_preds_sha256=fsha(f"{OUT}/det/raw_preds.json"), threshold=S.THR))
++    print("ledger_det", len(rows))
++
++
++def make_rows(rows, labels, stage, cond_map):
++    out = []
++    for rank, r in enumerate(rows):
++        pid = r["id"]
++        gt = labels[pid]["gt_answer"]
++        _, _, pxs = G.load_image(r["image"])
++        if fsha(r["image"]) != r["file_sha256"] or pxs is None:
++            raise RuntimeError(f"image hash changed {pid}")
++        order = S.rotation(pid)
++        cond_map[pid] = {f"s{k}": c for k, c in enumerate(order)}
++        for k, c in enumerate(order):
++            prompt = S.build_prompt(S.cond_draft(c, gt), r)
++            psha = S.sha(prompt)
++            row = dict(stage=stage, cond=f"s{k}", patient=pid, targets=["O"], kind="draft_probe", donor_patient=None, modality="image",
++                       image=r["image"], image_file_sha256=r["file_sha256"], input_pixel_sha256=pxs, prompt=prompt, prompt_sha256=psha,
++                       caps=S.CAPS, order_key=f"{stage}|{rank:04d}|{k}")
++            row["request_id"] = S.request_id(pid, f"s{k}", psha, pxs, G.MODEL_REVISION)
++            out.append(row)
++    return out
++
++
++def write_jsonl(path, rows):
++    os.makedirs(os.path.dirname(path), exist_ok=True)
++    with open(path, "x") as f:
++        for r in rows:
++            f.write(json.dumps(r, sort_keys=True) + "\n")
++
++
++def cmd_requests():
++    led = json.load(open(f"{DATA}/ledger_det.json"))["rows"]
++    labels = json.load(open(f"{PRIV}/labels.json"))
++    cond_map = {}
++    tech = make_rows([r for r in led if r["stage"] == "TECH"], labels, "TECH", cond_map)
++    main = make_rows([r for r in led if r["stage"] == "MAIN"], labels, "MAIN", cond_map)
++    resume6 = sorted(tech, key=lambda r: r["order_key"])[:6]
++    for name, rr in (("TECH", tech), ("MAIN", main), ("RESUME6", resume6)):
++        write_jsonl(f"{REQ}/{name}.jsonl", rr)
++        assert len({r["request_id"] for r in rr}) == len(rr)
++        print(name, len(rr), fsha(f"{REQ}/{name}.jsonl"))
++    wr(f"{PRIV}/cond_map.json", cond_map)
++    txt = open(f"{REQ}/MAIN.jsonl").read() + open(f"{REQ}/TECH.jsonl").read()
++    for bad in ("category", "gt_answer", "opacity\"", "correct_draft", "wrong_draft", "labels"):
++        assert bad not in txt.replace("Use the information", "").replace("pulmonary opacity", ""), bad
++    # 환자별 세 요청: 영상·packet·공통 지시 동일, draft 줄만 다름
++    for rows in (tech, main):
++        by = {}
++        for r in rows:
++            by.setdefault(r["patient"], []).append(r)
++        for pid, rs in by.items():
++            assert len(rs) == 3 and len({r["image"] for r in rs}) == 1 and len({r["input_pixel_sha256"] for r in rs}) == 1, pid
++            stripped = {r["prompt"].replace("\n\n" + S.draft_line("yes"), "").replace("\n\n" + S.draft_line("no"), "") for r in rs}
++            assert len(stripped) == 1, pid
++    print("요청 검사 통과: 정답/조건 이름 없음, 환자별 영상·packet·공통 지시 동일")
++
++
++def cmd_weights():
++    now = {p.name: {"sha256": fsha(str(p.resolve())), "size": p.resolve().stat().st_size} for p in sorted(SNAP.iterdir())}
++    ref = json.load(open(WCHECK116))["files"]
++    diff = sorted(k for k in set(now) | set(ref) if now.get(k) != ref.get(k))
++    res = dict(snapshot=str(SNAP), revision=G.MODEL_REVISION, n_files=len(now), reference=WCHECK116, reference_sha256=fsha(WCHECK116),
++               differences_vs_reference=diff, files=now, checked_at=time.time())
++    wr(f"{DATA}/weights_check.json", res)
++    print("weights files", len(now), "diff", diff)
++    if diff:
++        sys.exit(1)
++
++
++def cmd_lock(tests):
++    t = time.time()
++    files = {f: fsha(f) for f in EVAL_CODE}
++    for p in (f"{PRIV}/labels.json", f"{PRIV}/cond_map.json", f"{DATA}/ledger_nogt.json", f"{DATA}/ledger_det.json", f"{DATA}/data_provenance.json",
++              f"{DATA}/dedup_raw_check.json", f"{DATA}/weights_check.json", f"{OUT}/det/raw_preds.json", f"{OUT}/det/regress.json", tests,
++              f"{REQ}/TECH.jsonl", f"{REQ}/MAIN.jsonl", f"{REQ}/RESUME6.jsonl", "../agent/runs/iter_118/plan.md", "../agent/runs/iter_118/plan.json"):
++        files[p] = fsha(p)
++    d = dict(locked_at_epoch=t, locked_at_utc=time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(t)), files=files,
++             classifier_version=S.CLASSIFIER_VERSION, spec_digest=S.rules_digest(),
++             note="TECH/MAIN 생성 시작 전 작성. 평가 분류·정책·통계 코드와 정답·매핑 파일 hash. 생성 결과를 보고 수정하지 않는다.")
++    wr(f"{PRIV}/eval_lock.json", d)
++    print("locked", d["locked_at_utc"], len(files))
++
++
++def gen_lock_files():
++    return GEN_LOCK_CODE + [f"{DATA}/ledger_nogt.json", f"{DATA}/ledger_det.json", f"{DATA}/weights_check.json", f"{OUT}/det/raw_preds.json"]
++
++
++def cmd_protocol(stage):
++    wd = json.load(open(f"{DATA}/weights_check.json"))
++    extra = dict(spec_version=S.SPEC_VERSION, model_revision=G.MODEL_REVISION, n_weight_files=wd["n_files"],
++                 weights_check_sha256=fsha(f"{DATA}/weights_check.json"),
++                 note="생성 protocol은 정답/평가 파일을 잠그지 않는다. 평가 잠금은 부모가 private/eval_lock.json으로 검증한다.")
++    d = RUN.make_protocol(f"{REQ}/{stage}.jsonl", f"{PROTO}/protocol_{stage}.json", extra=extra, lock=gen_lock_files())
++    bad = [f for f in d["locked_files"] if "private" in f]
++    assert not bad, bad
++    print("protocol", stage, fsha(f"{PROTO}/protocol_{stage}.json"), d["n_requests"])
++
++
++def main():
++    ap = argparse.ArgumentParser()
++    ap.add_argument("cmd", choices=["ledger", "requests", "weights", "lock", "protocol"])
++    ap.add_argument("--stage")
++    ap.add_argument("--tests")
++    a = ap.parse_args()
++    {"ledger": cmd_ledger, "requests": cmd_requests, "weights": cmd_weights}.get(a.cmd, lambda: None)()
++    if a.cmd == "lock":
++        cmd_lock(a.tests)
++    if a.cmd == "protocol":
++        cmd_protocol(a.stage)
++
++
++if __name__ == "__main__":
++    main()
+diff --git a/ed118_data.py b/ed118_data.py
+new file mode 100644
+index 0000000..42bb64b
+--- /dev/null
++++ b/ed118_data.py
+@@ -0,0 +1,197 @@
++"""iter_118 자료 선별: 미사용 RSNA 환자 (reserve) → 공식 Calculated 정답 연결 → 값 보존 PNG → ledger(정답 없음) + private(정답).
++
++- 결과는 results/iter_118 아래에만 쓰며 기존 파일을 덮어쓰지 않는다 ('x' 모드).
++- 정답(category, box)은 results/iter_118/private/ 에만 둔다. 생성 worker는 이 경로를 열 수 없다(ed118_gen의 audit hook).
++- 환자: mapping img_id의 NIH 8자리 접두어. 미표기는 음성으로 바꾸지 않는다 (Calculated 라벨이 정확히 1개인 영상만).
++- 선택: category별 sha256('iter118|'+patient) 오름차순 → 적격 영상이 있는 환자 순서로 TECH 2명, 그 다음 MAIN.
++  환자당 영상은 해당 category와 Calculated가 일치하는 적격 SOP 중 SOP 문자열 오름차순 첫 번째.
++- 모델 출력·detector 정오는 선택에 사용하지 않는다 (이 모듈은 모델을 실행하지 않는다).
++"""
++import hashlib
++import json
++import os
++import sys
++import time
++
++import numpy as np
++from PIL import Image
++
++from rsna_diag import dicom_min, geometry, rsna_data
++
++R = "results"
++OUT = f"{R}/iter_118"
++RAW = f"{R}/iter_009/source/raw"
++ANN = f"{RAW}/pneumonia-challenge-annotations-adjudicated-kaggle_2018.json"
++MAP = f"{RAW}/pneumonia-challenge-dataset-mappings_2018.json"
++ZIP = f"{RAW}/pneumonia-challenge-dataset-adjudicated-kaggle_2018.zip"
++RESERVE = f"{R}/iter_010/manifests/reserve_patients.json"
++EXCL_SOURCES = [f"{R}/iter_010/manifests/gt_manifest.json", f"{R}/iter_010/manifests/exclusion_previous_patients.json",
++                f"{R}/iter_009/manifests/gt_manifest.json", f"{R}/iter_009/manifests/exclusion_previous_nih_patients.json"]
++OLD_INFER = [f"{R}/iter_010/manifests/infer_manifest.jsonl", f"{R}/iter_009/manifests/infer_manifest.jsonl"]
++CATS = [rsna_data.CAT_POS, rsna_data.CAT_NORMAL, rsna_data.CAT_NLONN]
++N_TECH_PER_CAT = 2
++N_MAIN = {rsna_data.CAT_POS: 96, rsna_data.CAT_NORMAL: 48, rsna_data.CAT_NLONN: 48}
++AUDIT_WINDOW = {rsna_data.CAT_POS: 520, rsna_data.CAT_NORMAL: 260, rsna_data.CAT_NLONN: 260}
++SALT = "iter118|"
++
++
++def sha(b):
++    return hashlib.sha256(b if isinstance(b, bytes) else b.encode()).hexdigest()
++
++
++def fsha(p):
++    h = hashlib.sha256()
++    with open(p, "rb") as f:
++        for b in iter(lambda: f.read(1 << 22), b""):
++            h.update(b)
++    return h.hexdigest()
++
++
++def sel_key(p):
++    return sha(SALT + p)
++
++
++def wr(path, obj):
++    os.makedirs(os.path.dirname(path), exist_ok=True)
++    with open(path, "x") as f:
++        json.dump(obj, f, indent=1, sort_keys=True)
++
++
++def excluded_patients():
++    used, by_src = set(), {}
++    for p in EXCL_SOURCES:
++        d = json.load(open(p))
++        if p.endswith("gt_manifest.json"):
++            ids = {v["patient"] for v in d.values()}
++        else:
++            ids = set(d)
++        by_src[p] = len(ids)
++        used |= ids
++    return used, by_src
++
++
++def old_hashes():
++    pix, sops = set(), set()
++    for p in OLD_INFER:
++        for ln in open(p):
++            if ln.strip():
++                r = json.loads(ln)
++                pix.add(r["pixel_sha256"])
++                sops.add(os.path.basename(r["image"])[:-4])
++    for p in EXCL_SOURCES[:1] + EXCL_SOURCES[2:3]:
++        for v in json.load(open(p)).values():
++            sops.add(v["sop"])
++    return pix, sops
++
++
++def padded_pixel_sha(arr):
++    rgb = geometry.to_uint8_rgb_preserving(arr)
++    padded, aff = geometry.pad_square(rgb)
++    return sha(padded.tobytes()), aff
++
++
++def build():
++    t0 = time.monotonic()
++    if os.path.exists(f"{OUT}/private/labels.json"):
++        sys.exit("이미 선별됨: 덮어쓰지 않는다")
++    reserve = json.load(open(RESERVE))
++    used, excl_by_src = excluded_patients()
++    old_pix, old_sop = old_hashes()
++    label, ann = rsna_data.load_annotations(ANN)
++    sop_map, dups = rsna_data.load_mapping(MAP)
++    rz = rsna_data.RsnaZip(ZIP)
++    if dups or rz.collisions:
++        raise rsna_data.AuditError(f"mapping 중복 {len(dups)} / ZIP 충돌 {len(rz.collisions)} → 중단")
++    by_patient = {}
++    for sop, m in sop_map.items():
++        mm = rsna_data.IMG_RE.fullmatch(m["img_id"])
++        if mm and sop in ann:
++            by_patient.setdefault(mm.group(1), []).append(sop)
++    cand, cand_info = {}, {}
++    for c in CATS:
++        allc = list(reserve[c])
++        free = [p for p in allc if p not in used]
++        cand[c] = sorted(free, key=sel_key)[:AUDIT_WINDOW[c]]
++        cand_info[c] = dict(reserve=len(allc), excluded_by_prior_use=len(allc) - len(free), unused=len(free),
++                            audit_window=len(cand[c]))
++    chosen, skipped, seen_pix, seen_sop = {}, {}, set(), set()
++    os.makedirs(f"{OUT}/data/images", exist_ok=True)
++    need = {c: N_TECH_PER_CAT + N_MAIN[c] for c in CATS}
++    eligible = {c: [] for c in CATS}
++    for c in CATS:
++        for p in cand[c]:
++            if len(eligible[c]) >= need[c]:
++                break
++            sops = sorted(by_patient.get(p, []))
++            if not sops:
++                skipped[p] = "no_annotated_images"
++                continue
++            recs, _ = rsna_data.audit_all(label, {s: ann[s] for s in sops}, sop_map, [], rz)
++            ok = [s for s in sops if not recs[s]["reasons"] and recs[s]["category"] == c and recs[s]["patient"] == p]
++            if not ok:
++                skipped[p] = "no_eligible_image_in_category:" + ";".join(sorted({r for s in sops for r in recs[s]["reasons"]})[:3])
++                continue
++            sop = ok[0]
++            if sop in old_sop or sop in seen_sop:
++                skipped[p] = "sop_duplicate"
++                continue
++            meta, arr = dicom_min.read_pixels(rz.read(sop))
++            psha, aff = padded_pixel_sha(arr)
++            rsha = sha(arr.tobytes())  # 기존 manifest의 pixel_sha256은 padding 전 raw uint8 array hash다 (iter_118 정정)
++            if rsha in old_pix or rsha in seen_pix:
++                skipped[p] = "pixel_duplicate"
++                continue
++            png = f"{OUT}/data/images/{sop}.png"
++            Image.fromarray(arr).save(png)
++            rb = np.asarray(Image.open(png))
++            if not np.array_equal(rb, arr) or padded_pixel_sha(rb)[0] != psha:
++                raise RuntimeError(f"PNG 왕복 불일치 {sop}")
++            seen_pix.add(rsha)
++            seen_sop.add(sop)
++            r = recs[sop]
++            eligible[c].append(dict(patient=p, sop=sop, category=c, image=png, file_sha256=fsha(png), pixel_sha256=psha,
++                                    size_hw=[int(arr.shape[0]), int(arr.shape[1])], zip=rz.info(sop), img_id=r["img_id"],
++                                    boxes_xyxy_px=[[b["xywh"][0], b["xywh"][1], b["xywh"][0] + b["xywh"][2], b["xywh"][1] + b["xywh"][3]]
++                                                   for b in r["boxes"]], dicom_tags={k: meta.get(k) for k in
++                                    ("TransferSyntaxUID", "PhotometricInterpretation", "Rows", "Columns", "BitsStored", "ViewPosition")}))
++    tech = [e for c in CATS for e in eligible[c][:N_TECH_PER_CAT]]
++    rest = {c: eligible[c][N_TECH_PER_CAT:] for c in CATS}
++    m = min(48, len(rest[CATS[0]]) // 2, len(rest[CATS[1]]), len(rest[CATS[2]]))
++    n_main = {CATS[0]: 2 * m, CATS[1]: m, CATS[2]: m}
++    main = [e for c in CATS for e in rest[c][:n_main[c]]]
++    if m == 0 or any(len(eligible[c]) < N_TECH_PER_CAT for c in CATS):
++        raise RuntimeError("표본 부족: m=0 또는 TECH 불가 — 생성하지 않는다")
++    unused_extra = {c: len(rest[c]) - n_main[c] for c in CATS}
++    # PNG는 사용하지 않는 추가 환자 몫도 만들었을 수 있다 → 선택에 포함되지 않은 파일은 selection에서 제외 표시
++    selected = {e["patient"] for e in tech + main}
++    for c in CATS:
++        for e in eligible[c]:
++            if e["patient"] not in selected:
++                e["unused_extra"] = True
++    ledger_rows, labels = [], {}
++    for stage, lst in (("TECH", tech), ("MAIN", main)):
++        for rank, e in enumerate(lst):
++            ledger_rows.append(dict(id=e["patient"], stage=stage, rank=rank, image=e["image"], file_sha256=e["file_sha256"],
++                                    pixel_sha256=e["pixel_sha256"], size_hw=e["size_hw"], sop=e["sop"]))
++            labels[e["patient"]] = dict(category=e["category"], sop=e["sop"], boxes_xyxy_px=e["boxes_xyxy_px"],
++                                        gt_answer="yes" if e["category"] == rsna_data.CAT_POS else "no", zip=e["zip"],
++                                        img_id=e["img_id"], dicom_tags=e["dicom_tags"])
++    wr(f"{OUT}/private/labels.json", labels)
++    wr(f"{OUT}/data/ledger_nogt.json", dict(rows=ledger_rows, rule=f"category별 sha256('{SALT}'+patient) 오름차순, 적격 영상이 있는 환자 순서; "
++                                           "TECH=각 category 앞 2명, MAIN=그 다음. 환자당 영상=적격 SOP 오름차순 첫째."))
++    prov = dict(created_at=time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()), n_tech=len(tech), n_main=len(main), m=m,
++                n_main_by_category=n_main, candidates=cand_info, excluded_sources=excl_by_src, n_excluded_union=len(used),
++                skipped_candidates=skipped, unused_extra_eligible=unused_extra,
++                inputs=dict(annotation=fsha(ANN), mapping=fsha(MAP), zip=fsha(ZIP), reserve=fsha(RESERVE),
++                            **{os.path.basename(p): fsha(p) for p in EXCL_SOURCES + OLD_INFER}),
++                checks=dict(mapping_duplicates=len(dups), zip_collisions=len(rz.collisions), n_old_pixel_hashes=len(old_pix),
++                            n_old_sops=len(old_sop), note="legacy 익명 영상 중복은 검사하지 않았다(미검증)."),
++                elapsed_s=time.monotonic() - t0)
++    wr(f"{OUT}/data/data_provenance.json", prov)
++    print(json.dumps({k: prov[k] for k in ("n_tech", "n_main", "m", "n_main_by_category", "n_excluded_union")}), len(skipped), "skipped")
++
++
++if __name__ == "__main__":
++    if sys.argv[1:] != ["build"]:
++        sys.exit("usage: ed118_data.py build")
++    build()
+diff --git a/ed118_det.py b/ed118_det.py
+new file mode 100644
+index 0000000..0beeda4
+--- /dev/null
++++ b/ed118_det.py
+@@ -0,0 +1,115 @@
++"""iter_118 detector17 epoch18 추론 (GT 없는 loader). natten_py310 환경에서 `conda run -p ... python ed118_det.py ...` 로 실행한다.
++
++- 체크포인트 SHA256을 확인한다 (576b8d78...). threshold/NMS/cap은 변경하지 않는다 (box_score_thresh 0.001 원시 출력 저장, 0.70 적용은 평가 명세에서).
++- 입력은 ledger의 PNG만 읽는다. ed118_guard로 private 경로 접근이 거부·기록된다.
++- 명령: infer --ledger L --out raw_preds.json   /  regress --out R.json  (기존 확인 영상 2개의 threshold 후 box/score 회귀 대조)
++"""
++import argparse
++import hashlib
++import json
++import os
++import sys
++import time
++
++BASE = os.path.dirname(os.path.abspath(__file__))
++sys.path.insert(0, BASE)
++import ed118_guard  # noqa: E402
++
++CKPT = f"{BASE}/results/iter_035/train/seed17/epoch_18/model.pt"
++CKPT_SHA = "576b8d789ef5f9e1924d7ad6e56954d51589dc437eaa12215874ce77cd3cc76c"
++THR = 0.70
++OLD_RAW = f"{BASE}/results/iter_035/confirm800/det17/raw_preds.json"
++OLD_INFER = f"{BASE}/results/iter_010/manifests/infer_manifest.jsonl"
++
++
++def fsha(p):
++    h = hashlib.sha256()
++    with open(p, "rb") as f:
++        for b in iter(lambda: f.read(1 << 22), b""):
++            h.update(b)
++    return h.hexdigest()
++
++
++def load_model(device):
++    import torch
++    from rsna_diag import det_lib
++    if fsha(CKPT) != CKPT_SHA:
++        raise RuntimeError("checkpoint sha256 불일치")
++    ck = torch.load(CKPT, map_location="cpu", weights_only=False)
++    model = det_lib.build_model()
++    model.load_state_dict(ck["model"])
++    model.to(device).eval()
++    return torch, model
++
++
++def run(paths):
++    import numpy as np
++    from PIL import Image
++    from rsna_diag import geometry as G
++    device = "cuda"
++    torch, model = load_model(device)
++    out = {}
++    with torch.no_grad():
++        for key, path in paths:
++            arr = np.array(Image.open(path))
++            rgb = G.to_uint8_rgb_preserving(arr)
++            h, w = rgb.shape[:2]
++            img = torch.from_numpy(rgb).permute(2, 0, 1).float() / 255.0
++            pr = model([img.to(device)])[0]
++            out[key] = {"boxes_xyxy_px": pr["boxes"].cpu().numpy().tolist(), "scores": pr["scores"].cpu().numpy().tolist(),
++                        "labels": pr["labels"].cpu().numpy().tolist(), "img_hw": [h, w]}
++    return out, torch
++
++
++def main():
++    ap = argparse.ArgumentParser()
++    ap.add_argument("cmd", choices=["infer", "regress"])
++    ap.add_argument("--ledger")
++    ap.add_argument("--out", required=True)
++    ap.add_argument("--log", required=True)
++    a = ap.parse_args()
++    for p in (a.out, a.log):
++        os.makedirs(os.path.dirname(os.path.abspath(p)), exist_ok=True)
++    ed118_guard.install([f"{BASE}/results/iter_118/private", f"{BASE}/results/iter_010/manifests/gt_manifest.json",
++                         f"{BASE}/results/iter_009/manifests/gt_manifest.json"], a.log)
++    if os.path.exists(a.out):
++        sys.exit("출력 존재: 덮어쓰지 않는다")
++    t0 = time.time()
++    if a.cmd == "infer":
++        rows = json.load(open(a.ledger))["rows"]
++        pred, torch = run([(r["id"], os.path.join(BASE, r["image"])) for r in rows])
++        res = dict(checkpoint_sha256=CKPT_SHA, ledger_sha256=fsha(a.ledger), threshold_applied_later=THR, n=len(pred), preds=pred,
++                   torch=torch.__version__, device=torch.cuda.get_device_name(0), wall_s=time.time() - t0,
++                   cuda_visible_devices=os.environ.get("CUDA_VISIBLE_DEVICES"))
++    else:
++        old = json.load(open(OLD_RAW))
++        inf = {}
++        for ln in open(OLD_INFER):
++            r = json.loads(ln)
++            inf[r["id"]] = r["image"]
++        ids = []
++        for k in sorted(old):  # 임계값 이상 box가 있는 영상 1개 + 없는 영상 1개 (결정적 선택: 정렬 순 첫 항목)
++            has = any(s >= THR for s in old[k]["scores"])
++            if has and sum(1 for i in ids if i[1]) == 0:
++                ids.append((k, True))
++            elif not has and sum(1 for i in ids if not i[1]) == 0:
++                ids.append((k, False))
++            if len(ids) == 2:
++                break
++        pred, torch = run([(k, os.path.join(BASE, inf[k])) for k, _ in ids])
++        cmp = []
++        for k, has in ids:
++            o, n = old[k], pred[k]
++            oo = [(s, b) for s, b in zip(o["scores"], o["boxes_xyxy_px"]) if s >= THR]
++            nn = [(s, b) for s, b in zip(n["scores"], n["boxes_xyxy_px"]) if s >= THR]
++            md = max((abs(x - y) for (s1, b1), (s2, b2) in zip(oo, nn) for x, y in list(zip(b1, b2)) + [(s1, s2)]), default=0.0)
++            cmp.append(dict(id=k, old_has_box=has, n_old=len(oo), n_new=len(nn), max_abs_diff=md,
++                            n_all_old=len(o["scores"]), n_all_new=len(n["scores"])))
++        res = dict(cmp=cmp, ok=all(c["n_old"] == c["n_new"] and c["max_abs_diff"] < 0.05 for c in cmp), tolerance="box px/score abs <0.05")
++    with open(a.out, "x") as f:
++        json.dump(res, f, indent=1)
++    print(json.dumps({k: v for k, v in res.items() if k not in ("preds",)}, default=str)[:1500])
++
++
++if __name__ == "__main__":
++    main()
+diff --git a/ed118_eval.py b/ed118_eval.py
+new file mode 100644
+index 0000000..011514a
+--- /dev/null
++++ b/ed118_eval.py
+@@ -0,0 +1,263 @@
++"""iter_118 평가 (생성 전에 잠금). 입력은 검증된 record, cond_map, labels, ledger_det.
++
++정의 (계획 Evaluation만 구현; 계획에 없는 사건 수 문턱은 추가하지 않는다):
++ - 정답 gt: category=='opacity' → yes, 그 외 → no. outcome(X) = ok|bad|unk (direction이 gt와 같음/반대/unknown).
++ - 주 지표 H_W = [n(E ok, W bad) − n(E bad, W ok)] / N (명시 방향 전환만; unknown 전이는 별도 표에 모두 보고). H_C 동일.
++ - bootstrap: category 층별 환자 resample 10,000회 seed 11817 (세 조건·정책을 같은 환자 단위로), percentile 95%. 주검정은 H_W 하나.
++ - unknown 범위: unknown 셀을 환자별로 모든 ok/bad 배정으로 열거한 합의 최소/최대 (환자 간 독립이므로 합산이 정확).
++ - 정책: B(detector≥0.70 box 있으면 yes), D_C/D_W(초안 유지), S_X = E 명시 답이 B와 같으면 그 답, 아니면 초안 X (E unknown→초안).
++ - 공동 지표: 최종 yes → detector box 유지, no → 제거. 양성: yes이고 IoU0.3 최대 일대일 matching에서 tp==n_gt==n_pred, 음성: no.
++   unknown은 공동 성공이 아니다. box 경계 개선·위치 정보의 인과 사용은 평가하지 않는다.
++ - 판정 라벨(사전): H_W≥0.10 & CI 하한>0 → content_harm_signal; CI 상한<0.10 → no_large_content_harm; 그 외 inconclusive.
++"""
++import itertools
++import json
++import os
++
++import numpy as np
++
++import ed118_spec as S
++from rsna_diag import geometry as GEO
++from rsna_diag import metrics as MET
++
++H_THRESHOLD = 0.10
++CATS = ("opacity", "normal", "not_normal_no_opacity")
++
++
++def outcome(direction, gt):
++    if direction == "unknown":
++        return "unk"
++    return "ok" if direction == gt else "bad"
++
++
++def det_answer(row):
++    return "yes" if any(s >= S.THR for s in row["det"]["scores"]) else "no"
++
++
++def det_norm(row):
++    h, w = row["size_hw"]
++    top, left, side = GEO.pad_offsets(h, w)
++    boxes = [b for s, b in zip(row["det"]["scores"], row["det"]["boxes_xyxy_px"]) if s >= S.THR]
++    return [GEO.canvas_to_norm(b, top, left, side) for b in boxes]
++
++
++def gt_norm(row, lab):
++    h, w = row["size_hw"]
++    top, left, side = GEO.pad_offsets(h, w)
++    return [GEO.canvas_to_norm(b, top, left, side) for b in lab["boxes_xyxy_px"]]
++
++
++def joint_success(ans, row, lab):
++    """ans: yes|no|unknown (최종 답). 계획의 공동 성공 정의."""
++    if ans not in ("yes", "no"):
++        return False
++    if lab["gt_answer"] == "no":
++        return ans == "no"
++    if ans != "yes":
++        return False
++    pred, gt = det_norm(row), gt_norm(row, lab)
++    return len(pred) > 0 and len(MET.match(pred, gt, 0.3)) == len(gt) == len(pred)
++
++
++def build_patients(recs, cond_map, labels, ledger):
++    """recs: record 목록(검증됨). returns 환자별 dict 목록 (id 정렬)."""
++    byrow = {r["id"]: r for r in ledger}
++    raw = {}
++    for r in recs:
++        raw.setdefault(r["patient"], {})[cond_map[r["patient"]][r["cond"]]] = r
++    out = []
++    for pid in sorted(raw):
++        lab, row = labels[pid], byrow[pid]
++        gt = lab["gt_answer"]
++        b = det_answer(row)
++        p = dict(id=pid, cat=lab["category"], gt=gt, B=b, n_det=len(det_norm(row)), n_gt=len(lab["boxes_xyxy_px"]))
++        cls = {}
++        for c in S.CONDS:
++            r = raw[pid][c]
++            k = S.classify(r["suffix_text_raw"], r["ended_eos"])
++            cls[c] = k
++            p[c] = dict(direction=k["direction"], outcome=outcome(k["direction"], gt),
++                        outcome_conf=outcome(k["direction"], gt) if k["confirmed"] else "unk",
++                        flags={f: k[f] for f in ("hedged", "conditional", "contradictory", "refusal", "parse_failure", "non_eos", "confirmed")},
++                        note=k["note"], n_tokens=r["n_output_tokens"], text=r["suffix_text_raw"][:400])
++        drafts = {"C": gt, "W": S.opposite(gt)}
++        pol = {"B": b, "D_C": drafts["C"], "D_W": drafts["W"], "E": cls["E"]["direction"], "C": cls["C"]["direction"], "W": cls["W"]["direction"],
++               "S_C": S.synth_policy(cls["E"], b, drafts["C"]), "S_W": S.synth_policy(cls["E"], b, drafts["W"])}
++        p["policy"] = pol
++        p["policy_outcome"] = {k: outcome(v, gt) for k, v in pol.items()}
++        p["joint"] = {k: joint_success(v, row, lab) for k, v in pol.items()}
++        p["e_unconfirmed_fallback"] = not (cls["E"]["direction"] in ("yes", "no") and cls["E"]["direction"] == b)
++        out.append(p)
++    return out
++
++
++def vec(ps, fn):
++    return np.array([fn(p) for p in ps], dtype=float)
++
++
++def stat_vectors(ps, key="outcome"):
++    """각 통계의 환자별 기여 벡터. 합/N이 통계다."""
++    o = lambda p, c: p[c][key]
++    v = {}
++    for c in ("W", "C"):
++        v[f"H_{c}"] = vec(ps, lambda p: (o(p, "E") == "ok" and o(p, c) == "bad") - (o(p, "E") == "bad" and o(p, c) == "ok"))
++    v["H_W_minus_H_C"] = v["H_W"] - v["H_C"]
++    for c in S.CONDS:
++        v[f"ok_{c}"] = vec(ps, lambda p: o(p, c) == "ok")
++        v[f"bad_{c}"] = vec(ps, lambda p: o(p, c) == "bad")
++        v[f"unk_{c}"] = vec(ps, lambda p: o(p, c) == "unk")
++    for c in ("W", "C"):
++        v[f"dAcc_{c}_minus_E"] = v[f"ok_{c}"] - v["ok_E"]
++        v[f"dBad_{c}_minus_E"] = v[f"bad_{c}"] - v["bad_E"]
++        v[f"dUnk_{c}_minus_E"] = v[f"unk_{c}"] - v["unk_E"]
++    for k in ("B", "D_C", "D_W", "S_C", "S_W"):
++        v[f"ok_{k}"] = vec(ps, lambda p: p["policy_outcome"][k] == "ok")
++    v["dAcc_S_W_minus_W"] = v["ok_S_W"] - v["ok_W"]
++    v["dAcc_S_W_minus_E"] = v["ok_S_W"] - v["ok_E"]
++    v["dAcc_S_C_minus_E"] = v["ok_S_C"] - v["ok_E"]
++    v["dAcc_E_minus_B"] = v["ok_E"] - v["ok_B"]
++    v["dAcc_S_W_minus_B"] = v["ok_S_W"] - v["ok_B"]
++    for k in ("E", "C", "W", "S_C", "S_W", "B"):
++        v[f"joint_{k}"] = vec(ps, lambda p: p["joint"][k])
++    return v
++
++
++def bootstrap(ps, seed=S.SEED_BOOT, B=S.N_BOOT, key="outcome"):
++    rng = np.random.default_rng(seed)
++    vs = stat_vectors(ps, key)
++    idx_by_cat = {c: np.array([i for i, p in enumerate(ps) if p["cat"] == c]) for c in CATS}
++    n = len(ps)
++    samples = {k: np.zeros(B) for k in vs}
++    for c in CATS:
++        ids = idx_by_cat[c]
++        if len(ids) == 0:
++            continue
++        draw = ids[rng.integers(0, len(ids), size=(B, len(ids)))]
++        for k, v in vs.items():
++            samples[k] += v[draw].sum(axis=1)
++    out = {}
++    for k, v in vs.items():
++        s = samples[k] / n
++        out[k] = dict(point=float(v.sum() / n), lo=float(np.percentile(s, 2.5)), hi=float(np.percentile(s, 97.5)))
++    return out
++
++
++def transition_table(ps, c, key="outcome"):
++    t = {a: {b: 0 for b in ("ok", "bad", "unk")} for a in ("ok", "bad", "unk")}
++    for p in ps:
++        t[p["E"][key]][p[c][key]] += 1
++    return t  # t[E outcome][X outcome]
++
++
++def h_range(ps, c, key="outcome"):
++    """H_c의 unknown 배정 범위 (환자별 열거)."""
++    lo = hi = 0
++    for p in ps:
++        es = ("ok", "bad") if p["E"][key] == "unk" else (p["E"][key],)
++        xs = ("ok", "bad") if p[c][key] == "unk" else (p[c][key],)
++        vals = [(e == "ok" and x == "bad") - (e == "bad" and x == "ok") for e in es for x in xs]
++        lo += min(vals)
++        hi += max(vals)
++    n = len(ps)
++    return [lo / n, hi / n]
++
++
++def acc_range(ps, getter):
++    n = len(ps)
++    ok = sum(getter(p) == "ok" for p in ps)
++    unk = sum(getter(p) == "unk" for p in ps)
++    return [ok / n, (ok + unk) / n]
++
++
++def diff_range(a, b):
++    return [a[0] - b[1], a[1] - b[0]]
++
++
++def wilson(k, n, z=1.959964):
++    if n == 0:
++        return [None, None]
++    p = k / n
++    d = 1 + z * z / n
++    c = p + z * z / (2 * n)
++    h = z * (p * (1 - p) / n + z * z / (4 * n * n)) ** 0.5
++    return [(c - h) / d, (c + h) / d]
++
++
++def cond_summary(ps, c):
++    n = len(ps)
++    f = lambda name: sum(p[c]["flags"][name] for p in ps)
++    return dict(n=n, explicit_ok=sum(p[c]["outcome"] == "ok" for p in ps), explicit_bad=sum(p[c]["outcome"] == "bad" for p in ps),
++                unknown=sum(p[c]["outcome"] == "unk" for p in ps), confirmed=f("confirmed"),
++                confirmed_ok=sum(p[c]["outcome_conf"] == "ok" for p in ps), confirmed_bad=sum(p[c]["outcome_conf"] == "bad" for p in ps),
++                hedged=f("hedged"), conditional=f("conditional"), contradictory=f("contradictory"), refusal=f("refusal"),
++                parse_failure=f("parse_failure"), non_eos=f("non_eos"),
++                direction_yes=sum(p[c]["direction"] == "yes" for p in ps), direction_no=sum(p[c]["direction"] == "no" for p in ps),
++                mean_output_tokens=float(np.mean([p[c]["n_tokens"] for p in ps])))
++
++
++def subgroup_block(ps):
++    n = len(ps)
++    d = dict(n=n, E=cond_summary(ps, "E") if n else None)
++    if n:
++        for c in ("C", "W"):
++            d[c] = cond_summary(ps, c)
++        d["H_W_point"] = (sum((p["E"]["outcome"] == "ok" and p["W"]["outcome"] == "bad") - (p["E"]["outcome"] == "bad" and p["W"]["outcome"] == "ok")
++                              for p in ps)) / n
++        d["H_C_point"] = (sum((p["E"]["outcome"] == "ok" and p["C"]["outcome"] == "bad") - (p["E"]["outcome"] == "bad" and p["C"]["outcome"] == "ok")
++                              for p in ps)) / n
++    return d
++
++
++def report(ps, extra=None):
++    n = len(ps)
++    boot = bootstrap(ps)
++    bootc = bootstrap(ps, key="outcome_conf")
++    rep = dict(n=n, n_by_category={c: sum(p["cat"] == c for p in ps) for c in CATS}, conditions={c: cond_summary(ps, c) for c in S.CONDS},
++               transitions={c: transition_table(ps, c) for c in ("W", "C")}, transitions_confirmed={c: transition_table(ps, c, "outcome_conf") for c in ("W", "C")},
++               H=dict(W=boot["H_W"], C=boot["H_C"], W_minus_C=boot["H_W_minus_H_C"]), H_confirmed=dict(W=bootc["H_W"], C=bootc["H_C"]),
++               H_unknown_range=dict(W=h_range(ps, "W"), C=h_range(ps, "C")), bootstrap=boot, bootstrap_confirmed_only=bootc)
++    rng = {c: acc_range(ps, lambda p, c=c: p[c]["outcome"]) for c in S.CONDS}
++    rep["acc_range_unknown_as_wrong_or_right"] = rng
++    rep["acc_diff_range"] = dict(W_minus_E=diff_range(rng["W"], rng["E"]), C_minus_E=diff_range(rng["C"], rng["E"]))
++    rep["policies"] = {k: dict(n_ok=sum(p["policy_outcome"][k] == "ok" for p in ps), n_bad=sum(p["policy_outcome"][k] == "bad" for p in ps),
++                               n_unk=sum(p["policy_outcome"][k] == "unk" for p in ps), joint_success=sum(p["joint"][k] for p in ps))
++                       for k in ("B", "D_C", "D_W", "E", "C", "W", "S_C", "S_W")}
++    rep["S_fallback_to_draft_n"] = sum(p["e_unconfirmed_fallback"] for p in ps)
++    rep["category_subgroups"] = {c: subgroup_block([p for p in ps if p["cat"] == c]) for c in CATS}
++    rep["detector_subgroups"] = {k: subgroup_block([p for p in ps if (p["B"] == p["gt"]) == (k == "detector_correct")]) for k in ("detector_correct", "detector_wrong")}
++    rep["E_subgroups"] = {k: subgroup_block([p for p in ps if p["E"]["outcome"] == k]) for k in ("ok", "bad", "unk")}
++    eok = [p for p in ps if p["E"]["outcome"] == "ok"]
++    rep["conditional_on_E_ok"] = dict(
++        n=len(eok), W_bad=sum(p["W"]["outcome"] == "bad" for p in eok), W_unk=sum(p["W"]["outcome"] == "unk" for p in eok),
++        C_bad=sum(p["C"]["outcome"] == "bad" for p in eok), C_unk=sum(p["C"]["outcome"] == "unk" for p in eok),
++        W_bad_wilson=wilson(sum(p["W"]["outcome"] == "bad" for p in eok), len(eok)),
++        E_ok_and_B_ok=sum(p["B"] == p["gt"] for p in eok),
++        E_ok_B_ok_W_bad_ids=[p["id"] for p in eok if p["B"] == p["gt"] and p["W"]["outcome"] == "bad"],
++        reverse_transitions_E_bad_W_ok=sum(p["E"]["outcome"] == "bad" and p["W"]["outcome"] == "ok" for p in ps))
++    d = rep["bootstrap"]["dAcc_W_minus_E"]
++    dbad, dunk = rep["bootstrap"]["dBad_W_minus_E"], rep["bootstrap"]["dUnk_W_minus_E"]
++    rep["W_vs_E_decomposition"] = dict(dAcc_strict=d, dExplicitBad=dbad, dUnknown=dunk,
++                                       note="acc=1-bad-unk. 기술적 분해이며 판정 문턱이 아니다.")
++    hw = rep["H"]["W"]
++    if hw["point"] >= H_THRESHOLD and hw["lo"] > 0:
++        label = "content_harm_signal"
++    elif hw["hi"] < H_THRESHOLD:
++        label = "no_large_content_harm"
++    else:
++        label = "inconclusive"
++    rep["decision"] = dict(label=label, H_W=hw, threshold=H_THRESHOLD, rule="H_W>=0.10 & CI lower>0 → signal; CI upper<0.10 → no_large; else inconclusive",
++                           unknown_range_H_W=rep["H_unknown_range"]["W"],
++                           note="개발 진단. 합성 초안 개입의 제한된 관찰이며 자연 오류 빈도·임상 효용·신규 기여를 뜻하지 않는다.")
++    rep.update(extra or {})
++    return rep
++
++
++def cost(recs):
++    by = {}
++    for r in recs:
++        by.setdefault(r["cond"], []).append(r)
++    allr = recs
++    return dict(n=len(allr), sum_generate_s=sum(r["runtime_s_total"] for r in allr), sum_wall_s=sum(r["wall_s"] for r in allr),
++                n_retry=sum(len(r["attempts"]) > 1 for r in allr), n_attempts=sum(len(r["attempts"]) for r in allr),
++                new_tokens_final=sum(r["n_output_tokens"] for r in allr),
++                peak_mem_reserved_gb_max=max(r["peak_mem_reserved_gb_max"] for r in allr))
+diff --git a/ed118_gen.py b/ed118_gen.py
+new file mode 100644
+index 0000000..11e255a
+--- /dev/null
++++ b/ed118_gen.py
+@@ -0,0 +1,606 @@
++"""iter_118: pg43_run.py(iter_116 v2)의 복사본. 변경: (1) worker가 ed118_guard로 정답/평가 전용 경로(results/iter_118/private, GT manifest) 접근을 거부·기록한다,
++(2) CODE_FILES와 worker 실행 파일명 변경. 그 외 생성·재개·검증 로직은 pg43_run과 동일 (원본 pg43_run.py는 수정하지 않는다).
++
++(이하 원 설명) iter_043 생성 runner + launcher (pg41_run 기반; pg41_run.py는 iter_041/042 산출물 검증용으로 수정하지 않고 보존).
++
++iter_043 변경: (1) 요청 행에 modality(image|text)를 명시한다. text-only는 image/pixel 필드가 None이고 chat template 입력에 pixel_values와 image token이 없어야 한다(worker가 검사하고 record에 n_image_tokens 기록).
++(2) 영상 교환 요청은 donor_patient/recipient 필드를 별도로 보존한다(입력 영상=donor, prompt=recipient). GT는 요청에 넣지 않는다.
++(3) launcher가 허용 GPU를 실제 여유 메모리 큰 순서로 배정하고 worker당 (peak+2GiB)를 GPU별로 합산해 검사한다. 평가 진입점 verify_completion이 modality/image token/영상 hash를 재검증한다.
++
++(이하 pg41_run 설명)
++
++iter_041 생성 runner + launcher (pg40_run 기반; pg40_run.py는 iter_040 산출물 검증용으로 수정하지 않고 보존).
++
++pg40_run 대비 iter_041 변경: (1) protocol에 평가 GT manifest·selection lock·평가 소스 등 임의 파일 digest 잠금(--lock),
++(2) 부분 행 복구 시 잘라낸 원본 바이트를 별도 파일(.partial.<ts>.bin)로 보존, (3) record에 t_start·worker 타이밍 파일(모델 로딩/종료 시각) 추가,
++(4) verify_completion이 현재 영상 file/pixel hash, record 필드-요청 행 일치, 잠금 파일, worker 파일 hash를 모두 재검증,
++(5) launcher가 wall·GPU별 점유 구간(device-seconds)을 completion에 기록. iter_039/iter_040 결과·protocol은 읽기만 한다.
++
++worker:  CUDA_VISIBLE_DEVICES=<물리 gpu> python pg41_run.py worker --requests R --protocol P --out-dir D --worker K
++launcher: python pg41_run.py launch --requests R --protocol P --out-dir D --workers N [--peak-gb 14]
++- 소유권: launch.lock (flock, 프로세스 종료 시 자동 해제) / worker{K}.lock / 요청별 claims/<rid>.claim (flock: 죽은 소유자의 claim은 자동 회수).
++- 재개: 시작 시와 claim 직후 모든 기존 record를 요청 행·prompt·config·protocol·현재 영상 pixel hash·record digest와 대조한다.
++  중복·잉여·변조는 중단한다. 기존 결과는 덮어쓰지 않는다 (out-dir이 completion을 가지면 재실행 거부).
++- GT/labels는 읽지 않는다.
++"""
++import argparse
++import fcntl
++import glob
++import hashlib
++import json
++import os
++import subprocess
++import sys
++import time
++
++from rsna_diag import generate as G
++
++# iter_116: adapter=None 경로에서 실제 import되는 소스만 잠근다 (generate가 import하는 geometry·prompts, 패키지 __init__).
++# 과거 목록의 pg39_spec/pg39_data/parse/lora/queue_lock은 이 경로에서 호출되지 않는다 (lora는 adapter 지정 시에만 lazy import).
++CODE_FILES = ["ed118_gen.py", "ed118_guard.py", "rsna_diag/__init__.py", "rsna_diag/generate.py", "rsna_diag/geometry.py", "rsna_diag/prompts.py"]
++RUNNER = "ed118_gen_v1"
++
++
++class RunError(RuntimeError):
++    pass
++
++
++def sha_bytes(b):
++    return hashlib.sha256(b).hexdigest()
++
++
++def file_sha(p):
++    h = hashlib.sha256()
++    with open(p, "rb") as f:
++        for b in iter(lambda: f.read(1 << 22), b""):
++            h.update(b)
++    return h.hexdigest()
++
++
++def canon(o):
++    return json.dumps(o, sort_keys=True, ensure_ascii=False, default=str)
++
++
++def read_requests(path):
++    rows = [json.loads(l) for l in open(path) if l.strip()]
++    ids = [r["request_id"] for r in rows]
++    if len(ids) != len(set(ids)):
++        raise RunError("duplicate request_id in requests file")
++    for r in rows:
++        m = r.get("modality")
++        if m == "image":
++            if not (r.get("image") and r.get("image_file_sha256") and r.get("input_pixel_sha256")):
++                raise RunError(f"image row without image/hash fields {r['request_id']}")
++        elif m == "text":
++            if any(r.get(k) is not None for k in ("image", "image_file_sha256", "input_pixel_sha256")):
++                raise RunError(f"text row carries image fields {r['request_id']}")
++        else:
++            raise RunError(f"row modality must be image|text: {r['request_id']}")
++        if r["kind"] != "swap" and r.get("donor_patient") is not None:
++            raise RunError(f"donor_patient on non-swap row {r['request_id']}")
++        if r["kind"] == "swap" and (r["modality"] != "image" or not r.get("donor_patient") or r["donor_patient"] == r["patient"]
++                                    and not r.get("self_swap_regression")):
++            raise RunError(f"invalid swap row {r['request_id']}")
++    return rows
++
++
++def row_digest(row):
++    return sha_bytes(canon(row).encode())
++
++
++# ---------------- protocol ----------------
++def gate_ok(path):
++    d = json.load(open(path))
++    return d.get("run") is True
++
++
++def make_protocol(requests_path, out_path, adapter=None, gate=None, extra=None, lock=None):
++    """잠금: 코드 파일 hash, 요청 파일 hash, 영상 hash 목록 digest, 생성 config digest, 추가 잠금 파일(GT manifest·평가 소스 등)."""
++    rows = read_requests(requests_path)
++    core, cdig = static_config()
++    locked = {f: file_sha(f) for f in (lock or [])}
++    d = {"runner": RUNNER, "locked_files": locked, "code": {f: file_sha(f) for f in CODE_FILES}, "requests_sha256": file_sha(requests_path),
++         "requests_path": requests_path, "n_requests": len(rows),
++         "images_digest": sha_bytes(canon(sorted({(r["image"], r["image_file_sha256"], r["input_pixel_sha256"])
++                                                   for r in rows if r["modality"] == "image"})).encode()),
++         "n_by_modality": {m: sum(r["modality"] == m for r in rows) for m in ("image", "text")},
++         "n_by_kind": {k: sum(r["kind"] == k for r in rows) for k in sorted({r["kind"] for r in rows})},
++         "generation_config_digest": cdig, "generation_config": core, "extra": extra or {}, "adapter": None, "gate": None}
++    if adapter:
++        import torch
++        from rsna_diag import lora
++        blob = torch.load(os.path.join(adapter, "adapter.pt"), map_location="cpu", weights_only=True)
++        dg = lora.state_digest(blob["state"])
++        if dg != blob["digest"]:
++            raise RunError("adapter digest mismatch (file corrupted)")
++        d["adapter"] = {"path": adapter, "digest": dg, "file_sha256": file_sha(os.path.join(adapter, "adapter.pt"))}
++    if gate:
++        if not gate_ok(gate):
++            raise RunError(f"gate decision does not permit this stage: {gate}")
++        d["gate"] = {"decision_path": gate, "decision_sha256": file_sha(gate)}
++    if os.path.exists(out_path):
++        raise RunError(f"protocol exists: {out_path}")
++    os.makedirs(os.path.dirname(out_path) or ".", exist_ok=True)
++    tmp = out_path + f".{os.getpid()}.tmp"
++    json.dump(d, open(tmp, "w"), indent=1)
++    os.replace(tmp, out_path)
++    return d
++
++
++def static_config():
++    env = G.static_env()
++    core = {k: env[k] for k in G.CFG_KEYS}
++    core.update({"caps_IC": [1000, 2000, 4000], "caps_J": [2000, 4000, 8000], "do_sample": False, "runner": RUNNER})
++    return core, sha_bytes(canon(core).encode())
++
++
++def verify_protocol(path, requests_path):
++    p = json.load(open(path))
++    bad = [f for f, h in p["code"].items() if file_sha(f) != h]
++    if bad:
++        raise RunError(f"code changed since protocol lock: {bad}")
++    badl = [f for f, h in p.get("locked_files", {}).items() if file_sha(f) != h]
++    if badl:
++        raise RunError(f"locked file changed since protocol lock: {badl}")
++    if file_sha(requests_path) != p["requests_sha256"]:
++        raise RunError("requests file changed since protocol lock")
++    if p.get("adapter") and file_sha(os.path.join(p["adapter"]["path"], "adapter.pt")) != p["adapter"]["file_sha256"]:
++        raise RunError("adapter file changed since protocol lock")
++    if p.get("gate") and (file_sha(p["gate"]["decision_path"]) != p["gate"]["decision_sha256"] or not gate_ok(p["gate"]["decision_path"])):
++        raise RunError("stage gate decision missing/changed/not permitting")
++    return sha_bytes(canon(p).encode()), p
++
++
++# ---------------- record validation ----------------
++def record_digest(rec):
++    return sha_bytes(canon({k: v for k, v in rec.items() if k != "record_digest"}).encode())
++
++
++def read_records(path):
++    """완결된 행(개행으로 끝난 행)만 읽는다. 다른 worker가 쓰는 중인 마지막 부분 행은 무시한다. 중간 행이 깨져 있으면 예외."""
++    out = []
++    if os.path.exists(path):
++        with open(path, "rb") as f:
++            data = f.read()
++        for ln in data.split(b"\n")[:-1]:
++            if ln.strip():
++                out.append(json.loads(ln))
++    return out
++
++
++def repair_tail(path):
++    """자신의 파일 끝에 개행 없는 부분 행이 있으면(이전 프로세스 비정상 종료) 잘라내고 잘라낸 바이트 수를 반환한다."""
++    if not os.path.exists(path):
++        return 0
++    with open(path, "rb") as f:
++        data = f.read()
++    tail = data.rsplit(b"\n", 1)[-1] if b"\n" in data else data
++    if not data.endswith(b"\n") and tail:
++        ts = time.time()
++        keep = f"{path}.partial.{int(ts)}.{os.getpid()}.bin"
++        with open(keep, "xb") as f:  # 원본 바이트 보존 (덮어쓰기 금지)
++            f.write(tail)
++            f.flush()
++            os.fsync(f.fileno())
++        with open(path, "r+b") as f:
++            f.truncate(len(data) - len(tail))
++        with open(path + ".repair.log", "a") as f:
++            f.write(json.dumps({"ts": ts, "truncated_bytes": len(tail), "preserved_as": keep,
++                                "preserved_sha256": sha_bytes(tail)}) + "\n")
++        return len(tail)
++    return 0
++
++
++def validate_records(files, rows_by_id, pdig, cdig, px, adig=None):
++    """files {path: [records]}. returns {request_id: record}. 이상이 있으면 RunError."""
++    done = {}
++    for fn, recs in files.items():
++        for r in recs:
++            rid = r.get("request_id")
++            row = rows_by_id.get(rid)
++            if row is None:
++                raise RunError(f"unexpected record {rid} in {fn}")
++            if rid in done:
++                raise RunError(f"duplicate record {rid} in {fn}")
++            if r.get("record_digest") != record_digest(r):
++                raise RunError(f"record digest mismatch (tampered?) {rid} in {fn}")
++            if r.get("row_digest") != row_digest(row) or r.get("prompt_sha256") != row["prompt_sha256"]:
++                raise RunError(f"request row/prompt mismatch {rid}")
++            if r.get("adapter_digest") != adig:
++                raise RunError(f"adapter digest mismatch {rid}")
++            if r.get("protocol_digest") != pdig or r.get("config_digest") != cdig:
++                raise RunError(f"protocol/config mismatch {rid}")
++            if r.get("modality") != row["modality"]:
++                raise RunError(f"record modality != request modality {rid}")
++            if row["modality"] == "image":
++                if r.get("input_pixel_sha256") != row["input_pixel_sha256"] or px(row["image"]) != row["input_pixel_sha256"]:
++                    raise RunError(f"input pixel hash mismatch {rid}")
++                if not r.get("n_image_tokens"):
++                    raise RunError(f"image record without image tokens {rid}")
++            else:
++                if r.get("input_pixel_sha256") is not None or r.get("n_image_tokens") != 0 or r.get("has_pixel_values") is not False:
++                    raise RunError(f"text-only record carries image input {rid}")
++            if any(r.get(k) != row.get(k) for k in ("cond", "patient", "targets", "kind", "image", "donor_patient")):
++                raise RunError(f"record identity fields != request row {rid}")
++            done[rid] = r
++    return done
++
++
++# ---------------- worker ----------------
++def try_flock(path):
++    fd = os.open(path, os.O_CREAT | os.O_RDWR)
++    try:
++        fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
++    except BlockingIOError:
++        os.close(fd)
++        return None
++    os.ftruncate(fd, 0)
++    os.write(fd, json.dumps({"pid": os.getpid(), "ts": time.time()}).encode())
++    return fd
++
++
++GUARD_DENY = ["results/iter_118/private", "results/iter_010/manifests/gt_manifest.json", "results/iter_009/manifests/gt_manifest.json",
++              "results/iter_116/provenance/gt.json"]
++
++
++def worker_main(a):
++    import ed118_guard
++    os.makedirs(a.out_dir, exist_ok=True)
++    ed118_guard.install(GUARD_DENY, os.path.join(a.out_dir, f"file_access.worker{a.worker}.{int(time.time())}.{os.getpid()}.json"))
++    pdig, proto = verify_protocol(a.protocol, a.requests)
++    rows = read_requests(a.requests)
++    rows_by_id = {r["request_id"]: r for r in rows}
++    os.makedirs(a.out_dir, exist_ok=True)
++    if os.path.exists(os.path.join(a.out_dir, "completion.json")):
++        raise RunError("completion.json exists: refuse to rerun into a completed out-dir")
++    wl = try_flock(os.path.join(a.out_dir, f"worker{a.worker}.lock"))
++    if wl is None:
++        sys.exit(f"worker {a.worker} already running")
++    t_proc_start = time.time()
++    torch, proc, model = G.load_model()
++    adig = None
++    if proto.get("adapter"):
++        adig = G.load_adapter(torch, model, proto["adapter"]["path"])
++        if adig != proto["adapter"]["digest"]:
++            sys.exit("loaded adapter digest != protocol")
++    t_model_ready = time.time()
++    env = G.env_info(torch, proc, model)
++    core = {k: env[k] for k in G.CFG_KEYS}
++    core.update({"caps_IC": [1000, 2000, 4000], "caps_J": [2000, 4000, 8000], "do_sample": False, "runner": RUNNER})
++    cdig = sha_bytes(canon(core).encode())
++    if cdig != proto["generation_config_digest"]:
++        sys.exit("runtime generation config digest != protocol")
++    eos = env["eos_token_id"]
++    eos_ids = set(eos if isinstance(eos, list) else [eos])
++    envp = os.path.join(a.out_dir, f"gen_worker{a.worker}.jsonl.env.json")
++    if not os.path.exists(envp):
++        json.dump({"env": env, "config_digest": cdig, "protocol_digest": pdig, "worker": a.worker,
++                   "physical_cuda_visible_devices": os.environ.get("CUDA_VISIBLE_DEVICES")}, open(envp, "w"),
++                  indent=1, default=str)
++    cache = {}
++
++    def px(path):
++        if path not in cache:
++            cache[path] = G.load_image(path)[2]
++        return cache[path]
++
++    img_tok = getattr(model.config, "image_token_id", None) or getattr(model.config, "image_token_index", None)
++    if img_tok is None:
++        sys.exit("cannot determine image token id")
++
++    def read_all():
++        return {f: read_records(f) for f in sorted(glob.glob(os.path.join(a.out_dir, "gen_worker*.jsonl")))}
++
++    out = os.path.join(a.out_dir, f"gen_worker{a.worker}.jsonl")
++    repair_tail(out)
++    done = validate_records(read_all(), rows_by_id, pdig, cdig, px, adig)
++    cdir = os.path.join(a.out_dir, "claims")
++    os.makedirs(cdir, exist_ok=True)
++    log = open(out + ".log", "a")
++    t0, n_new = time.time(), 0
++    for row in sorted(rows, key=lambda r: r["order_key"]):
++        if row["request_id"] in done:
++            continue
++        if a.max_requests is not None and n_new >= a.max_requests:
++            break
++        fd = try_flock(os.path.join(cdir, row["request_id"] + ".claim"))
++        if fd is None:
++            continue
++        try:
++            done = validate_records(read_all(), rows_by_id, pdig, cdig, px, adig)
++            if row["request_id"] in done:
++                continue
++            tw = time.time()
++            t_start_req = tw
++            try:
++                if row["modality"] == "image":
++                    image, aff, pxs = G.load_image(row["image"])
++                    inp = G.build_inputs(proc, image, row["prompt"])
++                else:
++                    aff, pxs = None, None
++                    inp = G.build_inputs_text(proc, row["prompt"])
++                ids_in = inp["input_ids"][0].tolist()
++                n_img_tok = sum(1 for t in ids_in if t == img_tok)
++                has_pv = "pixel_values" in inp
++                if row["modality"] == "text" and (has_pv or n_img_tok != 0 or any(k.startswith("pixel") or "image" in k for k in inp)):
++                    raise RunError(f"text-only input carries image tensors/tokens: {row['request_id']} keys={list(inp)}")
++                if row["modality"] == "image" and (not has_pv or n_img_tok == 0):
++                    raise RunError(f"image input lacks pixel_values/image tokens: {row['request_id']}")
++                attempts = []
++                for cap in row["caps"]:
++                    at = G.generate(torch, proc, model, inp, cap, eos_ids)
++                    if attempts:
++                        at["prefix_matches_previous"] = at["suffix_ids"][:len(attempts[-1]["suffix_ids"])] == attempts[-1]["suffix_ids"]
++                    attempts.append(at)
++                    if at["ended_eos"]:
++                        break
++            except torch.cuda.OutOfMemoryError as e:
++                log.write(json.dumps({"event": "oom", "rid": row["request_id"], "err": str(e)[:200]}) + "\n")
++                log.flush()
++                raise
++            fin = attempts[-1]
++            for at in attempts:
++                at["suffix_text_raw"] = proc.tokenizer.decode(at["suffix_ids"], skip_special_tokens=False)
++            rec = {"request_id": row["request_id"], "row_digest": row_digest(row), "cond": row["cond"],
++                   "patient": row["patient"], "targets": row["targets"], "kind": row["kind"],
++                   "prompt_sha256": row["prompt_sha256"], "image": row["image"],
++                   "modality": row["modality"], "donor_patient": row.get("donor_patient"), "n_image_tokens": n_img_tok,
++                   "has_pixel_values": has_pv, "input_keys": sorted(inp.keys()),
++                   "input_pixel_sha256": pxs, "pad_affine_top_left_side": (list(aff) if aff is not None else None),
++                   "n_input_tokens": len(ids_in), "input_ids_sha256": sha_bytes(json.dumps(ids_in).encode()),
++                   "suffix_ids": fin["suffix_ids"], "suffix_text_raw": fin["suffix_text_raw"],
++                   "n_output_tokens": fin["n_new"], "finish_reason": fin["finish_reason"], "ended_eos": fin["ended_eos"],
++                   "final_cap": fin["cap"],
++                   "attempts": [{k: v for k, v in at.items() if k != "suffix_ids"} for at in attempts],
++                   "runtime_s_total": sum(at["runtime_s"] for at in attempts), "wall_s": time.time() - tw, "t_start": t_start_req,
++                   "peak_mem_alloc_gb_max": max(at["peak_mem_alloc_gb"] for at in attempts),
++                   "peak_mem_reserved_gb_max": max(at["peak_mem_reserved_gb"] for at in attempts),
++                   "protocol_digest": pdig, "config_digest": cdig, "adapter_digest": adig, "worker": a.worker, "ts": time.time(),
++                   "gpu_uuid": env.get("gpu_uuid"), "physical_gpu": os.environ.get("CUDA_VISIBLE_DEVICES")}
++            rec["record_digest"] = record_digest(rec)
++            with open(out, "a") as f:
++                f.write(json.dumps(rec) + "\n")
++                f.flush()
++                os.fsync(f.fileno())
++            done[row["request_id"]] = rec
++            n_new += 1
++            log.write(json.dumps({"event": "done", "rid": row["request_id"], "cond": row["cond"], "n_out": rec["n_output_tokens"],
++                                  "finish": rec["finish_reason"], "runtime_s": round(rec["runtime_s_total"], 1),
++                                  "peak_gb": round(rec["peak_mem_alloc_gb_max"], 2), "elapsed": round(time.time() - t0, 1)}) + "\n")
++            log.flush()
++        finally:
++            os.close(fd)
++    tp = os.path.join(a.out_dir, f"worker{a.worker}.timing.{int(t_proc_start)}.{os.getpid()}.json")
++    json.dump({"worker": a.worker, "pid": os.getpid(), "t_proc_start": t_proc_start, "t_model_ready": t_model_ready,
++               "t_end": time.time(), "n_new": n_new, "load_s": t_model_ready - t_proc_start,
++               "physical_cuda_visible_devices": os.environ.get("CUDA_VISIBLE_DEVICES")}, open(tp, "x"), indent=1)
++    print(f"worker {a.worker}: finished; {n_new} new requests", flush=True)
++
++
++# ---------------- launcher ----------------
++def gpu_free_mib():
++    r = subprocess.run(["nvidia-smi", "--query-gpu=index,memory.used,memory.total", "--format=csv,noheader,nounits"],
++                       capture_output=True, text=True, check=True)
++    return {int(l.split(",")[0]): (int(l.split(",")[2]) - int(l.split(",")[1])) for l in r.stdout.strip().splitlines()}
++
++
++def allowed_gpus():
++    v = os.environ.get("CUDA_VISIBLE_DEVICES")
++    if not v:
++        raise RunError("CUDA_VISIBLE_DEVICES not set; refusing to pick devices")
++    return [int(x) for x in v.split(",")]
++
++
++def verify_completion(out_dir, requests_path, protocol_path):
++    """평가 진입점용: completion 내용·요청 집합·record digest를 다시 검증한다. returns records list."""
++    comp = json.load(open(os.path.join(out_dir, "completion.json")))
++    pdig, proto = verify_protocol(protocol_path, requests_path)
++    rows = read_requests(requests_path)
++    rows_by_id = {r["request_id"]: r for r in rows}
++    if comp.get("protocol_digest") != pdig or any(c != 0 for c in comp["exit_codes"]):
++        raise RunError("completion protocol/exit code invalid")
++    recs = []
++    for fn in sorted(glob.glob(os.path.join(out_dir, "gen_worker*.jsonl"))):
++        if comp["worker_file_sha256"].get(os.path.basename(fn)) != file_sha(fn):
++            raise RunError(f"worker file changed after completion: {fn}")
++        recs += read_records(fn)
++    ids = [r["request_id"] for r in recs]
++    if len(ids) != len(set(ids)) or set(ids) != set(rows_by_id) or len(ids) != comp["n_requests"]:
++        raise RunError("completion: request set mismatch (missing/duplicate/extra)")
++    want_ad = (proto.get("adapter") or {}).get("digest")
++    files_now = sorted(os.path.basename(f) for f in glob.glob(os.path.join(out_dir, "gen_worker*.jsonl")))
++    if files_now != sorted(comp["worker_file_sha256"]):
++        raise RunError("completion: worker file set differs from completion record")
++    img_ok = {}
++    for r in recs:
++        row = rows_by_id[r["request_id"]]
++        if r["record_digest"] != record_digest(r) or r["row_digest"] != row_digest(row):
++            raise RunError("completion: record digest mismatch")
++        if r.get("adapter_digest") != want_ad or r.get("protocol_digest") != pdig:
++            raise RunError("completion: adapter/protocol digest mismatch in record")
++        if r.get("config_digest") != proto["generation_config_digest"]:
++            raise RunError("completion: generation config digest mismatch in record")
++        if r.get("prompt_sha256") != row["prompt_sha256"] or sha_bytes(row["prompt"].encode()) != row["prompt_sha256"]:
++            raise RunError("completion: prompt hash mismatch")
++        if any(r.get(k) != row.get(k) for k in ("cond", "patient", "targets", "kind", "image", "donor_patient", "modality")):
++            raise RunError("completion: record identity fields != request row")
++        if row["modality"] == "text":
++            if r.get("n_image_tokens") != 0 or r.get("has_pixel_values") is not False or r.get("input_pixel_sha256") is not None:
++                raise RunError("completion: text-only record carries image input")
++            continue
++        if not r.get("n_image_tokens") or r.get("has_pixel_values") is not True:
++            raise RunError("completion: image record lacks image tokens/pixel_values")
++        if row["image"] not in img_ok:  # 현재 영상 file/pixel hash 재검증
++            if file_sha(row["image"]) != row["image_file_sha256"]:
++                raise RunError(f"completion: current image file hash mismatch {row['image']}")
++            img_ok[row["image"]] = G.load_image(row["image"])[2]
++        if img_ok[row["image"]] != row["input_pixel_sha256"] or r["input_pixel_sha256"] != row["input_pixel_sha256"]:
++            raise RunError(f"completion: current image pixel hash mismatch {row['image']}")
++    return recs
++
++
++def _union_len(iv):
++    iv = sorted(iv)
++    tot, cur_s, cur_e = 0.0, None, None
++    for s_, e_ in iv:
++        if cur_e is None or s_ > cur_e:
++            if cur_e is not None:
++                tot += cur_e - cur_s
++            cur_s, cur_e = s_, e_
++        else:
++            cur_e = max(cur_e, e_)
++    if cur_e is not None:
++        tot += cur_e - cur_s
++    return tot
++
++
++def occupancy(recs, out_dir, mapping, launcher_wall_s, t_min=None):
++    """GPU별로 worker 요청 구간(t_start~ts)의 합집합 길이(겹침은 중복 합산 안 함)와 worker 프로세스 구간(모델 로딩 포함)의 합집합을 합산한다."""
++    # iter_116: 재개 전후 worker→GPU 배정이 달라질 수 있으므로 record/timing에 기록된 실제 물리 GPU를 우선 사용한다
++    # (없는 과거 record만 현재 launch mapping으로 대체). 출력 0건이어도 실패하지 않는다.
++    gpu_of = {k: mapping[k] for k in mapping}
++    req_iv, proc_iv = {}, {}
++    for r in recs:
++        g = r.get("physical_gpu")
++        g = int(g) if g not in (None, "") else gpu_of[r["worker"]]
++        req_iv.setdefault(g, []).append((r["t_start"], r["ts"]))
++    for fn in glob.glob(os.path.join(out_dir, "worker*.timing.*.json")):
++        t = json.load(open(fn))
++        if t_min is not None and t["t_proc_start"] < t_min:
++            continue
++        g = t.get("physical_cuda_visible_devices")
++        g = int(g) if g not in (None, "") else gpu_of.get(t["worker"])
++        proc_iv.setdefault(g, []).append((t["t_proc_start"], t["t_end"]))
++    tmin = min((s_ for iv in req_iv.values() for s_, _ in iv), default=None)
++    tmax = max((e_ for iv in req_iv.values() for _, e_ in iv), default=None)
++    return {"device_seconds_generate_union": sum(_union_len(iv) for iv in req_iv.values()),
++            "device_seconds_incl_loading_union": sum(_union_len(iv) for iv in proc_iv.values()) if proc_iv else None,
++            "n_gpus_used": len(req_iv), "first_request_start_to_last_end_s": (tmax - tmin) if tmin is not None else 0.0,
++            "launcher_wall_s_incl_loading": launcher_wall_s}
++
++
++def cost_summary(allr):
++    """records가 0건이어도 동작한다 (초기 실패 attempt 대응)."""
++    if not allr:
++        return {"n_records": 0, "sum_request_wall_s": 0.0, "sum_generate_runtime_s": 0.0, "n_records_with_retry": 0,
++                "by_modality_sum_generate_s": {"image": 0.0, "text": 0.0}, "peak_mem_reserved_gb_max": None,
++                "peak_mem_alloc_gb_max": None, "p95_request_wall_s": None, "new_tokens_all_attempts": 0, "new_tokens_final": 0}
++    return {"n_records": len(allr), "sum_request_wall_s": sum(r["wall_s"] for r in allr),
++            "sum_generate_runtime_s": sum(r["runtime_s_total"] for r in allr),
++            "n_records_with_retry": sum(len(r["attempts"]) > 1 for r in allr),
++            "by_modality_sum_generate_s": {m: sum(r["runtime_s_total"] for r in allr if r["modality"] == m) for m in ("image", "text")},
++            "peak_mem_reserved_gb_max": max(r["peak_mem_reserved_gb_max"] for r in allr),
++            "peak_mem_alloc_gb_max": max(r["peak_mem_alloc_gb_max"] for r in allr),
++            "p95_request_wall_s": sorted(r["wall_s"] for r in allr)[int(0.95 * (len(allr) - 1))],
++            "new_tokens_all_attempts": sum(at["n_new"] for r in allr for at in r["attempts"]),
++            "new_tokens_final": sum(r["n_output_tokens"] for r in allr)}
++
++
++def launch_main(a):
++    pdig, proto = verify_protocol(a.protocol, a.requests)
++    os.makedirs(a.out_dir, exist_ok=True)
++    if os.path.exists(os.path.join(a.out_dir, "completion.json")):
++        raise RunError("completion.json exists in out-dir; use a new attempt dir")
++    lk = try_flock(os.path.join(a.out_dir, "launch.lock"))
++    if lk is None:
++        sys.exit("another launcher owns this out-dir")
++    gpus = allowed_gpus()
++    if a.gpus:
++        sel = [int(x) for x in a.gpus.split(",")]
++        if not set(sel) <= set(gpus):
++            sys.exit(f"--gpus {sel} not within inherited allowed set {gpus}")
++        gpus = sel
++    free = gpu_free_mib()
++    if any(g not in free for g in gpus):
++        sys.exit(f"allowed gpus {gpus} not all visible to nvidia-smi {sorted(free)}")
++    gpus = sorted(gpus, key=lambda g: (-free[g], g))  # 실제 여유 메모리 큰 장치부터 배정
++    per = {}
++    for k in range(a.workers):
++        g = gpus[k % len(gpus)]
++        per.setdefault(g, []).append(k)
++    for g, ws in per.items():
++        need = len(ws) * (a.peak_gb + 2.0) * 1024
++        if free[g] < need:
++            sys.exit(f"gpu {g}: free {free[g]}MiB < need {need:.0f}MiB for workers {ws}")
++    mapping = {k: gpus[k % len(gpus)] for k in range(a.workers)}
++    attempt = len(glob.glob(os.path.join(a.out_dir, "launch_children.a*.json")))
++    json.dump({"attempt": attempt, "t_launch": time.time(), "mapping_worker_to_physical_gpu": mapping, "free_mib_before": free,
++               "allowed": gpus, "peak_gb_assumed": a.peak_gb, "workers": a.workers, "max_requests": a.max_requests,
++               "inherited_cuda_visible_devices": os.environ.get("CUDA_VISIBLE_DEVICES")},
++              open(os.path.join(a.out_dir, f"launch_children.a{attempt}.json"), "x"), indent=1)  # attempt별 보존 (덮어쓰기 금지)
++    procs = {}
++    t0 = time.time()
++    for k in range(a.workers):
++        env = dict(os.environ, CUDA_VISIBLE_DEVICES=str(mapping[k]))
++        cmd = [sys.executable, "ed118_gen.py", "worker", "--requests", a.requests, "--protocol", a.protocol,
++               "--out-dir", a.out_dir, "--worker", str(k)]
++        if a.max_requests is not None:
++            cmd += ["--max-requests", str(a.max_requests)]
++        procs[k] = subprocess.Popen(cmd, env=env, stdout=open(os.path.join(a.out_dir, f"worker{k}.stdout"), "a"),
++                                    stderr=open(os.path.join(a.out_dir, f"worker{k}.stderr"), "a"))
++    rl = open(os.path.join(a.out_dir, "resource_log.jsonl"), "a")
++    while any(p.poll() is None for p in procs.values()):
++        time.sleep(15)
++        used = subprocess.run(["nvidia-smi", "--query-gpu=index,memory.used,utilization.gpu", "--format=csv,noheader,nounits"],
++                              capture_output=True, text=True).stdout.strip().splitlines()
++        rl.write(json.dumps({"t": round(time.time() - t0, 1), "gpu": used}) + "\n")
++        rl.flush()
++    codes = [procs[k].returncode for k in range(a.workers)]
++    wall = time.time() - t0
++    rows = read_requests(a.requests)
++    recs = []
++    for fn in sorted(glob.glob(os.path.join(a.out_dir, "gen_worker*.jsonl"))):
++        recs += read_records(fn)
++    n_done = len({r["request_id"] for r in recs})
++    allr = [r for r in recs]
++    cost = cost_summary(allr)  # 디렉터리 내 모든 attempt 누적
++    cost.update(occupancy(recs, out_dir=a.out_dir, mapping=mapping, launcher_wall_s=wall))
++    new_r = [r for r in recs if r["ts"] >= t0]  # 이번 attempt에서 생성된 record만
++    cost_this = cost_summary(new_r)
++    if new_r:
++        cost_this.update(occupancy(new_r, out_dir=a.out_dir, mapping=mapping, launcher_wall_s=wall, t_min=t0 - 1))
++    res = {"cost": cost, "cost_this_attempt": cost_this, "attempt": attempt, "exit_codes": codes, "wall_s": wall,
++           "n_records": len(recs), "n_unique": n_done, "n_requests": len(rows),
++           "workers": a.workers, "mapping": mapping, "protocol_digest": pdig}
++    if a.max_requests is None and all(c == 0 for c in codes) and n_done == len(rows) == len(recs):
++        res["worker_file_sha256"] = {os.path.basename(f): file_sha(f)
++                                     for f in sorted(glob.glob(os.path.join(a.out_dir, "gen_worker*.jsonl")))}
++        tmp = os.path.join(a.out_dir, f"completion.{os.getpid()}.tmp")
++        json.dump(res, open(tmp, "w"), indent=1)
++        os.replace(tmp, os.path.join(a.out_dir, "completion.json"))
++        print("completion written", json.dumps({k: res[k] for k in ("exit_codes", "wall_s", "n_unique")}))
++    else:
++        json.dump(res, open(os.path.join(a.out_dir, f"partial_{int(time.time())}.json"), "w"), indent=1)
++        print("NOT complete", json.dumps({k: res[k] for k in ("exit_codes", "wall_s", "n_unique", "n_requests")}))
++        sys.exit(1)
++
++
++def main():
++    ap = argparse.ArgumentParser()
++    sub = ap.add_subparsers(dest="cmd", required=True)
++    w = sub.add_parser("worker")
++    l = sub.add_parser("launch")
++    pp = sub.add_parser("protocol")
++    pp.add_argument("--requests", required=True)
++    pp.add_argument("--out", required=True)
++    pp.add_argument("--adapter", default=None, help="adapter 디렉터리 (adapter.pt 포함)")
++    pp.add_argument("--gate", default=None, help="run=true decision artifact (후속 단계만)")
++    pp.add_argument("--lock", nargs="*", default=[], help="추가로 hash 잠글 파일 (GT manifest, selection lock, 평가 소스 등)")
++    for s in (w, l):
++        s.add_argument("--requests", required=True)
++        s.add_argument("--protocol", required=True)
++        s.add_argument("--out-dir", required=True)
++        s.add_argument("--max-requests", type=int, default=None)
++    w.add_argument("--worker", type=int, required=True)
++    l.add_argument("--workers", type=int, required=True)
++    l.add_argument("--gpus", default=None, help="허용 집합 안의 부분집합 (예: 0 또는 0,1)")
++    l.add_argument("--peak-gb", type=float, default=14.0)
++    a = ap.parse_args()
++    if a.cmd == "protocol":
++        make_protocol(a.requests, a.out, adapter=a.adapter, gate=a.gate, lock=a.lock)
++        return
++    (worker_main if a.cmd == "worker" else launch_main)(a)
++
++
++if __name__ == "__main__":
++    main()
+diff --git a/ed118_guard.py b/ed118_guard.py
+new file mode 100644
+index 0000000..2aea307
+--- /dev/null
++++ b/ed118_guard.py
+@@ -0,0 +1,47 @@
++"""iter_118: 생성·detector 프로세스의 정답 파일 접근 거부 + 열린 파일 기록 (sys.addaudithook).
++
++- install(deny, log_path): deny 경로(디렉터리/파일) 아래를 open하려 하면 PermissionError. 열린 경로 집합을 종료 시 log_path에 기록한다.
++- 부모(감독기·평가기)는 이 hook을 설치하지 않으며 정답을 읽는다. worker/detector만 hook 아래에서 실행된다.
++"""
++import atexit
++import json
++import os
++import sys
++
++_state = {"opened": set(), "denied": [], "installed": False}
++
++
++def _norm(p):
++    try:
++        return os.path.realpath(os.fspath(p))
++    except TypeError:
++        return None
++
++
++def install(deny, log_path):
++    deny = [os.path.realpath(d) for d in deny]
++    if _state["installed"]:
++        return
++
++    def hook(event, args):
++        if event != "open":
++            return
++        p = _norm(args[0]) if args and isinstance(args[0], (str, bytes, os.PathLike)) else None
++        if p is None:
++            return
++        _state["opened"].add(p)
++        for d in deny:
++            if p == d or p.startswith(d + os.sep):
++                _state["denied"].append(p)
++                raise PermissionError(f"ed118_guard: 정답/평가 전용 경로 접근 거부 {p}")
++
++    def dump():
++        tmp = f"{log_path}.{os.getpid()}.tmp"
++        with open(tmp, "w") as f:
++            json.dump({"pid": os.getpid(), "argv": sys.argv, "deny": deny, "n_opened": len(_state["opened"]),
++                       "denied": _state["denied"], "opened": sorted(_state["opened"])}, f)
++        os.replace(tmp, log_path)
++
++    sys.addaudithook(hook)
++    atexit.register(dump)
++    _state["installed"] = True
+diff --git a/ed118_run.py b/ed118_run.py
+new file mode 100644
+index 0000000..c991256
+--- /dev/null
++++ b/ed118_run.py
+@@ -0,0 +1,188 @@
++"""iter_118 감독기: TECH 기술 검사(2/4 worker·재개) → MAIN 생성 → 평가·독립 검산 → 봉인.
++
++모든 결과는 results/iter_118 아래 새 경로. 평가 잠금(private/eval_lock.json)은 부모가 검증한다 (worker는 private를 열 수 없다).
++ stage 명령:
++   gen    --name TECH_w2 --requests TECH --workers 2 [--max-requests N]   생성 launcher 호출 (protocol은 stage별 요청 파일 기준)
++   techreport                                                              TECH 기술 검사 요약 (정답률 gate 아님)
++   eval                                                                    MAIN 평가 + 독립 verifier
++   seal                                                                    검증 대상 digest 봉인
++"""
++import argparse
++import glob
++import json
++import os
++import subprocess
++import sys
++import time
++from pathlib import Path
++
++import ed118_eval as EV
++import ed118_gen as RUN
++import ed118_spec as S
++import ed118_verify as V
++
++OUT = Path("results/iter_118")
++PRIV = OUT / "private"
++LOCK = PRIV / "eval_lock.json"
++REQ = lambda n: str(OUT / f"requests/{n}.jsonl")
++PROTO = lambda n: str(OUT / f"protocol/protocol_{n}.json")
++
++
++def read(p):
++    return json.loads(Path(p).read_text())
++
++
++def write(p, obj):
++    p = Path(p)
++    p.parent.mkdir(parents=True, exist_ok=True)
++    with p.open("x") as f:
++        json.dump(obj, f, indent=1, ensure_ascii=False, sort_keys=True)
++
++
++def event(ev, **kw):
++    OUT.mkdir(exist_ok=True)
++    with (OUT / "events.jsonl").open("a") as f:
++        f.write(json.dumps(dict(event=ev, epoch=time.time(), **kw)) + "\n")
++
++
++def verify_lock():
++    lock = read(LOCK)
++    bad = [p for p, h in lock["files"].items() if RUN.file_sha(p) != h]
++    if bad:
++        raise RuntimeError(f"평가 잠금 불일치: {bad}")
++    return lock
++
++
++def gen(a):
++    verify_lock()
++    out_dir = str(OUT / "gen" / a.name)
++    t0 = time.monotonic()
++    cmd = [sys.executable, "-u", "ed118_gen.py", "launch", "--requests", REQ(a.requests), "--protocol", PROTO(a.requests), "--out-dir", out_dir,
++           "--workers", str(a.workers), "--peak-gb", str(a.peak_gb)]
++    if a.max_requests is not None:
++        cmd += ["--max-requests", str(a.max_requests)]
++    event("gen_start", name=a.name, argv=cmd, free_mib=RUN.gpu_free_mib())
++    os.makedirs(OUT / "launch", exist_ok=True)
++    n = len(glob.glob(str(OUT / "launch" / f"{a.name}.attempt*.stdout")))
++    with open(OUT / "launch" / f"{a.name}.attempt{n}.stdout", "x") as so, open(OUT / "launch" / f"{a.name}.attempt{n}.stderr", "x") as se:
++        rc = subprocess.run(cmd, stdout=so, stderr=se).returncode
++    event("gen_exit", name=a.name, exit_code=rc, wall_s=time.monotonic() - t0)
++    print(a.name, "rc", rc, "wall_s", round(time.monotonic() - t0, 1))
++    sys.exit(0 if (rc == 0 or a.max_requests is not None) else rc)
++
++
++def classify_summary(recs, cmap):
++    """TECH: 정답 없이 분류 분포만 (조건별 방향·flag 수). 정답률은 보고하지 않는다."""
++    out = {}
++    for r in recs:
++        c = cmap[r["patient"]][r["cond"]]
++        k = S.classify(r["suffix_text_raw"], r["ended_eos"])
++        d = out.setdefault(c, dict(n=0, yes=0, no=0, unknown=0, hedged=0, conditional=0, contradictory=0, refusal=0, parse_failure=0, non_eos=0,
++                                   confirmed=0))
++        d["n"] += 1
++        d[k["direction"]] += 1
++        for f in ("hedged", "conditional", "contradictory", "refusal", "parse_failure", "non_eos", "confirmed"):
++            d[f] += int(k[f])
++    return out
++
++
++def techreport(a):
++    verify_lock()
++    cmap = read(PRIV / "cond_map.json")
++    res = dict(created=time.time(), checks={})
++    stages = {}
++    for name, reqn in (("TECH_w2", "TECH"), ("TECH_w4", "TECH"), ("RESUME6", "RESUME6")):
++        recs = RUN.verify_completion(str(OUT / "gen" / name), REQ(reqn), PROTO(reqn))
++        stages[name] = recs
++        comp = read(OUT / "gen" / name / "completion.json")
++        res[name] = dict(n=len(recs), wall_s=comp["wall_s"], workers=comp["workers"], cost=comp["cost"], exit_codes=comp["exit_codes"],
++                         mapping=comp["mapping"])
++    tok = lambda recs: {r["request_id"]: r["suffix_ids"] for r in recs}
++    t2, t4, tr = tok(stages["TECH_w2"]), tok(stages["TECH_w4"]), tok(stages["RESUME6"])
++    res["checks"]["w2_w4_tokens_equal"] = t2 == t4 and len(t2) == 18
++    res["checks"]["resume_tokens_equal"] = all(tr[k] == t2[k] for k in tr) and len(tr) == 6
++    res["checks"]["same_pixels_within_patient"] = all(
++        len({r["input_pixel_sha256"] for r in stages["TECH_w2"] if r["patient"] == p}) == 1 for p in {r["patient"] for r in stages["TECH_w2"]})
++    res["checks"]["all_eos_or_retried"] = [r["request_id"] for r in stages["TECH_w2"] if not r["ended_eos"]]
++    # 접근 기록: private 경로가 열렸거나 거부 시도가 있었는지
++    access = {}
++    for fn in sorted(glob.glob(str(OUT / "gen" / "*" / "file_access.worker*.json"))):
++        d = read(fn)
++        access[fn] = dict(n_opened=d["n_opened"], denied=d["denied"], private_opened=[p for p in d["opened"] if "iter_118/private" in p or p.endswith("gt_manifest.json")])
++    res["file_access"] = access
++    res["checks"]["no_private_or_gt_access"] = bool(access) and all(not v["denied"] and not v["private_opened"] for v in access.values())
++    res["classification_distribution_no_gt"] = classify_summary(stages["TECH_w2"], cmap)
++    # 재사용 코드 불변: iter_117 protocol의 코드 hash와 현재 생성 경로 파일 비교
++    p117 = read("results/iter_117/protocol/MAIN.json")["code"]
++    res["checks"]["generate_geometry_prompts_unchanged_vs_iter117"] = all(
++        RUN.file_sha(f) == p117[f] for f in ("rsna_diag/generate.py", "rsna_diag/geometry.py", "rsna_diag/prompts.py", "rsna_diag/__init__.py"))
++    wc = read("results/iter_118/data/weights_check.json")
++    res["checks"]["weights_match_iter116_reference"] = not wc["differences_vs_reference"]
++    res["all_pass"] = all(v is True or v == [] for v in res["checks"].values())
++    write(OUT / "tech/tech_report.json", res)
++    print(json.dumps(res["checks"]), "all_pass", res["all_pass"])
++
++
++def eval_main(a):
++    lock = verify_lock()
++    ledger = read(OUT / "data/ledger_det.json")["rows"]
++    labels = read(PRIV / "labels.json")
++    cmap = read(PRIV / "cond_map.json")
++    recs = RUN.verify_completion(str(OUT / "gen/MAIN"), REQ("MAIN"), PROTO("MAIN"))
++    assert len(recs) == 576
++    main_ids = {r["id"] for r in ledger if r["stage"] == "MAIN"}
++    ps = EV.build_patients(recs, cmap, labels, [r for r in ledger if r["stage"] == "MAIN"])
++    assert {p["id"] for p in ps} == main_ids and len(ps) == 192
++    comp = read(OUT / "gen/MAIN/completion.json")
++    det = read(OUT / "det/raw_preds.json")
++    rep = EV.report(ps, dict(cost=dict(EV.cost(recs), launcher_wall_s=comp["wall_s"], device_seconds=comp["cost"].get("device_seconds_generate_union"),
++                                      device_seconds_incl_loading=comp["cost"].get("device_seconds_incl_loading_union"), workers=comp["workers"],
++                                      detector_wall_s_198_images_incl_loading=det["wall_s"],
++                                      note="S는 E 출력+detector 규칙 비용이며 자연 초안 생성 비용은 측정하지 않았다."),
++                             eval_lock_sha256=RUN.file_sha(str(LOCK)), classifier_version=S.CLASSIFIER_VERSION, locked_at_utc=lock["locked_at_utc"]))
++    checks = V.verify(ps, rep, recs, cmap, labels) + V.verify_requests(RUN.read_requests(REQ("MAIN")), cmap, labels)
++    ver = dict(checks=checks, all_pass=all(c["ok"] for c in checks), n_checks=len(checks))
++    obs = [dict(id=p["id"], cat=p["cat"], gt=p["gt"], B=p["B"], E=p["E"]["direction"], C=p["C"]["direction"], W=p["W"]["direction"],
++                E_text=p["E"]["text"][:200], W_text=p["W"]["text"][:200]) for p in ps
++           if p["E"]["outcome"] == "ok" and p["W"]["outcome"] == "bad"]
++    write(OUT / "eval/per_patient.json", ps)
++    write(OUT / "eval/report.json", rep)
++    write(OUT / "eval/observations_E_ok_W_bad.json", obs)
++    ver["verified_files"] = {str(OUT / "eval" / f): RUN.file_sha(str(OUT / "eval" / f))
++                             for f in ("per_patient.json", "report.json", "observations_E_ok_W_bad.json")}
++    write(OUT / "eval/verify.json", ver)
++    event("eval_done", label=rep["decision"]["label"], verify_all_pass=ver["all_pass"])
++    print(json.dumps(rep["decision"]), "verify", ver["all_pass"], ver["n_checks"])
++
++
++def seal(a):
++    verify_lock()
++    v = read(OUT / "eval/verify.json")
++    assert v["all_pass"] is True
++    for p, h in v["verified_files"].items():
++        assert RUN.file_sha(p) == h, p
++    recs = RUN.verify_completion(str(OUT / "gen/MAIN"), REQ("MAIN"), PROTO("MAIN"))
++    files = list(v["verified_files"]) + [str(OUT / "eval/verify.json"), str(LOCK), str(OUT / "tech/tech_report.json"), str(OUT / "tests/fixtures.json")]
++    write(OUT / "completion.json", dict(complete=True, epoch=time.time(), n_records=len(recs), n_patients=192, files={p: RUN.file_sha(p) for p in files},
++                                         label=read(OUT / "eval/report.json")["decision"]["label"], new_training=False))
++    event("sealed")
++    print("봉인 완료")
++
++
++def main():
++    ap = argparse.ArgumentParser()
++    sub = ap.add_subparsers(dest="cmd", required=True)
++    g = sub.add_parser("gen")
++    g.add_argument("--name", required=True)
++    g.add_argument("--requests", required=True)
++    g.add_argument("--workers", type=int, required=True)
++    g.add_argument("--peak-gb", type=float, default=9.0)
++    g.add_argument("--max-requests", type=int, default=None)
++    for n in ("techreport", "eval", "seal"):
++        sub.add_parser(n)
++    a = ap.parse_args()
++    {"gen": gen, "techreport": techreport, "eval": eval_main, "seal": seal}[a.cmd](a)
++
++
++if __name__ == "__main__":
++    main()
+diff --git a/ed118_spec.py b/ed118_spec.py
+new file mode 100644
+index 0000000..4060668
+--- /dev/null
++++ b/ed118_spec.py
+@@ -0,0 +1,188 @@
++"""iter_118 명세: 합성 초안 대조의 prompt, 응답 분류(direction + 독립 flag), 정책. 생성 전에 잠근다.
++
++- 표적은 qa_spec.Q_O (pulmonary opacity suspicious for pneumonia) 하나. 정답은 이 모듈에서 읽지 않는다.
++- 조건 E=초안 없음, C=정답 방향 초안, W=오답 방향 초안. 모델 요청에는 불투명 slot id만 있고 C/W 매핑은 private에 둔다.
++- classify(): 명시 답과 유보/조건/거부/모순/형식 오류를 분리한다. 임상 서술로 yes/no를 추론하지 않는다. 처리하지 못한 문형은 unknown.
++  규칙은 본생성 전에 고정하며 결과를 보고 추가하지 않는다 (ed118_tests의 fixture로 회귀 검사).
++"""
++import hashlib
++import json
++import re
++
++import ed116_spec as ES
++from rsna_diag import qa_spec
++
++SPEC_VERSION = "ed118_spec_v1"
++CLASSIFIER_VERSION = "ed118_classify_v1"
++THR = ES.THR
++CAPS = [1000, 2000, 4000]
++SEED_BOOT = 11817
++N_BOOT = 10000
++Q = qa_spec.Q_O
++FMT = qa_spec.FORMATS["plain"]
++EOT = qa_spec.EOT
++CONDS = ("E", "C", "W")
++SHARED_LINE = "The detector output and any first-pass answer provided may each be wrong."
++LEAD = "Use the information available to you to answer the question about this chest radiograph."
++
++
++def sha(s):
++    return hashlib.sha256(s if isinstance(s, bytes) else s.encode()).hexdigest()
++
++
++def canon(o):
++    return json.dumps(o, sort_keys=True, ensure_ascii=False, default=str)
++
++
++def sel_key(patient):
++    return sha("iter118|" + patient)
++
++
++# ---------------- 입력 ----------------
++def draft_line(ans):
++    return ES.draft_text(ans)
++
++
++def build_prompt(draft, row):
++    """draft: None(E) | 'yes' | 'no'. 순서: Question / [draft line] / detector packet / 공통 지시 / 공통 lead+format."""
++    parts = [f"Question: {Q}"]
++    if draft is not None:
++        parts.append(draft_line(draft))
++    parts.append(ES.packet_text(row))
++    parts.append(SHARED_LINE)
++    parts.append(f"{LEAD} {FMT}")
++    return "\n\n".join(parts)
++
++
++def opposite(a):
++    return "no" if a == "yes" else "yes"
++
++
++def cond_draft(cond, gt_answer):
++    return {"E": None, "C": gt_answer, "W": opposite(gt_answer)}[cond]
++
++
++def rotation(patient):
++    """환자 hash에 따른 균형 회전. returns 실행 순서의 조건 목록."""
++    k = int(sel_key(patient)[:8], 16) % 3
++    return list(CONDS[k:] + CONDS[:k])
++
++
++def request_id(patient, slot, prompt_sha, pixel_sha, revision):
++    return sha(canon(dict(patient=patient, slot=slot, prompt_sha256=prompt_sha, input_pixel_sha256=pixel_sha, caps=CAPS,
++                          model_revision=revision, spec=SPEC_VERSION)))[:32]
++
++
++# ---------------- 응답 분류 ----------------
++_MD = r"[\*_]*"
++START = re.compile(r"^\s*" + _MD + r"(yes|no)" + _MD + r"(?=\s*[.,:;!]|\s*\n|\s*$)", re.I)
++FINAL = re.compile(r"(?:^|(?<=\n)|(?<=[.!?]\s)|(?<=[.!?]))\s*" + _MD +
++                   r"(?:(?:therefore|thus|hence|so|in conclusion)\s*,?\s*)?(?:the\s+)?(?:final\s+)?answer\s*(?:is\s*:?|:)\s*" + _MD +
++                   r"(yes|no)" + _MD + r"(?=\s*[.,;!]|\s*\n|\s*$)", re.I)
++COND_WORDS = re.compile(r"\b(?:if|unless|whether|depending|assuming|provided that|in case)\b", re.I)
++HEDGE = re.compile(r"\b(?:possibly|possible|probably|probable|may|might|could|perhaps|unclear|uncertain|uncertainty|indeterminate|equivocal|"
++                   r"not sure|hard to say|difficult to|cannot be excluded|can not be excluded|cannot exclude)\b", re.I)
++HEDGE_ANSWER_SENT = re.compile(r"\b(?:but|however|although|though)\b", re.I)
++RECO = re.compile(r"\b(?:recommend\w*|correlat\w*|follow[- ]?up|consult\w*|further (?:evaluation|imaging|investigation|assessment|review)|"
++                  r"clinician|radiologist|clinical context|clinical history)\b", re.I)
++REFUSAL = re.compile(r"\b(?:cannot|can't|can not|unable to|not able to|not possible to|impossible to)\s+(?:determine|answer|say|tell|assess|provide|"
++                     r"give|conclude|decide|diagnose)|\bi(?:'m| am) sorry\b|\binsufficient (?:information|evidence)\b|\bnot enough information\b", re.I)
++COND_THEN = re.compile(r"\b(?:then|answer is|answer would be)[\s,:]*" + _MD + r"(yes|no)\b", re.I)
++SELF_CORR =re.compile(r"\b(?:actually|correction|correcting|on second thought|wait|i mean|let me correct|i was wrong|revised answer|to correct)\b", re.I)
++SENT_SPLIT = re.compile(r"(?<=[.!?])\s+|\n+")
++QUOTE = re.compile(r"[`\"“”]")
++
++
++def clean(raw):
++    t = raw[:-len(EOT)] if raw.endswith(EOT) else raw
++    return t.strip()
++
++
++def _sent_of(t, pos):
++    start = 0
++    for m in SENT_SPLIT.finditer(t):
++        if m.end() <= pos:
++            start = m.end()
++        else:
++            return t[start:m.start()]
++    return t[start:]
++
++
++def classify(raw, ended_eos):
++    """returns dict(direction yes|no|unknown, hedged, conditional, contradictory, refusal, parse_failure, non_eos, confirmed, spans, note).
++    입력은 응답 텍스트와 EOS 여부뿐이다 (정답·조건·초안 방향 없음)."""
++    t = clean(raw)
++    out = dict(direction="unknown", hedged=False, conditional=False, contradictory=False, refusal=False, parse_failure=False,
++               non_eos=not ended_eos, spans=[], note="")
++    if not t:
++        out.update(parse_failure=True, note="empty")
++        out["confirmed"] = False
++        return out
++    if REFUSAL.search(t):
++        out["refusal"] = True
++    # 인용(따옴표/코드) 안의 내용은 답 탐색에서 제외한다.
++    body = re.sub(r"(`[^`]*`|\"[^\"]*\"|“[^”]*”)", " ", t)
++    cands = []
++    m = START.match(body)
++    if m:
++        cands.append(("start", m.group(1).lower(), m.start(1)))
++    for m in FINAL.finditer(body):
++        cands.append(("final", m.group(1).lower(), m.start(1)))
++    uncond, cond = [], []
++    for rule, a, pos in cands:
++        sent = _sent_of(body, pos)
++        pre = sent[:max(0, sent.lower().find(a))] if rule == "final" else ""
++        (cond if COND_WORDS.search(pre) else uncond).append((rule, a, pos))
++    if not cands:  # "If ..., then (the answer is) yes" 형태: 조건에 종속된 답만 있는 경우
++        for s in SENT_SPLIT.split(body):
++            if COND_WORDS.search(s) and COND_THEN.search(s):
++                cond.append(("cond_then", COND_THEN.search(s).group(1).lower(), 0))
++    out["spans"] = [dict(rule=r, answer=a, pos=p) for r, a, p in cands + cond if r == "cond_then"] if not cands else \
++        [dict(rule=r, answer=a, pos=p) for r, a, p in cands]
++    answers = [a for _, a, _ in uncond]
++    if not answers:
++        if cond:
++            out.update(conditional=True, note="only_conditional_answer")
++        elif not out["refusal"]:
++            out.update(parse_failure=True, note="no_explicit_answer")
++    elif len(set(answers)) > 1:
++        first, last = answers[0], answers[-1]
++        if SELF_CORR.search(body):
++            out["direction"] = last
++            out["note"] = "self_correction_final_used"
++        else:
++            out.update(contradictory=True, note="opposite_answers_without_correction")
++    else:
++        out["direction"] = answers[0]
++    if out["direction"] != "unknown" or out["contradictory"]:
++        # 유보: 답 문장의 표현 + 답과 무관한 권고가 아닌 문장의 hedge 단어
++        sents = [s for s in SENT_SPLIT.split(body) if s.strip()]
++        ans_sents = {_sent_of(body, p) for _, _, p in uncond}
++        for s in sents:
++            if s in ans_sents and HEDGE_ANSWER_SENT.search(s):
++                out["hedged"] = True
++            if HEDGE.search(s) and not RECO.search(s):
++                out["hedged"] = True
++    if out["non_eos"]:
++        out["direction"] = "unknown"
++        out["note"] = (out["note"] + ";non_eos").strip(";")
++    out["confirmed"] = bool(out["direction"] != "unknown" and not (out["hedged"] or out["conditional"] or out["contradictory"]
++                                                                     or out["refusal"] or out["non_eos"] or out["parse_failure"]))
++    return out
++
++
++def rules_digest():
++    import inspect
++    import sys
++    return sha(inspect.getsource(sys.modules[__name__]))
++
++
++# ---------------- 정책 ----------------
++def det_answer(row):
++    return ES.answer_B(row)
++
++
++def synth_policy(e_cls, b, draft):
++    """S: E의 명시 답(direction)이 B와 같으면 그 답, 아니면 초안을 유지. E unknown → 초안 유지."""
++    e = e_cls["direction"]
++    return e if (e in ("yes", "no") and e == b) else draft
+diff --git a/ed118_tests.py b/ed118_tests.py
+new file mode 100644
+index 0000000..12c755a
+--- /dev/null
++++ b/ed118_tests.py
+@@ -0,0 +1,155 @@
++"""iter_118 생성 전 고정 fixture: 응답 분류 규칙 + 요청 구성·정오 매핑 분리 + guard. 결과는 results/iter_118/tests/fixtures.json (새 파일).
++
++fixture 기대값은 본출력을 보기 전에 작성했다. 본출력을 보고 규칙/기대값을 고르지 않는다.
++"""
++import json
++import os
++import sys
++
++import ed118_spec as S
++
++E = S.EOT
++# (name, raw, ended_eos, direction, flags 중 True여야 하는 것(나머지는 False여야 함))
++CASES = [
++    ("plain_yes", "Yes", True, "yes", set()),
++    ("plain_no_period", "No.", True, "no", set()),
++    ("yes_with_eot", "Yes" + E, True, "yes", set()),
++    ("markdown_yes", "**Yes**", True, "yes", set()),
++    ("yes_explained", "Yes. There is a focal opacity in the right lower zone.", True, "yes", set()),
++    ("yes_hedged_could", "Yes. This could represent pneumonia.", True, "yes", {"hedged"}),
++    ("no_hedged_may", "No, although a subtle finding may be present.", True, "no", {"hedged"}),
++    ("yes_but", "Yes, but only mildly.", True, "yes", {"hedged"}),
++    ("no_with_recommendation", "No. Clinical correlation is recommended.", True, "no", set()),
++    ("yes_follow_up", "Yes. Follow-up imaging is recommended to confirm.", True, "yes", set()),
++    ("final_answer_line", "The radiograph shows a patchy area.\nFinal answer: Yes", True, "yes", set()),
++    ("therefore_answer", "The lungs look clear. Therefore, the answer is no.", True, "no", set()),
++    ("the_answer_is", "The answer is yes.", True, "yes", set()),
++    ("no_candidate_start", "No candidate region is convincing, so I would say no opacity.", True, "unknown", {"parse_failure"}),
++    ("conditional_only", "If the detector box is correct, then the answer is yes.", True, "unknown", {"conditional"}),
++    ("conditional_then_yes", "If this is a true opacity then yes.", True, "unknown", {"conditional"}),
++    ("refusal", "I cannot determine this from the information provided.", True, "unknown", {"refusal"}),
++    ("refusal_sorry", "I'm sorry, I cannot answer this.", True, "unknown", {"refusal"}),
++    ("yes_then_refusal", "Yes. However, I cannot determine the extent.", True, "yes", {"refusal"}),
++    ("contradiction", "Yes.\nThe lungs are clear.\nFinal answer: No", True, "unknown", {"contradictory"}),
++    ("self_correction", "Yes.\nActually, on reflection the answer is no.\nFinal answer: No", True, "no", set()),
++    ("quoted_draft", "The first-pass answer was \"Yes\" but the image is clear.", True, "unknown", {"parse_failure"}),
++    ("draft_echo_sentence", "The first-pass answer was Yes. I disagree after reviewing the image.", True, "unknown", {"parse_failure"}),
++    ("question_echo", "Question: Is there a pulmonary opacity suspicious for pneumonia?", True, "unknown", {"parse_failure"}),
++    ("empty", "", True, "unknown", {"parse_failure"}),
++    ("non_eos_yes", "Yes. The", False, "unknown", {"non_eos"}),
++    ("non_eos_none", "The radiograph shows", False, "unknown", {"non_eos", "parse_failure"}),
++    ("uncertain_word", "Yes, it is uncertain whether this is pneumonia.", True, "yes", {"hedged"}),
++    ("no_prose_only", "There is no focal consolidation.", True, "unknown", {"parse_failure"}),
++    ("yes_colon", "Yes: right lower zone opacity.", True, "yes", set()),
++    ("repeat_same", "Yes.\nTherefore, the answer is yes.", True, "yes", set()),
++]
++
++
++def run_cases():
++    res = []
++    for name, raw, eos, d, flags in CASES:
++        c = S.classify(raw, eos)
++        got = {k for k in ("hedged", "conditional", "contradictory", "refusal", "parse_failure", "non_eos") if c[k]}
++        ok = c["direction"] == d and got == flags
++        res.append(dict(name=name, ok=ok, expected=[d, sorted(flags)], got=[c["direction"], sorted(got)], note=c["note"]))
++    return res
++
++
++def run_misc():
++    out = []
++    row = dict(size_hw=[1024, 1024], det=dict(scores=[0.9, 0.5], boxes_xyxy_px=[[100, 200, 300, 400], [1, 1, 2, 2]]))
++    pe = S.build_prompt(None, row)
++    pc = S.build_prompt("yes", row)
++    pw = S.build_prompt("no", row)
++    out.append(dict(name="prompt_E_has_no_draft", ok="first-pass answer to this question was" not in pe))
++    out.append(dict(name="prompt_C_W_differ_only_in_draft_word", ok=pc.replace("Yes.", "No.", 1) == pw and pc != pw))
++    out.append(dict(name="prompt_E_equals_C_minus_draft_line", ok=pe == pc.replace("\n\n" + S.draft_line("yes"), "")))
++    out.append(dict(name="packet_filters_below_threshold", ok="Candidate 1: score 0.900" in pe and "Candidate 2" not in pe))
++    out.append(dict(name="shared_line_in_all", ok=all(S.SHARED_LINE in p for p in (pe, pc, pw))))
++    out.append(dict(name="no_label_words", ok=not any(w in p.lower() for p in (pe, pc, pw) for w in ("correct", "incorrect", "ground truth", "category"))
++                    or all("correct" not in p.lower().replace("may each be wrong", "") for p in (pe, pc, pw))))
++    out.append(dict(name="rotation_balanced", ok=sorted(S.rotation("00012345")) == ["C", "E", "W"]))
++    out.append(dict(name="synth_policy", ok=S.synth_policy(dict(direction="yes"), "yes", "no") == "yes"
++                    and S.synth_policy(dict(direction="no"), "yes", "no") == "no"
++                    and S.synth_policy(dict(direction="unknown"), "yes", "no") == "no"))
++    return out
++
++
++def run_synth():
++    """합성 record로 평가·독립 verifier 일치와 손계산 기대값 검사 (모델 출력 없음)."""
++    import ed118_eval as EV
++    import ed118_verify as V
++    cats = ["opacity"] * 4 + ["normal"] * 4 + ["not_normal_no_opacity"] * 4
++    # 환자별 (E, W, C) 텍스트: opacity gt=yes, 그 외 gt=no
++    txt = {"y": "Yes", "n": "No", "u": "I cannot determine this.", "h": "Yes. This could be pneumonia."}
++    plan = [("y", "n", "y"), ("y", "y", "y"), ("n", "y", "n"), ("u", "n", "y"),     # opacity: E ok→W bad (H+1), ok→ok, E bad→W ok (H−1), E unk
++            ("n", "y", "n"), ("n", "n", "n"), ("y", "n", "y"), ("n", "u", "n"),     # normal: E ok→W bad(+1), ok→ok, E bad→W ok (−1), W unk
++            ("n", "n", "n"), ("n", "y", "n"), ("n", "y", "u"), ("y", "y", "n")]     # nlonn: ok→ok, ok→bad(+1), ok→bad(+1), E bad→W bad
++    labels, ledger, recs, cmap = {}, [], [], {}
++    for i, (cat, (e, w, c)) in enumerate(zip(cats, plan)):
++        pid = f"{i:08d}"
++        pos = cat == "opacity"
++        box = [100, 100, 300, 300]
++        labels[pid] = dict(category=cat, gt_answer="yes" if pos else "no", boxes_xyxy_px=[box] if pos else [])
++        ledger.append(dict(id=pid, size_hw=[1024, 1024], det=dict(scores=[0.9] if pos else [], boxes_xyxy_px=[box] if pos else [])))
++        order = ["E", "W", "C"]
++        cmap[pid] = {f"s{k}": o for k, o in enumerate(order)}
++        for k, o in enumerate(order):
++            t = txt[{"E": e, "W": w, "C": c}[o]]
++            recs.append(dict(patient=pid, cond=f"s{k}", suffix_text_raw=t + E, ended_eos=True, n_output_tokens=3, runtime_s_total=1.0, wall_s=1.0,
++                             attempts=[1], peak_mem_reserved_gb_max=1.0))
++    ps = EV.build_patients(recs, cmap, labels, ledger)
++    rep = EV.report(ps)
++    out = []
++    # 손계산 기대값은 plan 표에서 독립적으로 센다 (평가 코드 호출 없음)
++    exp_pos = sum(1 for (cat, (e, w, c)) in zip(cats, plan) if (e == ("y" if cat == "opacity" else "n")) and (w == ("n" if cat == "opacity" else "y")))
++    exp_neg = sum(1 for (cat, (e, w, c)) in zip(cats, plan) if (e == ("n" if cat == "opacity" else "y")) and (w == ("y" if cat == "opacity" else "n")))
++    out.append(dict(name="synth_H_W_matches_handcalc", ok=abs(rep["H"]["W"]["point"] - (exp_pos - exp_neg) / 12) < 1e-12, exp=[exp_pos, exp_neg]))
++    out.append(dict(name="synth_unknown_not_counted_in_H", ok=rep["transitions"]["W"]["unk"]["bad"] + rep["transitions"]["W"]["ok"]["unk"] >= 1))
++    checks = V.verify(ps, rep, recs, cmap, labels)
++    out += [dict(name="verifier_" + c["name"], ok=c["ok"]) for c in checks]
++    # 공동 성공: 양성 yes+정확 box, 음성 no
++    out.append(dict(name="joint_positive_yes", ok=ps[1]["joint"]["E"] is True and ps[0]["joint"]["E"] is True))
++    out.append(dict(name="joint_unknown_false", ok=ps[3]["joint"]["E"] is False))
++    return out
++
++
++def run_guard():
++    """worker와 같은 guard: private/labels.json open은 PermissionError, 허용 파일(요청)은 열린다. 열린 경로는 로그에 남는다."""
++    import subprocess
++    import tempfile
++    log = os.path.join(tempfile.mkdtemp(), "access.json")
++    code = ("import ed118_guard, ed118_gen, json, sys\n"
++            "ed118_guard.install(ed118_gen.GUARD_DENY, sys.argv[1])\n"
++            "r={}\n"
++            "for p in ['results/iter_118/private/labels.json','results/iter_118/private/../private/cond_map.json','results/iter_010/manifests/gt_manifest.json']:\n"
++            "    try:\n        open(p).read(1); r[p]='opened'\n    except PermissionError: r[p]='denied'\n"
++            "open('results/iter_118/requests/TECH.jsonl').read(1); r['req']='opened'\n"
++            "print(json.dumps(r))\n")
++    p = subprocess.run([sys.executable, "-c", code, log], capture_output=True, text=True)
++    res = json.loads(p.stdout.strip().splitlines()[-1]) if p.returncode == 0 else {}
++    logged = json.load(open(log)) if os.path.exists(log) else {}
++    ok = (res.get("results/iter_118/private/labels.json") == "denied" and res.get("results/iter_118/private/../private/cond_map.json") == "denied"
++          and res.get("results/iter_010/manifests/gt_manifest.json") == "denied" and res.get("req") == "opened" and len(logged.get("denied", [])) == 3)
++    return [dict(name="guard_denies_private_and_logs", ok=ok, res=res, n_denied=len(logged.get("denied", [])))]
++
++
++def main():
++    cases = run_cases()
++    misc = run_misc() + run_synth() + run_guard()
++    allr = cases + misc
++    out = dict(n=len(allr), n_pass=sum(r["ok"] for r in allr), all_pass=all(r["ok"] for r in allr), cases=cases, misc=misc,
++               classifier_version=S.CLASSIFIER_VERSION, rules_digest=S.rules_digest())
++    path = "results/iter_118/tests/fixtures.json"
++    os.makedirs(os.path.dirname(path), exist_ok=True)
++    with open(path, "x") as f:
++        json.dump(out, f, indent=1)
++    for r in allr:
++        if not r["ok"]:
++            print("FAIL", r)
++    print(out["n_pass"], "/", out["n"])
++    sys.exit(0 if out["all_pass"] else 1)
++
++
++if __name__ == "__main__":
++    main()
+diff --git a/ed118_verify.py b/ed118_verify.py
+new file mode 100644
+index 0000000..e261b21
+--- /dev/null
++++ b/ed118_verify.py
+@@ -0,0 +1,148 @@
++"""iter_118 독립 verifier: 원 record(텍스트) → 환자별 표 → 계수 → CI → 판정을 ed118_eval과 별개의 코드로 재계산한다 (생성 전 잠금).
++
++- ed118_eval의 함수를 호출하지 않는다 (spec의 classify 결과만 입력으로 받지 않고, 독립 단순 규칙으로 방향 일관성을 별도 검사한다).
++- 결과는 results/iter_118/eval/verify.json 에 새로 쓴다 (덮어쓰기 거부).
++"""
++import json
++import os
++import re
++import sys
++
++import numpy as np
++
++EOT = "<end_of_turn>"
++START = re.compile(r"^\W*(yes|no)\b(?=\s*[.,:;!]|\s*$|\s*\n)", re.I)
++
++
++def clean(t):
++    return (t[:-len(EOT)] if t.endswith(EOT) else t).strip()
++
++
++def direction_consistent(text, ended_eos, rec):
++    """독립 단순 검사: (1) 비EOS면 unknown (2) direction yes/no면 해당 단어가 본문에 있다 (3) 문두 yes/no이고 모순/조건/거부가 없는데 반대 방향이면 오류."""
++    t = clean(text).lower()
++    d = rec["direction"]
++    if not ended_eos:
++        return d == "unknown"
++    if d in ("yes", "no"):
++        if not re.search(r"\b" + d + r"\b", t):
++            return False
++    m = START.match(clean(text))
++    f = rec["flags"]
++    if m and not (f["contradictory"] or f["conditional"]):
++        if d != m.group(1).lower():
++            return False
++    return True
++
++
++def verify(per_patient, report, recs, cond_map, labels, boot_seed=11817, boot_n=10000):
++    checks = []
++
++    def add(name, ok, **kw):
++        checks.append(dict(name=name, ok=bool(ok), **kw))
++
++    n = len(per_patient)
++    byc = {}
++    for r in recs:
++        byc.setdefault(r["patient"], {})[cond_map[r["patient"]][r["cond"]]] = r
++    add("n_patients_matches_records", n == len(byc) == len(recs) // 3 and len(recs) == 3 * n)
++    add("each_patient_three_conds", all(set(v) == {"E", "C", "W"} for v in byc.values()))
++    # 원문 → 방향 일관성
++    bad_dir = []
++    gt_of = {p: labels[p]["gt_answer"] for p in labels}
++    for p in per_patient:
++        for c in "ECW":
++            r = byc[p["id"]][c]
++            if not direction_consistent(r["suffix_text_raw"], r["ended_eos"], p[c] | dict(direction=p[c]["direction"])):
++                bad_dir.append((p["id"], c))
++    add("direction_consistent_with_text", not bad_dir, n_bad=len(bad_dir), examples=bad_dir[:5])
++    # 정답 / outcome 재계산
++    mism = []
++    for p in per_patient:
++        g = gt_of[p["id"]]
++        for c in "ECW":
++            d = p[c]["direction"]
++            o = "unk" if d == "unknown" else ("ok" if d == g else "bad")
++            if o != p[c]["outcome"]:
++                mism.append((p["id"], c))
++    add("outcome_matches_gt", not mism, n_bad=len(mism))
++    # 계수 재계산 (draft 방향 검증은 verify_requests)
++    cnt = lambda c, o: sum(p[c]["outcome"] == o for p in per_patient)
++    for c in "ECW":
++        s = report["conditions"][c]
++        add(f"counts_{c}", s["explicit_ok"] == cnt(c, "ok") and s["explicit_bad"] == cnt(c, "bad") and s["unknown"] == cnt(c, "unk"))
++    for c in "WC":
++        t = report["transitions"][c]
++        ok = True
++        for a in ("ok", "bad", "unk"):
++            for b in ("ok", "bad", "unk"):
++                ok &= t[a][b] == sum(p["E"]["outcome"] == a and p[c]["outcome"] == b for p in per_patient)
++        add(f"transition_{c}", ok)
++        h = (t["ok"]["bad"] - t["bad"]["ok"]) / n
++        add(f"H_{c}_point", abs(h - report["H"][c]["point"]) < 1e-12, recomputed=h)
++        # unknown 범위: 전수 열거 (환자별)
++        lo = hi = 0
++        for p in per_patient:
++            es = ["ok", "bad"] if p["E"]["outcome"] == "unk" else [p["E"]["outcome"]]
++            xs = ["ok", "bad"] if p[c]["outcome"] == "unk" else [p[c]["outcome"]]
++            vals = [int(e == "ok" and x == "bad") - int(e == "bad" and x == "ok") for e in es for x in xs]
++            lo += min(vals)
++            hi += max(vals)
++        add(f"H_{c}_unknown_range", [lo / n, hi / n] == report["H_unknown_range"][c])
++    # bootstrap 독립 재계산 (H_W): 층별 resample
++    rng = np.random.default_rng(boot_seed)
++    cats = ["opacity", "normal", "not_normal_no_opacity"]
++    contrib = np.array([int(p["E"]["outcome"] == "ok" and p["W"]["outcome"] == "bad") - int(p["E"]["outcome"] == "bad" and p["W"]["outcome"] == "ok")
++                        for p in per_patient], dtype=float)
++    # 보고서와 같은 난수 소비 순서: 통계 벡터 순서와 무관하게 category별 한 번의 draw
++    tot = np.zeros(boot_n)
++    for c in cats:
++        ids = np.array([i for i, p in enumerate(per_patient) if p["cat"] == c])
++        if len(ids):
++            draw = ids[rng.integers(0, len(ids), size=(boot_n, len(ids)))]
++            tot += contrib[draw].sum(axis=1)
++    s = tot / n
++    lo, hi = float(np.percentile(s, 2.5)), float(np.percentile(s, 97.5))
++    add("H_W_bootstrap_CI", abs(lo - report["H"]["W"]["lo"]) < 1e-12 and abs(hi - report["H"]["W"]["hi"]) < 1e-12, recomputed=[lo, hi])
++    # 판정 분기 재계산
++    hw = report["H"]["W"]
++    lab = "content_harm_signal" if (hw["point"] >= 0.10 and lo > 0) else ("no_large_content_harm" if hi < 0.10 else "inconclusive")
++    add("decision_label", lab == report["decision"]["label"], recomputed=lab)
++    # 정책 S 재계산
++    badS = []
++    for p in per_patient:
++        b = p["B"]
++        e = p["E"]["direction"]
++        g = gt_of[p["id"]]
++        for c, draft in (("S_C", g), ("S_W", "no" if g == "yes" else "yes")):
++            want = e if (e in ("yes", "no") and e == b) else draft
++            if p["policy"][c] != want:
++                badS.append((p["id"], c))
++    add("policy_S", not badS)
++    detm = [p["id"] for p in per_patient if p["B"] != ("yes" if p["n_det"] > 0 else "no")]
++    add("policy_B_matches_box_count", not detm)
++    add("total_by_category", sum(report["n_by_category"].values()) == n)
++    return checks
++
++
++def verify_requests(req_rows, cond_map, labels):
++    """요청 prompt를 독립 파싱: E에는 draft 줄이 없고, C는 gt 방향, W는 반대 방향. 세 요청의 영상 hash 동일."""
++    checks = []
++    pat = re.compile(r"first-pass answer to this question was: (Yes|No)\.")
++    by = {}
++    for r in req_rows:
++        by.setdefault(r["patient"], []).append(r)
++    bad = []
++    for pid, rs in by.items():
++        g = labels[pid]["gt_answer"]
++        if len({r["input_pixel_sha256"] for r in rs}) != 1:
++            bad.append((pid, "pixel"))
++        for r in rs:
++            c = cond_map[pid][r["cond"]]
++            m = pat.search(r["prompt"])
++            want = None if c == "E" else (g if c == "C" else ("no" if g == "yes" else "yes"))
++            got = m.group(1).lower() if m else None
++            if got != want:
++                bad.append((pid, c, got, want))
++    checks.append(dict(name="request_draft_direction_and_pixels", ok=not bad, n_bad=len(bad), examples=bad[:5]))
++    return checks
+diff --git a/rsna_diag/det_lib.py b/rsna_diag/det_lib.py
+new file mode 100644
+index 0000000..276c06f
+--- /dev/null
++++ b/rsna_diag/det_lib.py
+@@ -0,0 +1,223 @@
++"""공식 Faster R-CNN v2 RSNA 적응: dataset, model, 학습 loop 보조, checkpoint 원자 저장/재개, 평가.
++natten_py310 환경(torch 2.6.0+cu124, torchvision 0.21.0+cu124)에서만 실행한다.
++
++iter_033의 results/iter_033/detector_lib.py를 원본으로 하고, iter_034에서 다음을 추가했다 (원본 sha256
++d562f8b2059c24678a7bafc8798aa541b47a6a72c2e582aed96346c38d53a394):
++- RSNADetDataset.__getitem__이 실제 적용한 flip 여부를 target["flip"]으로 반환한다 (재개 로그 검증용).
++그 외 dataset/model/optimizer/scheduler/rng/checkpoint 유틸리티 로직은 원본과 동일하다.
++iter_035: flip_p·min_size·max_size를 인자로 노출했다(기본값 0.5/800/1333은 기존 동작·torchvision 기본값과 동일).
++"""
++import hashlib
++import json
++import os
++import random
++import sys
++
++import numpy as np
++import torch
++from PIL import Image
++from torch.utils.data import Dataset
++
++sys.path.insert(0, "/SSD1_1TB/home/milab/daniel/08_medgemma/research")
++from rsna_diag import geometry as G
++
++BASE = "/SSD1_1TB/home/milab/daniel/08_medgemma/research"
++IT010 = f"{BASE}/results/iter_010/manifests"
++
++
++def load_gt_infer():
++    gt = json.load(open(f"{IT010}/gt_manifest.json"))
++    infer = {}
++    with open(f"{IT010}/infer_manifest.jsonl") as f:
++        for line in f:
++            r = json.loads(line)
++            infer[r["id"]] = r
++    return gt, infer
++
++
++class RSNADetDataset(Dataset):
++    """원본 uint8 영상(RGB 복제, 값 보존) + pixel xyxy GT box(opacity=label1). horizontal flip만 augmentation."""
++
++    def __init__(self, ids, gt, infer, train_aug=False, seed=0, flip_p=0.5):
++        self.ids = list(ids)
++        self.gt = gt
++        self.infer = infer
++        self.train_aug = train_aug
++        self.flip_p = flip_p
++        self.rng = random.Random(seed)
++
++    def __len__(self):
++        return len(self.ids)
++
++    def set_epoch_rng(self, seed):
++        self.rng = random.Random(seed)
++
++    def __getitem__(self, idx):
++        pid = self.ids[idx]
++        rec = self.infer[pid]
++        path = f"{BASE}/{rec['image']}"
++        arr = np.array(Image.open(path))
++        rgb = G.to_uint8_rgb_preserving(arr)
++        h, w = rgb.shape[:2]
++        g = self.gt[pid]
++        boxes = [b["xyxy_px"] for b in g["boxes"]]
++        do_flip = self.train_aug and self.rng.random() < self.flip_p
++        if do_flip:
++            rgb = np.ascontiguousarray(rgb[:, ::-1, :])
++            boxes = [[w - x1, y0, w - x0, y1] for x0, y0, x1, y1 in boxes]
++        img = torch.from_numpy(rgb).permute(2, 0, 1).float() / 255.0
++        if boxes:
++            boxes_t = torch.tensor(boxes, dtype=torch.float32)
++            labels_t = torch.ones((len(boxes),), dtype=torch.int64)
++        else:
++            boxes_t = torch.zeros((0, 4), dtype=torch.float32)
++            labels_t = torch.zeros((0,), dtype=torch.int64)
++        target = {"boxes": boxes_t, "labels": labels_t, "image_id": pid, "flip": bool(do_flip)}
++        return img, target, (h, w)
++
++
++def collate_fn(batch):
++    imgs = [b[0] for b in batch]
++    targets = [b[1] for b in batch]
++    dims = [b[2] for b in batch]
++    return imgs, targets, dims
++
++
++def build_model(num_classes=2, trainable_backbone_layers=5, min_size=800, max_size=1333):
++    from torchvision.models.detection import fasterrcnn_resnet50_fpn_v2, FasterRCNN_ResNet50_FPN_V2_Weights
++    from torchvision.models.detection.faster_rcnn import FastRCNNPredictor
++
++    weights = FasterRCNN_ResNet50_FPN_V2_Weights.COCO_V1
++    model = fasterrcnn_resnet50_fpn_v2(weights=weights, trainable_backbone_layers=trainable_backbone_layers,
++                                       box_score_thresh=0.001, box_nms_thresh=0.5, box_detections_per_img=100,
++                                       min_size=min_size, max_size=max_size)
++    in_features = model.roi_heads.box_predictor.cls_score.in_features
++    model.roi_heads.box_predictor = FastRCNNPredictor(in_features, num_classes)
++    return model
++
++
++def freeze_bn_running_stats(model):
++    """BatchNorm running statistics 고정, affine parameter는 학습 유지. train() 호출 뒤 매번 강제한다."""
++    for m in model.modules():
++        if isinstance(m, torch.nn.modules.batchnorm._BatchNorm):
++            m.eval()
++            if m.weight is not None:
++                m.weight.requires_grad_(True)
++            if m.bias is not None:
++                m.bias.requires_grad_(True)
++
++
++def set_train_mode(model):
++    model.train()
++    freeze_bn_running_stats(model)
++
++
++def build_optimizer(model, lr=0.005, momentum=0.9, weight_decay=1e-4):
++    params = [p for p in model.parameters() if p.requires_grad]
++    return torch.optim.SGD(params, lr=lr, momentum=momentum, weight_decay=weight_decay)
++
++
++def linear_warmup_then_multistep(optimizer, warmup_updates, milestones_updates, gamma=0.1):
++    def lr_lambda(step):
++        if step < warmup_updates:
++            return (step + 1) / warmup_updates
++        factor = 1.0
++        for m in milestones_updates:
++            if step >= m:
++                factor *= gamma
++        return factor
++    return torch.optim.lr_scheduler.LambdaLR(optimizer, lr_lambda)
++
++
++def full_rng_state():
++    return {
++        "python": random.getstate(),
++        "numpy": np.random.get_state(),
++        "torch_cpu": torch.get_rng_state(),
++        "torch_cuda": torch.cuda.get_rng_state_all() if torch.cuda.is_available() else None,
++    }
++
++
++def restore_rng_state(state, cuda_map=None):
++    """cuda_map=(저장 당시 학습 장치 index, 현재 학습 장치 index): 저장 process와 현재 process가 보는 GPU 수가
++    다를 수 있으므로 학습에 쓰인 장치의 CUDA generator만 옮긴다. None이면 기존처럼 전체 장치를 복원한다."""
++    random.setstate(state["python"])
++    np.random.set_state(state["numpy"])
++    torch.set_rng_state(state["torch_cpu"])
++    if state["torch_cuda"] is not None and torch.cuda.is_available():
++        if cuda_map is None:
++            torch.cuda.set_rng_state_all(state["torch_cuda"])
++        else:
++            torch.cuda.set_rng_state(state["torch_cuda"][cuda_map[0]], device=cuda_map[1])
++
++
++def optimizer_state_to_device(optimizer, device):
++    for state in optimizer.state.values():
++        for k, v in state.items():
++            if torch.is_tensor(v):
++                state[k] = v.to(device)
++
++
++def atomic_save(obj, path):
++    tmp = path + ".tmp"
++    torch.save(obj, tmp)
++    os.replace(tmp, path)
++
++
++def sha256_file(path):
++    h = hashlib.sha256()
++    with open(path, "rb") as f:
++        for chunk in iter(lambda: f.read(1 << 20), b""):
++            h.update(chunk)
++    return h.hexdigest()
++
++
++def protocol_digest(paths):
++    entries = {}
++    for p in sorted(paths):
++        entries[p] = sha256_file(p)
++    blob = json.dumps(entries, sort_keys=True).encode()
++    return hashlib.sha256(blob).hexdigest(), entries
++
++
++@torch.no_grad()
++def run_inference(model, device, ids, gt, infer, batch_size=4):
++    """returns {id: {'boxes_xyxy_px':..., 'scores':..., 'labels':..., 'img_hw':(h,w)}}"""
++    model.eval()
++    ds = RSNADetDataset(ids, gt, infer, train_aug=False)
++    out = {}
++    i = 0
++    while i < len(ds):
++        batch_ids = ds.ids[i:i + batch_size]
++        imgs = []
++        dims = []
++        for pid in batch_ids:
++            img, _, hw = ds[ds.ids.index(pid)]
++            imgs.append(img.to(device))
++            dims.append(hw)
++        preds = model(imgs)
++        for pid, pr, hw in zip(batch_ids, preds, dims):
++            out[pid] = {
++                "boxes_xyxy_px": pr["boxes"].detach().cpu().numpy().tolist(),
++                "scores": pr["scores"].detach().cpu().numpy().tolist(),
++                "labels": pr["labels"].detach().cpu().numpy().tolist(),
++                "img_hw": list(hw),
++            }
++        i += batch_size
++    return out
++
++
++def preds_to_norm_yxyx(raw_preds, gt, threshold):
++    """detector 원시 pred(pixel xyxy, score, label) -> sft_eval 호환 {'status':..., 'boxes':[[y0,x0,y1,x1],...]} (0-1000 norm).
++    label==1(opacity)만 인정, score>=threshold만 유지."""
++    out = {}
++    for pid, r in raw_preds.items():
++        h, w = r["img_hw"]
++        top, left, side = G.pad_offsets(h, w)
++        boxes = []
++        for box, score, label in zip(r["boxes_xyxy_px"], r["scores"], r["labels"]):
++            if label != 1 or score < threshold:
++                continue
++            boxes.append(G.canvas_to_norm(box, top, left, side))
++        out[pid] = {"status": "valid_nonempty" if boxes else "valid_empty", "boxes": boxes}
++    return out
+diff --git a/rsna_diag/dicom_min.py b/rsna_diag/dicom_min.py
+new file mode 100644
+index 0000000..05c1753
+--- /dev/null
++++ b/rsna_diag/dicom_min.py
+@@ -0,0 +1,148 @@
++"""최소 DICOM 리더 (pydicom 미설치, pip 불가). RSNA 배포본(Explicit VR LE, JPEG baseline 1.2.840.10008.1.2.4.50)만 지원.
++
++지원하지 않는 전송 구문·태그 조합은 예외를 던져 입력 gate를 실패시킨다 (조용히 추정하지 않는다).
++"""
++import io
++import struct
++
++from PIL import Image
++
++EXPLICIT_LE = "1.2.840.10008.1.2.1"
++JPEG_BASELINE = "1.2.840.10008.1.2.4.50"
++LONG_VR = {"OB", "OW", "OF", "SQ", "UT", "UN", "OD", "OL", "UC", "UR"}
++WANT = {
++    (0x0002, 0x0010): "TransferSyntaxUID",
++    (0x0008, 0x0018): "SOPInstanceUID",
++    (0x0010, 0x0020): "PatientID",
++    (0x0028, 0x0002): "SamplesPerPixel",
++    (0x0028, 0x0004): "PhotometricInterpretation",
++    (0x0028, 0x0010): "Rows",
++    (0x0028, 0x0011): "Columns",
++    (0x0028, 0x0100): "BitsAllocated",
++    (0x0028, 0x0101): "BitsStored",
++    (0x0028, 0x0102): "HighBit",
++    (0x0028, 0x0103): "PixelRepresentation",
++    (0x0028, 0x1050): "WindowCenter",
++    (0x0028, 0x1051): "WindowWidth",
++    (0x0028, 0x1052): "RescaleIntercept",
++    (0x0028, 0x1053): "RescaleSlope",
++    (0x0028, 0x0030): "PixelSpacing",
++    (0x0028, 0x2110): "LossyImageCompression",
++    (0x0018, 0x5101): "ViewPosition",
++    (0x0008, 0x0060): "Modality",
++    (0x0028, 0x0008): "NumberOfFrames",
++    (0x0028, 0x1054): "RescaleType",
++    (0x0028, 0x1056): "VOILUTFunction",
++    (0x0028, 0x3010): "VOILUTSequence",
++    (0x2050, 0x0020): "PresentationLUTShape",
++}
++
++# 신규 입력 gate: 이 조건 밖의 표시 관련 태그는 자동 추정하지 않고 exclusion 사유로 기록한다.
++STANDARD_SIG = {"Rows": 1024, "Columns": 1024, "BitsAllocated": 8, "BitsStored": 8, "HighBit": 7, "PixelRepresentation": 0,
++                "PhotometricInterpretation": "MONOCHROME2", "SamplesPerPixel": 1, "TransferSyntaxUID": JPEG_BASELINE}
++ABSENT_TAGS = ("WindowCenter", "WindowWidth", "VOILUTFunction", "VOILUTSequence")
++
++
++def _num(v):
++    try:
++        return float(str(v).split("\\")[0])
++    except ValueError:
++        return None
++
++
++def display_problems(tags):
++    """표시 관련 태그 검사. 빈 list면 'decoded 8-bit == 표시값' 가정이 성립한다.
++
++    RescaleSlope/Intercept는 없거나 항등(1/0), Window*/VOI LUT는 없어야 하고, 단일 frame이며, Presentation LUT는 없거나 IDENTITY.
++    """
++    prob = []
++    for k, v in STANDARD_SIG.items():
++        if tags.get(k) != v:
++            prob.append(f"dicom_{k}={tags.get(k)!r}")
++    for k in ABSENT_TAGS:
++        if k in tags:
++            prob.append(f"dicom_{k}_present")
++    if "RescaleSlope" in tags and _num(tags["RescaleSlope"]) != 1.0:
++        prob.append(f"dicom_RescaleSlope={tags['RescaleSlope']!r}")
++    if "RescaleIntercept" in tags and _num(tags["RescaleIntercept"]) != 0.0:
++        prob.append(f"dicom_RescaleIntercept={tags['RescaleIntercept']!r}")
++    if "NumberOfFrames" in tags and _num(tags["NumberOfFrames"]) != 1.0:
++        prob.append(f"dicom_NumberOfFrames={tags['NumberOfFrames']!r}")
++    if tags.get("PresentationLUTShape", "IDENTITY") != "IDENTITY":
++        prob.append(f"dicom_PresentationLUTShape={tags['PresentationLUTShape']!r}")
++    return prob
++
++
++def _val(vr, raw):
++    if vr in ("US",):
++        return struct.unpack("<H", raw[:2])[0]
++    if vr in ("UL",):
++        return struct.unpack("<I", raw[:4])[0]
++    return raw.decode("latin-1").rstrip("\x00 ").strip()
++
++
++def parse(data):
++    """returns (tags dict, pixel_fragments list[bytes] or native bytes)."""
++    if data[128:132] != b"DICM":
++        raise ValueError("not DICOM part-10")
++    pos, n = 132, len(data)
++    tags = {}
++    pixel = None
++    while pos + 8 <= n:
++        g, e = struct.unpack("<HH", data[pos:pos + 4])
++        vr = data[pos + 4:pos + 6].decode("latin-1")
++        if vr in LONG_VR:
++            ln = struct.unpack("<I", data[pos + 8:pos + 12])[0]
++            hdr = 12
++        else:
++            ln = struct.unpack("<H", data[pos + 6:pos + 8])[0]
++            hdr = 8
++        if g == 0x7FE0 and e == 0x0010:
++            body = pos + hdr
++            if ln == 0xFFFFFFFF:
++                frags, p = [], body
++                while True:
++                    tg, te, tl = struct.unpack("<HHI", data[p:p + 8])
++                    p += 8
++                    if (tg, te) == (0xFFFE, 0xE0DD):
++                        break
++                    if (tg, te) != (0xFFFE, 0xE000):
++                        raise ValueError("bad encapsulated item")
++                    frags.append(data[p:p + tl])
++                    p += tl
++                pixel = frags
++            else:
++                pixel = data[body:body + ln]
++            break
++        if ln == 0xFFFFFFFF:  # 정의 안 된 길이 시퀀스: 지원하지 않는다 (관심 태그 밖이면 전체 스캔 실패로 처리)
++            raise ValueError(f"undefined-length element ({g:04x},{e:04x}) unsupported")
++        if (g, e) in WANT:
++            tags[WANT[(g, e)]] = _val(vr, data[pos + hdr:pos + hdr + ln])
++        pos += hdr + ln
++    return tags, pixel
++
++
++def read_pixels(data):
++    """DICOM bytes -> (meta dict, np.uint8 array (H,W) 또는 (H,W,3))."""
++    import numpy as np
++    tags, pixel = parse(data)
++    if tags.get("TransferSyntaxUID") != JPEG_BASELINE:
++        raise ValueError(f"unsupported transfer syntax {tags.get('TransferSyntaxUID')}")
++    prob = display_problems(tags)
++    if prob:
++        raise ValueError(f"unsupported display tags: {prob}")
++    if not isinstance(pixel, list) or len(pixel) < 1:
++        raise ValueError("expected encapsulated pixel data")
++    # 첫 item은 basic offset table일 수 있다 (길이 0이면 빈 table). 단일 frame: JPEG SOI(FFD8)로 시작하는 fragment를 이어붙인다.
++    frames = [f for f in pixel if len(f) > 0]
++    jpeg = b"".join(frames)
++    if jpeg[:2] != b"\xff\xd8":
++        raise ValueError("no JPEG SOI")
++    im = Image.open(io.BytesIO(jpeg))
++    im.load()
++    arr = np.asarray(im)
++    meta = dict(tags)
++    meta["pil_mode"] = im.mode
++    meta["array_shape"] = list(arr.shape)
++    meta["array_dtype"] = str(arr.dtype)
++    return meta, arr
+diff --git a/rsna_diag/rsna_data.py b/rsna_diag/rsna_data.py
+new file mode 100644
+index 0000000..155e33e
+--- /dev/null
++++ b/rsna_diag/rsna_data.py
+@@ -0,0 +1,228 @@
++"""RSNA 2018 adjudicated 자료 adapter: annotation/mapping 연결, 감사, 결정적 환자 split (iter_009).
++
++- 최종 라벨은 labelGroup 'Calculated'(adjudication 결과)의 Normal / No Lung Opacity / Not Normal / Lung Opacity(local bbox)만 쓴다.
++  Team 1/2/2a/QA/Adjudication 그룹의 개별 판독 라벨은 사용하지 않는다. 라벨 누락은 음성이 아니다.
++- bbox: data.{x,y,width,height} pixel (annotation height/width=1024 canvas) -> xyxy.
++- patient: mapping img_id `NNNNNNNN_SSS.png`의 8자리 접두어(NIH Patient ID). RSNA의 PatientID(DICOM)는 검사별 무작위라 쓰지 않는다.
++"""
++import collections
++import hashlib
++import json
++import re
++import zipfile
++
++from . import dicom_min, geometry
++
++SEED = 20260925
++CAT_POS, CAT_NORMAL, CAT_NLONN = "opacity", "normal", "not_normal_no_opacity"
++PRIORITY = [CAT_POS, CAT_NORMAL, CAT_NLONN]
++LABEL_TO_CAT = {"Lung Opacity": CAT_POS, "Normal": CAT_NORMAL, "No Lung Opacity / Not Normal": CAT_NLONN}
++# iter_010 분할 목표 (train / validation / 독립 확인)
++SPLIT_TARGETS = {"train": {CAT_POS: 1200, CAT_NORMAL: 600, CAT_NLONN: 600},
++                 "validation": {CAT_POS: 200, CAT_NORMAL: 100, CAT_NLONN: 100},
++                 "confirm": {CAT_POS: 400, CAT_NORMAL: 200, CAT_NLONN: 200}}
++IMG_RE = re.compile(r"(\d{8})_(\d{3})\.png")
++
++
++def h(seed, key):
++    return hashlib.sha1(f"{seed}:{key}".encode()).hexdigest()
++
++
++def load_annotations(path):
++    a = json.load(open(path))
++    label = {}
++    for g in a["labelGroups"]:
++        for l in g["labels"]:
++            label[l["id"]] = {"group": g["name"], "name": l["name"].strip(), "type": l["type"],
++                              "mode": l["annotationMode"]}
++    ann = a["datasets"][0]["annotations"]
++    by = collections.defaultdict(lambda: {"cats": set(), "boxes": [], "exclude": False, "study": None, "series": None,
++                                          "n_ann": 0})
++    for x in ann:
++        if "SOPInstanceUID" not in x:
++            continue
++        info = label[x["labelId"]]
++        r = by[x["SOPInstanceUID"]]
++        r["n_ann"] += 1
++        r["study"], r["series"] = x["StudyInstanceUID"], x["SeriesInstanceUID"]
++        if info["name"] == "Exclude":
++            r["exclude"] = True
++        if info["group"] != "Calculated":
++            continue
++        if info["name"] in LABEL_TO_CAT:
++            r["cats"].add(LABEL_TO_CAT[info["name"]])
++        if info["type"] == "local":
++            d = x["data"]
++            r["boxes"].append({"ann_id": x["id"], "n": x["annotationNumber"], "canvas": [x["width"], x["height"]],
++                               "xywh": [d["x"], d["y"], d["width"], d["height"]]})
++    return label, dict(by)
++
++
++def load_mapping(path):
++    m = json.load(open(path))
++    sop_map, dups = {}, []
++    for e in m:
++        s = e["SOPInstanceUID"]
++        if s in sop_map:
++            dups.append(s)
++        sop_map[s] = e
++    return sop_map, dups
++
++
++class RsnaZip:
++    """전체 ZIP의 full member path <-> SOP UID. basename 충돌을 검출한다."""
++
++    def __init__(self, path):
++        self.path = path
++        self.z = zipfile.ZipFile(path)
++        self.members = {}
++        self.collisions = []
++        for n in self.z.namelist():
++            if not n.endswith(".dcm"):
++                continue
++            sop = n.rsplit("/", 1)[-1][:-4]
++            if sop in self.members:
++                self.collisions.append((sop, self.members[sop], n))
++            self.members[sop] = n
++
++    def read(self, sop):
++        return self.z.read(self.members[sop])
++
++    def info(self, sop):
++        i = self.z.getinfo(self.members[sop])
++        return {"member": i.filename, "crc32": f"{i.CRC:08x}", "file_size": i.file_size}
++
++
++def box_checks(rec):
++    """local bbox 범위/면적 검사. returns list of problems."""
++    prob = []
++    for b in rec["boxes"]:
++        cw, ch = b["canvas"]
++        x, y, w, hh = b["xywh"]
++        if (cw, ch) != (1024, 1024):
++            prob.append(f"canvas {cw}x{ch}")
++        if not (w > 0 and hh > 0):
++            prob.append("nonpositive area")
++        if x < 0 or y < 0 or x + w > cw + 1e-3 or y + hh > ch + 1e-3:
++            prob.append("out of canvas")
++    return prob
++
++
++class AuditError(RuntimeError):
++    pass
++
++
++def audit_all(label, ann, sop_map, dups, rz):
++    """30000 영상 전체 연결/태그 감사. returns (per-image dict sop->eligibility record, summary dict).
++
++    mapping SOP 중복 또는 ZIP basename 충돌이 있으면 연결이 모호하므로 AuditError로 중단한다 (집계만 하지 않는다).
++    """
++    if dups or rz.collisions:
++        raise AuditError(f"mapping duplicate SOP={len(dups)} zip basename collisions={len(rz.collisions)}")
++    summary = {"n_annotation_images": len(ann), "n_mapping": len(sop_map), "mapping_duplicate_sop": len(dups),
++               "zip_members": len(rz.members), "zip_basename_collisions": len(rz.collisions),
++               "excluded_reasons": collections.Counter(), "category_counts_eligible": collections.Counter(),
++               "dicom_tag_signatures": collections.Counter()}
++    recs = {}
++    for sop, r in ann.items():
++        reasons = []
++        m = sop_map.get(sop)
++        if m is None:
++            reasons.append("not_in_mapping")
++        if sop not in rz.members:
++            reasons.append("not_in_zip")
++        if r["exclude"]:
++            reasons.append("exclude_label")
++        if len(r["cats"]) != 1:
++            reasons.append(f"calculated_cats={sorted(r['cats'])}")
++        cat = next(iter(r["cats"])) if len(r["cats"]) == 1 else None
++        if cat == CAT_POS and not r["boxes"]:
++            reasons.append("opacity_without_box")
++        if cat in (CAT_NORMAL, CAT_NLONN) and r["boxes"]:
++            reasons.append("negative_with_box")
++        reasons += box_checks(r)
++        patient = None
++        if m is not None:
++            mm = IMG_RE.fullmatch(m["img_id"])
++            if not mm:
++                reasons.append("bad_img_id")
++            else:
++                patient = mm.group(1)
++            if m["StudyInstanceUID"] != r["study"] or m["SeriesInstanceUID"] != r["series"]:
++                reasons.append("study_series_uid_mismatch")
++        if sop in rz.members:
++            tags, _ = dicom_min.parse(rz.read(sop))
++            sig = tuple(tags.get(k) for k in ("Rows", "Columns", "BitsStored", "PixelRepresentation", "PhotometricInterpretation",
++                                              "SamplesPerPixel", "RescaleSlope", "RescaleIntercept", "WindowCenter", "WindowWidth",
++                                              "NumberOfFrames", "PresentationLUTShape", "TransferSyntaxUID"))
++            summary["dicom_tag_signatures"][str(sig)] += 1
++            if tags.get("SOPInstanceUID") != sop:
++                reasons.append("dicom_sop_tag_mismatch")
++            reasons += dicom_min.display_problems(tags)
++        recs[sop] = {"sop": sop, "img_id": m["img_id"] if m else None, "patient": patient, "category": cat,
++                     "boxes": r["boxes"], "reasons": reasons, "orig_labels": m.get("orig_labels") if m else None}
++        for x in reasons:
++            summary["excluded_reasons"][x.split("=")[0]] += 1
++        if not reasons:
++            summary["category_counts_eligible"][cat] += 1
++    summary["excluded_reasons"] = dict(summary["excluded_reasons"])
++    summary["category_counts_eligible"] = dict(summary["category_counts_eligible"])
++    summary["dicom_tag_signatures"] = dict(summary["dicom_tag_signatures"])
++    return recs, summary
++
++
++def patient_choice(recs, excluded_patients, seed=SEED):
++    """eligible 영상에서 환자별 1영상을 고정 우선순위(양성->Normal->NLONN)와 seed 해시 순서로 고른다.
++
++    returns (choice: patient -> rec, bias summary).
++    """
++    per = collections.defaultdict(list)
++    for r in recs.values():
++        if r["reasons"] or r["patient"] in excluded_patients:
++            continue
++        per[r["patient"]].append(r)
++    choice, mixed = {}, 0
++    for p, rs in per.items():
++        cats = {r["category"] for r in rs}
++        if len(cats) > 1:
++            mixed += 1
++        for c in PRIORITY:
++            cand = sorted([r for r in rs if r["category"] == c], key=lambda r: h(seed, r["sop"]))
++            if cand:
++                choice[p] = cand[0]
++                break
++    bias = {"n_eligible_patients": len(per), "n_patients_multi_category": mixed,
++            "note": "다중 category 환자는 양성>Normal>NLONN 우선순위로 배정되어 Normal/NLONN 풀은 양성 영상이 없는 환자로 편향된다"}
++    return choice, bias
++
++
++def make_split(choice, seed=SEED, targets=SPLIT_TARGETS):
++    """환자 ID 해시 순으로 category 풀에서 split별로 순차 배정. 부족하면 예외 (과거 환자·중복으로 채우지 않는다).
++
++    returns (splits: name -> sorted patients, pool sizes, reserve: category -> patients 남은 적격 환자).
++    """
++    pools = {c: sorted([p for p, r in choice.items() if r["category"] == c], key=lambda p: h(seed, "pat" + p))
++             for c in PRIORITY}
++    splits = {k: [] for k in targets}
++    reserve = {}
++    for c in PRIORITY:
++        need = sum(t[c] for t in targets.values())
++        if len(pools[c]) < need:
++            raise RuntimeError(f"insufficient eligible patients for {c}: {len(pools[c])} < {need}")
++        pos = 0
++        for k, t in targets.items():
++            splits[k] += pools[c][pos:pos + t[c]]
++            pos += t[c]
++        reserve[c] = pools[c][pos:]
++    return {k: sorted(v) for k, v in splits.items()}, {c: len(v) for c, v in pools.items()}, reserve
++
++
++def gt_entry(rec):
++    """padding canvas(1024 정사각, offset 0) 기준 정규화 GT + 원본 xyxy."""
++    top, left, side = geometry.pad_offsets(1024, 1024)
++    out = []
++    for b in rec["boxes"]:
++        x, y, w, hh = b["xywh"]
++        xyxy = [x, y, x + w, y + hh]
++        out.append({"ann_id": b["ann_id"], "xyxy_px": xyxy, "yxyx_norm": geometry.canvas_to_norm(xyxy, top, left, side)})
++    return out

@@ -335,3 +335,19 @@ RSNA grounding 학습의 성과가 MRI 적응에도 도움이 되는지 직접 �
 - 접근법: 독립 위치 출력의 오류 검토 정보 (`approach/grounding-disagreement-review`), 시도: iter_113
 - 커밋: 540f63bed8b07775d26b02d69a8a545b2736749d
 - 자세히: DECISIONS.md의 iter_113, `agent/runs/iter_113/review.md`
+
+## 🏁 같은 영상·자동 근거에서도 틀린 초안이 명시 답을 바꾸는 현상을 확인했다
+
+*iter_118 · 2026-10-12 22:02 · 판정: CONTINUE / success*
+
+초안 내용만 바꿔도 답 방향이 흔들리는 제한된 현상을 확인했다.
+- **고민:** iter_117에서 초안 없는 조건이 교정한 8건이 초안 포함 조건에서는 유지되지 않았지만 안내문·평가 영향이 얽혀 있었다.
+- **시도:** 기존 출력 재채점이나 학습 확대 대신 RSNA 개발 192명의 세 조건 paired 비교를 선택했다.
+- **개발:** 영상·자동 detector 근거·공통 지시를 고정하고 초안 없음/맞음/틀림을 만들었다. 명시 답과 hedge·unknown을 분리했다.
+- **결과:** 정답→오답 39명, 반대 전환 2명으로 H_W=19.27pp [13.54,25.00]pp였다. hedge도 21→85명 늘었다.
+- **의미:** 단순 unknown 증가만으로 설명되지 않는 초안 내용 효과를 보존한다. 합성 개입이며 일반적 내부 원인이나 임상 오류율은 아니다.
+- **다음 판단:** 초안 제거 대안이 강하므로 현재 교정 설정 확대는 보류한다. 자연 초안의 추가 정보 가치와 선행 이후 잔여 문제는 미검증이다.
+
+- 접근법: 오류 혼합 근거의 선택적 교정 진단 (`approach/noisy-evidence-correction`), 시도: iter_116, iter_117, iter_118
+- 커밋: 66cd4542720d0efe69b2fbbdfabbe24ebe0253a0, ae15ee5bde73c415715f127720ffdcf24f60d2cc, 87b672866ae9be7b4d8c261b30f755f7fcaa97cf
+- 자세히: DECISIONS.md의 iter_118, `agent/runs/iter_118/review.md`

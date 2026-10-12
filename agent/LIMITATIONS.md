@@ -354,21 +354,23 @@ iter_113의 포착 9 대 6과 iter_114의 68명·87개에서 동일 22개 검토
 
 ## rsna-noisy-evidence-draft-retention — observed
 
-반복 개발 RSNA E600에서 직접 답과 detector17 threshold0.70이 불일치한 고정 87명을 평가했다. frozen MedGemma 1.5의 영상+초안+자동 근거 R은 고정 ev109_extract_v1에서 교정 0/40, 확정 오답 손상 0/47, unresolved 43/87이었고 resolved 44건은 모두 초안을 유지했다. 초안 없는 E는 8/40을 교정했지만 같은 8명의 R은 1건 오답·7건 unresolved였다. 현재 입력·평가에서의 제한된 관찰이며 일반적 교정 불능, 내부 anchoring 원인 또는 위치 학습 효과는 입증하지 않는다.
+iter_117의 제한된 초안 유지 관찰은 보존한다. iter_118의 RSNA 개발 192명에서 frozen MedGemma 1.5에 동일 영상·자동 detector 근거·공통 지시를 제공하고 합성 초안만 바꾸자, 초안 없음 E의 정답→틀린 초안 W의 명시 오답 전환은 39명, 반대 전환은 2명이었다. 전체 분모의 순전환 H_W는 0.192708, 95% CI [0.135417, 0.250000]이었다. 동시에 hedge 동반 응답은 21→85명, unknown은 0→1명으로 증가했다. 이는 고정 합성 개입의 답 방향 민감성이며 일반적인 교정 불능, 내부 anchoring 기전, 자연 초안의 순효용 또는 위치 학습 효과를 입증하지 않는다.
 
 - 적용 목표 시작: iter_003
-- 최신 리뷰: agent/runs/iter_117/review.json
-- 근거: research/results/iter_117/gen/MAIN/gen_worker*.jsonl: 고정 174명·696개 고유 출력, 698 attempts.
-- 근거: research/results/iter_117/eval/report.json: 불일치 집단 보수적 정답 K/B/G/M/N/E/R/S=47/40/54/54/34/29/26/53.
-- 근거: research/results/iter_117/eval/per_patient.json 및 observations.json: E가 교정한 8명과 동일 환자 R 원문 연결.
-- 근거: 리뷰에서 원출력 기반 계수와 paired bootstrap을 재계산하고 주요 결과를 재현했다.
-- 사용·평가 검증: 696개 요청의 prompt를 원 ledger와 고정 명세로 재구성해 모두 일치함을 확인했다.
-- 사용·평가 검증: 원 parser·표본·detector 운영점·성공 부등식을 유지했으며 T 응답 성공만 승인된 범위에서 필수 gate에서 분리했다.
-- 사용·평가 검증: processor.json의 기존 TECH 4입력 tensor 대조와 원 생성 경로의 불변성을 확인했다.
-- 사용·평가 검증: 695개 EOS 종료, 1개는 승인된 1000→2000→4000 재시도 후 unresolved로 보존했다.
-- 사용·평가 검증: worker의 GT 접근은 hash 검사였고 생성 입력은 영상과 고정 prompt였다. 읽기 분리 위반은 재사용 결함으로 남긴다.
-- 미해결: 독립 환자에서 영상·자동 근거·지시문을 고정하고 초안 내용만 바꿔도 같은 답변 변화가 생기는가?
-- 미해결: 높은 unresolved 중 내용 불확실성과 고정 추출 규칙의 영향은 얼마나 되는가?
-- 미해결: 단순 합의 S 또는 다수결 M 이후에도 중요한 추가 개선 여지가 있는가?
-- 미해결: 현재 선택 집단 밖의 일반화와 자유 판독·임상 정확성은 미검증이다.
+- 최신 리뷰: agent/runs/iter_118/review.json
+- 근거: research/results/iter_118/gen/MAIN/gen_worker*.jsonl: 192명·576개 고유 출력, 592 attempts.
+- 근거: research/results/iter_118/eval/report.json 및 per_patient.json: E/C/W 명시 정답 163/171/125명, 명시 오답 29/14/66명, unknown 0/7/1명.
+- 근거: 리뷰의 별도 원문 답 추출과 category 내 환자 bootstrap 10,000회(seed11817)에서 E/C/W 계수 및 H_W·H_C의 점추정치와 CI를 재현했다.
+- 근거: H_C=-0.078125, 95% CI [-0.119792, -0.041667]. 확정 응답 전환 지표 H_confirmed(W)=0.052083.
+- 근거: 기존 근거 agent/runs/iter_117/review.json과 해당 696개 출력의 원 판정은 변경하지 않았다.
+- 사용·평가 검증: 576개 MAIN prompt를 고정 명세·detector ledger·합성 초안 매핑으로 재구성해 불일치 0을 확인했다.
+- 사용·평가 검증: 198개 영상의 file hash 일치와 raw pixel hash 198개 고유성을 확인했다.
+- 사용·평가 검증: 평가 잠금·completion의 파일 digest 및 리뷰 SHA 87b672866ae9be7b4d8c261b30f755f7fcaa97cf의 대상 소스와 작업 파일이 일치했다.
+- 사용·평가 검증: MAIN worker 4개의 접근 기록에서 private·GT manifest·labels·annotation 경로 접근과 거부 시도는 없었다.
+- 사용·평가 검증: 생성 전 fixture 62/62, TECH의 2/4 worker token 일치와 정상 부분 종료 후 재개 결과가 기록돼 있다.
+- 사용·평가 검증: 기존 사용 이력 제외는 지정 manifest 범위에서 확인됐으며 legacy 익명 영상까지 완전한 미사용은 입증되지 않았다.
+- 미해결: 자연 발생 초안에서 초안 제거보다 유리한 정보가 얼마나 있으며, 그 이득을 보존하면서 손상을 줄일 필요가 있는가?
+- 미해결: 다른 모델·질문·도메인에서도 같은 효과가 나타나는가?
+- 미해결: 일반적인 조언 민감성 연구 이후 구별되는 기술적 문제가 남는가?
+- 미해결: 고정 hedge·refusal 규칙의 수치를 임상적 확신이나 거부의 정확한 빈도로 해석할 수 있는가?
 
