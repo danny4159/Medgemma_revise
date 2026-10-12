@@ -424,3 +424,4 @@
   - 모듈 t3_decide.py, t3_audit.py: needs_fix — 최대 12개 pairs_sample만 판정하며 불완전 목록을 assert가 허용한다. CT 목록 하드코딩과 계획에 없는 8쌍 실행 gate도 수정해야 한다. 현재 0쌍 결론에는 영향이 없다.; 검증: 현재 저장 목록은 실제 중복 2쌍 전체이며 두 쌍 모두 IoU>0.1임을 독립 확인했다.; 계획은 MAIN 8 case 미만에서도 사례 기반 실행을 허용하지만 코드는 eligible pair 8개 미만이면 run_models=false로 처리한다.
   - 모듈 t3_relation.py, t3_audit.py: needs_fix — 저장 relation_scan.json은 수정 전 target 오파싱 결과다. 최종 코드와 연결된 검증 결과가 없으며 byte hash를 pixel 동일성으로 표현한다. 실제 재사용 시에만 보완한다.; 검증: 실행 로그에서 t3_relation.py 실행 뒤 target 정규식이 수정된 순서를 확인했다.
   - 모듈 rsna_diag/__init__.py, rsna_diag/geometry.py, rsna_diag/mi19_baseline.py: needs_fix — 기존 승인 범위는 유지하지만 새 CT 입력에서의 재사용은 미승인이다. 비정사각 좌표 왕복·NCC 출력 변환 등 reuse_manifest의 required_checks가 미실행이다.; 검증: 리뷰 대상 SHA의 세 파일과 작업 파일의 동일성을 확인했다.
+- iter_121: 커밋 `ee8078ab0acba94f0d84d3ab2997e76eeb117bb9` (재사용 미승인: 리뷰 확인 필요), 리뷰: `agent/runs/iter_121/review.md`
