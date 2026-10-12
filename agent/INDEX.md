@@ -132,6 +132,7 @@
 - iter_124 [CONTINUE] (deep_medium/standard/normal) <MRI 고정 응답의 타 계열 대조: abandon> 💾a1a2743d0f29b0c6df592b97c572d03778b12b0d MR-RATE MRI 23명에서 Qwen도 MedGemma처럼 전원 PRESENT로 답해 BA 0.50이었다. 현재 고정 판별 후보는 보류하며, 공통 원인과 MRI 전체 능력은 미판정이다. → 다음: 투자 보류·전환을 권고한다. 현재 고정 FLAIR 판별 후보는 사전 음성 기준을 충족했으므로 추가 prompt·환자·세 번째 모델 없이 종료하고, 승인된 MR-RATE 범위에서 관측과 정답 연결이 더 명확한 기술 질문 하나를 선택한다. 기존 metadata·보고서에서 후보를 최대2~3개만 비교하고, 실제 적격 사례·관련 sequence·강한 단순 대안·결과별 종료 조건이 성립하는 하나에 한정해 작은 실제 비교를 계획한다. 질환명이나 모델 순위 변경만으로 새 연구 질문을 만들지 않는다. 현재 후보 재개는 관측 충분성 또는 전문 대안 이후의 잔여 가치에 대한 새 근거가 있을 때만 별도 계약으로 검토한다. 선택하지 않은 실행기의 전수 복구는 하지 않는다.
 - iter_125 [CONTINUE] (deep_medium/standard/normal) <MRI 해부학 관측 선택 대조: execution_failed> 💾ffcd2a54f246bd0cc48973f0e4c68cdd26d5ca6b MR-RATE 기술 MRI 8명까지 준비했지만 누적 ZIP 14.225GiB의 예산 초과와 공식 ICV 미검증으로 MedGemma 비교는 미실행이다. 관측 선택 효과는 아직 판단할 수 없다. → 다음: 한정 보완을 권고한다. 예산과 공식 전문 비교군을 복구해 기존 비교를 실행할 수 있는지 판단하고, 복구 불가이면 자료·실행 문제로 보류하는 것으로 끝낸다. 기준은 iter_125/plan.md이며 기존 표본·prompt·metric·성공 기준과 부분 결과를 보존한다. 다음 계획에서 누적 ZIP 14.225GiB와 남은 6,881,748,362 bytes, 추출·실행 공간을 근거로 예산 조정을 명시한다. 이는 현재 사용자 승인 범위에서 판단할 수 있다. 공식 SynthSeg ICV·QC 확보 경로와 실제 입력 출력을 먼저 확인하고, 기술8명의 zero mask 및 6/8 fallback 원인을 구분한다. 공식 비교군·자료 적격성·필수 runtime 검사가 성립하면 기술 생성과 처리량 비교→calibration 고정→탐색40명으로 이어간다. 전문 비교군을 임의의 hard-mask 비율로 대체하거나 selector·환자를 몰래 변경하지 않는다. 설계 변경이 필요하면 VLM 출력 전에 별도 근거와 판정 범위를 고정한다.
 - iter_126 [CONTINUE] (deep_medium/standard/normal) <MRI 해부학 관측 선택 대조: execution_failed> 💾8c64058b193a9de4a594a3f371c9dba790fc2561 MR-RATE 고정60명 중 음성3명의 명시적 크기 정답과 제외 사유3건이 미확인되어 비교를 중단했다. 모델 실험은 미실행이며 관측 선택 가설은 그대로 미검증이다. → 다음: 한정 보완을 권고한다. 모델 출력 전 발견한 선정 결함을 원 의미 기준과 고정 hash 순서로 수정할 수 있는지 한 번에 확인하고, 성립하면 기존 비교까지 진행하며 성립하지 않으면 현재 설계를 보류한다. 기준은 iter_125/plan.md와 iter_126/plan.md이며 원 기록·60명 manifest·중단 판정은 보존한다. 다음 별도 계획에서 일반 normal을 음성으로 소급 인정하지 않고, 전체 후보 검토·누락 제외 사유·부적격 사례의 결정적 대체 규칙·새 manifest와 비용을 실행 전에 고정한다. 과거 제외 사유를 복원할 수 없으면 새 검토 판단임을 명시한다. prompt·U/A selector·metric·성공 기준은 유지한다. 자료가 성립하면 공식 SynthSeg 2.0 기술8명 검증, runtime·처리량 검사, calibration12와 탐색40 비교를 같은 조건부 실행에 묶는다. 공식 비교군 또는 적격 표본이 성립하지 않으면 종료하며 감사 코드 정비만을 위한 반복은 발주하지 않는다.
+- iter_127 [CONTINUE] (deep_medium/standard/normal) <MRI 해부학 관측 선택 대조: execution_failed> 💾20d8bff915b00d2c1578939e4b0a240ddfa85bac MR-RATE 기술8명 중 2명에 비뇌 T2가 연결돼 MedGemma 비교는 미실행이다. 같은 ZIP의 뇌 series는 확인됐으므로 입력 연결의 한정 수정을 권고하며 가설 판정은 유지한다. → 다음: 한정 보완을 권고한다. 같은 ZIP에서 실제 뇌 series가 확인됐으므로 입력 연결을 한 번 수정해 기존 비교를 완료하거나, 기술 조건이 성립하지 않으면 현재 설계를 보류하는 것으로 끝낸다. iter_125~127 계획과 원 결과를 보존하고 별도 계획에서 해부학 적합성 필터를 먼저 고정한다. 고정 환자·역할·보고서 정답을 유지하며 적격 뇌 T2 안에서 기존 spacing→voxel area→series_id 순서를 적용한다. 두 실패 사례만 임의 교체하지 말고 전체60명의 연결을 같은 규칙으로 확인한다. SynthSeg 실패·정확도·fallback을 선정 근거로 사용하지 않는다. 기술8명의 영상 연결과 공식 ICV/QC 검증이 성립하면 원 U/A·prompt·metric·성공 기준으로 기술 생성·처리량→calibration12→탐색40을 같은 조건부 실행에서 완료한다. 성립하지 않으면 추가 환경·prompt 순회나 감사 전용 반복 없이 보류한다.
 
 ## 이전 목표들의 접근법 (참고용, 현재 목표의 재평가 횟수에는 안 들어감)
 
@@ -192,11 +193,11 @@
 - 영상 간 대상 대응의 투자 적합성 판단 [approach/cross-image-target-use]: 1회 (iter_120), 유효한 실험 0회, 미분류 0회, 최근 판정: execution_failed, 커밋: 752fba411759a093129c05feadfdff75e4d9a1b3
 - MRI 관측 범위와 분할 집계 진단 [approach/mri-coverage-aggregation]: 3회 (iter_121, iter_122, iter_123), 유효한 실험 1회, 미분류 0회, 최근 판정: abandon, 커밋: ee8078ab0acba94f0d84d3ab2997e76eeb117bb9, ee8078ab0acba94f0d84d3ab2997e76eeb117bb9, e39ba0666faf34899f9a4c230102b9d3fb1c44e7
 - MRI 고정 응답의 타 계열 대조 [approach/mri-cross-model-response]: 1회 (iter_124), 유효한 실험 1회, 미분류 0회, 최근 판정: abandon, 커밋: a1a2743d0f29b0c6df592b97c572d03778b12b0d
-- MRI 해부학 관측 선택 대조 [approach/mri-anatomy-observation]: 2회 (iter_125, iter_126), 유효한 실험 0회, 미분류 0회, 최근 판정: execution_failed, 커밋: ffcd2a54f246bd0cc48973f0e4c68cdd26d5ca6b, 8c64058b193a9de4a594a3f371c9dba790fc2561
+- MRI 해부학 관측 선택 대조 [approach/mri-anatomy-observation]: 3회 (iter_125, iter_126, iter_127), 유효한 실험 0회, 미분류 0회, 최근 판정: execution_failed, 커밋: ffcd2a54f246bd0cc48973f0e4c68cdd26d5ca6b, 8c64058b193a9de4a594a3f371c9dba790fc2561, 20d8bff915b00d2c1578939e4b0a240ddfa85bac
 
 현재 연구 브랜치: approach/mri-anatomy-observation (코드 위치: /SSD1_1TB/home/milab/daniel/08_medgemma/research)
 
 ### 최근 계획의 대안 순위
 
-1. MRI 해부학 관측 선택 대조: 기존 표본·기준을 유지한 한정 복구로 미실행 비교를 완료한다.
-2. 현재 구조 후보 보류: 추가 비용은 줄지만 관측 선택과 전문 대안의 가치는 미검증으로 남는다.
+1. MRI 해부학 관측 선택 대조: 출력 전 선정 결함을 원 기준으로 수정하고 기존 U/A/S 비교를 조건부 완료한다.
+2. 현재 구조 과제 보류: 준비 비용을 더 쓰지 않지만 관측 선택과 전문 대안의 가치는 미검증으로 남는다.

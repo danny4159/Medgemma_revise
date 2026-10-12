@@ -1,0 +1,1006 @@
+diff --git a/mr127_assets.py b/mr127_assets.py
+new file mode 100644
+index 0000000..9448220
+--- /dev/null
++++ b/mr127_assets.py
+@@ -0,0 +1,81 @@
++"""공식 FreeSurfer annex 가중치를 고정 SHA로 확보하고 UCL 공식 소스를 분리한다."""
++import hashlib
++import json
++from pathlib import Path
++import re
++import shutil
++import subprocess
++import sys
++import time
++import zipfile
++import requests
++from mr127_select import save, sha
++
++ROOT=Path('/home/test/.local/share/medgemma/mr_rate/iter127')
++FS_REV='4f8728e5132e8d39a8f1bf3d24d15fed62f4fc9d'
++UCL_REV='2a2aa3bbfccb83f8253a51ca8b329b9938a2646d'
++SOURCE=ROOT/'SynthSeg'
++ENVPY=Path('results/environments/synthseg125/bin/python').absolute()
++
++
++def main():
++    ROOT.mkdir(parents=True,exist_ok=True)
++    attempts=[]
++    # 먼저 원 README에 명시된 UCL 배포 링크의 실제 상태를 기록한다.
++    urls=['https://liveuclac-my.sharepoint.com/:u:/g/personal/rmappmb_ucl_ac_uk/EctEe3hOP8dDh1hYHlFS_rUBo80yFg7MQY5WnagHlWcS6A?e=e8bK0f',
++          'https://liveuclac-my.sharepoint.com/:f:/g/personal/rmappmb_ucl_ac_uk/EtlNnulBSUtAvOP6S99KcAIBYzze7jTPsmFk2_iHqKDjEw?e=rBP0RO']
++    for u in urls:
++        r=requests.get(u,stream=True,timeout=40)
++        attempts.append(dict(url=u,final_url=r.url,status=r.status_code))
++        r.close()
++    assert not SOURCE.exists()
++    SOURCE.mkdir()
++    archive=Path('results/external/synthseg_2a2aa3b.zip')
++    files={}
++    with zipfile.ZipFile(archive) as z:
++        prefix='SynthSeg-'+UCL_REV+'/'
++        for info in z.infolist():
++            assert info.filename.startswith(prefix)
++            rel=Path(info.filename[len(prefix):])
++            assert not rel.is_absolute() and '..' not in rel.parts
++            assert (info.external_attr>>16)&0o170000 != 0o120000
++            if info.is_dir() or not rel.parts or rel.parts[0]=='models': continue
++            dest=SOURCE/rel
++            dest.parent.mkdir(parents=True,exist_ok=True)
++            with z.open(info) as a,dest.open('xb') as b: shutil.copyfileobj(a,b)
++            files[str(dest)]=sha(dest)
++    weights={}
++    for name in ['synthseg_2.0.h5','synthseg_qc_2.0.h5']:
++        pointer_url=f'https://raw.githubusercontent.com/freesurfer/freesurfer/{FS_REV}/mri_synthseg/{name}'
++        r=requests.get(pointer_url,timeout=40)
++        r.raise_for_status()
++        pointer=r.text.strip()
++        key=pointer.split('/')[-1]
++        m=re.fullmatch(r'SHA256E-s(\d+)--([0-9a-f]{64})\.0\.h5',key)
++        assert m, pointer
++        size=int(m[1]); digest=m[2]
++        h=hashlib.md5(key.encode()).hexdigest()
++        u=f'https://surfer.nmr.mgh.harvard.edu/pub/dist/freesurfer/repo/annex.git/annex/objects/{h[:3]}/{h[3:6]}/{key}/{key}'
++        dst=SOURCE/'models'/name
++        dst.parent.mkdir(exist_ok=True)
++        t=time.monotonic()
++        with requests.get(u,stream=True,timeout=90) as response:
++            response.raise_for_status()
++            with dst.open('xb') as f:
++                for chunk in response.iter_content(4<<20): f.write(chunk)
++            assert dst.stat().st_size==size and sha(dst)==digest
++            weights[name]=dict(path=str(dst),size=size,sha256=digest,url=u,final_url=response.url,
++                 pointer_url=pointer_url,pointer=pointer,pointer_sha256=hashlib.sha256(r.content).hexdigest(),
++                 seconds=time.monotonic()-t,etag=response.headers.get('ETag'))
++        print('verified',name,size,flush=True)
++    freeze=subprocess.run([str(ENVPY),'-m','pip','freeze'],capture_output=True,text=True,check=True)
++    save('results/iter_127/assets.json',dict(created_utc=time.strftime('%Y-%m-%dT%H:%M:%SZ',time.gmtime()),
++         ucl_revision=UCL_REV,freesurfer_revision=FS_REV,ucl_archive=str(archive),ucl_archive_sha256=sha(archive),
++         source_files=files,weights=weights,access_attempts=attempts,environment_python=str(ENVPY),
++         environment_reused_without_modification=True,pip_freeze=freeze.stdout,
++         source_license=(SOURCE/'LICENSE.txt').read_text(),
++         training_overlap='합성 입력으로 학습한 공개 모델. MR-RATE 환자별 학습·선택 노출은 미검증.',
++         source_sha256=sha(__file__)))
++
++
++if __name__=='__main__': main()
+diff --git a/mr127_data.py b/mr127_data.py
+new file mode 100644
+index 0000000..a3fdbdc
+--- /dev/null
++++ b/mr127_data.py
+@@ -0,0 +1,107 @@
++"""iter127 고정 표본의 공식 ZIP 예산/bytes 검증과 원자적 기술 입력 추출."""
++import argparse
++from collections import Counter
++import fcntl
++import hashlib
++import json
++import os
++from pathlib import Path
++import shutil
++import time
++import zipfile
++import numpy as np
++import nibabel as nib
++from mr127_select import read,save,sha,OUT
++
++ROOT=Path('/home/test/.local/share/medgemma/mr_rate/iter127')
++REV='f6e39794e7820c96c18465231a30da424e6d1c69'
++
++
++def budget():
++    os.environ['HF_TOKEN_PATH']='/home/test/.cache/huggingface/token'
++    from huggingface_hub import HfApi
++    manifest=read(OUT/'selection_lock.json')['manifest']
++    existing={}
++    for p in ['results/iter_123/data/fetch_ledger.json','results/iter_125/data/fetch_ledger.json']:
++        for study,v in read(p).items():
++            rel=v['path'].split('/raw/')[-1]
++            assert rel not in existing
++            existing[rel]=v
++    paths={f"mri/{m['batch_id']}/{m['study_uid']}.zip" for m in manifest}|set(existing)
++    infos={i.path:i for i in HfApi().get_paths_info('Forithmus/MR-RATE',sorted(paths),repo_type='dataset',revision=REV)}
++    assert set(infos)==paths
++    verified={}
++    for rel,v in existing.items():
++        i=infos[rel]
++        assert v['revision']==REV
++        assert Path(v['path']).stat().st_size==i.size==v['size']
++        digest=sha(v['path'])
++        assert digest==i.lfs.sha256==v['sha256']
++        verified[rel]=dict(**v,verified_actual_sha256=digest)
++    original=read('results/iter_125/handoff_codex/audit.json')['budget']
++    objects={p:dict(size=i.size,sha256=i.lfs.sha256) for p,i in infos.items()}
++    total=sum(i.size for i in infos.values())
++    need=paths-set(existing)
++    free=shutil.disk_usage(ROOT.parent).free
++    assert free>sum(infos[p].size for p in need)*3
++    save(OUT/'budget_lock.json',dict(revision=REV,selection_sha256=sha(OUT/'selection_lock.json'),
++         official_objects=objects,verified_existing=verified,
++         total_zip_count=len(paths),total_bytes=total,limit_bytes=total,
++         existing_zip_count=len(existing),existing_bytes=sum(infos[p].size for p in existing),
++         new_zip_count=len(need),new_bytes=sum(infos[p].size for p in need),
++         delta_bytes_vs_old_plan=total-original['planned_cumulative_bytes'],
++         added_paths=sorted(paths-set(original['official_objects'])),
++         removed_undownloaded_paths=sorted(set(original['official_objects'])-paths),
++         free_bytes_external=free,free_bytes_ssd=shutil.disk_usage('.').free,
++         estimate_note_ko='기존62 ZIP 보존과 새60명 필요 객체의 합집합. 모든 실제 객체 bytes와 SHA 검증. 이후 필요한 T2/brain member만 추출.',
++         source_sha256=sha(__file__),created_utc=time.strftime('%Y-%m-%dT%H:%M:%SZ',time.gmtime())))
++    print('budget',len(paths),total,'new',len(need),sum(infos[p].size for p in need))
++
++
++def extract_tech():
++    manifest=read(OUT/'selection_lock.json')['manifest']
++    b=read(OUT/'budget_lock.json')
++    assert b['selection_sha256']==sha(OUT/'selection_lock.json')
++    inputs={}
++    for m in manifest:
++        if m['role']!='tech': continue
++        rel=f"mri/{m['batch_id']}/{m['study_uid']}.zip"
++        v=b['verified_existing'][rel]
++        assert sha(v['path'])==b['official_objects'][rel]['sha256']
++        directory=ROOT/'inputs'/m['study_uid']/m['series_id']
++        directory.mkdir(parents=True,exist_ok=False)
++        expected={f"{m['study_uid']}/img/{m['study_uid']}_{m['series_id']}.nii.gz":'img.nii.gz',
++                  f"{m['study_uid']}/seg/{m['study_uid']}_{m['series_id']}_brain-mask.nii.gz":'brain.nii.gz'}
++        files={}
++        with zipfile.ZipFile(v['path']) as z:
++            for member,name in expected.items():
++                matches=[i for i in z.infolist() if i.filename==member]
++                assert len(matches)==1
++                i=matches[0]
++                assert '..' not in Path(member).parts and not Path(member).is_absolute()
++                assert (i.external_attr>>16)&0o170000!=0o120000
++                dst=directory/name
++                with z.open(i) as s,dst.open('xb') as d: shutil.copyfileobj(s,d)
++                assert dst.stat().st_size==i.file_size
++                files[name]=dict(path=str(dst),sha256=sha(dst),member=member,crc=i.CRC,size=i.file_size)
++        image=nib.load(files['img.nii.gz']['path']); brain=nib.load(files['brain.nii.gz']['path'])
++        assert len(image.shape)==3 and image.shape==brain.shape and np.allclose(image.affine,brain.affine,atol=1e-3)
++        assert np.isfinite(image.get_fdata()).all() and np.isfinite(brain.get_fdata()).all()
++        assert np.isfinite(image.affine).all() and abs(np.linalg.det(image.affine[:3,:3]))>0
++        assert np.allclose(image.header.get_zooms()[:3],json.loads(m['array_spacing_mm']),atol=1e-3)
++        inputs[m['study_uid']]=dict(files=files,patient_uid=m['patient_uid'],series_id=m['series_id'],
++             zip_sha256=b['official_objects'][rel]['sha256'],revision=REV,
++             shape=list(image.shape),affine=image.affine.tolist(),native_spacing=[float(x) for x in image.header.get_zooms()[:3]],
++             axcodes=''.join(nib.aff2axcodes(image.affine)))
++    assert len(inputs)==8
++    save(OUT/'tech_inputs.json',dict(selection_sha256=sha(OUT/'selection_lock.json'),inputs=inputs,
++         budget_sha256=sha(OUT/'budget_lock.json'),source_sha256=sha(__file__)))
++    print('tech extracted',len(inputs))
++
++
++if __name__=='__main__':
++    ap=argparse.ArgumentParser(); ap.add_argument('action',choices=['budget','tech']); a=ap.parse_args()
++    OUT.mkdir(parents=True,exist_ok=True)
++    with (OUT/'data.lock').open('a') as f:
++        fcntl.flock(f,fcntl.LOCK_EX|fcntl.LOCK_NB)
++        budget() if a.action=='budget' else extract_tech()
+diff --git a/mr127_finish.py b/mr127_finish.py
+new file mode 100644
+index 0000000..8b9aefe
+--- /dev/null
++++ b/mr127_finish.py
+@@ -0,0 +1,123 @@
++"""iter127의 실제 중단 경계와 입력 연결 결함을 봉인한다. 성능 판정기가 아니다."""
++from collections import Counter
++import csv
++import json
++from pathlib import Path
++import subprocess
++import time
++
++import nibabel as nib
++import numpy as np
++import pandas as pd
++from mr127_select import read,save,sha,OUT
++
++
++def main():
++    root=Path('results/iter_127')
++    provenance=read(OUT/'provenance.json')
++    assert all(sha(p)==h for p,h in provenance['inputs'].items())
++    assert all(sha(p)==h for p,h in provenance['inherited_outputs'].items())
++    selection=read(OUT/'selection_lock.json')
++    verification=read(OUT/'independent_verify.json')
++    assert verification['all_pass'] and verification['selection_sha256']==sha(OUT/'selection_lock.json')
++    inputs=read(OUT/'tech_inputs.json')['inputs']
++    assets=read(root/'assets.json'); fs=read(root/'fs_assets.json')
++    for p,h in assets['source_files'].items():assert sha(p)==h
++    for x in assets['weights'].values():assert sha(x['path'])==x['sha256']
++    for p,h in fs['files'].items():assert sha(p)==h
++    # 원 실측 로그로 초기 supervisor의 peak 집계 누락을 별도로 교정한다.
++    runs=[]
++    for completion in sorted((root/'seg').glob('*/completion.json')):
++        stage=completion.parent.name; result=read(completion)
++        raw=[]
++        for p in completion.parent.glob('resources_*.jsonl'):
++            for line in p.read_text().splitlines():raw.append(json.loads(line))
++        actual_peak={g:max(x['used_mib'] for row in raw for x in row['gpus'] if x['index']==g) for g in ['0','1']}
++        minimum_free={g:min(x['free_mib'] for row in raw for x in row['gpus'] if x['index']==g) for g in ['0','1']}
++        outputs={}
++        for s in ['7ISDTZ2JVG','5SWPQWD3DD']:
++            d=Path('/home/test/.local/share/medgemma/mr_rate/iter127/seg')/stage/s/'attempt_000'
++            files={str(p):sha(p) for p in d.glob('*') if p.is_file()}
++            record=dict(artifacts=files,returncode=result['failures'].get(s,{}).get('returncode'))
++            if (d/'seg.nii.gz').exists():
++                a=np.asarray(nib.load(d/'seg.nii.gz').dataobj)
++                record.update(foreground_voxels=int(np.count_nonzero(a)),total_voxels=int(a.size),
++                              left_ventricle_voxels=int(np.count_nonzero(a==4)),right_ventricle_voxels=int(np.count_nonzero(a==43)))
++            if (d/'vol.csv').exists():
++                with (d/'vol.csv').open() as f:rows=list(csv.reader(f))
++                if len(rows)==2:record['volumes_mm3']={k:float(v) for k,v in zip(rows[0][1:],rows[1][1:])}
++            if (d/'qc.csv').exists():
++                with (d/'qc.csv').open() as f:rows=list(csv.reader(f))
++                if len(rows)==2:record['QC_raw']={k:float(v) for k,v in zip(rows[0][1:],rows[1][1:])}
++            outputs[s]=record
++        runs.append(dict(stage=stage,wall_s=result['wall_s'],actual_peak_gpu_total_mib=actual_peak,
++                min_gpu_free_mib=minimum_free,per_worker_2GiB_headroom=all(x>=2048 for x in minimum_free.values()),
++                original_summary_peak_mib=result['peak_gpu_total_mib'],
++                summary_peak_mismatch=actual_peak!=result['peak_gpu_total_mib'],outputs=outputs,
++                stage_passed=result['checks_passed'],completion_path=str(completion),completion_sha256=sha(completion)))
++    technical_by={m['study_uid']:m for m in selection['manifest'] if m['role']=='tech'}
++    visual=[]
++    bad={'7ISDTZ2JVG':'복부·척추 단면. 측뇌실을 관측하는 뇌 T2 입력이 아님.',
++         'PCKMK46BRL':'경부·척수 단면. 뇌 전체/측뇌실 관측 입력이 아님.'}
++    for sid,m in technical_by.items():
++        p=root/'diagnostics'/f'{sid}_U_diagnostic.png'
++        assert p.exists()
++        visual.append(dict(study_uid=sid,series_id=m['series_id'],patient_uid=m['patient_uid'],
++              image_path=str(p),image_sha256=sha(p),image_tool='tools.view_image through functions.exec',
++              actual_image_return_observed=True,body_scope_compatible=sid not in bad,
++              observation_ko=bad.get(sid,'표시된 단면에서 두개 내 뇌 조직을 확인. 임상 확장 정답의 재판독은 하지 않음.'),
++              timing_ko='SynthSeg pilot 이후 실제 반환 영상을 확인. 사전 시각 감사로 소급 기록하지 않음.'))
++    metadata=pd.read_csv('/home/test/.local/share/medgemma/mr_rate/meta/metadata/batch23_metadata.csv',low_memory=False)
++    fields=['patient_uid','study_uid','series_id','array_shape','array_spacing_mm','SeriesDescription','ProtocolName',
++            'PerformedProcedureStepDescription','StudyDescription']
++    rows=metadata[metadata.study_uid.isin(bad)&(metadata.classified_modality=='T2w')&(metadata.acquisition_plane=='AXIAL')][fields].fillna('').to_dict('records')
++    diagnosis=dict(status='input_linkage_failed',visual_technical_inputs=visual,
++        incompatible_studies=list(bad),metadata_series=rows,
++        native_input_sha256={s:{k:v['sha256'] for k,v in inputs[s]['files'].items()} for s in bad},
++        alternate_existing_series=[dict(study_uid=s,series_id='t2w-raw-axi',
++             image_path=str(root/'diagnostics'/f'{s}_other_series_readonly.png'),
++             image_sha256=sha(root/'diagnostics'/f'{s}_other_series_readonly.png'),
++             actual_image_return_observed=True,observation_ko='동일 기존 ZIP의 다른 T2 series에는 뇌 단면이 있음. 입력 선택이나 모델 실행에 사용하지 않음.') for s in bad],
++        explanation_ko='study에는 다른 신체 부위의 axial T2가 함께 있다. 작은 slice spacing 우선 규칙이 비뇌 series를 선택한다. 일반 brain-mask 출력/크기·affine 일치는 해부학적 입력 적합성을 보장하지 않는다.',
++        conclusion_scope_ko='선택한 series 연결의 무효. SynthSeg의 뇌 MRI 능력 실패, 보고서 임상 오류, MR-RATE 전체 부적합을 입증하지 않는다.',
++        uncertainty_ko='대체 뇌 series에서의 공식 SynthSeg ICV/QC 및 MedGemma 출력은 미실행.')
++    save(root/'diagnostics/input_linkage_failure.json',diagnosis)
++    budget=read(OUT/'budget_lock.json')
++    # 모든 소유 자식 종료 이후 보존한다. 타 사용자 프로세스를 종료/변경하지 않는다.
++    gpu=subprocess.check_output(['nvidia-smi','--query-compute-apps=pid,process_name,used_memory','--format=csv,noheader'],text=True)
++    result=dict(status='execution_failed',valid_experiment=False,stage='technical_input_and_specialist_gate',
++          selection_count=60,report_reviewed_cases=98,selection_arithmetic_checks=verification['check_count'],
++          selected_role_counts=dict(Counter(m['role'] for m in selection['manifest'])),
++          selected_semantics_scope_ko='전체 보고서의 명시적 크기 규약에 따라 선정. 실제 뇌 영상 연결은 별도이며 기술2명에서 실패.',
++          visual_technical_count=8,visually_incompatible_count=2,
++          official_segmentation_runs=runs,weights_check=read(root/'seg/weight_check.json'),
++          new_mri_download_bytes=0,new_model_download_bytes=sum(x['size'] for x in assets['weights'].values()),
++          proposed_zip_bytes=budget['total_bytes'],actual_existing_zip_bytes=budget['existing_bytes'],
++          remaining_zip_bytes=budget['new_bytes'],medgemma_requests_completed=0,
++          evaluator_prelocked=False,calibration_completed=False,exploration_completed=False,
++          failure_scope='현재 axial T2 series 선택 규칙의 뇌/척추 연결과 기술 단계 입력 유효성',
++          stop_reason_ko='기술8명의 실제 뇌 관측 전제가 2명에서 성립하지 않음. 공식 UCL/FreeSurfer 모델 출력도 유효한 전문 점수로 사용할 수 없음. 원 입력을 교체하거나 표본을 재선정하여 출력 후 조건을 바꾸지 않고 현재 설계를 보류.',
++          replacement_boundary_ko='plan의 실제 파일 결함 대체는 모델 출력 전 봉인이 조건이다. 이 결함은 SynthSeg 출력 이후 발견했으므로 이번 engineer는 대체 분기를 소급 적용하지 않음. VLM 출력 전만 의미하는지 scientist의 별도 판단이 필요.',
++          pending=['뇌 series 적합성을 포함한 입력 선택 설계','공식 전문 비교군 기술8명 유효 출력',
++                   'mask 좌표/selector/ICV/QC 실측 검증','MedGemma 공식 processor·생성·재개·처리량 검사',
++                   '생성 전 평가 코드 잠금','calibration12','explore40 U/A80건','독립 성능/비용 검산'],
++          source_fixes_ko=['자원 peak 집계가 pending 종료 후 한 GPU를 누락하는 결함 수정. 원 로그 재집계 결과를 별도 보존; 수정된 집계의 새 GPU 실행 검증은 미완료.'],
++          research_observation_ko='유효한 VLM 가설 검증 없음. 선정·공식 자산 경로 복구와 입력 연결 오류 확인만 완료.',
++          recommendation_ko='현재 설계는 입력 전제 실패로 보류. 재개를 택하면 기존 ZIP의 실제 뇌 series 조건을 출력 전에 명시하고 최소 공식 비교로 곧바로 이어지는 별도 계획이 필요. 또 다른 설치/감사 반복이나 MRI 능력 기각은 권고하지 않음.',
++          current_compute_processes=gpu.strip(),original_outputs_unchanged=True,
++          created_utc=time.strftime('%Y-%m-%dT%H:%M:%SZ',time.gmtime()),
++          source_sha256={str(p):sha(p) for p in Path('.').glob('mr127*.py')})
++    save(root/'result.json',result)
++    artifacts={str(p):sha(p) for p in root.rglob('*') if p.is_file() and p.name!='completion.json'}
++    artifacts.update({str(p):sha(p) for p in root.rglob('completion.json')})
++    for run in runs:
++        for row in run['outputs'].values():artifacts.update(row['artifacts'])
++    save(root/'completion.json',dict(status='execution_failed',valid_experiment=False,artifacts=artifacts,
++         source_sha256=result['source_sha256'],inherited_outputs_sha256=provenance['inherited_outputs'],
++         summary_ko='원 보고서 재선정과 공식2.0 자산 복구 후 기술2/8명에서 비뇌 series 연결을 확인. MedGemma 비교를 실행하지 않고 현재 설계를 보류.'))
++    print(json.dumps(dict(status=result['status'],selection=60,reviewed=98,visual_inputs=8,incompatible=2,
++        VLM_requests=0,new_MRI_bytes=0,output=str(root/'result.json')),ensure_ascii=False))
++    return 2
++
++
++if __name__=='__main__':raise SystemExit(main())
+diff --git a/mr127_judgments.py b/mr127_judgments.py
+new file mode 100644
+index 0000000..816cfb5
+--- /dev/null
++++ b/mr127_judgments.py
+@@ -0,0 +1,141 @@
++"""iter127의 원문을 직접 읽은 후보별 판정. 범용 임상 라벨 추출기가 아니다."""
++import json
++import time
++from mr127_select import OUT, read, save, sha
++
++# patient|decision|polarity|target_conflict|literal report quote|판단 근거
++TABLE = r'''14670|include|positive|0|the third and bilateral lateral ventricles are dilated secondary to atrophy.|양측 측뇌실 확장 명시. 위축이라는 원인 설명은 존재 불확실성이 아니다.
++14967|include|positive|0|Sulcal distances, lateral ventricles, third ventricle widths, and Sylvian fissures have become prominent secondary to volume loss|복수 측뇌실의 prominence와 volume loss 명시. 경도 위축도 유지한다.
++17182|unknown|unknown|0|Lateral ventricle and third ventricle are mildly prominent|단수 lateral ventricle이며 양측 범위 불명.
++3405|include|positive|0|the bilateral lateral ventricles and third ventricle are slightly enlarged.|양측 측뇌실의 경도 확장 명시. 전이의 시간 비교는 목표 크기 판정과 별개.
++14550|include|positive|0|Lateral and third ventricles and sulci are mildly enlarged (mild cerebral atrophy).|복수 측뇌실 경도 확장. CSF resorption 원인 추정은 확장 존재의 hedge가 아니다.
++1967|include|positive|0|Bilateral lateral ventricles and third ventricle are wide|양측 측뇌실 폭 증가 명시. 전이·혈액소견의 불확실성은 별개.
++18291|include|positive|0|Bilateral lateral ventricles, third ventricle are mildly prominent.|양측 측뇌실 prominence 명시. 골수종 동반을 제외하지 않는다.
++17804|include|positive|0|The 3rd and lateral ventricles and sulci are mildly enlarged consistent with patient age.|복수 측뇌실 확장 명시. 나이와의 일치 설명은 음성 근거가 아니다. 운동 artifact 기록을 유지한다.
++15758|include|positive|0|Both lateral ventricles and 3rd ventricle are widened secondary to atrophy|양측 폭 증가와 좌우 수치 명시. 위축 관련 확장 포함.
++14950|include|positive|0|Sulcal spaces, lateral ventricles, and third ventricle widths, and Sylvian fissures are prominent secondary to volume loss|복수 측뇌실 prominence 명시. mild senile atrophy 포함.
++16645|exclude|unilateral|0|The left lateral ventricle, particularly the temporal horn, is observed to be dilated|좌측만 확장. 양측 대상으로 확장하지 않는다.
++17759|include|positive|0|Bilateral lateral ventricles and third ventricle are enlarged.|양측 확장 명시. NPH 원인 판단은 평가하지 않는다.
++15831|unknown|unknown|1|The ventricular system is of normal width.|전체 정상 폭과 우측 비대칭 확장 병기. 양측 확장도 미확인.
++16126|exclude|unilateral|0|Mild enlargement is present in the right lateral ventricle atrium|우측 atrium만 확장. choroid cyst 추정과 별개로 양측 미확인.
++14770|include|positive|0|The third and lateral ventricles and sulci are widened due to cerebral volume loss.|복수 측뇌실 확장 명시. 저산소성 edema는 별도 동반소견.
++17564|include|positive|0|Enlargement compatible with atrophy has been observed in the 3rd ventricle, both lateral ventricles|양측 측뇌실 확장 명시. metastasis 치료 변화 문맥과 목표 정답을 구분.
++14766|exclude|not_positive|0|More prominent narrowing is observed in the occipital horn of the right lateral ventricle.|mass effect로 우측 narrowing. 후보 확장 극성과 불일치.
++15179|include|positive|0|Convexity sulci, basal cisterns, sylvian fissures and both lateral ventricles are dilated|양측 측뇌실 확장 명시. chronic infarct 동반.
++7790|include|positive|0|Bilateral lateral ventricles and third ventricle are mildly prominent.|양측 경도 prominence 명시. 병변 원인 추정은 목표 존재와 별개.
++16347|include|positive|0|the 3rd and lateral ventricles are observed to be midline and dilated.|복수 측뇌실 확장 명시. 정상 gray matter/sulci 문장은 측뇌실 정상 폭 주장이 아니다.
++16576|include|negative|0|the 3rd and lateral ventricles are midline and of normal width.|복수 측뇌실 정상 폭 명시. 소뇌 고신호와 목표 크기는 별개.
++17117|include|negative|0|The width of the 3rd and lateral ventricles and hemispheric sulci is normal.|복수 측뇌실 정상 폭 명시.
++16714|unknown|unknown|0|Bilateral lateral ventricles are normal.|일반 normal만 있어 명시적 크기·폭/확장 부재를 인증 못 함.
++16713|unknown|unknown|0|Bilateral lateral ventricles are normal.|일반 normal만 있어 명시적 크기·폭/확장 부재를 인증 못 함.
++16246|unknown|unknown|0|The third ventricle and lateral ventricular system are in normal location and of size compatible with age.|정상은 location의 수식어. 크기는 age-compatible이며 정상 크기/비확장으로 보충하지 않는다.
++17201|include|negative|0|The width of the third and lateral ventricles and hemispheric sulci is normal.|복수 측뇌실 정상 폭 명시. hippocampal cyst는 별개.
++16623|include|negative|0|Third and both lateral ventricles are midline and of normal width.|양측 측뇌실 정상 폭 명시.
++17856|unknown|unknown|0|Third and lateral ventricles and sulci are normal.|일반 정상만 있으며 목표 정상 크기·폭 미확인.
++16764|include|negative|0|the third and lateral ventricles are midline and of normal size.|복수 측뇌실 정상 크기 명시. optic sheath 확장은 목표와 다른 구조.
++16614|include|negative|0|the third and lateral ventricles are midline and of normal size.|복수 측뇌실 정상 크기 명시.
++17185|include|negative|0|The width of the 3rd and lateral ventricles and hemispheric sulci is normal.|복수 측뇌실 정상 폭. cervical findings는 별개.
++16463|include|negative|0|Third and both lateral ventricles are midline and of normal width.|양측 측뇌실 정상 폭. gliosis 동반은 별개.
++10914|include|negative|0|the third and lateral ventricles are midline and of normal width.|복수 측뇌실 정상 폭.
++16451|include|negative|0|Third and both lateral ventricles are midline and of normal width.|양측 정상 폭. mastoiditis를 이유로 제외하지 않는다.
++15764|include|negative|0|the third and lateral ventricles are midline and of normal size.|복수 정상 크기. otitis·sinusitis는 별개.
++15453|unknown|unknown|0|Third ventricle and lateral ventricles, widths of hemispheric cortical sulci are within normal limits.|widths가 sulci에만 붙어 측뇌실은 일반 정상인지 수식 범위 모호. 원 기준대로 unknown.
++16029|unknown|unknown|0|The 3rd ventricle and lateral ventricular system are in normal location and width compatible with age.|정상 location과 age-compatible width를 정상 폭/확장 부재로 확대하지 않는다.
++15264|unknown|unknown|0|The third ventricle and lateral ventricles, and the widths of the hemispheric cortical sulci are within normal limits.|측뇌실은 일반 정상 기술, widths는 sulci의 수식. 목표 명시적 크기 근거 미확인.
++17327|include|negative|0|Lateral ventricles, third and fourth ventricle sizes are normal.|복수 측뇌실 sizes 정상 명시.
++17508|unknown|unknown|0|Lateral ventricle and third ventricle widths are normal.|단수 lateral ventricle. 양측 명시적 정상 폭을 추정하지 않는다.
++16748|include|negative|0|the 3rd and lateral ventricles are midline and of normal size.|복수 측뇌실 정상 크기. optic nerve CSF prominence는 다른 대상.
++15999|unknown|unknown|0|Third ventricle and lateral ventricular system are in normal location and of width consistent with age.|정상 location과 나이에 따른 width 설명. 확장 부재/정상 폭으로 채우지 않는다.
++16928|include|negative|0|Width of third and lateral ventricles and hemispheric sulci is normal.|복수 정상 폭. 얼굴·목의 감염 추정은 별개.
++16567|include|negative|0|the 3rd and lateral ventricles are midline and of normal width.|복수 정상 폭. gliotic foci 동반 유지.
++15614|include|negative|0|the third and lateral ventricles are midline and of normal width.|복수 정상 폭. cortical atrophy·운동 artifact는 크기 정답 상충이 아니다. 후순위 검토만이며 선정 cutoff 이후.
++18263|include|negative|0|The width of the third and lateral ventricles and hemispheric sulci is normal.|복수 정상 폭. 후순위 검토만이며 선정 cutoff 이후.
++36505|include|negative|0|The width of the third and lateral ventricles and hemispheric sulci is normal.|복수 정상 폭. pituitary hypertrophy 대상은 별개.
++353|include|negative|0|The third ventricle, both lateral ventricles, and sulci are of normal caliber.|양측 정상 caliber 명시.
++70814|include|negative|0|Third ventricle, bilateral lateral ventricles, and sulci are of normal width.|양측 정상 폭 명시.
++68800|include|negative|0|The third ventricle and both lateral ventricles are of normal size.|양측 정상 크기. age-compatible은 sulci만 수식.
++70189|include|negative|0|The third ventricle, both lateral ventricles, and sulci are of normal width.|양측 정상 폭. MRA와 gliosis는 별개.
++69066|include|negative|0|Third ventricle and both lateral ventricles are of normal size.|양측 정상 크기. age-compatible은 sulci만 수식.
++70113|include|negative|0|The third ventricle, both lateral ventricles, and sulci are of normal size.|양측 정상 크기.
++70291|include|negative|0|The width of the third and lateral ventricles and hemispheric sulci is normal.|복수 정상 폭. facial nerve enhancement 추정은 별개.
++68654|include|negative|0|The third ventricle and both lateral ventricles are of normal size.|양측 정상 크기 명시.
++68298|include|negative|0|Third ventricle and lateral ventricles are of normal width.|복수 정상 폭. metastasis 평가 문맥과 별개.
++69946|include|negative|0|The third ventricle, both lateral ventricles, and sulci are of normal width.|양측 정상 폭 명시.
++69573|include|negative|0|The third ventricle, both lateral ventricles, and sulci are of normal size.|양측 정상 크기. pineal cyst와 별개.
++68622|include|negative|0|Third ventricle and lateral ventricles are of normal size.|복수 정상 크기.
++41333|include|negative|0|Third ventricle, both lateral ventricles, and sulci are of normal size.|양측 정상 크기.
++36182|include|negative|0|The width of the third and lateral ventricles and hemispheric sulci is normal.|복수 정상 폭. multifocal mass 유지. 좌우 mass 위치의 report/impression 차이는 목표 크기에 영향을 주지 않음.
++30484|include|negative|0|The width of the third and lateral ventricles and hemispheric sulci is normal.|복수 정상 폭. 후순위 검토만, cutoff 이후.
++69276|include|negative|0|The width of the third and lateral ventricles and hemispheric sulci is normal.|복수 정상 폭. pineal enlargement는 별개. cutoff 이후.
++70194|include|negative|0|Third ventricle, bilateral lateral ventricles, and sulci are of normal width.|양측 정상 폭. cutoff 이후 검토만.
++69340|include|positive|0|Marked increase is observed in the lateral ventricle widths and 3rd ventricle width, and it is symmetric.|복수 측뇌실 대칭 폭 증가 명시. shunt·원인 불확실성은 크기 존재와 별개.
++68412|include|positive|0|3rd and lateral ventricles; frontotemporal cerebral subarachnoid spaces are widened due to cerebral atrophy.|복수 측뇌실 위축 관련 확장 명시.
++70917|unknown|unknown|0|The lateral ventricle and third ventricle are slightly prominent.|단수 대상. 양측 확대 해석 금지.
++68807|include|positive|0|Lateral ventricles, third ventricle slightly prominent|복수 측뇌실 prominence. 경도 senile atrophy 유지.
++70362|exclude|unilateral|0|compression of the right lateral ventricle, and resulting left monoventricular dilation persist.|우측 compression과 좌측만 확장. 양측 대상 불성립.
++70842|include|positive|0|Lateral ventricles, third ventricle are mildly prominent.|복수 경도 prominence 명시.
++67665|include|positive|0|an increase in the dilation previously observed in the lateral ventricle widths was noted|양측 현재 atrium 23/22mm와 증가된 확장 명시. 이전 검사와 비교하더라도 현재 크기 기술 존재.
++70259|unknown|unknown|1|Asymmetric enlargement in the left lateral ventricle is a variant, and ventricles and sulci are normal.|좌측만 variant enlargement와 일반 정상 기술 동시. 양측 정답 미확인.
++68616|include|positive|0|The 3rd and lateral ventricles are enlarged.|복수 확장 명시. white matter/thalami 정상과 고신호의 상충은 목표 크기와 별개.
++68389|include|positive|0|Mild asymmetric prominence with left predominance is observed in the widths of the lateral ventricles|복수 폭 prominence에 좌측 predominance. 좌측만 확장이라고 쓰지 않았으며 전체 정상 주장 없음.
++70433|include|positive|0|The third ventricle, both lateral ventricles, and sulci are enlarged secondary to central cerebral atrophy.|양측 위축 관련 확장 명시.
++68783|unknown|unknown|0|Lateral ventricle, third ventricle are slightly prominent.|측뇌실 자체는 단수. bilateral temporal horns 확장은 부분영역 기술로 전체 양측 측뇌실 범위를 추정하지 않는다.
++69253|include|positive|0|The 3rd and lateral ventricles are observed to be dilated|복수 측뇌실 확장. tectal lesion·ventriculostomy는 동반소견.
++70042|unknown|unknown|0|The lateral ventricle and third ventricle are mildly prominent.|단수 대상. 양측 미확인.
++68414|unknown|unknown|0|Lateral ventricle, third ventricle are widened.|좌측 atrium 확장과 단수 측뇌실 표현만. 양측을 추정하지 않는다.
++70379|exclude|negative|0|third ventricle, both lateral ventricles and sulci are of normal width.|양측 정상 폭이며 후보 positive와 불일치. perivascular enlargements를 목표 확장으로 쓰지 않는다.
++70005|unknown|unknown|0|Lateral ventricle and third ventricle are slightly prominent.|단수 대상. 양측 미확인.
++68702|exclude|unilateral|0|Supratentorial ventricles and subarachnoid spaces are normal except for variant enlargement of the left lateral ventricle.|좌측만 variant 확장. 일반 정상의 예외로 분리되어 상충으로 보지 않음.
++70116|include|positive|0|Compensated enlargement is present in the lateral ventricles|복수 측뇌실 확장과 impression dilation 일치. 우측 horn의 국소 compression은 전체 확장과 양립 가능하며 전반적 정상 크기 주장이 아님. artifact와 shunt 기록 유지.
++70707|include|positive|0|Bilateral lateral ventricles, third ventricle are widened.|양측 확장 명시.
++70654|include|positive|0|There is minimal widening compatible with atrophy in the third ventricle, both lateral ventricles|양측 최소 확장도 유지. 원인 설명과 존재를 구분.
++70911|include|positive|0|The third and lateral ventricles are slightly prominent.|복수 경도 prominence 명시. chronic infarct 문맥 유지.
++68627|exclude|not_positive|0|Third and lateral ventricles are normal, and the frontal subarachnoid space is widened.|목표 확장 없음. subarachnoid widening은 다른 구조. 일반 normal을 negative로 옮기지도 않는다.
++70101|exclude|unknown|0|Central and peripheral CSF spaces widths are normal.|bilateral lateral ventricles는 gliosis 위치 문구만. 목표 확장 근거 없음. 원 제외 이유 미복원, 이번 원문 기반 새 판단.
++69242|exclude|unilateral|0|There is asymmetric enlargement in the body of the right lateral ventricle secondary to thalamic volume loss|우측만 확장. 원 제외 이유 미복원, 이번 원문 기반 새 판단.
++70410|unknown|unknown|0|The left lateral ventricle is variably wide, and there is mild enlargement in the frontal horns and frontal cerebral sulci.|좌측 variant와 frontal horns의 수식 범위 모호. 양측 전체를 추정하지 않음. 원 제외 이유 미복원, 이번 새 판단.
++68528|unknown|unknown|0|Lateral ventricle and third ventricle are mildly prominent.|단수 대상. 양측 미확인.
++70531|include|positive|0|Lateral ventricles, third ventricle are mildly prominent.|복수 경도 prominence 명시.
++69184|include|positive|0|The lateral ventricles and third ventricle are slightly prominent.|복수 경도 prominence 명시.
++68171|include|positive|0|Symmetric enlargements compatible with patient age are present in the lateral ventricles|복수 대칭 확장 명시. age-compatible 설명으로 음성 처리하지 않음. cutoff 이후 검토만.
++70764|include|positive|0|The third ventricle, both lateral ventricles, and anterior interhemispheric fissure are enlarged secondary to frontal cerebral atrophy.|양측 위축 관련 확장 명시. impression 정상 문장은 frontal atrophy 예외를 유지. cutoff 이후 검토만.
++68453|include|positive|0|The 3rd and lateral ventricles are enlarged.|복수 확장 명시. 비목표 midbrain 정상/atrophy 상충은 별도 기록. cutoff 이후 검토만.
++70663|unknown|unknown|1|Central and peripheral CSF space widths are normal.|좌측 인접 측뇌실 ex-vacuo enlargement와 넓은 CSF 정상 폭 병기. 양측 미확인. cutoff 이후 검토만.
++68239|exclude|unilateral|0|Partial dilation of the left lateral ventricle has developed due to decreased mass effect.|좌측만 부분 dilation. cutoff 이후 검토만.
++'''
++
++
++def main():
++    ordered=read(OUT/'ordered_candidates.json')
++    by={str(c['patient_uid']):c for rows in ordered.values() for c in rows}
++    reports=read(OUT/'full_reports.json')
++    old=read('results/iter_125/data/selection_lock.json')
++    judgments={}
++    for line in TABLE.strip().splitlines():
++        pid,decision,polarity,conflict,quote,reason=line.split('|',5)
++        assert pid not in judgments
++        c=by[pid]
++        r=reports[c['batch_id']][c['study_uid']]
++        assert quote in r['report'], (pid,quote)
++        quotes=[dict(section='report',quote=quote)]
++        # 해당 사례에 필요한 반대/범위 제한 문구도 원문에 직접 연결한다.
++        extra={15831:['Minimal asymmetric dilatation is observed in the right lateral ventricle.'],
++               68783:['Bilateral temporal horns are enlarged.'],
++               70116:['The right trigone, occipital horn and posterior segment of the corpus callosum are compressed due to hematoma and edema.'],
++               70663:['Ex-vacuo enlargement accompanies the adjacent lateral ventricle.']}
++        for q in extra.get(int(pid),[]):
++            assert q in r['report']
++            quotes.append(dict(section='report',quote=q))
++        judgments[pid]=dict(decision=decision,polarity=polarity,target='양측/명시적 복수 측뇌실' if decision=='include' else '원 인용의 대상 범위에 한정',
++                           conflict=bool(int(conflict)),reason_ko=reason,quotes=quotes,
++                           full_fields_reviewed=['report','findings','impression'],
++                           review_origin='이번 원문 직접 검토의 새 판단; 과거 판단의 자동 승계 아님',
++                           original_exclusion_reason=old['excluded_after_review'].get(pid),
++                           original_reason_missing=int(pid) in [70101,69242,70410],
++                           source_snapshot_sha256=sha(OUT/'full_reports.json'),
++                           reviewed_utc=time.strftime('%Y-%m-%dT%H:%M:%SZ',time.gmtime()))
++    save(OUT/'judgments.json',judgments)
++    print('reviewed',len(judgments))
++
++
++if __name__=='__main__': main()
+diff --git a/mr127_seg.py b/mr127_seg.py
+new file mode 100644
+index 0000000..57b3694
+--- /dev/null
++++ b/mr127_seg.py
+@@ -0,0 +1,159 @@
++"""고정 SynthSeg2.0 기술 실행. stage 잠금, GPU mapping, raw/volume/QC 검증 및 종료 보존."""
++import argparse
++import csv
++import fcntl
++import json
++import os
++from pathlib import Path
++import signal
++import subprocess
++import sys
++import time
++
++import nibabel as nib
++import numpy as np
++from mr127_select import read,save,sha,OUT
++from mr127_assets import ROOT,SOURCE,ENVPY
++
++
++def gpu_info():
++    rows=subprocess.check_output(['nvidia-smi','--query-gpu=index,uuid,memory.total,memory.used,memory.free','--format=csv,noheader,nounits'],text=True)
++    return [dict(index=p[0].strip(),uuid=p[1].strip(),total_mib=int(p[2]),used_mib=int(p[3]),free_mib=int(p[4]))
++            for p in csv.reader(rows.splitlines())]
++
++
++def csv_result(p):
++    with open(p) as f: rows=list(csv.reader(f))
++    assert len(rows)==2 and len(rows[0])==len(rows[1]),(str(p),rows)
++    out={k:float(v) for k,v in zip(rows[0][1:],rows[1][1:])}
++    assert len(out)==len(rows[0])-1 and all(np.isfinite(list(out.values())))
++    return out
++
++
++def verify_result(directory):
++    segmentation=nib.load(directory/'seg.nii.gz')
++    vox=np.asarray(segmentation.dataobj)
++    vol=csv_result(directory/'vol.csv'); qc=csv_result(directory/'qc.csv')
++    keys=['left lateral ventricle','right lateral ventricle','total intracranial']
++    assert all(k in vol and vol[k]>0 for k in keys), ('공식 부피 누락/0',vol)
++    assert np.isfinite(vox).all() and np.any(vox) and np.isin(vox,[4,43]).any(), 'zero mask'
++    assert np.allclose(segmentation.header.get_zooms()[:3],1,atol=1e-5)
++    assert np.isfinite(segmentation.affine).all()
++    assert all(0<=v<=1 for v in qc.values())
++    return dict(volumes_mm3=vol,qc_scores=qc,S=(vol[keys[0]]+vol[keys[1]])/vol[keys[2]],
++                foreground_voxels=int(np.count_nonzero(vox)),left_voxels=int(np.count_nonzero(vox==4)),
++                right_voxels=int(np.count_nonzero(vox==43)),shape=list(vox.shape),affine=segmentation.affine.tolist(),
++                artifacts={str(directory/n):sha(directory/n) for n in ['seg.nii.gz','vol.csv','qc.csv']})
++
++
++def main(stage):
++    out=Path('results/iter_127/seg')/stage
++    out.mkdir(parents=True,exist_ok=True)
++    assets=read('results/iter_127/assets.json')
++    inp=read(OUT/'tech_inputs.json')
++    assert inp['selection_sha256']==sha(OUT/'selection_lock.json')
++    for p,h in assets['source_files'].items(): assert sha(p)==h,p
++    for v in assets['weights'].values(): assert sha(v['path'])==v['sha256']
++    allowed=os.environ.get('CUDA_VISIBLE_DEVICES','').split(',')
++    assert len(allowed)==len(set(allowed)) and all(g.isdigit() for g in allowed)
++    fs_mode=stage.startswith('fs_')
++    fs_assets=read('results/iter_127/fs_assets.json') if fs_mode else None
++    if fs_mode:
++        for p,h in fs_assets['files'].items():assert sha(p)==h,p
++    selected=['7ISDTZ2JVG','5SWPQWD3DD'] if stage.endswith('pilot') else [s for s in inp['inputs'] if s not in ['7ISDTZ2JVG','5SWPQWD3DD']]
++    if stage.endswith('rest'):
++        prior=read(f'results/iter_127/seg/{stage[:-4]+"pilot"}/completion.json')
++        assert prior['status']=='complete' and prior['checks_passed']
++        for p,h in prior['artifacts'].items(): assert sha(p)==h
++    with (out/'stage.lock').open('a') as lock:
++        fcntl.flock(lock,fcntl.LOCK_EX|fcntl.LOCK_NB)
++        attempts=len(list(out.glob('launch_*.json')))
++        tag=f'{attempts:03d}'
++        cfg=dict(stage=stage,selected=selected,inputs_sha256=sha(OUT/'tech_inputs.json'),
++                 assets_sha256=sha('results/iter_127/assets.json'),code={p:sha(p) for p in ['mr127_seg.py','mr127_seg_entry.py']},
++                 official_flags=['--vol','--qc','--threads','4'],version='2.0 default',allowed_physical_gpus=allowed,
++                 backend='FreeSurfer official' if fs_mode else 'UCL official',gpu_memory_limit_mib=20000,
++                 fs_assets_sha256=sha('results/iter_127/fs_assets.json') if fs_mode else None,
++                 mapping={str(i):g for i,g in enumerate(allowed)})
++        save(out/f'launch_{tag}.json',cfg)
++        pending=list(selected); active={}; done={}; failures={}; peaks={g:0 for g in allowed}
++        t0=time.monotonic(); stopped=False
++        def stop(sig,frame):
++            nonlocal stopped
++            stopped=True
++            for p,_,_,_ in active.values(): p.terminate()
++        old_handlers={s:signal.signal(s,stop) for s in [signal.SIGTERM,signal.SIGINT]}
++        try:
++            with (out/f'resources_{tag}.jsonl').open('x') as resources:
++                while pending or active:
++                    gpu=gpu_info()
++                    resources.write(json.dumps(dict(time=time.time(),gpus=gpu))+'\n');resources.flush()
++                    # pending 큐가 비어도 실행 중인 모든 GPU의 peak를 집계한다.
++                    for g in gpu:
++                        if g['index'] in peaks:
++                            peaks[g['index']]=max(peaks[g['index']],g['used_mib'])
++                    available=sorted([g for g in gpu if g['index'] in allowed],key=lambda g:g['free_mib'],reverse=True)
++                    occupied={v[2] for v in active.values()}
++                    for g in available:
++                        if not pending or stopped: break
++                        if g['index'] in occupied: continue
++                        assert g['free_mib']>=20000, ('기술 실행 여유 부족',g)
++                        s=pending.pop(0)
++                        directory=ROOT/'seg'/stage/s/f'attempt_{tag}'
++                        directory.mkdir(parents=True,exist_ok=False)
++                        v=inp['inputs'][s]
++                        for x in v['files'].values(): assert sha(x['path'])==x['sha256']
++                        python=ROOT/'env_freesurfer/bin/python' if fs_mode else ENVPY
++                        script=ROOT/'freesurfer/mri_synthseg.py' if fs_mode else SOURCE/'scripts/commands/SynthSeg_predict.py'
++                        cmd=[str(python),str(Path('mr127_seg_entry.py').absolute()),str(script),
++                             '--i',v['files']['img.nii.gz']['path'],'--o',str(directory/'seg.nii.gz'),
++                             '--vol',str(directory/'vol.csv'),'--qc',str(directory/'qc.csv'),'--threads','4']
++                        env=dict(os.environ,CUDA_VISIBLE_DEVICES=g['index'],TF_FORCE_GPU_ALLOW_GROWTH='true',
++                                 TF_CPP_MIN_LOG_LEVEL='1',PYTHONDONTWRITEBYTECODE='1',PYTHONUNBUFFERED='1',SYNTHSEG_GPU_LIMIT_MIB='20000')
++                        if fs_mode:
++                            cmd.append('--noaddctab')
++                            env['FREESURFER_HOME']=str(ROOT/'freesurfer')
++                            env['TF_USE_LEGACY_KERAS']='1'
++                        libs=sorted(str(p) for p in ENVPY.parent.parent.glob('lib/python*/site-packages/nvidia/*/lib'))
++                        env['LD_LIBRARY_PATH']=':'.join(libs+[str(ENVPY.parent.parent/'lib')]+[env.get('LD_LIBRARY_PATH','')])
++                        h=(directory/'official.log').open('x')
++                        save(directory/'execution.json',dict(command=cmd,physical_gpu=g['index'],logical_gpu_inside_child=0,
++                             input=v,config=cfg,environment={k:env[k] for k in ['CUDA_VISIBLE_DEVICES','LD_LIBRARY_PATH','TF_FORCE_GPU_ALLOW_GROWTH']},
++                             started_utc=time.strftime('%Y-%m-%dT%H:%M:%SZ',time.gmtime())))
++                        p=subprocess.Popen(cmd,env=env,stdout=h,stderr=subprocess.STDOUT)
++                        active[s]=(p,h,g['index'],directory)
++                        print('started',s,'gpu',g['index'],'pid',p.pid,flush=True)
++                    for s,(p,h,g,directory) in list(active.items()):
++                        rc=p.poll()
++                        if rc is None: continue
++                        h.close()
++                        try:
++                            assert rc==0, f'official rc={rc}'
++                            result=verify_result(directory)
++                            done[s]=dict(**result,gpu=g,returncode=rc,directory=str(directory))
++                            save(directory/'verified.json',done[s])
++                            print('verified',s,flush=True)
++                        except Exception as e:
++                            failures[s]=dict(returncode=rc,error=str(e),directory=str(directory))
++                            print('failed',s,str(e)[:300],flush=True)
++                        del active[s]
++                    if failures or stopped:
++                        pending=[]
++                        for p,_,_,_ in active.values(): p.terminate()
++                    if active: time.sleep(2)
++        finally:
++            for p,h,_,_ in active.values():
++                if p.poll() is None: p.terminate()
++                p.wait(); h.close()
++            for s,handler in old_handlers.items(): signal.signal(s,handler)
++        result=dict(status='complete' if set(done)==set(selected) and not failures else 'failed',checks_passed=not failures and set(done)==set(selected),
++             results=done,failures=failures,expected_studies=selected,peak_gpu_total_mib=peaks,wall_s=time.monotonic()-t0,
++             config=cfg,artifacts={str(out/f'launch_{tag}.json'):sha(out/f'launch_{tag}.json')})
++        for v in done.values(): result['artifacts'].update(v['artifacts'])
++        save(out/'completion.json',result)
++        return 0 if result['checks_passed'] else 2
++
++
++if __name__=='__main__':
++    ap=argparse.ArgumentParser();ap.add_argument('stage',choices=['pilot','rest','fs_pilot','fs_rest','fs_recovery_pilot','fs_recovery_rest','fs_compat_pilot','fs_compat_rest']);a=ap.parse_args()
++    raise SystemExit(main(a.stage))
+diff --git a/mr127_seg_entry.py b/mr127_seg_entry.py
+new file mode 100644
+index 0000000..9654e12
+--- /dev/null
++++ b/mr127_seg_entry.py
+@@ -0,0 +1,18 @@
++"""공식 CLI 실행 전 GPU growth 설정만 적용한다. source/model 연산은 수정하지 않는다."""
++import json
++import os
++from pathlib import Path
++import runpy
++import sys
++import tensorflow as tf
++
++gpus=tf.config.list_physical_devices('GPU')
++if len(gpus)!=1:
++    raise RuntimeError(f'허용된 단일 GPU가 필요함: {gpus}')
++limit=int(os.environ.get('SYNTHSEG_GPU_LIMIT_MIB','20000'))
++tf.config.set_logical_device_configuration(gpus[0],[tf.config.LogicalDeviceConfiguration(memory_limit=limit)])
++print('GPU_ENVIRONMENT',json.dumps(dict(python=sys.executable,tensorflow=tf.__version__,
++    visible=os.environ.get('CUDA_VISIBLE_DEVICES'),memory_limit_mib=limit,gpus=[str(g) for g in gpus]),ensure_ascii=False),flush=True)
++script=sys.argv[1]
++sys.argv=sys.argv[1:]
++runpy.run_path(script,run_name='__main__')
+diff --git a/mr127_select.py b/mr127_select.py
+new file mode 100644
+index 0000000..43c8d33
+--- /dev/null
++++ b/mr127_select.py
+@@ -0,0 +1,196 @@
++"""iter127 전용 원문 검토/선정. 의미 판정은 저장한 사례별 판단만 사용한다."""
++import argparse
++from collections import Counter
++import hashlib
++import json
++from pathlib import Path
++import re
++import subprocess
++import time
++
++import pandas as pd
++import mr125_select as candidate
++
++OUT = Path('results/iter_127/data')
++META = Path(candidate.M)
++
++
++def sha(p):
++    h = hashlib.sha256()
++    with open(p, 'rb') as f:
++        for chunk in iter(lambda: f.read(4 << 20), b''):
++            h.update(chunk)
++    return h.hexdigest()
++
++
++def read(p):
++    return json.loads(Path(p).read_text())
++
++
++def save(p, value):
++    p = Path(p)
++    p.parent.mkdir(parents=True, exist_ok=True)
++    with p.open('x') as f:
++        json.dump(value, f, ensure_ascii=False, indent=2, allow_nan=False)
++
++
++def prepare():
++    old = read('results/iter_125/data/selection_lock.json')
++    sources = {str(META / p): sha(META / p) for p in old['source_sha256']}
++    assert all(sources[str(META / p)] == h for p, h in old['source_sha256'].items())
++    baseline = read('../agent/runs/iter_127/code_baseline.json')
++    for p, v in baseline['files'].items():
++        if p.startswith(('mr123_', 'mr125_', 'mr126_')):
++            assert sha(p) == v['hash'], p
++    plans = {'125': '477a1c817abfe198e25c14f64a487fbd6f53d5ab0c4a7e5fab91e36f2b705a47',
++             '126': '632a6090c0246dde0e0d8d80c18fee007d3f0625bae6d4320ffe1d67972e4070'}
++    for i, h in plans.items():
++        p = f'../agent/runs/iter_{i}/plan.md'
++        assert sha(p) == h
++        sources[p] = h
++    for p in ['../agent/runs/iter_127/plan.md', '../agent/runs/iter_127/plan.json',
++              '../agent/runs/iter_125/reuse_manifest.json', 'results/iter_125/data/candidates_raw.json',
++              'results/iter_125/data/ordered_candidates.json', 'results/iter_125/data/selection_lock.json']:
++        sources[p] = sha(p)
++    splits = pd.read_csv(META / 'splits.csv')
++    old_pids = candidate.old_patients()
++    joined, reports = [], {}
++    for b in ['batch04', 'batch23']:
++        meta = pd.read_csv(META / f'metadata/{b}_metadata.csv', low_memory=False)
++        t = meta[(meta.classified_modality == 'T2w') & (meta.acquisition_plane == 'AXIAL') &
++                 (meta.is_derived.astype(str) == 'False') & (meta.is_localizer.astype(str) == 'False')].copy()
++        spacing = t.array_spacing_mm.map(json.loads)
++        t['dz'] = spacing.map(lambda x: x[2])
++        t['area'] = spacing.map(lambda x: x[0] * x[1])
++        t = t.sort_values(['study_uid', 'dz', 'area', 'series_id']).groupby('study_uid').head(1)
++        t = t.merge(splits[splits.batch_id == b][['study_uid', 'split']], on='study_uid', validate='one_to_one')
++        r = pd.read_csv(META / f'reports/{b}_reports.csv').fillna('')
++        assert not r.study_uid.duplicated().any()
++        reports[b] = {x['study_uid']: dict(csv_row_index=i, **x) for i, x in enumerate(r.to_dict('records'))}
++        t = t[t.split == 'train'].merge(r, on='study_uid', validate='one_to_one')
++        t['batch_id'] = b
++        joined.append(t)
++    d = pd.concat(joined)
++    d = d[~d.patient_uid.isin(old_pids)].sort_values(['patient_uid', 'study_uid']).groupby('patient_uid').head(1)
++    rebuilt = []
++    for _, x in d.iterrows():
++        hits = [(k, s) for k in ['findings', 'impression'] for s in candidate.sents(x[k]) if candidate.LV.search(s)]
++        if not hits:
++            continue
++        pos = [h for h in hits if candidate.ENL.search(h[1]) and not candidate.NEGENL.search(h[1])]
++        neg = [h for h in hits if h not in pos and (candidate.NORM.search(h[1]) or candidate.NEGENL.search(h[1]))]
++        rebuilt.append(dict(batch_id=x.batch_id, patient_uid=int(x.patient_uid), study_uid=x.study_uid,
++                            series_id=x.series_id, array_shape=x.array_shape, array_spacing_mm=x.array_spacing_mm,
++                            hits=hits, pos=pos, neg=neg))
++    # JSON 직렬화로 tuple/list 표현을 정규화한다. 후보 검색 규칙 변경을 허용하지 않는다.
++    assert json.loads(json.dumps(rebuilt)) == read('results/iter_125/data/candidates_raw.json')
++    ordered = {}
++    for c in rebuilt:
++        lab = 'positive' if c['pos'] and not c['neg'] else 'negative' if c['neg'] and not c['pos'] else None
++        if lab:
++            c.update(cand_label=lab, h=hashlib.sha256(f"125|{c['patient_uid']}".encode()).hexdigest())
++            ordered.setdefault(c['batch_id'] + '|' + lab, []).append(c)
++    for v in ordered.values():
++        v.sort(key=lambda c: c['h'])
++    assert json.loads(json.dumps(ordered)) == read('results/iter_125/data/ordered_candidates.json')
++    inherited = {str(p): sha(p) for i in [125, 126] for p in Path(f'results/iter_{i}').rglob('*') if p.is_file()}
++    save(OUT / 'provenance.json', dict(created_utc=time.strftime('%Y-%m-%dT%H:%M:%SZ', time.gmtime()),
++         inputs=sources, inherited_outputs=inherited, baseline_sha=baseline['sha'],
++         baseline_sources={p: v['hash'] for p,v in baseline['files'].items() if p.startswith(('mr123_', 'mr125_', 'mr126_'))},
++         candidate_reconstruction_equal=True, original_order_equal=True,
++         excluded_previous_patients=sorted(old_pids), sizes={k: len(v) for k,v in ordered.items()}))
++    save(OUT / 'ordered_candidates.json', ordered)
++    save(OUT / 'full_reports.json', reports)
++    print({k: len(v) for k,v in ordered.items()})
++
++
++def show(cell, start, end):
++    rows = read(OUT / 'ordered_candidates.json')[cell]
++    reports = read(OUT / 'full_reports.json')
++    for rank, c in enumerate(rows[start:end], start):
++        r = reports[c['batch_id']][c['study_uid']]
++        print(f"\n[{rank}] patient={c['patient_uid']} study={c['study_uid']} cell={cell} CSVrow={r['csv_row_index']}")
++        print('REPORT:', r['report'])
++        # 원 report에 이미 표시된 문장은 비교 결과와 함께 중복 표시만 생략한다.
++        norm = lambda s: re.sub(r'\s+', ' ', s).strip()
++        for section in ['findings', 'impression']:
++            lines = [re.sub(r'^[—•*·]\s*','',line).strip() for line in r[section].splitlines() if line.strip()]
++            new = [line for line in lines if norm(line) not in norm(r['report'])]
++            print(section.upper(), '원 report와 중복인 행', len(lines)-len(new), '/',len(lines))
++            for line in new:
++                print('추가 구조화 문구:',line)
++
++
++def lock():
++    provenance = read(OUT / 'provenance.json')
++    assert all(sha(p) == h for p,h in provenance['inputs'].items())
++    ordered = read(OUT / 'ordered_candidates.json')
++    reports = read(OUT / 'full_reports.json')
++    judgments = read(OUT / 'judgments.json')
++    old = read('results/iter_125/data/selection_lock.json')
++    manifest, traces = [], {}
++    required = {m['patient_uid'] for m in old['manifest']}
++    for cell, rows in ordered.items():
++        old_ids = {m['patient_uid'] for m in old['manifest'] if m['batch_id']+'|'+m['label'] == cell}
++        last = max(i for i,c in enumerate(rows) if c['patient_uid'] in old_ids)
++        required.update(c['patient_uid'] for c in rows[:last+1])
++        selected = []
++        for rank,c in enumerate(rows):
++            pid = str(c['patient_uid'])
++            if pid not in judgments:
++                raise ValueError(f'의미 검토 누락: {cell} rank={rank} patient={pid}')
++            j = judgments[pid]
++            r = reports[c['batch_id']][c['study_uid']]
++            assert j['full_fields_reviewed'] == ['report','findings','impression']
++            assert j['decision'] in ['include','exclude','unknown'] and j['reason_ko']
++            assert j['target'] and j['polarity'] and isinstance(j['conflict'], bool)
++            anchors = []
++            for a in j['quotes']:
++                text = r[a['section']]
++                start = text.find(a['quote'])
++                assert start >= 0, (pid,a)
++                anchors.append(dict(**a,start=start,end=start+len(a['quote'])))
++            assert anchors
++            if j['decision'] == 'include':
++                assert j['polarity'] == c['cand_label'] and not j['conflict']
++                selected.append(dict(**c, rank_zero_based=rank, review=j,
++                                     anchors=anchors, source_csv=str(META/f"reports/{c['batch_id']}_reports.csv"),
++                                     source_sha256=sha(META/f"reports/{c['batch_id']}_reports.csv"),
++                                     csv_row_index=r['csv_row_index'],
++                                     source_row_sha256=hashlib.sha256(json.dumps(r,sort_keys=True).encode()).hexdigest()))
++            if len(selected) == 15:
++                break
++        traces[cell] = dict(last_reviewed_rank=rank, selected_patients=[m['patient_uid'] for m in selected])
++        assert len(selected) == 15, ('층별 적격 표본 부족',cell)
++        for i,m in enumerate(selected):
++            m['label'] = m.pop('cand_label')
++            m['role'] = 'tech' if i < 2 else 'calib' if i < 5 else 'explore'
++            manifest.append(m)
++    assert required <= {int(p) for p in judgments}, ('기존/선행 후보 검토 누락',required-{int(p) for p in judgments})
++    assert len(manifest) == len({m['patient_uid'] for m in manifest}) == len({m['study_uid'] for m in manifest}) == 60
++    assert not {m['patient_uid'] for m in manifest} & set(provenance['excluded_previous_patients'])
++    oldby = {m['patient_uid']: m for m in old['manifest']}
++    newby = {m['patient_uid']: m for m in manifest}
++    diff = [dict(patient_uid=pid, old_role=oldby.get(pid,{}).get('role'), new_role=newby.get(pid,{}).get('role'),
++                 reason_ko=judgments[str(pid)]['reason_ko'] if pid not in newby else '원 hash 순서 첫15 적격자 재선정과 역할 재배정')
++            for pid in sorted(oldby.keys()|newby.keys()) if oldby.get(pid,{}).get('role') != newby.get(pid,{}).get('role')]
++    assert all(sha(p)==h for p,h in provenance['inherited_outputs'].items())
++    save(OUT / 'selection_diff.json',diff)
++    save(OUT / 'selection_lock.json',dict(seed=125, manifest=manifest, traces=traces,
++          created_utc=time.strftime('%Y-%m-%dT%H:%M:%SZ',time.gmtime()),
++          judgments_sha256=sha(OUT/'judgments.json'), provenance_sha256=sha(OUT/'provenance.json'),
++          source_code_sha256=sha(__file__), reviewed_patients=len(judgments),
++          semantic_review_scope='기록된 개별 후보만; 후순위 미검토 후보는 미인증', inherited_results_unchanged=True))
++    print('locked',len(manifest),Counter(m['role'] for m in manifest),'diff',len(diff))
++
++
++if __name__ == '__main__':
++    ap=argparse.ArgumentParser()
++    ap.add_argument('action',choices=['prepare','show','lock'])
++    ap.add_argument('--cell')
++    ap.add_argument('--start',type=int,default=0)
++    ap.add_argument('--end',type=int,default=5)
++    a=ap.parse_args()
++    if a.action=='prepare': prepare()
++    elif a.action=='show': show(a.cell,a.start,a.end)
++    else: lock()
+diff --git a/mr127_verify_selection.py b/mr127_verify_selection.py
+new file mode 100644
+index 0000000..a33ea60
+--- /dev/null
++++ b/mr127_verify_selection.py
+@@ -0,0 +1,71 @@
++"""선정의 독립 산술·원문 anchor 검산. 의미 판단 자체의 독립 전문가 검증은 아니다."""
++import csv
++from collections import Counter
++import hashlib
++import json
++from pathlib import Path
++import time
++
++
++def digest(p):
++    d=hashlib.sha256()
++    with open(p,'rb') as f:
++        for b in iter(lambda:f.read(4<<20),b''):d.update(b)
++    return d.hexdigest()
++
++
++def main():
++    root=Path('results/iter_127/data')
++    load=lambda p:json.loads(Path(p).read_text())
++    lock=load(root/'selection_lock.json'); ordered=load(root/'ordered_candidates.json')
++    judgments=load(root/'judgments.json'); provenance=load(root/'provenance.json')
++    checks=[]
++    def check(name,condition):
++        checks.append(dict(name=name,passed=bool(condition)))
++    check('judgment_hash',digest(root/'judgments.json')==lock['judgments_sha256'])
++    check('provenance_hash',digest(root/'provenance.json')==lock['provenance_sha256'])
++    for p,h in provenance['inputs'].items():check('input:'+p,digest(p)==h)
++    for p,h in provenance['inherited_outputs'].items():check('old_output:'+p,digest(p)==h)
++    old=load('results/iter_125/data/selection_lock.json')
++    required={m['patient_uid'] for m in old['manifest']}
++    for cell,rows in ordered.items():
++        hashes=[hashlib.sha256(('125|'+str(c['patient_uid'])).encode()).hexdigest() for c in rows]
++        check('ordered:'+cell,hashes==sorted(hashes) and all(c['h']==h for c,h in zip(rows,hashes)))
++        old_ids={m['patient_uid'] for m in old['manifest'] if m['batch_id']+'|'+m['label']==cell}
++        last=max(i for i,c in enumerate(rows) if c['patient_uid'] in old_ids)
++        required.update(c['patient_uid'] for c in rows[:last+1])
++        wanted=[]
++        for c in rows:
++            if len(wanted)==15:break
++            j=judgments.get(str(c['patient_uid']))
++            check('reviewed_prefix:'+str(c['patient_uid']),j is not None)
++            if j and j['decision']=='include':wanted.append(c['patient_uid'])
++        selected=[m for m in lock['manifest'] if m['batch_id']+'|'+m['label']==cell]
++        check('first15:'+cell,[m['patient_uid'] for m in selected]==wanted and len(wanted)==15)
++        check('roles:'+cell,[m['role'] for m in selected]==['tech']*2+['calib']*3+['explore']*10)
++    check('old60_and_skipped20_reviewed',required<={int(p) for p in judgments})
++    check('unique60',len(lock['manifest'])==len({m['patient_uid'] for m in lock['manifest']})==len({m['study_uid'] for m in lock['manifest']})==60)
++    reports={}
++    for batch in ['batch04','batch23']:
++        p=Path('/home/test/.local/share/medgemma/mr_rate/meta/reports')/f'{batch}_reports.csv'
++        with p.open(newline='') as f:rows=list(csv.DictReader(f))
++        reports[batch]={r['study_uid']:(i,r) for i,r in enumerate(rows)}
++    for m in lock['manifest']:
++        i,r=reports[m['batch_id']][m['study_uid']]
++        check('csv_row:'+m['study_uid'],i==m['csv_row_index'])
++        check('polarity:'+m['study_uid'],m['review']['polarity']==m['label'] and not m['review']['conflict'])
++        for a in m['anchors']:
++            check('anchor:'+m['study_uid']+':'+str(a['start']),r[a['section']][a['start']:a['end']]==a['quote'])
++    status=all(c['passed'] for c in checks)
++    output=dict(created_utc=time.strftime('%Y-%m-%dT%H:%M:%SZ',time.gmtime()),all_pass=status,
++        check_count=len(checks),checks=checks,reviewed_cases=len(judgments),required_cases=len(required),
++        selected_cells=dict(Counter(m['batch_id']+'|'+m['label'] for m in lock['manifest'])),
++        judgment_counts=dict(Counter(j['decision'] for j in judgments.values())),
++        scope_ko='원 CSV·입력 hash·순서·역할·인용·과거 결과 불변을 검산. 임상 정답이나 새로운 독립 의미 판정을 만들지 않음.',
++        source_sha256=digest(__file__),selection_sha256=digest(root/'selection_lock.json'))
++    with (root/'independent_verify.json').open('x') as f:json.dump(output,f,ensure_ascii=False,indent=2)
++    print('selection verify',sum(c['passed'] for c in checks),'/',len(checks))
++    return 0 if status else 2
++
++
++if __name__=='__main__':raise SystemExit(main())
+diff --git a/mr127_weight_check.py b/mr127_weight_check.py
+new file mode 100644
+index 0000000..709855e
+--- /dev/null
++++ b/mr127_weight_check.py
+@@ -0,0 +1,56 @@
++"""공식 FreeSurfer unet의 모든 학습 weight가 공식 HDF5 값과 일치하는지 검사한다."""
++import hashlib
++import json
++import os
++from pathlib import Path
++import runpy
++import time
++
++os.environ['TF_USE_LEGACY_KERAS']='1'
++import h5py
++import numpy as np
++import tensorflow as tf
++
++
++def sha(p):
++    h=hashlib.sha256()
++    with open(p,'rb') as f:
++        for b in iter(lambda:f.read(4<<20),b''):h.update(b)
++    return h.hexdigest()
++
++
++def main():
++    root=Path('/home/test/.local/share/medgemma/mr_rate/iter127/freesurfer')
++    script=root/'mri_synthseg.py'
++    official=runpy.run_path(str(script),run_name='official_module_for_weight_audit')
++    labs=np.unique(np.load(root/'models/synthseg_segmentation_labels_2.0.npy'))
++    tf.random.set_seed(125); np.random.seed(125)
++    # 데이터 추론을 CPU로 대체하지 않는다. weight 연결만 CPU에서 확인한다.
++    with tf.device('/CPU:0'):
++        net=official['unet'](input_shape=[None,None,None,1],nb_labels=len(labs),nb_levels=5,
++                 nb_conv_per_level=2,conv_size=3,nb_features=24,feat_mult=2,activation='elu',batch_norm=-1,name='unet')
++        file=root/'models/synthseg_2.0.h5'
++        net.load_weights(str(file),by_name=True)
++    records=[]
++    with h5py.File(file,'r') as f:
++        for layer in net.layers:
++            actual=layer.get_weights()
++            if not actual:continue
++            assert layer.name in f, ('HDF5 layer missing',layer.name)
++            names=f[layer.name].attrs['weight_names']
++            names=[n.decode() if isinstance(n,bytes) else n for n in names]
++            expected=[np.asarray(f[layer.name][n]) for n in names]
++            assert len(actual)==len(expected)
++            equal=all(np.array_equal(a,e) for a,e in zip(actual,expected))
++            records.append(dict(layer=layer.name,weight_arrays=len(actual),parameters=sum(a.size for a in actual),equal=equal))
++    assert records and all(r['equal'] for r in records)
++    result=dict(all_pass=True,layers=records,weighted_layers=len(records),weight_arrays=sum(r['weight_arrays'] for r in records),
++        parameters=sum(r['parameters'] for r in records),hdf5_sha256=sha(file),official_source_sha256=sha(script),
++        tensorflow=tf.__version__,seed=125,source_sha256=sha(__file__),
++        created_utc=time.strftime('%Y-%m-%dT%H:%M:%SZ',time.gmtime()),
++        scope_ko='공식 FreeSurfer segmentation unet의 모든 학습 weight HDF5 대조. QC 모델·임상 정답·출력 적합성을 인증하지 않음.')
++    with Path('results/iter_127/seg/weight_check.json').open('x') as f:json.dump(result,f,ensure_ascii=False,indent=2)
++    print('weight_check',len(records),'layers',result['weight_arrays'],'arrays',result['parameters'],'parameters')
++
++
++if __name__=='__main__':main()
