@@ -351,3 +351,18 @@ RSNA grounding 학습의 성과가 MRI 적응에도 도움이 되는지 직접 �
 - 접근법: 오류 혼합 근거의 선택적 교정 진단 (`approach/noisy-evidence-correction`), 시도: iter_116, iter_117, iter_118
 - 커밋: 66cd4542720d0efe69b2fbbdfabbe24ebe0253a0, ae15ee5bde73c415715f127720ffdcf24f60d2cc, 87b672866ae9be7b4d8c261b30f755f7fcaa97cf
 - 자세히: DECISIONS.md의 iter_118, `agent/runs/iter_118/review.md`
+
+## 🏁 MRI 품질 직접 비교는 순서에 불안정했고 단순 지표보다 낮았다
+
+*iter_132 · 2026-10-13 09:15 · 판정: CONTINUE / abandon*
+
+MR-ART에서 직접 비교의 회복 가설이 지지되지 않아 현재 품질 비교 투자를 종료한다.
+- 고민: MR-RATE 질병 판별의 약한 정답과 고정 응답 문제를 벗어나 실제 반복 촬영의 품질 선택을 시험했다.
+- 시도: 전문가 품질 등급이 있는 T1w 자료에서 개별 채점·양순서 직접 비교·MRIQC를 대조했다.
+- 개발: 환자 분리, 고정8장 입력, 공식 tensor 검사와 원시 출력 평가를 구성했다.
+- 결과: 주평가39명·92쌍에서 직접49.57%, 개별65.38%, SNR_total98.72%였고 순서 일관성은6.67%였다.
+- 의미: 순서 불안정은 관찰로 보존하지만 단순 대안 이후의 실용 가치가 없어 확대하지 않는다. MRI 전체 능력과 적응 가능성은 미판정이다.
+
+- 접근법: MRI 반복 촬영의 품질 근거 비교 (`approach/mri-quality-evidence`), 시도: iter_132
+- 커밋: c1c5af0729627b009bff39abcdd69d2b7cf8da67
+- 자세히: DECISIONS.md의 iter_132, `agent/runs/iter_132/review.md`

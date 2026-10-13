@@ -413,3 +413,22 @@ MR-RATE batch04·batch23 공식 train의 반복 개발40명(보고서상 양성2
 - 미해결: CI[0,0]은 관찰된 환자별 차이가 모두0인 bootstrap 결과이며 모집단 효과의 불확실성이 없다는 뜻이 아니다.
 - 미해결: 타 모델의 동일 T2 정규화 대조와 경량 적응의 효과·추가 가치는 미검증이다.
 
+## mrart-quality-comparison-order-instability — observed
+
+MR-ART 개발40명에서 frozen MedGemma 1.5의 고정 axial 8장 품질 직접 비교는 첫 위치 A를 232/240건 선택했고, 촬영 순서를 뒤집어도 같은 촬영을 선택한 비율은 8/120쌍이었다. 전문가 등급 비동점 92쌍·39명의 환자 평균 정확도는 직접 비교0.49573, 개별 점수0.65385, MRIQC SNR_total0.98718이었다. 현재 입력·질문에서 직접 비교의 회복과 실용적 추가 가치는 지지되지 않으며, 일반 MRI 인식 결함이나 내부 원인을 확정하지 않는다.
+
+- 적용 목표 시작: iter_003
+- 최신 리뷰: agent/runs/iter_132/review.json
+- 근거: research/results/iter_132/gen/development/worker0_1791848409739726827.jsonl 및 worker1_1791848409739726827.jsonl: 고유360건, 직접 비교240건.
+- 근거: research/results/iter_132/eval/development_report.json: 직접−개별 −0.15812, 95% CI [-0.25214,-0.06410]; 직접−SNR_total −0.49145, CI [-0.53419,-0.44872].
+- 근거: 리뷰에서 원시 첫 줄·EOS·공식 scores.tsv·IQMs.tsv로 주지표와 seed132 층화 환자 bootstrap10,000회를 별도 재계산해 재현했다.
+- 사용·평가 검증: 고정 revision 91850547d9f0b2fdd21aa7c5f4f3d1a8a52c243b, 공식 chat template, greedy, max_new_tokens512를 확인했다.
+- 사용·평가 검증: protocol_lock_v2의 코드·입력 hash와 리뷰 SHA의 해당 파일이 일치했다. 개발 PNG960개의 hash를 독립 확인했다.
+- 사용·평가 검증: tests/tensors.json의 공식 경로 대조12건, tests/cpu.json의35건, tests/runtime.json의10건 통과 기록을 확인했다.
+- 사용·평가 검증: 개발359/360건 EOS이며 비EOS1건은 사전 규칙대로 invalid=0으로 유지했다. 미채택 batch2 결과는 본평가에 섞이지 않았다.
+- 사용·평가 검증: 기술6·IQM 학습60·개발40·보존20명의 환자 중복이 없고, 원 파일명·촬영 지시·전문가 등급은 모델 prompt에 제공하지 않았다.
+- 미해결: 부분 관측, 손상 인식, 비교 인터페이스와 위치 선호의 상대 기여는 미분리다.
+- 미해결: 건강한 성인의 지시된 움직임 T1w 자료이며 임상 재촬영·다른 sequence·타 모델로의 일반화는 미검증이다.
+- 미해결: 보존20명과 직접 적응은 미실행이다. 현재 과제에서 이를 추가 실행할 실용적 근거는 확보하지 못했다.
+- 미해결: MRIQC는 전체 volume을 사용하며 IQM 생성 전체 비용은 미측정이다.
+

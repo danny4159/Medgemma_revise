@@ -1,0 +1,1242 @@
+diff --git a/mr123_data.py b/mr123_data.py
+new file mode 100644
+index 0000000..c9e673c
+--- /dev/null
++++ b/mr123_data.py
+@@ -0,0 +1,184 @@
++"""iter_123: study ZIP 안전 추출, FLAIR/brain-mask 검사, 뇌 범위 기반 slice 선택·렌더링 (규칙 mr123_rules_v1)."""
++import hashlib, json, os, zipfile
++import numpy as np
++import nibabel as nib
++from PIL import Image
++
++ROOT = '/home/test/.local/share/medgemma/mr_rate/'
++RES = '/SSD1_1TB/home/milab/daniel/08_medgemma/research/results/iter_123/'
++SIDE = 896
++AREA_FRAC = 0.05  # 뇌 범위: slice별 brain-mask 면적이 최대 면적의 5% 이상인 연속 구간 (사전 고정)
++N_SLICE = 8
++
++
++def sha_file(p):
++    d = hashlib.sha256()
++    with open(p, 'rb') as f:
++        for b in iter(lambda: f.read(1 << 22), b''):
++            d.update(b)
++    return d.hexdigest()
++
++
++def extract(zip_path, study, series_id, out_root=ROOT + 'extracted/'):
++    """flair 영상과 brain-mask만 안전 추출. 경로 이탈·symlink 거부, 기존 파일 덮어쓰기 금지."""
++    out = os.path.join(out_root, study)
++    os.makedirs(out, exist_ok=True)
++    want = {f'{study}/img/{study}_{series_id}.nii.gz': 'img.nii.gz',
++            f'{study}/seg/{study}_{series_id}_brain-mask.nii.gz': 'brain.nii.gz'}
++    z = zipfile.ZipFile(zip_path)
++    res = {}
++    for info in z.infolist():
++        if info.filename in want:
++            assert '..' not in info.filename and not info.filename.startswith('/')
++            assert (info.external_attr >> 16) & 0o170000 != 0o120000, 'symlink'
++            dst = os.path.join(out, want[info.filename])
++            if not os.path.exists(dst):
++                with z.open(info) as s, open(dst + '.part', 'wb') as d:
++                    while True:
++                        b = s.read(1 << 22)
++                        if not b:
++                            break
++                        d.write(b)
++                os.replace(dst + '.part', dst)
++            res[want[info.filename]] = dict(path=dst, sha256=sha_file(dst), size=os.path.getsize(dst), zip_member=info.filename)
++    missing = set(want.values()) - set(res)
++    return res, sorted(missing)
++
++
++def load_case(img_path, brain_path):
++    im = nib.load(img_path)
++    bm = nib.load(brain_path)
++    info = dict(orig_axcodes=''.join(nib.aff2axcodes(im.affine)), shape=list(im.shape), zooms=[float(z) for z in im.header.get_zooms()[:3]],
++                brain_shape=list(bm.shape), brain_axcodes=''.join(nib.aff2axcodes(bm.affine)),
++                affine_match=bool(np.allclose(im.affine, bm.affine, atol=1e-3)), ndim=len(im.shape))
++    if len(im.shape) != 3 or tuple(im.shape) != tuple(bm.shape):
++        return None, None, info
++    im = nib.as_closest_canonical(im)
++    bm = nib.as_closest_canonical(bm)
++    a = np.asarray(im.dataobj).astype(np.float32)
++    b = np.asarray(bm.dataobj) > 0
++    info['canon_axcodes'] = ''.join(nib.aff2axcodes(im.affine))
++    info['canon_shape'] = list(a.shape)
++    info['canon_zooms'] = [float(z) for z in im.header.get_zooms()[:3]]
++    return a, b, info
++
++
++def brain_range(b):
++    area = b.sum(axis=(0, 1)).astype(np.float64)
++    if area.max() <= 0:
++        return None
++    ok = area >= AREA_FRAC * area.max()
++    best, s = None, None
++    for i, v in enumerate(list(ok) + [False]):
++        if v and s is None:
++            s = i
++        if not v and s is not None:
++            if best is None or (i - 1 - s) > (best[1] - best[0]):
++                best = (s, i - 1)
++            s = None
++    return best
++
++
++def pick(lo, hi, f0, f1, n=N_SLICE):
++    L = hi - lo
++    pos = [lo + L * (f0 + (f1 - f0) * i / (n - 1)) for i in range(n)]
++    idx = [int(round(p)) for p in pos]
++    return idx
++
++
++def intensity_window(a, b):
++    v = a[b]
++    return float(np.percentile(v, 1)), float(np.percentile(v, 99))
++
++
++def normalization_window(a, b=None, normalization='brain_percentile_1_99'):
++    """기존 percentile 동작 보존; volume min/max에는 mask를 사용하지 않는다."""
++    if not np.isfinite(a).all():
++        raise ValueError('nonfinite volume')
++    if normalization == 'brain_percentile_1_99':
++        lo, hi = intensity_window(a, b)
++    elif normalization == 'volume_minmax':
++        lo, hi = float(np.min(a)), float(np.max(a))
++    else:
++        raise ValueError('unknown normalization')
++    if hi <= lo:
++        raise ValueError('constant/degenerate volume')
++    return lo, hi
++
++
++def render_slice(a, k, lo_v, hi_v, zooms):
++    s = a[:, :, k]
++    s = np.clip((s - lo_v) / max(hi_v - lo_v, 1e-6), 0, 1)
++    s = (s * 255 + 0.5).astype(np.uint8)
++    img = s.T[::-1, ::-1]  # RAS 정렬 후: 위=anterior, 영상 왼쪽=환자 오른쪽(radiological)
++    h, w = img.shape
++    # 평면내 spacing 보정 (x: 열 방향 zooms[0], y: 행 방향 zooms[1])
++    hh = h * zooms[1]
++    ww = w * zooms[0]
++    scale = SIDE / max(hh, ww)
++    nh, nw = max(1, int(round(hh * scale))), max(1, int(round(ww * scale)))
++    pil = Image.fromarray(img).resize((nw, nh), Image.BICUBIC)
++    canvas = Image.new('L', (SIDE, SIDE), 0)
++    canvas.paste(pil, ((SIDE - nw) // 2, (SIDE - nh) // 2))
++    return canvas.convert('RGB')
++
++
++def build_case(rec, zip_path, out_dir):
++    """returns dict with qc info and rendered PNG paths; None 사유 포함."""
++    ex, missing = extract(zip_path, rec['study_uid'], rec['series_id'])
++    info = dict(study_uid=rec['study_uid'], patient_uid=rec['patient_uid'], series_id=rec['series_id'], files=ex, missing=missing)
++    if missing:
++        info['exclude'] = 'missing_member:' + ','.join(missing)
++        return info
++    a, b, li = load_case(ex['img.nii.gz']['path'], ex['brain.nii.gz']['path'])
++    info.update(li)
++    if a is None:
++        info['exclude'] = 'shape_or_ndim_mismatch'
++        return info
++    if not info['affine_match']:
++        info['exclude'] = 'affine_mismatch'
++        return info
++    if not np.isfinite(a).all():
++        info['exclude'] = 'nonfinite'
++        return info
++    if info['canon_axcodes'] != 'RAS':
++        info['exclude'] = 'orientation_not_RAS'
++        return info
++    br = brain_range(b)
++    if br is None:
++        info['exclude'] = 'no_brain_range'
++        return info
++    lo, hi = br
++    info['brain_slice_range'] = [lo, hi]
++    info['n_brain_slices'] = hi - lo + 1
++    info['brain_voxels'] = int(b.sum())
++    C = pick(lo, hi, 0.25, 0.75)
++    W = pick(lo, hi, 0.05, 0.95)
++    info['C_idx'], info['W_idx'] = C, W
++    if len(set(C)) < N_SLICE or len(set(W)) < N_SLICE:
++        info['exclude'] = 'lt8_unique_slices'
++        return info
++    lo_v, hi_v = intensity_window(a, b)
++    info['window_p1_p99'] = [lo_v, hi_v]
++    if not hi_v > lo_v:
++        info['exclude'] = 'degenerate_window'
++        return info
++    os.makedirs(out_dir, exist_ok=True)
++    pngs = {}
++    for k in sorted(set(C) | set(W)):
++        p = os.path.join(out_dir, f'{rec["study_uid"]}_s{k:03d}.png')
++        im = render_slice(a, k, lo_v, hi_v, info['canon_zooms'])
++        if not os.path.exists(p):
++            im.save(p)
++        pngs[k] = dict(path=p, sha256=sha_file(p))
++    info['pngs'] = {str(k): v for k, v in pngs.items()}
++    info['exclude'] = None
++    return info
++
++
++def montage(info, which, out_path):
++    ims = [Image.open(info['pngs'][str(k)]['path']).resize((224, 224)) for k in info[which + '_idx']]
++    M = Image.new('RGB', (224 * 4, 224 * 2))
++    for i, im in enumerate(ims):
++        M.paste(im, ((i % 4) * 224, (i // 4) * 224))
++    M.save(out_path)
+diff --git a/mr132_audit.py b/mr132_audit.py
+new file mode 100644
+index 0000000..6234d42
+--- /dev/null
++++ b/mr132_audit.py
+@@ -0,0 +1,41 @@
++"""현재 원 영상·PNG·정답·요청의 독립 연결 감사 (모델 출력 미사용)."""
++import hashlib,itertools,numpy as np,nibabel as nib
++from PIL import Image
++from mr132_common import RES,read,save,sha,now
++
++def main():
++    split=read(RES/'split_lock.json'); scores={r['bids_name']:r for r in read(RES/'metadata_audit.json')['objects']}
++    groups=split['splits']; ss=[s for v in groups.values() for s in v]; assert len(ss)==len(set(ss))==126
++    sources=[]; pngs={}; labels={};checks=[]
++    for stage in ['technical','development']:
++        m=read(RES/'data'/f'{stage}_manifest.json'); lab=read(RES/'data'/f'{stage}_labels.json'); req=read(RES/'requests'/f'{stage}.json')
++        assert m['subjects']==groups[stage] and len(req)==len(lab)*9
++        for v in m['volumes']:
++            f=v['source']; assert sha(f['path'])==f['sha256']; im=nib.load(f['path']); can=nib.as_closest_canonical(im);a=np.asarray(can.dataobj,dtype=np.float32)
++            assert nib.aff2axcodes(can.affine)==('R','A','S') and np.isfinite(a).all()
++            assert np.allclose(can.affine,v['canonical_affine']) and tuple(a.shape)==tuple(v['canonical_shape'])
++            idx=np.rint(np.linspace(.15*(a.shape[2]-1),.85*(a.shape[2]-1),8)).astype(int).tolist();assert idx==v['indices']
++            lo,hi=float(np.min(a)),float(np.max(a));assert v['window']==[lo,hi] and hi>lo
++            h=hashlib.sha256(a.tobytes()).hexdigest();sources.append(dict(subject=v['subject'],bids_name=v['bids_name'],file_sha256=f['sha256'],decoded_sha256=h))
++            for p in v['pngs']:
++                assert sha(p['path'])==p['sha256'];pix=hashlib.sha256(np.asarray(Image.open(p['path'])).tobytes()).hexdigest();assert pix==p['pixel_sha256'];pngs[p['path']]=dict(file_sha256=p['sha256'],pixel_sha256=pix)
++        for patient in lab:
++            labels[patient['id']]=patient
++            assert patient['subject'] in groups[stage]
++            assert patient['grades']==[scores[k]['score'] for k in patient['bids_names']]
++        vol={v['bids_name']:v for v in m['volumes']}
++        for r in req:
++            indices=[int(x) for x in r['id'].split('_')[-1]];labrec=labels[r['patient']]
++            for index,g in zip(indices,r['groups']):
++                expected=[p['path'] for p in vol[labrec['bids_names'][index]]['pngs']];assert expected==[p['path'] for p in g]
++            assert all(p['sha256']==pngs[p['path']]['file_sha256'] for g in r['groups'] for p in g)
++        checks.append(dict(stage=stage,n_subjects=len(m['subjects']),n_volumes=len(m['volumes']),n_requests=len(req),request_image_label_link=True,source_voxel_affine_slice_window_verified=True))
++    duplicate_files={h:[x['bids_name'] for x in sources if x['file_sha256']==h] for h in {x['file_sha256'] for x in sources} if sum(x['file_sha256']==h for x in sources)>1}
++    duplicate_pixels={h:[x['bids_name'] for x in sources if x['decoded_sha256']==h] for h in {x['decoded_sha256'] for x in sources} if sum(x['decoded_sha256']==h for x in sources)>1}
++    # 같은 사람 반복 촬영의 정확 중복은 별도 공개; 환자 간 중복은 독립성 실패다.
++    byname={x['bids_name']:x['subject'] for x in sources}
++    assert not any(len({byname[k] for k in group})>1 for group in duplicate_pixels.values())
++    save(RES/'input_integrity_audit.json',dict(created_at=now(),all_pass=True,source_sha256=sha(__file__),checks=checks,n_unique_subjects=46,n_volumes=len(sources),n_pngs=len(pngs),file_duplicates=duplicate_files,decoded_duplicates=duplicate_pixels,holdout_not_opened=True,sources=sources,pngs=pngs,inputs={str(p):sha(p) for p in [RES/'split_lock.json',RES/'metadata_audit.json',RES/'baseline/selection_lock.json']}))
++    print('입력 독립 감사:',len(sources),'volume,',len(pngs),'PNG, 환자 중복0')
++
++if __name__=='__main__':main()
+diff --git a/mr132_baseline.py b/mr132_baseline.py
+new file mode 100644
+index 0000000..d8cd947
+--- /dev/null
++++ b/mr132_baseline.py
+@@ -0,0 +1,60 @@
++"""독립 환자60명의 fold 내부 전처리로 MRIQC 대조 선택."""
++import itertools, time, joblib, numpy as np, sys, platform
++from sklearn.impute import SimpleImputer
++from sklearn.preprocessing import StandardScaler
++from sklearn.pipeline import make_pipeline
++from sklearn.linear_model import LogisticRegression
++from sklearn.ensemble import RandomForestClassifier
++from sklearn.model_selection import KFold
++import sklearn, scipy
++from mr132_common import RES,read,save,sha,now
++from mr132_preflight import rows
++from mr132_spec import ACQS,PAIRS
++
++def subject_accuracy(subs,values,labels):
++    acc=[]
++    for sub in subs:
++        y=[labels[f'{sub}_acq-{a}_T1w'] for a in ACQS]; v=[values[f'{sub}_acq-{a}_T1w'] for a in ACQS]
++        pair=[]
++        for i,j in PAIRS:
++            if y[i]==y[j]: continue
++            pair.append(.5 if v[i]==v[j] else float((v[i]<v[j])==(y[i]<y[j])))
++        if pair: acc.append(np.mean(pair))
++    return float(np.mean(acc))
++
++def main():
++    start=time.monotonic(); lock=read(RES/'split_lock.json'); train=lock['splits']['iqm_train']
++    iq=rows(RES/'metadata/IQMs.tsv'); scores=rows(RES/'metadata/scores.tsv'); labels={k:int(r['score']) for k,r in scores.items()}
++    columns=[c for c in next(iter(iq.values())) if c!='bids_name' and not c.startswith(('size_','spacing_'))]
++    assert all(c not in ['score','subject','age','sex','acq'] for c in columns)
++    def X(keys):
++        return np.array([[float(iq[k][c]) if iq[k][c].strip().lower() not in ['','nan','n/a'] else np.nan for c in columns] for k in keys])
++    keys=[f'{s}_acq-{a}_T1w' for s in train for a in ACQS]; xx=X(keys); yy=np.array([labels[k] for k in keys]); assert not np.isinf(xx).any()
++    candidates=[('logistic_C'+str(c),dict(kind='logistic',C=c)) for c in [.1,1,10]]+ [('forest_leaf'+str(c),dict(kind='forest',min_samples_leaf=c)) for c in [2,5]]
++    def model(cfg):
++        learner=LogisticRegression(C=cfg['C'],solver='lbfgs',max_iter=5000,random_state=132) if cfg['kind']=='logistic' else RandomForestClassifier(n_estimators=300,min_samples_leaf=cfg['min_samples_leaf'],max_features='sqrt',random_state=132,n_jobs=4)
++        return make_pipeline(SimpleImputer(strategy='median',keep_empty_features=True),StandardScaler(),learner)
++    folds=list(KFold(n_splits=5,shuffle=True,random_state=132).split(train)); cv={}; outpred={}
++    for name,cfg in candidates:
++        pred={}; fold_records=[]
++        for f,(a,b) in enumerate(folds):
++            ai=np.concatenate([np.arange(i*3,i*3+3) for i in a]); bi=np.concatenate([np.arange(i*3,i*3+3) for i in b]); m=model(cfg); m.fit(xx[ai],yy[ai]); prob=m.predict_proba(xx[bi]); val=prob @ m[-1].classes_
++            pred.update({keys[i]:float(v) for i,v in zip(bi,val)})
++            fold_records.append(dict(fold=f,train_subjects=[train[i] for i in a],validation_subjects=[train[i] for i in b],imputer_statistics=m[0].statistics_.tolist(),scaler_mean=m[1].mean_.tolist()))
++        cv[name]=dict(config=cfg,accuracy=subject_accuracy(train,pred,labels),folds=fold_records); outpred[name]=pred
++    learner=sorted(cv,key=lambda name:(-cv[name]['accuracy'],0 if cv[name]['config']['kind']=='logistic' else 1,list(cv).index(name)))[0]
++    single={c:{k:float(r[c])*( -1 if c=='snr_total' else 1) for k,r in iq.items()} for c in ['cjv','efc','snr_total']}
++    single_acc={c:subject_accuracy(train,v,labels) for c,v in single.items()}; best_single=max(single_acc,key=single_acc.get)
++    strongest=learner if cv[learner]['accuracy']>single_acc[best_single] else best_single
++    best=model(cv[learner]['config']); best.fit(xx,yy)
++    out=RES/'baseline'; out.mkdir(exist_ok=False)
++    joblib.dump(best,out/'selected_pipeline.joblib')
++    # 보존 환자의 IQM도 예측하되 영상·VLM 출력은 열지 않는다. 설정은 CV60에서만 고른다.
++    eval_keys=[f'{s}_acq-{a}_T1w' for stage in ['technical','development','holdout'] for s in lock['splits'][stage] for a in ACQS]
++    pred=best.predict_proba(X(eval_keys)) @ best[-1].classes_
++    vals=dict(single); vals[learner]={k:float(v) for k,v in zip(eval_keys,pred)}
++    save(out/'predictions.json',dict(values=vals,selected_strongest=strongest,selected_single=best_single,selected_classifier=learner))
++    save(out/'selection_lock.json',dict(created_at=now(),train_subjects=train,features=columns,excluded_features=[c for c in next(iter(iq.values())) if c not in columns],cv=cv,single_cv_accuracy=single_acc,selected_single=best_single,selected_classifier=learner,selected_strongest=strongest,pipeline_sha256=sha(out/'selected_pipeline.joblib'),predictions_sha256=sha(out/'predictions.json'),inputs={str(p):sha(p) for p in [RES/'split_lock.json',RES/'metadata/IQMs.tsv',RES/'metadata/scores.tsv']},code_sha256=sha(__file__),python=sys.executable,versions=dict(sklearn=sklearn.__version__,scipy=scipy.__version__,numpy=np.__version__),wall_s=time.monotonic()-start,iqm_generation_cost='미측정; 저장 표의 pipeline 추론만 측정'))
++    print('MRIQC CV 선택',strongest,'단일',single_acc,'학습', {k:v['accuracy'] for k,v in cv.items()})
++
++if __name__=='__main__': main()
+diff --git a/mr132_build.py b/mr132_build.py
+new file mode 100644
+index 0000000..7a19bd2
+--- /dev/null
++++ b/mr132_build.py
+@@ -0,0 +1,34 @@
++"""평가 정보와 추론 요청 분리 및 사전 protocol 잠금."""
++import argparse,itertools
++from pathlib import Path
++from mr132_common import RES,read,save,sha,digest,now
++from mr132_spec import SINGLE,PAIR,ACQS,PAIRS,CONFIG
++
++def build(stage):
++    m=read(RES/'data'/f'{stage}_manifest.json'); split=read(RES/'split_lock.json'); scores=read(RES/'metadata_audit.json')['objects']
++    rr=[]; ll=[]
++    for n,sub in enumerate(m['subjects']):
++        vv=[next(v for v in m['volumes'] if v['subject']==sub and v['acq']==a) for a in ACQS]
++        label=[next(r['score'] for r in scores if r['subject']==sub and r['acq']==a) for a in ACQS]
++        ll.append(dict(id=f'{stage}_p{n:03d}',subject=sub,grades=label,stratum='tie' if label[1]==label[2] else 'nontie',bids_names=[v['bids_name'] for v in vv]))
++        for kind,group in [('single',[i]) for i in range(3)]+[('pair',[i,j]) for i,j in PAIRS]+[('pair',[j,i]) for i,j in PAIRS]:
++            png_groups=[[dict(path=x['path'],sha256=x['sha256'],pixel_sha256=x['pixel_sha256']) for x in vv[i]['pngs']] for i in group]
++            r=dict(id=f'{stage}_p{n:03d}_{kind}_'+''.join(map(str,group)),patient=f'{stage}_p{n:03d}',kind=kind,groups=png_groups,prompt=SINGLE if kind=='single' else PAIR)
++            r['request_digest']=digest(r); rr.append(r)
++    out=RES/'requests'; out.mkdir(exist_ok=True)
++    save(out/f'{stage}.json',rr); save(RES/'data'/f'{stage}_labels.json',ll)
++    print(stage,len(rr),'requests')
++
++def lock():
++    files=[Path(p) for p in ['mr132_common.py','mr132_spec.py','mr132_build.py','mr132_run.py','mr132_eval.py','mr132_verify.py','mr132_tests.py','mr132_tech.py','mr132_data.py','mr132_baseline.py','mr132_preflight.py','mr123_data.py']]
++    inputs=[RES/'split_lock.json',RES/'metadata_audit.json',RES/'baseline/selection_lock.json',RES/'baseline/predictions.json',RES/'baseline/selected_pipeline.joblib']
++    for stage in ['technical','development']:
++        inputs += [RES/'data'/f'{stage}_manifest.json',RES/'data'/f'{stage}_labels.json',RES/'requests'/f'{stage}.json']
++    model=Path('../hf_cache/models--google--medgemma-1.5-4b-it/snapshots')/CONFIG['revision']
++    models={str(p.resolve()):dict(bytes=p.stat().st_size,sha256=sha(p)) for p in model.iterdir() if p.is_file()}
++    save(RES/'protocol_lock_v2.json',dict(locked_at=now(),supersedes_pre_generation_lock=sha(RES/'protocol_lock.json'),config=CONFIG,code={str(p.resolve()):sha(p) for p in files},inputs={str(p.resolve()):sha(p) for p in inputs},model_files=models,metric=dict(primary='patient_mean_nontied_pair_accuracy',tie=.5,invalid=0,unknown=0,bootstrap=10000,seed=132,stratified_by='headmotion_grade_tie',order_consistency='same canonical choice among A/B/TIE; UNKNOWN or invalid counted inconsistent; all three pairs',expansion=dict(delta_single=.10,delta_iqm=.05,order_consistency=.90,invalid_unknown=.05))))
++    print('평가·입력·모델 사전 잠금',sha(RES/'protocol_lock_v2.json'))
++
++if __name__=='__main__':
++    ap=argparse.ArgumentParser(); ap.add_argument('stage',choices=['technical','development','holdout','lock']); a=ap.parse_args()
++    lock() if a.stage=='lock' else build(a.stage)
+diff --git a/mr132_common.py b/mr132_common.py
+new file mode 100644
+index 0000000..0368809
+--- /dev/null
++++ b/mr132_common.py
+@@ -0,0 +1,24 @@
++"""iter_132 전용 보존·출처 유틸리티."""
++import hashlib, json, os
++from pathlib import Path
++from datetime import datetime, timezone
++
++RES = Path(__file__).resolve().parent / 'results/iter_132'
++DATA = Path('/home/test/.local/share/medgemma/mr_rate/mr_art/iter_132')
++REV = 'fb45b349f21faa4b65ad23089788bbea30d07d74'
++IQREV = '82b3272d7fe73b2a1965625efd821128eb081be3'
++
++def sha(p):
++    h=hashlib.sha256()
++    with open(p,'rb') as f:
++        for b in iter(lambda:f.read(4<<20), b''): h.update(b)
++    return h.hexdigest()
++
++def now(): return datetime.now(timezone.utc).isoformat()
++def digest(x): return hashlib.sha256(json.dumps(x,sort_keys=True,separators=(',',':'),allow_nan=False).encode()).hexdigest()
++def read(p): return json.loads(Path(p).read_text())
++def save(p,x):
++    p=Path(p); p.parent.mkdir(parents=True,exist_ok=True)
++    with open(p,'x') as f:
++        json.dump(x,f,indent=2,sort_keys=True,allow_nan=False); f.write('\n'); f.flush(); os.fsync(f.fileno())
++
+diff --git a/mr132_control.py b/mr132_control.py
+new file mode 100644
+index 0000000..76ddf4b
+--- /dev/null
++++ b/mr132_control.py
+@@ -0,0 +1,49 @@
++"""고정 단계의 감독기: 자체 대기, 기술 검증 후 개발, 사전 분기만 확대."""
++import os,sys,subprocess,time,json,signal
++from pathlib import Path
++from mr132_common import RES,read,save,sha,now
++
++def main():
++    out=RES/'control';out.mkdir(exist_ok=False)
++    save(out/'config.json',dict(started_at=now(),source_sha256=sha(__file__),batch=1,workers=2,peak_admission_mib=13000,estimated_development_wall_s=read(RES/'tests/throughput.json')['estimated_development_wall_s'],reason='batch2 token 불일치로 batch1; 동시 두 worker/장 메모리 부족; 검증 실패시 중단'))
++    assert read(RES/'tests/throughput.json')['chosen_batch']==1
++    start=time.monotonic();current=None
++    def run(name,cmd):
++        nonlocal current
++        t=time.monotonic()
++        with open(out/(name+'.log'),'xb') as f:
++            current=subprocess.Popen(cmd,stdout=f,stderr=subprocess.STDOUT)
++            rc=current.wait();current=None
++        save(out/(name+'.json'),dict(command=cmd,exit_code=rc,wall_s=time.monotonic()-t,ended_at=now()))
++        print(name,'rc',rc,'wall',round(time.monotonic()-t,2),flush=True)
++        if rc:raise RuntimeError(name+' failed')
++    def launch(name,stage,limit=0):
++        requests='pilot' if stage=='resume' else stage
++        run(name,[sys.executable,'mr132_run.py','launch','--job',str(RES/'gen'/stage),'--requests',str(RES/'requests'/f'{requests}.json'),'--workers','2','--batch','1','--peak','13000','--limit',str(limit)])
++    try:
++        launch('resume_partial','resume',2)
++        launch('resume_finish','resume')
++        run('runtime_tests',[sys.executable,'mr132_tests.py','runtime'])
++        launch('technical_generation','technical')
++        from mr132_run import verify_job
++        rr=verify_job(RES/'gen/technical',RES/'requests/technical.json')
++        assert len(rr)==54 and all(r['eos'] for r in rr),'기술 생성 절단을 먼저 해소해야 함'
++        save(RES/'tests/technical_gate.json',dict(created_at=now(),passed=True,n_requests=54,n_eos=sum(r['eos'] for r in rr),evidence={str(p):sha(p) for p in [RES/'tests/cpu.json',RES/'tests/tensors.json',RES/'tests/runtime.json',RES/'tests/throughput.json',RES/'gen/technical/completion.json']},input_manifest_sha256=sha(RES/'data/technical_manifest.json'),protocol_sha256=sha(RES/'protocol_lock_v2.json'),accuracy_not_a_gate=True))
++        launch('development_generation','development')
++        run('development_evaluation',[sys.executable,'mr132_eval.py','development'])
++        run('development_independent',[sys.executable,'mr132_verify.py','development'])
++        decision=read(RES/'eval/development_decision.json')
++        if decision['expand']:
++            run('holdout_data',[sys.executable,'mr132_data.py','holdout'])
++            run('holdout_requests',[sys.executable,'mr132_build.py','holdout'])
++            launch('holdout_generation','holdout')
++            run('holdout_evaluation',[sys.executable,'mr132_eval.py','holdout'])
++            run('holdout_independent',[sys.executable,'mr132_verify.py','holdout'])
++        save(out/'completion.json',dict(completed_at=now(),wall_s=time.monotonic()-start,holdout_executed=decision['expand'],development_decision_sha256=sha(RES/'eval/development_decision.json'),all_commands_pass=True))
++    finally:
++        if current and current.poll() is None:
++            current.terminate()
++            try:current.wait(timeout=30)
++            except subprocess.TimeoutExpired:current.kill();current.wait()
++
++if __name__=='__main__':main()
+diff --git a/mr132_data.py b/mr132_data.py
+new file mode 100644
+index 0000000..f06fd4b
+--- /dev/null
++++ b/mr132_data.py
+@@ -0,0 +1,78 @@
++"""고정 MR-ART 객체의 선택 반입과 익명 RAS axial 입력 구성."""
++import argparse, hashlib, os, time, requests, numpy as np, nibabel as nib
++from pathlib import Path
++from concurrent.futures import ThreadPoolExecutor
++from PIL import Image
++from mr132_common import RES,DATA,sha,save,read,digest,now
++from mr123_data import normalization_window,render_slice
++
++CFG=dict(orientation='RAS',slice_fraction=[.15,.85],n_slices=8,normalization='volume_minmax',side=896,registration=False)
++def fetch_volume(rec):
++    p=DATA/'volumes'/f'{rec["bids_name"]}.nii.gz'; p.parent.mkdir(parents=True,exist_ok=True)
++    stamp=p.with_suffix('.source.json')
++    if p.exists():
++        s=read(stamp)
++        assert s['object']==rec and s['sha256']==sha(p)
++        return s
++    partial=p.with_name(p.name+'.part.'+str(os.getpid()))
++    # 기존 부분 파일은 덮어쓰지 않는다. GET은 고정 versionId와 일치해야 한다.
++    h=hashlib.md5(); sh=hashlib.sha256(); total=0; start=time.monotonic()
++    url=rec['url']+'?versionId='+rec['version_id']
++    r=requests.get(url,stream=True,timeout=(30,120)); r.raise_for_status()
++    assert r.headers.get('ETag')==rec['etag']
++    with open(partial,'xb') as f:
++        for b in r.iter_content(1<<20): f.write(b); h.update(b); sh.update(b); total+=len(b)
++        f.flush(); os.fsync(f.fileno())
++    assert total==rec['bytes'] and h.hexdigest()==rec['md5']
++    if p.exists(): raise RuntimeError('output collision')
++    os.rename(partial,p)
++    s=dict(path=str(p),object=rec,sha256=sh.hexdigest(),md5=h.hexdigest(),bytes=total,final_url=r.url,wall_s=time.monotonic()-start)
++    save(stamp,s); return s
++
++def render(rec,index,stage):
++    f=fetch_volume(rec); source=Path(f['path']); start=time.monotonic()
++    im=nib.load(source); assert len(im.shape)==3 and np.isfinite(im.affine).all() and abs(np.linalg.det(im.affine[:3,:3]))>0
++    ras=nib.as_closest_canonical(im); assert nib.aff2axcodes(ras.affine)==('R','A','S')
++    a=np.asarray(ras.dataobj,dtype=np.float32); assert np.isfinite(a).all()
++    zooms=list(map(float,ras.header.get_zooms()[:3])); assert min(zooms)>0
++    idx=np.rint(np.linspace(.15*(a.shape[2]-1),.85*(a.shape[2]-1),8)).astype(int).tolist(); assert len(set(idx))==8
++    lo,hi=normalization_window(a,normalization='volume_minmax')
++    config=dict(CFG,renderer_sha256=sha('mr123_data.py'),adapter_sha256=sha(__file__),source_sha256=f['sha256'])
++    out=DATA/'png'/stage/f'v{index:04d}'
++    if out.exists():
++        old=read(out/'manifest.json'); assert old['config']==config
++        assert all(sha(x['path'])==x['sha256'] for x in old['pngs']); return old
++    out.mkdir(parents=True,exist_ok=False)
++    pngs=[]; thumbs=[]
++    for i,k in enumerate(idx):
++        pil=render_slice(a,k,lo,hi,zooms); p=out/f's{i:02d}.png'
++        pil.save(p); pixel=hashlib.sha256(np.asarray(pil).tobytes()).hexdigest()
++        again=render_slice(a,k,lo,hi,zooms)
++        assert hashlib.sha256(np.asarray(again).tobytes()).hexdigest()==pixel
++        pngs.append(dict(path=str(p),sha256=sha(p),pixel_sha256=pixel,slice_index=k))
++        thumbs.append(pil.resize((224,224)))
++    result=dict(anonymous_volume=f'v{index:04d}',bids_name=rec['bids_name'],subject=rec['subject'],acq=rec['acq'],source=f,config=config,original_shape=list(im.shape),original_affine=im.affine.tolist(),original_axcodes=nib.aff2axcodes(im.affine),canonical_shape=list(a.shape),canonical_affine=ras.affine.tolist(),canonical_zooms=zooms,canonical_axcodes='RAS',indices=idx,window=[lo,hi],pngs=pngs,wall_s=time.monotonic()-start)
++    save(out/'manifest.json',result)
++    if stage=='technical':
++        sheet=Image.new('RGB',(896,448))
++        for i,pil in enumerate(thumbs): sheet.paste(pil,((i%4)*224,(i//4)*224))
++        sheet.save(RES/'data'/f'{result["anonymous_volume"]}_montage.png')
++    return result
++
++def main():
++    ap=argparse.ArgumentParser(); ap.add_argument('stage',choices=['technical','development','holdout']); args=ap.parse_args()
++    lock=read(RES/'split_lock.json'); assert lock['metadata_audit_sha256']==sha(RES/'metadata_audit.json')
++    if args.stage=='holdout': assert read(RES/'eval/development_decision.json')['expand']
++    ss=lock['splits'][args.stage]; rr=[r for r in lock['objects'] if r['subject'] in ss]
++    output=RES/'data'/f'{args.stage}_manifest.json'; assert not output.exists()
++    (RES/'data').mkdir(parents=True,exist_ok=True)
++    start=time.monotonic()
++    with ThreadPoolExecutor(max_workers=6) as pool:
++        result=list(pool.map(lambda x:render(x[1],x[0],args.stage),enumerate(rr)))
++    for sub in ss:
++        imgs=[r for r in result if r['subject']==sub]
++        assert len(imgs)==3 and len({tuple(r['indices']) for r in imgs})==1
++    save(output,dict(stage=args.stage,created_at=now(),subjects=ss,volumes=result,split_sha256=sha(RES/'split_lock.json'),config=CFG,code_sha256=sha(__file__),wall_s=time.monotonic()-start))
++    print(args.stage,len(ss),len(result),'volume; wall',time.monotonic()-start)
++
++if __name__=='__main__': main()
+diff --git a/mr132_eval.py b/mr132_eval.py
+new file mode 100644
+index 0000000..d6a4028
+--- /dev/null
++++ b/mr132_eval.py
+@@ -0,0 +1,63 @@
++"""고정 parser의 환자별 순위 평가와 층화 paired bootstrap."""
++import argparse,numpy as np
++from mr132_common import RES,read,save,sha,now
++from mr132_spec import parse,pair_value,expansion,PAIRS,ACQS
++
++def compute(stage,records):
++    labels=read(RES/'data'/f'{stage}_labels.json'); baseline=read(RES/'baseline/predictions.json'); by={r['id']:r for r in records}
++    patients=[]; details=[]; consistent=[]; invalid=[]
++    for lab in labels:
++        ident=lab['id']; grades=lab['grades']; single=[]
++        for i in range(3):
++            rec=by[f'{ident}_single_{i}']; single.append(parse(rec['text'],'single',rec['eos']))
++        pp={'single':[],'direct':[],'direct_strict':[],'both_orders_correct':[]}
++        pp.update({name:[] for name in baseline['values']})
++        for i,j in PAIRS:
++            preds=[]; raws=[]
++            for first,second in [(i,j),(j,i)]:
++                rec=by[f'{ident}_pair_{first}{second}']; p=parse(rec['text'],'pair',rec['eos']); raws.append(p)
++                canonical=first if p=='A' else second if p=='B' else p
++                preds.append(canonical); invalid.append(p is None or p=='UNKNOWN')
++            same=all(p not in [None,'UNKNOWN'] for p in preds) and preds[0]==preds[1]; consistent.append(same)
++            d=dict(patient=ident,pair=[i,j],grades=[grades[i],grades[j]],grade_gap=abs(grades[i]-grades[j]),order_predictions=preds,raw_predictions=raws,consistent=same)
++            if grades[i]!=grades[j]:
++                winner=i if grades[i]<grades[j] else j
++                dv=np.mean([pair_value(p,winner) for p in preds]); st=np.mean([pair_value(p,winner,True) for p in preds])
++                sv=0 if single[i] is None or single[j] is None else .5 if single[i]==single[j] else float((single[i]<single[j])==(grades[i]<grades[j]))
++                d.update(direct=float(dv),direct_strict=float(st),single=sv,both_orders_correct=float(all(p==winner for p in preds)))
++                for k in pp:
++                    if k in d: pp[k].append(d[k])
++                    else:
++                        vv=baseline['values'][k]; a,b=[vv[lab['bids_names'][z]] for z in [i,j]]
++                        pp[k].append(.5 if a==b else float((a<b)==(grades[i]<grades[j])))
++            details.append(d)
++        patients.append(dict(id=ident,stratum=lab['stratum'],grades=grades,n_nontied=len(pp['direct']),single_scores=single,values={k:float(np.mean(v)) if v else None for k,v in pp.items()}))
++    valid=[p for p in patients if p['n_nontied']]; systems=list(valid[0]['values']); vals={k:np.array([p['values'][k] for p in valid]) for k in systems}
++    rng=np.random.default_rng(132); indices=[]
++    for b in range(10000):
++        sel=[]
++        for s in ['tie','nontie']:
++            group=np.array([i for i,p in enumerate(valid) if p['stratum']==s]); sel.extend(rng.choice(group,len(group),replace=True).tolist())
++        indices.append(sel)
++    indices=np.array(indices,dtype=int)
++    comparisons={}
++    for target in ['single',baseline['selected_strongest']]:
++        diff=vals['direct']-vals[target]; arr=diff[indices].mean(axis=1)
++        comparisons['direct_minus_'+target]=dict(delta=float(diff.mean()),ci95=np.quantile(arr,[.025,.975]).tolist())
++    error=float(np.mean(invalid)); consistency=float(np.mean(consistent))
++    delta_s=comparisons['direct_minus_single']['delta']; delta_i=comparisons['direct_minus_'+baseline['selected_strongest']]['delta']
++    report=dict(stage=stage,created_at=now(),n_patients=len(patients),n_primary_patients=len(valid),n_excluded_all_tied=len(patients)-len(valid),n_nontied_pairs=sum(p['n_nontied'] for p in patients),metrics={k:float(v.mean()) for k,v in vals.items()},strata={s:{k:float(np.mean([p['values'][k] for p in valid if p['stratum']==s])) for k in systems} for s in ['tie','nontie']},comparisons=comparisons,order_consistency=consistency,invalid_unknown_rate=error,single_invalid_rate=float(np.mean([v is None for p in patients for v in p['single_scores']])),selected_iqm=baseline['selected_strongest'],breakdown={tag:dict(n=len(group),direct=float(np.mean([d['direct'] for d in group])) if group else None,single=float(np.mean([d['single'] for d in group])) if group else None) for tag,group in [(str(g),[d for d in details if d['grade_gap']==g]) for g in [1,2]]+[('headmotion_pair',[d for d in details if d['pair']==[1,2] and d['grade_gap']>0])]},tie_pairs=[d for d in details if d['grade_gap']==0],cost=dict(individual_request_s=sum(r['wall_s'] for r in records if r['kind']=='single'),direct_request_s=sum(r['wall_s'] for r in records if r['kind']=='pair'),individual_tokens=sum(r['n_tokens'] for r in records if r['kind']=='single'),direct_tokens=sum(r['n_tokens'] for r in records if r['kind']=='pair'),iqm_generation='未測定'),expand=expansion(delta_s,delta_i,consistency,error))
++    report['cost']['iqm_generation']='미측정'
++    return report,patients,details
++
++def main():
++    ap=argparse.ArgumentParser(); ap.add_argument('stage',choices=['technical','development','holdout']); a=ap.parse_args()
++    from mr132_run import verify_job,verify_protocol
++    verify_protocol(); records=verify_job(RES/'gen'/a.stage,RES/'requests'/f'{a.stage}.json')
++    report,patients,details=compute(a.stage,records); out=RES/'eval'; out.mkdir(exist_ok=True)
++    save(out/f'{a.stage}_report.json',report); save(out/f'{a.stage}_per_patient.json',patients); save(out/f'{a.stage}_pairs.json',details)
++    positive=report['expand']; ci_positive=all(v['ci95'][0]>0 for v in report['comparisons'].values())
++    save(out/f'{a.stage}_decision.json',dict(expand=positive,branch='positive_exploration' if positive and ci_positive else 'precision_supplement' if positive else 'no_expansion',report_sha256=sha(out/f'{a.stage}_report.json'),reason='사전 효과 크기·순서·오류율 조건 적용',scope='현재 frozen MR-ART 품질 비교; MRI 전체 미판정'))
++    print(report['metrics'],report['comparisons'],'consistency',report['order_consistency'],'error',report['invalid_unknown_rate'],'expand',positive)
++
++if __name__=='__main__': main()
+diff --git a/mr132_finish.py b/mr132_finish.py
+new file mode 100644
+index 0000000..34ad4cb
+--- /dev/null
++++ b/mr132_finish.py
+@@ -0,0 +1,33 @@
++"""실제 종료·검증·비용 기록 연결; 연구 판정은 독립 GPT 리뷰에 맡긴다."""
++import json,time,os
++from pathlib import Path
++import numpy as np
++from mr132_common import RES,read,save,sha,now
++from mr132_run import verify_protocol,verify_job,load_records
++
++def main():
++    proto=verify_protocol(); control=read(RES/'control/completion.json'); assert control['all_commands_pass']
++    reports=read(RES/'eval/development_report.json'); v=read(RES/'eval/development_independent_verify.json'); assert v['all_pass'] and v['report_sha256']==sha(RES/'eval/development_report.json')
++    assert read(RES/'input_integrity_audit.json')['all_pass'] and read(RES/'baseline/independent_audit.json')['all_pass']
++    assert read(RES/'resource_profile/summary.json')['all_pass']
++    stages=['pilot_b1','pilot_b2','resume','technical','development','io_profile']+(['holdout'] if control['holdout_executed'] else [])
++    ledger={}; all_records=[]; resource={}
++    for stage in stages:
++        req='pilot' if stage in ['pilot_b1','pilot_b2','resume'] else stage
++        rr=verify_job(RES/'gen'/stage,RES/'requests'/f'{req}.json'); all_records.extend(rr)
++        expected=dict(pilot_b1=12,pilot_b2=12,resume=12,technical=54,development=360,holdout=180,io_profile=6)[stage];assert len(rr)==expected
++        job=RES/'gen'/stage; attempts=[read(p) for p in job.glob('result_*.json')]
++        samples=[json.loads(line) for p in job.glob('resources_*.jsonl') for line in p.read_text().splitlines()]
++        gpu={g:dict(sampled_peak_used_mib=max(int(r['used']) for x in samples for r in x['gpu'] if r['index']==g),sampled_min_free_mib=min(int(r['free']) for x in samples for r in x['gpu'] if r['index']==g)) for g in ['0','1']}
++        assert all(z['sampled_min_free_mib']>=2048 for z in gpu.values()),'실측 안전 여유 부족'
++        ledger[stage]=dict(n_requests=len(rr),n_unique=len({r['id'] for r in rr}),n_eos=sum(r['eos'] for r in rr),n_non_eos=sum(not r['eos'] for r in rr),n_tokens=sum(r['n_tokens'] for r in rr),max_tokens=max(r['n_tokens'] for r in rr),supervisor_wall_s=sum(a['wall_s'] for a in attempts),request_wall_sum_s=sum(r['wall_s'] for r in rr),peak_allocated_mib=max(r['peak_allocated_mib'] for r in rr),peak_reserved_mib=max(r['peak_reserved_mib'] for r in rr),gpu=gpu,by_kind={k:dict(n=sum(r['kind']==k for r in rr),mean_latency_s=float(np.mean([r['batch_wall_s'] for r in rr if r['kind']==k])),p95_latency_s=float(np.quantile([r['batch_wall_s'] for r in rr if r['kind']==k],.95)),amortized_mean_request_cost_s=float(np.mean([r['wall_s'] for r in rr if r['kind']==k]))) for k in ['single','pair']},completion_sha256=sha(job/'completion.json'))
++    chosen=read(RES/'execution_choice.json')
++    issues=dict(blocking_issues=[],reuse_issues=['고정 iter_132 입력·경로 전용이다. 새 자료에 대한 임상 정답·관측 충분성과 범용 재개를 승인하지 않는다.','직접 worker/launch CLI의 개발 단계 진입 gate는 감독기 mr132_control.py에 의존한다. 새 진입점 재사용 전 동일 gate 연결이 필요하다.','조건부 holdout 경로는 미실행이면 재사용 검증 범위 밖이다.','batch2는 원시 token 7/12 불일치로 출력 정합성 기준을 미충족했다. 새 batch 설정은 재측정해야 한다.'],deferred_issues=['8장 부분 관측에서 전체 volume 등급을 평가했으며 임상 재촬영·다른 sequence·다른 모델·직접 적응은 미검증이다.','IQM 생성 전체 서비스 비용을 측정하지 않았다. 기록한 요청·supervisor 시간은 IQM 생성 대비 비용 우월성의 근거가 아니다.'])
++    used_volumes=[x for stage in ['technical','development']+(['holdout'] if control['holdout_executed'] else []) for x in read(RES/'data'/f'{stage}_manifest.json')['volumes']]
++    save(RES/'execution_ledger.json',dict(created_at=now(),stages=ledger,total_model_requests=sum(x['n_requests'] for x in ledger.values()),scientific_requests=54+360+(180 if control['holdout_executed'] else 0),technical_comparison_resume_requests=42,holdout_executed=control['holdout_executed'],two_gpu_mapping=read(RES/'gpu_mapping_check.json'),download_bytes=sum(v['source']['bytes'] for v in used_volumes),png_bytes=sum(Path(p['path']).stat().st_size for v in used_volumes for p in v['pngs']),n_volumes=len(used_volumes),n_pngs=sum(len(v['pngs']) for v in used_volumes),estimated_vs_actual_development_wall_s=dict(estimate=chosen['estimated_development_wall_s'],actual=read(RES/'control/development_generation.json')['wall_s']),cost_note='supervisor 시간은 모델 로딩 포함, protocol·모델 SHA 검사는 밖이다. control의 각 명령 wall은 해당 검사를 포함한다. 요청 latency는 PNG 읽기·processor·생성 포함, 원 NIfTI 반입·렌더링·답 저장 시간 제외. pilot 비교표의 batch2 p95_s는 배치 시간을2요청으로 나눈 amortized 비용이다. 본 ledger p95_latency_s는 배치 전체 시간으로 계산한 실제 지연이다. CPU/RAM/I/O 압력의 보완6요청은 본생성 후 사후 계측이며 구성 선택에는 미사용. IQM 생성 비용 미측정. 개별/직접 공동 비교는 시각 token 노출이4배 다르다.',issues=issues))
++    save(RES/'engineer_findings.json',dict(created_at=now(),valid_model_comparison=True,protocol_sha256=proto,development_report_sha256=sha(RES/'eval/development_report.json'),development_verification_sha256=sha(RES/'eval/development_independent_verify.json'),reused_assets=dict(mr123_data=dict(source_commit='4682b4bacadbaf12cf0f379f41a5a4fb1b9cb983',blob='c9e673cbb6e495adcfe2d1d264097c2a3d72ee45',used_functions=['normalization_window','render_slice'],checks=[str(RES/'tests/cpu.json'),str(RES/'tests/tensors.json'),str(RES/'input_integrity_audit.json')])),method_developed=False,vlm_training=False,holdout_executed=control['holdout_executed'],problems=issues,scientific_scope='실제 움직임 촬영 MR-ART T1w의 고정 frozen MedGemma·8 axial slice 조건. 질병 진단·해부학 보존·일반 MRI 인식 또는 내부 원인 미판정.'))
++    files=[p for p in RES.rglob('*') if p.is_file() and p.name!='completion.json' and 'gen/' not in str(p.relative_to(RES)) and p.suffix not in ['.png','.html']]
++    files += [RES/'gen'/stage/'completion.json' for stage in stages]
++    save(RES/'completion.json',dict(completed_at=now(),all_current_scope_checks_pass=True,files={str(p):sha(p) for p in files},code={str(p.resolve()):sha(p) for p in Path('.').glob('mr132_*.py')},renderer_sha256=sha('mr123_data.py'),n_requests=sum(x['n_requests'] for x in ledger.values()),holdout_executed=control['holdout_executed'],source_preservation='Git checkpoint는 orchestrator 담당; 구현자는 commit·branch 작업 미실행'))
++    print('최종 연결 봉인:',sum(x['n_requests'] for x in ledger.values()),'모델 요청; holdout',control['holdout_executed'])
++if __name__=='__main__':main()
+diff --git a/mr132_preflight.py b/mr132_preflight.py
+new file mode 100644
+index 0000000..f8cff0d
+--- /dev/null
++++ b/mr132_preflight.py
+@@ -0,0 +1,110 @@
++"""공식 MR-ART 점수·공개 IQM·원 영상 객체 연결 후 고정 환자 분할."""
++import csv, io, re, requests, hashlib, shutil, sys
++from concurrent.futures import ThreadPoolExecutor
++from collections import Counter
++from mr132_common import RES, DATA, REV, IQREV, sha, save, now, digest
++
++def fetch(url,path):
++    r=requests.get(url,timeout=90); r.raise_for_status()
++    path.parent.mkdir(parents=True,exist_ok=True)
++    with open(path,'xb') as f: f.write(r.content)
++    return dict(url=url,final_url=r.url,path=str(path),sha256=sha(path),bytes=len(r.content))
++
++def rows(path):
++    rr=list(csv.DictReader(path.open(),delimiter='\t'))
++    keys=[r['bids_name'] for r in rr]
++    if len(set(keys))!=len(keys): raise ValueError('duplicate bids_name:'+str(path))
++    return {r['bids_name']:r for r in rr}
++
++def order(subject): return hashlib.sha256(('132:'+subject).encode()).hexdigest()
++
++def main():
++    meta=RES/'metadata'; meta.mkdir(parents=True,exist_ok=False)
++    official=f'https://raw.githubusercontent.com/OpenNeuroDatasets/ds004173/{REV}/'
++    iq=f'https://raw.githubusercontent.com/brainhack-ch/interpret-iqms/{IQREV}/'
++    sources={}
++    for name,url in [('scores.tsv',official+'derivatives/scores.tsv'),('dataset_description.json',official+'dataset_description.json'),('README',official+'README'),('IQMs.tsv',iq+'data/IQMs.tsv'),('scores_replica.tsv',iq+'data/scores.tsv'),('iqm_README.md',iq+'README.md')]:
++        sources[name]=fetch(url,meta/name)
++    sources['tree.json']=fetch(f'https://api.github.com/repos/OpenNeuroDatasets/ds004173/git/trees/{REV}?recursive=1',meta/'tree.json')
++    import json
++    tree=json.loads((meta/'tree.json').read_text()); assert not tree['truncated']
++    files={r['path']:r for r in tree['tree']}
++    scores=rows(meta/'scores.tsv'); replica=rows(meta/'scores_replica.tsv'); iqms=rows(meta/'IQMs.tsv')
++    score_diff={k:[scores.get(k),replica.get(k)] for k in set(scores)|set(replica) if scores.get(k)!=replica.get(k)}
++    if score_diff: raise ValueError('official/replica mismatch')
++    def link(item):
++        k,r=item
++        match=re.fullmatch(r'(sub-\d+)_acq-(standard|headmotion1|headmotion2)_T1w',k)
++        if not match: raise ValueError('unrecognized BIDS key:'+k)
++        sub,acq=match.groups(); path=f'{sub}/anat/{k}.nii.gz'
++        score=int(r['score']); assert score in [1,2,3]
++        rec=dict(bids_name=k,subject=sub,acq=acq,score=score,iqm_join=k in iqms,github_path=path)
++        if path not in files: return dict(rec,error='missing_github_path')
++        try:
++            r=requests.get(official+path,timeout=60); r.raise_for_status()
++            pointer=r.text.strip(); m=re.search(r'MD5E-s(\d+)--([a-f0-9]{32})\.nii\.gz',pointer)
++            if not m: raise ValueError('not annex MD5E pointer')
++            size,md5=int(m[1]),m[2]
++            blob=hashlib.sha1(b'blob '+str(len(r.content)).encode()+b'\0'+r.content).hexdigest()
++            assert blob==files[path]['sha']
++            url='https://s3.amazonaws.com/openneuro.org/ds004173/'+path
++            h=requests.head(url,timeout=60); h.raise_for_status()
++            assert int(h.headers['Content-Length'])==size
++            assert h.headers['ETag'].strip('"')==md5
++            return dict(rec,annex_pointer=pointer,annex_blob=blob,bytes=size,md5=md5,url=url,final_url=h.url,version_id=h.headers.get('x-amz-version-id'),etag=h.headers['ETag'],error=None)
++        except Exception as e: return dict(rec,error=repr(e))
++    with ThreadPoolExecutor(max_workers=12) as pool: linked=list(pool.map(link,sorted(scores.items())))
++    subjects=sorted({r['subject'] for r in linked},key=order)
++    eligible=[]; excluded=[]
++    for sub in subjects:
++        rr=[r for r in linked if r['subject']==sub]
++        issues=[]
++        if {r['acq'] for r in rr}!={'standard','headmotion1','headmotion2'}: issues.append('incomplete_three_acquisitions')
++        if any(not r['iqm_join'] for r in rr): issues.append('missing_iqm')
++        if any(r.get('error') for r in rr): issues.append('object_link_failed')
++        if issues: excluded.append(dict(subject=sub,issues=issues))
++        else: eligible.append(sub)
++    audit=dict(created_at=now(),sources=sources,revision=REV,iqm_revision=IQREV,license='CC0',score_rows=len(scores),iqm_rows=len(iqms),replica_mismatches=len(score_diff),subjects=len(subjects),eligible_subjects=len(eligible),excluded=excluded,score_distribution=dict(Counter(r['score'] for r in linked)),iqm_unmatched_keys=sorted(set(iqms)-set(scores)),iqm_missing_cells={c:sum(r[c].strip().lower() in ['','nan','n/a'] for r in iqms.values()) for c in next(iter(iqms.values())) if c!='bids_name'},objects=linked,source_code={__file__:sha(__file__)},conditions_met=len(eligible)>=126)
++    save(RES/'metadata_audit.json',audit)
++    return select(audit)
++
++def select(audit):
++    linked=audit['objects']; eligible=sorted({r['subject'] for r in linked}-{r['subject'] for r in audit['excluded']},key=order)
++    if len(eligible)<126:
++        print('자료 조건 실패:',len(eligible),'명; 규모 재설정 없이 종료'); return 2
++    assert 'sub-000103' in eligible
++    tech=['sub-000103']+[s for s in eligible if s!='sub-000103'][:5]
++    available=[s for s in eligible if s not in tech]
++    def tie(s):
++        rr={r['acq']:r['score'] for r in linked if r['subject']==s}
++        return rr['headmotion1']==rr['headmotion2']
++    counts={str(v):sum(tie(s)==v for s in available) for v in [True,False]}
++    def stratified_take(n):
++        nonlocal available
++        a=[s for s in available if tie(s)][:n//2]; b=[s for s in available if not tie(s)][:n//2]
++        selected=a+b
++        if len(selected)<n: selected += [s for s in available if s not in selected][:n-len(selected)]
++        available=[s for s in available if s not in selected]
++        return sorted(selected,key=order)
++    # 평가·보존의 1:1 층화를 먼저 보장하고 잔여 hash 순서에서 IQM 학습60명을 선택한다.
++    dev=stratified_take(40); hold=stratified_take(20); train=available[:60]
++    assert len(train)==60
++    splits=dict(technical=tech,iqm_train=train,development=dev,holdout=hold)
++    selected=set(tech+dev+hold)
++    max_objects=[r for r in linked if r['subject'] in selected]
++    initial=[r for r in max_objects if r['subject'] in tech+dev]
++    sizes=dict(initial_bytes=sum(r['bytes'] for r in initial),conditional_total_bytes=sum(r['bytes'] for r in max_objects),n_initial_volumes=len(initial),n_conditional_total_volumes=len(max_objects),external_free_bytes=shutil.disk_usage(DATA.parent.parent).free,estimated_uncompressed_bytes=198*256*256*256*4,estimated_png_upper_bytes=198*8*896*896*3)
++    assert sizes['conditional_total_bytes']<=10*1024**3
++    assert sizes['external_free_bytes']>sum([sizes['conditional_total_bytes'],sizes['estimated_uncompressed_bytes'],sizes['estimated_png_upper_bytes']])
++    split=dict(created_at=now(),seed=132,hash_rule='sha256(132:subject)',allocation_order=['technical','development','holdout','iqm_train'],splits=splits,strata={stage:dict(Counter('headmotion_tie' if tie(s) else 'headmotion_nontie' for s in ss)) for stage,ss in splits.items()},sampling=dict(remaining_after_tech_counts=counts,development_inclusion_probability={str(v):sum(tie(s)==v for s in dev)/counts[str(v)] for v in [True,False]}),objects=max_objects,budget=sizes,metadata_audit_sha256=sha(RES/'metadata_audit.json'),holdout_note='계획 단계 점수는 열람됨; 영상과 모델 출력은 설정 선택에 사용하지 않음')
++    save(RES/'split_lock.json',split)
++    print('자료 조건 통과:',len(eligible),'명; 분할', {k:len(v) for k,v in splits.items()},'용량',sizes)
++    return 0
++
++if __name__=='__main__':
++    if '--select-only' in sys.argv:
++        from mr132_common import read
++        audit=read(RES/'metadata_audit.json')
++        assert all(sha(x['path'])==x['sha256'] for x in audit['sources'].values())
++        sys.exit(select(audit))
++    sys.exit(main())
+diff --git a/mr132_resource_profile.py b/mr132_resource_profile.py
+new file mode 100644
+index 0000000..4f14dcb
+--- /dev/null
++++ b/mr132_resource_profile.py
+@@ -0,0 +1,40 @@
++"""동일 기술 입력의 사후 자원 계측: 설정·연구 판정 변경 없음."""
++import json,os,sys,time,subprocess
++from pathlib import Path
++from mr132_common import RES,read,save,sha,now
++
++def main():
++    # 모델 출력과 무관한 기술 첫 환자의3개 single·3개 정방향 pair를 사용한다.
++    rr=[r for r in read(RES/'requests/technical.json') if r['patient']=='technical_p000' and (r['kind']=='single' or r['id'].endswith(('pair_01','pair_02','pair_12')))]
++    assert len(rr)==6
++    req=RES/'requests/io_profile.json';save(req,rr)
++    cmd=[sys.executable,'mr132_run.py','launch','--job',str(RES/'gen/io_profile'),'--requests',str(req),'--workers','2','--batch','1','--peak','13000']
++    out=RES/'resource_profile';out.mkdir(exist_ok=False)
++    samples=[];start=time.monotonic()
++    with open(out/'generation.log','xb') as log:
++        child=subprocess.Popen(cmd,stdout=log,stderr=subprocess.STDOUT)
++        try:
++            while child.poll() is None:
++                workers=[]
++                for p in Path('/proc').glob('[0-9]*'):
++                    try:
++                        command=(p/'cmdline').read_bytes().replace(b'\0',b' ').decode()
++                        if 'mr132_run.py worker' not in command or str(RES/'gen/io_profile') not in command:continue
++                        workers.append(dict(pid=int(p.name),io=(p/'io').read_text(),stat=(p/'stat').read_text()))
++                    except (OSError,UnicodeError):pass
++                samples.append(dict(time=now(),cpu_count=os.cpu_count(),loadavg=os.getloadavg(),meminfo=Path('/proc/meminfo').read_text(),cpu_pressure=Path('/proc/pressure/cpu').read_text(),io_pressure=Path('/proc/pressure/io').read_text(),memory_pressure=Path('/proc/pressure/memory').read_text(),workers=workers))
++                time.sleep(2)
++            rc=child.wait()
++        finally:
++            if child.poll() is None:child.terminate();child.wait()
++    assert rc==0
++    from mr132_run import verify_job
++    actual=verify_job(RES/'gen/io_profile',req); baseline={r['id']:r for r in verify_job(RES/'gen/pilot_b1',RES/'requests/pilot.json')}
++    mismatch=[r['id'] for r in actual if r['tokens']!=baseline[r['id']]['tokens']]
++    save(out/'samples.json',samples)
++    def psi(x):return float(x.splitlines()[0].split('avg10=')[1].split()[0])
++    save(out/'summary.json',dict(created_at=now(),post_generation_resource_audit=True,selection_changed=False,hypothesis_or_metrics_changed=False,n_requests=6,n_samples=len(samples),max_cpu_load1=max(x['loadavg'][0] for x in samples),cpu_count=os.cpu_count(),max_io_some_avg10_percent=max(psi(x['io_pressure']) for x in samples),max_cpu_some_avg10_percent=max(psi(x['cpu_pressure']) for x in samples),max_memory_some_avg10_percent=max(psi(x['memory_pressure']) for x in samples),min_mem_available_kib=min(int(next(l for l in x['meminfo'].splitlines() if l.startswith('MemAvailable:')).split()[1]) for x in samples),wall_s=time.monotonic()-start,exit_code=rc,suffix_mismatch_ids=mismatch,all_pass=not mismatch,source_sha256=sha(__file__),samples_sha256=sha(out/'samples.json'),note='본실험 후 같은 기술 입력·batch1 구성의 CPU/RAM/I/O 압력을 보완 계측했다. 원 처리량 pilot의 사전 측정으로 보고하지 않으며 실행 구성이나 연구 분기에 반영하지 않는다.'))
++    print('자원 사후 계측',len(actual),'요청, token mismatches',mismatch,flush=True)
++    if mismatch:raise RuntimeError('resource profile regression mismatch')
++
++if __name__=='__main__':main()
+diff --git a/mr132_run.py b/mr132_run.py
+new file mode 100644
+index 0000000..4f66eef
+--- /dev/null
++++ b/mr132_run.py
+@@ -0,0 +1,206 @@
++"""잠긴 입력의 GPU 추론: 배타 소유권·원자 claim·개별 결과·안전 재개."""
++import argparse,os,sys,time,json,fcntl,subprocess,hashlib,signal
++from pathlib import Path
++from mr132_common import RES,read,save,sha,digest,now
++from mr132_spec import CONFIG
++
++MODEL=Path(__file__).resolve().parent.parent/'hf_cache/models--google--medgemma-1.5-4b-it/snapshots'/CONFIG['revision']
++PROTOCOL=RES/'protocol_lock_v2.json'
++def smi():
++    s=subprocess.check_output(['nvidia-smi','--query-gpu=index,uuid,memory.total,memory.used,memory.free,utilization.gpu','--format=csv,noheader,nounits'],text=True)
++    return [dict(zip(['index','uuid','total','used','free','utilization'],[x.strip() for x in line.split(',')])) for line in s.strip().splitlines()]
++
++def allowed():
++    raw=os.environ.get('CUDA_VISIBLE_DEVICES')
++    if raw is None: raise RuntimeError('CUDA_VISIBLE_DEVICES must be explicit')
++    ids=raw.split(','); assert ids and all(i.strip().isdigit() for i in ids)
++    actual={r['index'] for r in smi()}; assert set(ids)<=actual
++    return ids
++
++def verify_protocol(models=False,worker_only=False):
++    lock=read(PROTOCOL); assert lock['config']==CONFIG
++    for p,h in {**lock['code'],**({} if worker_only else lock['inputs'])}.items():
++        if sha(p)!=h: raise ValueError('protocol mismatch: '+p)
++    for p,r in lock['model_files'].items():
++        assert Path(p).stat().st_size==r['bytes']
++        if models and sha(p)!=r['sha256']: raise ValueError('model mismatch')
++    return sha(PROTOCOL)
++
++def requests(path):
++    rr=read(path); ids=[r['id'] for r in rr]; assert len(set(ids))==len(ids)
++    known={}
++    for stage in ['technical','development','holdout']:
++        p=RES/'requests'/f'{stage}.json'
++        if p.exists(): known.update({r['id']:r for r in read(p)})
++    for r in rr:
++        assert r==known[r['id']]
++        assert digest({k:v for k,v in r.items() if k!='request_digest'})==r['request_digest']
++        assert r['kind'] in ['single','pair'] and len(r['groups'])==(1 if r['kind']=='single' else 2)
++        for g in r['groups']:
++            assert len(g)==8
++            for im in g:
++                assert sha(im['path'])==im['sha256']
++        assert not any(s in r['prompt'] for s in ['headmotion','acq-standard','sub-','MRIQC','expert score'])
++    return rr
++
++def load_records(job,repair=False):
++    fd=os.open(Path(job)/'records.lock',os.O_CREAT|os.O_RDWR,0o600)
++    fcntl.flock(fd,fcntl.LOCK_EX if repair else fcntl.LOCK_SH)
++    try: return _load_records(job,repair)
++    finally: os.close(fd)
++
++def _load_records(job,repair=False):
++    records=[]
++    for p in sorted(Path(job).glob('worker*.jsonl')):
++        raw=p.read_bytes(); lines=raw.splitlines(keepends=True); good=0
++        for i,line in enumerate(lines):
++            try:
++                if not line.endswith(b'\n'): raise ValueError('uncommitted tail')
++                r=json.loads(line)
++            except Exception:
++                if i!=len(lines)-1 or not repair: raise ValueError('corrupt JSONL: '+str(p))
++                save(p.with_name(p.name+'.tail_'+str(time.time_ns())+'.json'),dict(bytes_hex=raw[good:].hex(),source_sha256=sha(p),reason='last uncommitted row'))
++                with open(p,'r+b') as f: f.truncate(good); f.flush(); os.fsync(f.fileno())
++                break
++            assert r['record_digest']==digest({k:v for k,v in r.items() if k!='record_digest'})
++            records.append(r); good+=len(line)
++    assert len({r['id'] for r in records})==len(records),'duplicate result'
++    return records
++
++def check_records(records,rr,proto):
++    expected={r['id']:r for r in rr}
++    for r in records:
++        req=expected[r['id']]
++        assert r['request_digest']==req['request_digest'] and r['protocol_sha256']==proto and r['config_digest']==digest(CONFIG)
++        assert r['kind']==req['kind']
++        assert r['image_hashes']==[im['sha256'] for g in req['groups'] for im in g]
++
++def verify_job(job,reqpath,complete=True):
++    proto=verify_protocol(); rr=requests(reqpath); rec=load_records(job); check_records(rec,rr,proto)
++    if complete:
++        c=read(Path(job)/'completion.json'); assert c['n_records']==len(rr)==len(rec) and c['protocol_sha256']==proto and c['requests_sha256']==sha(reqpath)
++        assert c['config']==CONFIG and all(x==0 for x in c['returncodes'])
++        assert {r['id'] for r in rec}=={r['id'] for r in rr}
++        assert all(sha(p)==h for p,h in c['files'].items())
++    return rec
++
++def messages(req):
++    from PIL import Image
++    content=[dict(type='text',text=req['prompt'])]
++    for i,group in enumerate(req['groups']):
++        content.append(dict(type='text',text='\nAcquisition '+('A' if i==0 else 'B')+':\n'))
++        for n,im in enumerate(group):
++            content.append(dict(type='text',text=f'\nAxial slice {n+1}/8, inferior to superior:\n'))
++            content.append(dict(type='image',image=Image.open(im['path']).convert('RGB')))
++    return [dict(role='user',content=content)]
++
++def input_tensor(proc,rr):
++    return proc.apply_chat_template(messages(rr[0]) if len(rr)==1 else [messages(r) for r in rr],add_generation_prompt=True,tokenize=True,return_dict=True,return_tensors='pt',padding=True)
++
++def worker(args):
++    assert args.lock_fd is not None; os.fstat(args.lock_fd)
++    proto=verify_protocol(worker_only=True); rr=requests(args.requests); job=Path(args.job); claims=job/'claims'
++    # 감독기의 flock fd를 상속하여 부모가 죽어도 자식이 살아 있는 동안 새 감독기를 거부한다.
++    import torch,numpy as np
++    from transformers import AutoProcessor,AutoModelForImageTextToText
++    torch.manual_seed(132); np.random.seed(132); torch.set_num_threads(4)
++    proc=AutoProcessor.from_pretrained(MODEL,local_files_only=True); proc.tokenizer.padding_side='left'
++    model=AutoModelForImageTextToText.from_pretrained(MODEL,local_files_only=True,dtype=torch.bfloat16,device_map={'':'cuda:0'},attn_implementation='sdpa').eval()
++    done={r['id'] for r in load_records(job)}; start=time.monotonic(); count=0
++    out=job/f'worker{args.worker}_{args.attempt}.jsonl'
++    with open(out,'xb') as f:
++        while True:
++            batch=[]; owned=[]
++            for req in rr:
++                if req['id'] in done: continue
++                if batch and req['kind']!=batch[0]['kind']: continue
++                p=claims/(req['id']+'.json')
++                try:
++                    fd=os.open(p,os.O_CREAT|os.O_EXCL|os.O_WRONLY,0o600)
++                except FileExistsError: continue
++                with os.fdopen(fd,'w') as c: json.dump(dict(pid=os.getpid(),worker=args.worker,request_digest=req['request_digest']),c)
++                # 완료 row는 claim 파일을 지운 후 다시 claim될 수 있어 현재 sibling row를 다시 확인한다.
++                current={r['id'] for r in load_records(job)}
++                if req['id'] in current: p.unlink(); done.update(current); continue
++                batch.append(req); owned.append(p)
++                if len(batch)==args.batch: break
++            if not batch: break
++            torch.cuda.reset_peak_memory_stats(); t=time.monotonic()
++            inputs=input_tensor(proc,batch).to(model.device,dtype=torch.bfloat16)
++            input_len=inputs['input_ids'].shape[-1]
++            with torch.inference_mode(): generated=model.generate(**inputs,max_new_tokens=512,do_sample=False)
++            torch.cuda.synchronize(); elapsed=time.monotonic()-t
++            for i,req in enumerate(batch):
++                tokens=generated[i,input_len:].tolist(); eosids=model.generation_config.eos_token_id; eosids=[eosids] if isinstance(eosids,int) else eosids
++                stop=next((n+1 for n,v in enumerate(tokens) if v in eosids),len(tokens)); tokens=tokens[:stop]
++                rec=dict(id=req['id'],kind=req['kind'],request_digest=req['request_digest'],protocol_sha256=proto,config_digest=digest(CONFIG),image_hashes=[im['sha256'] for g in req['groups'] for im in g],text=proc.decode(tokens,skip_special_tokens=True),tokens=tokens,n_tokens=len(tokens),eos=bool(tokens and tokens[-1] in eosids),wall_s=elapsed/len(batch),batch_wall_s=elapsed,batch_size=len(batch),input_len=input_len,peak_allocated_mib=torch.cuda.max_memory_allocated()/1024**2,peak_reserved_mib=torch.cuda.max_memory_reserved()/1024**2,worker=args.worker,gpu=os.environ['CUDA_VISIBLE_DEVICES'],completed_at=now())
++                rec['record_digest']=digest(rec)
++                recordfd=os.open(job/'records.lock',os.O_CREAT|os.O_RDWR,0o600); fcntl.flock(recordfd,fcntl.LOCK_EX)
++                try: f.write((json.dumps(rec,sort_keys=True)+'\n').encode()); f.flush(); os.fsync(f.fileno())
++                finally: os.close(recordfd)
++                done.add(req['id']); count+=1
++            for p in owned: p.unlink()
++            del inputs,generated
++            if args.limit and count>=args.limit: break
++    save(job/f'worker{args.worker}_{args.attempt}_exit.json',dict(completed=count,wall_s=time.monotonic()-start,returncode=0))
++
++def launch(args):
++    proto=verify_protocol(models=True); rr=requests(args.requests); job=Path(args.job); job.mkdir(parents=True,exist_ok=True)
++    fd=os.open(job/'supervisor.lock',os.O_CREAT|os.O_RDWR,0o600)
++    try: fcntl.flock(fd,fcntl.LOCK_EX|fcntl.LOCK_NB)
++    except BlockingIOError: os.close(fd); raise RuntimeError('active supervisor/children; refuse launch')
++    children=[]; logs=[]; started=time.monotonic()
++    try:
++        if (job/'completion.json').exists(): verify_job(job,args.requests); print('검증된 완료 재사용'); return
++        existing=load_records(job,repair=True); check_records(existing,rr,proto)
++        (job/'claims').mkdir(exist_ok=True)
++        # flock을 얻었으므로 이전 자식이 없다. stale claim만 별도 보존 후 회수한다.
++        stale=list((job/'claims').glob('*.json'))
++        if stale:
++            save(job/f'stale_claims_{time.time_ns()}.json',{str(p):read(p) for p in stale})
++            for p in stale:p.unlink()
++        attempt=str(time.time_ns()); ids=allowed(); free={r['index']:int(r['free']) for r in smi()}; ids.sort(key=lambda g:-free[g])
++        nworkers=args.workers; mapping=[ids[i%len(ids)] for i in range(nworkers)]
++        for g in ids:
++            required=mapping.count(g)*(args.peak+2048)
++            if free[g]<required: raise RuntimeError(f'memory admission {g}: free {free[g]} < {required}')
++        save(job/f'launch_{attempt}.json',dict(created_at=now(),requests_sha256=sha(args.requests),protocol_sha256=proto,config=CONFIG,batch=args.batch,mapping=mapping,physical_logical_mapping={g:0 for g in ids},memory_before=smi(),estimated_peak_mib=args.peak,worker_margin_mib=2048,existing=len(existing)))
++        for i,gpu in enumerate(mapping):
++            # 시작 직전에 다시 조회하고 이미 예약된 worker의 전체 peak+여유를 고려한다.
++            current={r['index']:int(r['free']) for r in smi()}
++            if current[gpu]<(args.peak+2048): raise RuntimeError('memory changed before child start')
++            env=dict(os.environ,CUDA_VISIBLE_DEVICES=gpu,TOKENIZERS_PARALLELISM='false',OMP_NUM_THREADS='4',HF_HUB_OFFLINE='1')
++            log=open(job/f'worker{i}_{attempt}.log','xb'); logs.append(log)
++            cmd=[sys.executable,str(Path(__file__).resolve()),'worker','--job',str(job),'--requests',str(args.requests),'--worker',str(i),'--attempt',attempt,'--batch',str(args.batch),'--lock-fd',str(fd),'--limit',str(args.limit)]
++            children.append(subprocess.Popen(cmd,env=env,stdout=log,stderr=subprocess.STDOUT,pass_fds=(fd,)))
++        with open(job/f'resources_{attempt}.jsonl','x') as resources:
++            while any(c.poll() is None for c in children):
++                resources.write(json.dumps(dict(time=now(),gpu=smi(),cpu_load=os.getloadavg(),memory=Path('/proc/meminfo').read_text().splitlines()[:3]))+'\n'); resources.flush()
++                if any(c.poll() not in [None,0] for c in children):
++                    for c in children:
++                        if c.poll() is None:c.terminate()
++                    break
++                time.sleep(5)
++        rc=[c.wait() for c in children]; rec=load_records(job); check_records(rec,rr,proto)
++        save(job/f'result_{attempt}.json',dict(returncodes=rc,n_records=len(rec),n_expected=len(rr),wall_s=time.monotonic()-started,resources=str(job/f'resources_{attempt}.jsonl')))
++        if any(rc): raise RuntimeError('child failed: '+str(rc))
++        if len(rec)==len(rr):
++            assert {r['id'] for r in rec}=={r['id'] for r in rr}
++            save(job/'completion.json',dict(created_at=now(),config=CONFIG,protocol_sha256=proto,requests_sha256=sha(args.requests),n_records=len(rec),returncodes=rc,files={str(p):sha(p) for p in job.glob('worker*.jsonl')},attempt=attempt))
++        elif not args.limit: raise RuntimeError('incomplete generation')
++        print('생성',len(rec),'/',len(rr),'rc',rc,'wall',time.monotonic()-started)
++    finally:
++        for c in children:
++            if c.poll() is None:c.terminate()
++        for c in children:
++            try:c.wait(timeout=30)
++            except subprocess.TimeoutExpired:c.kill(); c.wait()
++        for f in logs:f.close()
++        os.close(fd)
++
++def main():
++    ap=argparse.ArgumentParser(); ap.add_argument('command',choices=['launch','worker','verify']); ap.add_argument('--job',required=True); ap.add_argument('--requests',required=True); ap.add_argument('--workers',type=int,default=2); ap.add_argument('--batch',type=int,default=1); ap.add_argument('--peak',type=int,default=18000); ap.add_argument('--limit',type=int,default=0); ap.add_argument('--worker',type=int,default=0); ap.add_argument('--attempt'); ap.add_argument('--lock-fd',type=int); args=ap.parse_args()
++    if args.command=='worker': worker(args)
++    elif args.command=='launch': launch(args)
++    else: print('검증',len(verify_job(args.job,args.requests)))
++if __name__=='__main__': main()
+diff --git a/mr132_spec.py b/mr132_spec.py
+new file mode 100644
+index 0000000..c00bf5d
+--- /dev/null
++++ b/mr132_spec.py
+@@ -0,0 +1,31 @@
++"""생성 전 고정한 MR-ART prompt·첫 줄 parser·사건 정의."""
++import re
++CONFIG=dict(model_id='google/medgemma-1.5-4b-it',revision='91850547d9f0b2fdd21aa7c5f4f3d1a8a52c243b',dtype='bfloat16',attention='sdpa',max_new_tokens=512,do_sample=False,seed=132)
++SINGLE=('These are eight evenly spaced axial slices from one T1-weighted brain MRI acquisition. '
++        'Assess motion-related image degradation visible in these images, such as blurring, ghosting, or ringing. '
++        'Give a continuous degradation score from 0 to 100, where 0 means minimal degradation and 100 means severe degradation. '
++        'On the first line output only the numeric score. Then briefly explain the visible evidence. '
++        'Do not infer disease or use patient identity.')
++PAIR=('These are two T1-weighted brain MRI acquisitions of the same person, with the same eight axial slice positions. '
++      'Compare the motion-related image quality visible in the two acquisitions, including blurring, ghosting, or ringing. '
++      'Choose the acquisition with better image quality: A or B. Use TIE if neither is visibly better, or UNKNOWN if you cannot assess. '
++      'On the first line output only A, B, TIE, or UNKNOWN. Then briefly explain the visible evidence. '
++      'Do not infer disease or use patient identity.')
++ACQS=['standard','headmotion1','headmotion2']
++PAIRS=[(0,1),(0,2),(1,2)]
++def parse(text,kind,eos=True):
++    if not eos or not text.strip(): return None
++    line=text.strip().splitlines()[0].strip()
++    if kind=='single':
++        if not re.fullmatch(r'(?:\d+(?:\.\d+)?|\.\d+)',line): return None
++        score=float(line)
++        return score if 0<=score<=100 else None
++    return line if line in ['A','B','TIE','UNKNOWN'] else None
++
++def pair_value(pred,winner,strict=False):
++    if pred is None or pred=='UNKNOWN': return 0.
++    if pred=='TIE': return 0. if strict else .5
++    return float(pred==winner)
++
++def expansion(delta_single,delta_iqm,consistency,error_rate):
++    return delta_single>=.10 and delta_iqm>=.05 and consistency>=.90 and error_rate<=.05
+diff --git a/mr132_tech.py b/mr132_tech.py
+new file mode 100644
+index 0000000..acba65f
+--- /dev/null
++++ b/mr132_tech.py
+@@ -0,0 +1,43 @@
++"""공식 processor 경로·이미지 순서와 실제 생성 회귀 검사."""
++import argparse,hashlib,json,numpy as np
++from mr132_common import RES,read,save,sha,now
++from mr132_run import MODEL,messages,input_tensor,verify_job
++
++def tensor_checks():
++    import torch
++    torch.set_num_threads(4)
++    from transformers import AutoProcessor
++    proc=AutoProcessor.from_pretrained(MODEL,local_files_only=True);proc.tokenizer.padding_side='left'
++    rr=read(RES/'requests/technical.json'); checks=[]
++    subset=[r for r in rr if r['id'].endswith('single_0') or r['id'].endswith('pair_01')]
++    for r in subset:
++        wrapped=input_tensor(proc,[r])
++        msg=messages(r); text=proc.apply_chat_template(msg,add_generation_prompt=True,tokenize=False)
++        imgs=[c['image'] for c in msg[0]['content'] if c['type']=='image']
++        official=proc(text=[text],images=imgs,return_tensors='pt',padding=True,add_special_tokens=False)
++        eq=sorted(wrapped)==sorted(official) and all(torch.equal(wrapped[k],official[k]) for k in wrapped)
++        assert eq and wrapped['pixel_values'].shape[0]==len(imgs)
++        solo=torch.cat([proc.image_processor(images=[im],return_tensors='pt')['pixel_values'] for im in imgs])
++        order=torch.equal(solo,wrapped['pixel_values']);assert order
++        checks.append(dict(id=r['id'],official_keys={k:list(v.shape) for k,v in official.items()},tensors_equal=eq,image_order_equal=order,input_sha256=hashlib.sha256(wrapped['input_ids'].numpy().tobytes()).hexdigest(),pixel_sha256=hashlib.sha256(wrapped['pixel_values'].numpy().tobytes()).hexdigest()))
++    save(RES/'tests/tensors.json',dict(created_at=now(),all_pass=True,checks=checks,source_sha256=sha(__file__)))
++    print('공식 tensor·영상 순서',len(checks),'PASS')
++
++def compare():
++    a=verify_job(RES/'gen/pilot_b1',RES/'requests/pilot.json');b=verify_job(RES/'gen/pilot_b2',RES/'requests/pilot.json')
++    tokens={r['id']:r['tokens'] for r in a};mismatch=[r['id'] for r in b if tokens[r['id']]!=r['tokens']]
++    reports={}
++    for name,records in [('batch1',a),('batch2',b)]:
++        job=RES/'gen'/('pilot_b1' if name=='batch1' else 'pilot_b2');wall=sum(r['wall_s'] for r in records)
++        result=sorted(job.glob('result_*.json'))[-1];allwall=read(result)['wall_s']
++        resource=[]
++        for p in job.glob('resources*.jsonl'):resource.extend(json.loads(l) for l in p.read_text().splitlines())
++        reports[name]=dict(n_requests=len(records),loading_included_wall_s=allwall,loading_included_req_min=len(records)/allwall*60,generation_request_s=wall,generation_effective_req_min=len(records)/wall*120,peak_reserved_mib=max(r['peak_reserved_mib'] for r in records),peak_allocated_mib=max(r['peak_allocated_mib'] for r in records),observed_gpu_used_mib={g:max(int(x['used']) for r in resource for x in r['gpu'] if x['index']==g) for g in ['0','1']},by_kind={k:dict(n=sum(r['kind']==k for r in records),p95_s=float(np.quantile([r['wall_s'] for r in records if r['kind']==k],.95)),total_s=sum(r['wall_s'] for r in records if r['kind']==k),max_tokens=max(r['n_tokens'] for r in records if r['kind']==k)) for k in ['single','pair']},all_eos=all(r['eos'] for r in records))
++    chosen=2 if not mismatch and reports['batch2']['loading_included_req_min']>reports['batch1']['loading_included_req_min'] and reports['batch2']['all_eos'] else 1
++    peak=reports['batch'+str(chosen)]['peak_reserved_mib']
++    save(RES/'tests/throughput.json',dict(created_at=now(),configs=reports,token_mismatches=mismatch,chosen_batch=chosen,chosen_workers=2,worker2_per_gpu_feasible=2*(peak+2048)<=24576-100,worker2_per_gpu_reason='실측 peak 합과 worker당2GiB 여유의 admission을 적용; batch2 출력/처리량 우선 비교',estimated_development_wall_s=(40*3*reports['batch'+str(chosen)]['by_kind']['single']['total_s']/6+40*6*reports['batch'+str(chosen)]['by_kind']['pair']['total_s']/6)/2,estimate_note='기술6 single+6 pair 평균 요청시간과 두 GPU 병렬 가정; 실제 큐 tail·loading 추가'))
++    print('처리량',reports,'token mismatch',mismatch,'selected',chosen)
++
++if __name__=='__main__':
++    ap=argparse.ArgumentParser();ap.add_argument('mode',choices=['tensors','compare']);a=ap.parse_args()
++    tensor_checks() if a.mode=='tensors' else compare()
+diff --git a/mr132_tests.py b/mr132_tests.py
+new file mode 100644
+index 0000000..a17f973
+--- /dev/null
++++ b/mr132_tests.py
+@@ -0,0 +1,92 @@
++"""이번 사건 정의·방향·재사용 경계와 실제 protocol 실패 경로 검사."""
++import argparse,ast,copy,fcntl,hashlib,json,os,subprocess
++from pathlib import Path
++import numpy as np,nibabel as nib
++from mr132_common import RES,DATA,read,save,sha,digest,now
++from mr132_spec import parse,pair_value,expansion
++
++def cpu():
++    import mr123_data as renderer
++    checks=[]
++    def test(name,value):
++        checks.append(dict(name=name,pass_=bool(value)))
++        if not value:raise AssertionError(name)
++    blob=subprocess.check_output(['git','hash-object','--','mr123_data.py'],text=True).strip(); test('source_blob',blob=='c9e673cbb6e495adcfe2d1d264097c2a3d72ee45')
++    for s,value in [('0',0),('100',100),('25.5',25.5),('101',None),('-1',None),('Score: 25',None),('25%',None),('NaN',None),('25\nExplanation',25)]:test('score_'+s,parse(s,'single')==value)
++    for s,v in [('A','A'),('B','B'),('TIE','TIE'),('UNKNOWN','UNKNOWN'),('A or B',None),('a',None)]:test('choice_'+s,parse(s,'pair')==v)
++    test('nonEOS_invalid',parse('A','pair',False) is None)
++    test('tie_half',pair_value('TIE',0)==.5 and pair_value('TIE',0,True)==0)
++    test('unknown_zero',pair_value('UNKNOWN',0)==0)
++    test('expansion_boundary',expansion(.10,.05,.90,.05))
++    for values in [(.099,.05,.9,.05),(.10,.049,.9,.05),(.10,.05,.899,.05),(.10,.05,.9,.051)]:test('no_expansion_'+str(values),not expansion(*values))
++    a=np.zeros((32,32,8),np.float32); a[3:8,4:9,:]=1; a[22:27,23:28,:]=2
++    im=renderer.render_slice(a,3,0,2,[1,1,1]); pixels=np.asarray(im)
++    test('radiological_RAS_corners',pixels[770,770,0]>100 and pixels[195,195,0]>240 and pixels[770,195,0]==0)
++    ni=nib.Nifti1Image(a,np.diag([-2,3,4,1])); can=nib.as_closest_canonical(ni)
++    test('LAS_to_RAS',nib.aff2axcodes(can.affine)==('R','A','S'))
++    test('physical_coordinate',np.allclose(ni.affine@np.array([4,5,3,1]),can.affine@np.array([27,5,3,1])))
++    for arr in [np.zeros((2,2,2)),np.full((2,2,2),np.nan)]:
++        try:renderer.normalization_window(arr,normalization='volume_minmax'); ok=False
++        except ValueError:ok=True
++        test('invalid_volume_'+str(arr.flat[0]),ok)
++    imported=[n.names for n in ast.walk(ast.parse(Path('mr132_data.py').read_text())) if isinstance(n,ast.ImportFrom) and n.module=='mr123_data']
++    test('renderer_import_allowlist',[[n.name for n in names] for names in imported]==[['normalization_window','render_slice']])
++    m=read(RES/'data/technical_manifest.json')
++    test('actual_RAS_finite',all(v['canonical_axcodes']=='RAS' and np.isfinite(v['canonical_affine']).all() and min(v['canonical_zooms'])>0 for v in m['volumes']))
++    test('source_and_png_current',all(sha(v['source']['path'])==v['source']['sha256'] and all(sha(p['path'])==p['sha256'] for p in v['pngs']) for v in m['volumes']))
++    # 현재 cache 경로에서 source/config 변경은 실제 adapter가 거부한다.
++    from mr132_data import render
++    original=next(r for r in read(RES/'split_lock.json')['objects'] if r['bids_name']==m['volumes'][0]['bids_name'])
++    tampered=copy.deepcopy(original);tampered['md5']='0'*32
++    try:render(tampered,0,'technical');ok=False
++    except AssertionError:ok=True
++    test('changed_source_reject',ok)
++    import mr132_data
++    old=copy.deepcopy(mr132_data.CFG); mr132_data.CFG['side']=895
++    try:render(original,0,'technical');ok=False
++    except AssertionError:ok=True
++    finally:mr132_data.CFG=old
++    test('changed_config_reject',ok)
++    test('no_legacy_paths',all(str(DATA) in p['path'] for v in m['volumes'] for p in v['pngs']))
++    for c in checks:c['pass']=c.pop('pass_')
++    save(RES/'tests/cpu.json',dict(created_at=now(),all_pass=True,checks=checks,visual_inspection=dict(paths=[str(RES/'data/v0000_montage.png'),str(RES/'data/v0001_montage.png')],evidence='실제 view_image 반환을 확인; axial 정렬·뇌 표시 확인; 영상 품질 임상 판정 아님')))
++    print('CPU',len(checks),'PASS')
++
++def runtime():
++    from mr132_run import load_records,verify_job,requests
++    checks=[]
++    def test(n,v):
++        checks.append(dict(name=n,pass_=bool(v)))
++        if not v:raise AssertionError(n)
++    pilot=RES/'gen/pilot_b1'; resume=RES/'gen/resume'; req=RES/'requests/pilot.json'
++    reference=verify_job(pilot,req); recovered=verify_job(resume,req)
++    test('partial_resume_tokens',{r['id']:r['tokens'] for r in reference}=={r['id']:r['tokens'] for r in recovered})
++    test('resume_unique_complete',len(recovered)==len(read(req))==len({r['id'] for r in recovered}))
++    stamp={str(p):sha(p) for p in resume.glob('worker*.jsonl')}
++    verify_job(resume,req);test('complete_immutable',all(sha(p)==h for p,h in stamp.items()))
++    # 독립 결과 사본에서 중복·중간 손상·마지막 꼬리·변조를 실제 loader로 검사.
++    root=RES/'tests/runtime'; root.mkdir(exist_ok=False)
++    line=(json.dumps(reference[0])+'\n').encode()
++    for name,raw,repair,expected in [('duplicate',line+line,False,False),('middle_corruption',b'{bad}\n'+line,True,False),('torn_tail',line+b'{bad',True,True),('record_tamper',line.replace(b'"n_tokens":',b'"n_tokens":1,"other":'),False,False)]:
++        job=root/name; job.mkdir(); (job/'worker0.jsonl').write_bytes(raw)
++        try:out=load_records(job,repair=repair);passed=len(out)==1
++        except Exception:passed=False
++        test(name,passed==expected)
++    altered=copy.deepcopy(read(req));altered[0]['prompt']+=' changed'; path=root/'changed_request.json';save(path,altered)
++    try:requests(path);ok=False
++    except AssertionError:ok=True
++    test('request_tamper_rejected',ok)
++    altered=read(req)+[read(req)[0]];path=root/'duplicate_request.json';save(path,altered)
++    try:requests(path);ok=False
++    except AssertionError:ok=True
++    test('duplicate_request_rejected',ok)
++    fd=os.open(root/'supervisor.lock',os.O_CREAT|os.O_RDWR,0o600);fcntl.flock(fd,fcntl.LOCK_EX|fcntl.LOCK_NB)
++    cmd=['python','mr132_run.py','launch','--job',str(root),'--requests',str(req)]
++    result=subprocess.run(cmd,capture_output=True,text=True);os.close(fd);test('concurrent_launch_rejected',result.returncode!=0 and 'active supervisor/children' in result.stderr)
++    for c in checks:c['pass']=c.pop('pass_')
++    save(RES/'tests/runtime.json',dict(created_at=now(),checks=checks,all_pass=all(c['pass'] for c in checks)))
++    print('runtime',len(checks),'PASS')
++
++if __name__=='__main__':
++    ap=argparse.ArgumentParser();ap.add_argument('mode',choices=['cpu','runtime']);a=ap.parse_args()
++    cpu() if a.mode=='cpu' else runtime()
+diff --git a/mr132_verify.py b/mr132_verify.py
+new file mode 100644
+index 0000000..ef419a6
+--- /dev/null
++++ b/mr132_verify.py
+@@ -0,0 +1,58 @@
++"""production 평가 함수를 부르지 않는 원 출력 순위·bootstrap 독립 검산."""
++import argparse,re,itertools,numpy as np
++from mr132_common import RES,read,save,sha,now
++
++def main():
++    ap=argparse.ArgumentParser(); ap.add_argument('stage'); a=ap.parse_args(); stage=a.stage
++    from mr132_run import verify_job
++    rec=verify_job(RES/'gen'/stage,RES/'requests'/f'{stage}.json'); raw={r['id']:r for r in rec}
++    labels=read(RES/'data'/f'{stage}_labels.json'); baseline=read(RES/'baseline/predictions.json'); report=read(RES/'eval'/f'{stage}_report.json'); per=read(RES/'eval'/f'{stage}_per_patient.json'); tables={p['id']:p for p in per}
++    def first(r,score=False):
++        if not r['eos']:return None
++        l=r['text'].strip().splitlines()[0].strip() if r['text'].strip() else ''
++        if score:
++            if re.fullmatch(r'(?:[0-9]+(?:\.[0-9]+)?|\.[0-9]+)',l):
++                x=float(l); return x if 0<=x<=100 else None
++            return None
++        return l if l in ['A','B','TIE','UNKNOWN'] else None
++    computed=[]; concord=[]; errors=[]; checks=[]
++    for lab in labels:
++        singles=[first(raw[lab['id']+'_single_'+str(i)],True) for i in range(3)]
++        metrics={k:[] for k in report['metrics']}
++        for i,j in itertools.combinations(range(3),2):
++            preds=[]
++            for p,q in [(i,j),(j,i)]:
++                answer=first(raw[lab['id']+'_pair_'+str(p)+str(q)])
++                preds.append(p if answer=='A' else q if answer=='B' else answer); errors.append(answer in [None,'UNKNOWN'])
++            concord.append(preds[0]==preds[1] and preds[0] not in [None,'UNKNOWN'])
++            gi,gj=lab['grades'][i],lab['grades'][j]
++            if gi==gj:continue
++            win=i if gi<gj else j
++            metrics['direct'].append(sum(.5 if p=='TIE' else float(p==win) for p in preds)/2)
++            metrics['direct_strict'].append(sum(float(p==win) for p in preds)/2)
++            metrics['both_orders_correct'].append(float(preds==[win,win]))
++            si,sj=singles[i],singles[j]; metrics['single'].append(0 if si is None or sj is None else .5 if si==sj else float((si<sj)==(gi<gj)))
++            for k,vs in baseline['values'].items():
++                x,y=[vs[lab['bids_names'][z]] for z in [i,j]]
++                metrics[k].append(.5 if x==y else float((x<y)==(gi<gj)))
++        vec={k:float(np.average(v)) if v else None for k,v in metrics.items()}
++        checks.append(dict(name='patient_'+lab['id'],pass_=vec==tables[lab['id']]['values'] and singles==tables[lab['id']]['single_scores']))
++        if metrics['direct']:computed.append(dict(stratum=lab['stratum'],v=vec))
++    for k in report['metrics']:
++        checks.append(dict(name='metric_'+k,pass_=abs(np.mean([p['v'][k] for p in computed])-report['metrics'][k])<1e-12))
++    checks += [dict(name='consistency',pass_=abs(np.mean(concord)-report['order_consistency'])<1e-12),dict(name='errors',pass_=abs(np.mean(errors)-report['invalid_unknown_rate'])<1e-12)]
++    rng=np.random.default_rng(132); boot={k:[] for k in report['comparisons']}
++    for _ in range(10000):
++        selected=[]
++        for s in ['tie','nontie']:
++            indices=[i for i,p in enumerate(computed) if p['stratum']==s]; selected.extend(rng.choice(indices,len(indices),replace=True).tolist())
++        for key in boot:
++            target=key[len('direct_minus_'):]; boot[key].append(np.mean([computed[i]['v']['direct']-computed[i]['v'][target] for i in selected]))
++    for k,v in boot.items(): checks.append(dict(name='bootstrap_'+k,pass_=np.allclose(np.quantile(v,[.025,.975]),report['comparisons'][k]['ci95'],atol=1e-12,rtol=0)))
++    deltas=report['comparisons']; expand=(deltas['direct_minus_single']['delta']>=.10 and deltas['direct_minus_'+baseline['selected_strongest']]['delta']>=.05 and np.mean(concord)>=.90 and np.mean(errors)<=.05)
++    checks.append(dict(name='expand_contract',pass_=expand==report['expand']==read(RES/'eval'/f'{stage}_decision.json')['expand']))
++    for c in checks:c['pass']=bool(c.pop('pass_'))
++    save(RES/'eval'/f'{stage}_independent_verify.json',dict(created_at=now(),all_pass=all(c['pass'] for c in checks),checks=checks,report_sha256=sha(RES/'eval'/f'{stage}_report.json'),source_sha256=sha(__file__),raw_completion_sha256=sha(RES/'gen'/stage/'completion.json')))
++    print('독립 검산',sum(c['pass'] for c in checks),'/',len(checks))
++    if not all(c['pass'] for c in checks):raise RuntimeError('independent mismatch')
++if __name__=='__main__':main()
