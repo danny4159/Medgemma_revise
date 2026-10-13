@@ -51376,3 +51376,345 @@ SUMMARY: MRI 개발 6명의 개별·인접 판독 463건을 완료했으나 절�
 AutoRG의 기존 환경·가중치를 필요한 경로에 한해 재사용하고 DWI 입력·예측 mask·출력 의미를 소수 사례에서 확인한다. 성립하면 같은 global DWI 항목으로 실제 판독을 비교하고 종료한다. checkpoint의 DWI target과 ISLES/RadGenome 노출을 기록하며 GT mask oracle과 실용 경로를 섞지 않는다.
 
 입력별 SFT는 미실행 상태로 계속 추적한다. 현재 정답은 whole-sequence 범위이므로 개별 slice에 전체 보고서를 복제하지 않고 동일 관측·동일 target을 유지할 학습 단위를 정해야 한다. 전문 비교 결과만으로 적응을 자동 생략하거나 full 방법 개발을 승인하지 않는다. 새로운 실험에 필요한 검사만 수행하고 iter_141 재생성·반복 재채점·감사는 후속 과제로 발주하지 않는다.
+
+
+## iter_142 GPT PLAN [MRI 동일 관측 범위의 판독 대조 / proceed] — 2026-10-14 01:53:58
+
+# 요약
+
+- 이번에 할 일: 기존 DWI 기술 2명·개발 6명에서 AutoRG의 예측 영역 기반 판독을 실행한다.
+- 필요한 이유: frozen MedGemma의 개별·인접 비교는 불확정이다. 전문 시스템이 같은 소견을 회복하는지 확인해야 적응 이후의 잔여 문제를 정할 수 있다.
+- 확인할 기준: 공개 DWI 항목 회복, 명시 모순, 미판정·절단, 학습 노출 및 실제 처리 비용을 함께 비교한다.
+- 주의·다음: 개발 사례 비교이며 3D 구조 효과나 독립 일반화를 증명하지 않는다. 기존 MedGemma 출력은 보존하고 whole-sequence supervision의 SFT 설계로 연결한다.
+
+## 알림 맥락
+
+- 연구: MRI 동일 관측 범위의 판독 대조
+- 데이터: 뇌졸중 DWI MRI, RadGenome ISLES22와 공식 ISLES2022 원영상
+- 모델: 기존 frozen MedGemma 1.5 출력과 AutoRG-Brain RGv2·예측 segmentation
+- 과제: 같은 DWI 검사 범위에서 소견·위치·신호 설명을 생성한다
+- 가설: 전문 영역 판독 시스템은 현재 MedGemma가 놓친 공개 소견을 회복할 수 있다
+- 질문: 같은 MRI를 본 전문 3D 시스템은 소견 누락을 줄이는가?
+- 변경: 이어감
+- 연결: iter_141의 인접 처리 우열은 절단·미판정으로 불확정이어서 기존 전문 대안의 실제 해결 범위를 확인한다
+- 작업: AutoRG 판독을 한 번 비교하고 입력별 SFT의 학습 단위와 다음 투자 기준을 정한다
+
+# Current Understanding
+
+iter_141의 실제 463요청과 원 판정은 유지한다. 6명의 환자 평균 항목 일치율은 개별 45.65%, 인접 34.25%지만 차이 범위는 −46.39~+54.35pp다. 이 결과는 인접 처리의 확정적 열위나 MRI 인식 실패가 아니다.
+
+현재 정답은 같은 patient/session의 global 문장에 명시된 DWI 소견이다. ADC 저신호·병인·시기를 DWI 정답으로 옮기지 않는다. 원영상 연결과 mask 기하는 기존 검증을 계승하며 새 실행에 필요한 hash·입력 연결만 확인한다.
+
+유지: RadGenome 중심, 동일 판독 범위, 기본 모델→입력별 적응→전문 3D 비교의 연결, Codex 구현과 독립 리뷰.
+보류: iter_139 MSD 유무 LoRA, iter_138 인터페이스 실험, BraTS 접근 재감사.
+변경: 새 생성은 AutoRG 예측 영역 경로에만 추가한다. iter_141 재생성·재채점은 없다.
+미완료: 입력별 SFT, 적응 후 잔여 오류, 독립 환자 확인.
+
+# Strategy Check / 연구 방향 판단
+
+직전 카드 출처는 `agent/runs/iter_141/review.json`이다. 같은 `mri-volume-evidence-use` 질문과 현재 branch를 유지한다.
+
+1. 중요한 문제: 같은 관측과 학습 자료에서 공간적으로 묶어 처리하는 방식이 소견 누락·위치 오류를 줄이는가?
+2. 현재 근거: 실제 MedGemma 비교는 완료됐으나 반복·절단이 커 우열은 불확정이다. AutoRG 공식 DWI 입력 경로와 기존 실행 자산은 확인했다.
+3. 쉬운 해결책: 전문 segmentation·영역 판독·규칙 후처리 시스템이 충분할 수 있다. 실제 해결 범위를 먼저 확인한다.
+4. 남은 설명: 기본 과제 적응 부족, 출력 반복, 영역 추출 부족, 공간 통합 효과가 남는다. 이번에는 전문 시스템의 해결 가능성만 구분한다.
+5. 다음 결정: 전문 대안 회복 여부와 잔여 오류를 근거로 직접 SFT pilot의 목표를 정한다. 같은 frozen prompt 순회는 종료한다.
+
+SFT를 바로 시작하는 대안은 중요하지만 현재 whole-sequence 정답을 개별 slice/구간에 잘못 배분할 위험이 있다. 기존 전문 모델 한 조건의 실제 비교가 더 작은 비용으로 다음 baseline을 정한다. 이 선택은 SFT 취소나 무기한 자료 준비를 뜻하지 않는다.
+
+# Hypothesis
+
+H1: 예측 mask와 공식 판독 경로를 갖춘 AutoRG가 공개 DWI 소견을 회복하면, 현재 MedGemma 결과는 자료 자체의 판독 불가능성만으로 설명되지 않는다.
+
+H2: AutoRG도 회복하지 못하면 현재 checkpoint의 DWI target 적합성, 영역 예측, 텍스트 대응이 경쟁 설명으로 남는다. 이를 MRI 시스템 전체의 실패로 합치지 않는다.
+
+AutoRG의 학습과 후처리가 MedGemma와 다르므로 H1 양성도 3D 구조의 인과 효과가 아니다. 공식 후처리 전후 기록은 시스템 효과의 출처를 설명하기 위한 분석이며 별도 최적화 조건이 아니다.
+
+# Limitation Evidence / Correct Usage Checks
+
+대상은 observed `radgenome-dwi-adjacent-report-output`이다. iter_141 full review는 valid_experiment=true, blocking 없음이다. 공식 tensor, 입력 hash, 요청 완결성 및 원문 연결 검사를 계승한다. 범용 임상 평가나 방법 full 진입 근거로 확대하지 않는다.
+
+AutoRG는 다음을 새로 확인한다.
+
+- 기존 source SHA, checkpoint revision·실제 파일 hash와 환경 Python을 고정한다.
+- DWI 입력 dispatch와 checkpoint의 report 학습 지원을 구분한다. 공식 문서·배포 설정·학습 목록이 있으면 대조하고 없으면 미확인으로 남긴다.
+- 8명은 RadGenome train임을 명시한다. SEG의 ISLES2022 노출과 RGv2의 RadGenome 노출을 모델별로 기록한다. 정확한 환자별 노출을 모르면 독립 집단이라고 쓰지 않는다.
+- 입력은 같은 원본 DWI, modal=DWI만 제공한다. report·label·label2 및 GT mask는 일반 입력에서 제외한다.
+- 공식 region_segtool 전처리·예측 mask·빈 mask 처리·생성·후처리를 사용한다. 빈 영역이나 오류 사례를 성능을 보고 제외하지 않는다.
+- 공식 후처리의 위치 삽입·좌우 수정·기본 문장 추가를 기록한다. 원시 생성과 최종 시스템 출력을 모두 보존한다.
+
+# Contribution Path / Baselines / Reuse
+
+이번은 diagnostic이며 학습하지 않는다. 신규 기여는 미확정이다. 전문 시스템 비교 뒤에도 중요한 오류가 남으면 같은 환자·supervision·관측을 사용하는 직접 SFT가 다음 강한 기준선이다.
+
+주 비교는 AutoRG 최종 시스템 대 저장된 MedGemma 개별 처리다. 인접 처리 결과는 보조 비교로 함께 제시한다. 원본 volume 대 256-pixel 렌더링, 자동 영역 추출, 학습 자료와 supervision, 내부 공간 재표집 차이를 표로 기록한다. 전체 판독 범위가 같아도 동일 tensor·정보 보존량 비교는 아니다.
+
+현재 branch의 `i141_spec.py`는 출력·평가 규약의 참고로 유지한다. `reference_locked.json`, `data_manifest.json`, `eval/judgments.json`, `eval/report.json`은 읽기 전용 기존 근거다. `i141_judge.py`의 사례별 판정표를 새 출력 평가기로 호출하지 않는다.
+
+선별 반입은 원 SHA `02a8adade58f7cea84638f9e96bf963a0fb64d55`의 `ar70_run.py`, `ar70_patch.py`다. 외부 환경·가중치·공식 소스는 기존 결과 경로에서 읽는다. 새 runner는 반입 코드에서 필요한 로딩·기록 경로를 파생하고 FLAIR/BraTS/GT/given_mask 고정을 제거한다. 기존 launcher·parser·cost 모듈은 이번에 사용하지 않으므로 전수 복구하지 않는다.
+
+# Proposed Experiment
+
+## 1. 한정 지원 확인과 동작 확인
+
+기존 기술 2명 `sub-strokecase0001`, `sub-strokecase0003`을 사용한다. 나머지 개발 6명은 기존 manifest에서 역할을 읽어 고정하며 사례를 교체하지 않는다.
+
+기존 격리 환경 `research/results/environments/autorg70/bin/python`으로 import·CUDA·실제 DWI 한 건의 공식 경로를 확인한다. 정상 DWI dispatch가 없거나 checkpoint와 구조가 맞지 않으면 중단한다. 학습 목록 부재만으로 실행을 막지는 않으며 제한된 전이/노출 미확인 비교로 명시한다.
+
+기술 2명에서 공식 greedy max_length=300을 사용한다. 어느 영역이든 cap에 도달하면 두 기술 사례를 600으로 한 번 확인하고 본실행 전체 길이를 600으로 고정한다. 600에서도 절단되면 숨기지 않고 미완결 평가를 적용한다. 길이·prompt·checkpoint를 추가 탐색하지 않는다.
+
+공식 SDK 직접 호출과 새 wrapper의 같은 입력에서 전처리 tensor·token·최종 보고서 일치를 확인한다. 허용된 호환 patch 외 알고리즘 변경은 하지 않는다. 관측용 hook이 출력 token을 바꾸지 않는지 검사한다.
+
+## 2. 가능성 탐색: 실제 개발 비교
+
+고정 6명 각각에 원본 DWI→예측 병변/해부학 mask→region_segtool 보고서를 한 번 실행한다. GT mask는 사용하지 않는다. seed는 공식 SDK의 42를 유지하고 checkpoint·생성 설정을 잠근다.
+
+저장 항목은 입력 SHA, 예측 mask와 geometry, 영역별 원시 token·EOS·문장·영역 연결, 최종 후처리 보고서, 처리 시간·메모리·오류다. segmentation과 generation을 포함한 end-to-end 경계를 계측한다. 사전에 정한 6명 전원을 분모로 유지하며 실패·빈 출력·미완결을 따로 보고한다.
+
+## 3. 후속 입력별 SFT의 학습 단위
+
+이번에는 학습·새 모델 forward를 실행하지 않는다. 기존 공개 보고서 schema를 근거로 다음 계약을 결과 문서에 명시한다.
+
+- 한 학습 예제는 환자/session의 전체 DWI 관측과 그 범위에 명시적으로 대응하는 DWI 소견 target이다.
+- 개별 slice와 인접 묶음은 같은 slice 집합을 분할하는 방식만 다르게 한다. 전체 target은 모든 관측이 합쳐지는 sequence 단계에 한 번만 부여한다.
+- 지역별 정답 연결이 없는 한 slice/구간 출력에 전체 보고서 loss를 반복 부여하지 않는다. mask로 임의 속성·정상 판정을 만들지 않는다.
+- 실현 후보는 개별/인접 시각 표현을 동일 sequence decoder에 통합하고 같은 target으로 직접 CE SFT하는 방식이다. 기존 2단계 텍스트 통합을 사용한다면 국소 생성기 자체가 적응된 비교가 아님을 명시한다.
+- 다음 method pilot에는 sequence 수준 입력 구현·메모리 확인, 같은 train/validation 환자·시각 해상도·LoRA 범위·target 노출, 환자당 가중치, 생성 평가 일정이 필요하다. 본 반복의 8명은 개발 이력으로 유지한다.
+- 구현자가 구간 정답을 추측하거나 새 학습 구조를 임의 선택해 학습을 시작하지 않는다. 실행 가능한 단위와 아직 필요한 설계 선택을 하나로 좁혀 다음 계획에 전달한다.
+
+## 4. 규모 확대와 독립 확인
+
+이번에는 6명 이상으로 자동 확대하지 않는다. 이는 이미 연결된 저장 비교에 전문 시스템 한 조건을 추가하는 결정 범위다. 독립 효과 크기를 추정할 표본 수가 아니다.
+
+AutoRG 회복이 관찰돼도 다음 단계는 직접 SFT pilot의 별도 계획이다. full 개발·다중 seed·독립 test는 적응 가능성과 잔여 오류를 확인한 후 결정한다. 학습 노출이 없는 독립 검증이 필요하면 환자 split과 checkpoint 노출을 먼저 구분하고 정밀도에 맞춰 규모를 정한다.
+
+## 자원·처리량·재개
+
+실행 직전 nvidia-smi로 허용 GPU 0,1의 실제 여유를 확인한다. 초기 독립 사례를 두 GPU에 분산하고 논리·물리 대응을 남긴다. AutoRG의 실제 peak는 새 DWI 입력에서 측정하며 MedGemma의 8~10GB 수치를 대신 쓰지 않는다.
+
+기술 사례에서 GPU당 worker 1개와, 안전 여유가 있으면 2개 구성을 비교한다. 전체 환자/분, peak VRAM, CPU·RAM·I/O 경합, 긴 생성 지연과 출력 정합성을 본다. 두 번째 구성이 안전하지 않거나 기술 비교 비용이 남은 6명에서 절약할 비용보다 크면 실측 근거로 기존 구성을 선택한다. 모든 worker의 peak와 기존 점유를 합하고 worker당 2GB 여유를 둔다.
+
+예상 시간은 기술 2명의 loading·전처리·segmentation·영역별 생성 실측으로 산출한다. 과거 FLAIR launcher 211.6초는 경계가 달라 DWI 예상 시간으로 복사하지 않는다. 임의 device-minute 상한을 두지 않는다.
+
+새 결과는 `research/results/iter_142/`에 저장한다. 작업 ID는 환자·설정 hash로 고정하고 원자적 claim, worker별 출력, 종료 상태, 중복·누락 검사를 갖춘다. 재개는 입력·설정·소스·가중치 hash가 일치하는 성공 결과만 건너뛴다. 오류나 손상 결과를 완료로 간주하지 않는다. 기존 파일과 다른 사용자 프로세스를 변경하지 않는다.
+
+# Implementation Tasks for Claude
+
+실제 담당은 Codex이며 호환용 제목이다.
+
+1. 반입 파일과 원 review의 needs_fix 범위를 확인하고 새 결과 경로·DWI·region_segtool로 필요한 부분만 파생한다.
+2. 외부 소스·checkpoint·환경·입력 manifest를 연결하고 출처·학습 노출 표를 작성한다. 기존 가중치와 hf_cache는 수정하지 않는다.
+3. GT·report 비입력, 공식 SDK 대조, 실제 tensor·생성 기록, 재개·중복·오류 거부를 검사한다.
+4. 기술 2명에서 길이와 병렬 구성을 고정한 뒤 개발 6명을 실행한다.
+5. 새 AutoRG 출력의 항목 판정과 인용문을 별도 저장하고 기존 MedGemma 판정과 비교한다. 원시 출력·사전 규약·집계 코드와 독립 재계산 자료를 보존한다.
+6. whole-sequence SFT 계약과 다음 pilot에 필요한 단일 설계 선택을 보고한다. 이번에는 학습하지 않는다.
+7. 실행 완료/미완료, 실제 비용, 미해결 reuse 문제와 종료 행동을 보고한다. 소스 checkpoint는 orchestrator가 보존한다.
+
+# Evaluation (성공/실패 기준 포함)
+
+주 metric은 기존 공개 DWI positive atom에 대한 환자 평균 명확한 일치율이다. finding·signal·location·morphology/distribution을 분리 보고한다. 명시 reference contradiction, 내부 모순, report_unverified 추가 소견, unknown·unmentioned·unresolved 및 절단을 별도 집계한다. 미언급 추가 소견을 임상 허위로 부르지 않는다.
+
+새 출력의 의미 대응은 원문 quote와 span을 남기는 제한적 텍스트 판정이다. LLM의 임상 추론·합의로 정답을 추가하지 않는다. 각 atom은 matched/contradicted/unmentioned/unresolved로 기록한다. 완결되지 않은 출력은 확인된 문장과 미확정 잔여를 나누고 recall·모순의 보수적 범위를 산출한다. 절단된 내용까지 모순이 없다고 가정하지 않는다.
+
+기존 MedGemma의 판정표·불확실성 범위는 그대로 읽는다. 주 차이는 AutoRG−개별 MedGemma이고 인접 조건과의 차이는 보조다. 환자별 결과와 6명 paired bootstrap 95% 구간을 제시하되 작은 표본과 의미 판정 불확실성을 숨기지 않는다. 통계 구간이 의미 불확실성을 제거하지 않는다.
+
+- 양성: AutoRG−개별의 보수적 recall 이득이 5pp 이상이고 모순 환자율 증가의 최악 범위가 5pp 이하이면 개발 사례의 회복 근거다. location만의 변화, 공식 후처리 전후 변화와 환자별 편중을 함께 보고한다. 다음은 전문 대안을 고정한 입력별 SFT pilot 설계다.
+- 음성: 완결된 유효 비교에서 기준 미달이면 현재 RGv2 DWI 시스템의 확대를 보류한다. 적응 전체의 실패로 일반화하지 않고 같은 checkpoint·prompt 순회를 끝낸다.
+- 불확정: 미판정·절단·환자 변동이 행동을 바꾸면 불확정으로 종료한다. 새 출력의 연결 결함만 한 번 보완할 수 있다. 기존 141 재채점은 하지 않는다.
+- 실행 실패: 공식 경로 불성립·입력 오류·환경 장애로 실제 비교가 성립하지 않으면 가설을 판단하지 않는다. 확인한 오류와 승인 범위 내 복구 시도, 남은 blocker를 보고한다.
+
+5pp는 현재 트랙의 최소 관심 효과를 계승한 탐색 투자 기준이며 임상 유효성 기준이 아니다. 비용은 AutoRG의 실제 end-to-end 값을 보고하되 기존 MedGemma의 전체 비용이 없으므로 비용 우위 비율을 확정하지 않는다.
+
+# Risks / Checks
+
+- 개발 6명의 학습 노출 가능성이 높다. 좋은 점수만으로 실제 일반화나 공정한 모델 순위를 주장하지 않는다.
+- 공식 DWI 입력 지원과 DWI 보고서 학습 지원은 다르다. 지원 불확실성을 반드시 별도 표기한다.
+- region_segtool의 위치 삽입·좌우 수정·기본 문장 추가는 시스템 구성요소다. 최종 성능을 생성 모델 단독 능력으로 쓰지 않는다.
+- 원 보고서는 병변 설명 중심이며 완전한 정상/비정상 목록이 아니다. 임상 허위 소견률은 현재 정답만으로 완전히 평가할 수 없다.
+- 기존 GT mask는 입력에 넣지 않는다. 이번에 oracle을 추가하면 비교 조건이 달라지므로 자동 실행하지 않는다.
+- 기존 사례의 결과를 보고 제외·교체하거나 metric·성공 기준을 바꾸지 않는다.
+- 환경 문제가 생기면 승인된 격리 환경에서 필요한 호환 수정만 하고 기본 환경·기존 환경을 제자리 변경하지 않는다.
+
+## 대규모 GPU 필요 후보
+
+전체 volume의 고해상도 시각 표현과 언어 decoder를 공동 적응하는 3D report 모델은 향후 후보로 보존한다. 현재 두 GPU에서는 activation·sequence 길이·학습량 부담이 크며, 직접 경량 적응 이후 중요한 잔여 오류가 확인되기 전에는 개발하지 않는다.
+
+# 계획의 근거 (GPT 조사 노트)
+
+## 새로 확인한 것
+
+- `agent/runs/iter_141/review.json`, 관련 LIMITATIONS 항목과 CODE_ASSETS를 읽었다. 유효한 개발 비교이며 blocking은 없다. 개별/인접 recall은 0.45655/0.34246, 비EOS는 2/385와 32/78이다. 우열은 불확정이고 기존 출력 재실행·반복 재채점은 금지한다.
+- `agent/runs/iter_070/review.json`의 자산 판정과 원 commit의 `ar70_run.py`, `ar70_patch.py`를 확인했다. 기존 실행기는 FLAIR·BraTS 경로에 고정되고 GT mask를 생성하며 given_mask를 사용한다. 단순 modal 변경만으로 이번 실용 비교에 사용할 수 없다.
+- 현재 research HEAD는 `19946deb6cccb3693713c1fb609b3cd3faec9dee`다. ar70 파일은 현재 tree에 없고 원 commit은 존재한다. 현재 i141 파일은 유지하며 필요한 ar70 두 파일만 반입한다.
+- 기존 환경 `research/results/environments/autorg70/bin/python`, 모델 `research/results/iter_070/models/`, 공식 소스 `research/results/iter_070/external/src/AutoRG-Brain-9670703c88e8f599c0c7edc472a5ffce4dd72b0e/`가 존재한다. weights manifest의 모델 revision은 `da4ea5cb1058f66c370fab2e174af9c020fb0428`다. 실제 대형 가중치 hash 검사는 구현 단계에서 한다.
+- [AutoRG 공식 저장소](https://github.com/ljy19970415/AutoRG-Brain)는 DWI 입력과 mask 없는 region_segtool 실행을 지원하고, SEG의 ISLES2022 및 RGv2의 RadGenome 학습을 명시한다. 다만 DWI 입력 지원과 해당 checkpoint의 실제 DWI 보고서 target 학습은 같은 사실이 아니다.
+- 로컬 공식 SDK는 region_segtool에서 해부학 명칭 삽입, 좌우 문자열 수정, 일부 전역 문장 합성 및 기본 midline 문장 추가를 수행한다. 따라서 최종 보고서의 위치 정확도를 순수 생성 모델 능력으로 해석할 수 없다. 후처리 전후 출력 보존이 필요하다.
+- `i141_data.py`와 `reference_locked.json` 연결 규약상 DWI modal key는 없고 global 문장의 명시 DWI 절만 사용한다. 정답 단위는 whole sequence이며 slice/구간 supervision은 확인되지 않았다.
+
+## 의미와 남은 확인
+
+현재 6명은 독립 test가 아니다. AutoRG의 성공은 학습 노출 가능성이 있는 개발 사례에서 시스템이 공개 소견을 회복한다는 근거이며, 실패도 DWI report 학습 지원을 고려해야 한다. 공식 checkpoint별 학습 목록이 없으면 unknown을 남기되 정상 DWI 실행 자체를 막는 사유로 삼지 않는다. 공개 학습 파일의 로컬 raw_data 디렉터리는 확인되지 않았으므로 공식 checkpoint 설명과 배포된 설정만 한정 조사한다.
+
+이번에는 강한 시스템 비교를 실제 수행한다. SFT는 whole-sequence 단위의 설계 계약까지 연결하고 학습하지 않는다. 개별 slice에 global report를 복제하는 학습은 승인하지 않는다.
+
+
+
+## iter_142 CODEX IMPLEMENTATION REPORT — 2026-10-14 02:42:50
+
+# 요약
+
+- **핵심 결과:** 개발 6명의 AutoRG DWI 판독을 완료했습니다. 공개 항목 일치율은 46.55%로, 저장된 MedGemma 개별 처리 45.65% 대비 **+0.89pp이며 우위는 불확정**입니다.
+- **근거:** 보고서 6개와 내부 생성 31개가 모두 완결됐습니다. 원문 인용 71개와 주요 수치·bootstrap의 독립 재계산이 일치했습니다.
+- **주의:** 학습 노출 가능성이 있는 개발 비교입니다. 독립 일반화·3D 구조 효과·입력별 SFT는 미검증입니다.
+- **운영 문제:** SDK가 기존 모델 폴더에 새 경고 로그를 썼습니다. 보존 이동과 안전 경로 검증을 완료했지만, 원 실행의 조건 위반을 남겨 `SELF_CHECK: FAIL`로 보고합니다.
+
+# Work Performed
+
+공식 소스 217개 파일과 실제 checkpoint hash를 확인하고, 평가 규약·코드를 본 생성 전에 잠갔습니다. DWI 입력에는 `image`, `modal`만 전달했으며, 본 worker에서 GT mask와 정답 파일 접근을 차단했습니다.
+
+초기 기술 비교의 tensor 불일치는 checkpoint가 복원한 비결정적 cuDNN 설정과 연결됐습니다. 원 결과를 보존하고 seed 42·결정적 kernel 설정으로 재검증했습니다. 이후 SDK 직접 호출과 wrapper의 tensor·feature·token·보고서가 정확히 일치했습니다. 함수 변경 없는 SDK 실행과 관측 hook의 출력 대조도 통과했습니다.
+
+GPU당 2개 worker로 고정 개발 6명을 실행했습니다. 기존 iter_141 생성·판정은 변경하지 않았고, 신규 학습은 실행하지 않았습니다.
+
+# Files Changed
+
+새 연구 소스는 `i142_*.py`, `test_i142.py`입니다. `ar70_run.py`, `ar70_patch.py`는 원 blob 그대로 반입했습니다.
+
+주요 파일:
+
+- [실행기](./i142_worker.py), [병렬 실행기](./i142_launch.py), [안전 worker 진입점](./i142_worker_safe.py)
+- [평가기](./i142_eval.py), [새 출력 판정표](./i142_judge.py), [독립 검산기](./i142_verify.py)
+- [whole-sequence SFT 계약](./results/iter_142/whole_sequence_supervision.md)
+- [구현 결과와 문제 기록](./results/iter_142/implementation_outcome.json)
+
+Git commit·브랜치 변경은 하지 않았습니다. 소스 20개와 산출물 467개를 [completion.json](./results/iter_142/completion.json)에 연결했습니다.
+
+# Commands / Experiments (실제 실행한 명령과 성공/실패)
+
+- `python i142_prepare.py` — 출처·입력·가중치 검증과 사전 잠금 통과.
+- `python i142_pilot.py` — 최초 tensor 동등성 실패. 결정적 설정으로 재실행해 통과.
+- `python test_i142.py`, `python i142_checks.py` — 수정 후 CPU fixture 12개와 실제 완료·변조·경합 검사 8개 통과.
+- 기술 실행의 `--direct --equivalence` 및 `python i142_hooklaunch.py` — SDK·wrapper·hook 대조 통과.
+- `python i142_launch.py --stage main --name main --protocol results/iter_142/protocol_main.json --max-length 300 --per-gpu 2 --peak-mib 7000` — 개발 6명 모두 정상 종료.
+- `python i142_judge.py`, `python i142_eval.py`, `python i142_details.py`, `python i142_verify.py` — 판정 연결·집계·검산 통과.
+- 안전 로더 — 첫 보존 snapshot 검사는 로그 이동과 겹쳐 실패. 이동 완료 후 직렬 재검사와 실제 기술 판독 통과.
+- `python i142_finish.py` — 산출물 봉인 통과.
+
+기존 격리 환경 `results/environments/autorg70/bin/python`을 사용했습니다. 환경 목록은 [environment.json](./results/iter_142/environment.json)에 보존했습니다.
+
+# Results (수치와 결과 파일 경로)
+
+환자 평균 **공개 DWI 항목 일치율**입니다. 임상 진단 정확도로 해석하지 않습니다.
+
+| 조건 | 개발 환자 | 항목 일치율 |
+|---|---:|---:|
+| 저장된 MedGemma 개별 처리 | 6명 | 45.65% |
+| 저장된 MedGemma 인접 처리 | 6명 | 34.25% |
+| AutoRG 최종 시스템 | 6명 | 46.55% |
+
+AutoRG−개별 처리 차이는 **+0.89pp**, paired bootstrap 95% 구간은 **[−14.58, +19.35]pp**입니다. 의미 미판정을 포함한 차이 범위는 **[−34.09, +6.31]pp**여서 사전 회복 기준을 확정하지 못했습니다. 개선 1명·악화 2명·동일 3명으로 환자별 변동도 큽니다.
+
+AutoRG는 finding·signal 항목을 각각 6/6명에서 명시했습니다. 위치 항목의 환자 평균 일치율은 33.33%, morphology는 0%, distribution은 16.67%였습니다. 확인된 명시 reference contradiction은 0/6명이지만, 추가 소견의 임상적 참·거짓은 판정하지 않았습니다.
+
+후처리 전 일치율은 41.69%, 최종 출력은 46.55%였습니다. 좌우 수정과 global 문장 선택·생략이 함께 작용하므로 이를 생성 모델 단독 개선으로 해석하지 않습니다.
+
+실제 자원 사용:
+
+- 본실험 wall-clock: **230.27초**
+- 내부 영역/global 생성: **31개**, 비EOS **0개**
+- worker별 peak reserved VRAM: **6,076MiB**
+- GPU 전체 peak 점유: **12,868 / 12,797MiB**
+- 기술 처리량: **1.45 → 1.81건/분**
+- 종료 후 남은 연구 GPU 프로세스: **없음**
+
+결과는 [report.json](./results/iter_142/eval/report.json), [항목·비용 상세](./results/iter_142/eval/details.json), [독립 검산](./results/iter_142/eval/independent_verification.json)에 있습니다.
+
+# Goal Progress / Reused Assets (목표 진전·미검증 범위, 재사용 출처·검증)
+
+같은 DWI 대상에서 전문 예측 영역 시스템의 실제 해결 범위를 확인했습니다. 현재 개발 사례에서는 세부 위치·형상·분포 누락이 남았고, MedGemma 개별 처리 대비 분명한 회복 근거는 확보하지 못했습니다.
+
+AutoRG는 원본 volume·segmentation·영역 판독·후처리를 사용하므로 MedGemma의 256-pixel slice 입력과 정보 처리·학습 조건이 다릅니다. 공식 문서도 SEG의 ISLES2022 학습과 RGv2의 RadGenome 학습을 명시합니다. 환자별 노출과 실제 DWI report target 학습 구성은 미확인입니다. [공식 README](https://github.com/ljy19970415/AutoRG-Brain/blob/9670703c88e8f599c0c7edc472a5ffce4dd72b0e/README.md)
+
+입력별 SFT·적응 후 잔여 실패·독립 환자 확인·신규 방법의 contribution은 아직 검증하지 않았습니다.
+
+# Problems (현재 결론 무효 / 재사용 전 수정 / 추후 개선을 구분)
+
+- **현재 결론을 막는 문제:** 수치·원문 연결 결함은 발견하지 못했습니다. 의미 미판정과 환자 변동은 불확정 범위에 반영했습니다.
+- **복구한 운영 일탈:** 기존 모델 폴더에 생성된 새 로그 14개를 원본 보존 이동했습니다. 안전 로더의 실제 판독은 이전 token·mask·보고서와 일치했고 기존 로그도 유지됐습니다.
+- **재사용 조건:** 당시 실행 기록인 기본 worker/launcher를 그대로 재사용하지 말고, 새 안전 진입점과 모델 경로를 다음 protocol에 잠가야 합니다. 사례별 판정표는 범용 평가기가 아닙니다.
+- **추후 검증:** 독립 의미 평가, 환자별 학습 노출, 공통 경계의 MedGemma 전체 비용은 미확인입니다.
+
+# Recommendation to GPT
+
+현재 비교는 **불확정**으로 리뷰하고 같은 frozen 6명의 prompt·checkpoint 순회는 종료할 것을 권고합니다.
+
+다음 계획은 전체 DWI target을 한 번 부여하면서 개별/인접 문맥 표현과 전체 loss를 연결하는 **학습 가능한 통합 지점 하나**를 정해야 합니다. 전체 보고서를 slice별 정답으로 복제하지 않고, method pilot 기준에 따라 동작 확인과 가능성 탐색을 설계하십시오. 이번 결과로 입력별 적응 가능성이나 MRI 연구 전체를 기각하지 않습니다.
+
+SELF_CHECK: FAIL
+SUMMARY: AutoRG DWI 개발 6명 비교를 완료했으나 개별 MedGemma 대비 +0.89pp로 우위는 불확정이며, 복구한 SDK 로그 경로 일탈을 독립 리뷰에 전달합니다.
+
+
+## iter_142 GPT REVIEW [CONTINUE] — 2026-10-14 02:46:11
+
+# 요약
+
+- 판정: **유효한 실험, 우위는 불확정**이다. CONTINUE를 권고한다.
+- 핵심 근거: 개발 6명의 AutoRG 항목 일치율은 46.55%, 개별 MedGemma는 45.65%다. 차이는 +0.89pp, paired bootstrap 95% 구간은 [−14.58, +19.35]pp다.
+- 의미·한계: 전문 시스템의 실제 해결 범위를 확인했지만, 3D 구조 효과·독립 일반화·적응 효과는 미검증이다.
+- 다음: 같은 frozen 비교는 종료하고 전체 sequence supervision에 맞는 입력별 직접 적응 pilot을 설계한다.
+
+## 알림 요약
+
+- 결과: 뇌졸중 DWI MRI 6명의 AutoRG 보고서와 내부 생성 31개가 모두 완결됐다. 개별 MedGemma 대비 +0.89pp로 우위는 불확정이다.
+- 의미: 전문 시스템 비교가 미실행이던 상태에서 실제 출력 근거를 확보했다. 세부 누락은 남지만 일반적인 공간 통합 결함은 확정하지 못했다.
+- 후속: 과제 적응 부족과 적응 후 잔여 차이를 구분하도록 전체 sequence 정답을 사용하는 입력별 SFT pilot을 권고한다.
+- 대안: 학습 노출이 분리된 환자에서 AutoRG 비교를 확대할 수 있다. 일반화 판단에는 도움이 되지만 현재 입력별 적응 질문을 해결하지 못하므로 우선하지 않는다.
+
+# Assessment
+
+원 계획의 기술 2명·개발 6명, 예측 mask 경로, checkpoint 1개, 신규 학습 0이라는 범위를 지켰다. 기존 MedGemma 출력과 판정은 읽기 전용 비교자료로 사용했다. 실제 구현 담당은 claude_meta.json상 Codex/gpt-6.1-sol/high다.
+
+리뷰 대상은 b6ba0f1d2312947199048f3e59772f91c9f7ff1b다. 변경 소스 20개와 작업 파일의 byte 일치를 확인했고, protocol_main.json에 연결된 246개 파일 hash가 모두 일치했다. changes.patch와 실제 실행·실패·복구 로그를 확인했다.
+
+SELF_CHECK: FAIL은 기존 모델 폴더에 새 SDK 로그를 쓴 운영 일탈을 뜻한다. 안전 경로의 실제 판독 대조가 통과했고 현재 출력 점수가 로그에 의존하지 않으므로 과학적 비교 전체를 실행 실패로 분류하지 않는다. 원 일탈 기록은 유지하며 전체 스냅샷 재사용은 승인하지 않는다.
+
+# Key Findings
+
+새 최종 보고서 6개를 공개 원문 및 atom과 대조했다. 환자별 명확한 일치 수는 3/8, 2/5, 5/7, 3/7, 3/6, 3/8이다. 이로부터 환자 평균 0.465476을 재현했다. 판정표의 final/raw atom 인용 41개는 해당 출력 원문에 존재했다.
+
+저장된 개별 처리와의 차이 0.00892857, seed142·10,000회 paired bootstrap 구간 [−0.145833, 0.193452], 의미 미판정·기존 절단을 포함한 recall 차이 범위 [−0.340873, 0.063095]를 독립 재계산했다. 사전 보수적 +5pp 회복 기준은 충족하지 못했다. 상한이 기준을 넘으므로 확정 음성으로 바꾸지도 않는다.
+
+원시 token에서 내부 생성 31개·비EOS 0개를 확인했다. finding·signal은 각각 6/6명에서 회복됐지만 위치의 환자 평균 일치율은 33.33%, morphology는 0%, distribution은 16.67%다. 후처리 전후 41.69%→46.55%는 좌우 수정과 문장 선택을 포함한 시스템 변화이며 생성 모델 단독 개선이 아니다.
+
+본실험은 230.27초에 종료됐다. GPU당 2개 worker를 사용했고 worker peak reserved는 6,076MiB였다. 기술 처리량 1.45→1.81건/분과 출력 동등성 검사가 선택을 뒷받침한다. 다만 두 구성의 loading·검사 경계 차이를 포함한 탐색 실측이다.
+
+# Problems / Concerns
+
+1. 학습 노출 가능성이 있는 개발 6명이다. 환자별 노출과 DWI 보고서 학습 지원이 미확인이므로 독립 일반화나 공정한 모델 순위를 주장할 수 없다.
+2. 모순 0/6은 현재 공개 정답과 관측 문장의 명시 모순 집계다. 미언급 추가 위치·병인·시기를 임상적 허위로 판정하지 않은 것은 타당하다. 그러나 비교 report의 contradiction_range [0,0]은 기존 MedGemma 절단의 미확정 후속 내용을 포함하지 않는다. 이 범위를 완전한 안전성 상한으로 해석하지 않는다. 현재 recall 기반 불확정 판정은 바뀌지 않는다.
+3. SDK가 기존 모델 경로에 새 로그를 기록했다. 구현 로그에서 보존 이동과 초기 snapshot 실패, 이후 직렬 재검증을 확인했다. safe_loader_clean의 token·mask·보고서 일치와 기존 로그 불변 검사는 통과했다. 기본 launcher는 여전히 기존 worker를 호출하므로 다음 재사용 전에 연결을 고쳐야 한다.
+4. 사례별 의미 판정은 assistant의 제한적 텍스트 대응이다. 임상 전문가 독립 평가를 대신하지 않으며 i142_judge.py를 다른 출력에 그대로 적용해서는 안 된다.
+
+# Interpretation
+
+이번 비교로 전문 예측 영역 시스템도 현재 공개 DWI 항목을 완전히 회복하지 못한다는 제한된 관찰을 얻었다. 출력 완결성만으로 세부 누락이 모두 해소되지는 않았다. 다만 전문 모델의 target 적합성·영역 예측·언어 생성·후처리와 평가 의미가 얽혀 있어 내부 원인이나 일반적인 3D MRI 능력을 판정하지 않는다.
+
+iter_141의 인접 처리 불확정과 기존 observed 주장은 유지한다. 이번 결과는 그 한계를 validated로 올리거나 기각할 근거가 아니다. 신규 방법의 효과·입력별 SFT·적응 이후 잔여 실패는 아직 검증하지 않았다. 논문 추천은 유망한 개선 또는 재현된 진단 방향의 긍정적 근거가 부족하여 보류한다.
+
+# Strategy Check / 연구 방향 판단
+
+출처는 iter_142 plan과 iter_141 review이며 research_track은 mri-volume-evidence-use를 유지한다.
+
+1. **중요한 문제:** 같은 MRI 관측과 supervision에서 공간적으로 묶어 처리하는 방식이 소견 누락·위치 오류를 줄이는가? 질문은 유지한다.
+2. **현재 근거:** 이전에는 전문 비교가 미실행이었다. 이번에 실제 비교를 완료했지만 개별 MedGemma 대비 우위는 불확정이다. 기존 개별·인접 비교의 불확실성은 줄지 않았다.
+3. **쉬운 해결책:** AutoRG 예측 영역·후처리 시스템이 현재 문제를 충분히 해결한다는 근거를 얻지 못했다. 반대로 그 부족함만으로 새 방법의 필요성이 증명되지는 않는다. 직접 적응이 다음 강한 대조다.
+4. **남은 설명:** 과제 적응 부족, 영역 예측·target 지원, 세부 표현 누락, 공간 문맥 처리 효과가 남는다. 동일 전체 target을 사용하는 직접 적응 비교가 다음 판단을 바꿀 수 있다.
+5. **다음 결정:** 같은 frozen 6명의 추가 순회는 보류하고 입력별 적응 pilot으로 집중한다. 학습 동작만으로 확대하지 않고 실제 생성 개선과 잔여 차이에 따라 결정한다.
+
+실행 유효성은 확보됐다. 성능 우위와 가설 지지는 불확정이며 신규 기여 가능성은 미확인이다. 본 GPU 실행은 230초였지만 기술 동등성·로그 복구 작업이 추가됐다. 전체 준비 시간은 별도 계측되지 않아 지배 비용의 정확한 비율은 판단할 수 없다. 다음 반복을 기존 출력 감사나 전수 코드 복구만으로 소비하지 않는다.
+
+# Recommended Next Experiment
+
+전체 DWI 관측에 target을 한 번 부여하는 입력별 직접 적응 pilot을 권고한다. 계획에서 개별/인접 문맥이 실제로 달라지는 지점과 전체 loss의 gradient 연결을 하나로 정해야 한다. 독립 image feature를 같은 순서로 연결하기만 하고 인접 처리가 생겼다고 주장하거나, 고정 국소 텍스트 통합기 학습을 시각 생성기 적응으로 부르지 않는다.
+
+같은 환자 분할·관측 집합·해상도·target 노출·적응 범위를 유지하고 학습 동작 확인과 단일 seed의 실제 생성 평가를 묶는다. 기존 8명은 개발 이력으로 남긴다. 다음 계획의 확대·음성·불확정 종료 기준을 먼저 고정하며 full 개발은 자동 승인하지 않는다.

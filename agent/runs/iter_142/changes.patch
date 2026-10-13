@@ -1,0 +1,1674 @@
+diff --git a/ar70_patch.py b/ar70_patch.py
+new file mode 100644
+index 0000000..322b101
+--- /dev/null
++++ b/ar70_patch.py
+@@ -0,0 +1,60 @@
++"""iter_070: build a minimally patched copy of the official AutoRG-Brain source (pinned SHA).
++
++Patches (everything else is untouched):
++ 1. inferenceSdk.AutoRG_Brain.__init__: do not overwrite CUDA_VISIBLE_DEVICES (keep inherited GPU set).
++ 2. GPT-2 base 'healx/gpt-2-pubmed-medium' -> local pinned snapshot via env AR70_GPT2.
++ 3. generate(max_length=300) -> env AR70_MAXLEN (default 300), to allow the pre-registered single cap doubling.
++Writes a unified diff to <out>/ar70_patch.diff.
++"""
++import difflib
++import os
++import shutil
++import sys
++
++SHA = '9670703c88e8f599c0c7edc472a5ffce4dd72b0e'
++SRC = f'results/iter_070/external/src/AutoRG-Brain-{SHA}'
++DST = 'results/iter_070/external/patched'
++
++EDITS = [
++    ('AutoRG_Brain/inference/inferenceSdk.py',
++     '        os.environ["CUDA_VISIBLE_DEVICES"] = str(gpu_id[0])\n',
++     '        # ar70: inherited CUDA_VISIBLE_DEVICES is kept (original overwrote it); gpu_id[0] is the logical index\n'),
++    ('AutoRG_Brain/inference/inferenceSdk.py',
++     'max_length=300,',
++     "max_length=int(os.environ.get('AR70_MAXLEN', '300')),"),
++    ('AutoRG_Brain/network/language_model_patchwise.py',
++     'self.checkpoint = "healx/gpt-2-pubmed-medium"',
++     "self.checkpoint = __import__('os').environ.get('AR70_GPT2', 'healx/gpt-2-pubmed-medium')"),
++    ('AutoRG_Brain/network_training/nnUNetTrainerV2_llm_resize_new.py',
++     'checkpoint = "healx/gpt-2-pubmed-medium"',
++     "checkpoint = __import__('os').environ.get('AR70_GPT2', 'healx/gpt-2-pubmed-medium')"),
++    # 4. transformers moved BeamSearchScorer; same class, new module path (unused in greedy decoding)
++    ('AutoRG_Brain/network/language_model_patchwise.py',
++     'from transformers.generation_beam_search import BeamSearchScorer',
++     'from transformers.generation.beam_search import BeamSearchScorer'),
++]
++
++
++def main():
++    # --reapply: re-derive edited files from the pinned SRC into an existing DST (derived copy only)
++    reapply = len(sys.argv) > 1 and sys.argv[1] == '--reapply'
++    if os.path.exists(DST) and not reapply:
++        sys.exit('refusing to overwrite ' + DST)
++    if not os.path.exists(DST):
++        shutil.copytree(SRC, DST, ignore=shutil.ignore_patterns('__pycache__', 'results'))
++    diff = []
++    for f in dict.fromkeys(e[0] for e in EDITS):
++        orig = open(os.path.join(SRC, f)).read()
++        t = orig
++        for ef, old, new in EDITS:
++            if ef == f:
++                assert t.count(old) == 1, (f, old, t.count(old))
++                t = t.replace(old, new)
++        open(os.path.join(DST, f), 'w').write(t)
++        diff += list(difflib.unified_diff(orig.splitlines(True), t.splitlines(True), f'a/{f}', f'b/{f}'))
++    open(os.path.join(DST, 'ar70_patch.diff'), 'w').write(''.join(diff))
++    print(''.join(diff))
++
++
++if __name__ == '__main__':
++    main()
+diff --git a/ar70_run.py b/ar70_run.py
+new file mode 100644
+index 0000000..b04843d
+--- /dev/null
++++ b/ar70_run.py
+@@ -0,0 +1,147 @@
++"""iter_070 worker: AutoRG-Brain RGv2, FLAIR, P (predicted mask) vs G (annotation mask), same given_mask path.
++
++Run with the isolated env python (results/environments/autorg70). One worker processes its cases sequentially:
++  seg (official SegModel, saves *_ab/*_ana) -> P report (label=pred_ab,label2=pred_ana)
++                                             -> G report (label=GT whole-lesion mask, label2=pred_ana)
++Per (case, cond) atomic JSON in <out>/results/. Resume: existing results with same protocol hash are skipped.
++Generation: official greedy (max_length=300); a cap-reached output is re-run once with AR70_MAXLEN=600
++(both attempts are kept).
++"""
++import argparse
++import hashlib
++import json
++import os
++import sys
++import time
++import traceback
++
++ROOT = os.path.abspath(os.path.dirname(__file__))
++PATCHED = os.path.join(ROOT, 'results/iter_070/external/patched/AutoRG_Brain')
++MODELS = os.path.join(ROOT, 'results/iter_070/models')
++BRATS = os.path.join(ROOT, 'results/iter_070/data/brats/ASNR-MICCAI-BraTS2023-GLI-Challenge-TrainingData')
++
++
++def sha(path):
++    h = hashlib.sha256()
++    with open(path, 'rb') as f:
++        for ch in iter(lambda: f.read(1 << 22), b''):
++            h.update(ch)
++    return h.hexdigest()
++
++
++def protocol_hash():
++    keys = [os.path.join(MODELS, 'weights_manifest.json'), os.path.join(os.path.dirname(PATCHED), 'ar70_patch.diff'), os.path.abspath(__file__)]
++    return hashlib.sha256(b''.join(open(k, 'rb').read() for k in keys)).hexdigest()[:16]
++
++
++def atomic_json(path, obj):
++    tmp = path + '.tmp.%d' % os.getpid()
++    with open(tmp, 'w') as f:
++        json.dump(obj, f, indent=1, ensure_ascii=False)
++    os.replace(tmp, path)
++
++
++def make_gt_mask(case, out_dir):
++    import nibabel as nib
++    import numpy as np
++    p = f'{BRATS}/{case}/{case}-seg.nii.gz'
++    img = nib.load(p)
++    m = (np.asarray(img.dataobj) > 0).astype(np.uint8)
++    hdr = img.header.copy()
++    hdr.set_data_dtype(np.uint8)
++    o = os.path.join(out_dir, f'{case}_gt_whole.nii.gz')
++    if not os.path.exists(o):
++        nib.save(nib.Nifti1Image(m, img.affine, hdr), o)
++    return o, int(m.sum())
++
++
++def main():
++    ap = argparse.ArgumentParser()
++    ap.add_argument('--cases', required=True)
++    ap.add_argument('--out', required=True)
++    ap.add_argument('--conds', default='P,G')
++    a = ap.parse_args()
++    out = os.path.abspath(a.out)
++    for d in ['results', 'masks', 'gt', 'log']:
++        os.makedirs(os.path.join(out, d), exist_ok=True)
++    os.environ['AR70_GPT2'] = os.path.join(MODELS, 'gpt2pm')
++    os.environ['HF_HUB_OFFLINE'] = '1'
++    os.chdir(PATCHED)
++    sys.path.insert(0, PATCHED)
++    import torch
++    from inference.inferenceSdk import AutoRG_Brain
++
++    ph = protocol_hash()
++    t_load = time.time()
++    cfg = {'llm_folder': os.path.join(MODELS, 'autorg/RG_v2'), 'seg_folder': os.path.join(MODELS, 'autorg'),
++           'llm_chk': 'AutoRG_Brain_RGv2', 'seg_chk': 'AutoRG_Brain_SEG', 'output_dir': os.path.join(out, 'masks'),
++           'eval_mode': 'given_mask'}
++    model = AutoRG_Brain(gpu_id=[0], config=cfg)
++    load_s = time.time() - t_load
++    gen_log = []
++    orig_gen = model.trainer.llm_model.generate
++
++    def gen_wrap(*args, **kw):
++        o = orig_gen(*args, **kw)
++        eos = model.trainer.tokenizer.eos_token_id
++        gen_log.append({'max_length': kw.get('max_length'), 'shape': list(o.shape),
++                        'has_eos': [bool((row == eos).any().item()) for row in o[:, 1:]] if o.shape[1] > 1 else []})
++        return o
++    model.trainer.llm_model.generate = gen_wrap
++    meta = {'protocol_hash': ph, 'load_s': load_s, 'cuda_visible': os.environ.get('CUDA_VISIBLE_DEVICES'),
++            'device': torch.cuda.get_device_name(0), 'pid': os.getpid(), 'torch': torch.__version__}
++    atomic_json(os.path.join(out, 'log', f'worker_{os.getpid()}.json'), meta)
++
++    for case in a.cases.split(','):
++        img = f'{BRATS}/{case}/{case}-t2f.nii.gz'
++        stem = f'{case}-t2f'
++        need = [c for c in a.conds.split(',') if not os.path.exists(os.path.join(out, 'results', f'{case}__{c}.json'))]
++        if not need:
++            continue
++        torch.cuda.reset_peak_memory_stats()
++        t0 = time.time()
++        gt_path, gt_vox = make_gt_mask(case, os.path.join(out, 'gt'))
++        ab = os.path.join(out, 'masks', f'{stem}_ab.nii.gz')
++        ana = os.path.join(out, 'masks', f'{stem}_ana.nii.gz')
++        seg_s = None
++        if not (os.path.exists(ab) and os.path.exists(ana)):
++            ts = time.time()
++            try:
++                model.segmodel.seg([[img]], [None], [None], ['T2FLAIR'])
++            except Exception:
++                atomic_json(os.path.join(out, 'results', f'{case}__SEGFAIL.json'), {'case': case, 'err': traceback.format_exc()})
++                continue
++            seg_s = time.time() - ts
++        seg_peak = torch.cuda.max_memory_reserved() / 2**20
++        for cond in need:
++            label = ab if cond == 'P' else gt_path
++            rec = {'case': case, 'cond': cond, 'protocol_hash': ph, 'image': img, 'image_sha256': sha(img),
++                   'label_path': label, 'ana_path': ana, 'gt_whole_voxels': gt_vox, 'seg_s_case': seg_s,
++                   'attempts': [], 'status': 'ok'}
++            for maxlen in (300, 600):
++                os.environ['AR70_MAXLEN'] = str(maxlen)
++                del gen_log[:]
++                tg = time.time()
++                try:
++                    res = model.report([{'image': img, 'modal': 'T2FLAIR', 'label': label, 'label2': ana}])
++                    err = None
++                except Exception:
++                    res, err = None, traceback.format_exc()
++                att = {'max_length': maxlen, 'wall_s': time.time() - tg, 'gen': list(gen_log), 'error': err,
++                       'report': res[0]['pred_report'] if res else None}
++                cap = any((not all(g['has_eos'])) and g['shape'][1] >= maxlen - 1 for g in gen_log)
++                att['cap_hit'] = bool(cap)
++                rec['attempts'].append(att)
++                if err or not cap:
++                    break
++            if rec['attempts'][-1]['error']:
++                rec['status'] = 'error'
++            rec['peak_reserved_MiB'] = torch.cuda.max_memory_reserved() / 2**20
++            rec['seg_peak_reserved_MiB'] = seg_peak
++            rec['case_wall_s'] = time.time() - t0
++            atomic_json(os.path.join(out, 'results', f'{case}__{cond}.json'), rec)
++            print(case, cond, rec['status'], round(rec['case_wall_s'], 1), flush=True)
++
++
++if __name__ == '__main__':
++    main()
+diff --git a/i142_checks.py b/i142_checks.py
+new file mode 100644
+index 0000000..c542bd2
+--- /dev/null
++++ b/i142_checks.py
+@@ -0,0 +1,55 @@
++"""실제 기술 산출물의 완료 재사용과 오류·변조·누락 거부를 검사한다."""
++import copy
++import subprocess
++import time
++from i142_common import *
++
++def main():
++    proto=verify_protocol(RES/'protocol_technical_v2.json')
++    row=next(r for r in read(RES/'inference_inputs.json') if r['role']=='technical')
++    result=RES/'jobs/tech_equivalence_v2'/row['patient_id']/'result.json'
++    original=verify_result(result,proto,row)
++    root=RES/'tests'/('runtime_'+str(time.time_ns()))
++    root.mkdir()
++    checks={}
++    for label,change in [('error_status',lambda r:r.update(status='error')),
++                          ('wrong_protocol',lambda r:r.update(protocol_digest='wrong')),
++                          ('wrong_input',lambda r:r['input'].update(image_sha256='wrong')),
++                          ('wrong_output',lambda r:r['outputs'].update({next(iter(r['outputs'])):'wrong'}))]:
++        r=copy.deepcopy(original)
++        change(r)
++        r['record_digest']=digest({k:v for k,v in r.items() if k!='record_digest'})
++        p=root/(label+'.json')
++        save(p,r)
++        try:
++            verify_result(p,proto,row)
++        except AssertionError:
++            checks[label+'_rejected']=True
++    p=root/'corrupt.json'
++    p.write_text('{"truncated":')
++    try:
++        verify_result(p,proto,row)
++    except ValueError:
++        checks['corruption_rejected']=True
++    try:
++        verify_result(root/'missing.json',proto,row)
++    except FileNotFoundError:
++        checks['missing_rejected']=True
++    before=sha(result)
++    # 실제 worker 진입에서 같은 완료 작업을 재사용하며 새 GPU forward는 없다.
++    command=[str(ENV),str(ROOT/'i142_worker.py'),'--patient',row['patient_id'],'--protocol',str(RES/'protocol_technical_v2.json'),
++             '--out',str(result.parent),'--max-length','300','--direct','--equivalence']
++    r=subprocess.run(command,cwd=ROOT,capture_output=True,text=True)
++    save(root/'completed_reentry.json',{'command':command,'exit_code':r.returncode,'stdout':r.stdout,'stderr':r.stderr})
++    checks['completed_reentry_immutable']=r.returncode==0 and before==sha(result) and '완료 출력 재사용' in r.stdout
++    # 같은 출력 소유권을 다른 실제 worker가 인계받을 수 없어야 한다.
++    with ownership(result.parent/'owner.lock'):
++        r=subprocess.run(command,cwd=ROOT,capture_output=True,text=True)
++    checks['concurrent_worker_rejected']=r.returncode!=0 and 'BlockingIOError' in r.stderr and before==sha(result)
++    save(root/'concurrent_reentry.json',{'command':command,'exit_code':r.returncode,'stderr':r.stderr})
++    save(RES/'tests/runtime_checks_v2.json',{'created_at':now(),'checks':checks,'all_pass':all(checks.values()),'source_sha256':sha(__file__)})
++    assert len(checks)==8 and all(checks.values())
++    print(checks)
++
++if __name__=='__main__':
++    main()
+diff --git a/i142_common.py b/i142_common.py
+new file mode 100644
+index 0000000..51387b0
+--- /dev/null
++++ b/i142_common.py
+@@ -0,0 +1,79 @@
++"""iter_142의 고정 자산 연결, 배타적 소유권과 보존 저장."""
++import contextlib
++import datetime
++import fcntl
++import hashlib
++import json
++import os
++from pathlib import Path
++
++ROOT = Path(__file__).resolve().parent
++RES = ROOT / 'results/iter_142'
++OLD = ROOT / 'results/iter_141'
++ENV = ROOT / 'results/environments/autorg70/bin/python'
++MODELS = ROOT / 'results/iter_070/models'
++SRC = ROOT / 'results/iter_070/external/src/AutoRG-Brain-9670703c88e8f599c0c7edc472a5ffce4dd72b0e'
++SDK = RES / 'external/AutoRG_Brain'
++
++def now():
++    return datetime.datetime.now(datetime.timezone.utc).isoformat()
++
++def sha(p):
++    h = hashlib.sha256()
++    with open(p, 'rb') as f:
++        for b in iter(lambda: f.read(4 << 20), b''):
++            h.update(b)
++    return h.hexdigest()
++
++def digest(x):
++    return hashlib.sha256(json.dumps(x, sort_keys=True, ensure_ascii=False, separators=(',', ':')).encode()).hexdigest()
++
++def read(p):
++    def pairs(items):
++        d = {}
++        for k, v in items:
++            if k in d:
++                raise ValueError('duplicate key: ' + k)
++            d[k] = v
++        return d
++    return json.loads(Path(p).read_text(), object_pairs_hook=pairs)
++
++def save(p, x):
++    p = Path(p)
++    p.parent.mkdir(parents=True, exist_ok=True)
++    if p.exists():
++        raise FileExistsError(p)
++    tmp = p.with_name(p.name + '.tmp.' + str(os.getpid()))
++    with open(tmp, 'x') as f:
++        json.dump(x, f, ensure_ascii=False, indent=2)
++        f.flush()
++        os.fsync(f.fileno())
++    # 배타 link는 존재 확인과 rename 사이 경합도 거부한다.
++    os.link(tmp, p)
++    tmp.unlink()
++
++@contextlib.contextmanager
++def ownership(p):
++    p = Path(p)
++    p.parent.mkdir(parents=True, exist_ok=True)
++    with open(p, 'a+') as f:
++        fcntl.flock(f, fcntl.LOCK_EX | fcntl.LOCK_NB)
++        yield
++
++def verify_protocol(p):
++    x = read(p)
++    assert x['digest'] == digest({k:v for k,v in x.items() if k != 'digest'})
++    for path, h in x['files'].items():
++        assert sha(path) == h, 'protocol hash mismatch: ' + path
++    return x
++
++def verify_result(p, protocol, expected):
++    x = read(p)
++    assert x['status'] == 'ok'
++    assert x['record_digest'] == digest({k:v for k,v in x.items() if k != 'record_digest'})
++    assert x['protocol_digest'] == protocol['digest']
++    assert x['input'] == expected
++    for path, h in x['outputs'].items():
++        assert sha(path) == h
++    assert sha(expected['image']) == expected['image_sha256']
++    return x
+diff --git a/i142_control.py b/i142_control.py
+new file mode 100644
+index 0000000..12d8a3d
+--- /dev/null
++++ b/i142_control.py
+@@ -0,0 +1,43 @@
++"""기술 경계에서만 본실험 길이·병렬 배치를 결정하고 실행 잠금을 만든다."""
++from i142_common import *
++
++def main():
++    protocol=verify_protocol(RES/'protocol_technical_4w_v2.json')
++    comp=read(RES/'tests/technical_comparison_v2.json')
++    throughput=read(RES/'tests/throughput_v2.json')
++    assert comp['all_equal'] and all(c['complete'] and not c['cap_hit'] for c in comp['checks'])
++    inputs=read(RES/'inference_inputs.json')
++    tech=[r for r in inputs if r['role']=='technical']
++    for r in tech:
++        direct=read(RES/'jobs/tech_equivalence_v2'/r['patient_id']/'result.json')
++        eq=read(direct['equivalence_path'])
++        assert eq['all_pass'] and direct['complete'] and not direct['cap_hit']
++    resources=read(RES/'jobs/tech_4w_v2/resources.json')
++    baseline=throughput['baseline_2worker']['patients_per_min']
++    candidate=throughput['candidate_4worker']['patients_per_min']
++    safe=all(g['free']>=4096 for row in resources for g in row['gpus'])
++    per_gpu=2 if safe and candidate>baseline else 1
++    choice={'created_at':now(),'technical_pass':True,'max_length':300,'per_gpu':per_gpu,
++            'workers':per_gpu*2,'measured_peak_reserved_MiB':max(c['peak_reserved_MiB'] for c in comp['checks']),
++            'admission_peak_MiB':7000,'worker_margin_MiB':2048,
++            'baseline_patients_per_min':baseline,'candidate_patients_per_min':candidate,
++            'four_worker_gpu_margin_ok':safe,'cpu_ram_io':str(RES/'tests/pilot_cpu_ram_io_v2.json'),
++            'reason':'결정적 실행의 동일 tensor·feature·token·최종 보고서와 메모리 여유를 검증하고 전체 처리량으로 선택',
++            'expected_main_wall_s':6/(candidate if per_gpu==2 else baseline)*60,
++            'estimate_scope':'기술 volume 평균의 단순 예상. 실제 영역 수·전처리 크기·warm 상태가 달라질 수 있음',
++            'checks':{str(p):sha(p) for p in [RES/'tests/technical_comparison_v2.json',RES/'tests/throughput_v2.json',RES/'tests/runtime_checks_v2.json']}}
++    assert read(RES/'tests/runtime_checks_v2.json')['all_pass']
++    save(RES/'execution_choice.json',choice)
++    main={k:v for k,v in protocol.items() if k not in ('digest','created_at')}
++    main['created_at']=now()
++    main['main_max_length']=300
++    main['files'][str(RES/'execution_choice.json')]=sha(RES/'execution_choice.json')
++    main['files'][str(ROOT/'i142_control.py')]=sha(__file__)
++    main['files'][str(ROOT/'i142_details.py')]=sha(ROOT/'i142_details.py')
++    main['files'][str(RES/'evaluation_contract.json')]=sha(RES/'evaluation_contract.json')
++    main['digest']=digest(main)
++    save(RES/'protocol_main.json',main)
++    print(choice)
++
++if __name__=='__main__':
++    main()
+diff --git a/i142_details.py b/i142_details.py
+new file mode 100644
+index 0000000..41d436a
+--- /dev/null
++++ b/i142_details.py
+@@ -0,0 +1,51 @@
++"""같은 atom 규약의 후처리 전후·항목별 회복과 실제 비용을 요약한다."""
++from i142_common import *
++from i142_eval import score
++from collections import Counter
++import numpy as np
++
++def main():
++    protocol=verify_protocol(RES/'protocol_main.json')
++    inputs=[r for r in read(RES/'inference_inputs.json') if r['role']=='main']
++    refs={r['patient_id']:r for r in read(OLD/'reference_locked.json')['rows']}
++    jj=read(RES/'eval/judgments.json')
++    final=read(RES/'eval/per_patient.json')
++    before=[]
++    records=[]
++    for r in inputs:
++        rec=verify_result(RES/'jobs/main'/r['patient_id']/'result.json',protocol,r)
++        rec['raw_report']=' '.join(se for g in rec['observations']['generation'] for se in g['decoded'])
++        before.append(score(rec,refs[r['patient_id']],jj[r['patient_id']]['raw'],'raw_report'))
++        records.append(rec)
++    by_type={}
++    for name,rows in [('raw_all_regions_and_global',before),('final_region_segtool',final)]:
++        out={}
++        for typ in ('finding','signal','location','morphology','distribution'):
++            values=[]
++            counts=Counter()
++            for r in rows:
++                cc=r['types'].get(typ,{})
++                if cc:
++                    counts.update(cc)
++                    values.append(cc.get('matched',0)/sum(cc.values()))
++            out[typ]={'patients':len(values),'states':dict(counts),'patient_mean_recall':float(np.mean(values)) if values else None}
++        by_type[name]=out
++    rawmean=float(np.mean([r['recall'] for r in before]))
++    finalmean=float(np.mean([r['recall'] for r in final]))
++    launch=read(RES/'jobs/main/completion.json')
++    resources=read(Path(launch['launch_path']).parent/'resource_samples.json')
++    peaks={i:max(g['used'] for sample in resources for g in sample['gpus'] if g['index']==i) for i in os.environ['CUDA_VISIBLE_DEVICES'].split(',')}
++    metrics={'n_volumes':6,'raw_recall':rawmean,'final_recall':finalmean,'final_minus_raw':finalmean-rawmean,
++      'by_type':by_type,'main_supervisor_wall_s':launch['wall_s'],
++      'end_to_end_case_s':[read(next((RES/'jobs/main'/r['patient_id']).glob('attempt_*/timing.json')))['end_to_end_s'] for r in inputs],
++      'actual_region_generations':sum(len(g['tokens']) for r in records for g in r['observations']['generation']),
++      'non_eos_generations':sum(not e for r in records for g in r['observations']['generation'] for e in g['eos']),
++      'gpu_global_peak_used_MiB':peaks,'model_worker_peak_reserved_MiB':[r['peak_reserved_MiB'] for r in records],
++      'cost_comparison':'MedGemma 원 NIfTI부터 전체 최종 답 저장까지의 공통 경계 비용이 없으므로 비용 우위 비율 미판정',
++      'raw_comparison_scope':'후처리 전 모든 영역+global 문장의 연결. 최종 시스템은 global에서 일부 문장만 선택하므로 동일 텍스트 집합의 위치 수정만 비교하는 것이 아님'}
++    save(RES/'eval/pre_post_rows.json',before)
++    save(RES/'eval/details.json',metrics)
++    print(metrics)
++
++if __name__=='__main__':
++    main()
+diff --git a/i142_eval.py b/i142_eval.py
+new file mode 100644
+index 0000000..97203e6
+--- /dev/null
++++ b/i142_eval.py
+@@ -0,0 +1,88 @@
++"""사전 의미 계약에 따라 작성한 새 판정표를 집계한다. 기존 판정은 읽기만 한다."""
++from collections import Counter,defaultdict
++import argparse
++import numpy as np
++from i142_common import *
++
++def score(rec,ref,judgment,text_key='report'):
++    text=rec[text_key]
++    atoms={a['id']:a for a in ref['positive_atoms']}
++    assert set(atoms)==set(judgment['atoms'])
++    counts=Counter()
++    types=defaultdict(Counter)
++    evidence=[]
++    for aid,j in judgment['atoms'].items():
++        assert j['state'] in ('matched','contradicted','unmentioned','unresolved')
++        assert j['state'] not in ('matched','contradicted') or j['quotes']
++        counts[j['state']]+=1
++        types[atoms[aid]['type']][j['state']]+=1
++        for q in j['quotes']:
++            assert q and q in text
++            start=text.index(q)
++            evidence.append({'atom_id':aid,'quote':q,'start':start,'end':start+len(q),'reference_span':atoms[aid]})
++    for field in ('reference_contradictions','internal_contradictions'):
++        for j in judgment[field]:
++            assert j['status'] in ('confirmed','unresolved')
++            assert j['quotes'] and all(q in text for q in j['quotes'])
++    for j in judgment['report_unverified']:
++        assert j['quote'] in text
++    n=len(atoms)
++    incomplete=not rec['complete']
++    possible=counts['unresolved']+(counts['unmentioned'] if incomplete else 0)
++    out={'patient_id':rec['patient_id'],'n':n,'states':dict(counts),'types':{t:dict(c) for t,c in types.items()},
++         'recall':counts['matched']/n,'recall_min':counts['matched']/n,'recall_max':(counts['matched']+possible)/n,
++         'incomplete':incomplete,'evidence':evidence,'judgment':judgment}
++    for field in ('reference','internal'):
++        jj=judgment[field+'_contradictions']
++        out[field+'_contradiction_min']=int(any(j['status']=='confirmed' for j in jj))
++        out[field+'_contradiction_max']=int(incomplete or bool(jj))
++    return out
++
++def compare(rows,old,condition):
++    selected={r['patient_id']:r for r in old if r['condition']==condition}
++    assert set(selected)==set(r['patient_id'] for r in rows)
++    values=np.array([r['recall']-selected[r['patient_id']]['recall'] for r in rows])
++    rng=np.random.default_rng(142)
++    b=values[rng.integers(0,len(values),size=(10000,len(values)))].mean(1)
++    return {'delta':float(values.mean()),'bootstrap95':np.quantile(b,[.025,.975]).tolist(),
++       'recall_range':[float(np.mean([r['recall_min']-selected[r['patient_id']]['recall_max'] for r in rows])),
++                       float(np.mean([r['recall_max']-selected[r['patient_id']]['recall_min'] for r in rows]))],
++       'contradiction_range':[float(np.mean([r['reference_contradiction_min']-selected[r['patient_id']]['reference_contradiction_max'] for r in rows])),
++                              float(np.mean([r['reference_contradiction_max']-selected[r['patient_id']]['reference_contradiction_min'] for r in rows]))]}
++
++def decision(comparison,complete):
++    lo,hi=comparison['recall_range']
++    clo,chi=comparison['contradiction_range']
++    if lo>=.05 and chi<=.05:
++        return 'positive_development_recovery'
++    if not complete:
++        return 'inconclusive'
++    if hi<.05 or clo>.05:
++        return 'negative_current_RGv2_DWI'
++    return 'inconclusive'
++
++def main():
++    protocol=verify_protocol(RES/'protocol_main.json')
++    inputs=[r for r in read(RES/'inference_inputs.json') if r['role']=='main']
++    refs={r['patient_id']:r for r in read(OLD/'reference_locked.json')['rows']}
++    judgments=read(RES/'eval/judgments.json')
++    assert set(judgments)==set(r['patient_id'] for r in inputs)
++    rows=[]
++    for r in inputs:
++        rec=verify_result(RES/'jobs/main'/r['patient_id']/'result.json',protocol,r)
++        rows.append(score(rec,refs[r['patient_id']],judgments[r['patient_id']]['final']))
++    old=read(OLD/'eval/per_patient.json')
++    comparisons={c:compare(rows,old,c) for c in ('S','A')}
++    report={'created_at':now(),'n':len(rows),'recall':float(np.mean([r['recall'] for r in rows])),
++        'recall_range':[float(np.mean([r['recall_min'] for r in rows])),float(np.mean([r['recall_max'] for r in rows]))],
++        'comparisons':comparisons,'decision':decision(comparisons['S'],all(not r['incomplete'] for r in rows)),
++        'reference_contradiction_range':[float(np.mean([r['reference_contradiction_min'] for r in rows])),float(np.mean([r['reference_contradiction_max'] for r in rows]))],
++        'incomplete_patients':sum(r['incomplete'] for r in rows),
++        'scope':'공개 DWI 항목과 새 출력의 제한적 문장 일치; 임상 FP·독립 일반화 미판정',
++        'provenance':{str(p):sha(p) for p in [RES/'eval/judgments.json',OLD/'eval/per_patient.json',OLD/'eval/report.json',RES/'protocol_main.json']}}
++    save(RES/'eval/per_patient.json',rows)
++    save(RES/'eval/report.json',report)
++    print(report)
++
++if __name__=='__main__':
++    main()
+diff --git a/i142_finish.py b/i142_finish.py
+new file mode 100644
+index 0000000..81c597e
+--- /dev/null
++++ b/i142_finish.py
+@@ -0,0 +1,51 @@
++"""계획한 새 비교와 검증의 원본을 봉인하고 재사용 범위를 분리한다."""
++from i142_common import *
++
++def main():
++    protocol=verify_protocol(RES/'protocol_main.json')
++    rows=[r for r in read(RES/'inference_inputs.json') if r['role']=='main']
++    completion=read(RES/'jobs/main/completion.json')
++    assert set(completion['patients'])==set(r['patient_id'] for r in rows)
++    for r in rows:
++        verify_result(RES/'jobs/main'/r['patient_id']/'result.json',protocol,r)
++    verification=read(RES/'eval/independent_verification.json')
++    assert verification['all_pass']
++    for path,h in verification['verified_files'].items():
++        assert sha(path)==h
++    assert read(RES/'tests/runtime_checks_v2.json')['all_pass']
++    assert read(RES/'tests/technical_comparison_v2.json')['all_equal']
++    for pid in ['sub-strokecase0001','sub-strokecase0003']:
++        assert read(RES/'tests/hook_control'/pid/'check.json')['all_pass']
++    safe=read(RES/'tests/safe_loader_clean/check.json')
++    assert safe['all_pass']
++    assert not list((MODELS/'autorg').rglob('training_log_2026_10_14_*.txt'))
++    report=read(RES/'eval/report.json')
++    incident=read(RES/'incident_sdk_logs/incident_korean.json')
++    for r in incident['moved']:
++        assert not Path(r['source']).exists() and sha(r['preserved'])==r['sha256']
++    paths=[p for p in RES.rglob('*') if p.is_file() and not p.is_symlink() and 'cache' not in p.parts and '__pycache__' not in p.parts]
++    sources=[p for p in ROOT.glob('i142_*.py')]+[ROOT/'test_i142.py',ROOT/'ar70_run.py',ROOT/'ar70_patch.py']
++    outcome={'created_at':now(),'decision':report['decision'],'valid_comparison_completed':True,
++       'main_patients':6,'main_reports':6,'main_internal_generations':read(RES/'eval/details.json')['actual_region_generations'],
++       'training_executed':False,'independent_patient_confirmation':False,
++       'method_contribution_confirmed':False,'goal_completed':False,
++       'science_blocking_issues':[],
++       'reuse_issues':['보존된 i142_worker.py/i142_launch.py 기본 진입점은 기존 checkpoint 폴더를 사용하는 당시 실행 기록이다. 다음 재사용은 새 i142_worker_safe.py 진입점을 선택하고 그 소스와 model_view 경로를 새 protocol에 잠가야 한다. 안전 로더의 실제 한 명 예측/생성과 safe worker의 완료 재진입은 검증했다. 기존 본출력의 입력·점수는 warning 로그에 의존하지 않는다.',
++                       '새 의미 판정표는 6명 고정 출력 전용이며 범용 평가기로 사용하지 않는다.'],
++       'corrected_incidents':['초기 비결정적 kernel tensor 불일치는 seed42·cuDNN deterministic/benchmark 설정으로 수정하고 기술 exact 대조를 통과했다.',
++                              '이번에 생성된 SDK 경고 로그를 원본 보존 이동했다. 새 model_view와 safe_loader의 실제 기술 한 명 예측·생성은 token·mask·보고서 및 원 경로 불변 검사를 통과했다.',
++                              '첫 safe_loader 보존 snapshot 검사는 같은 시간에 새 로그를 이동하여 실패했다. 이동 완료 뒤 직렬 검사로 해소했다.'],
++       'self_check':'FAIL','self_check_reason':'본 비교·평가·안전 경로 검증은 완료했으나 원 실행에서 기존 모델 폴더에 새 로그를 쓰는 분리 조건 위반이 발생했다. 로그 보존 이동과 안전 진입점 보완은 완료했으며 원 실행의 일탈을 숨기지 않고 GPT 리뷰를 요청한다.',
++       'next_question':'전체 DWI target을 한 번 부여하는 입력별 SFT의 학습 가능한 통합 지점을 정한다. 같은 frozen 6명·checkpoint 순회는 추가하지 않는다.'}
++    save(RES/'implementation_outcome.json',outcome)
++    paths.append(RES/'implementation_outcome.json')
++    bundle={'created_at':now(),'files':{str(p):sha(p) for p in paths},'sources':{str(p):sha(p) for p in sources},
++       'external_assets':read(RES/'asset_manifest.json')['weights'],
++       'excluded_symlinks':{str(p):str(p.resolve()) for p in RES.rglob('*') if p.is_symlink()},
++       'model_data_backed_up_here':False,'code_commit_owner':'orchestrator'}
++    save(RES/'completion.json',bundle)
++    assert all(sha(p)==h for p,h in bundle['files'].items())
++    print({'decision':outcome['decision'],'main_patients':6,'files_sealed':len(bundle['files']),'sources':len(sources),'self_check':outcome['self_check']})
++
++if __name__=='__main__':
++    main()
+diff --git a/i142_hookcheck.py b/i142_hookcheck.py
+new file mode 100644
+index 0000000..f1b5e78
+--- /dev/null
++++ b/i142_hookcheck.py
+@@ -0,0 +1,76 @@
++"""함수 변경 없는 SDK 실행과 관측용 generate hook의 실제 token·보고서를 대조한다."""
++import argparse
++import sys
++from i142_common import *
++
++def main(a):
++    protocol=verify_protocol(RES/'protocol_main.json')
++    row=next(r for r in read(RES/'inference_inputs.json') if r['patient_id']==a.patient)
++    assert row['role']=='technical'
++    out=RES/'tests/hook_control'/a.patient
++    out.mkdir(parents=True)
++    os.environ.update(AR70_GPT2=str(MODELS/'gpt2pm'),AR70_MAXLEN='300',HF_HUB_OFFLINE='1',TRANSFORMERS_OFFLINE='1')
++    os.chdir(SDK)
++    sys.path.insert(0,str(SDK))
++    import numpy as np
++    import torch
++    from inference.inferenceSdk import AutoRG_Brain,setup_seed
++    masks=out/'direct_masks'
++    masks.mkdir()
++    cfg={'llm_folder':str(MODELS/'autorg/RG_v2'),'seg_folder':str(MODELS/'autorg'),
++         'llm_chk':'AutoRG_Brain_RGv2','seg_chk':'AutoRG_Brain_SEG','output_dir':str(masks),'eval_mode':'region_segtool'}
++    model=AutoRG_Brain([0],cfg)
++    setup_seed(42)
++    torch.backends.cudnn.benchmark=False
++    direct=[]
++    sdk_path=str(SDK/'inference/inferenceSdk.py')
++    def info(x):
++        if isinstance(x,torch.Tensor):
++            x=x.detach().cpu().numpy()
++        x=np.ascontiguousarray(x)
++        return {'shape':list(x.shape),'dtype':str(x.dtype),'sha256':hashlib.sha256(x.tobytes()).hexdigest()}
++    def trace(frame,event,arg):
++        if frame.f_code.co_filename!=sdk_path or frame.f_code.co_name!='report':
++            return None
++        local=frame.f_locals
++        if event=='line' and 'output' in local and 'region_features' in local and not direct:
++            direct.append({'features':info(local['region_features']),'data':info(local['d']),
++                           'predicted_masks':info(local['s']),'tokens':local['output'].detach().cpu().tolist()})
++        return trace
++    payload=[{'image':row['image'],'modal':'DWI'}]
++    # SDK/model 함수를 교체하지 않고 report의 지역 변수만 읽는다.
++    sys.settrace(trace)
++    try:
++        first=model.report(payload)
++    finally:
++        sys.settrace(None)
++    assert direct
++    second_masks=out/'hook_masks'
++    second_masks.mkdir()
++    model.segmodel.output_mask_dir=str(second_masks)
++    original=model.trainer.llm_model.generate
++    hooked=[]
++    def observe(*args,**kwargs):
++        value=original(*args,**kwargs)
++        hooked.append({'features':info(args[0]),'tokens':value.detach().cpu().tolist()})
++        return value
++    model.trainer.llm_model.generate=observe
++    setup_seed(42)
++    torch.backends.cudnn.benchmark=False
++    second=model.report(payload)
++    checks={'token_equal':direct[0]['tokens']==hooked[0]['tokens'],
++            'feature_equal':direct[0]['features']==hooked[0]['features'],
++            'report_equal':first[0]['pred_report']==second[0]['pred_report'],
++            'ab_mask_equal':sha(first[0]['ab_mask'])==sha(second[0]['ab_mask']),
++            'ana_mask_equal':sha(first[0]['ana_mask'])==sha(second[0]['ana_mask'])}
++    save(out/'check.json',{'patient_id':a.patient,'checks':checks,'all_pass':all(checks.values()),
++       'direct_no_function_patch':True,'trace_scope':'SDK report 지역 변수만 읽음. 모델/전처리/generate 함수 교체 없음.',
++       'direct':direct,'hook':hooked,'direct_report':first[0]['pred_report'],'hook_report':second[0]['pred_report'],
++       'actual_call':payload,'protocol_digest':protocol['digest'],'source_sha256':sha(__file__)})
++    assert all(checks.values())
++    print(checks)
++
++if __name__=='__main__':
++    p=argparse.ArgumentParser()
++    p.add_argument('--patient',required=True)
++    main(p.parse_args())
+diff --git a/i142_hooklaunch.py b/i142_hooklaunch.py
+new file mode 100644
+index 0000000..8f42313
+--- /dev/null
++++ b/i142_hooklaunch.py
+@@ -0,0 +1,42 @@
++"""필수 hook 대조 두 건을 허용 GPU에 분산하고 종료까지 소유한다."""
++import signal
++import subprocess
++from i142_common import *
++from i142_launch import gpu_status
++
++def main():
++    gpus=[g for g in gpu_status() if g['index'] in os.environ['CUDA_VISIBLE_DEVICES'].split(',')]
++    gpus.sort(key=lambda x:-x['free'])
++    assert len(gpus)==2 and all(g['free']>=7000+2048 for g in gpus)
++    children=[]
++    handles=[]
++    out=RES/'tests/hook_control'
++    out.mkdir()
++    try:
++        for patient,g in zip(['sub-strokecase0001','sub-strokecase0003'],gpus):
++            env=os.environ.copy()
++            env.update(CUDA_VISIBLE_DEVICES=g['index'],PYTHONDONTWRITEBYTECODE='1',OMP_NUM_THREADS='1',
++                MKL_NUM_THREADS='1',OPENBLAS_NUM_THREADS='1',HF_HOME=str(RES/'cache'),
++                XDG_CACHE_HOME=str(RES/'cache'),TMPDIR=str(RES/'tmp'))
++            cmd=[str(ENV),str(ROOT/'i142_hookcheck.py'),'--patient',patient]
++            log=open(out/(patient+'.log'),'x')
++            handles.append(log)
++            children.append((subprocess.Popen(cmd,cwd=ROOT,env=env,stdout=log,stderr=subprocess.STDOUT,start_new_session=True),patient,g,cmd))
++        for proc,patient,g,cmd in children:
++            assert proc.wait()==0,patient
++    finally:
++        for proc,patient,g,cmd in children:
++            if proc.poll() is None:
++                os.killpg(proc.pid,signal.SIGTERM)
++                try:
++                    proc.wait(timeout=15)
++                except subprocess.TimeoutExpired:
++                    os.killpg(proc.pid,signal.SIGKILL)
++                    proc.wait()
++        for f in handles:
++            f.close()
++        save(out/'exits.json',{'created_at':now(),'children':[{'patient_id':patient,'exit_code':proc.returncode,'gpu':g,'command':cmd} for proc,patient,g,cmd in children]})
++    print('관측 hook 대조 2명 통과')
++
++if __name__=='__main__':
++    main()
+diff --git a/i142_judge.py b/i142_judge.py
+new file mode 100644
+index 0000000..51b1406
+--- /dev/null
++++ b/i142_judge.py
+@@ -0,0 +1,93 @@
++"""iter_142 새 출력의 사례별 텍스트 판정표. 범용 의미 평가기로 재사용하지 않는다."""
++import re
++from i142_common import *
++
++def sentence(text,fragment):
++    hits=[s.strip() for s in re.split(r'(?<=\.)\s+',text) if fragment in s]
++    assert hits, fragment
++    return hits[0]
++
++def main():
++    refs={r['patient_id']:r for r in read(OLD/'reference_locked.json')['rows']}
++    records={r['patient_id']:r for r in [read(p) for p in sorted((RES/'jobs/main').glob('*/result.json'))]}
++    assert len(records)==6
++    all_j={}
++    for pid,rec in records.items():
++        ref=refs[pid]
++        modes={'final':rec['report'],'raw':' '.join(s for g in rec['observations']['generation'] for s in g['decoded'])}
++        all_j[pid]={}
++        for mode,text in modes.items():
++            judgments={a['id']:{'state':'unmentioned','quotes':[],
++                       'reason':'필요한 소견/위치/속성 전체가 명시되지 않음. 미언급은 임상 부재 정답이 아님.'} for a in ref['positive_atoms']}
++            def set_atom(index,state,fragments,reason):
++                key=pid+'__atom'+str(index).zfill(2)
++                judgments[key]={'state':state,'quotes':[sentence(text,f) for f in fragments],'reason':reason}
++            first=next(s.strip() for s in re.split(r'(?<=\.)\s+',text) if 'high signal intensity' in s and 'DWI' in s)
++            set_atom(0,'matched',[first],'병변과 고신호를 명시하여 공개 abnormal signal 항목에 대응함.')
++            set_atom(1,'matched',[first],'같은 DWI sequence의 high signal intensity를 명시함.')
++            extras=[]
++            if pid.endswith('0004'):
++                set_atom(4,'matched',['right frontal lobe'],'공개 right frontal lobe 위치를 명시함.')
++                fragment='right frontal-parietal lobe' if mode=='final' else 'left frontal-parietal lobe'
++                set_atom(5,'unresolved',[fragment],
++                    'frontal-parietal lobe 기술이 원문의 두 엽 경계(border)를 지칭하는지 미확정. 경계 위치를 임상 추론으로 채우지 않음.')
++                extras=[('acute or subacute infarction','원인·시기는 현재 DWI 정답 범위 밖이며 공개 항목으로 검증하지 않음.'),
++                        ('no observed abnormalities in the midline structures, sulci, gyri, ventricles, or cisterns','midline 이외의 주변 구조 정상 진술은 제공 reference로 검증하지 못함.')]
++                if mode=='raw':
++                    extras.append(('left frontal lobe','추가 좌측 위치의 임상 참/거짓은 공개 양성 목록만으로 판정하지 않음.'))
++            elif pid.endswith('0006'):
++                set_atom(4,'unresolved',['brainstem'],
++                    'brainstem은 넓은 부위명이다. cerebral peduncles와 같은 위치라고 임상 추론으로 확정하지 않음.')
++                extras=[('cerebellum','reference의 cerebral peduncles 이외 cerebellum/occipital 위치 기술은 미검증.'),
++                        ('right frontal lobe','추가 frontal 위치는 미검증. reference 미언급을 음성 정답으로 만들지 않음.')]
++            elif pid.endswith('0007'):
++                set_atom(2,'matched',['scattered lesions'],'분산된(scattered) 병변을 명시함.')
++                set_atom(4,'matched',['bilateral cerebellum'],'bilateral은 좌우를 명시하므로 공개 left cerebellum 양성도 포함함. 추가 우측의 진위는 별도 미검증.')
++                if mode=='final':
++                    set_atom(5,'matched',['right occipital lobe'],'최종 문장에 공개 right occipital 위치가 명시됨. 공식 좌우 후처리의 영향이 있음.')
++                else:
++                    set_atom(6,'matched',['brainstem'],'후처리 전 global 생성문에는 공개 brainstem 위치가 명시됨.')
++                extras=[('right frontal lobe, bilateral cerebellum, and right thalamus','right frontal/right thalamus 및 추가 우측 cerebellum은 공개 목록 밖의 미검증 위치.'),
++                        ('no mention of abnormalities in sulci','원문에 대한 메타 문구이며 임상 정상 정답으로 점수화하지 않음.')]
++            elif pid.endswith('0008'):
++                set_atom(4,'matched',['left frontal lobe'],'공개 left frontal lobe 위치를 명시함.')
++                extras=[('right frontal lobe','추가 우측 frontal 위치는 공개 정답으로 임상 진위를 판정할 수 없음.')]
++                if mode=='raw':
++                    extras.append(('bilateral cerebellum','추가 cerebellum 위치는 미검증.'))
++            elif pid.endswith('0009'):
++                if mode=='final':
++                    set_atom(5,'matched',['left frontal-parietal-occipital lobes and the left temporal lobe'],
++                        '최종 출력이 좌측 frontal/parietal과 좌측 temporal을 함께 명시해 공개 복합 위치에 대응함. 추가 occipital은 별도 미검증.')
++                else:
++                    set_atom(5,'unresolved',['left frontal-parietal-occipital lobes and the right temporal lobe'],
++                        '공개 문장의 left basal ganglia와 이어진 frontal/parietal/temporal 위치에 대해, 좌측 두 엽과 우측 temporal의 조합은 동일 복합 위치 대응이 모호함. 임의로 좌우 의미를 확정하지 않음.')
++                extras=[('acute or chronic infarction','병인·시기 표현은 이번 공개 DWI 평가 범위에서 미검증.'),
++                        ('surrounding brain edema','추가 brain edema는 공개 reference로 검증하지 못함.'),
++                        ('right frontal lobe','추가 우측 frontal 위치는 미검증.'),
++                        ('no evidence of abnormalities in nearby sulci','midline 외 구조 정상 진술은 미검증.')]
++            elif pid.endswith('0010'):
++                if mode=='final':
++                    set_atom(5,'matched',['right cerebellum'],'최종 출력의 right cerebellum을 명시적으로 회복함. 원시 left cerebellum에 대한 공식 좌우 수정의 영향임.')
++                # 부분 위치는 원 iter_141 규약대로 전체 위치 회복으로 세지 않는다.
++                judgments[pid+'__atom06']['reason']='right thalamus만 명시됨. bilateral의 왼쪽은 미언급.'
++                judgments[pid+'__atom07']['reason']='최종 left occipital만 있고 left parietal 연결이 없음. 원시 right occipital 역시 전체 left parieto-occipital을 회복하지 않음.'
++                extras=[('right frontal lobe','추가 우측 frontal/parietal 소견은 미검증.'),
++                        ('basal ganglia region','추가 basal ganglia 위치는 공개 정답으로 검증하지 못함.'),
++                        ('no observed alterations in the sulci','주변 구조 정상 기술은 midline 이외 공개 음성 항목이 없어 미검증.')]
++            else:
++                raise AssertionError(pid)
++            all_j[pid][mode]={'atoms':judgments,'reference_contradictions':[], 'internal_contradictions':[],
++                 'report_unverified':[{'quote':sentence(text,f),'reason':why} for f,why in extras],
++                 'review_note':'전체 새 원문을 확인했다. 공개 양성 목록 밖 위치를 음성으로 만들지 않았다. 명시적인 저신호/병변 부재/위치 배타성 주장 또는 동일 scope의 양립 불가 문장은 확인하지 못했다.',
++                 'extra_coverage':'원문 기반 미검증 추가 소견의 대표 목록. 임상 FP 전수 집계가 아님.'}
++    save(RES/'eval/judgments.json',all_j)
++    save(RES/'eval/judgment_provenance.json',{'created_at':now(),'source_sha256':sha(__file__),
++        'reference_sha256':sha(OLD/'reference_locked.json'),
++        'outputs':{str(RES/'jobs/main'/p/'result.json'):sha(RES/'jobs/main'/p/'result.json') for p in records},
++        'judgments_sha256':sha(RES/'eval/judgments.json'),
++        'judgment_timing':'새 생성 이후 제한된 assistant 텍스트 판정. 사건 정의·집계 코드는 본 생성 전에 잠금.',
++        'independent_clinician':False})
++    print({'patients':len(all_j),'modes':2})
++
++if __name__=='__main__':
++    main()
+diff --git a/i142_launch.py b/i142_launch.py
+new file mode 100644
+index 0000000..f2e6dfa
+--- /dev/null
++++ b/i142_launch.py
+@@ -0,0 +1,133 @@
++"""허용 장치에서 worker를 분산하고 실제 자원과 종료·완료를 기록한다."""
++import argparse
++import signal
++import subprocess
++import time
++from i142_common import *
++
++def gpu_status():
++    raw=subprocess.check_output(['nvidia-smi','--query-gpu=index,uuid,pci.bus_id,memory.total,memory.used,memory.free,utilization.gpu','--format=csv,noheader,nounits'],text=True)
++    result=[]
++    for line in raw.splitlines():
++        i,uuid,bus,total,used,free,util=[v.strip() for v in line.split(',')]
++        result.append(dict(index=i,uuid=uuid,bus=bus,total=int(total),used=int(used),free=int(free),util=int(util)))
++    return result
++
++def process_memory():
++    raw=subprocess.check_output(['nvidia-smi','--query-compute-apps=pid,used_gpu_memory','--format=csv,noheader,nounits'],text=True)
++    return {int(line.split(',')[0]):int(line.split(',')[1].strip()) for line in raw.splitlines() if line.strip() and 'N/A' not in line}
++
++def launch(a):
++    protocol=verify_protocol(a.protocol)
++    allow=os.environ.get('CUDA_VISIBLE_DEVICES','').split(',')
++    assert allow and all(allow)
++    gpus=[x for x in gpu_status() if x['index'] in allow or x['uuid'] in allow]
++    assert len(gpus)==len(allow)
++    gpus.sort(key=lambda x:-x['free'])
++    rows=read(RES/'inference_inputs.json')
++    selected=[x for x in rows if x['role']==('main' if a.stage=='main' else 'technical')]
++    if a.stage=='main':
++        choice=read(RES/'execution_choice.json')
++        assert choice['technical_pass'] and choice['max_length']==a.max_length
++    job=RES/'jobs'/a.name
++    job.mkdir(parents=True,exist_ok=True)
++    with ownership(job/'launch.lock'):
++        if (job/'completion.json').exists():
++            c=read(job/'completion.json')
++            assert c['protocol_digest']==protocol['digest'] and c['max_length']==a.max_length and c['direct']==a.direct
++            assert set(c['patients'])==set(x['patient_id'] for x in selected)
++            for r in selected:
++                verify_result(job/r['patient_id']/'result.json',protocol,r)
++            for path,h in c['files'].items():
++                assert sha(path)==h
++            print('검증된 job 완료 재사용',a.name)
++            return
++        attempt=job/('launch_'+str(time.time_ns()))
++        attempt.mkdir()
++        active=[]
++        started=time.perf_counter()
++        samples=[]
++        handles=[]
++        launch_meta={'created_at':now(),'inherited_cuda_visible':allow,'gpus':gpus,'commands':[],'results':[]}
++        pending=list(selected)
++        try:
++            while pending or active:
++                status=gpu_status()
++                # 실행 직전 실제 외부 점유와 아직 loading 중인 worker의 예약량을 합산한다.
++                for g in gpus:
++                    current=next(x for x in status if x['uuid']==g['uuid'])
++                    n=sum(x['gpu']==g['index'] for x in active)
++                    own_memory=process_memory()
++                    unallocated_reservation=sum(max(0,a.peak_mib-own_memory.get(x['proc'].pid,0)) for x in active if x['gpu']==g['index'])
++                    if pending and n<a.per_gpu and current['free']-unallocated_reservation >= a.peak_mib+2048*(n+1):
++                        row=pending.pop(0)
++                        env=os.environ.copy()
++                        env.update(CUDA_VISIBLE_DEVICES=g['index'],PYTHONDONTWRITEBYTECODE='1',
++                            OMP_NUM_THREADS='1',MKL_NUM_THREADS='1',OPENBLAS_NUM_THREADS='1',
++                            HF_HOME=str(RES/'cache'),XDG_CACHE_HOME=str(RES/'cache'),TMPDIR=str(RES/'tmp'),
++                            TOKENIZERS_PARALLELISM='false')
++                        (RES/'tmp').mkdir(exist_ok=True)
++                        command=[str(ENV),str(ROOT/'i142_worker.py'),'--patient',row['patient_id'],
++                            '--protocol',str(Path(a.protocol).resolve()),'--out',str(job/row['patient_id']),
++                            '--max-length',str(a.max_length)]
++                        if a.direct:
++                            command.append('--direct')
++                        if a.equivalence:
++                            command.append('--equivalence')
++                        log=open(attempt/(row['patient_id']+'.log'),'x')
++                        handles.append(log)
++                        child=subprocess.Popen(command,cwd=ROOT,env=env,stdout=log,stderr=subprocess.STDOUT,start_new_session=True)
++                        active.append({'proc':child,'gpu':g['index'],'row':row})
++                        launch_meta['commands'].append({'patient_id':row['patient_id'],'pid':child.pid,
++                            'physical_gpu':g,'child_logical_gpu':0,'command':command,'admission':current,'live_workers_same_gpu_before':n})
++                samples.append({'elapsed_s':time.perf_counter()-started,'gpus':status,
++                                'loadavg':os.getloadavg(),'active_pids':[x['proc'].pid for x in active]})
++                for item in list(active):
++                    rc=item['proc'].poll()
++                    if rc is not None:
++                        launch_meta['results'].append({'patient_id':item['row']['patient_id'],'exit_code':rc})
++                        active.remove(item)
++                        if rc!=0:
++                            raise RuntimeError('worker failed: '+item['row']['patient_id'])
++                        verify_result(job/item['row']['patient_id']/'result.json',protocol,item['row'])
++                if pending and not active and all(g['free']<a.peak_mib+2048 for g in status if g['index'] in allow):
++                    raise RuntimeError('가용 GPU 메모리 부족')
++                if pending or active:
++                    time.sleep(1)
++            launch_meta['status']='ok'
++        except BaseException:
++            launch_meta['status']='error'
++            for item in active:
++                os.killpg(item['proc'].pid,signal.SIGTERM)
++            for item in active:
++                try:
++                    item['proc'].wait(timeout=15)
++                except subprocess.TimeoutExpired:
++                    os.killpg(item['proc'].pid,signal.SIGKILL)
++                    item['proc'].wait()
++            raise
++        finally:
++            for f in handles:
++                f.close()
++            launch_meta['wall_s']=time.perf_counter()-started
++            save(attempt/'launch.json',launch_meta)
++            save(attempt/'resource_samples.json',samples)
++        paths=[job/r['patient_id']/'result.json' for r in selected]
++        save(job/'completion.json',{'created_at':now(),'protocol_digest':protocol['digest'],
++            'patients':[r['patient_id'] for r in selected],'files':{str(p):sha(p) for p in paths},
++            'launch_sha256':sha(attempt/'launch.json'),'launch_path':str(attempt/'launch.json'),
++            'wall_s':launch_meta['wall_s'],'max_length':a.max_length,'direct':a.direct,
++            'per_gpu':a.per_gpu,'peak_mib_admission':a.peak_mib})
++        print({'job':a.name,'patients':len(paths),'wall_s':launch_meta['wall_s']},flush=True)
++
++if __name__=='__main__':
++    p=argparse.ArgumentParser()
++    p.add_argument('--stage',choices=['tech','main'],required=True)
++    p.add_argument('--name',required=True)
++    p.add_argument('--protocol',required=True)
++    p.add_argument('--max-length',type=int,default=300)
++    p.add_argument('--per-gpu',type=int,default=1)
++    p.add_argument('--peak-mib',type=int,default=20000)
++    p.add_argument('--direct',action='store_true')
++    p.add_argument('--equivalence',action='store_true')
++    launch(p.parse_args())
+diff --git a/i142_pilot.py b/i142_pilot.py
+new file mode 100644
+index 0000000..984291e
+--- /dev/null
++++ b/i142_pilot.py
+@@ -0,0 +1,90 @@
++"""기술 2명을 각 2회 실행해 4-worker 처리량과 직접 SDK 출력 정합성을 비교한다."""
++import signal
++import subprocess
++import time
++from i142_common import *
++from i142_launch import gpu_status
++
++def main():
++    direct=RES/'jobs/tech_equivalence_v2'
++    baseline=read(direct/'completion.json')
++    rows=[r for r in read(RES/'inference_inputs.json') if r['role']=='technical']
++    previous=verify_protocol(RES/'protocol_technical_v2.json')
++    measured=max(verify_result(direct/r['patient_id']/'result.json',previous,r)['peak_reserved_MiB'] for r in rows)
++    gpus=[g for g in gpu_status() if g['index'] in os.environ['CUDA_VISIBLE_DEVICES'].split(',')]
++    gpus.sort(key=lambda x:-x['free'])
++    assert len(gpus)==2 and all(g['free']>=2*(measured+2048) for g in gpus)
++    protocol={k:v for k,v in previous.items() if k not in ['digest','created_at']}
++    protocol['created_at']=now()
++    protocol['files'][str(ROOT/'i142_pilot.py')]=sha(__file__)
++    protocol['digest']=digest(protocol)
++    save(RES/'protocol_technical_4w_v2.json',protocol)
++    job=RES/'jobs/tech_4w_v2'
++    job.mkdir()
++    children=[]
++    logs=[]
++    samples=[]
++    started=time.perf_counter()
++    try:
++        for replica in range(2):
++            for idx,row in enumerate(rows):
++                g=gpus[idx]
++                env=os.environ.copy()
++                env.update(CUDA_VISIBLE_DEVICES=g['index'],PYTHONDONTWRITEBYTECODE='1',OMP_NUM_THREADS='1',
++                    MKL_NUM_THREADS='1',OPENBLAS_NUM_THREADS='1',HF_HOME=str(RES/'cache'),
++                    XDG_CACHE_HOME=str(RES/'cache'),TMPDIR=str(RES/'tmp'),TOKENIZERS_PARALLELISM='false')
++                out=job/(row['patient_id']+'_rep'+str(replica))
++                log=open(job/(row['patient_id']+'_rep'+str(replica)+'.log'),'x')
++                logs.append(log)
++                cmd=[str(ENV),str(ROOT/'i142_worker.py'),'--patient',row['patient_id'],'--protocol',str(RES/'protocol_technical_4w_v2.json'),
++                     '--out',str(out),'--max-length','300']
++                child=subprocess.Popen(cmd,cwd=ROOT,env=env,stdout=log,stderr=subprocess.STDOUT,start_new_session=True)
++                children.append({'proc':child,'row':row,'gpu':g,'out':out,'command':cmd})
++        while any(c['proc'].poll() is None for c in children):
++            samples.append({'elapsed_s':time.perf_counter()-started,'gpus':gpu_status(),'loadavg':os.getloadavg()})
++            assert not any(c['proc'].poll() not in (None,0) for c in children), 'pilot worker failed'
++            time.sleep(1)
++        assert all(c['proc'].returncode==0 for c in children)
++    except BaseException:
++        for c in children:
++            if c['proc'].poll() is None:
++                os.killpg(c['proc'].pid,signal.SIGTERM)
++        for c in children:
++            try:
++                c['proc'].wait(timeout=15)
++            except subprocess.TimeoutExpired:
++                os.killpg(c['proc'].pid,signal.SIGKILL)
++                c['proc'].wait()
++        raise
++    finally:
++        for log in logs:
++            log.close()
++        save(job/'resources.json',samples)
++        save(job/'exits.json',{'wall_s':time.perf_counter()-started,'children':[{'row':c['row'],'gpu':c['gpu'],
++            'pid':c['proc'].pid,'exit_code':c['proc'].returncode,'out':str(c['out']),'command':c['command']} for c in children]})
++    checks=[]
++    for c in children:
++        r=verify_result(c['out']/'result.json',protocol,c['row'])
++        b=verify_result(direct/c['row']['patient_id']/'result.json',previous,c['row'])
++        checks.append({'patient_id':r['patient_id'],'out':str(c['out']),
++            'segmentation_tensor_equal':r['observations']['segmentation_inputs']==b['observations']['segmentation_inputs'],
++            'report_tensor_equal':r['observations']['report_inputs']==b['observations']['report_inputs'],
++            'features_tokens_equal':r['observations']['generation']==b['observations']['generation'],
++            'regions_equal':r['observations']['regions']==b['observations']['regions'],
++            'final_report_equal':r['report']==b['report'],'complete':r['complete'],'cap_hit':r['cap_hit'],
++            'peak_reserved_MiB':r['peak_reserved_MiB']})
++    equal=all(all(c[k] for k in ('segmentation_tensor_equal','report_tensor_equal','features_tokens_equal','regions_equal','final_report_equal')) for c in checks)
++    save(RES/'tests/technical_comparison_v2.json',{'created_at':now(),'checks':checks,'all_equal':equal,
++        'direct_sdk':'공식 AutoRG_Brain.report 직접 호출','wrapper':'입력 allowlist wrapper; 같은 SDK',
++        'hook_scope':'인자/반환을 바꾸지 않는 hash/token 관측 hook; direct에도 token 기록 hook 사용'})
++    assert equal
++    wall=read(job/'exits.json')['wall_s']
++    save(RES/'tests/throughput_v2.json',{'baseline_2worker':{'n':4,'wall_s':baseline['wall_s'],'patients_per_min':240/baseline['wall_s']},
++       'candidate_4worker':{'n':4,'wall_s':wall,'patients_per_min':240/wall},
++       'admission_peak_MiB':measured,'admission':gpus,'checks':checks,
++       'boundary':'subprocess 생성부터 전체 정상 종료까지; protocol 검증·loading·실제 segmentation·generation·저장 포함',
++       'baseline_note':'GPU당 한 worker에서 직접 SDK+wrapper의 연속 2회 호출; 총 4 volume 처리. 4 worker는 같은 2명을 각 2회 독립 실행. loading·검사/저장 경계 차이를 포함한 탐색 측정.'})
++    print({'all_equal':equal,'2w_patients_per_min':240/baseline['wall_s'],'4w_patients_per_min':240/wall})
++
++if __name__=='__main__':
++    main()
+diff --git a/i142_prepare.py b/i142_prepare.py
+new file mode 100644
+index 0000000..cf8f862
+--- /dev/null
++++ b/i142_prepare.py
+@@ -0,0 +1,82 @@
++"""새 SDK 사본을 파생하고 실제 원본 hash와 사전 평가 계약을 잠근다."""
++import difflib
++import shutil
++import subprocess
++from i142_common import *
++from ar70_patch import EDITS
++
++def main():
++    assert not RES.exists(), '기존 결과 경로 보존'
++    RES.mkdir()
++    reuse = read(ROOT.parent / 'agent/runs/iter_142/reuse_manifest.json')
++    for path, info in reuse['files'].items():
++        actual = subprocess.check_output(['git','hash-object','--',path], cwd=ROOT, text=True).strip()
++        assert actual == info['blob']
++    # 원 ZIP의 파일을 현재 공식 소스와 독립 대조한다.
++    import zipfile
++    archive = ROOT / 'results/iter_070/external/autorg_src.zip'
++    with zipfile.ZipFile(archive) as z:
++        src_files = {}
++        for p in SRC.rglob('*'):
++            if not p.is_file() or '__pycache__' in p.parts:
++                continue
++            name = str(p.relative_to(SRC.parent))
++            assert hashlib.sha256(z.read(name)).hexdigest() == sha(p), name
++            src_files[str(p)] = sha(p)
++    shutil.copytree(SRC, RES/'external', ignore=shutil.ignore_patterns('__pycache__'))
++    diff = []
++    for filename in dict.fromkeys(e[0] for e in EDITS):
++        original = (SRC/filename).read_text()
++        text = original
++        for file, old, new in EDITS:
++            if file == filename:
++                assert text.count(old) == 1
++                text = text.replace(old,new)
++        (RES/'external'/filename).write_text(text)
++        diff.extend(difflib.unified_diff(original.splitlines(True),text.splitlines(True),'a/'+filename,'b/'+filename))
++    (RES/'external/compatibility.diff').write_text(''.join(diff))
++    weights = read(MODELS/'weights_manifest.json')
++    weight_files = {}
++    for name, h in weights.items():
++        if name.endswith(('.model','.pkl')):
++            p = MODELS/'autorg'/name
++            assert sha(p) == h, name
++            weight_files[str(p)] = h
++    for p in (MODELS/'gpt2pm').glob('*'):
++        if p.is_file():
++            weight_files[str(p)] = sha(p)
++    # 공식 GPT2 checkpoint는 기존 고정 revision 자산이다. 현 hash를 별도 고정.
++    old = read(OLD/'data_manifest.json')
++    inputs = []
++    for r in old['rows']:
++        assert sha(r['source_path']) == r['source_sha256']
++        inputs.append({'patient_id':r['patient_id'], 'role':r['role'],
++                       'image':r['source_path'],'image_sha256':r['source_sha256'],'modal':'DWI'})
++    assert len(inputs)==8 and sum(r['role']=='main' for r in inputs)==6
++    save(RES/'inference_inputs.json', inputs)
++    save(RES/'asset_manifest.json', {'created_at':now(),'official_source_revision':SRC.name,
++         'source_archive_sha256':sha(archive),'source_files':src_files,'weights':weight_files,
++         'checkpoint_revisions':weights,'reused_blobs':reuse['files'],
++         'environment_python':str(ENV),'base_environment_changed':False,
++         'training_exposure':{'SEG':'공식 README에 ISLES2022 학습 명시; 환자별 노출 미확인',
++           'RGv2':'공식 README에 RadGenome 학습 명시; 현재 8명 공식 train, 환자별 노출 미확인',
++           'DWI_report_target':'DWI dispatch 지원. 배포 modal_wise_finding에는 ADC만 있어 실제 DWI target 학습 미확인'}})
++    save(RES/'evaluation_contract.json', {'created_at':now(),
++       'contract':read(OLD/'reference_locked.json')['evaluation_contract'],
++       'primary':'AutoRG 최종 출력 − 저장된 개별 MedGemma; 환자 평균 명시 양성 atom 일치율',
++       'bounds':'절단 시 unmentioned/unresolved를 상한에 포함; 미완결 모순의 최악은 1',
++       'decision':'보수적 recall 이득 >=0.05, 모순 증가 최악 <=0.05; 불확실성이 행동을 바꾸면 inconclusive',
++       'seed':142,'bootstrap_replicates':10000,'new_clinical_truth':False})
++    files = {str(p):sha(p) for p in [ROOT/'i142_common.py',ROOT/'i142_prepare.py',ROOT/'i142_worker.py',ROOT/'i142_launch.py',ROOT/'i142_eval.py',
++        RES/'asset_manifest.json',RES/'inference_inputs.json',RES/'evaluation_contract.json',
++        OLD/'reference_locked.json',OLD/'eval/report.json',OLD/'eval/per_patient.json',OLD/'data_manifest.json']}
++    files.update(weight_files)
++    files.update({str(p):sha(p) for p in (RES/'external').rglob('*') if p.is_file()})
++    x = {'created_at':now(),'files':files,'technical_max_length':300,'seed':42,
++         'model':'RGv2','eval_mode':'region_segtool','main_n':6}
++    x['digest'] = digest(x)
++    save(RES/'protocol_technical.json',x)
++    print({'inputs':len(inputs),'official_files_verified':len(src_files),'weights_verified':len(weight_files),'digest':x['digest']})
++
++if __name__=='__main__':
++    main()
+diff --git a/i142_resources.py b/i142_resources.py
+new file mode 100644
+index 0000000..e3ec92f
+--- /dev/null
++++ b/i142_resources.py
+@@ -0,0 +1,34 @@
++"""자기 supervisor와 자식의 CPU·RAM·I/O를 프로그램이 주기적으로 기록한다."""
++import argparse
++import time
++import psutil
++from i142_common import *
++
++def main(a):
++    parents=[p for p in psutil.process_iter(['pid','cmdline'])
++             if any(Path(arg).name==a.program for arg in (p.info['cmdline'] or [])) and p.pid!=os.getpid()]
++    assert len(parents)==1, [(p.pid,p.cmdline()) for p in parents]
++    parent=parents[0]
++    rows=[]
++    while parent.is_running() and parent.status()!=psutil.STATUS_ZOMBIE:
++        processes=[]
++        for p in [parent]+parent.children(recursive=True):
++            try:
++                io=p.io_counters()
++                mem=p.memory_info()
++                cpu=p.cpu_times()
++                processes.append({'pid':p.pid,'rss':mem.rss,'vms':mem.vms,'cpu_s':cpu.user+cpu.system,
++                    'read_bytes':io.read_bytes,'write_bytes':io.write_bytes,'threads':p.num_threads()})
++            except psutil.Error:
++                continue
++        rows.append({'created_at':now(),'processes':processes,'available_ram':psutil.virtual_memory().available,
++                     'loadavg':os.getloadavg()})
++        time.sleep(2)
++    save(Path(a.out),{'supervisor_pid':parent.pid,'samples':rows})
++    print({'samples':len(rows),'path':a.out})
++
++if __name__=='__main__':
++    p=argparse.ArgumentParser()
++    p.add_argument('--program',required=True)
++    p.add_argument('--out',required=True)
++    main(p.parse_args())
+diff --git a/i142_safe_loader.py b/i142_safe_loader.py
+new file mode 100644
+index 0000000..d2c6b33
+--- /dev/null
++++ b/i142_safe_loader.py
+@@ -0,0 +1,66 @@
++"""실제 재사용용 로더: 가중치 경로와 SDK가 쓰는 trainer 로그 경로를 분리한다."""
++from i142_common import *
++
++def config(output_dir):
++    view=RES/'model_view'
++    assert view.is_dir()
++    for name in ('AutoRG_Brain_SEG.model','AutoRG_Brain_SEG.model.pkl','RG_v2/AutoRG_Brain_RGv2.model','RG_v2/AutoRG_Brain_RGv2.model.pkl'):
++        link=view/'autorg'/name
++        source=MODELS/'autorg'/name
++        assert link.is_symlink() and link.resolve()==source.resolve()
++    return {'llm_folder':str(view/'autorg/RG_v2'),'seg_folder':str(view/'autorg'),
++        'llm_chk':'AutoRG_Brain_RGv2','seg_chk':'AutoRG_Brain_SEG','output_dir':str(output_dir),'eval_mode':'region_segtool'}
++
++def check(out,patient=None):
++    import sys
++    out=Path(out).resolve()
++    assert out.is_relative_to(RES)
++    out.mkdir()
++    old_logs={str(p):sha(p) for p in (MODELS/'autorg').rglob('*.txt')}
++    os.environ.update(AR70_GPT2=str(MODELS/'gpt2pm'),HF_HUB_OFFLINE='1',TRANSFORMERS_OFFLINE='1')
++    os.chdir(SDK)
++    sys.path.insert(0,str(SDK))
++    from inference.inferenceSdk import AutoRG_Brain
++    model=AutoRG_Brain([0],config(out))
++    checks={'old_logs_unchanged':old_logs=={str(p):sha(p) for p in (MODELS/'autorg').rglob('*.txt')},
++         'seg_log_under_iter142':Path(model.segmodel.trainer.log_file).resolve().is_relative_to(RES),
++         'new_seg_log_exists':Path(model.segmodel.trainer.log_file).is_file(),
++         'seg_folder_under_iter142':Path(model.segmodel.trainer.output_folder).resolve().is_relative_to(RES)}
++    generated=None
++    if patient:
++        from inference.inferenceSdk import setup_seed
++        import torch
++        row=next(r for r in read(RES/'inference_inputs.json') if r['patient_id']==patient)
++        assert row['role']=='technical'
++        setup_seed(42)
++        torch.backends.cudnn.benchmark=False
++        os.environ['AR70_MAXLEN']='300'
++        generated_tokens=[]
++        original=model.trainer.llm_model.generate
++        def observe(*args,**kwargs):
++            value=original(*args,**kwargs)
++            generated_tokens.append(value.detach().cpu().tolist())
++            return value
++        model.trainer.llm_model.generate=observe
++        payload=[{'image':row['image'],'modal':'DWI'}]
++        result=model.report(payload)
++        previous=read(RES/'jobs/tech_equivalence_v2'/patient/'result.json')
++        checks['safe_report_matches_prior']=result[0]['pred_report']==previous['report']
++        checks['safe_tokens_match_prior']=generated_tokens==[g['tokens'] for g in previous['observations']['generation']]
++        checks['safe_masks_match_prior']=all(sha(result[0][key])==previous['masks'][key]['sha256'] for key in ['ab_mask','ana_mask'])
++        checks['old_logs_unchanged_after_generation']=old_logs=={str(p):sha(p) for p in (MODELS/'autorg').rglob('*.txt')}
++        generated={'patient_id':patient,'actual_call':payload,'report':result[0]['pred_report'],'tokens':generated_tokens,
++                   'mask_hashes':{key:sha(result[0][key]) for key in ['ab_mask','ana_mask']}}
++    save(out/'check.json',{'created_at':now(),'checks':checks,'all_pass':all(checks.values()),
++        'old_logs':old_logs,'config':config(out),'source_sha256':sha(__file__),'generated':generated,
++        'scope':'실제 GPU 로딩·로그 분리와 선택한 기술 사례의 전체 예측/판독 경로 검사. 개발 6명 본출력은 재생성하지 않음.'})
++    assert all(checks.values())
++    print(checks)
++
++if __name__=='__main__':
++    import argparse
++    p=argparse.ArgumentParser()
++    p.add_argument('--out',required=True)
++    p.add_argument('--patient')
++    a=p.parse_args()
++    check(a.out,a.patient)
+diff --git a/i142_verify.py b/i142_verify.py
+new file mode 100644
+index 0000000..ba1059d
+--- /dev/null
++++ b/i142_verify.py
+@@ -0,0 +1,102 @@
++"""생산 평가기를 호출하지 않고 원문 연결과 주 수치·bootstrap을 검산한다."""
++import hashlib
++import json
++from pathlib import Path
++import numpy as np
++
++ROOT=Path(__file__).resolve().parent
++RES=ROOT/'results/iter_142'
++OLD=ROOT/'results/iter_141'
++
++def sha(p):
++    h=hashlib.sha256()
++    with open(p,'rb') as f:
++        for b in iter(lambda:f.read(4<<20),b''):
++            h.update(b)
++    return h.hexdigest()
++
++def load(p):
++    def unique(pairs):
++        d={}
++        for k,v in pairs:
++            if k in d:
++                raise ValueError(k)
++            d[k]=v
++        return d
++    return json.loads(Path(p).read_text(),object_pairs_hook=unique)
++
++def main():
++    judges=load(RES/'eval/judgments.json')
++    refs={r['patient_id']:r for r in load(OLD/'reference_locked.json')['rows']}
++    inputs=[r for r in load(RES/'inference_inputs.json') if r['role']=='main']
++    ids=[r['patient_id'] for r in inputs]
++    assert len(ids)==6 and len(set(ids))==6 and set(judges)==set(ids)
++    old={(r['patient_id'],r['condition']):r for r in load(OLD/'eval/per_patient.json')}
++    report=load(RES/'eval/report.json')
++    per={r['patient_id']:r for r in load(RES/'eval/per_patient.json')}
++    computed=[]
++    quotes=0
++    for pid in ids:
++        rec=load(RES/'jobs/main'/pid/'result.json')
++        assert rec['status']=='ok' and rec['patient_id']==pid
++        assert set(rec['actual_call'][0])=={'image','modal'} and rec['actual_call'][0]['modal']=='DWI'
++        assert rec['seg_call']['ab']==[None] and rec['seg_call']['ana']==[None]
++        for path,h in rec['outputs'].items():
++            assert sha(path)==h
++        final=judges[pid]['final']
++        atoms=final['atoms']
++        assert set(atoms)==set(a['id'] for a in refs[pid]['positive_atoms'])
++        matched=sum(j['state']=='matched' for j in atoms.values())
++        unknown=sum(j['state']=='unresolved' or (not rec['complete'] and j['state']=='unmentioned') for j in atoms.values())
++        n=len(atoms)
++        cc=final['reference_contradictions']
++        values={'recall':matched/n,'recall_min':matched/n,'recall_max':(matched+unknown)/n,
++            'reference_contradiction_min':int(any(j['status']=='confirmed' for j in cc)),
++            'reference_contradiction_max':int(not rec['complete'] or bool(cc))}
++        assert all(abs(per[pid][k]-v)<1e-12 for k,v in values.items())
++        for mode,text in [('final',rec['report']),('raw',' '.join(s for g in rec['observations']['generation'] for s in g['decoded']))]:
++            j=judges[pid][mode]
++            for a in j['atoms'].values():
++                assert a['state'] not in ('matched','contradicted') or a['quotes']
++                for q in a['quotes']:
++                    assert q and q in text
++                    quotes+=1
++            for field in ('reference_contradictions','internal_contradictions'):
++                for item in j[field]:
++                    assert item['quotes'] and all(q in text for q in item['quotes'])
++                    quotes+=len(item['quotes'])
++            for item in j['report_unverified']:
++                assert item['quote'] in text
++                quotes+=1
++        computed.append(values)
++    assert abs(report['recall']-sum(r['recall'] for r in computed)/6)<1e-12
++    independent={}
++    for c in ('S','A'):
++        dif=np.array([r['recall']-old[(pid,c)]['recall'] for pid,r in zip(ids,computed)])
++        rng=np.random.default_rng(142)
++        boot=dif[rng.integers(0,6,(10000,6))].mean(axis=1)
++        lo=sum(r['recall_min']-old[(pid,c)]['recall_max'] for pid,r in zip(ids,computed))/6
++        hi=sum(r['recall_max']-old[(pid,c)]['recall_min'] for pid,r in zip(ids,computed))/6
++        ci=np.percentile(boot,[2.5,97.5]).tolist()
++        saved=report['comparisons'][c]
++        assert abs(float(dif.mean())-saved['delta'])<1e-12
++        assert np.allclose(ci,saved['bootstrap95'],atol=1e-12,rtol=0)
++        assert np.allclose([lo,hi],saved['recall_range'],atol=1e-12,rtol=0)
++        independent[c]={'delta':float(dif.mean()),'ci95':ci,'range':[lo,hi]}
++    all_sources=load(RES/'asset_manifest.json')
++    for p,h in all_sources['source_files'].items():
++        assert sha(p)==h
++    # 기존 141 평가를 계산하지 않고, 계획 잠금에 연결된 원 파일이 그대로인지 검사한다.
++    protocol=load(RES/'protocol_main.json')
++    for p,h in protocol['files'].items():
++        assert sha(p)==h
++    result={'all_pass':True,'patients':6,'quote_connections':quotes,'independent':independent,
++       'source_sha256':sha(__file__),'meaning_scope':'산술·원문 연결 검증. 같은 assistant의 의미 판정에 대한 독립 전문의 검증은 아님',
++       'verified_files':{str(p):sha(p) for p in [RES/'eval/report.json',RES/'eval/per_patient.json',RES/'eval/judgments.json',RES/'protocol_main.json']}}
++    path=RES/'eval/independent_verification.json'
++    with open(path,'x') as f:
++        json.dump(result,f,ensure_ascii=False,indent=2)
++    print(result)
++
++if __name__=='__main__':
++    main()
+diff --git a/i142_worker.py b/i142_worker.py
+new file mode 100644
+index 0000000..76a6b9b
+--- /dev/null
++++ b/i142_worker.py
+@@ -0,0 +1,176 @@
++"""GT 없는 공식 DWI SDK 실행; 관측 hook은 인자와 반환값을 변경하지 않는다."""
++import argparse
++import sys
++import time
++import traceback
++from i142_common import *
++
++def run(a):
++    protocol = verify_protocol(a.protocol)
++    inputs = read(RES/'inference_inputs.json')
++    row = next(x for x in inputs if x['patient_id']==a.patient)
++    assert a.max_length in (300,600)
++    assert a.max_length==protocol.get('max_length',protocol['technical_max_length'])
++    if row['role']=='main':
++        choice = read(RES/'execution_choice.json')
++        assert choice['technical_pass'] and a.max_length==choice['max_length']
++        assert protocol['files'][str(RES/'execution_choice.json')]==sha(RES/'execution_choice.json')
++    out = Path(a.out).resolve()
++    assert out.is_relative_to(RES)
++    with ownership(out/'owner.lock'):
++        if (out/'result.json').exists():
++            verify_result(out/'result.json',protocol,row)
++            print('검증된 완료 출력 재사용',a.patient,flush=True)
++            return
++        attempt = out / ('attempt_'+str(time.time_ns()))
++        attempt.mkdir(parents=True)
++        masks = attempt/'masks'
++        masks.mkdir()
++        # worker는 GT/정답 파일을 읽지 못한다. audit hook은 fork된 전처리에도 상속됨.
++        access = []
++        def audit(event,args):
++            if event=='open' and isinstance(args[0],(str,bytes,os.PathLike)):
++                path = os.fsdecode(args[0])
++                if 'derivatives/' in path or path.endswith('_msk.nii.gz') or any(s in path for s in ['reference_locked','global_finding','modal_wise_finding','eval/judgments']):
++                    raise PermissionError('정답 접근 금지: '+path)
++                if str(OLD/'data_selected') in path:
++                    access.append(path)
++                    assert path==row['image'], path
++        sys.addaudithook(audit)
++        os.environ['AR70_GPT2']=str(MODELS/'gpt2pm')
++        os.environ['AR70_MAXLEN']=str(a.max_length)
++        os.environ['HF_HUB_OFFLINE']='1'
++        os.environ['TRANSFORMERS_OFFLINE']='1'
++        os.chdir(SDK)
++        sys.path.insert(0,str(SDK))
++        import numpy as np
++        import torch
++        import nibabel as nib
++        from inference.inferenceSdk import AutoRG_Brain, setup_seed
++        assert torch.cuda.is_available() and torch.cuda.device_count()==1
++        started=time.perf_counter()
++        cfg={'llm_folder':str(MODELS/'autorg/RG_v2'),'seg_folder':str(MODELS/'autorg'),
++             'llm_chk':'AutoRG_Brain_RGv2','seg_chk':'AutoRG_Brain_SEG','output_dir':str(masks),'eval_mode':'region_segtool'}
++        rec={'status':'error','patient_id':a.patient,'protocol_digest':protocol['digest'],'input':row,
++             'actual_call':[{'image':row['image'],'modal':'DWI'}], 'direct_sdk':a.direct,
++             'created_at':now(),'pid':os.getpid(),'cuda_visible':os.environ['CUDA_VISIBLE_DEVICES']}
++        try:
++            model=AutoRG_Brain([0],cfg)
++            rec['cudnn_from_checkpoint']={'benchmark':torch.backends.cudnn.benchmark,'deterministic':torch.backends.cudnn.deterministic}
++            # 체크포인트가 nondeterministic kernel 설정을 복원한다. 동일 seed의 수치 대조를 위해 고정한다.
++            setup_seed(42)
++            torch.backends.cudnn.benchmark=False
++            rec['execution_seed']=42
++            rec['cudnn_execution']={'benchmark':False,'deterministic':True}
++            torch.cuda.synchronize()
++            rec['load_s']=time.perf_counter()-started
++            rec['device']=torch.cuda.get_device_name(0)
++            rec['environment']={'python':sys.executable,'torch':torch.__version__}
++            torch.cuda.reset_peak_memory_stats()
++            logs={'segmentation_inputs':[],'report_inputs':[],'generation':[],'regions':[]}
++            def array_info(x):
++                if isinstance(x,torch.Tensor):
++                    x=x.detach().cpu().numpy()
++                x=np.ascontiguousarray(x)
++                return {'shape':list(x.shape),'dtype':str(x.dtype),'sha256':hashlib.sha256(x.tobytes()).hexdigest()}
++            original_generate=model.trainer.llm_model.generate
++            def generate(*args,**kwargs):
++                output=original_generate(*args,**kwargs)
++                tokens=output.detach().cpu().tolist()
++                eos=model.trainer.tokenizer.eos_token_id
++                logs['generation'].append({'features':array_info(args[0]),'tokens':tokens,
++                    'eos_token_id':eos,'eos':[eos in t[1:] for t in tokens],
++                    'max_length':kwargs['max_length'],'decoded':model.trainer.tokenizer.batch_decode(output,skip_special_tokens=True,clean_up_tokenization_spaces=True)})
++                return output
++            model.trainer.llm_model.generate=generate
++            seg_predict=model.segmodel.trainer.predict_preprocessed_data_return_seg_and_softmax
++            def seg(*args,**kwargs):
++                logs['segmentation_inputs'].append({'data':array_info(args[0]),'modal':kwargs['modal']})
++                return seg_predict(*args,**kwargs)
++            model.segmodel.trainer.predict_preprocessed_data_return_seg_and_softmax=seg
++            predict=model.trainer.predict_preprocessed_data_return_region_report
++            def region(*args,**kwargs):
++                logs['report_inputs'].append({'data':array_info(args[0]),'predicted_masks':array_info(args[1]),'regions':args[2], 'modal':kwargs['modal']})
++                assert args[2] is None and kwargs['modal']=='DWI'
++                output=predict(*args,**kwargs)
++                logs['regions'].append(output[1])
++                return output
++            model.trainer.predict_preprocessed_data_return_region_report=region
++            seg_fn=model.segmodel.seg
++            def seg_call(images,ab,ana,modals):
++                assert images==[[row['image']]] and ab==[None] and ana==[None] and modals==['DWI']
++                rec['seg_call']={'images':images,'ab':ab,'ana':ana,'modals':modals}
++                return seg_fn(images,ab,ana,modals)
++            model.segmodel.seg=seg_call
++            # direct와 wrapper 차이는 입력 allowlist 검사뿐이다. 위 관측 hook은 동일.
++            def wrapper(payload):
++                assert len(payload)==1 and set(payload[0])=={'image','modal'}
++                return model.report(payload)
++            tick=time.perf_counter()
++            result=model.report(rec['actual_call']) if a.direct else wrapper(rec['actual_call'])
++            torch.cuda.synchronize()
++            rec['inference_s']=time.perf_counter()-tick
++            assert len(result)==1 and result[0]['image']==[row['image']]
++            rec['report']=result[0]['pred_report']
++            rec['observations']=logs
++            assert logs['generation'], '공식 경로에 실제 생성 없음'
++            rec['complete']=all(all(g['eos']) for g in logs['generation'])
++            rec['cap_hit']=any(not e and len(t)>=a.max_length-1 for g in logs['generation'] for t,e in zip(g['tokens'],g['eos']))
++            rec['peak_reserved_MiB']=torch.cuda.max_memory_reserved()/2**20
++            rec['peak_allocated_MiB']=torch.cuda.max_memory_allocated()/2**20
++            rec['masks']={}
++            image=nib.load(row['image'])
++            for key in ['ab_mask','ana_mask']:
++                p=Path(result[0][key])
++                m=nib.load(p)
++                assert m.shape==image.shape and np.allclose(m.affine,image.affine,atol=1e-4)
++                rec['masks'][key]={'path':str(p),'sha256':sha(p),'shape':list(m.shape),'affine':m.affine.tolist(),
++                                  'foreground_voxels':int(np.count_nonzero(np.asarray(m.dataobj)))}
++            rec['outputs']={v['path']:v['sha256'] for v in rec['masks'].values()}
++            if a.equivalence:
++                first_logs=logs
++                logs={'segmentation_inputs':[],'report_inputs':[],'generation':[],'regions':[]}
++                repeat_masks=attempt/'equivalence_masks'
++                repeat_masks.mkdir()
++                model.segmodel.output_mask_dir=str(repeat_masks)
++                setup_seed(42)
++                torch.backends.cudnn.benchmark=False
++                repeated=wrapper(rec['actual_call'])
++                checks={'segmentation_tensors':first_logs['segmentation_inputs']==logs['segmentation_inputs'],
++                        'report_tensors':first_logs['report_inputs']==logs['report_inputs'],
++                        'features_and_tokens':first_logs['generation']==logs['generation'],
++                        'region_names':first_logs['regions']==logs['regions'],
++                        'report':result[0]['pred_report']==repeated[0]['pred_report']}
++                eq={'checks':checks,'all_pass':all(checks.values()),'direct':first_logs,'wrapper':logs,
++                    'report':repeated[0]['pred_report'],'scope':'同一 seed·결정적 kernel의 공식 SDK 직접 호출 대 allowlist wrapper'}
++                save(attempt/'equivalence.json',eq)
++                rec['equivalence_path']=str(attempt/'equivalence.json')
++                rec['outputs'][rec['equivalence_path']]=sha(attempt/'equivalence.json')
++                assert eq['all_pass'], '공식 SDK 대조 실패'
++            rec['status']='ok'
++        except Exception:
++            rec['error']=traceback.format_exc()
++            rec['outputs']={}
++        rec['image_access']=sorted(set(access))
++        rec['wall_including_load_before_result_save_s']=time.perf_counter()-started
++        rec['record_digest']=digest(rec)
++        save(attempt/'record.json',rec)
++        if rec['status']=='ok':
++            save(out/'result.json',rec)
++        finished=time.perf_counter()
++        save(attempt/'timing.json',{'end_to_end_s':finished-started,'result_saved':rec['status']=='ok',
++                                   'record_sha256':sha(attempt/'record.json')})
++        print(a.patient,rec['status'],round(finished-started,2),flush=True)
++        if rec['status']!='ok':
++            print(rec['error'],flush=True)
++            raise RuntimeError('SDK 실행 실패')
++
++if __name__=='__main__':
++    p=argparse.ArgumentParser()
++    p.add_argument('--patient',required=True)
++    p.add_argument('--protocol',required=True)
++    p.add_argument('--out',required=True)
++    p.add_argument('--max-length',type=int,default=300)
++    p.add_argument('--direct',action='store_true')
++    p.add_argument('--equivalence',action='store_true')
++    run(p.parse_args())
+diff --git a/i142_worker_safe.py b/i142_worker_safe.py
+new file mode 100644
+index 0000000..df1a3f1
+--- /dev/null
++++ b/i142_worker_safe.py
+@@ -0,0 +1,24 @@
++"""보존된 본실행 worker에 검증된 checkpoint/log 분리 경로를 연결하는 새 진입점."""
++import argparse
++from i142_common import RES,MODELS,ROOT,sha,save,now
++from i142_safe_loader import config
++import i142_worker as worker
++
++def main():
++    p=argparse.ArgumentParser()
++    p.add_argument('--patient',required=True)
++    p.add_argument('--protocol',required=True)
++    p.add_argument('--out',required=True)
++    p.add_argument('--max-length',type=int,default=300)
++    p.add_argument('--direct',action='store_true')
++    p.add_argument('--equivalence',action='store_true')
++    a=p.parse_args()
++    cfg=config(a.out)
++    worker.MODELS=RES/'model_view'
++    assert str(worker.MODELS/'autorg')==cfg['seg_folder']
++    assert str(worker.MODELS/'autorg/RG_v2')==cfg['llm_folder']
++    assert (worker.MODELS/'gpt2pm').resolve()==(MODELS/'gpt2pm').resolve()
++    worker.run(a)
++
++if __name__=='__main__':
++    main()
+diff --git a/test_i142.py b/test_i142.py
+new file mode 100644
+index 0000000..c315516
+--- /dev/null
++++ b/test_i142.py
+@@ -0,0 +1,62 @@
++"""현재 실행에 필요한 잠금·완료·평가 분기만 검사한다."""
++import copy
++import subprocess
++from i142_common import *
++from i142_eval import score,decision
++
++def main():
++    checks={}
++    root=RES/'tests'/('cpu_'+str(time.time_ns()))
++    root.mkdir(parents=True)
++    p=root/'atomic.json'
++    save(p,{'a':1})
++    try:
++        save(p,{'a':2})
++    except FileExistsError:
++        checks['overwrite_rejected']=read(p)=={'a':1}
++    with ownership(root/'lock'):
++        command=[str(ENV),'-c',"from i142_common import ownership;\nwith ownership("+repr(str(root/'lock'))+"):\n print('wrong')"]
++        result=subprocess.run(command,cwd=ROOT,capture_output=True,text=True)
++        checks['concurrent_owner_rejected']=result.returncode!=0 and 'BlockingIOError' in result.stderr
++    (root/'duplicate.json').write_text('{"a":1,"a":2}')
++    try:
++        read(root/'duplicate.json')
++    except ValueError:
++        checks['duplicate_key_rejected']=True
++    (root/'broken.json').write_text('{"unfinished":')
++    try:
++        read(root/'broken.json')
++    except ValueError:
++        checks['corrupt_json_rejected']=True
++    protocol=verify_protocol(RES/'protocol_technical_v2.json')
++    bad=copy.deepcopy(protocol)
++    bad['seed']=99
++    save(root/'bad_protocol.json',bad)
++    try:
++        verify_protocol(root/'bad_protocol.json')
++    except AssertionError:
++        checks['wrong_protocol_rejected']=True
++    ref={'positive_atoms':[{'id':'x','type':'signal'}]}
++    j={'atoms':{'x':{'state':'unmentioned','quotes':[]}},'reference_contradictions':[],
++       'internal_contradictions':[],'report_unverified':[]}
++    r={'report':'','complete':False,'patient_id':'fixture'}
++    s=score(r,ref,j)
++    checks['incomplete_recall_upper']=s['recall_min']==0 and s['recall_max']==1
++    checks['incomplete_contra_upper']=s['reference_contradiction_min']==0 and s['reference_contradiction_max']==1
++    checks['positive_boundary']=decision({'recall_range':[.05,.1],'contradiction_range':[0,.05]},True)=='positive_development_recovery'
++    checks['inconclusive_bounds']=decision({'recall_range':[-.1,.2],'contradiction_range':[0,0]},True)=='inconclusive'
++    checks['negative_completed']=decision({'recall_range':[-.1,.04],'contradiction_range':[0,0]},True)=='negative_current_RGv2_DWI'
++    checks['incomplete_not_negative']=decision({'recall_range':[-.1,.04],'contradiction_range':[0,1]},False)=='inconclusive'
++    j['atoms']['x']={'state':'matched','quotes':['not present']}
++    try:
++        score(r,ref,j)
++    except AssertionError:
++        checks['false_quote_rejected']=True
++    result={'created_at':now(),'checks':checks,'all_pass':all(checks.values()),'source_sha256':sha(__file__)}
++    save(root/'checks.json',result)
++    print(result)
++    assert len(checks)==12 and result['all_pass']
++
++if __name__=='__main__':
++    import time
++    main()

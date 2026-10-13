@@ -147,6 +147,7 @@
 - iter_139 [사용자 보완으로 전환 → iter_140] 기존 기록 보존, 성공·실패 판정 아님 (Codex 구현)
 - iter_140 [CONTINUE] (deep_medium/standard/normal) <MRI 동일 관측 범위의 판독 대조: execution_failed> 💾9157bb31ca641fe720bd2d5203780df82635d53d RadGenome 후보 8명의 보고서와 로컬 영상–mask 3쌍을 확인했지만 이용·release 연결 미확인으로 판독 비교는 미실행이다. MRI 가설은 유지하며 ISLES22 대안의 한정 연결 검토를 권고한다. → 다음: 한정 보완으로 RadGenome ISLES22의 공식 영상–보고서 연결을 확인하고, 같은 관측 범위의 판독 비교가 성립하는지 결정한다. 공개 원영상과 보고서 파일이라는 구체적 근거가 있으므로 같은 BraTS 인증 감사를 반복하지 않는다. 다음 계획에서 질환 변경을 명시하고 원영상 ID·sequence·mask 공간·보고서 범위·환자 split·AutoRG 학습 노출을 먼저 확인한다. 성립하면 소수 실제 입력의 개별/인접 판독 비교까지 묶고 입력별 SFT와 예측 mask 기반 3D 대조의 후속 단위를 남긴다. 성립하지 않으면 대형 실행기나 추가 자료 순회를 만들지 않고 종료하며, BraTS 재개에 필요한 사용자 본인의 접근 승인 또는 승인된 원천 자료 증거를 구체적으로 요청한다. MSD 유무 학습으로 복귀하지 않는다.
 - iter_141 [CONTINUE] (deep_medium/standard/normal) <MRI 동일 관측 범위의 판독 대조: inconclusive> 💾19946deb6cccb3693713c1fb609b3cd3faec9dee MRI 6명의 동일 전체 영상 비교에서 항목 일치율은 개별 45.65%·인접 34.25%였지만, 인접 출력 32/78건의 절단과 미판정으로 우열은 불확정이다. 입력별 SFT·3D 비교는 남아 있다. → 다음: 한정 보완으로 AutoRG 예측 mask 기반 DWI 판독을 소수 사례에서 비교해 전문 시스템이 현재 소견 회복 문제를 해결하는지 판단하고 종료한다. 기존 환경·가중치를 재사용하되 DWI target 지원·환자 학습 노출을 먼저 한정 확인하고, 성립하면 같은 global DWI 항목으로 실제 출력을 비교한다. GT mask 경로와 실용 경로를 분리하며 모델 차이를 순수 3D 구조 효과로 주장하지 않는다. 동시에 전체 sequence 정답을 사용하는 입력별 SFT pilot의 공정한 학습 단위를 정해 다음 단계로 연결한다. 구간 정답이 없는 전체 보고서를 개별 slice에 복제하지 않는다. iter_141 생성 재실행·반복 재채점·감사만을 위한 후속 iteration은 만들지 않는다.
+- iter_142 [CONTINUE] (deep_medium/standard/normal) <MRI 동일 관측 범위의 판독 대조: inconclusive> 💾b6ba0f1d2312947199048f3e59772f91c9f7ff1b DWI MRI 6명에서 AutoRG 항목 일치율은 46.55%, 개별 MedGemma는 45.65%로 우위가 불확정입니다. 전문 시스템에도 세부 누락이 남았으며 입력별 SFT는 아직 미실행입니다. → 다음: 최소 방법 시험으로 전체 sequence 정답을 한 번 사용하는 입력별 직접 적응 pilot을 설계해, 과제 적응 뒤에도 개별·인접 처리 차이가 남는지 판단한다. iter_141의 유효한 observed 근거와 이번 전문 대조를 연결하고, 실제 문맥 처리 위치·gradient 연결·동일 관측·환자·target 노출·적응 범위를 고정한다. 작은 학습 동작 확인과 1개 seed의 실제 생성 평가를 묶고, 사전 기준에 따라 필요한 확대 또는 보류로 끝낸다. 전체 보고서를 slice별 정답으로 복제하거나 같은 6명의 frozen prompt·checkpoint 순회, 기존 출력 재채점을 발주하지 않는다.
 
 ## 이전 목표들의 접근법 (참고용, 현재 목표의 재평가 횟수에는 안 들어감)
 
@@ -216,11 +217,11 @@
 - MRI 관측 추가와 근거 통합 분리 [approach/mri-observation-integration]: 3회 (iter_134, iter_135, iter_136), 유효한 실험 1회, 미분류 0회, 최근 판정: abandon, 커밋: 7dfd466b5a42361f39ad7da0bf0a94b5dc134885, abd065b34e59dd24e0e9c81d8d07488aec47ec15, 87bb24e65b04b7f8c556ababd9035dfa18fafed1
 - MRI 설명 요구와 상태 판별 대조 [approach/mri-explanation-demand]: 2회 (iter_137, iter_138), 유효한 실험 0회, 미분류 0회, 최근 판정: 사용자 보완으로 전환 (검증 미완료), 커밋: 3a26adc68c3c38a819f1dd0d328b6e4d2bf96fd4
 - MRI 인접 문맥의 직접 적응 대조 [approach/mri-adjacent-adaptation]: 1회 (iter_139), 유효한 실험 0회, 미분류 0회, 최근 판정: 사용자 보완으로 전환 (검증 미완료), 커밋: 없음
-- MRI 동일 관측 범위의 판독 대조 [approach/mri-scope-report-comparison]: 2회 (iter_140, iter_141), 유효한 실험 1회, 미분류 0회, 최근 판정: inconclusive, 커밋: 9157bb31ca641fe720bd2d5203780df82635d53d, 19946deb6cccb3693713c1fb609b3cd3faec9dee
+- MRI 동일 관측 범위의 판독 대조 [approach/mri-scope-report-comparison]: 3회 (iter_140, iter_141, iter_142), 유효한 실험 2회, 미분류 0회, 최근 판정: inconclusive, 커밋: 9157bb31ca641fe720bd2d5203780df82635d53d, 19946deb6cccb3693713c1fb609b3cd3faec9dee, b6ba0f1d2312947199048f3e59772f91c9f7ff1b
 
 현재 연구 브랜치: approach/mri-scope-report-comparison (코드 위치: /SSD1_1TB/home/milab/daniel/08_medgemma/research)
 
 ### 최근 계획의 대안 순위
 
-1. MRI 동일 관측 범위의 판독 대조: 공개 ISLES22의 DWI 연결을 한 번 확인하고 실제 paired 생성까지 수행한다.
-2. BraTS 공식 접근 근거 확보 후 재개: 뇌종양 설계를 유지할 수 있지만 사용자 본인의 승인·원천 release 증거가 필요해 현재 실행 경로보다 느리다.
+1. MRI 동일 관측 범위의 판독 대조: 기존 AutoRG의 실제 예측 영역 판독을 추가해 강한 전문 대안의 해결 범위를 먼저 확인한다.
+2. 전체 sequence 직접 SFT pilot: 적응 효과를 바로 시험할 수 있지만 현재 slice별 정답이 없어 공정한 학습 단위와 메모리 경로를 먼저 확정해야 한다.
