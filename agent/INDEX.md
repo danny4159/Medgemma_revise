@@ -143,7 +143,8 @@
 - iter_135 [CONTINUE] (deep_medium/standard/normal) <MRI 관측 추가와 근거 통합 분리: inconclusive> 💾abd065b34e59dd24e0e9c81d8d07488aec47ec15 저장 360응답 중 영상 없는 36건은 경계 표식 뒤 UNKNOWN이었다. 영상 조건의 불일치 후보 49건은 남았으며, 자료 연결 미확인으로 현재 설계를 보류한다. 신규 모델 실험은 없다. → 다음: 투자 보류·전환을 권고한다. 현재 RadGenome–BraTS 존재 설계의 준비 반복을 끝내고, 같은 MRI 관측·통합 질문을 기존 승인 자료로 검증할 수 있는 최소 비교 하나를 선택한다. iter_064의 지정 slice 과제와 이번 전체 입력 존재 과제의 차이, annotation 부재와 임상 정상의 차이를 유지한다. 자료 경로를 바꾸려면 이용 근거·관측별 정답·경쟁 설명·단순 대조가 성립하는지 먼저 확인하고, 성립하면 한정 기술 확인과 실제 비교를 같은 계획에 묶는다. 성립하는 경로가 없고 Synapse 접근이 반드시 필요할 때만 해당 접근 요건에 관한 구체적 사용자 결정을 요청한다. 같은 32명의 parser 정비·prompt 순회·타 모델 전수 비교·LoRA 확대는 발주하지 않는다.
 - iter_136 [CONTINUE] (deep_medium/standard/normal) <MRI 관측 추가와 근거 통합 분리: abandon> 💾87bb24e65b04b7f8c556ababd9035dfa18fafed1 뇌종양 FLAIR 45명에서 개별 OR BA 0.500·공동 0.494로 통합 손실은 미판정이다. 영상 응답 403/405가 PRESENT였지만 일부 설명은 병변 부재를 말해 인식 실패로 단정할 수 없다. → 다음: 한정 보완을 권고한다. 현재 장수별 frozen 비교는 종료하고, 첫 줄 고정과 부재 설명의 불일치가 출력 인터페이스에 의존하는지 단일 대조로 판별한 뒤 회복 근거가 없으면 이 경로를 끝낸다. 다음 계획은 iter_064의 단독 판별 신호와 이번 원문 사례를 근거로 대조 하나만 사전 고정하고, 동일 pixels·정답·생성 조건에서 실제 응답을 비교한다. 기존 출력 재채점이나 자유 문장 평가기 정비만으로 반복을 소모하지 않으며 prompt grid·새 자료·타 모델 전수 비교·LoRA 확대를 자동 발주하지 않는다. 양성이면 상태 출력과 내용 정확도의 회복을 구분해 후속 최소 개입 가치를 판단하고, 음성 또는 내용 판단 불가능이면 현재 존재 인터페이스 투자를 보류한다.
 - iter_137 [CONTINUE] (deep_medium/standard/normal) <MRI 설명 요구와 상태 판별 대조: execution_failed> 💾3a26adc68c3c38a819f1dd0d328b6e4d2bf96fd4 설명 요구 제거 대조는 A의 기술 응답 유효율 11/12가 사전 기준에 미달해 E45 본비교를 실행하지 않았다. 설명 제거의 효과는 미판정이며 원 실패를 보존한 한정 보완을 권고한다. → 다음: 한정 보완을 권고한다. 단일 형식 오류로 중단된 비교를 별도 사전 계획에서 한 번 완결하고, 회복 근거가 없거나 불확정이면 현재 존재 인터페이스 투자를 끝낸다. 기준 문서는 agent/runs/iter_137/plan.md(SHA256 714180bae143bda916ab22f190ba451db355a4e540a3d2eb83590c31df1fc8f9)다. 원 gate 실패와 결과는 변경하지 않는다. 후속 계획에서는 D 형식률을 진입 조건에서 분리하는 설계 변경의 이유를 명시하고, E의 조건별 95% 출력 기준·invalid/UNKNOWN 오답 처리·BA/CI·양성/음성 기준은 유지한다. 동일 pixels·A/B 질문·모델·생성 설정·E45 180요청만 사용하며 문구·parser·seed·표본을 탐색하지 않는다. 자산 반입과 단일 gate 잠금, 메모리 검사만 필요한 범위에서 보완하고 기존 불변 검증은 재사용한다. 2 worker를 우선하며 실제 시작 전 메모리 여유를 확인한다. E 출력 기준도 미달하면 해당 결과를 보존하고 추가 형식 정비로 연장하지 않는다.
-- iter_138 [진행 중]
+- iter_138 [사용자 보완으로 전환 → iter_139] 기존 기록 보존, 성공·실패 판정 아님 (Claude 구현)
+- iter_139 [진행 중] — 사용자 보완 반영, GPT 재계획부터
 
 ## 이전 목표들의 접근법 (참고용, 현재 목표의 재평가 횟수에는 안 들어감)
 
@@ -211,11 +212,13 @@
 - MRI 반복 촬영의 품질 근거 비교 [approach/mri-quality-evidence]: 1회 (iter_132), 유효한 실험 1회, 미분류 0회, 최근 판정: abandon, 커밋: c1c5af0729627b009bff39abcdd69d2b7cf8da67
 - MRI 병변 위치 지원과 설명 오류 분리 [approach/mri-lesion-report-gap]: 1회 (iter_133), 유효한 실험 1회, 미분류 0회, 최근 판정: abandon, 커밋: 20ff6781c45b8b1e924d5b3f0995ef9803d9216d
 - MRI 관측 추가와 근거 통합 분리 [approach/mri-observation-integration]: 3회 (iter_134, iter_135, iter_136), 유효한 실험 1회, 미분류 0회, 최근 판정: abandon, 커밋: 7dfd466b5a42361f39ad7da0bf0a94b5dc134885, abd065b34e59dd24e0e9c81d8d07488aec47ec15, 87bb24e65b04b7f8c556ababd9035dfa18fafed1
-- MRI 설명 요구와 상태 판별 대조 [approach/mri-explanation-demand]: 2회 (iter_137, iter_138), 유효한 실험 0회, 미분류 0회, 최근 판정: execution_failed, 커밋: 3a26adc68c3c38a819f1dd0d328b6e4d2bf96fd4
+- MRI 설명 요구와 상태 판별 대조 [approach/mri-explanation-demand]: 2회 (iter_137, iter_138), 유효한 실험 0회, 미분류 0회, 최근 판정: 사용자 보완으로 전환 (검증 미완료), 커밋: 3a26adc68c3c38a819f1dd0d328b6e4d2bf96fd4
+- MRI 인접 문맥의 직접 적응 대조 [approach/mri-adjacent-adaptation]: 1회 (iter_139), 유효한 실험 0회, 미분류 0회, 최근 판정: 진행 중, 커밋: 없음
 
-현재 연구 브랜치: approach/mri-explanation-demand (코드 위치: /SSD1_1TB/home/milab/daniel/08_medgemma/research)
+현재 연구 브랜치: approach/mri-adjacent-adaptation (코드 위치: /SSD1_1TB/home/milab/daniel/08_medgemma/research)
 
 ### 최근 계획의 대안 순위
 
-1. MRI 설명 요구와 상태 판별 대조: 기존 E45 고정 비교를 한 번 완결해 설명 요구의 효과와 현재 경로의 투자 여부를 판정한다.
-2. 현재 인터페이스 투자 즉시 보류: 실행 비용은 줄지만 iter_136의 상태–설명 불일치를 설명할 최소 대조가 미검증으로 남는다.
+1. MRI 인접 문맥의 직접 적응 대조: 실제 인접 정보와 과제 적응의 효과를 같은 중심·정답에서 분리한다.
+2. AutoRG-Brain 전문 대조 선행: 기존 해결책의 성능을 먼저 확인할 수 있지만 전체 volume 정보량과 학습 노출 차이가 국소 문맥 질문을 대신하지 못한다.
+3. 판독문 연결 선행: 전체 판독 질문에 직접적이지만 RadGenome release·mask·보고서 연결이 미해결이므로 한정 확인과 병행한다.

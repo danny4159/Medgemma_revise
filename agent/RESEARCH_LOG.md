@@ -50557,3 +50557,195 @@ annotation-free는 임상 정상과 다르고 P는 GT 선택이다. 모델 학�
 
 소스에서 i137_lock.CODE에 i137_gate.py가 빠진 점, i137_tech.gate와 별도 gate의 중복, 누락 GPU 측정을 default=0으로 처리하는 점을 확인했다. i137_eval.decide는 조건별 EOS·경계·첫 줄95%와 원 효과 기준을 구현한다. 생성 seed136과 bootstrap seed137을 유지한다. 이번은 기준 계획의 한정 보완이므로 새 문헌·신규성 주장을 도입하지 않는다.
 
+
+
+## iter_139 GPT PLAN [MRI 인접 문맥의 직접 적응 대조 / proceed] — 2026-10-13 22:24:17
+
+# 요약
+
+- 이번에 할 일: 동일 중심 MRI의 1장·실제 인접5장을 frozen 및 입력별 직접 SFT로 비교한다.
+- 필요한 이유: 기존 실험은 실제 인접 문맥과 과제 적응의 효과를 분리하지 못했다.
+- 확인할 기준: 가중치 갱신·저장 재로딩·생성 개선을 확인하고, 같은 개발 환자의 BA와 비용을 비교한다.
+- 주의·다음: 국소 mask 기반 판단의 method pilot이다. 전체 판독 개선과 신규 기여는 미확정이며, 후속 3D 전문 대조와 판독문 연결을 명시적으로 남긴다.
+
+## 알림 맥락
+
+- 연구: MRI 병변 근거와 답변 연결
+- 데이터: MSD Task01 뇌종양 FLAIR MRI와 병변 mask
+- 모델: MedGemma 1.5 4B, 기본 모델과 입력별 직접 LoRA SFT
+- 과제: 중심 MRI 한 장 또는 중심 포함 인접5장을 받아 중심의 병변 존재 상태를 출력한다
+- 가설: 응답 적응 부족과 실제 인접 정보의 추가 가치를 구분할 수 있다
+- 질문: 같은 중심 영상을 판단할 때 이웃 영상은 학습 후에도 도움이 되는가?
+- 변경: 구체화
+- 연결: 설명 요구 제거 비교는 미완료로 보존하고, 사용자 지시에 따라 실제 인접 입력과 과제 적응 비교로 이동한다
+- 작업: 두 입력별 학습과 실제 생성 비교로 다음 독립 확인·3D 전문 대조의 투자 범위를 정한다
+
+# Current Understanding
+
+iter_138의 원 plan·세션·부분 결과와 checkpoint `d3363f45d9bea0a6c4b6ebefca03e64d653b0391`를 보존한다. 미완료를 실패 또는 MRI 연구 기각으로 변경하지 않는다. 설명 요구 유무 비교는 이번에 재시도하지 않는다.
+
+유지하는 관찰은 iter_064의 지정 target에서 다른 slice 추가 손실과 iter_136의 상태 응답 판별 부족이다. 바꾸는 것은 실제 연속5장, 중심 정답 고정, 입력별 직접 적응이다. iter_056의 dense 구간 비교와 iter_070의 HIGH/MIXED 보고서 과제는 이번 결과와 직접 합산하지 않는다.
+
+로컬 MSD 원 tar, dataset.json과54명의 영상·mask를 확인했다. FLAIR은 channel0이고 정답은 비배경 mask 합집합이다. 저장 grid는1mm isotropic이다. 이는 원 촬영의 획득 간격을 뜻하지 않는다. 자유 판독문 정답은 없다.
+
+# Strategy Check / 연구 방향 판단
+
+직전 카드 출처는 iter_136/137 원 리뷰와 iter_138 plan이다. 새 근거는 최신 사용자 범위와 실제 인접 target의 자료 적격성 확인이다.
+
+1. 중요한 문제: 과제 적응 뒤에도 공간 문맥을 활용하지 못하는 조건이 있는지 알아야 새로운 MRI 근거 활용 방법에 투자할 수 있다.
+2. 현재 근거: frozen 상태 고정과 제한된 context 손실은 observed다. 실제 인접 입력의 적응 결과는 없다.
+3. 쉬운 해결책: 직접 단일 SFT로 충분할 수 있다. 전문 segmentation+규칙도 강한 대안이지만 기존 결과는 정보량이 달랐다.
+4. 남은 설명: 응답·과제 적응 부족, 중심만으로 충분한 정보, 인접 입력 활용 부족, mask와 시각적 병변 의미 차이다.
+5. 다음 결정: 적응 회복과 인접 이득이 있으면 미사용 환자·전문 대조로 집중한다. 단일 적응이 충분하면 이를 baseline으로 보존한다. 양쪽 학습이 불충분하면 현 recipe의 범위를 명시하고 원인에 맞는 보완 여부를 한 번 판단한다.
+
+대안은 직접 적응, 전문 대조 선행, 판독문 연결 선행이다. 이번에는 첫 번째를 선택하고 나머지는 필요한 적합성 확인만 병행한다. prompt나 parser 정비만으로 반복을 끝내지 않는다.
+
+# Hypothesis
+
+H1: 과제 적응 부족이 지배하면 두 SFT가 각 frozen 조건보다 개선되며 인접−단일 차이는 작을 수 있다.
+
+H2: 인접 정보가 유용하고 활용 가능하면 동일 target supervision의 인접 SFT가 단일 SFT보다 개선된다. 중심 복제보다 실제 인접 입력이 좋아지는지는 보조 근거다.
+
+H3: 학습이 유효해도 양쪽 판별이 낮으면 현재 적응 범위·자료 의미·시각 신호 적합성이 남는다. 이를 내부 표현 결함으로 확정하지 않는다. 복제 대조는 인접 adapter에서 분포 변화도 수반하므로 순수한 공간 인과 효과가 아니다.
+
+# Limitation Evidence / Correct Usage Checks
+
+대상은 observed `mri-explicit-target-context-effect`, `msd-flair-presence-answer-explanation-gap`이다. iter_064/136 full review는 실제 출력·공식 processor·정답 연결·출력 완결성을 확인했고 blocking_issues는 비어 있다. 이 근거로 최소 method pilot에 진입한다. full 방법 개발이나 validated 승격은 아니다.
+
+이번에 새로 검사할 부분은 5장 입력, 중심 위치 표기, 학습 labels와 assistant-only loss, 환자 분할, adapter 로딩이다. 기존 고정 응답의 정확도나 형식률을 새로운 학습 진입 문턱으로 삼지 않는다. invalid·UNKNOWN은 평가에 포함한다.
+
+mask 없는 중심은 임상 정상 환자가 아니다. mask 양성 역시 해당 FLAIR에서 임상적으로 충분히 보인다는 독립 판독 보증이 아니다. 결과는 annotation-defined 중심 판별로 한정한다.
+
+# Contribution Path / Baselines / Reuse
+
+주 baseline은 직접 단일 SFT다. 같은 초기 모델, 중심 해상도, 환자·target·정답, optimizer update 수와 supervision 노출을 맞춘다. 인접 조건은 image token과 계산량이 늘므로 동일 계산량 실험이라고 부르지 않는다. frozen 단일/인접과 중심5회 복제, T32로만 만든 위치 prior를 함께 보고한다.
+
+위치 prior는 뇌 nonzero 범위 내 상대 z를10개 bin으로 나누고 T32의 bin별 양성 비율로 예측한다. 빈 bin은 T32 전체 비율, threshold0.5, 동률은 PRESENT로 고정한다. GT 선택 표본의 위치 편향을 점검하는 baseline이며 임상 해법은 아니다.
+
+재사용은 JSON reuse_assets에 지정한 iter_136 commit의5개 파일로 한정한다. `msd56_data.py`의 읽기·render 함수와 추론의 공식 입력·출력 경계·기록 로직을 활용한다. old select/extract/build와 old gate는 실행하지 않는다. 새 조건과 학습 코드는 iter_139 전용으로 파생하며 원 파일과 결과를 보존한다. 누락 소스는 보존 commit에서 반입하고 새 구현으로 덮어 대체하지 않는다.
+
+AutoRG-Brain은 후속 전문 대조다. [공식 코드](https://github.com/ljy19970415/AutoRG-Brain)는 FLAIR와 예측 mask/사용자 mask 경로를 지원하지만 학습 노출을 명시한다. 이번에는 기존 환경·가중치 manifest·공식 경로의 적합성을 확인하며 과거 HIGH/MIXED 추출기를 재사용하지 않는다.
+
+# Proposed Experiment
+
+## 1. 자료와 분할 고정
+
+기존 D6는 기술 확인 전용으로 유지한다. 기존 E48을 case ID 정렬 후 NumPy default_rng(139) permutation으로 T32/V16으로 분할한다. 이48명은 반복 개발 이력이 있으므로 V16을 독립 test라고 부르지 않는다. 이번에 기존54명 밖의 환자나 공식 test를 열지 않는다. 환자 식별은 현재 case ID 범위이며 원천 중복 미확인은 명시하고 image hash 중복을 차단한다.
+
+각 환자에서 FLAIR nonzero z 범위 양 끝2장을 제외한 중심 후보를 만든다. mask 면적>0과=0의 z 정렬 목록에서 각각 quantile 위치0,1/3,2/3,1에 가장 가까운 index를 선택한다. 정확한 index는 round-half-up 규칙으로 고정한다. 현재 후보 수는 환자별 최소42/28로 네 고유 target을 구성할 수 있다. 환자당 양성4·음성4, 총 T256/V128이다. GT 기반 층화 표본임을 명시하며 일반적인 중심 slice 선택 정책으로 주장하지 않는다.
+
+각 중심 z에 대해 S는 z 한 장, A는 z−2,z−1,z,z+1,z+2, R은 z를5회 복제한다. S와 A의 중심 PNG·processor 해상도는 동일하다. 240×240 원 grid에서 동일 volume min–max 렌더링을 사용하며 별도 crop·확대·장수별 정규화는 하지 않는다. canonical index, 원본 index 변환, affine 기반 물리 좌표와 spacing을 기록한다. 원 획득 spacing은 미확인으로 둔다.
+
+중심 annotation와 인접 annotation 패턴, 중심 면적을 저장해 경계/내부 사례를 모두 보조 보고한다. 이 정보는 모델 입력에 제공하지 않는다. 환자명·파일명·mask·역할 정답이 prompt에 들어가지 않게 한다.
+
+## 2. 고정 질문과 생성
+
+질문은 중심만 판단한다. 공통 문구는 `FLAIR MRI image(s) of one brain are provided. Judge only the target image; other images, if present, are context. Is a tumor-like lesion visible in the target image? Output only PRESENT, ABSENT, or UNKNOWN.`으로 한다. S에는 `The target is image 1 of 1.`, A/R에는 `The target is image 3 of 5.`를 덧붙인다. 영상 순서는 inferior→superior다. R에도 동일한 중심 지정 문구를 사용한다. 설명 생성은 학습 목표에 포함하지 않으며 이를 iter_138 설명 제거 효과의 검증으로 해석하지 않는다.
+
+모델 revision은 `91850547d9f0b2fdd21aa7c5f4f3d1a8a52c243b`, bf16·sdpa·greedy·seed139다. max_new_tokens1024를 모든 조건에 사용한다. 기존 thought/final 경계 처리와 첫 줄 상태 parser를 그대로 적용하고 추가 설명 발생률은 별도로 보고한다. 절단·invalid·UNKNOWN은 오답이다. 결과를 보고 문구·parser·길이를 변경하지 않는다.
+
+## 3. 동작 확인
+
+D6의 동일 target 구성으로 공식 processor와 wrapper tensor, 중심 pixels, 영상별 token 수, padding과 순서를 검사한다. 대표 overlay는 영상과 mask를 별도 표시해 확인하며 모델에는 overlay를 넣지 않는다.
+
+학습 sanity는 T32의 사전 첫2명에서 양성·음성 각2개씩, 총8개 target으로 한다. 두 입력 형태에서 assistant 정답과 EOS만 loss에 포함하고 image/user/padding token은 제외하는지 실제 labels를 검사한다. nonzero finite gradient, trainable parameter 목록, optimizer step 전후 adapter tensor 변화, finite loss를 확인한다. 최대32 updates의 작은 sanity 후 adapter를 저장·재로딩해 같은 입력 logits와 greedy 출력을 비교한다. 이 adapter는 본학습에 이어 쓰지 않고 동일 base에서 다시 시작한다. overfit 성공은 일반화 근거가 아니다.
+
+frozen V16 S/A/R 384요청을 생성한다. 점수가 낮거나 고정 상태여도 입력·정답·완료 무결성이 맞으면 아래 SFT를 진행한다. 형식률을 높이려고 prompt를 탐색하지 않는다.
+
+## 4. 가능성 탐색: 두 직접 SFT
+
+언어 decoder의 q/k/v/o projection에 rank16, alpha32, dropout0.05 LoRA를 적용한다. vision encoder·projector·embedding은 frozen이다. 실제 module 이름과 학습 parameter 수를 기록한다. 두 trajectory는 같은 seed139, LR2e−5, AdamW, weight_decay0, warmup5%, gradient clipping1, effective batch8, 같은 target 순서·epoch 수를 사용한다. gradient checkpointing을 적용하고 microbatch는 메모리 실측으로 정한다. 양쪽의 update당 target 노출은 동일하게 유지한다.
+
+T32×8=256 targets로8 epoch, trajectory당256 updates를 기본으로 한다. epoch4에는 V16 중 ID 정렬 첫4명 V4의32 targets만 생성해 추세를 확인한다. epoch8에는 양쪽 모두 V16 전체128 targets를 평가한다. loss와 생성 정확도를 함께 기록한다.
+
+조건부 연장은 두 trajectory를 같은 길이로 수행한다. epoch8에서 어느 한 조건이라도 마지막2 epoch train CE가 직전2 epoch보다5% 이상 감소하거나 V4 BA가 epoch4보다0.05 이상 증가하면16 epoch까지 연장한다. epoch16에서는 마지막4 epoch CE가 직전4 epoch보다5% 이상 감소하고 V16 BA가 epoch8보다0.02 이상 증가한 조건이 있을 때만32 epoch까지 연장한다. NaN·loss 폭주·무갱신은 연장 이유가 아니라 구현/학습 안정성 문제다. threshold를 충족하지 않으면 현재 endpoint에서 종료한다.
+
+공통 checkpoint epoch는 실제 평가한8/16/32 중 두 조건의 V16 BA 평균이 가장 높은 epoch로 선택하며 동률은 이른 epoch다. 양쪽을 서로 다른 학습량으로 선택하지 않는다. 선택된 A adapter에 R 입력128요청을 추가해 실제 이웃과 반복 영상의 차이를 보조 분석한다. V16 선택과 효과 추정은 개발 분석이며 확증 검정으로 표현하지 않는다.
+
+## 5. 규모 확대와 독립 확인
+
+이번에는 T 확대·추가 LR·추가 seed·새 loss·새 visual adapter를 실행하지 않는다. pilot 양성이거나 정밀도만 부족하고 학습 경로가 유효하면 다음 리뷰에서 기존54명 밖의 환자 적격성과 중복을 확인해 독립 집단 규모를 정한다. 목표 최소 효과는 BA5pp이며 이번 paired 환자 변동으로 필요한 정밀도와 비용을 산출한다. full method는 validated 근거와 별도 계획이 필요하다.
+
+독립 확인에서는 prompt·전처리·checkpoint·분할·metric을 잠근 뒤 한 번 평가한다. 이번 V16은 그 집단이 아니다.
+
+## 6. 3D 전문 대조와 전체 판독으로의 연결
+
+이번 반복에서 AutoRG 환경·weights manifest·외부 source revision·추론 경로를 확인하고 다음 비교의 blocker 표를 남긴다. 재설치나 모델 재다운로드를 기본으로 하지 않는다. 공식 SEG anomaly label 의미, 예측 mask를 원 grid로 되돌리는 변환, MSD/BraTS 학습 중복을 확인한다. 이전 iter_070 출력은 새 과제 성능값으로 사용하지 않는다.
+
+후속 국소 전문 대조는 전체 FLAIR의 예측 anomaly mask를 같은 중심 z에서 읽어 presence로 변환하는 실용 경로다. GT mask 경로는 원인 분리용 oracle이며 성능 baseline과 섞지 않는다. 전체 volume 정보량과 사전학습 차이를 명시한다. AutoRG가 현재 label 의미를 지원하지 못하면 그 이유를 기록하고, 기존 HD-GLIO의 네 sequence 조건을 정보량이 다른 보조 대안으로 검토한다. 전문 모델 우위만으로 native 3D 구조의 인과 효과를 주장하지 않는다.
+
+RadGenome은 기존 iter_070/083/133 자료 기록에서 영상·mask·보고서·원 release ID·이용 조건·학습 split 연결을 한 번 확인한다. 공개 mirror의 이름 일치만으로 연결 완료를 선언하지 않는다. 연결이 막혀도 MSD 실제 SFT를 중단하지 않는다. 자유 판독 정답을 mask에서 만들어내지 않는다.
+
+보고서 연결이 성립한 후 별도 계획에서 같은 검사 관측 범위를 사용한 단일 slice별 처리+고정 통합, 인접 구간별 처리+동일 통합, 전체 범위 표집 공동 입력, AutoRG 전체 volume 보고서를 비교한다. 통합 규칙은 중복·누락·모순을 출력 전에 고정해야 한다. 국소 pilot 완료는 이 전체 판독 요청의 완료가 아니다.
+
+## 7. 자원·예상 비용·재개
+
+실행 직전 nvidia-smi와 상속 CUDA_VISIBLE_DEVICES를 확인하고 여유가 큰 허용 장치부터 쓴다. 두 SFT trajectory를 GPU별 하나씩 병렬 배치하는 구성을 우선한다. 이는 고정 상한이 아니라 학습 메모리의 초기 구성이다. 학습은 inference8~10GB 참고값으로 승인하지 않고 optimizer·activation 포함 peak를 측정한다.
+
+D/T 기술 입력으로 microbatch1과 가능한 microbatch2의 유효 targets/분·peak를 비교한다. 추론은 각 GPU1 worker와 메모리가 허용하는 batch 확대 또는2 worker 중 유망한 한 구성을 짧게 비교한다. GPU 전체 점유+동시 peak 예약+worker당2GiB가 용량 이내일 때만 증설한다. 모든 worker가 실제 요청을 수행했는지 확인한다. 출력 token 정합성, 긴 출력 지연, OOM·CPU/RAM/I/O 경합을 함께 기록한다.
+
+현재 학습 시간은 미측정이다. 기술 확인의 step 시간 tS/tA로 기본 병렬 학습 wall을 대략256×max(tS,tA), 최대 연장을1024×max(tS,tA)로 산출하고 loading·평가·checkpoint 시간을 더한다. 추론은384개 frozen, 최대768개 milestone,64개 추세,128개 복제 요청을 해당 조건별 처리량으로 환산한다. 과거 단일 요청 처리량을5장 학습 시간에 대입하지 않는다. 수 시간 실행은 허용되며 임의 시간 상한을 두지 않는다.
+
+학습 checkpoint는 epoch 경계마다 adapter·optimizer·scheduler·RNG·sample 순서를 보존한다. 요청 ID·worker별 출력·원자적 claim과 code/input/model/checkpoint hash를 연결한다. 재개 시 이미 완료한 epoch·요청을 중복 실행하지 않고 실패 attempt 비용도 기록한다. 기존 실행의 claim이나 출력을 변경하지 않는다.
+
+# Implementation Tasks for Claude
+
+현재 구현 담당은 Codex이며 이 섹션명은 호환용이다.
+
+1. 보존 checkpoint와 reuse manifest를 확인하고 필요한 파일만 반입한다. iter_139 전용 경로와 파생 관계를 기록한다.
+2. D6/T32/V16, target 선택·원본 index·물리 좌표·class·인접 annotation 패턴을 결과 생성 전에 봉인한다. 중복·누수와 중심 pixel 일치를 검사한다.
+3. 새 질문·세 입력 조건·기존 parser·1024 생성 길이·평가기·학습 설정을 잠근다. old gate와 하드코딩된 요청 수를 새 경로에 그대로 적용하지 않는다.
+4. 실제 tensor·loss mask·gradient·weight update·저장/재로딩·재개 sanity를 수행한다. 기본 환경과 hf_cache는 변경하지 않는다. 의존성이 필요하면 격리 환경을 사용한다.
+5. frozen 비교 뒤 정확도와 무관하게 두 입력별 직접 SFT를 실행한다. 사전 연장 조건만 적용하며 실제 학습이 끝나기 전에 완료 보고하지 않는다.
+6. 원시 confusion counts와 환자별 점수에서 독립 계산으로 BA·차이·CI를 교차 확인한다. 선택된 공통 epoch와 모든 milestone을 보존한다.
+7. AutoRG와 RadGenome은 필요한 경로·조건·blocker만 확인한다. 미사용 전체 코드 복구나 새 판독문 정답 생성은 하지 않는다.
+8. 실제 도달 단계, 학습량·요청량·wall-clock·GPU peak, 확대 여부와 미실행 비교를 보고한다. source checkpoint는 orchestrator가 보존한다.
+
+# Evaluation (성공/실패 기준 포함)
+
+환자당 양성4·음성4이므로 환자별 sensitivity와 specificity 평균을 BA로 만들고 환자 평균을 보고한다. invalid·UNKNOWN·비EOS·잘못된 경계는 오답이며 분모에서 제외하지 않는다. 상태 분포와 형식률을 별도로 보고하고, 형식률 개선과 내용 판별 개선을 구분한다.
+
+주효과는 선택된 공통 epoch의 A-SFT−S-SFT BA다. 환자 paired bootstrap10,000회, seed139, percentile95% CI를 사용한다. 보조 효과는 각 SFT−frozen, frozen A−S, A-adapter의 A−R, 학습 전후 차이의 차이다. patient cluster를 유지하며 target 수를 독립 환자 수처럼 쓰지 않는다. 개발 checkpoint 선택 후 CI라는 한계를 표시한다.
+
+- 양성 탐색: A-SFT BA−S-SFT BA≥0.05, CI 하한>0, A-SFT sensitivity와 specificity 각각≥0.65. 위치 prior 및 복제 비교, 비용 증가를 함께 검토해 다음 독립 확인·전문 대조로 연결한다.
+- 현재 국소 추가 이득 부족: 유효 학습에서 주효과 CI 상한<0.05. 단일 SFT가 충분하면 baseline으로 보존한다. 전체 판독·다른 관측 범위의 문맥 가치는 미판정이다.
+- 적응 회복: 각 SFT의 frozen 대비 BA가0.10 이상 증가하고 BA≥0.70이면 해당 입력의 실질적인 회복 신호로 보고한다. 이것만으로 인접 우위나 새로운 방법 기여를 선언하지 않는다.
+- 불확정: 그 밖의 효과·정밀도, 또는 mask 의미가 해석을 막는 경우다. 학습 연장 기준과 종료점을 적용하고, 추가 표본이 결정을 바꿀 수 있는지 다음 리뷰에서 비용과 함께 판단한다.
+- 기술 실패: 입력·정답·갱신·재로딩·완료 무결성이 확보되지 않으면 execution_failed다. 낮은 accuracy 자체는 실행 실패가 아니다.
+
+최소 가치 있는 인접 이득은 BA5pp로 둔다. 이를 충족해도 추론·학습 비용 비율을 반드시 보고하며, 작은 정확도 이득에 큰 비용이 들면 실용 채택을 자동 권고하지 않는다. 두 GPU 사용량 자체는 성공 기준이 아니다.
+
+# Risks / Checks
+
+반복 개발 자료의 재분할이 독립성을 회복시키지는 않는다. 기존54명은 모두 개발 이력이 있으며 최종 일반화 주장은 미사용 환자로 확인해야 한다. 모델 사전학습 노출도 미확인이다.
+
+GT 기반 target 선택은 양쪽 class와 경계 사례를 확보하는 진단 설계다. 실제 임상 유병률이나 무작위 slice의 정확도로 해석하지 않는다. 위치 prior, 작은 중심 병변, 주변 양성과 중심 음성의 패턴을 숨기지 않는다.
+
+언어층 LoRA 한 설정의 무개선은 vision 적응·모든 경량 학습의 실패가 아니다. 반대로 loss 감소만으로 영상 근거 활용 회복을 주장하지 않는다. A/R 차이도 순수 공간 기전 증명은 아니다.
+
+AutoRG의 예측 mask·GT mask, 전체 volume·국소 입력, 학습 노출과 정보량을 분리한다. RadGenome 연결이 미완료이면 정확한 blocker와 해소 경로를 남기고 전체 판독 평가는 미실행으로 표시한다.
+
+## 대규모 GPU 필요 후보
+
+3D MRI encoder와 언어 모델의 공동 post-training, 원 해상도 volume token 학습은 장기 후보로 보존한다. 두 직접 적응과 전문 대조에서도 중요한 잔여 문제가 확인돼야 투자 이유를 세울 수 있다. 이번 pilot만으로 full fine-tuning의 필요성을 주장하지 않는다.
+
+# 계획의 근거 (GPT 조사 노트)
+
+## 새로 확인한 것
+
+- GOAL, iter_138 plan·checkpoint, iter_056/064/070 원 review, iter_136 review.json, 관련 LIMITATIONS와 CODE_ASSETS를 확인했다. iter_138 checkpoint는 `d3363f45d9bea0a6c4b6ebefca03e64d653b0391`, unreviewed이며 원 plan을 재개하지 않는다. claude_report.md는 없고 results/iter_138에는 data·requests가 확인됐다.
+- 현재 research HEAD도 위 checkpoint이며 조회 당시 작업 트리는 깨끗했다. 현재 i136 계열 일부 소스는 없지만 iter_136 보존 commit에서 확인했다. 파일 부재를 코드 소실로 취급하지 않는다.
+- 로컬 MSD dataset.json의 training은 484개, modality 0은 FLAIR, labels는 background/edema/non-enhancing tumor/enhancing tumour, licence는 CC-BY-SA 4.0이다. 원 tar와 추출된54명의 NIfTI가 존재한다.
+- 54명 mask를 읽기 전용으로 집계했다. 뇌 nonzero z 범위 양 끝2장을 제외해도 환자별 양성 중심 후보 최소42개, 음성 후보 최소28개다. 저장 grid spacing은 모두1×1×1mm다. 이는 전처리된 grid 간격이며 원 획득 간격이 확인됐다는 뜻은 아니다.
+- iter_064는 MedGemma 복제 BA0.7708 대비 다른 반대 상태 slice 추가0.5000을 확인했지만 Qwen에서는 같은 저하가 없었다. 실제 인접 5장이나 입력별 SFT의 결과가 아니다. iter_136은 영상 요청403/405 PRESENT와 일부 부재 설명을 확인했고 blocking_issues는 비어 있다.
+- iter_056은 dense 구간과 균등8장 비교이며 단일 중심 대조가 없다. iter_059의 전문 모델 우위는 네 sequence 전체 volume을 사용한 조건으로 현재 단일 FLAIR 정보량 비교가 아니다.
+- AutoRG 환경 `research/results/environments/autorg70/bin/python`이 존재한다. iter_070의 실제30출력은 유효하지만 원 release 연결·학습 노출·공식 wrapper 대조·재개 검증 문제가 남았다. HIGH/MIXED parser는 이번 과제로 재사용하지 않는다.
+
+## 공식 선행과 의미
+
+[AutoRG-Brain 공식 저장소](https://github.com/ljy19970415/AutoRG-Brain)는 T2FLAIR NIfTI, 예측 segmentation과 보고서 생성, 사용자 mask 입력을 지원한다. SEG의 BraTS2021 등 학습과 RGv2의 RadGenome 학습을 명시한다. 따라서 후속 MRI 전문 대조 후보로 적합하지만 미노출 독립 비교라고 가정할 수 없다. 공식 문서의 RadGenome benchmark mask 제공 경로와 일반 예측 mask 경로도 분리해야 한다. RadGenome HF 페이지 직접 조회는 이번에 오류가 났으며 기존 release 연결 문제가 해결됐다는 새 근거는 없다.
+
+## 판단
+
+현재 observed 근거와 정상 사용 검사가 최소 method pilot을 지지한다. 완전한 공간 통합 실패나 신규 방법 필요성을 지지하지는 않는다. 기존 반복 개발54명을 train/development로 명시적으로 전환해 두 입력별 직접 적응을 비교하고, 나머지 환자는 이번에 열지 않는다. 본격 확대와 독립 확인은 pilot 리뷰 뒤 별도 판단한다.
+
