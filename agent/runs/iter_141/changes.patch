@@ -1,0 +1,1663 @@
+diff --git a/i141_cap_control.py b/i141_cap_control.py
+new file mode 100644
+index 0000000..79e73cd
+--- /dev/null
++++ b/i141_cap_control.py
+@@ -0,0 +1,74 @@
++"""사전 계획의 1024→2048 기술 재실행을 관리한다. prompt·관측·metric을 변경하지 않는다."""
++from datetime import datetime
++from pathlib import Path
++import subprocess
++import sys
++import time
++import numpy as np
++from i141_common import HERE,RES,read,save,sha,now
++import i141_run as run
++import i141_prepare as prep
++
++
++def call(job,workers,peak):
++    with (RES/'tests'/('launch_'+job.name+'_'+str(time.time_ns())+'.log')).open('xb') as f:
++        cmd=[sys.executable,str(HERE/'i141_run.py'),'launch','--stage','technical2048','--job',str(job),
++             '--workers',str(workers),'--peak',str(peak)]
++        process=subprocess.Popen(cmd,stdout=f,stderr=subprocess.STDOUT)
++        print({'supervisor_pid':process.pid,'job':str(job)},flush=True)
++        rc=process.wait()
++    assert rc==0,'기술 재실행 실패: '+str(job)
++    return run.verify_job(job,'technical2048')
++
++
++def wall(job):
++    c=read(job/'completion.json')
++    start=read(job/('start_'+c['attempt']+'.json'))['created_at']
++    records=run.verify_job(job,'technical2048')
++    end=max(datetime.fromisoformat(r['completed_at']).timestamp() for r in records)
++    return end-datetime.fromisoformat(start).timestamp()
++
++
++def main():
++    initial=run.verify_job(RES/'jobs/tech_w2','technical')
++    assert any(r['n_tokens']>=1024 and not r['eos'] for r in initial)
++    assert read(RES/'tests/runtime_checks.json')['all_pass']
++    # 이전 잠금·출력을 유지하고 새 stage의 정확한 2048 설정을 본출력 전에 잠근다.
++    prep.CODE=prep.CODE+['i141_cap_control.py']
++    prep.lock('technical2048')
++    a=call(RES/'jobs/tech2048_w2',2,12000)
++    peak=int(np.ceil(max(r['peak_reserved_mib'] for r in a)))+256
++    free={r['index']:int(r['free']) for r in run.smi()}
++    assert all(free[g]>=2*(peak+2048) for g in run.allowed()), '4 worker 메모리 불충분; 본실행은 보류'
++    b=call(RES/'jobs/tech2048_w4',4,peak)
++    same=all(r['tokens']==next(x['tokens'] for x in a if x['id']==r['id']) for r in b)
++    w2,w4=wall(RES/'jobs/tech2048_w2'),wall(RES/'jobs/tech2048_w4')
++    chosen=4 if same and w4<w2 else 2
++    throughput={'created_at':now(),'stage':'technical2048','measured_worker_peak_mib':peak-256,
++                'admission_peak_mib':peak,'worker_margin_mib':2048,'two_workers_per_gpu_need_mib':2*(peak+2048),
++                'gpu_free_before':free,'w2_generation_wall_s':w2,'w4_generation_wall_s':w4,
++                'w2_requests_per_min':len(a)*60/w2,'w4_requests_per_min':len(b)*60/w4,
++                'tokens_equal':same,'selected_workers':chosen,
++                'reason':'같은 개발 요청의 생성 처리량과 greedy token 정합성. 로딩 비용은 별도 기록.',
++                'truncated_w2':sum(not r['eos'] for r in a),'truncated_w4':sum(not r['eos'] for r in b),
++                'output_max_tokens':2048,
++                'main_requests':len(read(RES/'requests/main.json')),
++                'estimated_main_generation_wall_s':len(read(RES/'requests/main.json'))*(w4 if chosen==4 else w2)/len(a),
++                'estimate_limit':'개발 8건의 단순 처리량 외삽. 본요청 길이·S/A 비율 차이로 불확실.'}
++    save(RES/'tests/throughput_choice.json',throughput)
++    valid=read(RES/'tests/tensors_v2.json')['all_pass'] and read(RES/'tests/runtime_checks.json')['all_pass']
++    valid=valid and all(r['boundary_status']!='invalid_boundary' for r in a)
++    gate={'created_at':now(),'passed':valid,'main_max_new_tokens':2048,
++          'initial_1024_cap_reached':True,'2048_recheck_done_both_conditions':True,
++          'n_2048_records':len(a)+len(b),'cap_reached_again':any(not r['eos'] and r['n_tokens']>=2048 for r in a),
++          'boundary_invalid':sum(r['boundary_status']=='invalid_boundary' for r in a),
++          'EOS_100_percent_not_required_by_plan':True,
++          'truncation_policy':'본출력 재생성 없음; 미완결·미판정 범위 별도. 반복문을 정답으로 정리하지 않음.',
++          'evidence':{str(RES/'tests'/p):sha(RES/'tests'/p) for p in ['tensors_v2.json','runtime_checks.json','throughput_choice.json']}}
++    save(RES/'tests/technical_gate.json',gate)
++    assert valid
++    print({'gate':gate,'throughput':throughput},flush=True)
++
++
++if __name__=='__main__':
++    main()
+diff --git a/i141_common.py b/i141_common.py
+new file mode 100644
+index 0000000..89a3da0
+--- /dev/null
++++ b/i141_common.py
+@@ -0,0 +1,39 @@
++"""iter_141 출처·배타 저장 유틸리티. i136_common.py의 작은 hash/save 경로를 파생."""
++import hashlib
++import json
++import os
++from pathlib import Path
++from datetime import datetime, timezone
++
++HERE = Path(__file__).resolve().parent
++RES = HERE / 'results/iter_141'
++
++
++def sha(p):
++    h = hashlib.sha256()
++    with Path(p).open('rb') as f:
++        for b in iter(lambda: f.read(4 << 20), b''):
++            h.update(b)
++    return h.hexdigest()
++
++
++def now():
++    return datetime.now(timezone.utc).isoformat()
++
++
++def digest(obj):
++    return hashlib.sha256(json.dumps(obj, sort_keys=True, separators=(',', ':'), allow_nan=False).encode()).hexdigest()
++
++
++def read(p):
++    return json.loads(Path(p).read_text())
++
++
++def save(p, obj):
++    p = Path(p)
++    p.parent.mkdir(parents=True, exist_ok=True)
++    with p.open('x') as f:
++        json.dump(obj, f, ensure_ascii=False, indent=2, sort_keys=True, allow_nan=False)
++        f.write('\n')
++        f.flush()
++        os.fsync(f.fileno())
+diff --git a/i141_data.py b/i141_data.py
+new file mode 100644
+index 0000000..a2481ba
+--- /dev/null
++++ b/i141_data.py
+@@ -0,0 +1,169 @@
++"""고정 8명의 원 DWI–global 문장 연결·공간 검사와 동일 관측 요청을 구성한다."""
++from collections import Counter
++from pathlib import Path
++import json
++import math
++import re
++import nibabel as nib
++import numpy as np
++from PIL import Image, ImageOps, ImageDraw
++from i141_common import HERE, RES, read, save, sha, digest, now
++from i141_preflight import IDS
++from i141_spec import QUESTION, RENDER, SEMANTIC_CONTRACT
++
++LOCATIONS = {
++    '0001': ['left frontal-parietal lobes', 'bilateral occipital lobes', 'near the left lateral ventricle', 'thalamus', 'bilateral cerebellum'],
++    '0003': ['left frontal-parietal-temporal-occipital lobes'],
++    '0004': ['vicinity of the right frontal lobe', 'border of the frontal and parietal lobes', 'insular cortex', 'adjacent to the lateral ventricle'],
++    '0006': ['cerebral peduncles'],
++    '0007': ['left cerebellum', 'right occipital lobe', 'brainstem'],
++    '0008': ['left frontal lobe', 'corpus callosum', 'basal ganglia region'],
++    '0009': ['left basal ganglia', 'frontal-parietal-temporal lobes'],
++    '0010': ['brainstem', 'right cerebellum', 'bilateral thalami', 'left parieto-occipital lobe'],
++}
++
++
++def span(text, quote):
++    assert text.count(quote) == 1, quote
++    start = text.index(quote)
++    return {'quote': quote, 'start': start, 'end': start + len(quote)}
++
++
++def build():
++    completion = read(RES / 'selected_download_complete.json')
++    assert completion['selected_members_crc32_verified'] is True
++    for f in completion['files']:
++        assert sha(f['path']) == f['sha256']
++    official = RES / 'official'
++    reports = read(official / 'ISLES22/global_finding.json')
++    modal = read(official / 'ISLES22/modal_wise_finding.json')
++    split = read(official / 'train_val_test_split.json')['train']
++    raw = RES / 'data_selected/ISLES-2022'
++    print((raw / 'README').read_text(), flush=True)
++    print((raw / 'dataset_description.json').read_text(), flush=True)
++    assert not (RES / 'data_manifest.json').exists()
++    rows, reference, requests, hashes = [], [], {'technical': [], 'main': []}, []
++    for index, pid in enumerate(IDS):
++        key = pid + '_ses-0001_dwi'
++        global_key = pid + '_ses-0001'
++        assert key in split and global_key in reports
++        p = raw / pid / 'ses-0001/dwi' / (key + '.nii.gz')
++        assert p.is_file(), '선택 원영상 누락'
++        img = nib.load(p)
++        original = np.asanyarray(img.dataobj)
++        assert original.ndim == 3 and np.isfinite(original).all(), '임의 4D channel 선택 금지'
++        canonical = nib.as_closest_canonical(img)
++        arr = np.asanyarray(canonical.dataobj)
++        assert nib.aff2axcodes(canonical.affine) == ('R', 'A', 'S')
++        orientation = nib.orientations.ornt_transform(nib.orientations.io_orientation(img.affine),
++                                                     nib.orientations.io_orientation(canonical.affine))
++        voxel_map = nib.orientations.inv_ornt_aff(orientation, img.shape)
++        checks = []
++        for q in [(0, 0, 0), tuple(x-1 for x in arr.shape), tuple(x//2 for x in arr.shape)]:
++            qh = np.array([*q, 1.])
++            native = voxel_map @ qh
++            physical_old, physical_new = img.affine @ native, canonical.affine @ qh
++            v = original[tuple(np.rint(native[:3]).astype(int))]
++            checks.append({'canonical_index': list(q), 'native_index': native[:3].tolist(),
++                           'physical_error_mm': float(np.max(np.abs(physical_old-physical_new))),
++                           'voxel_equal': bool(v == arr[q])})
++        assert all(c['physical_error_mm'] < 1e-5 and c['voxel_equal'] for c in checks)
++        lo, hi = float(arr.min()), float(arr.max())
++        assert hi > lo
++        nonzero = np.where(np.any(arr != 0, axis=(0, 1)))[0]
++        assert len(nonzero)
++        zs = list(range(int(nonzero[0]), int(nonzero[-1]) + 1))
++        mask_path = raw / 'derivatives' / pid / 'ses-0001' / (global_key + '_msk.nii.gz')
++        mask = nib.load(mask_path)
++        maskarr = np.asanyarray(mask.dataobj)
++        labels = [float(x) for x in np.unique(maskarr)]
++        geometry_ok = mask.shape == img.shape and np.allclose(mask.affine, img.affine, atol=1e-5)
++        # mask 정합은 검사만 하며 입력·선정·정규화에는 사용하지 않는다.
++        meta_path = p.with_suffix('').with_suffix('.json')
++        sidecar = read(meta_path) if meta_path.is_file() else None
++        images = []
++        for z in zs:
++            pixels = np.round(np.clip((arr[:, :, z]-lo)/(hi-lo), 0, 1)*255).astype(np.uint8)
++            displayed = np.flip(pixels.T, axis=(0, 1))
++            ph = digest({'shape': list(displayed.shape), 'bytes_hex': displayed.tobytes().hex()})
++            im = Image.fromarray(displayed).convert('RGB')
++            zoom = canonical.header.get_zooms()
++            width = max(1, round(displayed.shape[1]*float(zoom[0])))
++            height = max(1, round(displayed.shape[0]*float(zoom[1])))
++            im = im.resize((width, height), Image.Resampling.BILINEAR)
++            im = ImageOps.pad(im, (RENDER['side'], RENDER['side']), method=Image.Resampling.BILINEAR, color=0)
++            dest = RES / 'png' / pid / f'z{z:04d}.png'
++            dest.parent.mkdir(parents=True, exist_ok=True)
++            assert not dest.exists()
++            im.save(dest)
++            physical = canonical.affine @ np.array([(arr.shape[0]-1)/2, (arr.shape[1]-1)/2, z, 1])
++            images.append({'path': str(dest), 'sha256': sha(dest), 'pixel_sha256': digest({'shape':[256,256,3], 'bytes_hex':np.asarray(im).tobytes().hex()}),
++                           'native_display_pixel_digest': ph, 'canonical_z': z, 'physical_center_RAS_mm': physical[:3].tolist()})
++        hashes.extend(im['pixel_sha256'] for im in images)
++        stage = 'technical' if index < 2 else 'main'
++        condition_rows = []
++        for condition, size in [('S', 1), ('A', 5)]:
++            for pos in range(0, len(images), size):
++                chunk = images[pos:pos+size]
++                req = {'id': pid + f'__{condition}__{pos:04d}', 'patient_id': pid, 'condition': condition,
++                       'kind': 'findings', 'images': chunk, 'slice_indices': [x['canonical_z'] for x in chunk],
++                       'roles': ['DWI']*len(chunk), 'prompt': QUESTION}
++                req['request_digest'] = digest(req)
++                requests[stage].append(req)
++                condition_rows.append(req)
++        multisets = {c: Counter(im['sha256'] for r in condition_rows if r['condition']==c for im in r['images']) for c in ['S','A']}
++        assert multisets['S'] == multisets['A']
++        # global 문장 내부의 같은 병변에 대한 DWI 절만 연결. ADC·병인·병기는 제외.
++        text = reports[global_key]
++        atom_quotes = [('finding', 'abnormal signal' if 'abnormal signal' in text else 'abnormal signals'),
++                       ('signal', 'high signal on DWI' if 'high signal on DWI' in text else 'hyperintense on DWI')]
++        for quote in ['Scattered', 'scattered']:
++            if quote in text:
++                atom_quotes.append(('distribution', quote))
++                break
++        for quote in ['patchy', 'punctate', 'plaque-like']:
++            if quote in text:
++                atom_quotes.append(('morphology', quote))
++                break
++        atom_quotes += [('location', q) for q in LOCATIONS[pid[-4:]]]
++        atoms = [{'id': f'{pid}__atom{j:02d}', 'type': kind, **span(text, quote)} for j, (kind,quote) in enumerate(atom_quotes)]
++        reference.append({'patient_id': pid, 'source_path': str(official/'ISLES22/global_finding.json'),
++                          'source_sha256': sha(official/'ISLES22/global_finding.json'), 'source_key': global_key,
++                          'original_text': text, 'positive_atoms': atoms,
++                          'negative_reference': [span(text, m.group()) for m in re.finditer(r'no (?:midline shift|displacement of midline structures)', text, re.I)],
++                          'excluded': ['ADC low signal', 'diffusion restriction', 'etiology', 'timing'],
++                          'DWI_modal_key_present': key in modal,
++                          'link_basis': '같은 BIDS patient/session global key. 문장 자체가 해당 병변의 DWI 신호를 명시한다.',
++                          'supervision_unit': 'whole sequence; regional/slice mapping not provided'})
++        rows.append({'patient_id':pid, 'role':stage, 'DWI_key':key, 'global_key':global_key,
++                     'source_path':str(p), 'source_sha256':sha(p), 'native_shape':list(img.shape),
++                     'canonical_shape':list(arr.shape), 'native_affine':img.affine.tolist(), 'canonical_affine':canonical.affine.tolist(),
++                     'native_axcodes':list(nib.aff2axcodes(img.affine)), 'stored_spacing_mm':[float(x) for x in img.header.get_zooms()],
++                     'canonical_to_native_voxel':voxel_map.tolist(), 'physical_checks':checks,
++                     'sidecar_path':str(meta_path) if sidecar is not None else None, 'sidecar':sidecar,
++                     'DWI_b_value_basis':'공식 ISLES2022 record 7960856: b=1000; 3D image, no channel selection',
++                     'slice_indices':zs, 'trimmed_exact_zero_exterior_slices':list(range(0,zs[0]))+list(range(zs[-1]+1,arr.shape[2])),
++                     'volume_minmax':[lo,hi], 'images':images, 'same_observation_multiset':True,
++                     'mask':{'path':str(mask_path),'sha256':sha(mask_path),'shape':list(mask.shape),'affine':mask.affine.tolist(),
++                             'numeric_labels':labels, 'geometry_matches_DWI':bool(geometry_ok), 'used_for_input_selection':False},
++                     'new_patient_independence':'new development cases; prior global metadata access and model training exposure not excluded'})
++    assert len(set(r['source_sha256'] for r in rows)) == len(rows), '환자간 원영상 중복'
++    # 작은 pad slice의 pixel 중복은 표시하며 환자를 제거하지 않는다.
++    save(RES/'data_manifest.json', {'created_at':now(),'source_release':'ISLES2022 v2.3.1 record 7960856',
++         'use_basis':'public CC-BY-4.0 source MRI; RadGenome text MIT card', 'rows':rows, 'render':RENDER,
++         'cross_patient_raw_duplicate_count':len(rows)-len(set(r['source_sha256'] for r in rows)),
++         'rendered_pixel_unique':len(set(hashes)), 'rendered_slices':len(hashes)})
++    save(RES/'reference_locked.json', {'created_at':now(),'rows':reference,'evaluation_contract':SEMANTIC_CONTRACT})
++    for stage, rr in requests.items():
++        save(RES/'requests'/f'{stage}.json', rr)
++    save(RES/'data_gate.json', {'created_at':now(),'passed':True, 'candidates':len(rows),'eligible':len(rows),
++         'DWI_modal_report_links':0, 'explicit_global_DWI_links':len(rows),
++         'mask_geometry_matches':sum(r['mask']['geometry_matches_DWI'] for r in rows),
++         'supervision':'whole DWI sequence from explicit global DWI clauses; no slice-specific target',
++         'restriction':'global report linkage is text-grounded; clinical image truth and prior model exposure remain unverified',
++         'requests':{s:len(v) for s,v in requests.items()}, 'new_model_requests':0})
++    print(json.dumps({'patients':len(rows),'requests':{s:len(v) for s,v in requests.items()},'slices':[len(r['slice_indices']) for r in rows]}))
++
++
++if __name__ == '__main__':
++    build()
+diff --git a/i141_eval.py b/i141_eval.py
+new file mode 100644
+index 0000000..57fad71
+--- /dev/null
++++ b/i141_eval.py
+@@ -0,0 +1,132 @@
++"""사전 고정 내용 판정표의 근거 span 연결과 paired 지표를 계산한다. 임상 정답 생성기는 아니다."""
++import argparse
++from collections import Counter
++import random
++import numpy as np
++from i141_common import HERE, RES, read, save, sha, now
++from i141_spec import integrate
++import i141_run as run
++
++
++def packages():
++    records=run.verify_job(RES/'jobs/main','main')
++    patients=[x['patient_id'] for x in read(RES/'data_manifest.json')['rows'] if x['role']=='main']
++    pairs=[(pid,c) for pid in patients for c in ['S','A']]
++    random.Random(141).shuffle(pairs)
++    references={x['patient_id']:x for x in read(RES/'reference_locked.json')['rows']}
++    items,mapping=[],{}
++    for i,(pid,cond) in enumerate(pairs):
++        selected=[r for r in records if r['patient_id']==pid and r['condition']==cond]
++        package=integrate(selected)
++        qid=f'Q{i:02d}'
++        mapping[qid]={'patient_id':pid,'condition':cond}
++        items.append({'id':qid,'reference':references[pid], 'package':package,
++                      'outputs':[{'id':r['id'].split('__')[0]+f'__part{j:03d}',
++                                  'slice_indices':r['slice_indices'],'final_text':r['final_text'],'eos':r['eos'],
++                                  'boundary_status':r['boundary_status'],'raw_text':r['text_marked']}
++                                 for j,r in enumerate(sorted(selected,key=lambda x:x['slice_indices'][0]))],
++                      'n_outputs':len(selected),'truncated_outputs':sum(not r['eos'] for r in selected),
++                      'invalid_boundary_outputs':sum(r['boundary_status']=='invalid_boundary' for r in selected)})
++        # 중복 제거의 source request ID에서도 조건 라벨을 숨긴다.
++        for j,sent in enumerate(items[-1]['package']['sentences']):
++            sent['request_id']=qid+f'__sentence{j:03d}'
++    save(RES/'eval/blinded_packages.json',items)
++    save(RES/'eval/condition_mapping.json',mapping)
++    save(RES/'eval/package_provenance.json', {'created_at':now(),
++         'main_completion_sha256':sha(RES/'jobs/main/completion.json'),
++         'reference_sha256':sha(RES/'reference_locked.json'),
++         'package_sha256':sha(RES/'eval/blinded_packages.json'),
++         'blinding_scope':'condition labels removed; same assistant, not independent blinded clinician'})
++    print({'packages':len(items),'model_outputs':len(records)})
++
++
++def analyze():
++    run.verify_job(RES/'jobs/main','main')
++    packages={x['id']:x for x in read(RES/'eval/blinded_packages.json')}
++    mapping=read(RES/'eval/condition_mapping.json')
++    judgments=read(RES/'eval/judgments.json')
++    assert set(judgments)==set(packages)
++    rows=[]
++    for qid,p in packages.items():
++        j=judgments[qid]
++        refs={a['id']:a for a in p['reference']['positive_atoms']}
++        assert set(j['atoms'])==set(refs)
++        text=p['package']['raw_concatenation']
++        counts=Counter()
++        evidence=[]
++        for aid,a in j['atoms'].items():
++            assert a['state'] in ['matched','contradicted','unmentioned','unresolved']
++            counts[a['state']]+=1
++            for quote in a.get('output_quotes',[]):
++                assert quote and quote in text, '생성문 근거 없음: '+qid+' '+aid
++                evidence.append({'atom_id':aid,'reference_span':refs[aid], 'output_quote':quote,
++                                 'output_start':text.index(quote),'output_end':text.index(quote)+len(quote)})
++            assert a['state'] not in ['matched','contradicted'] or a.get('output_quotes'), '확정 판정에는 원문 근거 필요'
++        for field in ['reference_contradictions','internal_contradictions']:
++            for item in j[field]:
++                assert item['status'] in ['confirmed','unresolved']
++                for quote in item['quotes']:
++                    assert quote in text
++        n=len(refs)
++        truncated=p['truncated_outputs']>0 or p['invalid_boundary_outputs']>0
++        unknown=counts['unresolved']+(counts['unmentioned'] if truncated else 0)
++        contra=j['reference_contradictions']
++        internal=j['internal_contradictions']
++        row=dict(mapping[qid],blinded_id=qid,n_positive_atoms=n,states=dict(counts),
++                 recall=counts['matched']/n if n else None,
++                 recall_min=counts['matched']/n if n else None,
++                 recall_max=(counts['matched']+unknown)/n if n else None,
++                 reference_contradiction_min=int(any(x['status']=='confirmed' for x in contra)),
++                 reference_contradiction_max=int(bool(contra)),
++                 internal_contradiction_min=int(any(x['status']=='confirmed' for x in internal)),
++                 internal_contradiction_max=int(bool(internal)),
++                 unresolved_rate=counts['unresolved']/n if n else None,
++                 truncated_outputs=p['truncated_outputs'], n_outputs=p['n_outputs'],
++                 report_unverified_claims=j['report_unverified_claims'], evidence=evidence,
++                 judgments=j)
++        rows.append(row)
++    systems={}
++    for cond in ['S','A']:
++        rr=[r for r in rows if r['condition']==cond]
++        systems[cond]={'patients':len(rr),'recall_denominator_patients':sum(r['n_positive_atoms']>0 for r in rr),
++                       'excluded_no_positive_atoms':sum(r['n_positive_atoms']==0 for r in rr)}
++        for key in ['recall','recall_min','recall_max','reference_contradiction_min','reference_contradiction_max',
++                    'internal_contradiction_min','internal_contradiction_max','unresolved_rate']:
++            systems[cond][key]=float(np.mean([r[key] for r in rr if r[key] is not None]))
++        systems[cond]['truncation_rate']=sum(r['truncated_outputs'] for r in rr)/sum(r['n_outputs'] for r in rr)
++    delta=systems['A']['recall']-systems['S']['recall']
++    dmin=systems['A']['recall_min']-systems['S']['recall_max']
++    dmax=systems['A']['recall_max']-systems['S']['recall_min']
++    cmin=systems['A']['reference_contradiction_min']-systems['S']['reference_contradiction_max']
++    cmax=systems['A']['reference_contradiction_max']-systems['S']['reference_contradiction_min']
++    if dmin>=0.05 and cmax<=0.05:
++        decision='positive_exploration'
++    elif dmax<0.05 or cmin>0.05:
++        decision='negative_frozen_adjacent_advantage_not_established'
++    else:
++        decision='inconclusive'
++    pairs=[]
++    for pid in sorted(set(r['patient_id'] for r in rows)):
++        s=next(r for r in rows if r['patient_id']==pid and r['condition']=='S')
++        a=next(r for r in rows if r['patient_id']==pid and r['condition']=='A')
++        pairs.append({'patient_id':pid,'recall_S':s['recall'],'recall_A':a['recall'],
++                      'delta':a['recall']-s['recall'],'delta_range':[a['recall_min']-s['recall_max'],a['recall_max']-s['recall_min']]})
++    rng=np.random.default_rng(141)
++    values=np.array([p['delta'] for p in pairs])
++    bootstrap=values[rng.integers(0,len(values),size=(10000,len(values)))].mean(1)
++    report={'created_at':now(),'systems':systems,'delta_recall_A_minus_S':delta,'delta_recall_range':[dmin,dmax],
++            'delta_reference_contradiction_range':[cmin,cmax], 'paired_patients':pairs,
++            'exploratory_paired_bootstrap_95CI':np.quantile(bootstrap,[.025,.975]).tolist(),
++            'bootstrap_used_as_new_gate':False,'decision':decision,'valid_experiment':True,
++            'evaluation_scope':'explicit public DWI text agreement; assistant textual judgment, no clinical false-positive truth',
++            'provenance':{str(p):sha(p) for p in [RES/'eval/judgments.json',RES/'eval/blinded_packages.json',RES/'reference_locked.json',RES/'jobs/main/completion.json']}}
++    save(RES/'eval/per_patient.json',rows)
++    save(RES/'eval/report.json',report)
++    print({k:v for k,v in report.items() if k not in ['provenance','paired_patients']})
++
++
++if __name__=='__main__':
++    p=argparse.ArgumentParser()
++    p.add_argument('command',choices=['packages','analyze'])
++    a=p.parse_args()
++    globals()[a.command]()
+diff --git a/i141_execute.py b/i141_execute.py
+new file mode 100644
+index 0000000..3292c25
+--- /dev/null
++++ b/i141_execute.py
+@@ -0,0 +1,58 @@
++"""기술 판단 경계 후 고정 6명의 paired 본생성을 실행하고 완료까지 소유한다."""
++from collections import Counter
++import signal
++import subprocess
++import sys
++import time
++from i141_common import HERE,RES,read,save,now
++import i141_prepare as prep
++import i141_run as run
++
++
++def main():
++    gate=read(RES/'tests/technical_gate.json')
++    choice=read(RES/'tests/throughput_choice.json')
++    assert gate['passed'] is True
++    assert gate['main_max_new_tokens']==2048
++    rr=read(RES/'requests/main.json')
++    assert len(set(r['patient_id'] for r in rr))==6
++    count=Counter(r['condition'] for r in rr)
++    tech=run.verify_job(RES/'jobs/tech2048_w2','technical2048')
++    means={c:sum(r['wall_s'] for r in tech if r['condition']==c)/sum(r['condition']==c for r in tech) for c in count}
++    workers=choice['selected_workers']
++    wall_ratio=choice['w4_generation_wall_s']/choice['w2_generation_wall_s'] if workers==4 else 1.
++    weighted_wall=sum(count[c]*means[c] for c in count)/2*wall_ratio
++    save(RES/'pre_main_decision.json',{'created_at':now(),'patients':6,'requests':dict(count),'total_requests':len(rr),
++         'workers':workers,'GPU_permitted':run.allowed(),'admission_peak_mib':choice['admission_peak_mib'],
++         'max_new_tokens':2048,'estimated_generation_wall_s':weighted_wall,'estimate':True,
++         'estimated_basis':'2048 기술 출력의 조건별 평균 처리시간과 개발 병렬 처리량 비율. 대기/로딩/평가 별도.',
++         'stop_conditions':'자식 오류/OOM/입력 또는 source hash 불일치 시 중단. 고정 요청 미완료는 완료 아님.',
++         'scope_changes':'없음; 고정6명/385개 slice multiset/동일 prompt·metric 유지',
++         'resume':'동일 protocol 아래 고유 claim과 worker JSONL에 저장된 완료 요청 재생성 안 함'})
++    prep.CODE=prep.CODE+['i141_cap_control.py','i141_execute.py','i141_finish.py']
++    prep.lock('main')
++    cmd=[sys.executable,str(HERE/'i141_run.py'),'launch','--stage','main','--job',str(RES/'jobs/main'),
++         '--workers',str(workers),'--peak',str(choice['admission_peak_mib'])]
++    with (RES/'main_supervisor.log').open('xb') as f:
++        proc=subprocess.Popen(cmd,stdout=f,stderr=subprocess.STDOUT)
++        print({'main_supervisor_pid':proc.pid,'requests':len(rr),'workers':workers,
++               'estimated_generation_minutes':weighted_wall/60},flush=True)
++        try:
++            rc=proc.wait()
++        finally:
++            if proc.poll() is None:
++                proc.send_signal(signal.SIGINT)
++                try:
++                    proc.wait(timeout=60)
++                except subprocess.TimeoutExpired:
++                    proc.terminate()
++                    proc.wait()
++    save(RES/'main_exit.json',{'created_at':now(),'returncode':rc,'supervisor_pid':proc.pid})
++    assert rc==0,'본생성 오류: main_supervisor.log 확인'
++    result=run.verify_job(RES/'jobs/main','main')
++    assert len(result)==len(rr)
++    print({'generation_complete':len(result),'exit_code':rc},flush=True)
++
++
++if __name__=='__main__':
++    main()
+diff --git a/i141_finish.py b/i141_finish.py
+new file mode 100644
+index 0000000..6b37149
+--- /dev/null
++++ b/i141_finish.py
+@@ -0,0 +1,82 @@
++"""완료된 paired 출력의 독립 산술·위치/속성 분해·측정 비용과 보존 manifest를 기록한다."""
++from collections import Counter, defaultdict
++import importlib.metadata
++import json
++from pathlib import Path
++import subprocess
++import sys
++import numpy as np
++from i141_common import HERE,RES,read,save,sha,now
++import i141_run as run
++
++
++def main():
++    records=run.verify_job(RES/'jobs/main','main')
++    report=read(RES/'eval/report.json')
++    refs={r['patient_id']:r for r in read(RES/'reference_locked.json')['rows']}
++    mapping=read(RES/'eval/condition_mapping.json')
++    judgments=read(RES/'eval/judgments.json')
++    patient_values={}
++    breakdown={c:defaultdict(Counter) for c in ['S','A']}
++    for qid,j in judgments.items():
++        pid,c=mapping[qid]['patient_id'],mapping[qid]['condition']
++        atoms=refs[pid]['positive_atoms']
++        count=sum(j['atoms'][a['id']]['state']=='matched' for a in atoms)
++        patient_values[(pid,c)]=count/len(atoms)
++        for a in atoms:
++            breakdown[c][a['type']][j['atoms'][a['id']]['state']]+=1
++    delta=np.mean([patient_values[(p,'A')]-patient_values[(p,'S')] for p in sorted(refs) if (p,'S') in patient_values])
++    checks={'independent_mean_delta':abs(float(delta)-report['delta_recall_A_minus_S'])<1e-12,
++            'main_request_count':len(records)==len(read(RES/'requests/main.json')),
++            'all_6_patients':len(set(r['patient_id'] for r in records))==6,
++            'source_baseline_unchanged':subprocess.check_output(['git','rev-parse','HEAD'],text=True).strip()=='9157bb31ca641fe720bd2d5203780df82635d53d'}
++    original=read(RES/'derivation_manifest.json')
++    for p,h in original['sources'].items():
++        checks['source_unchanged_'+p]=sha(HERE/p)==h
++    row=read(RES/'protocol_lock_main.json')
++    for p,h in {**row['inputs'],**row['code'],**row['gates']}.items():
++        checks['locked_'+p]=sha(p)==h
++    assert all(checks.values())
++    save(RES/'eval/independent_verify.json',{'created_at':now(),'all_pass':True,'checks':checks,
++         'delta':float(delta),'scope':'판정표에서 독립 산술·현재 입력/소스 hash 검증. 독립 임상 의미 검증이 아님.'})
++    save(RES/'eval/attribute_breakdown.json',{c:{t:dict(v) for t,v in types.items()} for c,types in breakdown.items()})
++    cost={}
++    for c in ['S','A']:
++        rr=[r for r in records if r['condition']==c]
++        cost[c]={'requests':len(rr),'tokens':sum(r['n_tokens'] for r in rr),'eos':sum(r['eos'] for r in rr),
++                 'truncated':sum(not r['eos'] for r in rr),'invalid_boundary':sum(r['boundary_status']=='invalid_boundary' for r in rr),
++                 'request_processing_seconds_sum':sum(r['wall_s'] for r in rr),
++                 'request_latency_p50_s':float(np.median([r['wall_s'] for r in rr])),
++                 'request_latency_p95_s':float(np.quantile([r['wall_s'] for r in rr],.95)),
++                 'peak_worker_reserved_mib':max(r['peak_reserved_mib'] for r in rr)}
++    completion=read(RES/'jobs/main/completion.json')
++    attempt=completion['attempt']
++    result=read(RES/'jobs/main'/('result_'+attempt+'.json'))
++    resources=[]
++    for path in (RES/'jobs/main').glob('resources_*.jsonl'):
++        resources += [json.loads(l) for l in path.read_text().splitlines() if l.strip()]
++    peaks={g:max(int(r['used']) for event in resources for r in event['gpu'] if r['index']==g) for g in run.allowed()}
++    minfree={g:min(int(r['free']) for event in resources for r in event['gpu'] if r['index']==g) for g in run.allowed()}
++    per_worker=[read(p) for p in (RES/'jobs/main').glob('worker*_exit.json')]
++    save(RES/'eval/cost.json',{'created_at':now(),'conditions':cost,
++         'main_supervisor_wall_s':result['wall_s'],'includes_model_loading':True,
++         'worker_loading_seconds_sum':sum(x['load_s'] for x in per_worker),
++         'gpu_peak_total_used_mib':peaks,'gpu_min_free_mib':minfree,'cpu_load_max':max(e['cpu_load'][0] for e in resources),
++         'workers':len(result['returncodes']),'returncodes':result['returncodes'],
++         'resource_samples':len(resources),'scope':'이미 준비한 PNG 읽기→tensor→생성→raw 저장 및 supervisor loading. 겹치는 요청 시간 합은 GPU device-seconds가 아님.',
++         'unmeasured':'원 NIfTI 반입/전체 전처리와 내용 평가를 포함한 end-to-end latency는 직접 계측하지 않았다.',
++         'request_save_timings':{str(p):sha(p) for p in (RES/'jobs/main').glob('timing*.jsonl')}})
++    save(RES/'environment.json',{'created_at':now(),'python':sys.executable,'CUDA_VISIBLE_DEVICES':__import__('os').environ.get('CUDA_VISIBLE_DEVICES'),
++         'packages':{p:importlib.metadata.version(p) for p in ['torch','transformers','nibabel','numpy','Pillow','requests']},
++         'model_revision':'91850547d9f0b2fdd21aa7c5f4f3d1a8a52c243b','environment_changed':False})
++    files={str(p):sha(p) for p in RES.rglob('*') if p.is_file() and p.name not in ['supervisor.lock','records.lock']}
++    save(RES/'completion.json',{'created_at':now(),'status':'paired_generation_and_text_evaluation_completed',
++         'valid_experiment':True,'decision':report['decision'],'new_model_requests_main':len(records),
++         'new_training_updates':0,'new_3d_outputs':0,'files':files,
++         'checks':'actual model outputs/protocol/runtime/token equality/independent arithmetic; clinical truth outside public text unresolved',
++         'code':{str(p):sha(p) for p in HERE.glob('i141_*.py')}})
++    print({'completion_files':len(files),'main_requests':len(records),'delta':float(delta),'decision':report['decision']})
++
++
++if __name__=='__main__':
++    main()
+diff --git a/i141_judge.py b/i141_judge.py
+new file mode 100644
+index 0000000..0151760
+--- /dev/null
++++ b/i141_judge.py
+@@ -0,0 +1,139 @@
++"""생성 후 원문을 읽어 고정한 12개 package의 한정 대응표.
++
++이 파일은 임상 정답 생성기나 범용 의미 parser가 아니다. 기준은 생성 전
++i141_spec.py/reference_locked.json에 고정됐다. 아래는 사후 assistant 텍스트 판정이며
++독립 전문의 평가가 아니다. 조건명을 사용하지 않고 공개 문장과 실제 출력 span을 연결한다.
++"""
++from i141_common import RES, read, save, sha, now
++
++# atom 번호 → 원문 문장 번호. 정확한 복합 위치·좌우·속성만 matched로 둔다.
++MATCHED = {
++    'Q00': {0:[0], 1:[2], 5:[6]},
++    'Q01': {0:[58], 1:[59], 4:[58]},
++    'Q02': {0:[25], 1:[27], 4:[25]},
++    'Q03': {0:[45], 1:[47], 2:[45], 4:[56], 5:[3]},
++    'Q04': {0:[0], 1:[2]},
++    'Q05': {0:[3], 1:[5]},
++    'Q06': {0:[0], 1:[1]},
++    'Q07': {0:[0], 1:[2]},
++    'Q08': {0:[0], 1:[2]},
++    'Q09': {0:[10], 1:[12]},
++    'Q10': {0:[53], 1:[68], 4:[66], 7:[70]},
++    'Q11': {0:[8], 1:[9], 2:[44]},
++}
++UNRESOLVED = {
++    'Q00': {2:([0],'multiple foci만으로 scattered 분포를 확정하지 않음'),
++            3:([6,31],'round/spherical 형상이 patchy 기술과 같은지 미판정')},
++    'Q01': {2:([33,35],'bilateral/periventricular 분포가 scattered와 같은지 미판정'),
++            3:([61],'small focus가 punctate와 같은지 미판정'),
++            6:([68],'left thalamus를 basal ganglia region으로 옮기는 해부학 추론을 하지 않음')},
++    'Q02': {2:([33,34],'여러 lobe의 multiple foci와 scattered 대응은 미판정'),
++            3:([0],'ovoid 형상이 patchy와 같은지 미판정'),
++            7:([15,17],'periventricular에 lateral ventricle이 명시되지 않음')},
++    'Q03': {3:([4],'irregular 형상이 patchy와 같은지 미판정')},
++    'Q04': {},
++    'Q05': {},
++    'Q06': {2:([0,13],'여러 영역/symmetric hyperintensities를 scattered로 추정하지 않음'),
++            3:([83],'irregular 형상이 plaque-like와 같은지 미판정'),
++            5:([85,86],'right posterior hemisphere만으로 right occipital lobe를 추정하지 않음')},
++    'Q07': {3:([1],'irregular 형상이 patchy와 같은지 미판정')},
++    'Q08': {2:([0,1],'multiple foci를 scattered로 확정하지 않음'),
++            3:([11],'small foci를 punctate로 확정하지 않음')},
++    'Q09': {2:([10],'multiple foci를 scattered로 확정하지 않음'),
++            3:([11,38],'rounded/ill-defined 형상과 patchy 대응 미판정')},
++    'Q10': {2:([79,80],'several focal areas를 scattered로 확정하지 않음'),
++            3:([13,81],'irregular/rounded 형상과 patchy 대응 미판정')},
++    'Q11': {3:([62],'roughly circular 형상이 patchy와 같은지 미판정')},
++}
++PARTIAL = {
++    'Q03': {6:([64],'right thalamus만 기술됨. bilateral의 왼쪽 회복은 미언급'),
++            7:([140,141],'posterior/likely parietal만 기술됨. left+occipital 연결은 미언급')},
++    'Q09': {5:([13,15],'frontal/parietal만 기술됨. temporal을 포함한 전체 복합 위치는 미언급')},
++    'Q10': {5:([80],'두 lobe의 별도 병변을 frontoparietal border로 만들지 않음')},
++    'Q11': {5:([74,79],'frontal/parietal만 기술됨. temporal 포함 전체 복합 위치는 미언급')},
++}
++EXTRAS = {
++    'Q00': [0,7,25,37,49,55,56],
++    'Q01': [0,2,27,33,35,37,68],
++    'Q02': [0,1,15,32,34,42,46],
++    'Q03': [6,8,25,70,71,81,92,100,114,117],
++    'Q04': [0,22,36],
++    'Q05': [3,5,25,31],
++    'Q06': [0,2,9,13,14,33,80,82,85],
++    'Q07': [0,12,14,45,91,92],
++    'Q08': [0,1,11,22,34,35],
++    'Q09': [0,10,11,23,27,28,37,39],
++    'Q10': [4,8,9,15,16,50,58,69,76,82,114],
++    'Q11': [5,6,9,54,57,62,73,74,79,87,116,118,133,135],
++}
++INTERNAL = {
++    'Q00': [('unresolved',[25,26,28],'increased/hyperintense와 dark가 같은 묶음에서 나옴. dark의 상대 기준이 없어 확정 반대 신호로 해석하지 않음')],
++    'Q01': [('unresolved',[19,20,21],'같은 slice의 high/dark 기술. dark의 상대 기준 미확인')],
++    'Q02': [('confirmed',[0,3],'같은 5장 묶음에서 병변 존재와 brain parenchyma에 visible abnormality 없음이 함께 기술됨')],
++    'Q03': [('unresolved',[23],'dark를 high signal의 근거로 기술. 상대 밝기 기준 미확인'),
++            ('unresolved',[145],'increased signal과 appearing dark를 같은 영역에 기술. 상대 기준 미확인')],
++    'Q10': [('unresolved',[114],'increased signal과 appearing dark를 같은 영역에 기술. 상대 기준 미확인'),
++            ('unresolved',[116,118],'동일 slice에서 no abnormality와 likely lesion이 함께 있으나 양성이 hedge되어 확정 모순으로 세지 않음')],
++    'Q11': [('unresolved',[121,122,123],'동일 slice의 high/dark 기술. 상대 기준 미확인')],
++}
++
++
++def main():
++    path=RES/'eval/blinded_packages.json'
++    packages=read(path)
++    assert {x['id'] for x in packages}==set(MATCHED)==set(UNRESOLVED)
++    result={}
++    review=[]
++    for p in packages:
++        q=p['id']
++        def quotes(indices):
++            return [p['package']['sentences'][i]['text'] for i in indices]
++        row={'atoms':{},'reference_contradictions':[], 'internal_contradictions':[],
++             'report_unverified_claims':[], 'review_note':'일반 finding/signal과 구체 위치·속성을 분리한 텍스트 일치도다. 같은 실제 병변의 시각적 회복이나 임상 정확도를 인증하지 않음.'}
++        for i,atom in enumerate(p['reference']['positive_atoms']):
++            if i in MATCHED[q]:
++                value={'state':'matched','output_quotes':quotes(MATCHED[q][i]),
++                       'reason':'공개 항목을 명시적으로 기술. 위치의 요구 범위/좌우가 충족됨. generic 항목은 위치 회복과 별도.'}
++            elif i in UNRESOLVED[q]:
++                inds,reason=UNRESOLVED[q][i]
++                value={'state':'unresolved','output_quotes':quotes(inds),'reason':reason}
++            elif i in PARTIAL.get(q,{}):
++                inds,reason=PARTIAL[q][i]
++                value={'state':'unmentioned','output_quotes':quotes(inds),'reason':reason}
++            else:
++                value={'state':'unmentioned','output_quotes':[],'reason':'해당 완전한 소견/위치/속성이 기술되지 않음. 미언급을 임상 부재로 바꾸지 않음.'}
++            value['reference_span']={k:atom[k] for k in ['quote','start','end']}
++            row['atoms'][atom['id']]=value
++        for status,indices,reason in INTERNAL.get(q,[]):
++            qs=quotes(indices)
++            same=[r for r in p['outputs'] if all(s in r['final_text'] for s in qs)]
++            assert same,'서로 다른 slice 범위를 내부 모순으로 합치지 않는다: '+q
++            row['internal_contradictions'].append({'status':status,'quotes':qs,'reason':reason,
++                'scopes':[{'id':r['id'],'slice_indices':r['slice_indices']} for r in same]})
++        for i in EXTRAS[q]:
++            text=quotes([i])[0]
++            row['report_unverified_claims'].append({'quote':text,'sentence_index':i,
++                'status':'report_unverified_or_input_unsupported',
++                'reason':'reference에 없는 위치/형상·원인/병기·확산 제한·제공되지 않은 sequence 관찰 또는 비판독 문구의 원문 예시. 임상 허위 판정 아님.'})
++        # 위 예시는 독특한 추가 위치·속성·원인 기술을 묶은 것이다. 전체 임상 FP 수가 아니다.
++        row['extra_claim_coverage']='원문 기반 대표 추가 기술 목록. 반복과 동의어를 임상 FP로 전수 계산하지 않음.'
++        row['reference_contradiction_note']='각 출력의 정상/부재 기술은 해당 slice/묶음 범위. 다른 범위의 양성 reference와 자동 충돌로 세지 않음. 추가 위치를 reference 미언급만으로 반박하지 않음.'
++        result[q]=row
++        review.append({'package':q,'reviewed_exact_deduplicated_sentences':len(p['package']['sentences']),
++                       'same_scope_conflicts_checked':len(row['internal_contradictions']),
++                       'reference_atoms':len(row['atoms']),'conditional_clinical_truth_invented':False})
++    for q,row in result.items():
++        package=next(p for p in packages if p['id']==q)
++        text=package['package']['raw_concatenation']
++        assert all(v['quote'] in text for v in row['report_unverified_claims'])
++    save(RES/'eval/judgments.json',result)
++    save(RES/'eval/assistant_review_record.json',{'created_at':now(),'packages_sha256':sha(path),
++         'reference_sha256':sha(RES/'reference_locked.json'),'adjudication_source_sha256':sha(__file__),
++         'post_generation':True,'independent_clinician':False,'rules_changed_after_generation':False,
++         'scope':'고정 reference atom과 소견 집합 대응. unclear 동의어/범위는 unresolved. 추가 임상 정답 생성 없음.',
++         'reviews':review})
++    print({'judged_packages':len(result),'source_span_quotes_checked':True})
++
++
++if __name__=='__main__':
++    main()
+diff --git a/i141_preflight.py b/i141_preflight.py
+new file mode 100644
+index 0000000..cf7d220
+--- /dev/null
++++ b/i141_preflight.py
+@@ -0,0 +1,161 @@
++"""iter_141 고정 ISLES22 후보의 공식 자료를 확인하고 원본을 보존한다."""
++import argparse
++from datetime import datetime, timezone
++import hashlib
++import json
++import os
++from pathlib import Path
++import sys
++import time
++
++ROOT = Path(__file__).resolve().parent
++OUT = ROOT / 'results/iter_141'
++REV = '0348ba42fad134da57b50e736ba858a8e73eb086'
++IDS = ['sub-strokecase' + x for x in ['0001', '0003', '0004', '0006', '0007', '0008', '0009', '0010']]
++
++
++def now():
++    return datetime.now(timezone.utc).isoformat()
++
++
++def sha(p):
++    h = hashlib.sha256()
++    with Path(p).open('rb') as f:
++        for b in iter(lambda: f.read(4 << 20), b''):
++            h.update(b)
++    return h.hexdigest()
++
++
++def save(p, obj):
++    with Path(p).open('x') as f:
++        json.dump(obj, f, ensure_ascii=False, indent=2, allow_nan=False)
++        f.write('\n')
++        f.flush()
++        os.fsync(f.fileno())
++
++
++def fetch():
++    import requests
++    if OUT.exists():
++        raise FileExistsError('기존 결과 보존: ' + str(OUT))
++    OUT.mkdir(parents=True)
++    official = OUT / 'official'
++    official.mkdir()
++    session = requests.Session()
++    session.trust_env = False
++    records = []
++    for name in ['ISLES22/modal_wise_finding.json', 'ISLES22/global_finding.json',
++                 'ISLES22/impression.json', 'train_val_test_split.json', 'README.md']:
++        url = f'https://huggingface.co/datasets/JiayuLei/RadGenome-Brain_MRI/resolve/{REV}/{name}'
++        dest = official / name
++        dest.parent.mkdir(parents=True, exist_ok=True)
++        start = now()
++        r = session.get(url, timeout=60)
++        rec = {'path': name, 'requested_at': start, 'url': url, 'final_url': r.url,
++               'status_code': r.status_code, 'bytes': len(r.content),
++               'response_sha256': hashlib.sha256(r.content).hexdigest()}
++        records.append(rec)
++        if r.status_code == 200:
++            with dest.open('xb') as f:
++                f.write(r.content)
++        else:
++            with (official / (name.replace('/', '__') + '.error.txt')).open('x') as f:
++                f.write(r.text)
++    save(OUT / 'fetch_manifest.json', {'created_at': now(), 'revision': REV, 'records': records})
++    print(json.dumps({'downloads': len(records), 'statuses': [x['status_code'] for x in records]}))
++
++
++def inspect():
++    official = OUT / 'official'
++    split = json.loads((official / 'train_val_test_split.json').read_text())
++    docs = {name: json.loads((official / f'ISLES22/{name}.json').read_text())
++            for name in ['modal_wise_finding', 'global_finding', 'impression']}
++    train = split['train']
++    rows = []
++    for pid in IDS:
++        # 공식 key를 그대로 보존하며 문자열 유사 연결은 하지 않는다.
++        keys = [k for k in train if k.startswith(pid + '_') or k.startswith(pid + '-') or k == pid]
++        row = {'patient_id': pid, 'role': 'technical' if pid in IDS[:2] else 'exploration',
++               'train_keys': keys, 'documents': {}}
++        for name, d in docs.items():
++            matches = {k: v for k, v in d.items() if k.startswith(pid + '_') or k.startswith(pid + '-') or k == pid}
++            row['documents'][name] = matches
++        rows.append(row)
++    result = {'created_at': now(), 'schema': {n: {'type': type(d).__name__, 'count': len(d),
++              'value_types': sorted(set(type(v).__name__ for v in d.values()))} for n, d in docs.items()},
++              'candidate_order': IDS, 'rows': rows}
++    save(OUT / 'report_schema_candidates.json', result)
++    print(json.dumps(result, ensure_ascii=False, indent=2))
++
++
++def archive():
++    import requests
++    import shutil
++    import zipfile
++    session = requests.Session()
++    session.trust_env = False
++    meta_path = ROOT / 'results/iter_140/preflight_a2/isles_zenodo_metadata.json'
++    prior = json.loads(meta_path.read_text())
++    meta = json.loads(prior['body'])
++    info = next(f for f in meta['files'] if f['key'] == 'ISLES-2022.zip')
++    dest = OUT / 'official/ISLES-2022.zip'
++    if dest.exists():
++        raise FileExistsError('기존 archive 보존')
++    assert shutil.disk_usage(OUT).free > info['size'] + 2 * 1024 ** 3
++    started = time.monotonic()
++    url = info['links']['self']
++    response = session.get(url, stream=True, timeout=(30, 120))
++    response.raise_for_status()
++    md5 = hashlib.md5()
++    count = 0
++    with dest.open('xb') as f:
++        for b in response.iter_content(4 << 20):
++            f.write(b)
++            md5.update(b)
++            count += len(b)
++        f.flush()
++        os.fsync(f.fileno())
++    record = {'created_at': now(), 'metadata_path': str(meta_path), 'metadata_sha256': sha(meta_path),
++              'url': url, 'final_url': response.url, 'status_code': response.status_code,
++              'bytes': count, 'expected_bytes': info['size'], 'md5': md5.hexdigest(),
++              'expected_checksum': info['checksum'], 'sha256': sha(dest),
++              'elapsed_seconds': time.monotonic() - started}
++    save(OUT / 'archive_download.json', record)
++    assert count == info['size'] and 'md5:' + md5.hexdigest() == info['checksum']
++    selected = []
++    with zipfile.ZipFile(dest) as z:
++        catalog = [{'name': i.filename, 'bytes': i.file_size, 'compressed_bytes': i.compress_size,
++                    'crc': i.CRC} for i in z.infolist()]
++        save(OUT / 'archive_catalog.json', catalog)
++        for i in z.infolist():
++            parts = Path(i.filename).parts
++            if not (any(pid in parts for pid in IDS) or Path(i.filename).name in
++                    ['dataset_description.json', 'README', 'README.md', 'participants.tsv']):
++                continue
++            if not (i.filename.endswith(('_dwi.nii.gz', '_dwi.json', '_msk.nii.gz')) or
++                    Path(i.filename).name in ['dataset_description.json', 'README', 'README.md', 'participants.tsv']):
++                continue
++            assert not Path(i.filename).is_absolute() and '..' not in parts
++            target = OUT / 'data' / i.filename
++            assert target.resolve().is_relative_to((OUT / 'data').resolve())
++            target.parent.mkdir(parents=True, exist_ok=True)
++            with z.open(i) as source, target.open('xb') as f:
++                shutil.copyfileobj(source, f)
++            selected.append({'member': i.filename, 'path': str(target), 'bytes': i.file_size,
++                             'sha256': sha(target)})
++    save(OUT / 'extraction_manifest.json', {'created_at': now(), 'files': selected,
++         'archive_sha256': record['sha256'], 'total_selected_bytes': sum(x['bytes'] for x in selected)})
++    print(json.dumps({'archive_bytes': count, 'selected_files': len(selected),
++                      'elapsed_seconds': record['elapsed_seconds']}))
++
++
++if __name__ == '__main__':
++    p = argparse.ArgumentParser()
++    p.add_argument('stage', choices=['fetch', 'inspect', 'archive'])
++    args = p.parse_args()
++    if args.stage == 'fetch':
++        fetch()
++    elif args.stage == 'inspect':
++        inspect()
++    else:
++        archive()
+diff --git a/i141_prepare.py b/i141_prepare.py
+new file mode 100644
+index 0000000..01d77c0
+--- /dev/null
++++ b/i141_prepare.py
+@@ -0,0 +1,91 @@
++"""관측·reference·평가 규약과 실제 코드 digest를 모델 출력 전에 잠근다."""
++import argparse
++from pathlib import Path
++import subprocess
++import sys
++import nibabel as nib
++import numpy as np
++from PIL import Image, ImageDraw
++from transformers import AutoProcessor
++from i141_common import HERE, RES, read, save, sha, now
++from i141_spec import BASE_CONFIG, START_TOKEN, END_TOKEN, SEMANTIC_CONTRACT
++
++CODE = ['i141_common.py', 'i141_spec.py', 'i141_run.py', 'i141_data.py', 'i141_prepare.py', 'i141_tech.py', 'i141_eval.py']
++MODEL = HERE.parent / 'hf_cache/models--google--medgemma-1.5-4b-it/snapshots' / BASE_CONFIG['revision']
++
++
++def prepare():
++    assert read(RES/'data_gate.json')['passed'] is True
++    full = read(RES/'requests/technical.json')
++    selected = []
++    for pid in [x['patient_id'] for x in read(RES/'data_manifest.json')['rows'][:2]]:
++        rows = [r for r in full if r['patient_id'] == pid]
++        for condition in ['S','A']:
++            rr = [r for r in rows if r['condition']==condition]
++            for r in [rr[len(rr)//2], rr[-1]]:
++                if r not in selected:
++                    selected.append(r)
++    save(RES/'requests/technical_pilot.json', selected)
++    proc = AutoProcessor.from_pretrained(MODEL, local_files_only=True)
++    ids = {'start_id':proc.tokenizer.convert_tokens_to_ids(START_TOKEN),
++           'end_id':proc.tokenizer.convert_tokens_to_ids(END_TOKEN)}
++    assert proc.tokenizer.convert_ids_to_tokens(ids['start_id'])==START_TOKEN
++    assert proc.tokenizer.convert_ids_to_tokens(ids['end_id'])==END_TOKEN
++    save(RES/'tests/boundary_check.json', {'created_at':now(),'passed':True,'ids':ids,'tokenizer_files':{
++         str(p):sha(p) for p in MODEL.iterdir() if p.is_file() and ('token' in p.name or 'processor' in p.name)}})
++    baseline = read(HERE.parent/'agent/runs/iter_141/code_baseline.json')
++    save(RES/'derivation_manifest.json', {'created_at':now(),'source_commit':'9157bb31ca641fe720bd2d5203780df82635d53d',
++         'sources':{p:sha(HERE/p) for p in ['i136_run.py','i136_common.py','i136_spec.py']},
++         'reuse_manifest':read(HERE.parent/'agent/runs/iter_141/reuse_manifest.json'),
++         'reused_scope':'hash/claims/lock/model loading/token boundary only; former CLI paths/presence parser unused',
++         'source_baseline_path':str(HERE.parent/'agent/runs/iter_141/code_baseline.json')})
++    # 대표 native mask overlay는 입력이 아닌 감사 전용 파일이다.
++    sheet = Image.new('RGB',(768,512))
++    draw = ImageDraw.Draw(sheet)
++    for i,row in enumerate(read(RES/'data_manifest.json')['rows'][:2]):
++        mask = np.asanyarray(nib.as_closest_canonical(nib.load(row['mask']['path'])).dataobj)
++        z = int(np.argmax(np.sum(mask>0,axis=(0,1))))
++        iminfo = next(x for x in row['images'] if x['canonical_z']==z)
++        im = Image.open(iminfo['path']).convert('RGB')
++        overlay = im.copy()
++        plane = np.flip((mask[:,:,z]>0).T,(0,1)).astype('uint8')*255
++        plane = Image.fromarray(plane).resize((256,256),Image.Resampling.NEAREST)
++        red = Image.new('RGB',(256,256),(255,0,0))
++        overlay = Image.composite(Image.blend(im,red,0.4),im,plane)
++        sheet.paste(im,(0,i*256)); sheet.paste(overlay,(256,i*256))
++        draw.text((520,i*256+20),row['patient_id']+' z'+str(z),fill='white')
++    sheet.save(RES/'tests/DWI_mask_audit.png')
++    print({'technical_requests':len(selected),'image_counts':[len(x['images']) for x in selected]})
++
++
++def lock(stage):
++    from i141_run import request_file, config_for
++    config = config_for(stage)
++    inputs = [RES/'data_manifest.json', RES/'reference_locked.json', RES/'data_gate.json',
++              RES/'selected_download_complete.json', RES/'range_catalog.json',request_file(stage),
++              RES/'tests/boundary_check.json', HERE.parent/'agent/runs/iter_141/plan.json']
++    inputs.extend(RES/'official'/x for x in ['ISLES22/global_finding.json','ISLES22/modal_wise_finding.json','train_val_test_split.json'])
++    for row in read(RES/'data_manifest.json')['rows']:
++        inputs.append(Path(row['source_path']))
++        inputs.append(Path(row['mask']['path']))
++        inputs.extend(Path(x['path']) for x in row['images'])
++    gates = [RES/'data_gate.json',RES/'tests/boundary_check.json']
++    if stage=='main':
++        gates += [RES/'tests/technical_gate.json']
++        inputs += [RES/'tests/runtime_checks.json',RES/'tests/throughput_choice.json']
++    models = {str(p):{'bytes':p.stat().st_size,'sha256':sha(p)} for p in MODEL.iterdir() if p.is_file()}
++    proto = {'created_at':now(),'stage':stage,'config':config,'evaluation_contract':SEMANTIC_CONTRACT,
++             'inputs':{str(p):sha(p) for p in inputs},'code':{str(HERE/p):sha(HERE/p) for p in CODE},
++             'gates':{str(p):sha(p) for p in gates},'model_files':models,
++             'scientific_rules': 'iter_141 plan unchanged; global DWI clauses explicitly linked before generation'}
++    path = RES/f'protocol_lock_{stage}.json'
++    save(path,proto)
++    print({'lock_created_at':proto['created_at'],'sha256':sha(path),'stage':stage})
++
++
++if __name__=='__main__':
++    parser=argparse.ArgumentParser()
++    parser.add_argument('command',choices=['prepare','lock'])
++    parser.add_argument('--stage',choices=['technical','technical2048','main'],default='technical')
++    args=parser.parse_args()
++    prepare() if args.command=='prepare' else lock(args.stage)
+diff --git a/i141_run.py b/i141_run.py
+new file mode 100644
+index 0000000..dc1d95a
+--- /dev/null
++++ b/i141_run.py
+@@ -0,0 +1,280 @@
++"""iter_141 자유 소견 실행기. i136_run.py의 hash·claims·모델 경로를 파생.
++1–5장 자유 소견, 동일 관측 provenance, 공동 시작 barrier, worker당 여유를 검사한다.
++출처 commit 9157bb31ca641fe720bd2d5203780df82635d53d. 과거 presence parser 미사용.
++"""
++import argparse, os, sys, time, json, fcntl, subprocess
++from pathlib import Path
++from i141_common import RES, read, save, sha, digest, now
++from i141_spec import BASE_CONFIG, TOKENS, STAGES, FORBIDDEN_IN_PROMPT, START_TOKEN, END_TOKEN, split_final
++
++MODEL = Path(__file__).resolve().parent.parent / 'hf_cache/models--google--medgemma-1.5-4b-it/snapshots' / BASE_CONFIG['revision']
++MARGIN_MIB = 2048
++def protocol_path(stage, new=False):
++    return RES / ('protocol_lock_' + stage + '.json')
++def request_file(stage):
++    return RES / 'requests' / ('technical_pilot.json' if stage.startswith('technical') else 'main.json')
++
++
++def config_for(stage):
++    if stage in TOKENS: n = TOKENS[stage]
++    else:
++        g = read(RES / 'tests/technical_gate.json'); assert g.get('passed') is True, 'technical gate not passed'; n = g['main_max_new_tokens']
++    return dict(BASE_CONFIG, max_new_tokens=n)
++
++
++def boundary_ids(tok):
++    """tokenizer의 실제 mapping에서 thought 표식 id를 읽고 잠긴 tests/boundary_check.json과 일치해야 한다 (ID 상수 가정 금지)."""
++    ids = dict(start_id=tok.convert_tokens_to_ids(START_TOKEN), end_id=tok.convert_tokens_to_ids(END_TOKEN))
++    assert tok.convert_ids_to_tokens(ids['start_id']) == START_TOKEN and tok.convert_ids_to_tokens(ids['end_id']) == END_TOKEN
++    locked = read(RES / 'tests/boundary_check.json')
++    assert locked['passed'] is True and locked['ids'] == ids, 'boundary ids differ from locked check'
++    return ids
++
++
++def smi():
++    s = subprocess.check_output(['nvidia-smi', '--query-gpu=index,uuid,memory.total,memory.used,memory.free,utilization.gpu', '--format=csv,noheader,nounits'], text=True)
++    return [dict(zip(['index', 'uuid', 'total', 'used', 'free', 'utilization'], [x.strip() for x in line.split(',')])) for line in s.strip().splitlines()]
++
++
++def allowed():
++    raw = os.environ.get('CUDA_VISIBLE_DEVICES')
++    if raw is None: raise RuntimeError('CUDA_VISIBLE_DEVICES must be explicit')
++    ids = [i.strip() for i in raw.split(',')]; assert ids and all(i.isdigit() for i in ids)
++    assert set(ids) <= {r['index'] for r in smi()}
++    return ids
++
++
++def verify_protocol(stage, models=False):
++    """launch·worker 모두 호출. code·gates·inputs를 항상 전체 검사. main은 technical gate가 protocol에 잠겨 있고 passed=True여야 한다."""
++    lock = read(protocol_path(stage)); cfg = config_for(stage)
++    assert lock['config'] == cfg and lock['stage'] == stage, 'config/stage mismatch'
++    for p, h in {**lock['code'], **lock['gates'], **lock['inputs']}.items():
++        if sha(p) != h: raise ValueError('protocol mismatch: ' + p)
++    for p, r in lock['model_files'].items():
++        assert Path(p).stat().st_size == r['bytes']
++        if models and sha(p) != r['sha256']: raise ValueError('model mismatch')
++    if stage == 'main':
++        gp = str(RES / 'tests/technical_gate.json'); assert gp in lock['gates'], 'technical gate not locked'
++        assert read(gp).get('passed') is True
++    return sha(protocol_path(stage))
++
++
++def requests(stage, path=None):
++    path = path or request_file(stage); rr = read(path); ids = [r['id'] for r in rr]; assert len(set(ids)) == len(ids)
++    for r in rr:
++        assert digest({k: v for k, v in r.items() if k != 'request_digest'}) == r['request_digest']
++        assert r['kind'] == 'findings' and 1 <= len(r['images']) == len(r['roles']) <= 5
++        for im in r['images']: assert sha(im['path']) == im['sha256']
++        assert not any(s in r['prompt'] for s in FORBIDDEN_IN_PROMPT)
++    return rr
++
++
++def load_records(job, repair=False):
++    fd = os.open(Path(job) / 'records.lock', os.O_CREAT | os.O_RDWR, 0o600)
++    fcntl.flock(fd, fcntl.LOCK_EX if repair else fcntl.LOCK_SH)
++    try: return _load_records(job, repair)
++    finally: os.close(fd)
++
++
++def _load_records(job, repair=False):
++    records = []
++    for p in sorted(Path(job).glob('worker*.jsonl')):
++        raw = p.read_bytes(); lines = raw.splitlines(keepends=True); good = 0
++        for i, line in enumerate(lines):
++            try:
++                if not line.endswith(b'\n'): raise ValueError('uncommitted tail')
++                r = json.loads(line)
++            except Exception:
++                if i != len(lines) - 1 or not repair: raise ValueError('corrupt JSONL: ' + str(p))
++                save(p.with_name(p.name + '.tail_' + str(time.time_ns()) + '.json'), dict(bytes_hex=raw[good:].hex(), source_sha256=sha(p), reason='last uncommitted row'))
++                with open(p, 'r+b') as f: f.truncate(good); f.flush(); os.fsync(f.fileno())
++                break
++            assert r['record_digest'] == digest({k: v for k, v in r.items() if k != 'record_digest'})
++            records.append(r); good += len(line)
++    assert len({r['id'] for r in records}) == len(records), 'duplicate result'
++    return records
++
++
++def check_records(records, rr, proto, cfg):
++    expected = {r['id']: r for r in rr}
++    for r in records:
++        req = expected[r['id']]   # 요청 밖 id는 KeyError
++        assert r['request_digest'] == req['request_digest'] and r['protocol_sha256'] == proto and r['config_digest'] == digest(cfg)
++        assert r['image_hashes'] == [im['sha256'] for im in req['images']]
++
++
++def verify_job(job, stage, complete=True):
++    proto = verify_protocol(stage); rr = requests(stage); cfg = config_for(stage); rec = load_records(job); check_records(rec, rr, proto, cfg)
++    if complete:
++        c = read(Path(job) / 'completion.json'); assert c['n_records'] == len(rr) == len(rec) and c['protocol_sha256'] == proto and c['requests_sha256'] == sha(request_file(stage))
++        assert c['config'] == cfg and all(x == 0 for x in c['returncodes'])
++        assert {r['id'] for r in rec} == {r['id'] for r in rr}
++        assert all(sha(p) == h for p, h in c['files'].items()) and set(c['files']) == {str(p) for p in Path(job).glob('worker*.jsonl')}
++    return rec
++
++
++def messages(req):
++    from PIL import Image
++    content = [dict(type='text', text=req['prompt'])]
++    for n, im in enumerate(req['images']):   # v2: 'Image n:' 라벨 텍스트 제거 (첫 기술 실행에서 모델이 라벨을 첫 줄에 따라 써 형식 오류 유발; 정답 내용과 무관한 형식 수정)
++        content.append(dict(type='image', image=Image.open(im['path']).convert('RGB')))
++    return [dict(role='user', content=content)]
++
++
++def input_tensor(proc, req):
++    return proc.apply_chat_template(messages(req), add_generation_prompt=True, tokenize=True, return_dict=True, return_tensors='pt')
++
++
++def admission(gpu, peak, reserved_others=0):
++    """worker 시작 직전: 해당 물리 GPU의 실제 free에서 이미 기동한 worker의 예약(peak+margin)을 이중 계산 없이 반영한다.
++    (이미 로딩을 마친 worker의 점유는 nvidia-smi free에 이미 반영되므로 reserved_others는 로딩 중인 worker용)"""
++    row = next(r for r in smi() if r['index'] == gpu); free = int(row['free'])
++    if free - reserved_others < peak + MARGIN_MIB: raise RuntimeError('admission gpu%s: free %d - reserved %d < %d' % (gpu, free, reserved_others, peak + MARGIN_MIB))
++    return dict(gpu=gpu, uuid=row['uuid'], free=free, need=peak + MARGIN_MIB)
++
++
++def worker(args):
++    assert args.lock_fd is not None
++    job = Path(args.job); st = os.fstat(args.lock_fd); lp = job / 'supervisor.lock'
++    assert st.st_ino == lp.stat().st_ino, 'lock fd is not job supervisor.lock'
++    probe = os.open(lp, os.O_RDWR)
++    try: fcntl.flock(probe, fcntl.LOCK_EX | fcntl.LOCK_NB); raise RuntimeError('supervisor flock not held')
++    except BlockingIOError: pass
++    finally: os.close(probe)
++    proto = verify_protocol(args.stage, models=False); cfg = config_for(args.stage); rr = requests(args.stage); claims = job / 'claims'
++    import torch, numpy as np
++    from transformers import AutoProcessor, AutoModelForImageTextToText
++    torch.manual_seed(cfg['seed']); np.random.seed(cfg['seed']); torch.set_num_threads(4)
++    proc = AutoProcessor.from_pretrained(MODEL, local_files_only=True)
++    bid = boundary_ids(proc.tokenizer)
++    adm = admission(os.environ['CUDA_VISIBLE_DEVICES'], args.peak)   # 직접 진입도 admission 통과 필요 (launcher는 사전 예약 기록)
++    t_load = time.monotonic()
++    model = AutoModelForImageTextToText.from_pretrained(MODEL, local_files_only=True, dtype=torch.bfloat16, device_map={'': 'cuda:0'}, attn_implementation='sdpa').eval()
++    load_s = time.monotonic() - t_load
++    (job / ('worker%s_%s.ready' % (args.worker, args.attempt))).write_text(now())
++    while not (job / ('start_' + args.attempt + '.json')).exists(): time.sleep(0.2)
++    done = {r['id'] for r in load_records(job)}; start = time.monotonic(); count = 0
++    out = job / ('worker%s_%s.jsonl' % (args.worker, args.attempt))
++    with open(out, 'xb') as f:
++        while True:
++            req = None
++            for cand in rr:
++                if cand['id'] in done: continue
++                p = claims / (cand['id'] + '.json')
++                try: fd = os.open(p, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600)
++                except FileExistsError: continue
++                with os.fdopen(fd, 'w') as c: json.dump(dict(pid=os.getpid(), worker=args.worker, request_digest=cand['request_digest']), c)
++                current = {r['id'] for r in load_records(job)}
++                if cand['id'] in current: p.unlink(); done.update(current); continue
++                req = cand; break
++            if req is None: break
++            torch.cuda.reset_peak_memory_stats(); t = time.monotonic()
++            inputs = input_tensor(proc, req).to(model.device, dtype=torch.bfloat16)
++            input_len = inputs['input_ids'].shape[-1]
++            with torch.inference_mode(): generated = model.generate(**inputs, max_new_tokens=cfg['max_new_tokens'], do_sample=False)
++            torch.cuda.synchronize(); elapsed = time.monotonic() - t
++            tokens = generated[0, input_len:].tolist(); eosids = model.generation_config.eos_token_id; eosids = [eosids] if isinstance(eosids, int) else eosids
++            stop = next((n + 1 for n, v in enumerate(tokens) if v in eosids), len(tokens)); tokens = tokens[:stop]
++            status, fin = split_final(tokens, bid['start_id'], bid['end_id']); text = proc.decode(tokens, skip_special_tokens=True)
++            rec = dict(id=req['id'], kind=req['kind'], patient_id=req['patient_id'], condition=req['condition'], slice_indices=req['slice_indices'], request_digest=req['request_digest'], protocol_sha256=proto, config_digest=digest(cfg),
++                       image_hashes=[im['sha256'] for im in req['images']], text=text, text_marked=proc.decode(tokens, skip_special_tokens=False), tokens=tokens, n_tokens=len(tokens),
++                       boundary_status=status, boundary_ids=bid, final_text=proc.decode(fin, skip_special_tokens=True), raw_first_line=(text.strip().splitlines() or [''])[0],
++                       eos=bool(tokens and tokens[-1] in eosids), wall_s=elapsed, input_len=input_len, n_image_tokens=int((inputs['input_ids'] == model.config.image_token_id).sum()) if hasattr(model.config, 'image_token_id') else None,
++                       peak_allocated_mib=torch.cuda.max_memory_allocated() / 1024 ** 2, peak_reserved_mib=torch.cuda.max_memory_reserved() / 1024 ** 2,
++                       worker=args.worker, gpu=os.environ['CUDA_VISIBLE_DEVICES'], completed_at=now())
++            rec['record_digest'] = digest(rec)
++            recordfd = os.open(job / 'records.lock', os.O_CREAT | os.O_RDWR, 0o600); fcntl.flock(recordfd, fcntl.LOCK_EX)
++            try: f.write((json.dumps(rec, sort_keys=True) + '\n').encode()); f.flush(); os.fsync(f.fileno())
++            finally: os.close(recordfd)
++            with open(job / ('timing_w%s_%s.jsonl' % (args.worker, args.attempt)), 'a') as tf: tf.write(json.dumps(dict(id=req['id'], read_to_saved_s=time.monotonic() - t)) + '\n'); tf.flush(); os.fsync(tf.fileno())
++            done.add(req['id']); count += 1; (claims / (req['id'] + '.json')).unlink()
++            del inputs, generated
++            if args.limit and count >= args.limit: break
++    save(job / ('worker%s_%s_exit.json' % (args.worker, args.attempt)), dict(completed=count, wall_s=time.monotonic() - start, load_s=load_s, returncode=0, admission=adm))
++
++
++def _diskstats():
++    out = {}
++    for l in Path('/proc/diskstats').read_text().splitlines():
++        x = l.split()
++        if x[2] in ('sda', 'sdb'): out[x[2]] = dict(read_sectors=int(x[5]), write_sectors=int(x[9]))
++    return out
++
++
++def launch(args):
++    stage = args.stage; proto = verify_protocol(stage, models=True); cfg = config_for(stage); rr = requests(stage); job = Path(args.job); job.mkdir(parents=True, exist_ok=True)
++    fd = os.open(job / 'supervisor.lock', os.O_CREAT | os.O_RDWR, 0o600)
++    try: fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
++    except BlockingIOError: os.close(fd); raise RuntimeError('active supervisor/children; refuse launch')
++    children = []; logs = []; started = time.monotonic()
++    try:
++        if (job / 'completion.json').exists(): verify_job(job, stage); print('검증된 완료 재사용'); return
++        existing = load_records(job, repair=True); check_records(existing, rr, proto, cfg)
++        (job / 'claims').mkdir(exist_ok=True)
++        stale = list((job / 'claims').glob('*.json'))
++        if stale:
++            save(job / ('stale_claims_%d.json' % time.time_ns()), {str(p): read(p) for p in stale})
++            for p in stale: p.unlink()
++        attempt = str(time.time_ns()); ids = allowed(); free = {r['index']: int(r['free']) for r in smi()}; ids.sort(key=lambda g: -free[g])
++        mapping = [ids[i % len(ids)] for i in range(args.workers)]
++        for g in ids:   # 사전 admission (전체 동시 worker 합계)
++            required = mapping.count(g) * (args.peak + MARGIN_MIB)
++            if free[g] < required: raise RuntimeError('memory admission %s: free %d < %d' % (g, free[g], required))
++        save(job / ('launch_%s.json' % attempt), dict(created_at=now(), stage=stage, requests_sha256=sha(request_file(stage)), protocol_sha256=proto, config=cfg, mapping=mapping,
++                                                      allowed_ids=ids, gpu_uuid={r['index']: r['uuid'] for r in smi()}, memory_before=smi(), estimated_peak_mib=args.peak, worker_margin_mib=MARGIN_MIB, existing=len(existing)))
++        io0 = _diskstats(); t_start = time.monotonic()
++        for i, gpu in enumerate(mapping):
++            admission(gpu, args.peak, reserved_others=sum(1 for j, c in enumerate(children) if mapping[j] == gpu and c.poll() is None) * MARGIN_MIB)
++            env = dict(os.environ, CUDA_VISIBLE_DEVICES=gpu, TOKENIZERS_PARALLELISM='false', OMP_NUM_THREADS='4', HF_HUB_OFFLINE='1')
++            log = open(job / ('worker%d_%s.log' % (i, attempt)), 'xb'); logs.append(log)
++            cmd = [sys.executable, str(Path(__file__).resolve()), 'worker', '--job', str(job), '--stage', stage, '--worker', str(i), '--attempt', attempt, '--lock-fd', str(fd),
++                   '--limit', str(args.limit), '--peak', str(args.peak)]
++            children.append(subprocess.Popen(cmd, env=env, stdout=log, stderr=subprocess.STDOUT, pass_fds=(fd,)))
++            ready = job / ('worker%d_%s.ready' % (i, attempt)); t0 = time.monotonic()   # 다음 worker 시작 전 로딩 완료 대기(메모리 재확인 목적)
++            while not ready.exists():
++                if children[-1].poll() is not None: raise RuntimeError('worker %d exited before ready: rc=%s' % (i, children[-1].returncode))
++                if time.monotonic() - t0 > 900: raise RuntimeError('worker ready timeout')
++                time.sleep(2)
++        save(job / ('start_' + attempt + '.json'), dict(created_at=now()))
++        with open(job / ('resources_%s.jsonl' % attempt), 'x') as resources:
++            while any(c.poll() is None for c in children):
++                resources.write(json.dumps(dict(time=now(), gpu=smi(), cpu_load=os.getloadavg(), memory=Path('/proc/meminfo').read_text().splitlines()[:3], disk=_diskstats())) + '\n'); resources.flush()
++                if any(c.poll() not in [None, 0] for c in children):
++                    for c in children:
++                        if c.poll() is None: c.terminate()
++                    break
++                time.sleep(5)
++        rc = [c.wait() for c in children]; rec = load_records(job); check_records(rec, rr, proto, cfg)
++        save(job / ('result_%s.json' % attempt), dict(returncodes=rc, n_records=len(rec), n_expected=len(rr), wall_s=time.monotonic() - started, process_wall_s=time.monotonic() - t_start,
++                                                      disk_io_start=io0, disk_io_end=_diskstats(), resources=str(job / ('resources_%s.jsonl' % attempt))))
++        if any(rc): raise RuntimeError('child failed: ' + str(rc))
++        if len(rec) == len(rr):
++            assert {r['id'] for r in rec} == {r['id'] for r in rr}
++            save(job / 'completion.json', dict(created_at=now(), config=cfg, protocol_sha256=proto, requests_sha256=sha(request_file(stage)), n_records=len(rec), returncodes=rc,
++                                               files={str(p): sha(p) for p in job.glob('worker*.jsonl')}, attempt=attempt))
++        elif not args.limit: raise RuntimeError('incomplete generation')
++        print('생성', len(rec), '/', len(rr), 'rc', rc, 'wall', time.monotonic() - started)
++    finally:
++        for c in children:
++            if c.poll() is None: c.terminate()
++        for c in children:
++            try: c.wait(timeout=30)
++            except subprocess.TimeoutExpired: c.kill(); c.wait()
++        for f in logs: f.close()
++        os.close(fd)
++
++
++def main():
++    ap = argparse.ArgumentParser(); ap.add_argument('command', choices=['launch', 'worker', 'verify']); ap.add_argument('--job', required=True)
++    ap.add_argument('--stage', choices=STAGES, required=True); ap.add_argument('--workers', type=int, default=2); ap.add_argument('--peak', type=int, default=9000)
++    ap.add_argument('--limit', type=int, default=0); ap.add_argument('--worker', type=int, default=0); ap.add_argument('--attempt'); ap.add_argument('--lock-fd', type=int); args = ap.parse_args()
++    job = Path(args.job).resolve()
++    assert str(job).startswith(str(RES) + '/'), 'job must be under results/iter_141'
++    args.job = str(job)
++    if args.command == 'worker': worker(args)
++    elif args.command == 'launch': launch(args)
++    else: print('검증', len(verify_job(args.job, args.stage)))
++
++
++if __name__ == '__main__':
++    main()
+diff --git a/i141_select_download.py b/i141_select_download.py
+new file mode 100644
+index 0000000..3b3bfc7
+--- /dev/null
++++ b/i141_select_download.py
+@@ -0,0 +1,103 @@
++"""공식 ZIP의 HTTP Range로 고정 후보 파일만 반입한다. 원 ZIP 전체 MD5 검증과 구분한다."""
++from concurrent.futures import ThreadPoolExecutor
++import hashlib
++import io
++import json
++from pathlib import Path
++import struct
++import time
++import zipfile
++import zlib
++import requests
++from i141_preflight import ROOT, OUT, IDS, now, save, sha
++
++URL = 'https://zenodo.org/api/records/7960856/files/ISLES-2022.zip/content'
++SIZE = 1692717470
++
++
++def get_range(start, end):
++    session = requests.Session()
++    session.trust_env = False
++    started = time.monotonic()
++    r = session.get(URL, headers={'Range': f'bytes={start}-{end}'}, timeout=(30, 120), stream=True)
++    assert r.status_code == 206, 'Range 서버 응답 오류: ' + str(r.status_code)
++    assert r.headers.get('Content-Range') == f'bytes {start}-{end}/{SIZE}'
++    data = r.content
++    assert len(data) == end - start + 1
++    record = {'requested_at': now(), 'url': URL, 'final_url': r.url,
++              'range': [start, end], 'content_range': r.headers['Content-Range'],
++              'status_code': r.status_code, 'bytes': len(data), 'sha256': hashlib.sha256(data).hexdigest(),
++              'etag': r.headers.get('ETag'), 'last_modified': r.headers.get('Last-Modified'),
++              'elapsed_seconds': time.monotonic() - started}
++    return data, record
++
++
++def main():
++    tail = (OUT / 'archive_tail.bin').read_bytes()
++    end = struct.unpack('<4s4H2LH', tail[-22:])
++    assert end[0] == b'PK\x05\x06' and end[1:3] == (0, 0) and end[-1] == 0
++    count, central_size, central_offset = end[4:7]
++    catalog, rec = get_range(central_offset, central_offset + central_size - 1)
++    patched_end = struct.pack('<4s4H2LH', b'PK\x05\x06', 0, 0, count, count, central_size, 0, 0)
++    with zipfile.ZipFile(io.BytesIO(catalog + patched_end)) as z:
++        infos = z.infolist()
++    save(OUT / 'range_catalog.json', {'created_at': now(), 'request': rec,
++         'entries': [{'name': x.filename, 'bytes': x.file_size, 'compressed_bytes': x.compress_size,
++                      'compression': x.compress_type, 'crc32': x.CRC, 'header_offset': x.header_offset}
++                     for x in infos]})
++    picked = []
++    for x in infos:
++        parts = Path(x.filename).parts
++        selected_patient = any(pid in parts for pid in IDS)
++        metadata = Path(x.filename).name in ['dataset_description.json', 'README', 'README.md', 'participants.tsv']
++        if (selected_patient and x.filename.endswith(('_dwi.nii.gz', '_dwi.json', '_msk.nii.gz'))) or metadata:
++            assert not Path(x.filename).is_absolute() and '..' not in parts
++            picked.append(x)
++    save(OUT / 'selected_members.json', {'created_at': now(), 'n_members': len(picked),
++         'compressed_bytes': sum(x.compress_size for x in picked), 'uncompressed_bytes': sum(x.file_size for x in picked),
++         'files': [x.filename for x in picked]})
++    print(json.dumps({'selected_members': len(picked), 'compressed_bytes': sum(x.compress_size for x in picked)},ensure_ascii=False), flush=True)
++    assert all(any(pid in x.filename and x.filename.endswith('_dwi.nii.gz') for x in picked) for pid in IDS)
++    destination = OUT / 'data_selected'
++    assert not destination.exists()
++    destination.mkdir()
++    ledger = OUT / 'range_download_ledger.jsonl'
++    started = time.monotonic()
++
++    def download(x):
++        header, hrec = get_range(x.header_offset, x.header_offset + 29)
++        h = struct.unpack('<4s5H3L2H', header)
++        assert h[0] == b'PK\x03\x04' and not h[2] & 1 and h[3] == x.compress_type
++        filename_len, extra_len = h[-2:]
++        payload, prec = get_range(x.header_offset + 30, x.header_offset + 29 + filename_len + extra_len + x.compress_size)
++        assert payload[:filename_len].decode('utf-8' if h[2] & 2048 else 'cp437') == x.filename
++        compressed = payload[filename_len + extra_len:]
++        assert x.compress_type in [zipfile.ZIP_STORED, zipfile.ZIP_DEFLATED]
++        decoded = zlib.decompress(compressed, -15) if x.compress_type == zipfile.ZIP_DEFLATED else compressed
++        assert len(decoded) == x.file_size and zlib.crc32(decoded) == x.CRC
++        assert (hrec['etag'], hrec['last_modified']) == (rec['etag'], rec['last_modified'])
++        assert (prec['etag'], prec['last_modified']) == (rec['etag'], rec['last_modified'])
++        path = destination / x.filename
++        assert path.resolve().is_relative_to(destination.resolve())
++        path.parent.mkdir(parents=True, exist_ok=True)
++        with path.open('xb') as f:
++            f.write(decoded)
++        return {'member': x.filename, 'path': str(path), 'bytes': len(decoded), 'sha256': sha(path),
++                'crc32_verified': True, 'crc32': x.CRC, 'requests': [hrec, prec]}
++
++    rows = []
++    with ThreadPoolExecutor(max_workers=4) as pool, ledger.open('x') as f:
++        for row in pool.map(download, picked):
++            rows.append(row)
++            f.write(json.dumps(row) + '\n')
++            f.flush()
++    save(OUT / 'selected_download_complete.json', {'created_at': now(), 'elapsed_seconds': time.monotonic()-started,
++         'files': rows, 'catalog_sha256': sha(OUT / 'range_catalog.json'), 'ledger_sha256': sha(ledger),
++         'source_archive_bytes': SIZE, 'source_archive_expected_md5': '302ee280373cdd5c190ab763d72a7a50',
++         'full_archive_md5_verified': False, 'selected_members_crc32_verified': True,
++         'downloaded_range_bytes': rec['bytes'] + sum(r['bytes'] for row in rows for r in row['requests'])})
++    print(json.dumps({'download_complete': len(rows), 'elapsed_seconds': time.monotonic()-started}))
++
++
++if __name__ == '__main__':
++    main()
+diff --git a/i141_spec.py b/i141_spec.py
+new file mode 100644
+index 0000000..fdbf72f
+--- /dev/null
++++ b/i141_spec.py
+@@ -0,0 +1,61 @@
++"""출력 전 고정할 DWI 질문·통합·내용 대응 규약. presence parser를 재사용하지 않는다."""
++import re
++
++BASE_CONFIG = dict(model_id='google/medgemma-1.5-4b-it', revision='91850547d9f0b2fdd21aa7c5f4f3d1a8a52c243b',
++                   dtype='bfloat16', attention='sdpa', do_sample=False, seed=141, batch=1, image_labels=False)
++TOKENS = dict(technical=1024, technical2048=2048)
++STAGES = ['technical', 'technical2048', 'main']
++START_TOKEN, END_TOKEN = '<unused94>', '<unused95>'
++QUESTION = ('Describe the visible findings in the provided axial DWI MRI image(s) of one brain in at most three short sentences. '
++            'Mention the location and signal appearance of visible abnormalities. '
++            'The slices are ordered from inferior to superior and displayed in radiological convention: '
++            'image left is patient right, image top is anterior. '
++            'Use only the provided images. Do not infer unprovided sequences, disease cause, or timing. '
++            'If a finding cannot be determined, state that uncertainty.')
++FORBIDDEN_IN_PROMPT = ['RadGenome', 'ISLES', 'sub-stroke', 'stroke', 'infarct', 'ADC', 'mask', 'annotation']
++RENDER = dict(orientation='closest_canonical_RAS_no_resampling', convention='radiological_axial',
++              normalization='volume_minmax', side=256, interpolation='bilinear',
++              selection='all axial slices; trim only exact-zero exterior padding',
++              grouping='nonoverlapping consecutive at most five')
++SEMANTIC_CONTRACT = {
++    'primary': '환자별 명시 양성 atom의 명확한 일치 수 / 양성 atom 수; 환자 평균',
++    'matching': '같은 소견·위치·속성을 명시한 원문만 matched. 위치는 명시 좌우를 요구하며 임상 추론·애매한 동의어는 unresolved.',
++    'states': ['matched', 'contradicted', 'unmentioned', 'unresolved'],
++    'contradiction': '같은 관측 범위의 명시적 반대 주장만 reference contradiction. 다른 slice에 부재라는 설명은 volume 전체 부재로 일반화하지 않음.',
++    'internal_contradiction': '동일 slice/중첩 scope 안의 명확한 양립 불가 주장 또는 volume 전체 주장이 국소 주장과 충돌할 때만 확정.',
++    'extra': 'reference 미언급 추가 소견은 report_unverified, 임상 허위가 아님.',
++    'incomplete': 'invalid boundary는 내용 미판정. 비EOS 출력은 미완결로 분리하고 관측 텍스트 및 unresolved 범위를 보존.',
++    'ranges': '환자별 unresolved atom을 모두 실패/성공으로 두어 recall 범위; 모순 불확실성도 최선/최악 환자율로 유지.',
++    'positive': 'A-S 최소 recall 차이 >=0.05이고 최대 명시 모순 환자율 증가 <=0.05.',
++    'inconclusive': '미판정·절단·환자 변동에 따라 다음 판단이 달라지면 inconclusive. 원문 한정 보완 후 종료.',
++    'negative': '유효 비교에서 사전 양성 기준 미달. frozen 인접 우위 미확보에만 한정.',
++    'clinical_scope': '공식 공개 텍스트와 출력의 근거 정리. 새로운 임상 정답을 생성하지 않음.',
++    'supervision': 'global/sequence 전체 범위만 검증되면 전체 sequence target. 각 slice에 전체 report 복제 금지.',
++}
++
++
++def split_final(tokens, start_id, end_id):
++    # i136_spec.py와 같은 tokenizer 표식 경계; 평가 내용 규약은 새로 고정한다.
++    ns, ne = tokens.count(start_id), tokens.count(end_id)
++    if ns == 0 and ne == 0:
++        return 'no_marker', list(tokens)
++    if ns == 1 and ne == 1 and tokens[0] == start_id and tokens.index(end_id) > 0:
++        return 'thought_final', list(tokens[tokens.index(end_id) + 1:])
++    return 'invalid_boundary', []
++
++
++def sentences(text):
++    return [x.strip() for x in re.split(r'(?<=[.!?])\s+|\n+', text) if x.strip()]
++
++
++def integrate(records):
++    ordered = sorted(records, key=lambda r: r['slice_indices'][0])
++    full = '\n'.join(r['final_text'] for r in ordered)
++    seen, unique = set(), []
++    for r in ordered:
++        for sent in sentences(r['final_text']):
++            if sent not in seen:
++                unique.append({'text': sent, 'request_id': r['id'], 'slice_indices': r['slice_indices']})
++                seen.add(sent)
++    return {'raw_concatenation': full, 'exact_sentence_deduplication': '\n'.join(x['text'] for x in unique),
++            'sentences': unique, 'deduplication': 'exact string only; no contradiction deletion'}
+diff --git a/i141_tech.py b/i141_tech.py
+new file mode 100644
+index 0000000..f7199c4
+--- /dev/null
++++ b/i141_tech.py
+@@ -0,0 +1,196 @@
++"""새 1–5장 DWI 입력의 공식 tensor·재개·경합·처리량을 검사한다."""
++import argparse
++from collections import Counter
++import copy
++import fcntl
++import json
++import os
++from pathlib import Path
++import subprocess
++import sys
++import time
++from types import SimpleNamespace
++import numpy as np
++from i141_common import HERE, RES, read, save, sha, digest, now
++from i141_spec import BASE_CONFIG, split_final, integrate, SEMANTIC_CONTRACT
++import i141_run as run
++
++
++def tensors():
++    import torch
++    from transformers import AutoProcessor
++    from PIL import Image
++    p=AutoProcessor.from_pretrained(run.MODEL,local_files_only=True)
++    rr=read(RES/'requests/technical_pilot.json')
++    checks=[]
++    for r in rr:
++        actual=run.input_tensor(p,r)
++        text=p.apply_chat_template(run.messages(r),add_generation_prompt=True,tokenize=False)
++        official=p(text=text,images=[Image.open(x['path']).convert('RGB') for x in r['images']],return_tensors='pt',add_special_tokens=False)
++        equal=set(actual)==set(official) and all(torch.equal(actual[k],official[k]) for k in actual)
++        # processor의 영상 tensor가 같은 순서에서 1장 처리와 동일한지 검사한다.
++        value=actual['pixel_values']
++        single_values=[]
++        for image in r['images']:
++            q=dict(r,images=[image])
++            single_values.append(run.input_tensor(p,q)['pixel_values'])
++        allpixels=torch.cat(single_values,dim=0)
++        target_equal=torch.equal(value,allpixels)
++        checks.append({'id':r['id'],'images':len(r['images']),'keys':list(actual),
++                       'shapes':{k:list(v.shape) for k,v in actual.items()},
++                       'image_token_count':int((actual['input_ids']==p.tokenizer.convert_tokens_to_ids('<image_soft_token>')).sum()),
++                       'official_tensor_equal':equal,'single_joint_pixels_equal':target_equal})
++    toy={'id':'x','slice_indices':[1],'final_text':'A. B.'}
++    integration=integrate([toy,dict(toy,id='y',slice_indices=[2],final_text='A. C.')])
++    pure_checks={'no_marker':split_final([1,2],94,95)==('no_marker',[1,2]),
++                 'thought_final':split_final([94,3,95,5],94,95)==('thought_final',[5]),
++                 'bad_boundary':split_final([94,3],94,95)==('invalid_boundary',[]),
++                 'integration_exact':integration['exact_sentence_deduplication']=='A.\nB.\nC.'}
++    result={'created_at':now(),'checks':checks,'pure_checks':pure_checks,
++            'all_pass':all(c['official_tensor_equal'] and c['single_joint_pixels_equal'] for c in checks) and all(pure_checks.values())}
++    save(RES/'tests/tensors_v2.json',result)
++    assert result['all_pass']
++    print({'tensors':len(checks),'all_pass':True})
++
++
++def call(job,workers,peak,limit=0):
++    cmd=[sys.executable,str(HERE/'i141_run.py'),'launch','--stage','technical',
++         '--job',str(job),'--workers',str(workers),'--peak',str(peak),'--limit',str(limit)]
++    with (RES/'tests'/('launch_'+job.name+'_'+str(time.time_ns())+'.log')).open('xb') as f:
++        process=subprocess.Popen(cmd,stdout=f,stderr=subprocess.STDOUT)
++        print(json.dumps({'supervisor_pid':process.pid,'job':str(job)}),flush=True)
++        rc=process.wait()
++    assert rc==0,'launch failed: '+str(job)
++    return run.verify_job(job,'technical',complete=not limit)
++
++
++def runtime():
++    rr=run.requests('technical')
++    reference=run.verify_job(RES/'jobs/tech_w2','technical')
++    baseline={r['id']:r for r in reference}
++    peak=int(np.ceil(max(r['peak_reserved_mib'] for r in reference)))+256
++    checks=[]
++    job=RES/'jobs/tech_resume'
++    partial=call(job,2,peak,limit=1)
++    assert 0<len(partial)<len(rr)
++    preserved={str(p):p.read_bytes() for p in job.glob('worker*.jsonl')}
++    tail=next(job.glob('worker*.jsonl'))
++    with tail.open('ab') as f:
++        f.write(b'{"interrupted":')
++    resumed=call(job,2,peak)
++    checks.append({'name':'partial_resume_tokens','pass':all(r['tokens']==baseline[r['id']]['tokens'] for r in resumed),
++                   'partial_records':len(partial),'final_records':len(resumed)})
++    checks.append({'name':'preserve_committed_prefix','pass':all(Path(p).read_bytes().startswith(b) for p,b in preserved.items())})
++    before={str(p):sha(p) for p in job.glob('worker*.jsonl')}
++    # 완료 재실행은 source/input/completion 검증 후 불변으로 끝나야 한다.
++    call(job,2,peak)
++    checks.append({'name':'complete_relaunch_immutable','pass':all(sha(p)==h for p,h in before.items())})
++    # 동시 감독기와 직접 worker의 실제 동일 검증 함수 경로를 검사한다.
++    held=os.open(job/'supervisor.lock',os.O_RDWR)
++    fcntl.flock(held,fcntl.LOCK_EX|fcntl.LOCK_NB)
++    with (RES/'tests/duplicate_launch.log').open('xb') as f:
++        rc=subprocess.run([sys.executable,str(HERE/'i141_run.py'),'launch','--stage','technical','--job',str(job)],stdout=f,stderr=subprocess.STDOUT).returncode
++    os.close(held)
++    checks.append({'name':'duplicate_supervisor_refused','pass':rc!=0})
++    cases=[('request_duplicate',rr+[rr[0]]),('request_digest_changed',[dict(rr[0],prompt='changed')]),
++           ('image_hash_changed',[dict(rr[0],images=[dict(rr[0]['images'][0],sha256='0'*64)])])]
++    for name,values in cases:
++        if name=='image_hash_changed':
++            values[0]['request_digest']=digest({k:v for k,v in values[0].items() if k!='request_digest'})
++        path=RES/'tests'/(name+'.json')
++        save(path,values)
++        try:
++            run.requests('technical',path)
++            ok=False
++        except (AssertionError,ValueError):
++            ok=True
++        checks.append({'name':name,'pass':ok})
++    bad=copy.deepcopy(read(run.protocol_path('technical')))
++    bad['code'][str(HERE/'i141_spec.py')]='0'*64
++    badpath=RES/'tests/protocol_corrupted.json'
++    save(badpath,bad)
++    old=run.protocol_path
++    run.protocol_path=lambda stage:badpath
++    direct=RES/'tests/direct_worker'
++    direct.mkdir()
++    fd=os.open(direct/'supervisor.lock',os.O_CREAT|os.O_RDWR,0o600)
++    fcntl.flock(fd,fcntl.LOCK_EX|fcntl.LOCK_NB)
++    try:
++        run.worker(SimpleNamespace(lock_fd=fd,job=str(direct),stage='technical'))
++        ok=False
++    except ValueError as e:
++        ok='protocol mismatch' in str(e)
++    finally:
++        os.close(fd)
++        run.protocol_path=old
++    checks.append({'name':'direct_worker_source_hash_refused_before_model_load','pass':ok})
++    badrecord=copy.deepcopy(reference)
++    badrecord[0]['protocol_sha256']='0'*64
++    try:
++        run.check_records(badrecord,rr,run.verify_protocol('technical'),run.config_for('technical'))
++        ok=False
++    except AssertionError:
++        ok=True
++    checks.append({'name':'record_provenance_tamper_refused','pass':ok})
++    try:
++        run._load_records(RES/'jobs/tech_w2')
++        complete_ids={r['id'] for r in reference}=={r['id'] for r in rr}
++    except Exception:
++        complete_ids=False
++    checks.append({'name':'no_duplicate_missing_extra','pass':complete_ids})
++    result={'created_at':now(),'checks':checks,'all_pass':all(c['pass'] for c in checks),'peak_admission_mib':peak}
++    save(RES/'tests/runtime_checks.json',result)
++    assert result['all_pass']
++    print({'runtime_checks':len(checks),'all_pass':True})
++
++
++def throughput():
++    baseline=run.verify_job(RES/'jobs/tech_w2','technical')
++    peak=int(np.ceil(max(r['peak_reserved_mib'] for r in baseline)))+256
++    free={r['index']:int(r['free']) for r in run.smi()}
++    fits=all(free[g]>=2*(peak+2048) for g in run.allowed())
++    report={'created_at':now(),'measured_worker_peak_mib':peak-256,'admission_peak_mib':peak,
++            'two_workers_per_gpu_need_mib':2*(peak+2048),'gpu_free_before':free,'worker_margin_mib':2048}
++    if fits:
++        result=call(RES/'jobs/tech_w4',4,peak)
++        same=all(r['tokens']==next(b['tokens'] for b in baseline if b['id']==r['id']) for r in result)
++        def generation_wall(job):
++            starts=list(job.glob('start_*.json'))
++            start=read(starts[-1])['created_at']
++            from datetime import datetime
++            end=max(datetime.fromisoformat(r['completed_at']).timestamp() for r in run.load_records(job))
++            return end-datetime.fromisoformat(start).timestamp()
++        wall2=generation_wall(RES/'jobs/tech_w2')
++        wall4=generation_wall(RES/'jobs/tech_w4')
++        report.update({'w2_generation_wall_s':wall2,'w4_generation_wall_s':wall4,
++                       'w2_requests_per_min':len(baseline)*60/wall2,'w4_requests_per_min':len(result)*60/wall4,
++                       'tokens_equal':same,'selected_workers':4 if same and wall4<wall2 else 2,
++                       'reason':'개발 요청의 전체 생성 처리량과 token 정합성으로 선택'})
++        assert same
++    else:
++        # 메모리가 두 worker를 허용하지 않으면 같은 개발 입력의 batch2를 직접 비교한다.
++        raise RuntimeError('w4 unsafe; batch expansion pilot required before main')
++    save(RES/'tests/throughput_choice.json',report)
++    print(report)
++
++
++def gate():
++    jobs=[RES/'jobs/tech_w2',RES/'jobs/tech_resume',RES/'jobs/tech_w4']
++    allrecords=[r for j in jobs for r in run.verify_job(j,'technical')]
++    capped=any(r['n_tokens']>=1024 and not r['eos'] for r in allrecords)
++    result={'created_at':now(),'passed':read(RES/'tests/tensors_v2.json')['all_pass'] and read(RES/'tests/runtime_checks.json')['all_pass'],
++            'main_max_new_tokens':2048 if capped else 1024,'cap_reached':capped,
++            'n_technical_records':len(allrecords),'boundary_invalid':sum(r['boundary_status']=='invalid_boundary' for r in allrecords),
++            'eos':sum(r['eos'] for r in allrecords), 'requires_2048_technical_recheck':capped,
++            'evidence':{str(RES/'tests'/p):sha(RES/'tests'/p) for p in ['tensors_v2.json','runtime_checks.json','throughput_choice.json']}}
++    if capped:
++        result['passed']=False
++    save(RES/'tests/technical_gate.json',result)
++    print(result)
++
++
++if __name__=='__main__':
++    p=argparse.ArgumentParser()
++    p.add_argument('command',choices=['tensors','runtime','throughput','gate'])
++    args=p.parse_args()
++    globals()[args.command]()

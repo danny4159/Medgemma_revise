@@ -470,3 +470,22 @@ MSD Task01 반복 개발 E45의 고정 FLAIR 단독·공동·복제 입력에서
 - 미해결: 독립 환자 재현과 모델 학습 노출은 미확인이다.
 - 미해결: 개별 판별 신호를 확보한 조건에서 공동 입력의 정보 손실이 남는지는 미검증이다.
 
+## radgenome-dwi-adjacent-report-output — observed
+
+RadGenome ISLES22 공식 train의 고정 개발 6명에서 동일 전체 DWI 영상을 처리한 frozen MedGemma 1.5의 비EOS 출력은 개별 입력 2/385건, 연속 최대 5장 입력 32/78건이었다. 공개 global DWI 문장의 항목별 환자 평균 일치율은 각각 0.45655와 0.34246이지만, 미판정·절단을 반영한 차이 범위가 [-0.46389, 0.54345]여서 인접 처리의 우열은 불확정이다. 현재 prompt·2048-token 생성의 제한된 관찰이며 일반적인 MRI 인식 또는 공간 통합 결함을 확정하지 않는다.
+
+- 적용 목표 시작: iter_003
+- 최신 리뷰: agent/runs/iter_141/review.json
+- 근거: research/results/iter_141/jobs/main/worker*.jsonl: 독립 집계한 고유 463요청, S 385건/A 78건, 비EOS 2건/32건.
+- 근거: research/results/iter_141/eval/judgments.json 및 blinded_packages.json에서 환자 평균 일치율과 불확실성 범위를 독립 재계산했다.
+- 근거: research/results/iter_141/eval/report.json: A−S -0.1140873, 불확실성 범위 [-0.4638889, 0.5434524].
+- 사용·평가 검증: 리뷰 대상 SHA 19946deb6cccb3693713c1fb609b3cd3faec9dee의 변경 소스 13개와 작업 파일의 byte 일치를 확인했다.
+- 사용·평가 검증: protocol_lock_main.json의 code·inputs·gates hash를 독립 확인했다.
+- 사용·평가 검증: 원시 출력 ID와 고정 요청 목록의 일치 및 중복·누락 없음, 판정 인용문과 출력 원문의 연결을 확인했다.
+- 사용·평가 검증: tests/tensors_v2.json, runtime_checks.json, technical_gate.json에 공식 tensor 비교·재개 검사·1024→2048 기술 재확인 근거가 있다.
+- 사용·평가 검증: DWI modal 정답은 없으며 명시적인 global DWI 문장만 연결했다. mask는 입력·slice 선택에 사용하지 않았다.
+- 미해결: 입력별 직접 적응 이후에도 반복·절단과 위치 항목 누락이 남는가?
+- 미해결: 전체 sequence supervision을 같은 관측 범위의 개별·인접 처리에 공정하게 연결할 수 있는가?
+- 미해결: AutoRG 예측 mask 경로가 같은 공개 소견을 회복하는가? 학습 노출과 정보량 차이는 무엇인가?
+- 미해결: 독립 환자와 독립 의미 평가에서 재현되는지는 미검증이다.
+
