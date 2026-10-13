@@ -432,3 +432,22 @@ MR-ART 개발40명에서 frozen MedGemma 1.5의 고정 axial 8장 품질 직접 
 - 미해결: 보존20명과 직접 적응은 미실행이다. 현재 과제에서 이를 추가 실행할 실용적 근거는 확보하지 못했다.
 - 미해결: MRIQC는 전체 volume을 사용하며 IQM 생성 전체 비용은 미측정이다.
 
+## radgenome-flair-fixed-category-response — observed
+
+RadGenome–BraTS 반복 개발 FLAIR 15사례와 고정 8장·prompt에서 frozen MedGemma 1.5의 첫 줄은 무표시 U, 위치 표시 L, MRI 없는 표시-only M의 45요청 모두 HIGH였다. M 15건은 모두 EOS로 종료했으며 영상 없이 신호를 단정했다. 다만 일부 U/L 설명문은 high와 low를 함께 기술하므로, 첫 줄 고정을 혼합 신호 인식 부재나 영상 전체 무사용으로 해석할 수 없다.
+
+- 적용 목표 시작: iter_003
+- 최신 리뷰: agent/runs/iter_133/review.json
+- 근거: research/results/iter_133/jobs/main/worker*_1791877113721202786.jsonl: 고유 요청 45개, 첫 줄 HIGH 45개를 독립 집계했다.
+- 근거: research/results/iter_133/eval/report.json: EOS 유효 출력 U/L/M 6/10/15건, MIXED_HIGH_LOW 첫 줄 재현 각각 0/11.
+- 근거: 00187__L과 00430__L의 원문은 HIGH 첫 줄 뒤에 병변 내부 low signal을 명시한다.
+- 근거: 00187__M은 MRI 픽셀 없이 right cerebellum과 increased signal intensity를 기술한다.
+- 사용·평가 검증: protocol_lock_main.json의 code·inputs·gates hash와 현재 파일 일치를 확인했다.
+- 사용·평가 검증: tests/tensor_check_v2.json에서 공식 chat template 대조와 요청당 image soft token 2048개 검사 기록을 확인했다.
+- 사용·평가 검증: completion.json의 원시 출력 파일 hash 및 45개 record digest를 독립 확인했다.
+- 사용·평가 검증: 고정 max_new_tokens512에서 U 9건·L 5건은 비EOS이며 원 규칙대로 invalid다.
+- 사용·평가 검증: M에는 MRI 픽셀이 없다는 문장이 명시되어 있다. HIGH와 MIXED_HIGH_LOW의 의미는 상호 배타적이지 않다.
+- 미해결: 첫 줄 선택과 설명문 내용의 불일치가 응답 범주 정의에 얼마나 의존하는가?
+- 미해결: 반복 생성·절단을 통제한 독립 입력에서도 같은 관찰이 재현되는가?
+- 미해결: 8장 관측과 whole-abnormality 표시가 보고서의 신호 기술 대상에 충분히 대응하는가?
+

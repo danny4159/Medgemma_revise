@@ -1,0 +1,1217 @@
+diff --git a/i133_common.py b/i133_common.py
+new file mode 100644
+index 0000000..9c323b5
+--- /dev/null
++++ b/i133_common.py
+@@ -0,0 +1,28 @@
++"""iter_133 전용 경로·출처 유틸리티 (mr132_common 파생; 결과는 results/iter_133에만 쓴다)."""
++import hashlib, json, os
++from pathlib import Path
++from datetime import datetime, timezone
++
++HERE = Path(__file__).resolve().parent
++RES = HERE / 'results/iter_133'
++SRC = HERE / 'results/iter_070/data'   # 읽기 전용 기존 자료
++BRATS = SRC / 'brats/ASNR-MICCAI-BraTS2023-GLI-Challenge-TrainingData'
++
++
++def sha(p):
++    h = hashlib.sha256()
++    with open(p, 'rb') as f:
++        for b in iter(lambda: f.read(4 << 20), b''):
++            h.update(b)
++    return h.hexdigest()
++
++
++def now(): return datetime.now(timezone.utc).isoformat()
++def digest(x): return hashlib.sha256(json.dumps(x, sort_keys=True, separators=(',', ':'), allow_nan=False).encode()).hexdigest()
++def read(p): return json.loads(Path(p).read_text())
++
++
++def save(p, x):
++    p = Path(p); p.parent.mkdir(parents=True, exist_ok=True)
++    with open(p, 'x') as f:
++        json.dump(x, f, indent=2, sort_keys=True, allow_nan=False); f.write('\n'); f.flush(); os.fsync(f.fileno())
+diff --git a/i133_data.py b/i133_data.py
+new file mode 100644
+index 0000000..0466137
+--- /dev/null
++++ b/i133_data.py
+@@ -0,0 +1,169 @@
++"""iter_133: 기존 RadGenome-BraTS FLAIR 15사례의 연결 감사, 동일 slice U/L/M 렌더링, 요청 구성.
++U=무표시 FLAIR, L=동일 FLAIR+seg>0 외접 직사각형, M=회색 배경+동일 직사각형. 선택 slice는 GT로 정한 oracle 관측이다."""
++import json, sys
++from fractions import Fraction
++import numpy as np
++import nibabel as nib
++from PIL import Image, ImageDraw
++from i133_common import RES, SRC, BRATS, sha, digest, read, save, now
++from i133_spec import RENDER, PROMPTS, FORBIDDEN_IN_PROMPT
++from mr123_data import normalization_window, render_slice
++
++SIDE = RENDER['side']; N = RENDER['n_slices']
++TECH = ['BraTS-GLI-00012-000', 'BraTS-GLI-00456-000']
++
++
++def eligible():
++    t = read(SRC / 'label_table.json'); assert t['revision'] == '0348ba42fad134da57b50e736ba858a8e73eb086'
++    out = []
++    for pid, v in t['val'].items():
++        if v['label'] in ('HIGH', 'MIXED_HIGH_LOW'):
++            assert v['auto'] == v['label'] and v['key'] == pid + '-t2f'
++            out.append(dict(pid=pid, report_label=v['label'], evidence=v['evidence'], report=v['report']))
++    assert len(out) == 15 and sum(o['report_label'] == 'MIXED_HIGH_LOW' for o in out) == 11
++    return out
++
++
++def pick_indices(lo, hi, n=N):
++    """등간격 위치, 반올림 동률은 낮은 index (정확한 분수 계산)."""
++    idx = []
++    for i in range(n):
++        x = Fraction(lo) + Fraction(hi - lo) * i / (n - 1)
++        fl = x.numerator // x.denominator
++        idx.append(fl if (x - fl) <= Fraction(1, 2) else fl + 1)
++    return idx
++
++
++def load_pair(pid):
++    d = BRATS / pid
++    im = nib.load(d / f'{pid}-t2f.nii.gz'); sg = nib.load(d / f'{pid}-seg.nii.gz')
++    info = dict(orig_axcodes=''.join(nib.aff2axcodes(im.affine)), shape=list(im.shape), zooms=[float(z) for z in im.header.get_zooms()[:3]],
++                seg_shape=list(sg.shape), affine_match=bool(np.allclose(im.affine, sg.affine, atol=1e-3)))
++    assert im.shape == sg.shape and info['affine_match'] and len(im.shape) == 3
++    imc = nib.as_closest_canonical(im); sgc = nib.as_closest_canonical(sg)
++    a = np.asarray(imc.dataobj).astype(np.float32); s = np.rint(np.asarray(sgc.dataobj)).astype(np.int16)
++    info['canon_axcodes'] = ''.join(nib.aff2axcodes(imc.affine)); assert info['canon_axcodes'] == 'RAS'
++    info['canon_zooms'] = [float(z) for z in imc.header.get_zooms()[:3]]
++    info['seg_labels'] = sorted(int(x) for x in np.unique(s)); assert set(info['seg_labels']) <= {0, 1, 2, 3}
++    assert np.isfinite(a).all()
++    return a, s > 0, info
++
++
++def geometry(shape2, zooms):
++    nX, nY = shape2; h, w = nY, nX
++    hh, ww = h * zooms[1], w * zooms[0]; sc = SIDE / max(hh, ww)
++    nh, nw = max(1, int(round(hh * sc))), max(1, int(round(ww * sc)))
++    return dict(h=h, w=w, nh=nh, nw=nw, ox=(SIDE - nw) // 2, oy=(SIDE - nh) // 2)
++
++
++def rect_canvas(m2, zooms):
++    """m2: (nX,nY) bool. 반환 (left,top,right,bottom) canvas 정수 좌표(오른쪽·아래 exclusive) 또는 None."""
++    if not m2.any():
++        return None
++    xs = np.where(m2.any(axis=1))[0]; ys = np.where(m2.any(axis=0))[0]
++    x0, x1, y0, y1 = int(xs.min()), int(xs.max()), int(ys.min()), int(ys.max())
++    g = geometry(m2.shape, zooms); nX, nY = m2.shape
++    c0, c1 = nX - 1 - x1, nX - 1 - x0; r0, r1 = nY - 1 - y1, nY - 1 - y0
++    l = g['ox'] + c0 * g['nw'] / g['w']; r = g['ox'] + (c1 + 1) * g['nw'] / g['w']
++    t = g['oy'] + r0 * g['nh'] / g['h']; b = g['oy'] + (r1 + 1) * g['nh'] / g['h']
++    return int(round(l)), int(round(t)), int(round(r)), int(round(b))
++
++
++def draw_rect(img, rc):
++    d = ImageDraw.Draw(img); l, t, r, b = rc
++    d.rectangle([l, t, r - 1, b - 1], outline=tuple(RENDER['rect_rgb']), width=RENDER['rect_px'])
++    return img
++
++
++def build_case(pid, outdir):
++    a, m, info = load_pair(pid); z = info['canon_zooms']
++    zs = np.where(m.any(axis=(0, 1)))[0]; lo, hi = int(zs.min()), int(zs.max())
++    idx = pick_indices(lo, hi); assert len(set(idx)) == N, (pid, idx)
++    vlo, vhi = normalization_window(a, None, 'volume_minmax')
++    tot = int(m.sum()); rows = []; paths = {c: [] for c in 'ULM'}
++    for k in idx:
++        m2 = m[:, :, k]; rc = rect_canvas(m2, z)
++        u = render_slice(a, k, vlo, vhi, z); l = u.copy()
++        if rc: draw_rect(l, rc)
++        mm = Image.new('RGB', (SIDE, SIDE), tuple(RENDER['gray']))
++        if rc: draw_rect(mm, rc)
++        for c, im in zip('ULM', (u, l, mm)):
++            p = outdir / c / f'{pid}_s{k:03d}.png'; p.parent.mkdir(parents=True, exist_ok=True)
++            if p.exists(): raise FileExistsError(p)
++            im.save(p); paths[c].append(dict(path=str(p), sha256=sha(p)))
++        rows.append(dict(index=k, mask_voxels=int(m2.sum()), mask_present=bool(m2.any()), rect_canvas=rc,
++                         frac_of_total_positive=float(m2.sum()) / tot))
++    return dict(pid=pid, info=info, mask_z_range=[lo, hi], window=[vlo, vhi], total_positive_voxels=tot, slices=rows,
++                selected_fraction_positive=float(sum(r['mask_voxels'] for r in rows)) / tot, images=paths)
++
++
++def checks(case):
++    """좌표·픽셀 동일성·정보 누설 검사. 문제 목록 반환."""
++    probs = []; pid = case['pid']; a, m, info = load_pair(pid); z = info['canon_zooms']; red = np.array(RENDER['rect_rgb']); gray = np.array(RENDER['gray'])
++    for n, sl in enumerate(case['slices']):
++        k = sl['index']; U = np.asarray(Image.open(case['images']['U'][n]['path']).convert('RGB')).astype(int)
++        L = np.asarray(Image.open(case['images']['L'][n]['path']).convert('RGB')).astype(int)
++        M = np.asarray(Image.open(case['images']['M'][n]['path']).convert('RGB')).astype(int)
++        diff = (U != L).any(-1); isred = (L == red).all(-1)
++        if not (diff <= isred).all(): probs.append(f'{pid} s{k}: L differs from U outside red outline')
++        if (L == red).all(-1).sum() != (M == red).all(-1).sum(): probs.append(f'{pid} s{k}: L/M outline mismatch')
++        if not (isred == (M == red).all(-1)).all(): probs.append(f'{pid} s{k}: outline pixel positions differ L vs M')
++        rest = ~(M == red).all(-1)
++        if not (M[rest] == gray).all(): probs.append(f'{pid} s{k}: M contains non-gray non-red pixel')
++        if (U == red).all(-1).any() and not sl['mask_present']: pass
++        # 직사각형 vs 독립 렌더링한 mask 위치
++        rc = sl['rect_canvas']
++        if sl['mask_present']:
++            mimg = np.asarray(render_slice(m.astype(np.float32), k, 0.0, 1.0, z).convert('L')).astype(float) / 255
++            ys, xs = np.where(mimg > 0.5)
++            ind = (xs.min(), ys.min(), xs.max() + 1, ys.max() + 1)
++            if max(abs(ind[0] - rc[0]), abs(ind[1] - rc[1]), abs(ind[2] - rc[2]), abs(ind[3] - rc[3])) > 3:
++                probs.append(f'{pid} s{k}: rect {rc} vs independent mask bbox {ind}')
++        else:
++            if isred.any(): probs.append(f'{pid} s{k}: outline without mask')
++    return probs
++
++
++def make_requests(cases, pids, stage):
++    reqs = []
++    for pid in pids:
++        c = cases[pid]
++        for cond in 'ULM':
++            r = dict(id=f'{pid}__{cond}', kind='single', patient=pid, cond=cond, prompt=PROMPTS[cond], groups=[c['images'][cond]])
++            assert not any(s in r['prompt'] for s in FORBIDDEN_IN_PROMPT)
++            r['request_digest'] = digest(r); reqs.append(r)
++    return reqs
++
++
++def main():
++    RES.mkdir(parents=True, exist_ok=True); out = RES / 'png'
++    t0 = now(); el = eligible(); man = read(SRC / 'brats_manifest.json'); mf = man['sha256']
++    modal = read(SRC / 'radgenome/BraTS_GLI/modal_wise_finding.json'); problems = []; cases = {}; audit = []
++    for e in el:
++        pid = e['pid']; rel = f'ASNR-MICCAI-BraTS2023-GLI-Challenge-TrainingData/{pid}/{pid}'
++        for suf in ('-t2f.nii.gz', '-seg.nii.gz'):
++            p = BRATS / pid / (pid + suf); h = sha(p)
++            if mf[rel + suf] != h: problems.append(f'sha mismatch {pid}{suf}')
++        if modal[pid + '-t2f'] != e['report']: problems.append(f'report text mismatch {pid}')
++        cases[pid] = build_case(pid, out)
++        audit.append(dict(pid=pid, report_label=e['report_label'], t2f_sha256=mf[rel + '-t2f.nii.gz'], seg_sha256=mf[rel + '-seg.nii.gz'],
++                          report_key=pid + '-t2f', **{k: cases[pid]['info'][k] for k in ('orig_axcodes', 'canon_axcodes', 'shape', 'zooms', 'seg_labels')}))
++        problems += checks(cases[pid])
++    allsha = [im['sha256'] for c in cases.values() for cond in 'ULM' for im in c['images'][cond]]
++    manifest = dict(created_at=t0, finished_at=now(), source_manifest=str(SRC / 'brats_manifest.json'), source_manifest_sha256=sha(SRC / 'brats_manifest.json'),
++                    label_table_sha256=sha(SRC / 'label_table.json'), modal_finding_sha256=sha(SRC / 'radgenome/BraTS_GLI/modal_wise_finding.json'),
++                    mirror=dict(repo='MedOtter/brats2023-gli-dataset', revision=man['revision'], license='cc-by-4.0 (HF card, 비gated; 공식 BraTS 접근 인증이 아닌 mirror 이용 조건)',
++                                radgenome_license='mit (README.md)', note='mirror 접근 가능성은 공식 data use 동의가 아니다. 연구 내부 탐색 한정, 재배포 없음.'),
++                    render=RENDER, prompts=PROMPTS, n_cases=len(cases), cases=cases, audit=audit, n_images=len(allsha), n_unique_image_hashes=len(set(allsha)),
++                    problems=problems)
++    save(RES / 'data_manifest.json', manifest)
++    tech = make_requests(cases, TECH, 'technical'); main_ = make_requests(cases, [e['pid'] for e in el], 'main')
++    (RES / 'requests').mkdir(exist_ok=True)
++    save(RES / 'requests/technical.json', tech); save(RES / 'requests/main.json', main_)
++    print('cases', len(cases), 'problems', len(problems), 'tech', len(tech), 'main', len(main_))
++    for p in problems[:20]: print(p)
++    sys.exit(1 if problems else 0)
++
++
++if __name__ == '__main__':
++    main()
+diff --git a/i133_eval.py b/i133_eval.py
+new file mode 100644
+index 0000000..f3edbed
+--- /dev/null
++++ b/i133_eval.py
+@@ -0,0 +1,82 @@
++"""iter_133 평가: main 45요청의 첫 줄 범주 집계. 임상 정확도 평가가 아니라 보고서에 명시된 기술의 재현 집계.
++사전 판정 규칙(plan.md Evaluation)을 그대로 구현한다. AutoRG 기존 출력은 별도 기술 집계로만 병기한다."""
++import sys
++import numpy as np
++from i133_common import RES, SRC, sha, read, save, now
++from i133_spec import parse, CATS
++import i133_run as R
++
++COND = ['U', 'L', 'M']
++HIGHISH = ('HIGH', 'MIXED_HIGH_LOW')
++
++
++def load(job):
++    rec = R.verify_job(job, RES / 'requests/main.json', 'main')
++    man = read(RES / 'data_manifest.json'); lab = {a['pid']: a['report_label'] for a in man['audit']}
++    out = {}
++    for r in rec:
++        pid, cond = r['id'].split('__'); out[(pid, cond)] = dict(cat=parse(r['text'], r['eos']), eos=r['eos'], n_tokens=r['n_tokens'], first_line=(r['text'].strip().splitlines() or [''])[0][:80])
++    assert len(out) == 45 and set(lab.values()) == {'HIGH', 'MIXED_HIGH_LOW'}
++    return out, lab
++
++
++def table(out, lab):
++    pids = sorted(lab); mixed = [p for p in pids if lab[p] == 'MIXED_HIGH_LOW']; high = [p for p in pids if lab[p] == 'HIGH']
++    res = {}
++    for c in COND:
++        cats = [out[(p, c)]['cat'] for p in pids]
++        res[c] = dict(valid=sum(x is not None for x in cats), invalid=sum(x is None for x in cats), non_eos=sum(not out[(p, c)]['eos'] for p in pids),
++                      dist={k: sum(x == k for x in cats) for k in CATS}, mixed_reproduced=sum(out[(p, c)]['cat'] == 'MIXED_HIGH_LOW' for p in mixed),
++                      high_preserved=sum(out[(p, c)]['cat'] in HIGHISH for p in high), high_exact=sum(out[(p, c)]['cat'] == 'HIGH' for p in high),
++                      exact_agreement=sum(out[(p, c)]['cat'] == lab[p] for p in pids))
++    return pids, mixed, high, res
++
++
++def transitions(out, pids, a, b):
++    t = {}
++    for p in pids:
++        k = f"{out[(p, a)]['cat']}->{out[(p, b)]['cat']}"; t[k] = t.get(k, 0) + 1
++    return t
++
++
++def boot(out, mixed, a, b, n=10000, seed=133):
++    x = np.array([[out[(p, c)]['cat'] == 'MIXED_HIGH_LOW' for c in (a, b)] for p in mixed], float); d = x[:, 0] - x[:, 1]
++    rng = np.random.default_rng(seed); ms = [d[rng.integers(0, len(d), len(d))].sum() for _ in range(n)]
++    return dict(net_cases=int(d.sum()), gained=int(((x[:, 0] == 1) & (x[:, 1] == 0)).sum()), lost=int(((x[:, 0] == 0) & (x[:, 1] == 1)).sum()), ci95_net=[float(np.percentile(ms, 2.5)), float(np.percentile(ms, 97.5))])
++
++
++def decide(res, net_LU, net_LM):
++    valid_ok = all(res[c]['valid'] >= 14 for c in COND); high_ok = res['L']['high_preserved'] >= 3
++    flags = dict(L_minus_U_net=net_LU, L_minus_M_net=net_LM, high_preserved_L=res['L']['high_preserved'], valid_each_ge14=valid_ok)
++    if net_LU <= 0: v = 'negative_hold_marking_investment'
++    elif net_LM <= 0: v = 'negative_no_image_use_claim'
++    elif net_LU >= 3 and net_LM >= 3 and high_ok and valid_ok: v = 'positive_investment_signal'
++    else: v = 'inconclusive'
++    return dict(verdict=v, flags=flags, L_vs_M_indistinct=net_LM <= 0, note='임상 성능 gate가 아니라 후속 확인의 최소 정보 가치 문턱. 양성이어도 정확한 영역 의미·독립 환자·단순 대안 이후 가치는 미확인.')
++
++
++def autorg(lab):
++    """iter_070 저장 라벨(원 parser 결과)을 같은 집계 틀로 재배열만 한다. 입력 정보·모델이 달라 순위 비교가 아니다."""
++    pc = read(SRC.parent / 'eval/report_all15.json')['per_case']; mixed = [p for p in lab if lab[p] == 'MIXED_HIGH_LOW']; high = [p for p in lab if lab[p] == 'HIGH']; res = {}
++    for c in ['P', 'G']:
++        lb = {p: pc[p][c]['label'] for p in lab}
++        res[c] = dict(dist={k: sum(v == k for v in lb.values()) for k in sorted(set(lb.values()))}, mixed_reproduced=sum(lb[p] == 'MIXED_HIGH_LOW' for p in mixed), high_preserved=sum(lb[p] in HIGHISH for p in high))
++    return res
++
++
++def main(job):
++    out, lab = load(job); pids, mixed, high, res = table(out, lab)
++    tr = dict(U_to_L=transitions(out, pids, 'U', 'L'), M_to_L=transitions(out, pids, 'M', 'L'), U_to_M=transitions(out, pids, 'U', 'M'))
++    bs = dict(L_minus_U=boot(out, mixed, 'L', 'U'), L_minus_M=boot(out, mixed, 'L', 'M'), U_minus_M=boot(out, mixed, 'U', 'M'))
++    dec = decide(res, bs['L_minus_U']['net_cases'], bs['L_minus_M']['net_cases'])
++    simple = dict(always_MIXED_HIGH_LOW=dict(mixed_reproduced=len(mixed), high_preserved=len(high), note='train majority 및 무조건 high+low 기술; 유효 판독기 아님'))
++    ar = autorg(lab)
++    per = [dict(pid=p, report=lab[p], **{c: out[(p, c)]['cat'] for c in COND}, first_lines={c: out[(p, c)]['first_line'] for c in COND}, n_tokens={c: out[(p, c)]['n_tokens'] for c in COND}) for p in pids]
++    save(RES / 'eval/report.json', dict(created_at=now(), job=str(job), n_mixed=len(mixed), n_high_only=len(high), per_condition=res, transitions=tr, bootstrap_mixed_cases_seed133_10000=bs,
++                                        decision=dec, simple_baselines=simple, autorg_iter070_labels_regrouped=ar, per_patient=per,
++                                        eval_code_sha256=sha(__file__)))
++    print(res); print(tr); print(bs); print(dec)
++
++
++if __name__ == '__main__':
++    main(sys.argv[1])
+diff --git a/i133_lock.py b/i133_lock.py
+new file mode 100644
+index 0000000..1a028c8
+--- /dev/null
++++ b/i133_lock.py
+@@ -0,0 +1,29 @@
++"""단계별 protocol 잠금 (technical / main). main은 technical_gate.json(passed=True)을 gates에 포함해야 한다."""
++import sys
++from pathlib import Path
++from i133_common import RES, HERE, sha, read, save, now
++from i133_spec import CONFIG
++from i133_run import MODEL, protocol_path
++
++CODE = ['i133_common.py', 'i133_spec.py', 'i133_data.py', 'i133_run.py', 'i133_lock.py', 'mr123_data.py', 'i133_eval.py', 'i133_tech.py']
++
++
++def main(stage):
++    code = {str(HERE / c): sha(HERE / c) for c in CODE if (HERE / c).exists()}
++    inputs = {str(RES / 'data_manifest.json'): sha(RES / 'data_manifest.json')}
++    for s in ['technical', 'main']:
++        inputs[str(RES / f'requests/{s}.json')] = sha(RES / f'requests/{s}.json')
++    gates = {}
++    if stage == 'main':
++        g = RES / 'tests/technical_gate.json'
++        assert read(g)['passed'] is True; gates[str(g)] = sha(g)
++        assert (HERE / 'i133_eval.py').exists(), 'eval code must be locked before main generation'
++    mf = {}
++    for p in sorted(Path(MODEL).iterdir()):
++        r = p.resolve(); mf[str(r)] = dict(bytes=r.stat().st_size, sha256=sha(r))
++    save(protocol_path(stage), dict(created_at=now(), stage=stage, config=CONFIG, code=code, inputs=inputs, gates=gates, model_files=mf))
++    print('locked', stage, len(code), 'code', len(mf), 'model files')
++
++
++if __name__ == '__main__':
++    main(sys.argv[1])
+diff --git a/i133_post.py b/i133_post.py
+new file mode 100644
+index 0000000..801aed0
+--- /dev/null
++++ b/i133_post.py
+@@ -0,0 +1,22 @@
++"""사후(post hoc) 기술 집계: 원 판정과 별개. 첫 줄은 EOS 무관 집계, 설명문의 low/mixed 언급은 단순 키워드(임상 판정 아님)."""
++import re, glob, json
++from collections import Counter
++from i133_common import RES, read, save, now, sha
++
++man = read(RES / 'data_manifest.json'); lab = {a['pid']: a['report_label'] for a in man['audit']}
++rows = []
++for f in sorted(glob.glob(str(RES / 'jobs/main/worker*.jsonl'))):
++    for l in open(f): rows.append(json.loads(l))
++assert len(rows) == 45
++pat = re.compile(r'hypointens|low[- ]signal|low signal|mixed|heterogene|dark|necro', re.I)
++first = Counter(); kw = {}; nopix = {}
++for r in rows:
++    pid, c = r['id'].split('__'); fl = r['text'].strip().splitlines()[0].strip()
++    first[(c, fl)] += 1
++    body = '\n'.join(r['text'].strip().splitlines()[1:])
++    k = (c, lab[pid]); d = kw.setdefault(f'{c}|{lab[pid]}', dict(n=0, with_keyword=0, non_eos=0)); d['n'] += 1; d['with_keyword'] += bool(pat.search(body)); d['non_eos'] += (not r['eos'])
++    if c == 'M': nopix[pid] = body[:200]
++save(RES / 'eval/post_hoc.json', dict(created_at=now(), note='사후 기술 집계. 주판정·parser는 변경하지 않음. 키워드 언급은 임상 판독이 아님.',
++     first_line_regardless_of_eos={f'{c}|{fl}': n for (c, fl), n in sorted(first.items())}, keyword_mentions_in_explanation=kw, M_explanation_heads=nopix, source=str(RES / 'jobs/main'), code_sha256=sha(__file__)))
++print(dict(first)); print(kw)
++for p, t in list(nopix.items())[:3]: print(p, repr(t))
+diff --git a/i133_run.py b/i133_run.py
+new file mode 100644
+index 0000000..f01434b
+--- /dev/null
++++ b/i133_run.py
+@@ -0,0 +1,234 @@
++"""iter_133 추론 실행기 (mr132_run 파생). 변경점: iter_133 경로·CONFIG(seed133)·단일 요청(8 slice)·batch1 고정,
++worker 직접 진입에서도 protocol+단계 gate+감독기 flock 보유를 검증한다. 결과는 results/iter_133 아래 job 디렉터리에만 쓴다."""
++import argparse, os, sys, time, json, fcntl, subprocess
++from pathlib import Path
++from i133_common import RES, read, save, sha, digest, now
++from i133_spec import CONFIG, FORBIDDEN_IN_PROMPT
++
++MODEL = Path(__file__).resolve().parent.parent / 'hf_cache/models--google--medgemma-1.5-4b-it/snapshots' / CONFIG['revision']
++def protocol_path(stage): return RES / f'protocol_lock_{stage}.json'
++STAGES = ['technical', 'main']
++
++
++def smi():
++    s = subprocess.check_output(['nvidia-smi', '--query-gpu=index,uuid,memory.total,memory.used,memory.free,utilization.gpu', '--format=csv,noheader,nounits'], text=True)
++    return [dict(zip(['index', 'uuid', 'total', 'used', 'free', 'utilization'], [x.strip() for x in line.split(',')])) for line in s.strip().splitlines()]
++
++
++def allowed():
++    raw = os.environ.get('CUDA_VISIBLE_DEVICES')
++    if raw is None: raise RuntimeError('CUDA_VISIBLE_DEVICES must be explicit')
++    ids = raw.split(','); assert ids and all(i.strip().isdigit() for i in ids)
++    actual = {r['index'] for r in smi()}; assert set(ids) <= actual
++    return ids
++
++
++def verify_protocol(models=False, worker_only=False, stage='main'):
++    """worker/launch 모두 호출. stage=main이면 technical gate 통과 파일이 protocol에 잠겨 있고 passed=True여야 한다."""
++    PROTOCOL = protocol_path(stage); lock = read(PROTOCOL); assert lock['config'] == CONFIG and lock['stage'] == stage
++    for p, h in {**lock['code'], **lock['gates'], **({} if worker_only else lock['inputs'])}.items():
++        if sha(p) != h: raise ValueError('protocol mismatch: ' + p)
++    for p, r in lock['model_files'].items():
++        assert Path(p).stat().st_size == r['bytes']
++        if models and sha(p) != r['sha256']: raise ValueError('model mismatch')
++    if stage == 'main':
++        gp = str(RES / 'tests/technical_gate.json')
++        assert gp in lock['gates'], 'technical gate not locked'
++        g = read(gp); assert g.get('passed') is True, 'technical gate failed'
++    return sha(PROTOCOL)
++
++
++def requests(path):
++    rr = read(path); ids = [r['id'] for r in rr]; assert len(set(ids)) == len(ids)
++    known = {}
++    for stage in STAGES:
++        p = RES / 'requests' / f'{stage}.json'
++        if p.exists(): known.update({r['id']: r for r in read(p)})
++    for r in rr:
++        assert r == known[r['id']]
++        assert digest({k: v for k, v in r.items() if k != 'request_digest'}) == r['request_digest']
++        assert r['kind'] == 'single' and len(r['groups']) == 1 and len(r['groups'][0]) == 8
++        for im in r['groups'][0]: assert sha(im['path']) == im['sha256']
++        assert not any(s in r['prompt'] for s in FORBIDDEN_IN_PROMPT)
++    return rr
++
++
++def load_records(job, repair=False):
++    fd = os.open(Path(job) / 'records.lock', os.O_CREAT | os.O_RDWR, 0o600)
++    fcntl.flock(fd, fcntl.LOCK_EX if repair else fcntl.LOCK_SH)
++    try: return _load_records(job, repair)
++    finally: os.close(fd)
++
++
++def _load_records(job, repair=False):
++    records = []
++    for p in sorted(Path(job).glob('worker*.jsonl')):
++        raw = p.read_bytes(); lines = raw.splitlines(keepends=True); good = 0
++        for i, line in enumerate(lines):
++            try:
++                if not line.endswith(b'\n'): raise ValueError('uncommitted tail')
++                r = json.loads(line)
++            except Exception:
++                if i != len(lines) - 1 or not repair: raise ValueError('corrupt JSONL: ' + str(p))
++                save(p.with_name(p.name + '.tail_' + str(time.time_ns()) + '.json'), dict(bytes_hex=raw[good:].hex(), source_sha256=sha(p), reason='last uncommitted row'))
++                with open(p, 'r+b') as f: f.truncate(good); f.flush(); os.fsync(f.fileno())
++                break
++            assert r['record_digest'] == digest({k: v for k, v in r.items() if k != 'record_digest'})
++            records.append(r); good += len(line)
++    assert len({r['id'] for r in records}) == len(records), 'duplicate result'
++    return records
++
++
++def check_records(records, rr, proto):
++    expected = {r['id']: r for r in rr}
++    for r in records:
++        req = expected[r['id']]
++        assert r['request_digest'] == req['request_digest'] and r['protocol_sha256'] == proto and r['config_digest'] == digest(CONFIG)
++        assert r['image_hashes'] == [im['sha256'] for im in req['groups'][0]]
++
++
++def verify_job(job, reqpath, stage, complete=True):
++    proto = verify_protocol(stage=stage); rr = requests(reqpath); rec = load_records(job); check_records(rec, rr, proto)
++    if complete:
++        c = read(Path(job) / 'completion.json'); assert c['n_records'] == len(rr) == len(rec) and c['protocol_sha256'] == proto and c['requests_sha256'] == sha(reqpath)
++        assert c['config'] == CONFIG and all(x == 0 for x in c['returncodes'])
++        assert {r['id'] for r in rec} == {r['id'] for r in rr}
++        assert all(sha(p) == h for p, h in c['files'].items())
++    return rec
++
++
++def messages(req):
++    from PIL import Image
++    content = [dict(type='text', text=req['prompt'])]
++    for n, im in enumerate(req['groups'][0]):
++        content.append(dict(type='text', text=f'\nAxial slice {n + 1}/8, inferior to superior:\n'))
++        content.append(dict(type='image', image=Image.open(im['path']).convert('RGB')))
++    return [dict(role='user', content=content)]
++
++
++def input_tensor(proc, req):
++    return proc.apply_chat_template(messages(req), add_generation_prompt=True, tokenize=True, return_dict=True, return_tensors='pt')
++
++
++def worker(args):
++    assert args.lock_fd is not None
++    # 감독기 flock 보유 검증: 같은 파일을 새로 열어 비차단 flock이 거부되어야 하고, 상속 fd가 같은 inode여야 한다.
++    job = Path(args.job); st = os.fstat(args.lock_fd); lp = job / 'supervisor.lock'
++    assert st.st_ino == lp.stat().st_ino, 'lock fd is not job supervisor.lock'
++    probe = os.open(lp, os.O_RDWR)
++    try:
++        fcntl.flock(probe, fcntl.LOCK_EX | fcntl.LOCK_NB); raise RuntimeError('supervisor flock not held')
++    except BlockingIOError: pass
++    finally: os.close(probe)
++    proto = verify_protocol(worker_only=True, stage=args.stage); rr = requests(args.requests); claims = job / 'claims'
++    import torch, numpy as np
++    from transformers import AutoProcessor, AutoModelForImageTextToText
++    torch.manual_seed(CONFIG['seed']); np.random.seed(CONFIG['seed']); torch.set_num_threads(4)
++    proc = AutoProcessor.from_pretrained(MODEL, local_files_only=True)
++    t_load = time.monotonic()
++    model = AutoModelForImageTextToText.from_pretrained(MODEL, local_files_only=True, dtype=torch.bfloat16, device_map={'': 'cuda:0'}, attn_implementation='sdpa').eval()
++    load_s = time.monotonic() - t_load
++    done = {r['id'] for r in load_records(job)}; start = time.monotonic(); count = 0
++    out = job / f'worker{args.worker}_{args.attempt}.jsonl'
++    with open(out, 'xb') as f:
++        while True:
++            req = None
++            for cand in rr:
++                if cand['id'] in done: continue
++                p = claims / (cand['id'] + '.json')
++                try: fd = os.open(p, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600)
++                except FileExistsError: continue
++                with os.fdopen(fd, 'w') as c: json.dump(dict(pid=os.getpid(), worker=args.worker, request_digest=cand['request_digest']), c)
++                current = {r['id'] for r in load_records(job)}
++                if cand['id'] in current: p.unlink(); done.update(current); continue
++                req = cand; break
++            if req is None: break
++            torch.cuda.reset_peak_memory_stats(); t = time.monotonic()
++            inputs = input_tensor(proc, req).to(model.device, dtype=torch.bfloat16)
++            input_len = inputs['input_ids'].shape[-1]
++            with torch.inference_mode(): generated = model.generate(**inputs, max_new_tokens=CONFIG['max_new_tokens'], do_sample=False)
++            torch.cuda.synchronize(); elapsed = time.monotonic() - t
++            tokens = generated[0, input_len:].tolist(); eosids = model.generation_config.eos_token_id; eosids = [eosids] if isinstance(eosids, int) else eosids
++            stop = next((n + 1 for n, v in enumerate(tokens) if v in eosids), len(tokens)); tokens = tokens[:stop]
++            rec = dict(id=req['id'], kind=req['kind'], request_digest=req['request_digest'], protocol_sha256=proto, config_digest=digest(CONFIG),
++                       image_hashes=[im['sha256'] for im in req['groups'][0]], text=proc.decode(tokens, skip_special_tokens=True), tokens=tokens, n_tokens=len(tokens),
++                       eos=bool(tokens and tokens[-1] in eosids), wall_s=elapsed, input_len=input_len,
++                       peak_allocated_mib=torch.cuda.max_memory_allocated() / 1024 ** 2, peak_reserved_mib=torch.cuda.max_memory_reserved() / 1024 ** 2,
++                       worker=args.worker, gpu=os.environ['CUDA_VISIBLE_DEVICES'], completed_at=now())
++            rec['record_digest'] = digest(rec)
++            recordfd = os.open(job / 'records.lock', os.O_CREAT | os.O_RDWR, 0o600); fcntl.flock(recordfd, fcntl.LOCK_EX)
++            try: f.write((json.dumps(rec, sort_keys=True) + '\n').encode()); f.flush(); os.fsync(f.fileno())
++            finally: os.close(recordfd)
++            done.add(req['id']); count += 1; (claims / (req['id'] + '.json')).unlink()
++            del inputs, generated
++            if args.limit and count >= args.limit: break
++    save(job / f'worker{args.worker}_{args.attempt}_exit.json', dict(completed=count, wall_s=time.monotonic() - start, load_s=load_s, returncode=0))
++
++
++def launch(args):
++    stage = args.stage; proto = verify_protocol(models=True, stage=stage); rr = requests(args.requests); job = Path(args.job); job.mkdir(parents=True, exist_ok=True)
++    fd = os.open(job / 'supervisor.lock', os.O_CREAT | os.O_RDWR, 0o600)
++    try: fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
++    except BlockingIOError: os.close(fd); raise RuntimeError('active supervisor/children; refuse launch')
++    children = []; logs = []; started = time.monotonic()
++    try:
++        if (job / 'completion.json').exists(): verify_job(job, args.requests, stage); print('검증된 완료 재사용'); return
++        existing = load_records(job, repair=True); check_records(existing, rr, proto)
++        (job / 'claims').mkdir(exist_ok=True)
++        stale = list((job / 'claims').glob('*.json'))
++        if stale:
++            save(job / f'stale_claims_{time.time_ns()}.json', {str(p): read(p) for p in stale})
++            for p in stale: p.unlink()
++        attempt = str(time.time_ns()); ids = allowed(); free = {r['index']: int(r['free']) for r in smi()}; ids.sort(key=lambda g: -free[g])
++        mapping = [ids[i % len(ids)] for i in range(args.workers)]
++        for g in ids:
++            required = mapping.count(g) * (args.peak + 2048)
++            if free[g] < required: raise RuntimeError(f'memory admission {g}: free {free[g]} < {required}')
++        save(job / f'launch_{attempt}.json', dict(created_at=now(), stage=stage, requests_sha256=sha(args.requests), protocol_sha256=proto, config=CONFIG, mapping=mapping,
++                                                   memory_before=smi(), estimated_peak_mib=args.peak, worker_margin_mib=2048, existing=len(existing)))
++        for i, gpu in enumerate(mapping):
++            env = dict(os.environ, CUDA_VISIBLE_DEVICES=gpu, TOKENIZERS_PARALLELISM='false', OMP_NUM_THREADS='4', HF_HUB_OFFLINE='1')
++            log = open(job / f'worker{i}_{attempt}.log', 'xb'); logs.append(log)
++            cmd = [sys.executable, str(Path(__file__).resolve()), 'worker', '--job', str(job), '--requests', str(args.requests), '--stage', stage, '--worker', str(i), '--attempt', attempt, '--lock-fd', str(fd), '--limit', str(args.limit)]
++            children.append(subprocess.Popen(cmd, env=env, stdout=log, stderr=subprocess.STDOUT, pass_fds=(fd,)))
++        with open(job / f'resources_{attempt}.jsonl', 'x') as resources:
++            while any(c.poll() is None for c in children):
++                resources.write(json.dumps(dict(time=now(), gpu=smi(), cpu_load=os.getloadavg(), memory=Path('/proc/meminfo').read_text().splitlines()[:3])) + '\n'); resources.flush()
++                if any(c.poll() not in [None, 0] for c in children):
++                    for c in children:
++                        if c.poll() is None: c.terminate()
++                    break
++                time.sleep(5)
++        rc = [c.wait() for c in children]; rec = load_records(job); check_records(rec, rr, proto)
++        save(job / f'result_{attempt}.json', dict(returncodes=rc, n_records=len(rec), n_expected=len(rr), wall_s=time.monotonic() - started, resources=str(job / f'resources_{attempt}.jsonl')))
++        if any(rc): raise RuntimeError('child failed: ' + str(rc))
++        if len(rec) == len(rr):
++            assert {r['id'] for r in rec} == {r['id'] for r in rr}
++            save(job / 'completion.json', dict(created_at=now(), config=CONFIG, protocol_sha256=proto, requests_sha256=sha(args.requests), n_records=len(rec), returncodes=rc,
++                                               files={str(p): sha(p) for p in job.glob('worker*.jsonl')}, attempt=attempt))
++        elif not args.limit: raise RuntimeError('incomplete generation')
++        print('생성', len(rec), '/', len(rr), 'rc', rc, 'wall', time.monotonic() - started)
++    finally:
++        for c in children:
++            if c.poll() is None: c.terminate()
++        for c in children:
++            try: c.wait(timeout=30)
++            except subprocess.TimeoutExpired: c.kill(); c.wait()
++        for f in logs: f.close()
++        os.close(fd)
++
++
++def main():
++    ap = argparse.ArgumentParser(); ap.add_argument('command', choices=['launch', 'worker', 'verify']); ap.add_argument('--job', required=True); ap.add_argument('--requests', required=True)
++    ap.add_argument('--stage', choices=STAGES, required=True); ap.add_argument('--workers', type=int, default=2); ap.add_argument('--peak', type=int, default=18000)
++    ap.add_argument('--limit', type=int, default=0); ap.add_argument('--worker', type=int, default=0); ap.add_argument('--attempt'); ap.add_argument('--lock-fd', type=int); args = ap.parse_args()
++    job = Path(args.job).resolve()
++    assert str(job).startswith(str(RES) + '/'), 'job must be under results/iter_133'
++    args.job = str(job)
++    if args.command == 'worker': worker(args)
++    elif args.command == 'launch': launch(args)
++    else: print('검증', len(verify_job(args.job, args.requests, args.stage)))
++
++
++if __name__ == '__main__':
++    main()
+diff --git a/i133_spec.py b/i133_spec.py
+new file mode 100644
+index 0000000..af525ab
+--- /dev/null
++++ b/i133_spec.py
+@@ -0,0 +1,25 @@
++"""iter_133: GPU 출력 전에 고정한 prompt·첫 줄 parser·렌더 설정 (U/L/M)."""
++CONFIG = dict(model_id='google/medgemma-1.5-4b-it', revision='91850547d9f0b2fdd21aa7c5f4f3d1a8a52c243b', dtype='bfloat16',
++              attention='sdpa', max_new_tokens=512, do_sample=False, seed=133, batch=1)
++CATS = ['HIGH', 'MIXED_HIGH_LOW', 'OTHER', 'UNKNOWN']
++COMMON = ('These are eight evenly spaced axial FLAIR MRI slices of one brain, ordered from inferior to superior. '
++          'Describe the visible FLAIR signal of the main lesion. '
++          'On the first line output only one of: HIGH, MIXED_HIGH_LOW, OTHER, UNKNOWN. '
++          'HIGH means the lesion appears hyperintense (high signal); it does not state whether low-signal components are absent. '
++          'MIXED_HIGH_LOW means both high-signal and low-signal components are visible within the lesion. '
++          'OTHER means a different signal pattern. UNKNOWN means the signal cannot be assessed. '
++          'Then briefly explain the visible evidence.')
++GUIDE = (' A thin red rectangle on each slice marks the approximate region around the lesion on that slice. '
++         'It is only a coarse guide, and not every tissue inside the rectangle is lesion.')
++NOPIX = ' In this input, no MRI pixel data are provided: every image is a neutral gray background that contains only the red rectangle.'
++PROMPTS = dict(U=COMMON, L=COMMON + GUIDE, M=COMMON + GUIDE + NOPIX)
++RENDER = dict(side=896, rect_rgb=[255, 0, 0], rect_px=2, gray=[128, 128, 128], normalization='volume_minmax', n_slices=8,
++              round_half='down', mask_rule='seg>0', orientation='closest_canonical_RAS')
++FORBIDDEN_IN_PROMPT = ['BraTS', 'GLI', 't2f', 'glioma', 'tumor', 'edema', 'RadGenome', 'sub-', 'report']
++
++
++def parse(text, eos=True):
++    if not eos or not text or not text.strip():
++        return None
++    line = text.strip().splitlines()[0].strip()
++    return line if line in CATS else None
+diff --git a/i133_tech.py b/i133_tech.py
+new file mode 100644
+index 0000000..67b217e
+--- /dev/null
++++ b/i133_tech.py
+@@ -0,0 +1,111 @@
++"""기술 검사: tensor 대조(tensor), 변조·진입 거부(neg), 구성 간 출력 정합성·처리량(compare), 최종 gate(gate).
++기술 사례 출력으로 prompt/문턱을 조정하지 않는다. 내용 성능은 gate에 쓰지 않는다."""
++import sys, os, json, subprocess, copy, shutil, time
++from pathlib import Path
++from i133_common import RES, HERE, sha, read, save, digest, now
++from i133_spec import CONFIG
++import i133_run as R
++
++T = RES / 'tests'
++
++
++def tensor():
++    import torch
++    from PIL import Image
++    from transformers import AutoProcessor
++    proc = AutoProcessor.from_pretrained(R.MODEL, local_files_only=True); rr = R.requests(RES / 'requests/technical.json'); out = []
++    tok = proc.tokenizer; boi = getattr(proc, 'boi_token', None); img_tok = '<image_soft_token>'; img_id = tok.convert_tokens_to_ids(img_tok)
++    for r in rr:
++        wrap = R.input_tensor(proc, r)
++        msgs = R.messages(r)
++        text = proc.apply_chat_template(msgs, tokenize=False, add_generation_prompt=True)
++        imgs = [Image.open(im['path']).convert('RGB') for im in r['groups'][0]]
++        ind = proc(text=text, images=imgs, return_tensors='pt', add_special_tokens=False)  # 템플릿이 <bos>를 이미 포함
++        same_ids = bool(torch.equal(wrap['input_ids'], ind['input_ids'])); same_pix = bool(torch.equal(wrap['pixel_values'], ind['pixel_values']))
++        n_img_tok = int((wrap['input_ids'] == img_id).sum()) if img_id is not None else None
++        # 영상 순서 민감도: slice 1,2 교환 시 pixel_values가 달라져야 한다.
++        sw = copy.deepcopy(r); g = sw['groups'][0]; g[0], g[1] = g[1], g[0]
++        pv_sw = R.input_tensor(proc, sw)['pixel_values']
++        order_sensitive = not torch.equal(wrap['pixel_values'], pv_sw)
++        # pixel_values[n]이 n번째 입력 영상의 독립 처리 결과와 같은가
++        per = [proc.image_processor(images=[im], return_tensors='pt')['pixel_values'] for im in imgs]
++        per_ok = all(torch.equal(wrap['pixel_values'][n:n + 1], per[n]) for n in range(8))
++        decoded = tok.decode(wrap['input_ids'][0])
++        leak = [s for s in ['BraTS', 'GLI', '00012', '00456', 't2f', 'glioma', 'tumor', 'edema'] if s in decoded]
++        out.append(dict(id=r['id'], same_input_ids=same_ids, same_pixel_values=same_pix, n_image_tokens=n_img_tok, n_images=len(imgs), input_len=int(wrap['input_ids'].shape[-1]),
++                        pixel_values_shape=list(wrap['pixel_values'].shape), order_sensitive=order_sensitive, per_image_pixel_match=per_ok, leak=leak,
++                        has_generation_prompt=decoded.rstrip().endswith('model') or '<start_of_turn>model' in decoded))
++    ok = all(o['same_input_ids'] and o['same_pixel_values'] and o['order_sensitive'] and o['per_image_pixel_match'] and not o['leak'] and o['n_image_tokens'] == 8 * 256 for o in out)
++    save(T / 'tensor_check_v2.json', dict(created_at=now(), passed=ok, image_token=img_tok, rows=out, note='v1(tensor_check.json)은 독립 경로의 BOS 중복·image token 이름 오류로 실패; 검사 코드 오류이며 wrapper 입력 결함이 아님'))
++    print('tensor passed', ok, [(o['n_image_tokens'], o['input_len']) for o in out])
++
++
++def neg():
++    rr = read(RES / 'requests/technical.json'); res = {}
++
++    def must_fail(name, fn):
++        try: fn(); res[name] = dict(rejected=False)
++        except Exception as e: res[name] = dict(rejected=True, error=type(e).__name__ + ': ' + str(e)[:150])
++    tmp = T / 'neg_tmp'; tmp.mkdir(parents=True, exist_ok=True)
++    # 1. 요청 변조: prompt 변경(digest 불일치)
++    x = copy.deepcopy(rr); x[0]['prompt'] += ' extra'; save(tmp / 'tamper_prompt.json', x)
++    must_fail('tampered_prompt', lambda: R.requests(tmp / 'tamper_prompt.json'))
++    # 2. 입력 hash 변경: 이미지 sha 필드 변경(+digest 재계산 → known과 불일치)
++    x = copy.deepcopy(rr); x[0]['groups'][0][0]['sha256'] = '0' * 64; x[0]['request_digest'] = digest({k: v for k, v in x[0].items() if k != 'request_digest'}); save(tmp / 'tamper_hash.json', x)
++    must_fail('changed_input_hash', lambda: R.requests(tmp / 'tamper_hash.json'))
++    # 3. 중복 요청
++    save(tmp / 'dup.json', [rr[0], rr[0]]); must_fail('duplicate_request_ids', lambda: R.requests(tmp / 'dup.json'))
++    # 4. 요청 밖 id
++    x = copy.deepcopy(rr[:1]); x[0]['id'] = 'unknown__U'; save(tmp / 'unknown.json', x); must_fail('unknown_request_id', lambda: R.requests(tmp / 'unknown.json'))
++    # 5. worker 직접 진입(lock fd 없음 / 비감독기 fd)
++    env = dict(os.environ, CUDA_VISIBLE_DEVICES='0'); job = RES / 'jobs/neg_direct'; job.mkdir(parents=True, exist_ok=True)
++    p = subprocess.run([sys.executable, str(HERE / 'i133_run.py'), 'worker', '--job', str(job), '--requests', str(RES / 'requests/technical.json'), '--stage', 'technical', '--worker', '0', '--attempt', 'x'], env=env, capture_output=True, text=True)
++    res['worker_without_lock_fd'] = dict(rejected=p.returncode != 0, rc=p.returncode, stderr_tail=p.stderr[-200:])
++    (job / 'supervisor.lock').write_text('')
++    fd = os.open(job / 'supervisor.lock', os.O_RDWR)  # flock을 잡지 않은 fd로 worker 시도
++    p = subprocess.run([sys.executable, str(HERE / 'i133_run.py'), 'worker', '--job', str(job), '--requests', str(RES / 'requests/technical.json'), '--stage', 'technical', '--worker', '0', '--attempt', 'y', '--lock-fd', str(fd)], env=env, capture_output=True, text=True, pass_fds=(fd,))
++    os.close(fd); res['worker_with_unheld_lock'] = dict(rejected=p.returncode != 0, rc=p.returncode, stderr_tail=p.stderr[-200:])
++    # 6. 감독기 중복: flock 보유 중 launch 거부
++    import fcntl
++    job2 = RES / 'jobs/neg_dup'; job2.mkdir(parents=True, exist_ok=True)
++    fd2 = os.open(job2 / 'supervisor.lock', os.O_CREAT | os.O_RDWR, 0o600); fcntl.flock(fd2, fcntl.LOCK_EX)
++    p = subprocess.run([sys.executable, str(HERE / 'i133_run.py'), 'launch', '--job', str(job2), '--requests', str(RES / 'requests/technical.json'), '--stage', 'technical'], env=dict(os.environ, CUDA_VISIBLE_DEVICES='0,1'), capture_output=True, text=True)
++    os.close(fd2); res['duplicate_supervisor'] = dict(rejected=p.returncode != 0 and 'refuse launch' in p.stderr, rc=p.returncode, stderr_tail=p.stderr[-200:])
++    # 7. main 단계: technical gate 없이 protocol 검증 거부 (main 잠금 전)
++    must_fail('main_without_gate_lock', lambda: R.verify_protocol(stage='main'))
++    # 8. 손상 record 거부 (중간 행 손상) / 마지막 행 복구
++    jb = RES / 'jobs/neg_records'; jb.mkdir(parents=True, exist_ok=True)
++    (jb / 'worker0_a.jsonl').write_bytes(b'{"bad":\n{"also":1}\n'); must_fail('corrupt_middle_row', lambda: R.load_records(jb))
++    res['all_rejected'] = all(v['rejected'] for k, v in res.items() if isinstance(v, dict))
++    save(T / 'negative_tests.json', dict(created_at=now(), **res)); print({k: v['rejected'] for k, v in res.items() if isinstance(v, dict)})
++
++
++def toks(job): return {r['id']: r['tokens'] for r in R.load_records(job)}
++
++
++def compare():
++    jobs = RES / 'jobs'; base = toks(jobs / 'T_w2'); out = dict(created_at=now(), configs={})
++    for name in ['T_w2', 'T_w4', 'T_resume']:
++        j = jobs / name; rec = R.load_records(j); comp = read(j / 'completion.json'); t = toks(j)
++        res = [read(p) for p in sorted(j.glob('result_*.json'))]
++        peaks = [r['peak_reserved_mib'] for r in rec]; wall = sum(x['wall_s'] for x in res)
++        # 요청 처리 구간(첫 시작~마지막 완료) 기준 처리량: worker exit 파일의 wall_s(load 제외)
++        ex = [read(p) for p in j.glob('worker*_exit.json')]
++        gen_wall = max(e['wall_s'] for e in ex) if ex else None
++        used = max((max(int(g['used']) for g in json.loads(l)['gpu']) for l in open(next(j.glob('resources_*.jsonl'))) if l.strip()), default=None)
++        out['configs'][name] = dict(n=len(rec), identical_tokens_to_T_w2=all(t[k] == base[k] for k in base) and set(t) == set(base), launch_wall_s=wall, generation_wall_s=gen_wall,
++                                    req_per_min_generation=len(rec) / gen_wall * 60 if gen_wall else None, req_per_min_incl_load=len(rec) / wall * 60,
++                                    mean_request_s=sum(r['wall_s'] for r in rec) / len(rec), max_peak_reserved_mib=max(peaks), max_gpu_used_mib=used,
++                                    all_eos=all(r['eos'] for r in rec), max_tokens=max(r['n_tokens'] for r in rec), returncodes=comp['returncodes'])
++    save(T / 'compare.json', out); print(json.dumps(out['configs'], indent=1)[:1800])
++
++
++def gate():
++    t = read(T / 'tensor_check_v2.json'); n = read(T / 'negative_tests.json'); c = read(T / 'compare.json')['configs']
++    checks = dict(tensor=t['passed'], negative=n['all_rejected'], w4_identical=c['T_w4']['identical_tokens_to_T_w2'], resume_identical=c['T_resume']['identical_tokens_to_T_w2'],
++                  complete_6=all(v['n'] == 6 for v in c.values()), rc_zero=all(all(x == 0 for x in v['returncodes']) for v in c.values()))
++    save(T / 'technical_gate.json', dict(created_at=now(), passed=all(checks.values()), checks=checks, n_non_eos_outputs={k: None for k in c}, note='비EOS(512 token) 출력은 모델 출력으로서 invalid 처리하는 결과이며 인프라 gate가 아님(초기 코드의 all_eos 조건을 제거; 제거 전 결과는 compare.json에 보존). 내용 성능은 gate에 쓰지 않음. 기술 요청 출력으로 prompt/문턱 조정 없음.')); print(checks)
++
++
++if __name__ == '__main__':
++    globals()[sys.argv[1]]()
+diff --git a/mr123_data.py b/mr123_data.py
+new file mode 100644
+index 0000000..c9e673c
+--- /dev/null
++++ b/mr123_data.py
+@@ -0,0 +1,184 @@
++"""iter_123: study ZIP 안전 추출, FLAIR/brain-mask 검사, 뇌 범위 기반 slice 선택·렌더링 (규칙 mr123_rules_v1)."""
++import hashlib, json, os, zipfile
++import numpy as np
++import nibabel as nib
++from PIL import Image
++
++ROOT = '/home/test/.local/share/medgemma/mr_rate/'
++RES = '/SSD1_1TB/home/milab/daniel/08_medgemma/research/results/iter_123/'
++SIDE = 896
++AREA_FRAC = 0.05  # 뇌 범위: slice별 brain-mask 면적이 최대 면적의 5% 이상인 연속 구간 (사전 고정)
++N_SLICE = 8
++
++
++def sha_file(p):
++    d = hashlib.sha256()
++    with open(p, 'rb') as f:
++        for b in iter(lambda: f.read(1 << 22), b''):
++            d.update(b)
++    return d.hexdigest()
++
++
++def extract(zip_path, study, series_id, out_root=ROOT + 'extracted/'):
++    """flair 영상과 brain-mask만 안전 추출. 경로 이탈·symlink 거부, 기존 파일 덮어쓰기 금지."""
++    out = os.path.join(out_root, study)
++    os.makedirs(out, exist_ok=True)
++    want = {f'{study}/img/{study}_{series_id}.nii.gz': 'img.nii.gz',
++            f'{study}/seg/{study}_{series_id}_brain-mask.nii.gz': 'brain.nii.gz'}
++    z = zipfile.ZipFile(zip_path)
++    res = {}
++    for info in z.infolist():
++        if info.filename in want:
++            assert '..' not in info.filename and not info.filename.startswith('/')
++            assert (info.external_attr >> 16) & 0o170000 != 0o120000, 'symlink'
++            dst = os.path.join(out, want[info.filename])
++            if not os.path.exists(dst):
++                with z.open(info) as s, open(dst + '.part', 'wb') as d:
++                    while True:
++                        b = s.read(1 << 22)
++                        if not b:
++                            break
++                        d.write(b)
++                os.replace(dst + '.part', dst)
++            res[want[info.filename]] = dict(path=dst, sha256=sha_file(dst), size=os.path.getsize(dst), zip_member=info.filename)
++    missing = set(want.values()) - set(res)
++    return res, sorted(missing)
++
++
++def load_case(img_path, brain_path):
++    im = nib.load(img_path)
++    bm = nib.load(brain_path)
++    info = dict(orig_axcodes=''.join(nib.aff2axcodes(im.affine)), shape=list(im.shape), zooms=[float(z) for z in im.header.get_zooms()[:3]],
++                brain_shape=list(bm.shape), brain_axcodes=''.join(nib.aff2axcodes(bm.affine)),
++                affine_match=bool(np.allclose(im.affine, bm.affine, atol=1e-3)), ndim=len(im.shape))
++    if len(im.shape) != 3 or tuple(im.shape) != tuple(bm.shape):
++        return None, None, info
++    im = nib.as_closest_canonical(im)
++    bm = nib.as_closest_canonical(bm)
++    a = np.asarray(im.dataobj).astype(np.float32)
++    b = np.asarray(bm.dataobj) > 0
++    info['canon_axcodes'] = ''.join(nib.aff2axcodes(im.affine))
++    info['canon_shape'] = list(a.shape)
++    info['canon_zooms'] = [float(z) for z in im.header.get_zooms()[:3]]
++    return a, b, info
++
++
++def brain_range(b):
++    area = b.sum(axis=(0, 1)).astype(np.float64)
++    if area.max() <= 0:
++        return None
++    ok = area >= AREA_FRAC * area.max()
++    best, s = None, None
++    for i, v in enumerate(list(ok) + [False]):
++        if v and s is None:
++            s = i
++        if not v and s is not None:
++            if best is None or (i - 1 - s) > (best[1] - best[0]):
++                best = (s, i - 1)
++            s = None
++    return best
++
++
++def pick(lo, hi, f0, f1, n=N_SLICE):
++    L = hi - lo
++    pos = [lo + L * (f0 + (f1 - f0) * i / (n - 1)) for i in range(n)]
++    idx = [int(round(p)) for p in pos]
++    return idx
++
++
++def intensity_window(a, b):
++    v = a[b]
++    return float(np.percentile(v, 1)), float(np.percentile(v, 99))
++
++
++def normalization_window(a, b=None, normalization='brain_percentile_1_99'):
++    """기존 percentile 동작 보존; volume min/max에는 mask를 사용하지 않는다."""
++    if not np.isfinite(a).all():
++        raise ValueError('nonfinite volume')
++    if normalization == 'brain_percentile_1_99':
++        lo, hi = intensity_window(a, b)
++    elif normalization == 'volume_minmax':
++        lo, hi = float(np.min(a)), float(np.max(a))
++    else:
++        raise ValueError('unknown normalization')
++    if hi <= lo:
++        raise ValueError('constant/degenerate volume')
++    return lo, hi
++
++
++def render_slice(a, k, lo_v, hi_v, zooms):
++    s = a[:, :, k]
++    s = np.clip((s - lo_v) / max(hi_v - lo_v, 1e-6), 0, 1)
++    s = (s * 255 + 0.5).astype(np.uint8)
++    img = s.T[::-1, ::-1]  # RAS 정렬 후: 위=anterior, 영상 왼쪽=환자 오른쪽(radiological)
++    h, w = img.shape
++    # 평면내 spacing 보정 (x: 열 방향 zooms[0], y: 행 방향 zooms[1])
++    hh = h * zooms[1]
++    ww = w * zooms[0]
++    scale = SIDE / max(hh, ww)
++    nh, nw = max(1, int(round(hh * scale))), max(1, int(round(ww * scale)))
++    pil = Image.fromarray(img).resize((nw, nh), Image.BICUBIC)
++    canvas = Image.new('L', (SIDE, SIDE), 0)
++    canvas.paste(pil, ((SIDE - nw) // 2, (SIDE - nh) // 2))
++    return canvas.convert('RGB')
++
++
++def build_case(rec, zip_path, out_dir):
++    """returns dict with qc info and rendered PNG paths; None 사유 포함."""
++    ex, missing = extract(zip_path, rec['study_uid'], rec['series_id'])
++    info = dict(study_uid=rec['study_uid'], patient_uid=rec['patient_uid'], series_id=rec['series_id'], files=ex, missing=missing)
++    if missing:
++        info['exclude'] = 'missing_member:' + ','.join(missing)
++        return info
++    a, b, li = load_case(ex['img.nii.gz']['path'], ex['brain.nii.gz']['path'])
++    info.update(li)
++    if a is None:
++        info['exclude'] = 'shape_or_ndim_mismatch'
++        return info
++    if not info['affine_match']:
++        info['exclude'] = 'affine_mismatch'
++        return info
++    if not np.isfinite(a).all():
++        info['exclude'] = 'nonfinite'
++        return info
++    if info['canon_axcodes'] != 'RAS':
++        info['exclude'] = 'orientation_not_RAS'
++        return info
++    br = brain_range(b)
++    if br is None:
++        info['exclude'] = 'no_brain_range'
++        return info
++    lo, hi = br
++    info['brain_slice_range'] = [lo, hi]
++    info['n_brain_slices'] = hi - lo + 1
++    info['brain_voxels'] = int(b.sum())
++    C = pick(lo, hi, 0.25, 0.75)
++    W = pick(lo, hi, 0.05, 0.95)
++    info['C_idx'], info['W_idx'] = C, W
++    if len(set(C)) < N_SLICE or len(set(W)) < N_SLICE:
++        info['exclude'] = 'lt8_unique_slices'
++        return info
++    lo_v, hi_v = intensity_window(a, b)
++    info['window_p1_p99'] = [lo_v, hi_v]
++    if not hi_v > lo_v:
++        info['exclude'] = 'degenerate_window'
++        return info
++    os.makedirs(out_dir, exist_ok=True)
++    pngs = {}
++    for k in sorted(set(C) | set(W)):
++        p = os.path.join(out_dir, f'{rec["study_uid"]}_s{k:03d}.png')
++        im = render_slice(a, k, lo_v, hi_v, info['canon_zooms'])
++        if not os.path.exists(p):
++            im.save(p)
++        pngs[k] = dict(path=p, sha256=sha_file(p))
++    info['pngs'] = {str(k): v for k, v in pngs.items()}
++    info['exclude'] = None
++    return info
++
++
++def montage(info, which, out_path):
++    ims = [Image.open(info['pngs'][str(k)]['path']).resize((224, 224)) for k in info[which + '_idx']]
++    M = Image.new('RGB', (224 * 4, 224 * 2))
++    for i, im in enumerate(ims):
++        M.paste(im, ((i % 4) * 224, (i // 4) * 224))
++    M.save(out_path)
+diff --git a/mr132_common.py b/mr132_common.py
+new file mode 100644
+index 0000000..0368809
+--- /dev/null
++++ b/mr132_common.py
+@@ -0,0 +1,24 @@
++"""iter_132 전용 보존·출처 유틸리티."""
++import hashlib, json, os
++from pathlib import Path
++from datetime import datetime, timezone
++
++RES = Path(__file__).resolve().parent / 'results/iter_132'
++DATA = Path('/home/test/.local/share/medgemma/mr_rate/mr_art/iter_132')
++REV = 'fb45b349f21faa4b65ad23089788bbea30d07d74'
++IQREV = '82b3272d7fe73b2a1965625efd821128eb081be3'
++
++def sha(p):
++    h=hashlib.sha256()
++    with open(p,'rb') as f:
++        for b in iter(lambda:f.read(4<<20), b''): h.update(b)
++    return h.hexdigest()
++
++def now(): return datetime.now(timezone.utc).isoformat()
++def digest(x): return hashlib.sha256(json.dumps(x,sort_keys=True,separators=(',',':'),allow_nan=False).encode()).hexdigest()
++def read(p): return json.loads(Path(p).read_text())
++def save(p,x):
++    p=Path(p); p.parent.mkdir(parents=True,exist_ok=True)
++    with open(p,'x') as f:
++        json.dump(x,f,indent=2,sort_keys=True,allow_nan=False); f.write('\n'); f.flush(); os.fsync(f.fileno())
++
+diff --git a/mr132_run.py b/mr132_run.py
+new file mode 100644
+index 0000000..4f66eef
+--- /dev/null
++++ b/mr132_run.py
+@@ -0,0 +1,206 @@
++"""잠긴 입력의 GPU 추론: 배타 소유권·원자 claim·개별 결과·안전 재개."""
++import argparse,os,sys,time,json,fcntl,subprocess,hashlib,signal
++from pathlib import Path
++from mr132_common import RES,read,save,sha,digest,now
++from mr132_spec import CONFIG
++
++MODEL=Path(__file__).resolve().parent.parent/'hf_cache/models--google--medgemma-1.5-4b-it/snapshots'/CONFIG['revision']
++PROTOCOL=RES/'protocol_lock_v2.json'
++def smi():
++    s=subprocess.check_output(['nvidia-smi','--query-gpu=index,uuid,memory.total,memory.used,memory.free,utilization.gpu','--format=csv,noheader,nounits'],text=True)
++    return [dict(zip(['index','uuid','total','used','free','utilization'],[x.strip() for x in line.split(',')])) for line in s.strip().splitlines()]
++
++def allowed():
++    raw=os.environ.get('CUDA_VISIBLE_DEVICES')
++    if raw is None: raise RuntimeError('CUDA_VISIBLE_DEVICES must be explicit')
++    ids=raw.split(','); assert ids and all(i.strip().isdigit() for i in ids)
++    actual={r['index'] for r in smi()}; assert set(ids)<=actual
++    return ids
++
++def verify_protocol(models=False,worker_only=False):
++    lock=read(PROTOCOL); assert lock['config']==CONFIG
++    for p,h in {**lock['code'],**({} if worker_only else lock['inputs'])}.items():
++        if sha(p)!=h: raise ValueError('protocol mismatch: '+p)
++    for p,r in lock['model_files'].items():
++        assert Path(p).stat().st_size==r['bytes']
++        if models and sha(p)!=r['sha256']: raise ValueError('model mismatch')
++    return sha(PROTOCOL)
++
++def requests(path):
++    rr=read(path); ids=[r['id'] for r in rr]; assert len(set(ids))==len(ids)
++    known={}
++    for stage in ['technical','development','holdout']:
++        p=RES/'requests'/f'{stage}.json'
++        if p.exists(): known.update({r['id']:r for r in read(p)})
++    for r in rr:
++        assert r==known[r['id']]
++        assert digest({k:v for k,v in r.items() if k!='request_digest'})==r['request_digest']
++        assert r['kind'] in ['single','pair'] and len(r['groups'])==(1 if r['kind']=='single' else 2)
++        for g in r['groups']:
++            assert len(g)==8
++            for im in g:
++                assert sha(im['path'])==im['sha256']
++        assert not any(s in r['prompt'] for s in ['headmotion','acq-standard','sub-','MRIQC','expert score'])
++    return rr
++
++def load_records(job,repair=False):
++    fd=os.open(Path(job)/'records.lock',os.O_CREAT|os.O_RDWR,0o600)
++    fcntl.flock(fd,fcntl.LOCK_EX if repair else fcntl.LOCK_SH)
++    try: return _load_records(job,repair)
++    finally: os.close(fd)
++
++def _load_records(job,repair=False):
++    records=[]
++    for p in sorted(Path(job).glob('worker*.jsonl')):
++        raw=p.read_bytes(); lines=raw.splitlines(keepends=True); good=0
++        for i,line in enumerate(lines):
++            try:
++                if not line.endswith(b'\n'): raise ValueError('uncommitted tail')
++                r=json.loads(line)
++            except Exception:
++                if i!=len(lines)-1 or not repair: raise ValueError('corrupt JSONL: '+str(p))
++                save(p.with_name(p.name+'.tail_'+str(time.time_ns())+'.json'),dict(bytes_hex=raw[good:].hex(),source_sha256=sha(p),reason='last uncommitted row'))
++                with open(p,'r+b') as f: f.truncate(good); f.flush(); os.fsync(f.fileno())
++                break
++            assert r['record_digest']==digest({k:v for k,v in r.items() if k!='record_digest'})
++            records.append(r); good+=len(line)
++    assert len({r['id'] for r in records})==len(records),'duplicate result'
++    return records
++
++def check_records(records,rr,proto):
++    expected={r['id']:r for r in rr}
++    for r in records:
++        req=expected[r['id']]
++        assert r['request_digest']==req['request_digest'] and r['protocol_sha256']==proto and r['config_digest']==digest(CONFIG)
++        assert r['kind']==req['kind']
++        assert r['image_hashes']==[im['sha256'] for g in req['groups'] for im in g]
++
++def verify_job(job,reqpath,complete=True):
++    proto=verify_protocol(); rr=requests(reqpath); rec=load_records(job); check_records(rec,rr,proto)
++    if complete:
++        c=read(Path(job)/'completion.json'); assert c['n_records']==len(rr)==len(rec) and c['protocol_sha256']==proto and c['requests_sha256']==sha(reqpath)
++        assert c['config']==CONFIG and all(x==0 for x in c['returncodes'])
++        assert {r['id'] for r in rec}=={r['id'] for r in rr}
++        assert all(sha(p)==h for p,h in c['files'].items())
++    return rec
++
++def messages(req):
++    from PIL import Image
++    content=[dict(type='text',text=req['prompt'])]
++    for i,group in enumerate(req['groups']):
++        content.append(dict(type='text',text='\nAcquisition '+('A' if i==0 else 'B')+':\n'))
++        for n,im in enumerate(group):
++            content.append(dict(type='text',text=f'\nAxial slice {n+1}/8, inferior to superior:\n'))
++            content.append(dict(type='image',image=Image.open(im['path']).convert('RGB')))
++    return [dict(role='user',content=content)]
++
++def input_tensor(proc,rr):
++    return proc.apply_chat_template(messages(rr[0]) if len(rr)==1 else [messages(r) for r in rr],add_generation_prompt=True,tokenize=True,return_dict=True,return_tensors='pt',padding=True)
++
++def worker(args):
++    assert args.lock_fd is not None; os.fstat(args.lock_fd)
++    proto=verify_protocol(worker_only=True); rr=requests(args.requests); job=Path(args.job); claims=job/'claims'
++    # 감독기의 flock fd를 상속하여 부모가 죽어도 자식이 살아 있는 동안 새 감독기를 거부한다.
++    import torch,numpy as np
++    from transformers import AutoProcessor,AutoModelForImageTextToText
++    torch.manual_seed(132); np.random.seed(132); torch.set_num_threads(4)
++    proc=AutoProcessor.from_pretrained(MODEL,local_files_only=True); proc.tokenizer.padding_side='left'
++    model=AutoModelForImageTextToText.from_pretrained(MODEL,local_files_only=True,dtype=torch.bfloat16,device_map={'':'cuda:0'},attn_implementation='sdpa').eval()
++    done={r['id'] for r in load_records(job)}; start=time.monotonic(); count=0
++    out=job/f'worker{args.worker}_{args.attempt}.jsonl'
++    with open(out,'xb') as f:
++        while True:
++            batch=[]; owned=[]
++            for req in rr:
++                if req['id'] in done: continue
++                if batch and req['kind']!=batch[0]['kind']: continue
++                p=claims/(req['id']+'.json')
++                try:
++                    fd=os.open(p,os.O_CREAT|os.O_EXCL|os.O_WRONLY,0o600)
++                except FileExistsError: continue
++                with os.fdopen(fd,'w') as c: json.dump(dict(pid=os.getpid(),worker=args.worker,request_digest=req['request_digest']),c)
++                # 완료 row는 claim 파일을 지운 후 다시 claim될 수 있어 현재 sibling row를 다시 확인한다.
++                current={r['id'] for r in load_records(job)}
++                if req['id'] in current: p.unlink(); done.update(current); continue
++                batch.append(req); owned.append(p)
++                if len(batch)==args.batch: break
++            if not batch: break
++            torch.cuda.reset_peak_memory_stats(); t=time.monotonic()
++            inputs=input_tensor(proc,batch).to(model.device,dtype=torch.bfloat16)
++            input_len=inputs['input_ids'].shape[-1]
++            with torch.inference_mode(): generated=model.generate(**inputs,max_new_tokens=512,do_sample=False)
++            torch.cuda.synchronize(); elapsed=time.monotonic()-t
++            for i,req in enumerate(batch):
++                tokens=generated[i,input_len:].tolist(); eosids=model.generation_config.eos_token_id; eosids=[eosids] if isinstance(eosids,int) else eosids
++                stop=next((n+1 for n,v in enumerate(tokens) if v in eosids),len(tokens)); tokens=tokens[:stop]
++                rec=dict(id=req['id'],kind=req['kind'],request_digest=req['request_digest'],protocol_sha256=proto,config_digest=digest(CONFIG),image_hashes=[im['sha256'] for g in req['groups'] for im in g],text=proc.decode(tokens,skip_special_tokens=True),tokens=tokens,n_tokens=len(tokens),eos=bool(tokens and tokens[-1] in eosids),wall_s=elapsed/len(batch),batch_wall_s=elapsed,batch_size=len(batch),input_len=input_len,peak_allocated_mib=torch.cuda.max_memory_allocated()/1024**2,peak_reserved_mib=torch.cuda.max_memory_reserved()/1024**2,worker=args.worker,gpu=os.environ['CUDA_VISIBLE_DEVICES'],completed_at=now())
++                rec['record_digest']=digest(rec)
++                recordfd=os.open(job/'records.lock',os.O_CREAT|os.O_RDWR,0o600); fcntl.flock(recordfd,fcntl.LOCK_EX)
++                try: f.write((json.dumps(rec,sort_keys=True)+'\n').encode()); f.flush(); os.fsync(f.fileno())
++                finally: os.close(recordfd)
++                done.add(req['id']); count+=1
++            for p in owned: p.unlink()
++            del inputs,generated
++            if args.limit and count>=args.limit: break
++    save(job/f'worker{args.worker}_{args.attempt}_exit.json',dict(completed=count,wall_s=time.monotonic()-start,returncode=0))
++
++def launch(args):
++    proto=verify_protocol(models=True); rr=requests(args.requests); job=Path(args.job); job.mkdir(parents=True,exist_ok=True)
++    fd=os.open(job/'supervisor.lock',os.O_CREAT|os.O_RDWR,0o600)
++    try: fcntl.flock(fd,fcntl.LOCK_EX|fcntl.LOCK_NB)
++    except BlockingIOError: os.close(fd); raise RuntimeError('active supervisor/children; refuse launch')
++    children=[]; logs=[]; started=time.monotonic()
++    try:
++        if (job/'completion.json').exists(): verify_job(job,args.requests); print('검증된 완료 재사용'); return
++        existing=load_records(job,repair=True); check_records(existing,rr,proto)
++        (job/'claims').mkdir(exist_ok=True)
++        # flock을 얻었으므로 이전 자식이 없다. stale claim만 별도 보존 후 회수한다.
++        stale=list((job/'claims').glob('*.json'))
++        if stale:
++            save(job/f'stale_claims_{time.time_ns()}.json',{str(p):read(p) for p in stale})
++            for p in stale:p.unlink()
++        attempt=str(time.time_ns()); ids=allowed(); free={r['index']:int(r['free']) for r in smi()}; ids.sort(key=lambda g:-free[g])
++        nworkers=args.workers; mapping=[ids[i%len(ids)] for i in range(nworkers)]
++        for g in ids:
++            required=mapping.count(g)*(args.peak+2048)
++            if free[g]<required: raise RuntimeError(f'memory admission {g}: free {free[g]} < {required}')
++        save(job/f'launch_{attempt}.json',dict(created_at=now(),requests_sha256=sha(args.requests),protocol_sha256=proto,config=CONFIG,batch=args.batch,mapping=mapping,physical_logical_mapping={g:0 for g in ids},memory_before=smi(),estimated_peak_mib=args.peak,worker_margin_mib=2048,existing=len(existing)))
++        for i,gpu in enumerate(mapping):
++            # 시작 직전에 다시 조회하고 이미 예약된 worker의 전체 peak+여유를 고려한다.
++            current={r['index']:int(r['free']) for r in smi()}
++            if current[gpu]<(args.peak+2048): raise RuntimeError('memory changed before child start')
++            env=dict(os.environ,CUDA_VISIBLE_DEVICES=gpu,TOKENIZERS_PARALLELISM='false',OMP_NUM_THREADS='4',HF_HUB_OFFLINE='1')
++            log=open(job/f'worker{i}_{attempt}.log','xb'); logs.append(log)
++            cmd=[sys.executable,str(Path(__file__).resolve()),'worker','--job',str(job),'--requests',str(args.requests),'--worker',str(i),'--attempt',attempt,'--batch',str(args.batch),'--lock-fd',str(fd),'--limit',str(args.limit)]
++            children.append(subprocess.Popen(cmd,env=env,stdout=log,stderr=subprocess.STDOUT,pass_fds=(fd,)))
++        with open(job/f'resources_{attempt}.jsonl','x') as resources:
++            while any(c.poll() is None for c in children):
++                resources.write(json.dumps(dict(time=now(),gpu=smi(),cpu_load=os.getloadavg(),memory=Path('/proc/meminfo').read_text().splitlines()[:3]))+'\n'); resources.flush()
++                if any(c.poll() not in [None,0] for c in children):
++                    for c in children:
++                        if c.poll() is None:c.terminate()
++                    break
++                time.sleep(5)
++        rc=[c.wait() for c in children]; rec=load_records(job); check_records(rec,rr,proto)
++        save(job/f'result_{attempt}.json',dict(returncodes=rc,n_records=len(rec),n_expected=len(rr),wall_s=time.monotonic()-started,resources=str(job/f'resources_{attempt}.jsonl')))
++        if any(rc): raise RuntimeError('child failed: '+str(rc))
++        if len(rec)==len(rr):
++            assert {r['id'] for r in rec}=={r['id'] for r in rr}
++            save(job/'completion.json',dict(created_at=now(),config=CONFIG,protocol_sha256=proto,requests_sha256=sha(args.requests),n_records=len(rec),returncodes=rc,files={str(p):sha(p) for p in job.glob('worker*.jsonl')},attempt=attempt))
++        elif not args.limit: raise RuntimeError('incomplete generation')
++        print('생성',len(rec),'/',len(rr),'rc',rc,'wall',time.monotonic()-started)
++    finally:
++        for c in children:
++            if c.poll() is None:c.terminate()
++        for c in children:
++            try:c.wait(timeout=30)
++            except subprocess.TimeoutExpired:c.kill(); c.wait()
++        for f in logs:f.close()
++        os.close(fd)
++
++def main():
++    ap=argparse.ArgumentParser(); ap.add_argument('command',choices=['launch','worker','verify']); ap.add_argument('--job',required=True); ap.add_argument('--requests',required=True); ap.add_argument('--workers',type=int,default=2); ap.add_argument('--batch',type=int,default=1); ap.add_argument('--peak',type=int,default=18000); ap.add_argument('--limit',type=int,default=0); ap.add_argument('--worker',type=int,default=0); ap.add_argument('--attempt'); ap.add_argument('--lock-fd',type=int); args=ap.parse_args()
++    if args.command=='worker': worker(args)
++    elif args.command=='launch': launch(args)
++    else: print('검증',len(verify_job(args.job,args.requests)))
++if __name__=='__main__': main()
+diff --git a/mr132_spec.py b/mr132_spec.py
+new file mode 100644
+index 0000000..c00bf5d
+--- /dev/null
++++ b/mr132_spec.py
+@@ -0,0 +1,31 @@
++"""생성 전 고정한 MR-ART prompt·첫 줄 parser·사건 정의."""
++import re
++CONFIG=dict(model_id='google/medgemma-1.5-4b-it',revision='91850547d9f0b2fdd21aa7c5f4f3d1a8a52c243b',dtype='bfloat16',attention='sdpa',max_new_tokens=512,do_sample=False,seed=132)
++SINGLE=('These are eight evenly spaced axial slices from one T1-weighted brain MRI acquisition. '
++        'Assess motion-related image degradation visible in these images, such as blurring, ghosting, or ringing. '
++        'Give a continuous degradation score from 0 to 100, where 0 means minimal degradation and 100 means severe degradation. '
++        'On the first line output only the numeric score. Then briefly explain the visible evidence. '
++        'Do not infer disease or use patient identity.')
++PAIR=('These are two T1-weighted brain MRI acquisitions of the same person, with the same eight axial slice positions. '
++      'Compare the motion-related image quality visible in the two acquisitions, including blurring, ghosting, or ringing. '
++      'Choose the acquisition with better image quality: A or B. Use TIE if neither is visibly better, or UNKNOWN if you cannot assess. '
++      'On the first line output only A, B, TIE, or UNKNOWN. Then briefly explain the visible evidence. '
++      'Do not infer disease or use patient identity.')
++ACQS=['standard','headmotion1','headmotion2']
++PAIRS=[(0,1),(0,2),(1,2)]
++def parse(text,kind,eos=True):
++    if not eos or not text.strip(): return None
++    line=text.strip().splitlines()[0].strip()
++    if kind=='single':
++        if not re.fullmatch(r'(?:\d+(?:\.\d+)?|\.\d+)',line): return None
++        score=float(line)
++        return score if 0<=score<=100 else None
++    return line if line in ['A','B','TIE','UNKNOWN'] else None
++
++def pair_value(pred,winner,strict=False):
++    if pred is None or pred=='UNKNOWN': return 0.
++    if pred=='TIE': return 0. if strict else .5
++    return float(pred==winner)
++
++def expansion(delta_single,delta_iqm,consistency,error_rate):
++    return delta_single>=.10 and delta_iqm>=.05 and consistency>=.90 and error_rate<=.05

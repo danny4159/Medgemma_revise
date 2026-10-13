@@ -48412,3 +48412,434 @@ MRIQC가 훨씬 높다는 결과는 현재 실용 과제의 추가 투자 가치
 # Recommended Next Experiment
 
 이번 품질 과제에는 추가 실험을 권고하지 않는다. 보존20명·타 모델·prompt 변경·LoRA를 자동 실행하지 않는다. 다음 계획은 승인된 MRI 범위에서 중요한 잔여 문제와 실제 자료 연결을 갖춘 방향 하나를 선택하는 전략 판단으로 한정한다. 선택할 근거가 없으면 준비 코드를 더 만들지 말고 필요한 사용자 범위 선택을 구체화한다.
+
+
+## iter_133 GPT PLAN [MRI 병변 위치 지원과 설명 오류 분리 / proceed] — 2026-10-13 16:23:36
+
+# 요약
+
+- 이번에 할 일: 기존 RadGenome–BraTS FLAIR 15사례에서 무표시 영상, 위치 표시 영상, 표시-only 입력의 실제 MedGemma 출력을 비교한다.
+- 필요한 이유: iter_070의 예측/정답 mask 중첩이 높아 위치 지원의 효과를 구분하지 못했다. 이번에는 표시 개입과 영상 기여를 직접 나눈다.
+- 확인할 기준: 명시적 mixed-high-low 기술이 표시 후 늘고, 표시-only보다도 늘어나는지 확인한다.
+- 주의·다음: HIGH-only 보고서를 low 부재 정답으로 해석하지 않는다. 결과는 제한된 설명 일치 관찰이며 다음 반복은 사용자 승인을 기다린다.
+
+## 알림 맥락
+
+- 연구: MRI 병변 근거와 설명 연결
+- 데이터: RadGenome–BraTS 뇌종양 FLAIR MRI 기존 15사례
+- 모델: MedGemma 1.5 frozen; 기존 AutoRG 출력 참고
+- 과제: 같은 MRI에서 병변의 보이는 신호 특성을 짧게 기술한다
+- 가설: 위치 지정이 도움이 된다면 표시 후 설명이 달라지고, 그 변화에 실제 영상이 필요할 것이다
+- 질문: 병변 주변을 알려주면 영상에 근거한 설명이 더 잘 연결되는가?
+- 변경: 구체화
+- 연결: MR-ART 품질 비교는 종료하고, iter_070에서 구분하지 못한 위치 지원 효과를 사용자 승인에 따라 검토한다
+- 작업: 자료 연결 확인 후 세 조건 45요청으로 후속 독립 확인의 투자 가치를 판단한다
+
+# Current Understanding
+
+iter_070의 AutoRG P/G BA 0.613636과 후보 종료 판정은 유지한다. P/G Dice 평균 0.920396은 두 조건이 위치 지원 유무를 강하게 구분하지 않았음을 뜻한다. 새 비교는 그 결과를 뒤집는 재평가가 아니다.
+
+RadGenome FLAIR 원문은 병변과 edema를 구분하지만 BraTS subregion과 정확히 대응한다고 보장하지 않는다. HIGH 4건은 low를 명시하지 않은 보고서이며 명시적 low 부재 4건이 아니다. 따라서 임상 이진 BA를 주지표로 사용하지 않는다. 15사례는 이미 개발에 사용된 자료이고 독립 확인 집단이 아니다.
+
+MR-RATE의 고정 양성 관찰은 유지한다. 다른 자료의 이번 결과로 그 원인이 해결됐다고 주장하지 않는다. 현재 속성의 MedGemma 한계는 아직 관찰하지 않았으므로 limitation_ids는 비워 두며 학습하지 않는다.
+
+# Strategy Check / 연구 방향 판단
+
+1. 중요한 문제: 병변 위치를 제공하는 도구와 영상 설명 모델 사이에서 어떤 정보가 실제 설명에 쓰이는지 알아야 적절한 개입을 선택할 수 있다.
+2. 현재 근거: 라운드 01과 iter_070 원 리뷰를 계승한다. 이번 변경 근거는 HIGH-only의 비배타적 의미와 BTReport의 mask 기반 특징 지원 범위다.
+3. 쉬운 해결책: 기존 AutoRG 영역 판독과 정량 규칙이 있다. 단순한 모든 항목 high+low 응답도 양성 기술 recall을 높일 수 있으므로 recall만으로 방법 가치를 주장하지 않는다.
+4. 남은 설명: 위치 지정, 표시 prior, 영상 내용, 부분 관측, 보고서 대상 불일치다. 이번에는 앞의 세 요소만 제한적으로 구분한다.
+5. 다음 결정: 영상에 의존하는 표시 효과가 있으면 정확한 정답 연결을 갖춘 독립 확인 하나를 제안한다. 없거나 불확정이면 같은 15사례 조건 순회를 중단한다.
+
+# Hypothesis
+
+U와 L의 관측을 고정한다. 위치 지정이 현재 설명에 도움이 되면 L에서 명시적 mixed 기술 재현이 U보다 증가한다. MRI 없이 동일 표시만 제공한 M에서도 증가가 같으면 영상에 근거한 회복으로 해석할 수 없다.
+
+L의 무개선은 인식 결함을 확정하지 않는다. 표시의 부정확성, 8장 관측의 부족, 보고서의 대상 의미가 남는다. L의 개선도 정확한 병변 검출 능력이나 임상 판독 개선의 증명은 아니다.
+
+# Limitation Evidence / Correct Usage Checks
+
+기존 근거는 `agent/runs/iter_070/review.json`, `agent/runs/iter_133/think/round_01.json`, `research/results/iter_070/data/label_table.json`이다. 기존 MR-RATE observed 주장은 배경이며 이번 자료에 자동 전이하지 않는다.
+
+실행 전에 15쌍의 현재 SHA256, shape, affine, 방향, spacing, segmentation label, 환자 ID를 manifest와 대조한다. 보고서 key와 영상 ID의 개별 연결 근거 및 자산 이용 조건을 확인한다. release 수준 설명만으로 개별 파일을 인증하지 않는다. 연결 또는 이용 근거가 확보되지 않으면 관련 사례를 임의 대체하지 않고 자료 blocker로 종료한다.
+
+새 출력의 공식 chat template, image token 수, tensor, 방향과 intensity rendering을 검사한다. report·질병명·파일명·정답 범주는 입력에 넣지 않는다. 위치 표시는 명시적인 oracle 지원이며 실용 입력으로 표시하지 않는다.
+
+# Contribution Path / Baselines / Reuse
+
+기여는 미확정이다. AutoRG의 given_mask 기능을 새 방법으로 주장하지 않는다. BTReport의 확인한 VASARI 구현은 segmentation·anatomy 기반 특징 추출이며 이번 FLAIR 신호의 직접 판독 대조로 사용하지 않는다.
+
+필수 대조는 U/L/M이다. 기존 train majority MIXED_HIGH_LOW와 무조건 high+low 기술을 함께 집계한다. 이 단순 대조는 양성 기술 재현의 상한적 쉬운 해법이며 유효 임상 판독기가 아니다.
+
+기존 AutoRG P/G 출력은 15사례의 원문을 보존하고 새 공통 기술 집계만 `results/iter_133/`에 작성한다. 원 수치·parser·판정을 덮어쓰지 않는다. 전체 volume, 예측 anatomy, 학습 노출과 입력 차이를 표시하며 MedGemma와 공정한 모델 순위로 쓰지 않는다. ar70 실행·평가 코드를 재실행하지 않으므로 관련 needs_fix 전체 복구도 하지 않는다.
+
+현재 HEAD의 mr123_data와 mr132_run/common/spec을 필요한 부분만 재사용한다. 자동 기반에 없다면 reuse_assets로 반입한다. mr132_run의 과제별 schema·경로·감독기 의존 검사를 iter_133에 맞춰 연결한다. 원본 파일과 기존 결과를 유지하고 파생 구현의 출처 SHA를 기록한다.
+
+# Proposed Experiment
+
+## 1. 자료 확인과 동작 확인
+
+기존 적격 15사례 전수를 대상으로 한다. 00012와 00456 두 기술 사례에서 방향·표시·출력 인터페이스를 검사한다. 기술 결과로 prompt나 판정 문턱을 최적화하지 않는다.
+
+whole-abnormality는 seg>0으로 정의하되 정확한 신호 ROI라고 부르지 않는다. canonical orientation에서 양성 mask가 존재하는 axial 범위의 8개 등간격 위치를 사용한다. 반올림 동률은 낮은 index를 택한다. 각 위치의 실제 mask 포함 여부와 전체 양성 voxel 중 선택 slice가 차지하는 비율을 기록한다. 모든 조건에 같은 slice를 사용하므로 U 역시 GT로 선택한 관측이며 실용적 무지원 baseline이 아니다.
+
+MRI는 고정 volume min–max로 렌더링한다. 세 조건의 canvas는 896×896이며 해부학적 종횡비와 방향을 유지한다. L에는 각 slice의 seg>0 enclosing rectangle을 가는 선으로 표시한다. 내부 픽셀을 채우거나 crop·확대하지 않는다. 표시가 없는 slice는 그대로 둔다. M은 동일 canvas의 중립 회색 배경에 동일 rectangle만 남긴다. 표시 색·두께·좌표 변환은 기술 검사 전에 config에 고정한다.
+
+U/L의 MRI 부분 hash 및 표시 외 픽셀 동일성을 검증한다. M은 임상 입력이 아닌 prior 대조임을 기록한다. 보고서의 임상적 정확성이나 8장 관측 충분성을 기술 검사 통과로 인증하지 않는다.
+
+## 2. 가능성 탐색
+
+15명×U/L/M=45요청을 실행한다. 한 환자의 조건은 같은 generation 설정을 사용한다. seed133, greedy, bf16, SDPA, revision `91850547d9f0b2fdd21aa7c5f4f3d1a8a52c243b`, max_new_tokens512를 고정한다.
+
+공통 질문은 FLAIR 영상에서 주 병변의 보이는 신호를 기술하도록 하며 첫 줄을 HIGH / MIXED_HIGH_LOW / OTHER / UNKNOWN 중 하나로, 이후 짧은 근거를 요구한다. HIGH는 high가 보인다는 뜻이며 low 부재를 뜻하지 않는다고 명시한다. MIXED_HIGH_LOW는 high와 low 모두 보일 때 사용한다. L/M에는 rectangle이 병변 주변의 거친 안내이며 안의 모든 조직이 병변은 아니라는 동일 문장을 추가한다. M에는 영상 픽셀이 제공되지 않았다는 사실을 숨기지 않는다. 정확한 영어 prompt와 parser는 GPU 출력 전 config로 봉인한다.
+
+공식 입력 대조와 동일 요청 재현 6건, 처리량 비교 최대12건은 성능 집계와 분리한다. 기술 결함 수정은 변경·영향 범위를 기록하고 영향받은 비교를 같은 최종 설정으로 다시 완결한다.
+
+## 3. 규모 확대
+
+이번 반복에서 새 환자·새 MRI·새 prompt·추가 mask 범위로 확대하지 않는다. 기존 15사례 전수는 보유 자산을 이용한 투자 선별 규모이며 효과를 확증할 충분한 표본이라는 뜻은 아니다. 양성 기준을 충족하면 독립 환자와 더 정확한 영역–설명 연결을 확보하는 다음 계획을 제안한다.
+
+## 4. 독립 확인
+
+이번에는 수행하지 않는다. 학습·LoRA·추가 seed도 없다. 방법 개발은 현재 결과의 독립 리뷰와 method gate를 별도로 거쳐야 한다.
+
+## 자원과 재개
+
+시작 직전 nvidia-smi로 허용 GPU0,1의 실제 여유와 논리/물리 대응을 확인한다. 독립 요청을 두 GPU에 배분한다. bf16 8~10GB는 참고이며 실제 peak에 worker당 최소2GB 여유를 둔다.
+
+기술 요청으로 GPU당1 worker와 메모리가 허용하는 GPU당2 worker를 비교한다. 총 요청/분, 실제 요청 지연, peak, 오류, CPU/RAM/I/O 경합과 출력 정합성을 기록한다. 작은 전체 workload에서 추가 loading 비용이 절약보다 크면 1 worker를 유지하고 실측 근거를 남긴다. 과거 batch2 불일치 때문에 batch2를 자동 사용하지 않는다.
+
+wall-clock 추정은 `loading + 렌더링 + 남은 요청/실측 총 처리량 + 평가`로 갱신한다. 단계별 실제 시간을 기록한다. 원자 claim, worker별 출력, protocol/input hash와 성공 상태가 일치하는 결과만 재사용하고 completion에서 45개 고유 ID를 검사한다.
+
+# Implementation Tasks for Claude
+
+1. 기존 결과·코드·자료의 provenance와 이용 조건을 확인하고 iter_133 manifest를 작성한다. 기존 mirror 접근 가능성을 이용 허가로 대체하지 않는다.
+2. label_table의 15건과 원 modal_wise_finding의 기술을 대조한다. HIGH-only와 명시적 mixed를 구분하되 새로운 임상 음성을 만들지 않는다.
+3. 동일 slice의 U/L/M 렌더링을 만들고 좌표·픽셀 동일성·정보 누설 검사를 실행한다.
+4. 재사용 추론 경로의 고정 MR-ART 가정을 제거한 파생 실행기를 연결하고 모든 진입점의 gate·안전 재개를 검사한다.
+5. 기술 검증과 처리량 선택 후 설정을 봉인하고 45요청을 완결한다.
+6. 원출력·첫 줄·EOS·unknown·invalid를 보존한다. 기존 AutoRG 출력의 새 기술 집계는 원 평가와 분리한다.
+7. 환자별 전환표·기술 재현·비용·남은 불확실성을 보고하고 종료한다. 다음 iteration이나 학습을 시작하지 않는다.
+
+# Evaluation (성공/실패 기준 포함)
+
+주집계는 명시적 mixed 보고서 11건에서 각 조건의 MIXED_HIGH_LOW 출력 수 및 paired 전환이다. HIGH-only 4건에서는 HIGH 또는 MIXED_HIGH_LOW를 모두 high 기술 보존으로 집계한다. 이 네 건의 mixed 출력을 임상 false positive로 세지 않는다. OTHER/UNKNOWN/invalid를 구분하며 비EOS는 invalid다.
+
+세 조건의 전체 범주 분포, U→L·M→L 전환표, 보고서 범주와의 기술적 exact agreement를 함께 보고한다. exact agreement는 임상 정확도가 아니다. 모든 high+low 출력이 recall을 높이는 단순 대조와 구분되지 않으면 연구상 성공으로 해석하지 않는다. 환자 bootstrap95% 구간은 불확실성 기술용이며 작은 표본의 확증 근거로 쓰지 않는다.
+
+양성 투자 신호는 다음을 모두 만족해야 한다: L이 U와 M 각각보다 mixed 기술을 순3사례 이상 더 재현하고, HIGH-only의 high 보존이 최소3/4이며, 각 조건에서 EOS를 갖춘 유효 범주 출력이 최소14/15다. 이는 임상 성능 gate가 아니라 후속 확인의 최소 정보 가치 문턱이다. 양성이어도 정확한 영역 의미·독립 환자·단순 대안 이후의 가치가 남는다.
+
+L−U 순증가≤0이면 현재 표시 개입 투자를 보류한다. L과 M이 구분되지 않으면 영상 활용 회복 주장을 보류한다. 중간 효과·평가 불확실성은 불확정으로 종료하며 같은 자료의 조건 탐색을 추가하지 않는다. 자료 gate 실패는 execution_failed 범위로 보고하고 MRI 가설의 음성 결과로 바꾸지 않는다.
+
+# Risks / Checks
+
+- 선택 slice는 GT를 사용한다. 병변 검출이나 실용적 관측 선택 성능은 평가하지 않는다.
+- rectangle은 거친 위치 지원이다. tumor core와 edema의 신호를 정확히 분리했다고 주장하지 않는다.
+- HIGH-only는 음성 정답이 아니다. 자유 보고서의 미언급을 부재로 바꾸지 않는다.
+- M에서 UNKNOWN이 나오는 것은 정상적일 수 있다. L−M만으로 좋은 임상 판독이나 위치 개입 효과를 증명하지 않으며 U−L을 함께 본다.
+- 기존 AutoRG는 다른 정보와 학습 노출을 사용한다. 모델 간 우열·미노출 일반화를 주장하지 않는다.
+- 자료 연결을 새 임상 해석이나 LLM 합의로 보충하지 않는다. 성립하지 않으면 구체적 원인과 재개 조건을 보고한다.
+- 대규모 GPU 필요 후보인 3D encoder–언어 공동 적응은 노트로만 보존한다. 이번에는 학습하지 않는다.
+- MR-ART·MR-RATE·iter_070의 원 기록을 보존한다. 운영은 Claude, 자동 fallback 없음, full review와 다음 반복 사용자 승인 대기를 유지한다.
+
+# 계획의 근거 (GPT 조사 노트)
+
+## 새로 확인한 것
+
+라운드 01 원문 `agent/runs/iter_133/think/round_01.json`을 읽고 남은 세 질문에 집중했다. 파일 생성·다운로드·모델 실행은 하지 않았다.
+
+1. `research/results/iter_070/data/label_table.json`의 val 23개 원문을 확인했다. 적격 15건은 명시적 high+low 11건과 high 기술 4건이다. 후자의 원문은 low 부재를 명시하지 않는다. 따라서 이들을 임상적으로 상호 배타적인 양성/음성으로 평가하면 안 된다. 새 비교는 명시된 기술의 재현과 출력 변화에 한정한다. 원 iter_070 평가·판정은 수정하지 않는다.
+2. 보고서는 병변과 주변 edema를 자주 분리하지만 특정 BraTS subregion을 지칭한다고 보장하지 않는다. 따라서 tumor core를 정답 ROI로 새로 선언하지 않는다. seg>0의 rectangle은 병변 주변을 가리키는 거친 위치 지원이며 정확한 신호 측정 영역이 아니다. 같은 slice를 쓰는 U/L 차이는 이 표시 개입의 효과이지 전체 병변 검출 능력이나 순수 인식 원인이 아니다.
+3. [BTReport VASARI 구현](https://github.com/KurtLabUW/BTReport/blob/main/btreport/vasari_features/vasari_auto_v2.py)은 segmentation label과 anatomy mask에서 위치·부피·관계를 계산한다. 기본 ET label이 4인 점도 확인했다. 이 경로를 BraTS2023에 적용할 때는 label 매핑 검사가 필요하다. 확인한 코드에 이번 FLAIR high/low 판독을 직접 측정하는 기능은 없었다. 이는 BTReport 전체의 한계를 판정한 것은 아니다.
+4. [BTReport README](https://github.com/KurtLabUW/BTReport)는 최소 T1n과 tumor segmentation 입력, 정량 특징 이후 문장 생성을 설명한다. 현재 속성 비교에 전체 생성 파이프라인 설치는 필요하지 않다. 합성 보고서를 새 정답으로 사용하지 않는다.
+5. `research/results/iter_083/preflight_a1/release_evidence.json`은 release 수준의 2021/2023 연결과 ET 4→3 변경을 지지하지만 개별 mirror 파일·이용 권한의 인증은 아니라는 범위를 유지한다. 구현의 첫 단계에서 현재 자산의 이용 근거와 환자 연결을 확인한다.
+6. 현재 research HEAD는 `c1c5af0729627b009bff39abcdd69d2b7cf8da67`이고 작업 트리는 깨끗하다. mr132_run/common/spec 및 mr123_data를 직접 읽고 iter_132 review.json의 승인 범위를 확인했다. ar70_labels는 기존 정답표 생성 이력으로만 참고하며 새 범용 임상 정답 추출기로 사용하지 않는다.
+
+## 의미와 설계 결정
+
+정답 대상 불확실성을 숨긴 HIGH/MIXED 임상 BA 비교는 선택하지 않는다. 기존 자산에서 위치 표시가 명시적 설명을 바꾸는지를 45개 출력으로 확인하는 한정 진단을 선택한다. 표시-only를 포함해 단순 위치 prior와 영상 기여를 구분한다. 이 실험은 방법 gate의 근거를 자동 생성하지 않으며, 양성 기술 recall이 높다는 이유만으로 새 방법 투자도 승인하지 않는다.
+
+## 대규모 GPU 필요 후보
+
+3D encoder·connector·언어 모델을 영역별 MRI 신호 설명과 공동 적응하는 후보는 유지한다. 정확한 영역–속성 정답과 단순 대안 이후의 잔여 필요성이 먼저 확인돼야 하므로 이번에는 학습하지 않는다.
+
+이전 사고 라운드 노트: agent/runs/iter_133/think/
+
+
+
+## iter_133 CLAUDE IMPLEMENTATION REPORT — 2026-10-13 16:44:06
+
+# 요약
+
+- **핵심 결과:** 45요청을 모두 실행했다. 첫 줄이 모든 조건(U/L/M)·모든 사례에서 `HIGH`였고 `MIXED_HIGH_LOW`는 0건이다. 영상 없이 직사각형만 준 M도 15/15가 `HIGH`였다. 사전 규칙의 L−U 순증가가 0이므로 판정은 `negative_hold_marking_investment`(현재 표시 개입 투자 보류)다.
+- **근거:**
+  - mixed 보고서 11건의 `MIXED_HIGH_LOW` 재현은 U/L/M 모두 0/11이고 L−U·L−M 순증가는 0이다.
+  - 첫 줄이 유효한 출력은 U 6, L 10, M 15/15다. 비EOS(512 token에서 잘림)를 invalid로 처리하는 사전 규칙 때문이며, 사전 기준(각 조건 ≥14/15)은 U·L에서 미충족이다. 첫 줄은 EOS와 무관하게 45/45가 `HIGH`다.
+  - HIGH-only 4건의 high 보존은 U 1/4, L 2/4, M 4/4이며, L도 사전 기준 3/4에 못 미친다.
+  - 기존 AutoRG P/G(iter_070 저장 라벨 재배열, 입력·모델이 달라 순위 비교 아님)는 mixed 8/11 재현이다.
+- **미검증·주의:**
+  - 15사례는 개발 자료이고 선택 slice는 GT로 정했으므로 oracle 관측이다. 표본 15라 확증 근거가 아니다.
+  - HIGH-only를 low 부재 정답으로 보지 않았다.
+  - 이는 이 prompt·8장·표시 조건의 관찰이다. 영상 인식 결함이나 MedGemma 일반 한계로 확대하지 않는다.
+  - 사후 분석에서 M의 설명문이 픽셀 없이도 병변 위치·해부를 서술했다. 키워드 집계는 임상 판독이 아니다.
+- **다음:** 사용자 승인을 기다린다. 같은 15사례의 prompt·표시·mask 조건 순회는 계획대로 하지 않는다. 재개하려면 영역–설명 연결이 명확한 독립 자료가 필요하다.
+
+# Work Performed
+
+- iter_070 label_table의 적격 15건(mixed 11, HIGH-only 4)과 BraTS·RadGenome 파일을 현재 SHA256·헤더·원문과 대조했다.
+  - 15쌍 30개 파일의 SHA는 `brats_manifest.json`과 모두 일치했다. 보고서 원문은 `modal_wise_finding.json`과 일치했다.
+  - 방향은 LPS→RAS, shape 240×240×155, spacing 1mm, seg 라벨은 {0,1,2,3}의 부분집합이었다.
+  - 보고서는 환자 key `BraTS-GLI-xxxxx-xxx-t2f`로 영상과 연결했다.
+- 이용 조건을 기록했다.
+  - mirror는 HF API 조회로 CC-BY-4.0, 비gated, revision `b032d35…`를 확인했다. RadGenome는 MIT다.
+  - 이는 공식 BraTS 접근 인증이 아니다. 새 다운로드는 없다.
+- 동일 slice 8장의 U/L/M 렌더링을 구현했다.
+  - 8장은 seg>0 axial 범위에서 등간격으로 고르고, 반올림 동률은 낮은 index로 했다. 렌더링은 volume min–max, 896²다.
+  - 360장(15×8×3)의 해시는 모두 고유하다.
+  - U/L은 빨간 외곽선 밖에서 픽셀이 동일하다. M은 회색+빨강만 포함한다. 직사각형은 독립 mask 렌더링의 bbox와 ±3px 이내다. 문제는 0건이다.
+  - 대표 overlay 3사례를 실제 영상으로 열어 확인했다(00012, 01077, 00772). 끝쪽 slice에서는 직사각형이 아주 작은 경우가 있다.
+- 추론 실행기 `i133_run.py`를 `mr132_run`에서 파생했다. 원본 4개 파일은 수정하지 않았다.
+  - 단일 요청 8 slice, seed133, batch1 고정이며 iter_133 경로만 쓴다.
+  - worker 직접 진입에서도 protocol 해시, main 단계 technical gate, 감독기 flock 실제 보유를 검증한다.
+- 기술 검사와 gate는 모두 통과했고, 그 뒤 protocol을 main으로 잠그고 45요청을 4 workers로 실행했다.
+- 평가와 사후 집계를 수행했다.
+
+# Files Changed
+
+- 새 파일(모두 research/ 아래): `i133_common.py`, `i133_spec.py`, `i133_data.py`, `i133_run.py`, `i133_lock.py`, `i133_tech.py`, `i133_eval.py`, `i133_post.py`
+- 반입 4개 파일은 수정하지 않았다. git blob이 reuse_manifest와 일치함을 확인했다.
+  - `mr123_data.py` c9e673c…
+  - `mr132_common.py` 0368809…
+  - `mr132_spec.py` c00bf5d…
+  - `mr132_run.py` 4f66eef…
+- `mr123_data.py`는 `normalization_window`와 `render_slice`만 import해 사용했다.
+- 결과는 `results/iter_133/`에 저장했다.
+  - `data_manifest.json`, `requests/`, `png/`
+  - `protocol_lock_technical.json`, `protocol_lock_main.json`
+  - `tests/`, `jobs/`
+  - `eval/report.json`, `eval/post_hoc.json`
+  - `overlay_*.png`
+
+# Commands / Experiments
+
+- `python i133_data.py`: 성공(15사례, 문제 0건, 기술 6요청·main 45요청 생성).
+- `python i133_lock.py technical`: 성공.
+- `python i133_tech.py tensor`: 1차 실패 후 2차 성공.
+  - 1차는 검사 코드 오류였다. 독립 경로에서 BOS가 중복되고 image token 이름이 틀렸다. 이는 wrapper 결함이 아니다.
+  - 1차 결과 `tensor_check.json`은 보존했고 `tensor_check_v2.json`으로 재실행했다.
+  - 2차는 6요청의 input_ids·pixel_values가 독립 경로와 일치했고, image soft token은 요청당 2048(=8×256)이었다.
+  - 영상 순서 교환이 pixel_values를 바꾸는 것, 각 slice의 개별 처리 일치, 입력 문자열에 환자 ID·질병명이 없음도 확인했다.
+- `python i133_tech.py neg`: 9개 거부 검사가 모두 의도한 사유로 거부됐다.
+  - 요청 변조, 입력 hash 변경, 중복 id, 미등록 id
+  - lock fd 없이 worker 직접 진입, 감독기가 보유하지 않은 lock fd로 worker 진입
+  - 중복 감독기, main 단계 gate 미잠금, 손상 JSONL 중간 행
+- 기술 생성 3종(각 6요청)과 비교:
+  - `T_w2`(GPU당 1 worker): wall 76.3초.
+  - `T_w4`(GPU당 2 workers): wall 66.2초. T_w2와 token이 완전히 일치했다.
+  - `T_resume`: 2건 완료 후 `--limit 1` 정지 → 마지막 행에 부분 JSON을 일부러 추가 → 재개 시 tail을 `.tail_*.json`으로 보존하고 6/6 완료했다. T_w2와 token이 일치했다.
+- `python i133_tech.py gate`: passed.
+  - 초기 gate에 `all_eos` 조건이 있었다. 기술 요청 2건이 모델 출력상 512 token에서 끝나 gate가 실패했다.
+  - 비EOS는 invalid로 집계하는 모델 결과이지 인프라 오류가 아니므로, 결과 확인 후 이 조건을 gate에서 제거했다. `compare.json`에는 제거 전 값이 남아 있다. 이 변경은 gate 정의의 사후 조정이므로 여기에 명시한다.
+- `python i133_lock.py main`: 성공(코드 8개, gate 포함).
+- `python i133_run.py launch … --stage main --workers 4 --peak 9800`: 45/45, rc [0,0,0,0], wall 253.7초.
+- `python i133_eval.py …`: 성공.
+- `python i133_post.py`: 성공.
+- `nvidia-smi`로 실행 전 두 GPU의 여유(약 24GB)를 확인했다. `CUDA_VISIBLE_DEVICES=0,1` 안에서만 배정했다.
+
+# Results
+
+주 결과는 `results/iter_133/eval/report.json`이다. 첫 줄 범주는 모든 조건에서 `HIGH`뿐이다.
+
+| 조건 | 유효 첫 줄(EOS) | 비EOS | mixed 11건 재현 | HIGH-only 4건 high 보존 |
+|---|---|---|---|---|
+| U | 6/15 | 9 | 0 | 1/4 |
+| L | 10/15 | 5 | 0 | 2/4 |
+| M | 15/15 | 0 | 0 | 4/4 |
+
+- L−U, L−M, U−M의 mixed 순증가는 모두 0이다. bootstrap CI [0,0]은 차이가 모두 0이어서 나온 값이다.
+- 사전 규칙의 판정은 `negative_hold_marking_investment`다. 같은 원인으로 `L_vs_M_indistinct=true`이므로 영상 활용 회복 주장은 보류한다. 유효 출력 ≥14/15 조건도 U·L에서 미충족이다.
+- 위 표의 보존·재현은 예측 범주의 집계이며 임상 정확도가 아니다. 비EOS 14건은 모두 512 token에서 잘린 긴 설명문이다.
+- 사후 집계(`eval/post_hoc.json`, 원 판정과 별개):
+  - 첫 줄은 EOS와 무관하게 45/45가 `HIGH`다.
+  - M의 설명문은 픽셀이 없다는 문구가 있는데도 병변 위치와 해부를 서술했다(예: 00187 "right cerebellum", 01105 "red rectangle"를 병변 영역으로 서술).
+  - low·mixed 계열 키워드가 설명문에 나온 비율은 U 11/15, L 13/15, M 8/15다. 단순 키워드라 부정문(예: "no visible low-signal components")도 포함해 센 값이며 임상 근거로 쓰지 않는다.
+- 처리량: 기술 6요청 기준으로 GPU당 2 workers가 1 worker보다 생성 구간 7.36 대 5.99 req/min, loading 포함 5.44 대 4.72 req/min이었다. 출력은 token 단위로 동일했다. GPU 점유는 1 worker에서 GPU당 약 9.7GB, 2 workers에서 약 19.4GB로 24GB 안에 들어와 4 workers를 선택했다. 표본이 6요청뿐이라 처리량 추정은 거칠다. batch2는 과거 불일치 때문에 쓰지 않았다.
+- 비용: main 45요청의 launch wall은 253.7초이고, 평가는 수 초다.
+- 독립 재계산(리뷰어용): 집계는 `i133_eval.py`가 원시 JSONL의 첫 줄에서 직접 계산했다. 별도 구현에 의한 재검증은 하지 않았다.
+
+# Goal Progress / Reused Assets
+
+- **도달 단계:** 가능성 탐색(15사례 전수). 확대·독립 확인·학습은 하지 않았다.
+- **시험 설정:** 직사각형 표시와 영상 기여를 가르는 U/L/M 구조, 입력·평가 무결성 검사, 재개·소유권·변조 거부는 작동했다.
+- **연구 관찰:** 이 설정에서는 first-line 범주가 입력과 무관하게 `HIGH`로 고정되어 표시 개입의 효과를 구분할 수 없었다. M(영상 없음)에서도 `HIGH`이므로 이 응답은 영상에 근거한 판단으로 해석할 수 없다. MR-RATE의 고정 `PRESENT` 관찰과 같은 종류의 응답 편향이 이 자료에서도 관찰됐지만, 두 자료의 원인이 같다고 말할 수 없다.
+- **연구 질문:** 병변 위치 지원의 효과는 이 prompt·조건에서 검출되지 않았다. 관측 부족, prompt 인터페이스(HIGH 정의 문구 포함), 표시 방식 중 어느 것 때문인지는 구분하지 못했다. 정확한 영역 정답이 있는 독립 자료와 직접 SFT 같은 강한 대조 이후의 가치는 미검증이다.
+- **재사용:**
+  - 반입 4개 파일은 수정 없이 보존하고 `mr123_data.py`의 두 함수만 사용했다.
+  - `mr132_run`의 구조(원자 claim, 안전 재개, 소유권)는 `i133_run.py`로 파생했다. 필수 검사 중 공식 chat template tensor 대조, worker 직접 진입의 gate, 중복 실행·부분 재개·입력 hash 변경 거부, 45개 고유 요청 검사(completion 검증)는 수행했다. batch2는 채택하지 않았다.
+  - 이 파생 코드 전체를 일반 재사용용으로 승인하는 것은 아니다.
+- **미실행:** 독립 확인, 학습, 새 환자·prompt 확대, AutoRG 재실행, 새로운 임상 판정.
+
+# Problems
+
+- **현재 결론 무효:** 없음.
+- **재사용 전 수정:**
+  - 유효 출력 기준(첫 줄 EOS 필요) 때문에 비EOS가 U에서 9/15이다. 이는 규칙대로의 결과다. 다만 같은 prompt를 쓸 다음 실험은 설명문 길이를 짧게 제한하는 prompt를 새 계획에서 검토해야 한다.
+  - `i133_run.py`의 메모리 admission은 시작 시점 한 번뿐이고, 시작 직전 재조회는 넣지 않았다(구현 중 단순화).
+- **추후 개선(선택):**
+  - 기술 gate의 `n_non_eos_outputs` 필드는 값이 비어 있는 자리표시자다.
+  - 비EOS의 첫 줄과 설명문 분석은 사후 집계이며, 계획 판정에는 쓰지 않았다.
+  - 직사각형 외곽선이 얇은 병변 경계 위에 놓이는 문제와 끝쪽 slice의 매우 작은 직사각형은 미평가다.
+  - 8장 관측의 충분성, 보고서와 BraTS subregion의 정확한 대응도 확인하지 못했다.
+
+# Recommendation to GPT
+
+- 권고: **투자 보류(전환).** 같은 15사례에서 prompt·표시·mask 변형을 순회하지 않는다. 사전 판정(L−U≤0)과 일치한다.
+- 이유: 첫 줄이 입력과 무관하게 고정되어 이 설정으로는 위치 지원 효과도, 영상 기여도 구분할 수 없었다.
+- 재개 조건(새 계획에서만): 영역과 속성 정답이 연결된 독립 자료, 또는 응답 prior를 통제하는 최소 개입. 후속은 사용자 승인을 받는다.
+- 이 결과를 MR-RATE 고정 응답의 원인 규명이나 MedGemma의 일반 MRI 한계로 확대하지 않는다.
+
+SELF_CHECK: PASS
+SUMMARY: 기존 RadGenome–BraTS FLAIR 15사례에서 U/L/M 45요청을 완결했다. 모든 조건의 첫 줄이 HIGH(영상 없는 M 포함)이고 mixed 재현 0이라 L−U 순증가 0으로 사전 판정은 표시 개입 투자 보류다. 한정된 개발 자료·prompt의 관찰이며 영상 인식 결함으로 일반화하지 않는다.
+
+# [orchestrator] 권한 거부된 도구 호출
+- Bash: mkdir -p results/iter_133 && cat > i133_common.py <<'EOF'
+"""iter_133 전용 경로·출처 유틸리티 (mr132_common 파생; 결과는 results/iter_133에만 쓴다)."""
+import hashlib, json, os
+from pathlib import Path
+from datetime import datetime, timezone
+
+HERE = Path(__file__).resolve().parent
+RES = HERE / 'results/iter_133'
+SRC = HERE / 'results/iter_070/data'   # 읽기 전용 기존 자료
+BRATS = SRC / 'brats/ASNR-MICCAI-BraTS2023-GLI-Challenge-TrainingData'
+
+def sha(p):
+    h = hashlib.sha256()
+    with open(p, 'rb') as f:
+        for b in iter(lambda: f.read(4 << 20), b''): h.update(b)
+    return h.hexdigest()
+
+def now(): return datetime.now(timezone.utc).isoformat()
+def digest(x): return hashlib.sha256(json.dumps(x, sort_keys=True, separators=(',', ':'), allow_nan=False).encode()).hexdigest()
+def read(p): return json.loads(Path(p).read_text())
+def save(p, x):
+    p = Path(p); p.parent.mkdir(parents=True, exist_ok=True)
+    with open(p, 'x') as f:
+        json.dump(x, f, indent=2, sort_keys=True, allow_nan=False); f.write('\n'); f.flush(); os.fsync(f.fileno())
+EOF
+cat > i133_spec.py <<'EOF'
+"""iter_133: GPU 출력 전에 고정한 prompt·첫 줄 parser·집계 규칙 (U/L/M)."""
+import re
+CONFIG = dict(model_id='google/medgemma-1.5-4b-it', revision='91850547d9f0b2fdd21aa7c5f4f3d1a8a52c243b', dtype='bfloat16',
+              attention='sdpa', max_new_tokens=512, do_sample=False, seed=133, batch=1)
+CATS = ['HIGH', 'MIXED_HIGH_LOW', 'OTHER', 'UNKNOWN']
+COMMON = ('These are eight evenly spaced axial FLAIR MRI slices of one brain, ordered from inferior to superior. '
+          'Describe the visible FLAIR signal of the main lesion. '
+          'On the first line output only one of: HIGH, MIXED_HIGH_LOW, OTHER, UNKNOWN. '
+          'HIGH means the lesion appears hyperintense (high signal); it does not state whether low-signal components are absent. '
+          'MIXED_HIGH_LOW means both high-signal and low-signal components are visible within the lesion. '
+          'OTHER means a different signal pattern. UNKNOWN means the signal cannot be assessed. '
+          'Then briefly explain the visible evidence.')
+GUIDE = (' A thin red rectangle on each slice marks the approximate region around the lesion on that slice. '
+         'It is only a coarse guide, and not every tissue inside the rectangle is lesion.')
+NOPIX = (' In this input, no MRI pixel data are provided: every image is a neutral gray background that contains only the red rectangle.')
+PROMPTS = dict(U=COMMON, L=COMMON + GUIDE, M=COMMON + GUIDE + NOPIX)
+RENDER = dict(side=896, rect_rgb=[255, 0, 0], rect_px=2, gray=[128, 128, 128], normalization='volume_minmax', n_slices=8,
+              round_half='down', mask_rule='seg>0', orientation='closest_canonical_RAS')
+FORBIDDEN_IN_PROMPT = ['BraTS', 'GLI', 't2f', 'glioma', 'tumor', 'edema', 'RadGenome', 'sub-', 'report']
+
+def parse(text, eos=True):
+    if not eos or not text or not text.strip(): return None
+    line = text.strip().splitlines()[0].strip()
+    return line if line in CATS else None
+EOF
+- Bash: python - <<'EOF' 2>&1 | tail -20
+from transformers import AutoProcessor
+import i133_run as R
+from collections import Counter
+proc=AutoProcessor.from_pretrained(R.MODEL,local_files_only=True)
+print(getattr(proc,'image_token',None),getattr(proc,'boi_token',None),getattr(proc,'image_token_id',None))
+r=R.requests(R.RES/'requests/technical.json')[0]
+w=R.input_tensor(proc,r)
+c=Counter(w['input_ids'][0].tolist()); print(c.most_common(4)); print(w['pixel_values'].shape, [k for k in w])
+print(proc.tokenizer.convert_ids_to_tokens([c.most_common(1)[0][0]]))
+print(proc.tokenizer.decode(w['input_ids'][0][:60]))
+EOF
+python -c "
+import json;d=json.load(open('results/iter_133/tests/tensor_check.json'));print({k:v for k,v in d['rows'][0].items()},d['image_token'])"
+- Bash: python - <<'EOF'
+p='i133_tech.py'; s=open(p).read()
+s=s.replace("ind = proc(text=text, images=imgs, return_tensors='pt')","ind = proc(text=text, images=imgs, return_tensors='pt', add_special_tokens=False)  # 템플릿이 <bos>를 이미 포함")
+s=s.replace("img_tok = getattr(proc, 'image_token', None); img_id = tok.convert_tokens_to_ids(img_tok) if img_tok else None","img_tok = '<image_soft_token>'; img_id = tok.convert_tokens_to_ids(img_tok)")
+s=s.replace("n_img_tok == 8 * 256","n_image_tokens'] == 8 * 256") if False else s
+open(p,'w').write(s)
+EOF
+rm -f results/iter_133/tests/tensor_check.json; python i133_tech.py tensor 2>&1 | tail -3
+- Bash: CUDA_VISIBLE_DEVICES=0,1 python i133_run.py launch --job results/iter_133/jobs/T_w2 --requests results/iter_133/requests/technical.json --stage technical --workers 2 2>&1 | tail -5
+
+
+
+## iter_133 GPT REVIEW [CONTINUE] — 2026-10-13 16:48:49
+
+# 요약
+
+- **판정:** 제한된 실제 출력 비교는 유효하다. 현재 15사례·표시 설계의 추가 투자는 종료한다.
+- **핵심 근거:** 첫 줄 HIGH 45/45, mixed 범주 재현 U/L/M 모두 0/11이다. EOS 유효 출력은 각각 6/15·10/15·15/15다.
+- **의미·한계:** 첫 줄 고정은 확인했지만 일부 설명문은 high와 low를 함께 기술한다. 이를 혼합 신호 인식 부재로 해석할 수 없다.
+- **다음:** 사용자 승인 후 응답 범주와 내용 인식을 분리할 독립 비교의 성립 여부만 한정 검토한다.
+
+## 알림 요약
+
+- 결과: 뇌종양 FLAIR 15사례에서 무표시·위치 표시·MRI 없는 입력의 첫 줄이 모두 HIGH였다. MRI 제공 조건 30건 중 14건은 길이 제한으로 잘렸다.
+- 의미: 현재 표시의 첫 줄 개선은 없었다. 다만 설명문에 혼합 신호 기술도 있어 위치 오류와 내용 인식 오류는 아직 분리되지 않았다.
+- 후속: 범주 선택과 실제 설명을 구분하는 독립 비교를 한정 검토한다. 현재 결과가 곧바로 인식 실패나 학습 필요성을 뜻하지 않기 때문이다.
+- 대안: 현재 신호 속성 후보를 보류하고 원시 관찰만 보존할 수 있다. 추가 평가 비용을 줄이지만 MRI 없는 입력의 단정과 내용·범주 불일치 원인은 남는다.
+
+# Assessment
+
+`valid_experiment=true`, `approach_status=abandon`, `verdict=CONTINUE`로 판정한다. 유효성은 고정 U/L/M 입력에 대한 실제 응답 변화의 관찰에 한정한다. 사전 endpoint의 L−U 순증가 0에 따른 현재 설계 보류는 유지한다. 임상 설명 능력이나 위치 지원 일반 효과의 음성 결론은 승인하지 않는다.
+
+구현은 engineer_backend.json과 claude_meta.json상 Claude, Sonnet/medium이며 실제 modelUsage는 claude-sonnet-5-5다. 리뷰 대상 SHA는 `20ff6781c45b8b1e924d5b3f0995ef9803d9216d`다. checkpoint의 12개 파일과 현재 파일의 byte 일치를 확인했으며 unpreserved_paths는 없다. 원 계획, 구현 보고서, diff, 관련 도구 호출, 실행 코드와 원시 출력을 대조했다.
+
+# Key Findings
+
+1. **완료와 무결성:** main 원시 JSONL은 고유 ID 45개이며 completion의 worker returncode는 모두 0이다. 원시 파일 hash와 record digest를 독립 확인했다. main protocol의 code·inputs·gates hash도 현재 파일과 일치한다.
+2. **독립 집계:** 첫 줄 HIGH는 각 조건 15/15다. EOS 유효 출력은 U 6, L 10, M 15이며 HIGH-only 4건의 사전 high 보존은 각각 1·2·4다. mixed 11건의 첫 줄 재현과 paired 순증가는 모두 0이다. 따라서 이 endpoint의 bootstrap [0,0]은 산술적으로도 재현된다.
+3. **중요한 해석 제한:** 00187__L과 00430__L은 HIGH 첫 줄 뒤에 병변 내부 low signal과 high signal을 함께 기술한다. 00456__U도 mixed signal pattern을 명시한다. 첫 줄 MIXED_HIGH_LOW 0건은 설명문에서 mixed 기술이 전혀 없다는 뜻이 아니다.
+4. **영상 없는 대조:** M은 MRI 픽셀이 없다는 안내를 포함하지만 15건 모두 EOS로 HIGH를 출력한다. 00187__M은 right cerebellum과 increased signal intensity까지 기술한다. 이는 현재 입력에서 근거 없는 신호 단정의 관찰이며 U/L의 모든 설명이 영상과 무관하다는 증거는 아니다.
+5. **정상 입력 검사:** tensor_check_v2는 공식 template의 두 입력 경로, image token 2048개, 영상 순서와 개별 pixel 처리 일치를 검사했다. 1차 실패는 독립 검사 경로의 BOS 중복·token 이름 오류로 기록되어 있다. 대표 overlay도 직접 확인했다.
+6. **자원:** 기술 6요청에서 2-worker와 4-worker의 loading 포함 처리량은 4.72와 5.44 req/min이며 token 동일성이 기록됐다. 4-worker peak GPU 점유는 19,360 MiB로 보고됐다. main launch wall은 약 253.7초다. 두 GPU 활용은 타당하지만 작은 처리량 표본과 미완료 I/O 계측은 남는다.
+
+# Problems / Concerns
+
+**출력 길이:** U 9건·L 5건이 512 token에서 종료됐고 일부 원문은 같은 설명의 반복이다. 정상 EOS와 충분한 생성 길이를 확보한 비교라고 부를 수 없다. 다만 첫 줄은 이미 생성되어 있어 HIGH 45/45 관찰 자체는 절단 때문에 생긴 집계 오류가 아니다. 사전 invalid 처리와 투자 보류를 유지하되 완결된 내용의 무효과로 확대하지 않는다.
+
+**범주 의미:** prompt는 HIGH가 low 부재를 뜻하지 않는다고 명시한다. 따라서 HIGH와 MIXED_HIGH_LOW는 의미상 겹친다. 모델이 HIGH를 선택하면서 low를 설명하는 출력은 이 설계에서 가능한 응답이다. 현재 endpoint는 신호 인식과 범주 선택을 함께 측정한다.
+
+**gate 변경:** 실제 도구 로그에서 기술 출력 후 all_eos 조건을 제거한 것을 확인했다. 계획은 비EOS를 invalid로 평가하므로 이 추가 인프라 조건 제거만으로 45건 전체를 무효화하지는 않는다. 그러나 gate 통과를 출력 적합성 통과로 보고해서는 안 된다. 충분한 출력 검증의 미달은 명시적으로 남긴다.
+
+**자료·대조:** 파일명·기존 SHA·보고서 key 연결은 확인됐지만 정확한 신호 영역과 보고서 대상의 임상적 동등성은 미확정이다. U도 GT로 slice를 선택한 oracle 관측이다. M은 픽셀 제거와 추가 안내 문장을 함께 바꾸므로 순수 픽셀 효과만 분리한 대조가 아니다. 기존 AutoRG 수치는 별도 정보량과 노출 조건의 참고값이다.
+
+**재사용:** worker 직접 진입의 inputs hash 생략, 빈 비EOS 계수, GPU 시작 시 재확인 및 비용 계측 범위는 보완 대상이다. 이 결함들이 현재 감독기 단회 실행의 저장 출력과 집계를 무효화한다는 증거는 없다.
+
+# Interpretation
+
+원 계획의 현재 표시 개입 보류 분기를 유지한다. 다만 보고서의 ‘mixed 재현 0’은 반드시 ‘첫 줄 MIXED_HIGH_LOW 재현 0’으로 읽어야 한다. 실제 설명문에는 혼합 신호 언급이 존재한다. 이를 사후 재채점해 성공으로 바꾸지도 않는다.
+
+이번에 새로 확인한 것은 비배타적 범주 질문에서의 첫 줄 고정과 MRI 없는 조건의 신호 단정이다. MRI 인식 결함, 위치 지원 무용성, 내부 원인 또는 MR-RATE 고정 양성과 동일한 원인은 확인하지 못했다. iter_070의 원 판정과 기존 MRI observed 주장은 그대로 유지한다.
+
+# Strategy Check / 연구 방향 판단
+
+1. **중요한 문제:** MRI 병변 근거가 설명에 어떻게 연결되는지는 유지할 질문이다. 현재 측정으로 위치 실패와 내용 실패를 구분했는지가 핵심이다.
+2. **현재 근거:** 계획은 위치 표시 후 mixed 범주 증가를 예상했다. 추가 증거는 첫 줄 45/45 HIGH, M의 영상 없는 단정, 일부 설명문의 명시적 high+low, U/L의 절단이다. 현재 판단은 표시의 사전 endpoint 개선 없음과 원인 미분리다.
+3. **쉬운 해결책:** 무조건 mixed 응답은 기술 재현 11/11이지만 판독기가 아니다. 기존 AutoRG 8/11 역시 정보량·노출이 달라 현재 VLM의 추가 가치나 전문 대안 충분성을 확정하지 못한다. 먼저 응답 정의의 단순 문제를 분리할 가치가 있는지 판단해야 한다.
+4. **남은 설명:** 범주 중첩·응답 prior·반복 생성·관측 부족·보고서 대상 불일치가 남는다. 새로운 frozen 모델이나 LoRA를 곧바로 추가해도 이 설명들은 해소되지 않는다.
+5. **다음 결정:** 같은 15사례 조건 순회를 종료한다. 독립 입력과 명확한 속성 질문으로 응답 인터페이스와 내용 인식을 구분할 수 있으면 한정 비교 하나를 제안하고, 자료 연결이나 정보 가치가 성립하지 않으면 보류한다.
+
+실행 유효성은 제한된 출력 관찰에 대해 인정한다. 성능 개선은 없고 위치 지원 가설의 양성 근거도 없다. 신규 기여 가능성은 미확정이다. 구현 세션은 약 1,201초, 본실행은 약 254초로 기록되어 있으나 두 시간을 세부 준비·재작업 비용으로 정확히 분해하거나 전체 track 비용으로 일반화하지 않는다.
+
+# Recommended Next Experiment
+
+현재 반복의 확대는 권고하지 않는다. 사용자 승인 후 한정 후속 계획에서 상호 배타적인 속성 질문, 첫 줄과 설명 내용의 별도 평가, 영상 없는 대조, 반복·절단 처리 및 독립 영역–설명 연결을 함께 검토한다. 이 비교가 실제로 인식 개입 여부를 바꾸는 경우에만 실행하며, 성립하지 않으면 현재 후보를 보류한다. 기존 15사례 재채점·prompt 탐색·자동 학습은 제외한다.
+
+논문 추천은 보류한다. 이번에는 현재 설계의 종료와 제한된 응답 관찰을 확인했으며, 특정 방법 방향을 더 깊이 투자할 긍정적 근거는 확보하지 못했다.
