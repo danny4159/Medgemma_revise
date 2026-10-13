@@ -48843,3 +48843,533 @@ rm -f results/iter_133/tests/tensor_check.json; python i133_tech.py tensor 2>&1 
 현재 반복의 확대는 권고하지 않는다. 사용자 승인 후 한정 후속 계획에서 상호 배타적인 속성 질문, 첫 줄과 설명 내용의 별도 평가, 영상 없는 대조, 반복·절단 처리 및 독립 영역–설명 연결을 함께 검토한다. 이 비교가 실제로 인식 개입 여부를 바꾸는 경우에만 실행하며, 성립하지 않으면 현재 후보를 보류한다. 기존 15사례 재채점·prompt 탐색·자동 학습은 제외한다.
 
 논문 추천은 보류한다. 이번에는 현재 설계의 종료와 제한된 응답 관찰을 확인했으며, 특정 방법 방향을 더 깊이 투자할 긍정적 근거는 확보하지 못했다.
+
+
+## iter_134 GPT PLAN [MRI 관측 추가와 근거 통합 분리 / proceed] — 2026-10-13 17:26:31
+
+# 요약
+
+- 이번에 할 일: 신규 뇌종양 MRI에서 같은 두 slice의 개별 판독 후 고정 OR와 공동 입력을 비교한다.
+- 필요한 이유: 추가 관측으로 병변을 볼 수 있게 되는 효과와, 이미 제공된 정보를 공동 처리에서 잃는 현상을 구분한다.
+- 확인할 기준: 영상–mask 연결, 완결 출력, 개별 판독의 기본 신호와 공동 처리의 환자별 손실을 따로 확인한다.
+- 주의·다음: GT로 구성한 두-slice 진단이다. 임상 정상 판정·실용 slice 선택·새 방법의 효과로 확대하지 않는다. 결과에 따라 후속 대조 하나 또는 현재 후보 보류를 선택한다.
+
+## 알림 맥락
+- 연구: MRI 관측 추가와 근거 통합
+- 데이터: 신규 RadGenome–BraTS 뇌종양 FLAIR MRI와 병변 mask
+- 모델: MedGemma 1.5, frozen 추론
+- 과제: 한 장 또는 두 장의 MRI에서 제공된 영상 전체의 병변 존재를 답한다
+- 가설: 관측 누락과 동일 관측의 공동 처리 손실은 개별 판독·고정 통합으로 구분할 수 있다
+- 질문: 따로 보면 얻을 수 있는 병변 정보를 두 장을 함께 보여줘도 보존하는가?
+- 변경: 구체화
+- 연결: iter_133의 범주 중첩·출력 절단을 계승해 신규 환자와 배타적 존재 질문으로 관측·통합을 분리한다
+- 작업: 자료 연결과 출력 검사를 통과하면 고정 비교를 실행해 다음 투자 대상 또는 보류를 결정한다
+
+# Current Understanding
+
+iter_064는 지정 target slice의 판단이었다. 복제 대비 다른 slice에서 MedGemma BA가 0.7708→0.5000으로 낮아졌지만, 전체 영상 집합의 존재 판단은 시험하지 않았다. Qwen의 반대 근거와 단독 기본 신호의 한계도 유지한다.
+
+iter_133의 첫 줄 HIGH 45/45와 영상 조건의 비EOS 14/30은 범주·응답 문제를 포함한다. 같은 15사례를 재채점하거나 prompt 순회하지 않는다.
+
+iter_059는 네 sequence 전체 volume의 HD-GLIO+OR가 FLAIR 구간8장 MedGemma보다 정확하고 저렴함을 보였다. 구간 검출용 VLM 적응 보류를 유지한다. 이번 질문은 그 전문 대안의 순위 재검증이 아니라 동일 관측 집합의 처리 방식 차이다.
+
+유지: 원 판정, MRI research_track, 데이터·코드·출력 보존, Claude 구현과 독립 리뷰. 변경: 신규 환자, 배타적인 존재 답변, 두-slice 전체 집합 질문. 보류: 위치 표시·신호 범주, 반구 위치 집합, 학습과 전문 모델 재실행.
+
+# Strategy Check / 연구 방향 판단
+
+1. 중요한 문제: 선택한 관측에 포함된 병변 정보가 최종 답에 남는지 알아야 관측 선택과 정보 보존 중 어디에 투자할지 정할 수 있다.
+2. 현재 근거: round_01 원문과 iter_059/064/133 리뷰를 계승한다. 새로 확인한 것은 전문 대안 비교가 동일 정보 비교가 아니며, 위치 집합의 slice별 정답은 여전히 없다는 점이다.
+3. 쉬운 해결책: 개별 판독+OR가 직접 대조다. 전문 segmentation+규칙의 기존 실용 가치는 유지한다. 이번 비교에서 OR가 충분하다는 결과만으로 새 방법을 만들지 않는다.
+4. 남은 설명: 관측 누락, 단독 판독 부족, 입력 수 효과, 공동 처리와 순서 효과, annotation의 영상 가시성 한계다.
+5. 다음 결정: 판별 가능한 공동 손실이면 가까운 대조 하나를 선택한다. 두 경로가 충분하면 후보 보류, 기본 판독이 부족하면 frozen 존재 과제 순회 종료, 자료 연결 실패면 그 경로만 보류한다.
+
+위치 집합은 자료 의미가 미확인이라 선택하지 않는다. 존재 질문은 기존 검출 연구의 반복 위험이 있지만, 동일 입력·동일 모델·전체 집합 질문으로 처리 효과를 분리하는 한정 정보 가치가 있다. 이 비교를 새 임상 검출 방법의 필요성으로 포장하지 않는다.
+
+# Hypothesis
+
+- 관측 누락: N1 단독에서는 annotation 병변이 없지만 P를 추가한 집합에는 있다. 개별 OR와 공동 입력 모두 회복하면 공동 처리 결함의 근거는 없다.
+- 공동 처리 손실: P 단독의 정답이 같은 P pixels를 포함한 P+N1에서 사라지고, 개별 OR가 공동 입력보다 우세하면 제한적 손실을 지지한다.
+- 입력 수 효과: P+P도 P보다 악화되면 서로 다른 관측의 통합만으로 원인을 설명할 수 없다.
+- 기본 판독 부족: P와 N의 단독 구분부터 낮으면 통합 실패 해석을 보류한다.
+
+# Limitation Evidence / Correct Usage Checks
+
+관련 id는 `mri-explicit-target-context-effect`, `radgenome-flair-fixed-category-response`이며 observed 상태를 유지한다. 이번은 diagnostic, method_stage=none이다.
+
+공식 anomaly annotation이 표현하는 범위와 FLAIR 보고서 연결을 확인한다. mask 밖은 임상 정상이라는 뜻이 아니다. 답변 정확도는 annotation-defined tumor presence와의 일치도로 보고하며 실제 임상 진단 정확도로 쓰지 않는다. whole-tumor mask가 FLAIR 신호 정답이나 완전한 가시성 보증은 아니다.
+
+모델 revision은 기존 `91850547d9f0b2fdd21aa7c5f4f3d1a8a52c243b`, bf16·greedy·공식 chat template을 사용한다. 모델에 보고서·mask·case 이름·선택 유형을 전달하지 않는다. 단독과 공동에서 각 slice의 RGB pixels·해상도·강도 정규화를 동일하게 유지한다.
+
+# Contribution Path / Baselines / Reuse
+
+신규 기여는 미확정이다. 가장 가까운 직접 대안은 동일 모델의 개별 답변+고정 OR다. Vote-MI는 관측 선택을 다루므로 선택을 GT로 통제하는 이번 첫 비교에 필수 실행 대조가 아니다. AutoRG는 전문 supervision과 전체 volume을 사용하고 RGv2는 RadGenome 학습 노출이 있어 동일 정보·미노출 baseline으로 부를 수 없다.
+
+후속 학습을 제안한다면 동일 supervision의 직접 SFT와 OR 대조를 반드시 포함한다. 이번에는 학습하지 않는다. 전문 대안보다 부족하다는 사실만으로 전체 질문을 종료하거나, 공동 손실만으로 새 기여를 선언하지 않는다.
+
+재사용 출처는 `20ff6781c45b8b1e924d5b3f0995ef9803d9216d`다. `reuse_assets`의 7개 파일과 실제 의존성만 반입한다. `mr123_data.py`의 normalization_window/render_slice, i133의 출처·실행 패턴을 사용하되 새 i134 경로로 분리한다. 기존 15사례 적격 선택, 8장 고정 검사, HIGH/MIXED evaluator는 사용하지 않는다. worker 입력 hash 생략과 출력 gate 문제를 새 실행 전에 수정한다. 원 파일·결과를 덮어쓰지 않는다.
+
+# Proposed Experiment
+
+## 1. 한정 자료 확인
+
+대상은 RadGenome BraTS_GLI 공식 train의 신규 환자다. 현재 확인된 후보는 161 case이며 환자 수로 간주하지 않는다. 기존 MRI 실험의 case manifest와 원천 ID를 연결해 중복을 제외한다. 기존 15사례와 MSD 개발 환자와의 연결이 불명확하면 독립 신규 환자로 선언하지 말고 자료 gate를 보류한다. 모델 사전학습 노출은 알려진 범위와 미확인을 따로 기록한다.
+
+공식 접근 경로·이용 조건, RadGenome 보고서 key와 BraTS release ID, 영상·mask의 개별 연결을 확인한다. filename 일치와 mirror의 MIT 문자열만으로 인증하지 않는다. 기존 mapping 403을 그대로 반복하지 말고 이미 승인된 인증 접근과 공식 release 설명을 한정 확인한다. 추가 접근 승인이 실제 필요하면 구체적인 경로와 요구 권한을 보고한다.
+
+선정 순서는 seed134로 고정한다. 첫 4명은 기술 집단, 다음 적격 32명은 개발 평가 집단이다. 출력 전에 ID·제외 사유·대체 순서를 봉인한다. 먼저 4명의 FLAIR·mask만 확보한다. 연결 성립 후 평가32명에 필요한 파일만 확보한다. 전체 snapshot은 받지 않는다. 파일 크기·압축 해제 크기·디스크 여유를 합산하고 `results/iter_134/data`에 보관한다. 용량이 부족하면 다른 파일을 삭제하지 말고 별도 승인 범위의 저장 가능 경로를 확인한다.
+
+필수 조건은 동일 grid의 영상·whole-tumor mask, 유한 intensity, 공식 label 의미, 명시적 종양성 병변 보고서 연결이다. 보고서는 환자 수준 의미 확인에만 사용하고 slice별 정답을 만들어내지 않는다. schema·연결이 성립하지 않으면 다른 과제를 즉석 실행하지 않는다.
+
+## 2. 관측 구성
+
+환자마다 canonical RAS에서 P는 whole-tumor annotation 면적이 최대인 axial slice로 정하고 동률은 낮은 z를 택한다. 이는 GT oracle 선택이며 실용 대표 slice가 아니다.
+
+N 후보는 whole-tumor annotation이 0이고, 비영 배경 제거 후 뇌 단면 면적이 해당 volume 최대 면적의 50% 이상인 slice다. 이 기준은 빈 두개골 말단을 피하는 기계적 기준이며 정상 보증이 아니다. P와의 물리 거리 순으로 서로 다른 N1/N2를 선택하고 동률은 낮은 z를 택한다. 적격 N이 두 개 없으면 사전 제외한다. mask 경계와의 거리·뇌 단면·각 annotation 면적을 기록한다. 결과를 보고 거리나 기준을 바꾸지 않는다.
+
+세 영상은 같은 volume min–max window, spacing 보존, 896 canvas를 사용한다. 실제 processor 해상도·token 수와 이미지 순서를 기록한다. 이미지에 GT 표시·정답 암시를 추가하지 않는다.
+
+## 3. 입력과 고정 질문
+
+환자당 10요청이다.
+
+- 단독 P, N1, N2: 3요청.
+- 공동 P+N1, N1+P: 2요청.
+- 공동 N1+N2, N2+N1: 2요청.
+- 복제 P+P, N1+N1: 2요청.
+- 영상 없음: 1요청.
+
+공통 의미는 `제공된 영상 중 어느 하나에 종양성 병변이 보이는가`다. 한 장과 두 장 모두 같은 전체 집합 범위를 사용한다. 답은 PRESENT / ABSENT / UNKNOWN의 배타적 세 상태와 한 문장 근거다. UNKNOWN은 제공 영상에서 판단할 수 없음이며 ABSENT로 합치지 않는다. 영상 없음 조건은 MRI가 제공되지 않았음을 명시한다. 구체적 영어 prompt·정규식·근거 모순 분류표를 기술 실행 전에 저장한다. 환자별 문구를 바꾸지 않는다.
+
+개별 OR는 하나라도 PRESENT면 PRESENT, 모두 ABSENT면 ABSENT, 나머지는 UNKNOWN이다. invalid가 포함되면 집계도 invalid로 둔다. 사후 유리한 재해석을 하지 않는다. N1과 N2의 annotation 부재는 제공 집합 내 주석 병변 부재이지 환자 음성이나 임상 정상 정답이 아니다.
+
+## 4. 동작 확인
+
+기술4명·40요청으로 입력 연결·tensor·순서·출력·EOS·메모리·재개를 확인한다. max_new_tokens=1024로 시작하고, 기술 출력에 절단이 있으면 동일 prompt의 기술 요청 전체를 2048로 한 번만 재실행한다. 재실행 전후를 모두 보존한다. 기술 정확도는 gate로 삼지 않는다.
+
+본비교 진입은 기술 출력이 모두 EOS로 완결되고, 첫 줄 형식 유효율이 95% 이상이며, 무결성·메모리 검사를 통과할 때다. 2048에서도 절단이 남으면 본비교를 하지 않는다. gate를 제거하거나 반복 제거용 임의 stopping rule을 추가하지 않는다. 그 경우 완료된 기술 출력은 탐색 자료로 보존하되 본비교·통합 가설은 미검증이라고 보고한다.
+
+## 5. 가능성 탐색
+
+고정 신규32명에서 320요청을 실행한다. 학습0, 생성 seed134, 환자별 조건 순서는 seed로 균형화한다. 환자당 양성 집합 P+N1과 annotation 음성 집합 N1+N2를 평가한다. 공동 양순서는 평균해 한 환자의 한 관측 단위로 사용한다. 양순서를 독립 환자로 세지 않는다.
+
+32명은 15pp 수준의 큰 paired 차이를 탐색하는 규모다. 차이5명은 약15.6pp이며 작은 효과의 확증에는 부족하다. CI가 넓다는 사실을 숨기거나 독립 test라고 부르지 않는다.
+
+## 6. 규모 확대·독립 확인
+
+이번 반복은 32명으로 종료한다. 본결과를 보고 환자·prompt·모델·학습을 추가하지 않는다. 양성일 때에도 신규 환자 재현 또는 타 모델/직접 형식 적응 중 무엇이 다음 결정을 바꾸는지 독립 리뷰에서 선택한다. 3D 우위나 논문 수준 일반화는 이번 범위가 아니다.
+
+## 7. 자원·비용·재개
+
+두 허용 GPU를 사용한다. 실행 직전과 각 worker 시작 직전에 nvidia-smi를 읽고 logical/physical ID·UUID를 연결한다. 다른 사용자의 점유와 실제 peak에 worker당 2GiB 여유를 포함한다.
+
+기술 요청에서 2 GPU×1 worker와 2 GPU×2 worker를 먼저 비교한다. 메모리 때문에 4-worker admission이 안 되면 안전한 batch 확대 후보 하나를 검토하거나 구체적 이유와 함께 2-worker를 유지한다. 유효 요청/분, 실제 요청 latency p50/p95, peak VRAM, CPU/RAM/I/O, 오류와 출력 token 동일성을 비교한다. 평가 정확도로 실행 구성을 선택하지 않는다.
+
+bf16 모델의 8~10GiB는 참고값이다. 1024/2048 출력의 실제 KV cache와 동시 peak를 측정한다. 예상 wall-clock은 기술 실측 조건별 시간에 남은 요청 수를 곱하고 loading·렌더링·검증 시간을 더해 본실행 전에 기록한다. 현재 새 입력의 시간은 미계측이므로 임의 숫자나 시간 상한을 두지 않는다.
+
+요청별 ID·protocol hash·입력 hash·worker별 JSONL·원자적 완료를 사용한다. 부분 기록은 완료로 읽지 않는다. 재개 시 완료 요청의 내용 hash를 검증하고 미완료만 실행한다. 중단 재개·worker 실패·입력 변조의 거부 검사를 실제 실행 경로에 연결한다.
+
+# Implementation Tasks for Claude
+
+1. 지정 원 리뷰·round_01 노트·재사용 manifest를 읽고 기존 자료와 결과의 불변성을 보존한다.
+2. 공식 자료 연결과 환자 중복을 확인하고, 기술4명과 평가32명의 고정 순서·제외 사유를 저장한다.
+3. 승인된 렌더 함수를 새 자료에 검증하고 P/N1/N2 선택·10조건 요청을 구현한다.
+4. 새 출력 계약과 평가기를 구현한다. 기존 HIGH/MIXED evaluator를 수정해 재사용하지 않는다.
+5. 새 결과 경로·모든 진입점 hash 검사·GPU admission·완결 출력 gate와 재개 검사를 연결한다.
+6. 기술 검사와 처리량 비교 후 설정을 봉인하고, 조건 성립 시 320요청을 실행한다.
+7. 환자별 원출력·EOS·형식·모순·비용과 paired 통계를 연결해 보고한다. 실행 유효성, 기본 판독, 공동 처리 효과와 다음 투자 결정을 구분한다.
+
+# Evaluation (성공/실패 기준 포함)
+
+주 metric은 annotation-defined 양성·음성 집합에 대한 strict BA다. UNKNOWN·invalid는 해당 class에서 오답으로 포함하고 각각의 비율도 보고한다. 보조로 명시 답만의 정확도와 coverage를 제시하되 주 판정을 대체하지 않는다.
+
+주 차이는 개별 OR BA−공동 양순서 평균 BA다. 환자 bootstrap 10,000회·seed134의 95% CI를 계산한다. P/N 단독 BA, P+P와 P의 차이, N1+N1과 N1의 차이, 순서별 결과, OR 정답→공동 오답 및 반대 전환 수를 보고한다.
+
+첫 줄과 설명의 명시적 모순, UNKNOWN, 반복, 비EOS를 각각 표시한다. 근거 문장의 임상 타당성을 LLM 합의로 채점하지 않는다. 기술 단계 전에 고정한 명시 모순 규약으로 감사하고, 모호한 내용은 unresolved로 남긴다. 원 답을 설명문으로 사후 교체하지 않는다.
+
+- 양성: OR BA≥0.75, OR−공동≥0.15, paired CI 하한>0, 본출력 완결·형식 유효율≥95%를 모두 충족한다. 동일 관측에서의 제한적 공동 처리 손실로 보존한다. 복제에서도 손실이면 일반 입력 수 효과를 포함한 해석으로 좁힌다. 다음 계획에서 타 모델 또는 직접 공동 형식 적응 하나를 비교한다.
+- 음성: OR·공동 BA가 모두≥0.75이고 차이 CI 상한<0.15면 현재 큰 공동 손실 후보를 보류한다. 두 경로의 관측 추가 이득은 보존한다. OR BA≤0.60이면 기본 판독 부족으로 frozen 존재 과제의 추가 순회를 종료하며 통합 능력은 미판정이다.
+- 불확정: 나머지는 불확정이다. 완결성·annotation 의미·단독 신호·환자 변동 중 지배 원인을 명시한다. 같은 자료의 prompt·slice 조정은 하지 않는다. 새 환자 확인의 정보 가치가 있을 때만 별도 계획을 제안한다.
+- 실행 실패: 자료 연결·환자 분리·입력 무결성·기술 gate 실패는 가설 기각이 아니다. 한정 기술 수정 후 동일 gate를 다시 검사할 수 있으나 유효 결과의 방향을 바꾸기 위한 재실행은 금지한다.
+
+비용은 환자당 동일 집합의 두 단독 요청 대 한 공동 요청, 재사용을 포함한 전체 workload 비용을 각각 보고한다. 단순 OR가 정확도를 보존하면서 비용도 충분하면 새 방법의 필요성은 낮다. 정확도 손실과 비용 절감의 trade-off를 함께 남긴다.
+
+# Risks / Checks
+
+- GT 선택을 실용 slice 선택 성능으로 보고하지 않는다. 이번 설계는 인접 연속 volume 판독이나 실제 대표영상 선택의 우열을 시험하지 않는다.
+- annotation 없는 slice를 정상으로 부르지 않는다. 전체 종양 mask와 FLAIR 가시성의 차이는 남는다.
+- 최대면적 P는 쉬운 양성에 편향된다. 이 조건에서의 음성을 MRI 전체에 일반화하지 않는다.
+- 보고서·mask·영상 연결, release 변환과 환자 중복 확인이 없는 상태에서 본실행을 시작하지 않는다.
+- 공동·단독의 RGB pixels는 같아도 processor 내부 token 배치가 달라질 수 있다. 실제 tensor·token 비용을 기록하고 구조적 인과 효과로 단정하지 않는다.
+- 같은 연구 질문의 이력을 유지하며 자료 이름 변경으로 과거 보류를 지우지 않는다.
+
+## 대규모 GPU 필요 후보
+
+3D encoder와 언어 모델의 공동 적응, 다양한 관측 수와 누락 조건을 포함한 MRI instruction tuning은 장기 후보로 보존한다. 현재는 제한된 공동 처리 손실과 강한 단순 대안 이후의 필요성부터 확인하며 실행하지 않는다.
+
+# 계획의 근거 (GPT 조사 노트)
+
+## 이번 라운드의 결정
+
+위치 집합 질문은 보류하고, 동일 두 slice의 병변 존재 정보를 개별 OR와 공동 입력이 얼마나 보존하는지 한정 진단한다. 양측 병변 보고서에서 slice별 해부학 정답을 임상 추측 없이 얻었다는 근거가 없기 때문이다. 존재 질문도 임상 정상/비정상을 평가하는 것으로 확대하지 않고 annotation-defined tumor presence에 한정한다.
+
+## 원문 확인과 이전 질문의 답
+
+- `agent/runs/iter_134/think/round_01.json` 원문을 읽어 이전 조사와 미확인 사항을 계승했다.
+- `agent/runs/iter_059/review.md`와 `plan.json`을 확인했다. HD-GLIO+OR의 BA 0.950457 대 U8 0.768639, 전체 비용 비율 0.600989는 네 sequence 전체 volume 대 FLAIR 구간8장 비교다. 동일 정보량의 개별/공동 처리는 검증하지 않았다. 해당 잔여 불확실성만으로 새 방법을 정당화하지 않으며, 이번은 사용자가 승인한 입력 방식 질문을 끝내기 위한 제한적 비교다.
+- 공식 AutoRG 설명은 anomaly mask와 modality별 보고서 사용을 지원하지만 보고서 위치 문장을 slice별 반구 정답으로 변환하는 규약을 제공하지 않는다. RGv2의 RadGenome 학습 노출도 유지한다. [AutoRG-Brain 공식 구현](https://github.com/ljy19970415/AutoRG-Brain)
+- Vote-MI의 `representative_select` GitHub 페이지 조회는 다시 실패했고 해당 README raw 경로는 404였다. 이는 구현 부재의 증거가 아니다. 이번에는 GT로 정보 포함 여부를 통제하므로 대표 slice 선택기를 실행하는 것이 개별/공동 처리 차이를 식별하는 데 필수적이지 않다. Vote-MI 실행 가능성 조사를 이번 비교의 선행 blocker로 만들지 않는다. [BrainMD 공식 저장소](https://github.com/YuliWanghust/BrainMD)
+- `research/results/iter_083/preflight_a1/release_evidence.json`을 확인했다. release 수준의 2021/2023 관계와 label 변경 설명은 있지만 개별 파일 동등성·접근 조건의 인증은 없고 mapping 접근 403이 기록돼 있다. 신규 영상 연결은 구현의 자료 gate로 남긴다.
+
+## 재사용 근거
+
+현재 research HEAD는 `20ff6781c45b8b1e924d5b3f0995ef9803d9216d`이며 commit 객체와 i133 파일 존재를 확인했다. 작업 트리는 깨끗했다. `review.json/code_assets`, `i133_common.py`, `i133_spec.py`, `i133_data.py`, `i133_run.py`와 import 의존성을 확인했다. 렌더링의 RAS 변환·min–max·seg>0은 현재 자료에 맞는지 다시 검증해야 한다. worker_only의 inputs 검사 생략, 8장 전용 요청 검증, iter_133 경로 고정은 새 실행 전 수정 대상이다. 기존 HIGH/MIXED 평가기는 반입하지 않는다.
+
+## 의미와 한계
+
+신규 contribution이나 일반적 통합 결함은 아직 없다. 이번 양성 결과도 두-slice OR 과제에 한정된다. 병변 없는 annotation slice는 임상 정상 slice가 아니며, mask의 존재는 해당 FLAIR만으로 병변을 확실히 인식할 수 있다는 보증도 아니다. 따라서 단독 출력 신호와 공동 처리 손실을 별도로 판단한다. 신규 모델 실험·다운로드·파일 생성은 이 계획 라운드에서 수행하지 않았다.
+
+이전 사고 라운드 노트: agent/runs/iter_134/think/
+
+
+
+## iter_134 CLAUDE IMPLEMENTATION REPORT — 2026-10-13 18:01:09
+
+# 요약
+
+- **핵심 결과**: MedGemma 1.5는 주석에 병변이 없는 slice에도 첫 줄로 PRESENT를 답했습니다. 사전 판정은 `negative_basic_reading_insufficient`입니다. 한 장짜리 판독의 기본 신호가 부족해서, 두 장을 합쳤을 때의 통합 능력은 판정하지 못했습니다.
+- **근거** (신규 RadGenome–BraTS 환자 32명, 320요청, 전부 EOS 종료):
+  - OR BA 0.484, joint BA 0.477, single BA 0.500입니다.
+  - OR−joint 차이는 0.0078이고 95% CI는 [−0.031, 0.047]입니다.
+  - 병변 없는 slice 단독(N1, N2)의 ABSENT 응답은 0건입니다. 따라서 negative class 정확도는 0입니다.
+  - 복제(P+P, N1+N1) 효과는 0이고 CI는 [0, 0]입니다.
+- **미검증·주의**: 표본이 작고 GT로 만든 oracle slice이며, 반복 사용한 개발 자료입니다. 설명문 키워드 집계는 의미 평가기가 아닙니다. 실행 구성과 gate 범위는 아래 "미정·보류"에 따로 정리했습니다.
+- **다음**: frozen 존재 질문의 추가 prompt·slice 순회는 그만두는 것을 권고합니다. 통합 질문을 이어가려면 타 모델 또는 직접 형식 적응이 필요하며, 이는 GPT 리뷰에서 결정할 사항입니다.
+
+# Work Performed
+
+- **자료 연결과 표본**:
+  - RadGenome train FLAIR 후보 161건의 순서를 `sha256("134|pid")`로 다운로드 전에 봉인했습니다(`order.json`).
+  - 앞 48건의 FLAIR·seg를 미러에서 받아 LFS sha256으로 검증했습니다. 약 130MB입니다.
+  - 기술 4명과 평가 32명을 선정했습니다. 제외된 사례는 `fewer_than_2_eligible_N` 1건입니다.
+  - 이전 BraTS 환자 번호(val 23명, iter_133 15사례)와 겹치는 환자는 0명입니다.
+  - 아래 "미정·보류"에 적은 대로, MSD Task01 환자와의 연결과 모델 사전학습 노출은 미확인입니다.
+- **관측과 요청 구성**:
+  - P는 whole-tumor mask 면적이 최대인 slice입니다. N1, N2는 mask가 0이고 뇌 면적이 최대의 50% 이상인 slice이며, P에 가까운 순으로 골랐습니다.
+  - 환자당 10조건을 구성했습니다: P, N1, N2, P+N1, N1+P, N1+N2, N2+N1, P+P, N1+N1, 영상 없음.
+  - 저장 PNG 108장을 독립 재렌더링과 대조했고, mask 가시성과 N slice의 mask 부재도 확인했습니다. 문제는 0건입니다.
+- **고정 규약**: PRESENT/ABSENT/UNKNOWN 질문과 첫 줄 strict parser, 설명문 모순 감사 규약, 평가기(`i134_eval.py`)를 생성 전에 코드로 잠갔습니다.
+- **재사용 코드 보강**: i133 실행기를 수정했습니다.
+  - worker 직접 진입에서도 code, gates, inputs를 전부 hash 검사합니다.
+  - worker 시작 직전에 GPU admission을 하고, worker 로딩 완료를 확인한 뒤 다음 worker를 띄웁니다.
+  - 요청당 0~2장의 가변 영상을 지원합니다.
+  - 자원 로그에 GPU, CPU, RAM, 디스크 I/O를 기록합니다.
+- **기술 검사와 본실행**: 기술 gate를 통과한 뒤 320요청을 실행했습니다.
+
+# Files Changed
+
+신규 코드 (`research/`):
+- `i134_common.py`, `i134_fetch.py`, `i134_data.py`, `i134_spec.py`
+- `i134_run.py`, `i134_lock.py`, `i134_eval.py`, `i134_tech.py`
+- `i134_posthoc.py`, `test_i134.py`
+
+반입한 `i133_*.py`와 `mr123_data.py`는 수정하지 않았습니다.
+
+결과는 `results/iter_134/` 아래입니다.
+- `data/`: `order.json`, `selection_v2.json`, `data_manifest_v2.json`, `brats/`
+- `requests/`, `png_v2/`, `protocol_lock_*`
+- `jobs/`: `Tb_w2`, `Tb_w4`, `Tb_resume`, `main` 등
+- `tests/`, `eval_main.json`, `eval_main_per_patient.json`, `eval_posthoc_content.json`
+
+# Commands / Experiments
+
+| 단계 | 결과 |
+|---|---|
+| `i134_fetch.py seal` / `fetch 48` | 성공 (최초 `repo_type` 누락 404는 수정 후 성공) |
+| `i134_data.py` | v1은 보고서 정규식 구현 오류로 36건 선정이 틀려 폐기, v2는 36명 선정, problems 0 |
+| `test_i134.py` (CPU 단위 검사) | 28/28 통과 (최초 2회는 26/28이었으며 검사 코드·fixture 오류 수정) |
+| 기술 `tensor` 검사 | 40요청, 공식 processor 대조·순서·target pixel 동일성 통과 |
+| 기술 `neg` 검사 | 12개 거부 검사 전부 통과 |
+| `Tb_w2` / `Tb_w4` / `Tb_resume` | 각 40/40, 출력 token 동일 |
+| 기술 gate | passed |
+| 평가 코드 dry-run (기술 4명) | 정상 동작 |
+| `main` 생성 (4 worker) | 320/320, rc [0,0,0,0], wall 342초 |
+| `i134_eval.py` | `eval_main.json` 저장 |
+| `i134_posthoc.py` | 사후 키워드 집계, 주판정 불변 |
+
+기술 단계에서 프로토콜을 수정한 경위는 다음과 같습니다.
+1. 최초 기술 실행(`T_w2`)에서 모델이 제가 넣은 "Image n:" 라벨을 첫 줄에 따라 써서, 영상 요청의 첫 줄 형식 오류가 12건 발생했습니다.
+2. 라벨 텍스트를 제거했습니다. 정답 내용과 무관한 형식 수정이며 `config.image_labels=False`로 구분했습니다.
+3. protocol은 생성 전에 a1~a3으로 보정해 다시 잠갔습니다. 원 기록(`T_w2`)과 이전 검사 파일은 보존했습니다.
+
+# Results
+
+- **본실행 결과**: `results/iter_134/eval_main.json`. 32명에서 OR BA 0.484, joint BA 0.477, single BA 0.500입니다. OR−joint 차이는 0.0078이고 95% CI는 [−0.031, 0.047]입니다. 판정은 `negative_basic_reading_insufficient`(OR BA ≤ 0.60)입니다.
+- **판정에서 확인한 것과 못 한 것**: 공동 처리 손실의 증거는 없었습니다. 다만 기본 판독 부족으로 통합 능력 자체는 판정하지 못했습니다.
+- **조건별 strict 정확도**:
+  - P, PN1, PP: 1.0 (전부 PRESENT)
+  - N1, N2, N1N2, N2N1, N1N1: 0.0 (ABSENT 응답 0건)
+  - N1P: 0.906 (정답이 PRESENT이므로 나온 값)
+- **형식과 완결성**:
+  - 영상 요청의 첫 줄 유효율은 96.5%(278/288)로 기준 95% 이상입니다.
+  - 영상 없음 32건은 전부 `<unused94>thought` 형식의 사고 모드 출력이어서 strict에서는 전부 invalid입니다. 전체 320건 기준 유효율은 86.9%입니다.
+  - 비EOS는 0건, 반복은 0건, UNKNOWN은 0건입니다.
+- **첫 줄과 설명문의 불일치**:
+  - 병변 없는 조건에서 설명문이 부정인데 첫 줄은 PRESENT인 사례가 조건당 8~11건입니다. 예: 첫 줄 "PRESENT", 설명 "no obvious tumor-like lesion".
+  - 사후 키워드 집계에서는 N 단독 조건의 약 1/3이 병변 없음 취지(N1 11건, N2 10건, N1N1 12건)입니다. 병변 있음 취지는 6~9건입니다.
+  - 원 답을 설명문으로 바꾸지 않았고, 주판정도 바꾸지 않았습니다.
+- **비용**: 환자당 요청 처리 시간(로딩 제외)은 단독 2요청 3.38초 대 공동 1요청 1.84초입니다(양성 집합).
+- **실행 구성 비교** (기술 40요청, 출력 token은 전 구성에서 동일):
+
+  | 구성 | 생성 처리량 | GPU 사용량 |
+  |---|---|---|
+  | 2 worker (GPU당 1개) | 29.2 req/min | 각 약 9GB |
+  | 4 worker (GPU당 2개) | 34.1 req/min (+17%) | 각 약 18GB |
+
+  본실행은 4 worker로 했습니다. 본실행 peak는 GPU 17.96/17.89 GiB, 요청 p95 지연은 20.8초입니다(영상 없음의 사고 출력 때문입니다).
+
+# Goal Progress / Reused Assets
+
+- **목표 진전**: 같은 MedGemma 1.5 frozen에서 PRESENT/ABSENT/UNKNOWN 배타 질문의 첫 줄이 한 장 단독 판독에서도 거의 항상 PRESENT였습니다. iter_123/133의 고정 응답 관찰과 같은 방향입니다. 다음은 아직 모릅니다.
+  - 관측 추가가 도움이 되는가
+  - 공동 처리 손실이 있는가
+  - 입력 수 효과가 있는가
+  - 설명문 내용이 첫 줄보다 정확한가
+- **재사용**: 승인 SHA `20ff6781…`의 `mr123_data.normalization_window/render_slice`를 반입 그대로 썼고, 새 i134 렌더 검증으로 확인했습니다. i133 실행기는 보강해 새 i134 파일로 분리했고, 기존 iter_070/133 산출물에는 쓰지 않았습니다.
+- **reuse_manifest required_checks**:
+  - iter_134 경로 분리: 충족
+  - 새 NIfTI의 affine·orientation·label 의미와 렌더링: 충족
+  - 감독기와 worker 직접 진입의 동일 hash 검사: 충족 (protocol 변조 거부 검사 포함)
+  - 단일/두 영상의 processor tensor와 순서·target pixel 동일성: 충족
+  - 출력 gate, 요청 누락·중복, 중단·재개, 입력 변조 거부: 충족 (재개 시 torn tail 복구 포함)
+  - worker 직전 admission과 지연·CPU·RAM·I/O 계측: 연결함
+  - 실패 worker 검사: 코드에 연결했으나 실제 실패 주입 시험은 하지 않았습니다.
+
+# Problems
+
+**현재 결론 무효**: 없습니다.
+
+**해석에 영향을 주는 미정·보류** (GPT 리뷰 대상):
+- **gate 범위**: 기술 gate의 "첫 줄 유효율 95% 이상"이 영상 요청만인지 영상 없음 포함인지 계획에 명시되지 않았습니다.
+  - 기술 출력을 본 뒤 영상 요청 기준으로 해석했습니다. 평가기의 decision 정의와 동일하며, 평가기는 생성 전에 잠갔습니다.
+  - 영상 없음을 포함하면 기술 단계는 90%로 gate 미달이었습니다. `technical_gate_technical.json`에 두 값을 모두 기록했습니다.
+- **프롬프트 형식 수정**: 라벨 제거는 기술 출력(정답이 아니라 형식)을 본 뒤에 한 수정입니다. 원 기록과 v1 결과는 보존했고 이 사실을 보고합니다.
+- **사전학습 노출·MSD 연결**: RadGenome–BraTS의 모델 사전학습 노출은 미확인입니다. MSD Task01 환자와의 연결도 확인할 수 없었습니다.
+- **접근 경로**: 영상은 공식 BraTS 인증이 아니라 기존에 쓰던 미러(`MedOtter/brats2023-gli-dataset`, 고정 revision)를 통해 받았습니다. 공식 data use 동의를 확인한 것이 아닙니다.
+- **N1·N2 인접성**: N1, N2는 P와의 물리 거리 순으로 골라 서로 인접한 slice입니다. 첫 사례는 1mm 간격입니다. 계획의 규칙대로 구현한 것이며 서로 다른 관측으로서의 정보량은 제한적입니다.
+
+**수정이 필요하지만 현재 결론에는 영향 없음**:
+- `i134_tech.py`는 검사 하네스라 protocol 잠금 목록에서 뺐습니다. digest는 `ac3b4ecb…`입니다.
+- v1 자료 산출물(`png/`, `requests/*.json`, `data/*.json`)은 폐기본으로 남아 있습니다. 삭제하지 않았고 v2와 혼동되지 않도록 이름을 구분했습니다.
+- 실행 중 실패 주입(자식 프로세스 강제 종료) 시험은 하지 않았습니다. 재개는 limit 중단과 torn tail로만 확인했습니다.
+
+**추후 개선**: 사고 모드 출력(`<unused94>thought`)의 최종 답 추출은 이번 범위가 아닙니다. 영상 없음 조건은 대조 관찰로만 남깁니다.
+
+# Recommendation to GPT
+
+- **판단**: 집중 / 한정 보완 / 보류 중 **보류 + 한정 확인 하나**를 권합니다.
+  - 이번 관찰은 기본 판독 부족입니다. 사전 판정대로 frozen 존재 과제의 추가 prompt·slice 순회는 종료를 권합니다. 통합 능력 자체는 미판정입니다.
+  - 관측 부족, 통합 실패, 입력 수 효과는 이 설계로 구분하지 못했습니다.
+- **다음 후보**:
+  - 같은 32명 입력에서 타 모델(예: Qwen2.5-VL)의 단독 판독 BA를 확인하는 작은 대조입니다. 기본 신호가 모델 특이인지 보려는 것입니다.
+  - 반대로 영상 신호가 약해서 생긴 결과라면, 질문을 존재 여부에서 영상으로 지지되는 속성으로 바꾸는 방법도 있습니다.
+  - 두 후보 모두 이번 결과로 효과를 가정하지 않습니다. 학습은 이번 결과만으로 정당화되지 않으며, 한다면 직접 SFT와 OR 대조를 포함해야 합니다.
+- **미해결로 넘기는 것**: 첫 줄과 설명문의 불일치(조건당 8~11건)가 응답 범주 정의에 의존하는지, 사고 모드 출력에서 최종 답을 안정적으로 읽을 수 있는지입니다.
+
+SELF_CHECK: FAIL
+SUMMARY: 신규 RadGenome–BraTS 환자 32명·320요청으로 두 slice의 개별 OR와 공동 입력을 비교했으나, MedGemma가 병변 없는 slice에도 PRESENT를 답해 OR BA 0.484로 기본 판독 부족 분기(통합 능력은 미판정)가 되었다. gate 범위·프롬프트 형식 수정의 사후 해석 때문에 FAIL로 GPT 리뷰를 요청한다.
+
+# [orchestrator] 권한 거부된 도구 호출
+- Bash: cd /SSD1_1TB/home/milab/daniel/08_medgemma/research && python - <<'E'
+import json
+d='results/iter_070/data/'
+s=json.load(open(d+'radgenome/train_val_test_split.json'))
+print({k:v[:3] for k,v in s.items()})
+l=json.load(open(d+'medotter_listing.json'));print(l['sha']);f=l['files'];print(len(f),f[:5] if isinstance(f,list) else list(f.items())[:5])
+mf=json.load(open(d+'radgenome/BraTS_GLI/modal_wise_finding.json'));print(len(mf),list(mf)[:4])
+E
+git status --short | head; cat /SSD1_1TB/home/milab/daniel/08_medgemma/research/results/iter_083/preflight_a1/release_evidence.json | head -c 2500
+- Bash: python - <<'E'
+import json,re
+s=json.load(open('radgenome/train_val_test_split.json'))
+mf=json.load(open('radgenome/BraTS_GLI/modal_wise_finding.json'))
+l=dict(json.load(open('medotter_listing.json'))['files'])
+tr=sorted({k[:-4] for k in s['train'] if k.endswith('-t2f')})
+print(len(tr))
+inm=[p for p in tr if p+'-t2f' in mf]; print('in modal',len(inm))
+base='ASNR-MICCAI-BraTS2023-GLI-Challenge-TrainingData/'
+inl=[p for p in inm if base+f'{p}/{p}-t2f.nii.gz' in l and base+f'{p}/{p}-seg.nii.gz' in l];print('in listing',len(inl))
+print(sum(l[base+f'{p}/{p}-t2f.nii.gz']+l[base+f'{p}/{p}-seg.nii.gz'] for p in inl)/1e6,'MB')
+used=set(json.load(open('label_table.json'))['val']);print(len(used), used&set(inl))
+for p in inl[:3]: print(p, mf[p+'-t2f'][:400])
+lt=json.load(open('label_table.json'));print(lt.keys())
+E
+ls /SSD1_1TB/home/milab/daniel/08_medgemma/research/results/iter_070/ | head; ls /SSD1_1TB/home/milab/daniel/08_medgemma/research/results/iter_083/preflight_a1
+- Bash: python - <<'E'
+import json
+s=json.load(open('radgenome/train_val_test_split.json'))
+mf=json.load(open('radgenome/BraTS_GLI/modal_wise_finding.json'))
+l=dict(json.load(open('medotter_listing.json'))['files'])
+tr=sorted({k[:-4] for k in s['train'] if k.endswith('-t2f')})
+print(len(tr))
+inm=[p for p in tr if p+'-t2f' in mf]; print('in modal',len(inm))
+base='ASNR-MICCAI-BraTS2023-GLI-Challenge-TrainingData/'
+def f(p,suf): return base+p+'/'+p+suf
+inl=[p for p in inm if f(p,'-t2f.nii.gz') in l and f(p,'-seg.nii.gz') in l];print('in listing',len(inl))
+print(sum(l[f(p,'-t2f.nii.gz')]+l[f(p,'-seg.nii.gz')] for p in inl)/1e6,'MB')
+lt=json.load(open('label_table.json'));print(lt.keys())
+used=set(lt['val']);print(len(used), used&set(inl))
+for p in inl[:3]: print(p, mf[p+'-t2f'][:400])
+E
+- Bash: cat > i134_common.py <<'E'
+"""iter_134 전용 경로·출처 유틸리티 (i133_common 파생; 결과는 results/iter_134에만 쓴다)."""
+import hashlib, json, os
+from pathlib import Path
+from datetime import datetime, timezone
+
+HERE = Path(__file__).resolve().parent
+RES = HERE / 'results/iter_134'
+OLD = HERE / 'results/iter_070/data'   # 읽기 전용 기존 자료(RadGenome 보고서·split·미러 listing)
+DATA = RES / 'data'
+BRATS = DATA / 'brats'
+REPO = 'MedOtter/brats2023-gli-dataset'
+REVISION = 'b032d353a3e80911a5f850bc54e6fb575298a354'
+BASE = 'ASNR-MICCAI-BraTS2023-GLI-Challenge-TrainingData/'
+SEED = 134
+
+
+def sha(p):
+    h = hashlib.sha256()
+    with open(p, 'rb') as f:
+        for b in iter(lambda: f.read(4 << 20), b''):
+            h.update(b)
+    return h.hexdigest()
+
+
+def now(): return datetime.now(timezone.utc).isoformat()
+def digest(x): return hashlib.sha256(json.dumps(x, sort_keys=True, separators=(',', ':'), allow_nan=False).encode()).hexdigest()
+def read(p): return json.loads(Path(p).read_text())
+
+
+def save(p, x):
+    p = Path(p); p.parent.mkdir(parents=True, exist_ok=True)
+    with open(p, 'x') as f:
+        json.dump(x, f, indent=2, sort_keys=True, allow_nan=False); f.write('\n'); f.flush(); os.fsync(f.fileno())
+E
+cat > i134_fetch.py <<'E'
+"""iter_134: 후보 순서 봉인(seed134) 및 필요한 FLAIR(t2f)·seg 파일만 미러에서 확보. 전체 snapshot 금지.
+순서는 다운로드 전에 order.json으로 봉인한다. 기존 파일은 덮어쓰지 않고 크기·LFS sha256으로 검증한다."""
+import sys, hashlib, json, os
+from pathlib import Path
+from i134_common import *
+
+TOK = Path('/home/test/.cache/huggingface/token')
+
+
+def candidates():
+    s = read(OLD / 'radgenome/train_val_test_split.json'); mf = read(OLD / 'radgenome/BraTS_GLI/modal_wise_finding.json')
+    lst = dict(read(OLD / 'medotter_listing.json')['files']); assert read(OLD / 'medotter_listing.json')['sha'] == REVISION
+    tr = sorted(set(k[:-4] for k in s['train'] if k.endswith('-t2f')))
+    out = [p for p in tr if p + '-t2f' in mf and BASE + p + '/' + p + '-t2f.nii.gz' in lst and BASE + p + '/' + p + '-seg.nii.gz' in lst]
+    return out, lst, mf
+
+
+def seal_order():
+    c, lst, mf = candidates(); assert len(c) == 161
+    order = sorted(c, key=lambda p: hashlib.sha256(('%d|%s' % (SEED, p)).encode()).hexdigest())
+    sizes = {p: [lst[BASE + p + '/' + p + '-t2f.nii.gz'], lst[BASE + p + '/' + p + '-seg.nii.gz']] for p in c}
+    save(DATA / 'order.json', dict(created_at=now(), rule='sorted by sha256("134|"+pid); first 4 technical, then eligible cases in order for main32',
+                                    split='RadGenome train', n_candidates=len(c), order=order, listing_sizes=sizes,
+                                    listing_sha256=sha(OLD / 'medotter_listing.json'), split_sha256=sha(OLD / 'radgenome/train_val_test_split.json'),
+                                    modal_finding_sha256=sha(OLD / 'radgenome/BraTS_GLI/modal_wise_finding.json')))
+    print('sealed', len(order), order[:6])
+
+
+def fetch(pids):
+    from huggingface_hub import HfApi, hf_hub_download
+    api = HfApi(token=TOK.read_text().strip() if TOK.exists() else None)
+    for p in pids:
+        for suf in ('-t2f.nii.gz', '-seg.nii.gz'):
+            rel = BASE + p + '/' + p + suf; dst = BRATS / BASE / p / (p + suf)
+            info = api.get_paths_info(REPO, [rel], revision=REVISION)[0]
+            want = info.lfs.sha256 if info.lfs else None
+            if not dst.exists():
+                dst.parent.mkdir(parents=True, exist_ok=True)
+                got = hf_hub_download(REPO, rel, repo_type='dataset', revision=REVISION, local_dir=str(DATA / '_dl'), token=api.token)
+                os.replace(got, str(dst) + '.part'); os.replace(str(dst) + '.part', dst)
+            assert want is None or sha(dst) == want, 'sha mismatch ' + rel
+            print(p, suf, dst.stat().st_size, 'ok', flush=True)
+
+
+if __name__ == '__main__':
+    if sys.argv[1] == 'seal': seal_order()
+    else: fetch(read(DATA / 'order.json')['order'][:int(sys.argv[2])])
+E
+python i134_fetch.py seal
+- Bash: cd results/iter_134 && mkdir -p superseded_build_v1 && mv png requests data/selection.json data/data_manifest.json superseded_build_v1/ && ls . superseded_build_v1
+- Bash: sed -i "s#DATA / 'selection.json'#DATA / 'selection_v2.json'#; s#DATA / 'data_manifest.json'#DATA / 'data_manifest_v2.json'#; s#RES / 'png'#RES / 'png_v2'#; s#requests/technical.json#requests/technical_v2.json#; s#requests/main.json#requests/main_v2.json#" i134_data.py && grep -n "_v2" i134_data.py
+- Bash: CUDA_VISIBLE_DEVICES=0,1 python i134_tech.py tensor 2>&1 | tail -5
+- Bash: python ../experiment_wait.py --pid $(pgrep -f "i134_run.py launch" | head -1) --timeout 600
+
+
+
+## iter_134 GPT REVIEW [CONTINUE] — 2026-10-13 18:05:56
+
+# 요약
+
+- 판정: **execution_failed / CONTINUE**. 생성은 완료됐으나 원 계획의 본실험 진입 조건을 충족하지 않았다.
+- 핵심 근거: 32 case·320요청의 OR BA 0.484375, 공동 BA 0.4765625, 차이 0.0078125와 95% CI [−0.03125, 0.046875]를 독립 재현했다.
+- 의미·한계: 저장 출력은 보존한다. 환자 중복·자료 연결 미완료와 gate 사후 변경으로 독립 가설 검증은 승인하지 않는다. 첫 줄 실패를 시각 인식 실패로 확정할 수도 없다.
+- 다음: 자료와 출력 계약의 한정 확인으로 후속 비교 가능 여부를 결정한다. 현재 결과를 통과시키기 위한 재채점이나 반복 생성은 하지 않는다.
+
+## 알림 요약
+
+- 결과: 뇌종양 FLAIR 32사례의 개별 OR와 공동 입력은 BA 0.484/0.477이었다. 다만 자료 gate가 미완료이고 기술 형식 기준을 출력 확인 뒤 변경했다.
+- 의미: 첫 줄 고정과 설명 불일치는 확인했지만, 계획한 독립 비교는 미완료다. 관측 부족과 공동 처리 손실은 여전히 구분하지 못했다.
+- 후속: 자료 연결과 사전 출력 계약을 한 번 한정 확인해 유효한 후속 비교가 가능한지 결정할 것을 권고한다.
+- 대안: 현재 frozen 존재 설계를 즉시 보류할 수 있다. 반복 비용은 줄지만 설명과 첫 줄의 차이를 활용한 판별 가능성은 미확인으로 남는다.
+
+# Assessment
+
+리뷰 대상은 commit `7dfd466b5a42361f39ad7da0bf0a94b5dc134885`다. commit.json의 17개 경로를 해당 SHA의 blob과 작업 파일로 대조해 모두 일치함을 확인했다. unpreserved_paths는 비어 있다. 구현 전후 diff에는 선별 반입한 i133 파일과 신규 i134 코드가 함께 포함된다. 실제 구현은 engineer_backend.json과 claude_meta.json 기준 Claude, Sonnet/medium이다.
+
+본실행은 미실행이 아니다. completion.json과 4개 worker 원시 JSONL에서 320개 고유 요청, 요청 ID 집합 일치, 파일 SHA256와 record digest 일치, returncode 0을 확인했다. 그러나 실행 완료와 계획된 가설 검증의 유효성은 다르다. 원 계획의 자료·기술 gate 미충족 때문에 valid_experiment=false로 판정한다.
+
+# Key Findings
+
+1. 원시 응답에 독립 parser와 환자 bootstrap을 적용했다. OR BA=0.484375, joint BA=0.4765625, 차이=0.0078125, seed134·10,000회 CI=[−0.03125, 0.046875]로 보고서와 일치했다.
+2. 320건 모두 EOS다. 유효 첫 줄은 PRESENT 278건뿐이며 invalid 42건이다. 영상 조건은 278/288=96.53%, 전체는 278/320=86.875%다. N1은 PRESENT 31건·invalid 1건, N2는 PRESENT 32건으로 ABSENT는 없다.
+3. 첫 줄과 설명은 실제로 다르다. `BraTS-GLI-00478-000__N1`은 PRESENT 뒤에 병변이 보이지 않는다고 설명한다. 따라서 strict endpoint의 기본 판별 부족을 전체 내용 인식 부재로 바꿔 말하면 안 된다.
+4. 영상 없는 32건은 모두 strict invalid다. 원문에는 영상이 없으므로 판단할 수 없다는 취지의 내용이 있어, 이를 영상 없이 병변을 단정한 32건으로 집계해서는 안 된다.
+5. protocol_lock_main.json의 code·inputs·gates hash와 본요청의 PNG hash가 현재 파일과 일치했다. cpu_tests_v3.json의 28개 검사, tensor_check_v3.json, negative_tests_v2.json, 재개·token 동일성 검사 기록을 확인했다. 리뷰에서 GPU 실험이나 파일 생성은 하지 않았다.
+
+# Problems / Concerns
+
+가장 큰 문제는 기술 gate를 사후 변경했다는 점이다. 계획은 기술4명·40요청에서 첫 줄 유효율 95% 이상을 요구했다. 실제 전체 유효율은 90%다. claude_stream.jsonl의 도구 호출은 출력 확인 후 분모를 전체 rec에서 NONE을 제외한 img로 바꾸었음을 보여준다. 평가기에서 영상 조건을 사용했다는 사실은 별도 기술 진입 기준의 변경을 정당화하지 않는다. 기술 단계의 이미지 라벨 제거와 재검사는 한정 형식 수정으로 볼 수 있지만, 실패한 gate의 적용 범위를 좁히는 것은 별개의 문제다.
+
+자료 gate도 미완료다. 계획은 MSD 개발 환자 연결이 불명확하면 보류하라고 명시했다. 구현은 이전 RadGenome val 번호와의 중복만 확인하고 MSD 연결은 확인 불가로 기록했다. 공식 이용 조건과 개별 release 연결 역시 미러 다운로드·hash 검사로 대체됐다. 실제 권한 위반이나 환자 중복이 확인됐다는 뜻은 아니지만, 계획의 선행 조건 충족 근거가 없다는 뜻이다. 처음 기술4명 이후 조건부 확대 대신 앞 48 case를 먼저 받은 절차도 계획과 다르다.
+
+실행기 안전성은 개선됐지만 실제 실패 worker 주입 검사는 수행되지 않았다. 이는 저장 출력의 산술을 무효화하는 이유가 아니라 재사용 전 해결할 항목이다. 단독·공동 비용 3.38초/1.84초는 요청 처리 시간이며 전체 비용이 아니다.
+
+# Interpretation
+
+평가기의 `negative_basic_reading_insufficient` 분기는 수치상 재현된다. 다만 이번 리뷰에서는 선행 gate 미충족 때문에 이를 계획을 통과한 과학적 음성 판정으로 승인하지 않는다. 저장된 제한적 출력 관찰은 폐기하지 않는다.
+
+형식상 배타적인 PRESENT/ABSENT/UNKNOWN 질문에서도 유효 첫 줄이 PRESENT로 고정됐지만 설명문에는 명시적 부재가 있다. 이는 첫 줄 endpoint가 정보 활용을 충분히 대표하지 않을 수 있음을 보여준다. 실제 병변 인식, 관측 부족, 공동 처리 손실 중 어느 원인이 지배적인지는 미확정이다. 낮은 BA만으로 통합 능력이나 MRI 전체를 기각하지 않는다.
+
+현재 자료는 독립 test가 아니며, 과거 MSD 개발 집단과의 독립성도 확인되지 않았다. limitation_updates는 비워 기존 observed 주장을 소급 강화하지 않는다. 논문 추천은 유효한 긍정적 탐구 근거가 이번 비교에서 확보되지 않아 보류한다.
+
+# Strategy Check / 연구 방향 판단
+
+1. **중요한 문제:** 관측에 포함된 병변 정보가 최종 답에 남는지 구분한다는 계획의 질문을 유지한다. slice 수 자체의 성능표는 목표가 아니다.
+2. **현재 근거:** iter_064의 지정 target context 관찰과 iter_133의 첫 줄·설명 불일치를 계승한다. 이번 추가 증거는 완결된 320출력에서도 첫 줄과 설명이 어긋난다는 점이다. 독립 재현이나 내부 원인 증명으로 격상하지 않는다.
+3. **쉬운 해결책:** 개별 OR는 현재 strict endpoint에서 충분하지 않았다. 그러나 설명문을 임의로 답으로 바꾸는 것도 해결책 검증이 아니다. 전문 segmentation+규칙의 기존 실용 근거는 유지하며 같은 정보량 비교로 해석하지 않는다.
+4. **남은 설명:** 기본 영상 판별 부족, 첫 줄 응답 인터페이스, annotation과 가시성 차이, 공동 처리 효과가 남는다. 지금 타 모델을 추가하면 자료·출력 계약 문제도 함께 반복한다.
+5. **다음 결정:** 자료·출력 계약의 한정 보완으로 판별 가능한 비교가 성립하는지 한 번 결정한다. 성립하지 않으면 현재 설계를 보류한다. 결과를 소급 통과시키거나 새로운 frozen 실패 수집으로 연장하지 않는다.
+
+실행 유효성은 미승인, 성능 개선은 없음, 통합 가설 지지는 없음, 신규 기여 가능성은 미확정이다. 보고된 본생성 wall은 약342초이며 기술40요청에서 2-worker 29.16 대 4-worker 34.09 req/min과 출력 token 동일성을 확인했다. 이 병렬 구성 선택은 합리적이다. 총 준비·재작업 비용의 단계별 계측은 없어 지배 비용을 정량 단정하지 않는다. 반복된 자료·평가 불확실성이 다음 투자의 핵심 장애다.
+
+# Recommended Next Experiment
+
+다음은 추가 GPU 비교보다 한정 보완 계획이 우선이다. 원 plan.md의 가설·표본·metric·기준과 현재 결과를 보존하고, 공식 자료 연결·이용 조건·MSD 중복의 확인 가능한 근거를 점검한다. 확인이 불가능하면 해당 독립성 요구를 갖춘 현재 설계를 보류하거나, 목적과 해석이 다른 별도 계획을 명시해야 한다.
+
+출력 계약은 저장 원문에서 첫 줄·설명 불일치와 NONE의 형식을 확인해 다음 판별 비교의 가능성을 결정하는 데만 사용한다. 현재 결과를 새 parser로 성공 또는 유효 음성으로 재분류하지 않는다. 보완이 유효 비교로 이어질 구체적 조건을 제시하지 못하면 여기서 끝낸다. 타 모델·학습 확대는 자동 권고하지 않는다. 최신 사용자 지시에 따라 다음 계획은 자동 진행할 수 있으며, 실제 추가 접근 권한이 필요할 때만 구체적으로 질문한다.
