@@ -451,3 +451,22 @@ RadGenome–BraTS 반복 개발 FLAIR 15사례와 고정 8장·prompt에서 froz
 - 미해결: 반복 생성·절단을 통제한 독립 입력에서도 같은 관찰이 재현되는가?
 - 미해결: 8장 관측과 whole-abnormality 표시가 보고서의 신호 기술 대상에 충분히 대응하는가?
 
+## msd-flair-presence-answer-explanation-gap — observed
+
+MSD Task01 반복 개발 E45의 고정 FLAIR 단독·공동·복제 입력에서 frozen MedGemma 1.5는 영상 요청 405건 중 403건에 첫 줄 PRESENT를 출력했고 2건은 형식 invalid였다. 개별 OR BA는 0.500, 공동 양순서 평균 BA는 0.49444였다. 일부 PRESENT 설명은 병변 부재를 명시하므로 이 결과는 현재 응답 인터페이스의 판별 부족이며, 병변 인식 부재나 일반적인 통합 실패를 확정하지 않는다.
+
+- 적용 목표 시작: iter_003
+- 최신 리뷰: agent/runs/iter_136/review.json
+- 근거: research/results/iter_136/jobs/main/worker*_1791884608175525940.jsonl: 고유 450요청, 영상 PRESENT 403·invalid 2, NONE UNKNOWN 45를 독립 집계했다.
+- 근거: 원시 출력에서 OR−공동 BA=0.00555556, 환자 bootstrap 10,000회·seed136의 95% CI [0, 0.01666667]을 독립 재현했다.
+- 근거: BRATS_334__N1, BRATS_253__N1, BRATS_316__N1, BRATS_481__N1, BRATS_381__N1은 PRESENT 뒤 설명에서 visible tumor-like lesion의 부재를 명시한다.
+- 사용·평가 검증: main protocol의 code·inputs·gates hash, completion의 출력 파일 hash, 450개 record digest와 요청 ID 집합을 독립 확인했다.
+- 사용·평가 검증: 모든 출력 EOS 종료, 최대 284 token으로 max_new_tokens1024 내에 완결됐다.
+- 사용·평가 검증: tensor_check.json의 공식 processor 대조, 동일 target pixels, 영상당 256 image tokens 검사 기록을 확인했다.
+- 사용·평가 검증: D_overlay.png를 직접 확인했으며 manifest의 D6/E45 분리, 사전 N2 부적격 3명 제외와 P/N1 pixel 동일성 기록을 검토했다.
+- 사용·평가 검증: NONE을 포함한 기술 유효율은 59/60이며 분모·문턱 완화 없이 통과했다.
+- 미해결: 첫 줄 상태와 설명의 불일치가 고정 상태어·질문 인터페이스에 얼마나 의존하는가?
+- 미해결: annotation 부재와 단일 FLAIR에서의 시각적 병변 부재가 일치하는 범위는 어디까지인가?
+- 미해결: 독립 환자 재현과 모델 학습 노출은 미확인이다.
+- 미해결: 개별 판별 신호를 확보한 조건에서 공동 입력의 정보 손실이 남는지는 미검증이다.
+
