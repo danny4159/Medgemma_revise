@@ -1,0 +1,134 @@
+# 요약
+
+- 이번에 할 일: 미실행 E45의 설명 요구 유무 180요청을 한 번 완결한다.
+- 필요한 이유: iter_137은 기술 응답 A 11/12로 중단돼 설명 제거 효과를 판단하지 못했다.
+- 확인할 기준: 기존 E 출력95%와 BA·paired 효과 기준을 그대로 유지한다.
+- 주의·다음: 원 실패는 보존한다. 음성·불확정·출력 기준 미달이면 현재 인터페이스 투자를 종료한다.
+
+## 알림 맥락
+
+- 연구: MRI 병변 근거와 답변 연결
+- 데이터: MSD Task01 뇌종양 FLAIR MRI, 기존 개발 D6/E45
+- 모델: MedGemma 1.5 4B, 학습 없는 고정 모델
+- 과제: 단일 MRI 영상에서 병변 존재 상태를 출력한다
+- 가설: 설명 요구가 상태 출력의 판별 부족에 기여할 수 있다
+- 질문: 설명을 요구하지 않으면 같은 영상에서 병변 유무를 더 잘 구분하는가?
+- 변경: 실행 복구
+- 연결: iter_137의 기술 형식 실패를 보존하고 아직 실행하지 않은 본비교를 별도 기준으로 완결한다
+- 작업: 고정 180요청으로 회복 여부를 판단하고 현재 인터페이스의 후속 투자 여부를 결정한다
+
+# Current Understanding
+
+기준 문서는 `agent/runs/iter_137/plan.md`, SHA256 `714180bae143bda916ab22f190ba451db355a4e540a3d2eb83590c31df1fc8f9`다. 구현자는 이 문서와 iter_137 원 review.json을 먼저 읽는다. 이번 문서의 명시적 amendment가 충돌 부분에 우선한다.
+
+유지: 가설, D6/E45, P/N1 pixels·정답, A/B 문구, parser, 모델 revision, 생성·bootstrap seed, E metric·출력·효과 기준. 원 plan·gate failed·출력·판정은 수정하지 않는다.
+
+변경: D 첫 줄 유효율95%를 이번 실행의 진입 조건에서 분리해 관찰값으로 남긴다. 분모12에서 이 기준은 전건 유효를 요구하며, E에서 invalid를 오답으로 포함하는 고정 비교를 막는 것과 정확도 해석 가능성은 다르다. 이는 사후 원 실패의 통과 처리가 아니라 E 출력 생성 전 명시하는 새 설계다. 입력·출처·완료·EOS·경계 검사와 E 조건별95% 기준은 유지한다.
+
+미완료: E45×P/N1×A/B=180개 실제 출력과 평가다. 반복 개발 자료이며 독립 test가 아니다.
+
+# Strategy Check / 연구 방향 판단
+
+직전 카드 출처는 iter_137/review.json이다. 추가 과학적 근거는 없으며 실행 범위만 좁혀 완결한다.
+
+1. 중요한 문제: 영상 판단과 상태 답변의 연결을 구분해야 불필요한 시각 적응을 피할 수 있다.
+2. 현재 근거: iter_136의 영상403/405 PRESENT와 일부 부재 설명은 유효 관찰이다. iter_137은 기술 실패이며 설명 제거 효과는 미판정이다.
+3. 쉬운 해결책: 설명 요구 한 문장 삭제를 원 질문과 비교한다. 충분하면 단순 baseline으로 보존할 수 있다.
+4. 남은 설명: 설명 요구 영향, 기본 판별 부족, annotation과 가시성 차이다. 이번에는 첫 요인의 총효과만 시험한다.
+5. 다음 결정: 큰 회복이면 독립 확인 가치를 별도 판단한다. 음성·불확정·출력 조건 미달이면 현재 경로를 끝낸다. 같은 문구·parser 정비를 이어가지 않는다.
+
+# Hypothesis
+
+설명 요구가 판별을 방해한다면 B에서 양성·음성 정확도가 함께 회복된다. 기본 판별 부족 또는 정답 적합성이 지배하면 회복되지 않는다. 상태 분포만 바뀌는 것은 회복이 아니다. 내부 attention·시각 표현의 원인을 식별하는 실험은 아니다.
+
+# Limitation Evidence / Correct Usage Checks
+
+대상은 observed `msd-flair-presence-answer-explanation-gap`이다. iter_136의 full review가 공식 processor, pixels, token 경계, EOS와 출력 무결성을 확인했다. iter_137의 본실험 미실행 blocking은 해소해야 할 실행 범위이며 한계 상태를 승격하지 않는다.
+
+P는 annotation 최대 면적 slice, N1은 annotation 면적0 slice다. N1을 임상 정상으로 해석하지 않는다. GT는 선택·평가용이고 모델에는 mask, 역할, 환자 ID, 정답을 제공하지 않는다. PNG는240×240이며 processor tensor와256 image tokens의 기존 검증을 입력·설정 불변 확인 후 계승한다.
+
+# Contribution Path / Baselines / Reuse
+
+신규 기여는 미확정이다. 단순 인터페이스 효과를 분리해 후속 투자 판단을 돕는 진단이다. 직접 대조는 원 질문 A, 참고 baseline은 항상 PRESENT BA0.50이다. 학습·전문 모델·공동 입력 확대는 없다.
+
+현재 branch `approach/mri-explanation-demand`와 HEAD `3a26adc68c3c38a819f1dd0d328b6e4d2bf96fd4`를 유지한다. 현재 파일이 있으므로 `reuse_assets=[]`이며 외부 반입은 없다. 구현 기록에 이 SHA와 아래 개별 파일·의존성·승인 범위·검사를 명시한다. 이전 반입 절차 이탈을 소급 정당화하지 않는다.
+
+- 승인 범위 재사용: `i134_spec.py`, `i137_spec.py`, `i137_common.py`, `i137_data.py`, `msd56_data.py`. 현재 자료·질문·strict parser에 한정한다.
+- 수정 필요: `i137_run.py`, `i137_tech.py`, `i137_gate.py`, `i137_lock.py`, `i137_eval.py`, `test_i137.py`. gate 통합·누락 측정 거부·사전 code hash 잠금·새 결과 경로 연결을 수정한다.
+- 이번 결과는 `research/results/iter_138/`에만 쓴다. 필요하면 기존 소스에서 명시적으로 파생하되 출처 SHA와 대응 파일을 기록한다. 과거 protocol이 가리키는 소스·결과는 보존하며 동일 코드를 무관하게 재구현하지 않는다.
+
+# Proposed Experiment
+
+## 동작 확인
+
+기존 D24의 완료·EOS·경계, tensor24, 재개 후 token 동일성과 입력 provenance 검증을 SHA·설정 불변 확인 후 재사용한다. 기존 A11/12·B12/12를 그대로 기록한다. 기존 failed gate를 복사해 passed로 만들지 않는다. 새 amendment와 검증 출처를 포함한 별도 gate를 출력 전에 잠근다.
+
+메모리 수집·gate·경로 변경으로 실제 확인이 필요한 경우에만 같은 D24를 한 번 새 실행한다. 정확도로 진입·문구를 선택하지 않는다. D 형식률은 보고만 하며 EOS·경계·완료·입력 무결성 실패는 중단한다. 1024 tokens를 유지하고 이번에 길이·문구 순회를 하지 않는다.
+
+## 가능성 탐색 및 본비교
+
+E45 전원을 고정해 P/N1 각각 A/B를 새 생성한다. 180요청, 조건별90개다. A는 `i134_spec.QUESTION`, B는 끝의 ` Then give one short sentence of visible evidence.`만 삭제한다. 추가 문장·예시는 없다.
+
+모델 revision `91850547d9f0b2fdd21aa7c5f4f3d1a8a52c243b`, bf16, sdpa, greedy, 생성 seed136, batch1, image_labels=False, max_new_tokens1024를 양쪽에 동일 적용한다. 기존 iter_136 출력은 재현성 보조 비교에만 사용한다.
+
+## 규모 확대
+
+E45가 이번 종료점이다. 새 환자·seed·조건·학습은 추가하지 않는다. 양성일 때만 다음 리뷰에서 독립 확인의 가치를 판단한다.
+
+## 독립 확인
+
+이번에는 수행하지 않는다. 반복 개발 E45 결과를 외부 일반화 증거로 쓰지 않는다.
+
+## 자원·비용·재개
+
+두 GPU 각1 worker를 우선한다. 직전 loading 포함 처리량은2 worker41.88, 4 worker29.85요청/분이었다. 4-worker는 두 worker가0건이므로 네 worker의 일반적 비효율을 주장하지 않는다. 현재180요청의 작은 작업에서는 새 병렬 탐색 비용을 피하고 기존 측정을 재사용한다.
+
+실행 직전 nvidia-smi로 상속된 허용 장치와 UUID·논리 index 대응, 실제 남은 메모리를 확인한다. GPU별 다른 프로세스 점유+동시 worker 예상 peak 합계+worker당2048MiB가 용량 이내여야 한다. 모델8~10GB는 참고값이며 실제 peak로 갱신한다. 측정 누락은0으로 대체하지 않는다. 자원 수집은 기동 전부터 시작하고 GPU 전체 점유·프로세스 peak·CPU/RAM/I/O를 기록한다. 안전 여유가 없으면 동시성을 줄이고 이유를 남긴다.
+
+41.88요청/분을 적용한 E180 약4.3분은 참고 추정이다. loading·준비·실패 시도·재개 비용을 구분하고 실제 처리량으로 갱신한다. 임의 시간 상한은 없다.
+
+요청 ID·원자적 claim·worker별 출력·code/input/protocol hash·completion 검사를 유지한다. 변경 없는 재개 알고리즘은 기존 실제 SIGKILL 검증을 재사용한다. 변경했다면 영향 경로만 D에서 검증한다. 기존 실행의 claim과 출력은 건드리지 않는다.
+
+# Implementation Tasks for Claude
+
+1. 기준 plan SHA와 현재 소스 출처·모듈 상태를 확인하고 iter_138의 변경 목록을 기록한다.
+2. 기존 D6/E45 manifest·PNG hash·정답·환자 분리·A/B 한 문장 차이를 재연결한다. 새 표본 선정·재렌더는 하지 않는다.
+3. gate를 한 구현으로 통합한다. D 형식률은 관찰 항목, EOS·경계·완료·출처는 진입 조건으로 분리한다. gate 소스와 평가기·모든 실행 의존성을 protocol에 사전 잠근다.
+4. 빈 GPU 측정, GPU 일부 누락, 안전 여유 부족을 통과시키지 않는 회귀 검사를 한다. gate/code/input 변조의 직접 worker·launch·eval 거부를 확인한다.
+5. 경로 분리 뒤 원 결과에 쓰지 않는지 검사한다. 필요할 때만 D24를 한 번 생성하고 E180을 완결한다.
+6. 평가기의 invalid/UNKNOWN 오답·고정 분모·paired bootstrap·출력95%와 판정 경계를 검증한다. E 원시 confusion counts에서 별도 계산으로 주수치를 교차 확인한다.
+7. 실제 도달 단계·고유 요청과 총 시도 수·비용·미실행 독립 확인·SELF_CHECK를 보고한다. 소스 보존·커밋은 orchestrator 절차를 따른다.
+
+# Evaluation (성공/실패 기준 포함)
+
+환자별 P=PRESENT와 N1=ABSENT의 정답 지표 평균을 만든 뒤45명 평균으로 BA를 계산한다. UNKNOWN·invalid·절단은 오답이며 분모에서 제외하지 않는다. sensitivity, specificity, 두 답 모두 정답인 환자 비율, 상태별 confusion counts를 보고한다.
+
+주효과 B−A BA, 환자 paired bootstrap10,000회, seed137, percentile95% CI를 유지한다. E 조건별90개에 대해 EOS·경계·첫 줄 유효율 각각≥95%여야 회복/무회복 판정을 한다. 첫 줄 기준은 최소86/90이다.
+
+- 양성: 출력 조건 충족, B BA≥0.75, sensitivity·specificity 각각≥0.65, B−A≥0.15, CI 하한>0. 단순 baseline과 독립 확인 투자 가치를 별도 판단한다.
+- 음성: 출력 조건 충족 상태에서 B BA≤0.60 또는 차이 CI 상한<0.15. 현재 삭제 개입 투자를 종료한다.
+- 불확정: 나머지 또는 annotation 의미가 회복 해석을 막는 경우. 현재 경로를 보류하며 추가 prompt·parser·seed·표본 탐색을 하지 않는다.
+- E 출력 조건 미달: 점수·원출력을 보존하되 양성·음성으로 승격하지 않는다. 현재 인터페이스 투자는 종료한다.
+- 실행 실패: 입력·출처·완료 무결성이 한정 복구 후에도 성립하지 않으면 execution_failed로 종료한다.
+
+A/B token 수·요청 시간·loading 포함 wall-clock·GPU peak와 비용 비율을 보고한다. 양성이어도 비용 증가와 annotation 범위를 고려해 채택을 자동 승인하지 않는다. 설명 임상 정확도는 채점하지 않으며 보수적 원문 감사는 보조 정보다. B 설명 감소 자체를 의미 정확도 개선으로 해석하지 않는다.
+
+# Risks / Checks
+
+D 기준 변경은 명시적 설계 amendment다. iter_137 실패를 지우거나 새로운 결과로 대체하지 않는다. E 기준은 그대로 유지한다. 동작 확인 통과와 가설 지지를 구분한다.
+
+annotation-free는 임상 정상과 다르고 P는 GT 선택이다. 모델 학습 노출·독립 환자 일반화·충분한 기본 인식 이후의 공동 입력 효과는 미확인이다. 현재 실패를 MRI 전체나 경량 적응 전체의 기각으로 확대하지 않는다.
+
+## 대규모 GPU 필요 후보
+
+3D MRI encoder–언어 모델 공동 post-training은 장기 후보로 보존한다. 이번 출력 요구 대조만으로 그 필요성이나 신규성을 주장하지 않는다.
+
+# 계획의 근거 (GPT 조사 노트)
+
+원문 확인: agent/GOAL.md, agent/runs/iter_137/plan.md·review.json, agent/LIMITATIONS.md의 대상 항목, agent/CODE_ASSETS.md의 iter_137 항목과 현재 i137 소스·의존성을 읽었다. 기준 plan SHA256은 714180bae143bda916ab22f190ba451db355a4e540a3d2eb83590c31df1fc8f9로 직접 확인했다.
+
+현재 research HEAD는 3a26adc68c3c38a819f1dd0d328b6e4d2bf96fd4이며 작업 트리는 깨끗하다. 같은 approach를 유지하므로 다른 checkpoint의 파일 반입은 필요 없다. 현재 존재하는 파일의 출처와 승인 범위를 새 실행 기록에 명시해야 하며, 이전 빈 reuse_manifest를 소급 수정하지 않는다.
+
+직전 원 리뷰에 따르면 각 기술 구성은 24요청·EOS 24/24·최대29 tokens이고 token 출력이 동일했다. A 유효11/12, B12/12이며 E는 미실행이다. 2-worker 처리량은 loading 포함41.88요청/분, 4-worker는29.85요청/분이지만 후자의 출력 배분21/3/0/0은 정상적인 네 worker 동시 생성 근거가 아니다.
+
+소스에서 i137_lock.CODE에 i137_gate.py가 빠진 점, i137_tech.gate와 별도 gate의 중복, 누락 GPU 측정을 default=0으로 처리하는 점을 확인했다. i137_eval.decide는 조건별 EOS·경계·첫 줄95%와 원 효과 기준을 구현한다. 생성 seed136과 bootstrap seed137을 유지한다. 이번은 기준 계획의 한정 보완이므로 새 문헌·신규성 주장을 도입하지 않는다.
