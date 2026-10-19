@@ -66,10 +66,12 @@ def codex_environment():
     return executable, env
 
 
-def command(executable, workspace, output, schema):
+def command(executable, workspace, output, schema, effort="medium"):
+    if effort not in {"medium", "high"}:
+        raise ValueError("사고 강도는 medium 또는 high여야 합니다")
     cmd = [executable, "exec", "--ignore-user-config", "--skip-git-repo-check", "--json",
            "-C", str(workspace), "-s", "read-only", "-m", "gpt-6-astra",
-           "-c", 'model_reasoning_effort="high"', "-c", 'web_search="live"',
+           "-c", f'model_reasoning_effort="{effort}"', "-c", 'web_search="live"',
            "-c", 'approval_policy="never"', "-c", 'forced_login_method="chatgpt"',
            "-c", "project_doc_max_bytes=0", "-c", "allow_login_shell=false"]
     for feature in ("shell_tool", "unified_exec", "shell_snapshot", "multi_agent", "multi_agent_v2",
@@ -118,12 +120,20 @@ class Codex:
             raise RuntimeError("Codex CLI 실행 불가: Node/PATH를 확인하세요")
         return result.stdout.strip()
 
-    def call(self, folder, prompt, schema):
+    def call(self, folder, prompt, schema, *, effort="medium", reason="일반 조사"):
+        if effort not in {"medium", "high"} or not reason.strip():
+            raise ValueError("호출 등급과 선택 이유가 필요합니다")
         folder.mkdir(parents=True, exist_ok=True)
         # 재개 시 성공한 호출은 다시 결제/호출하지 않는다. 미완료 원본도 덮어쓰지 않는다.
         cached = folder / "answer.json"
         if cached.exists():
             return read_json(cached)
+        settings_path = folder / "call_settings.json"
+        if not settings_path.exists():
+            # 기존 시도는 high 고정 정책이었다. 재개 시 과거 호출 조건을 바꾸지 않는다.
+            legacy = any(folder.glob("attempt_*"))
+            save(settings_path, {"effort": "high" if legacy else effort,
+                                 "reason": "이전 high 고정 호출 재개" if legacy else reason})
         if not (folder / "prompt.txt").exists():
             save(folder / "prompt.txt", prompt)
             save(folder / "schema.json", schema)
@@ -165,10 +175,12 @@ class Codex:
         exe, env = codex_environment()
         output = attempt / "final.json"
         log = attempt / "stream.jsonl"
+        settings = read_json(folder / "call_settings.json")
         # 기존 저장소/사용자 AGENTS와 완전히 분리된 실행 디렉터리. 웹 이외 실행 도구 비활성화.
         with tempfile.TemporaryDirectory(prefix="medical-literature-") as workspace:
-            cmd = command(exe, Path(workspace), output.resolve(), (folder / "schema.json").resolve())
-            save(attempt / "invocation.json", {"command": cmd, "started_at": now()})
+            cmd = command(exe, Path(workspace), output.resolve(), (folder / "schema.json").resolve(),
+                          effort=settings["effort"])
+            save(attempt / "invocation.json", {"command": cmd, "started_at": now(), **settings})
             with (folder / "prompt.txt").open() as source, log.open("w") as target:
                 proc = subprocess.Popen(cmd, stdin=source, stdout=target, stderr=subprocess.STDOUT,
                                         env=env, start_new_session=True, cwd=workspace)

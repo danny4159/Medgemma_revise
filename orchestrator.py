@@ -108,7 +108,8 @@ import research_history as history
 import gpt_usage
 import gpt_context
 import planning_effort
-from presentation import notice, iteration_result, plan_ready, stage_notice, context_fields, transition_text
+from presentation import (notice, iteration_result, plan_ready, stage_notice, context_fields,
+                          transition_text, summary_section, result_highlight)
 
 PROJECT_DIR = Path(__file__).resolve().parent
 AGENT_DIR = PROJECT_DIR / "agent"
@@ -268,7 +269,15 @@ def usage_retry_delay(error, waited):
     return max(0, min(delay, LIMIT["max"] - waited))
 
 
-def with_retries(what, fn):
+def subscription_quota(error):
+    """구독 소진만 인계한다. 일반 429/overloaded·지출 한도는 자동 교체 사유가 아니다."""
+    return isinstance(error, UsageLimitError) and (
+        error.limit_type in ("five_hour", "seven_day")
+        or bool(re.search(r"usage limit|weekly limit|5.hour limit|hit your (?:usage )?limit",
+                          error.output or "", re.IGNORECASE)))
+
+
+def with_retries(what, fn, *, handoff_on_quota=False):
     """fn()을 실행한다.
 
     - 사용 한도 초과: 알려진 초기화 시각 이후 재시도, 미확인/계속 거절이면 poll 주기. 최대 max.
@@ -284,6 +293,8 @@ def with_retries(what, fn):
         try:
             result = fn()
         except UsageLimitError as e:
+            if handoff_on_quota and subscription_quota(e):
+                raise  # step_claude가 코드를 보존한 뒤 외부 루프에서 같은 iter 인계
             last = e
             if waited >= LIMIT["max"]:
                 raise AgentError(f"{what}: 사용 한도가 {waited // 3600}시간 동안 풀리지 않음. 마지막 오류: {e}")
@@ -534,6 +545,8 @@ def agent_env(gpus):
     env["CONDA_DEFAULT_ENV"] = "medgemma"
     env["PYTHONNOUSERSITE"] = "1"
     env["HF_HOME"] = str(HF_HOME)
+    if STATE["n"] is not None:
+        env["MEDGEMMA_ITERATION_OWNER"] = f"{PROJECT_DIR.resolve()}:{STATE['n']}"
     if gpus is not None:
         env["CUDA_VISIBLE_DEVICES"] = gpus
     # API 키가 있으면 Claude Code가 구독 대신 API 과금으로 동작한다.
@@ -738,19 +751,22 @@ def configure_engineer(args):
     active = started_engineer(n) if not is_done(n) else None
     if requested and active and requested != active and not (iter_dir(n) / "claude_report.md").exists():
         raise AgentError(f"iter_{n:03d} 구현은 {active} 세션으로 이미 시작했습니다. "
-                         "같은 담당으로 완료하거나 --replan에 인계 지시를 적어 새 반복에서 변경하세요.")
+                         "종료·checkpoint를 확인한 뒤 --handoff-engineer와 --handoff-note로 같은 반복을 인계하세요.")
     unfinished = active if not (iter_dir(n) / "claude_report.md").exists() else None
     args.engineer = requested or unfinished or scheduled_engineer(saved)
     sandbox_request = getattr(args, "codex_engineer_sandbox", None)
     args.codex_engineer_sandbox = sandbox_request or saved.get("codex_engineer_sandbox", "workspace-write")
+    fallback_request = getattr(args, "engineer_fallback", None)
+    args.engineer_fallback = fallback_request or saved.get("engineer_fallback", "none")
     if args.engineer not in ("claude", "codex"):
         raise AgentError(f"알 수 없는 구현 담당 설정: {args.engineer}")
     if args.codex_engineer_sandbox not in ("workspace-write", "danger-full-access"):
         raise AgentError("지원하지 않는 Codex 구현 권한 설정입니다.")
-    if requested or sandbox_request:
+    if requested or sandbox_request or fallback_request:
         updated = {} if requested else dict(saved)
         updated.update(backend=requested or saved["backend"],
-                       codex_engineer_sandbox=args.codex_engineer_sandbox)
+                       codex_engineer_sandbox=args.codex_engineer_sandbox,
+                       engineer_fallback=args.engineer_fallback)
         if return_at:
             updated.update(return_at=return_at, return_backend=args.engineer_return_to)
         save_atomic(selection, json.dumps(updated, indent=2))
@@ -760,7 +776,8 @@ def bind_engineer(args, n):
     backend = engineer_backend(args)
     active = started_engineer(n)
     if active and active != backend:
-        raise AgentError(f"진행 중 구현 담당({active})을 {backend}로 교체할 수 없습니다. 보존 후 재계획하세요.")
+        raise AgentError(f"진행 중 구현 담당({active})을 {backend}로 조용히 교체할 수 없습니다. "
+                         "종료 확인 뒤 --handoff-engineer로 같은 iter를 인계하세요.")
     path = iter_dir(n) / "engineer_backend.json"
     if not path.exists():
         save_atomic(path, json.dumps({"backend": backend, "time": now(),
@@ -768,14 +785,154 @@ def bind_engineer(args, n):
     return backend
 
 
+def prepare_engineer_handoff(args):
+    """lock 안에서만 실행. 연구 계획/번호는 유지하고 구현 세션만 보존·교체한다."""
+    n = current_iteration()
+    d = iter_dir(n)
+    pending = [p for p in sorted((d / "engineer_handoffs").glob("*/transaction.json"))
+               if (load_json(p) or {}).get("status") == "preparing"]
+    requested = getattr(args, "handoff_engineer", None)
+    if not pending and not requested:
+        return
+    if len(pending) > 1:
+        raise AgentError("미완료 구현 인계가 여러 개입니다. engineer_handoffs 기록을 확인하세요.")
+    if (RESUME_FILE.exists() or pending_interventions() or getattr(args, "replan", None)
+            or getattr(args, "reset", False) or getattr(args, "goal", None)):
+        raise AgentError("계획 변경과 구현 담당 인계는 별도 작업입니다. 대기 중인 재계획부터 확인하세요.")
+    if pending:
+        path = pending[0]
+        tx = load_json(path)
+        if (requested and requested != tx["to"]) or (
+                getattr(args, "engineer", None) and args.engineer != tx["to"]):
+            raise AgentError("미완료 인계를 먼저 같은 담당으로 마무리하세요.")
+    else:
+        active = started_engineer(n)
+        if not active or not (d / "plan.md").exists() or any(
+                (d / name).exists() for name in ("claude_report.md", "review.json", "done.json", "superseded.json")):
+            raise AgentError("구현 중단 상태에서만 같은 iter 인계가 가능합니다. 완료된 구현은 그대로 리뷰하세요.")
+        if requested == active:
+            raise AgentError("같은 담당입니다. 인계 옵션 없이 실행하면 기존 세션을 재개합니다.")
+        note = (getattr(args, "handoff_note", None) or "").strip()
+        if not note:
+            raise AgentError("--handoff-note에 종료 확인·checkpoint 경로·남은 작업을 적으세요.")
+        if (d / "code_baseline.json").exists():
+            checkpoint_code(n, "before_engineer_handoff")
+        identity = datetime.datetime.now().strftime("%Y%m%d_%H%M%S_") + uuid.uuid4().hex[:8]
+        path = d / "engineer_handoffs" / identity / "transaction.json"
+        # 세션/캐시만 옮긴다. 원 계획·git baseline·checkpoint·전체 스트림은 제자리에 남는다.
+        movable = ("claude_session.txt", "codex_engineer_session.txt", "claude_result.raw.json",
+                   "claude_meta.json", "claude_usage.json", "codex_engineer_usage.json",
+                   "engineer_backend.json", "engineer_choice.json")
+        tx = {"id": identity, "status": "preparing", "iteration": n, "from": active,
+              "to": requested, "note": note, "time": now(),
+              "files": [name for name in movable if (d / name).exists()]}
+        save_atomic(path, json.dumps(tx, ensure_ascii=False, indent=2))
+    for name in tx["files"]:
+        source, archived = d / name, path.parent / name
+        # 재실행은 이미 보관한 파일을 덮어쓰지 않는다. backend 게시 뒤 중단돼도 안전하다.
+        if not archived.exists() and source.exists():
+            source.replace(archived)
+    save_atomic(d / "engineer_backend.json", json.dumps({
+        "backend": tx["to"], "time": now(), "handoff": tx["id"]}, ensure_ascii=False, indent=2))
+    save_atomic(d / "engineer_choice.json", json.dumps({"backend": tx["to"], "handoff": tx["id"]}))
+    args.engineer = tx["to"]
+    configure_engineer(args)
+    tx["status"] = "applied"
+    save_atomic(path, json.dumps(tx, ensure_ascii=False, indent=2))
+    record_event(n, "engineer_handoff", previous=tx["from"], engineer=tx["to"],
+                 archive=str(path.parent), instructions=tx["note"])
+    print(f"iter_{n:03d} 그대로 재개: {tx['from']} → {tx['to']}. 원 계획·코드·실험 결과 보존.")
+
+
+def engineer_handoff_context(n):
+    records = []
+    for path in sorted((iter_dir(n) / "engineer_handoffs").glob("*/transaction.json")):
+        tx = load_json(path)
+        records.append(f"{tx['from']} → {tx['to']} ({tx['time']}): {tx['note']}\n원본 인계 기록: {path.parent}")
+    if not records:
+        return "없음"
+    return ("같은 iter의 담당 인계이며 새 연구/실패 판정이 아니다. 원 계획과 checkpoint를 확인하고 "
+            "남은 작업만 재개하라. 실행 중인 실험이 남았으면 중복 실행하지 말고 상태를 확인하라. "
+            "두 담당의 *_stream.jsonl과 아래 보관 기록을 함께 참조하라.\n" + "\n".join(records))
+
+
+def iteration_processes(n):
+    """동일 호출에서 상속된 소유 표식의 잔존 프로세스만 조회한다. 다른 작업은 건드리지 않는다."""
+    marker = f"MEDGEMMA_ITERATION_OWNER={PROJECT_DIR.resolve()}:{n}".encode()
+    alive = []
+    for entry in Path('/proc').iterdir():
+        if not entry.name.isdigit() or int(entry.name) == os.getpid():
+            continue
+        try:
+            if entry.stat().st_uid != os.getuid():
+                continue
+            if marker in (entry / 'environ').read_bytes().split(b'\0'):
+                alive.append(int(entry.name))
+        except (FileNotFoundError, ProcessLookupError):
+            continue
+        except PermissionError:
+            # 확인할 수 없는 같은 사용자 작업이 연구 경로에 있으면 안전성을 추정하지 않는다.
+            try:
+                cwd = (entry / 'cwd').resolve(strict=True)
+            except (FileNotFoundError, PermissionError, ProcessLookupError):
+                continue
+            if cwd.is_relative_to(RESEARCH_DIR.resolve()):
+                raise AgentError(f"구현 인계 전 프로세스 확인 불가: PID {entry.name}")
+    return alive
+
+
+def fallback_engineer_after_quota(args, n, error):
+    """사용자가 선택한 단방향 Claude→Codex 인계. 살아 있는 실험은 종료를 기다린다."""
+    if (engineer_backend(args) != "claude" or getattr(args, "engineer_fallback", "none") != "codex"
+            or not subscription_quota(error)):
+        raise error
+    check_stop()
+    if STATE["proc"] is not None:
+        raise AgentError("구현 에이전트가 아직 실행 중이어서 자동 인계를 보류합니다.")
+    notify(f"🔄 iter_{n:03d} | Claude 사용 한도 → Codex 인계 준비\n"
+           "같은 계획·부분 결과를 보존합니다. 실행 중인 실험이 있으면 완료를 기다린 뒤 남은 작업을 이어갑니다.")
+    set_stage(n, "Claude 한도 · 잔존 실험 완료 후 Codex 인계")
+    while iteration_processes(n):
+        sleep_with_stop(30)
+    check_stop()
+    checkpoint = checkpoint_code(n, "before_quota_handoff")
+    note = (f"사용자 승인 구독 한도 자동 전환; iteration 소유 프로세스 종료 확인. "
+            f"소스 checkpoint: {(checkpoint or {}).get('sha', 'checkpoint.json 확인')}. "
+            "원 계획·기존 출력·학습 checkpoint를 확인하여 미완료 작업만 수행한다. "
+            "실험 완료 여부와 optimizer/RNG 재개 가능성을 먼저 점검하며 완료된 작업을 반복하지 않는다.")
+    args.engineer_return_at = None
+    args.handoff_engineer, args.handoff_note = "codex", note
+    try:
+        prepare_engineer_handoff(args)
+    finally:
+        args.handoff_engineer, args.handoff_note = None, None
+    record_event(n, "quota_handoff", previous="claude", engineer="codex", limit_type=error.limit_type)
+    notify(f"▶️ iter_{n:03d} | Codex로 남은 구현 재개\n"
+           "반복 번호·연구 계획·검증 기준은 그대로입니다. 이후 반복도 Codex로 이어갑니다.")
+
+
+def research_context():
+    """현행 정책·초점과 원문 색인만 전달한다. 역사 지시 본문은 자동 첨부하지 않는다."""
+    policy = read(RESEARCH_POLICY_FILE).strip()
+    if not policy:
+        raise AgentError(f"연구 운영 정책이 없거나 비어 있음: {RESEARCH_POLICY_FILE}")
+    focus = read(AGENT_DIR / "RESEARCH_FOCUS.md", "별도 초점 없음").strip()
+    routes = read(AGENT_DIR / "RESEARCH_HISTORY_INDEX.md", "별도 이력 색인 없음").strip()
+    return (
+        f"=== 현재 연구 운영 정책 ===\n{policy}\n\n"
+        f"=== 현재 연구 질문·승인 범위 (최종 목표·과거 판정은 유지) ===\n{focus}\n\n"
+        f"=== 관련 이력의 원문 조회 색인 (과거 지시는 현재 명령이 아님) ===\n{routes}\n\n"
+        "색인의 관련 원 리뷰만 확인한다. 아카이브 전체를 자동으로 읽거나 당시의 일회성 지시를 재실행하지 않는다.\n"
+        "날짜가 있는 질문 카드보다 이후 사용자 승인·해당 반복의 원 계획·최신 리뷰를 우선한다.\n\n"
+    )
+
+
 def resource_context(args):
     """재시도·세션 재개를 포함한 모든 호출에 최신 사용자 자원 정책을 전달한다."""
     policy = read(RESOURCE_POLICY_FILE).strip()
     if not policy:
         raise AgentError(f"연구 자원 정책이 없거나 비어 있음: {RESOURCE_POLICY_FILE}")
-    research_policy = read(RESEARCH_POLICY_FILE).strip()
-    if not research_policy:
-        raise AgentError(f"연구 운영 정책이 없거나 비어 있음: {RESEARCH_POLICY_FILE}")
+    research = research_context()
     usage_policy = read(CLAUDE_USAGE_POLICY_FILE).strip()
     if not usage_policy:
         raise AgentError(f"Claude 사용량 정책이 없거나 비어 있음: {CLAUDE_USAGE_POLICY_FILE}")
@@ -788,8 +945,7 @@ def resource_context(args):
     timeout = f"{args.claude_timeout}초 (명시된 실행 제한)" if args.claude_timeout else "시간 제한 없음"
     return (
         f"=== 현재 사용자 자원 정책 (이전 계획의 임의 시간 상한보다 우선) ===\n{policy}\n\n"
-        f"=== 현재 연구 운영 정책 (이전 자동 포기·코드 폐기 규칙보다 우선) ===\n{research_policy}\n\n"
-        f"=== 현재 연구 우선순위 (최종 목표·과거 판정은 유지) ===\n{read(AGENT_DIR / 'RESEARCH_FOCUS.md', '별도 초점 없음')}\n\n"
+        f"{research}"
         f"=== 현재 {label} 구현 사용량 정책 (필수 검증·GPU 활용 유지) ===\n{usage_policy}\n\n"
         f"=== 사람이 읽는 설명·보고서의 표현 기준 (실행·검증 기준은 유지) ===\n{read(REPORTING_STYLE_FILE)}\n\n"
         f"=== 현재 실행 설정 ===\nCUDA_VISIBLE_DEVICES: {visible}\n"
@@ -872,13 +1028,26 @@ def summarize_tool_input(name, tool_input):
     return json.dumps(tool_input, ensure_ascii=False)
 
 
-def run_claude(args, prompt, log_path, tier, session_file=None, resume_id=None):
-    """Claude를 stream-json으로 실행해 진행 상황을 보여주고 최종 result 이벤트를 반환한다.
+def claude_working_directories():
+    """승인된 외부 데이터 경로를 신규·재개 호출 모두에 명시적으로 전달한다."""
+    settings = load_json(AGENT_DIR / "claude_settings.json") or {}
+    extra = settings.get("permissions", {}).get("additionalDirectories", [])
+    if not isinstance(extra, list) or any(not isinstance(p, str) for p in extra):
+        raise AgentError("Claude additionalDirectories는 승인된 절대경로 목록이어야 합니다.")
+    paths = [str(PROJECT_DIR)]
+    for value in extra:
+        path = Path(value)
+        if (not path.is_absolute() or not path.is_dir() or
+                path.resolve() in (Path('/'), Path.home(), *PROJECT_DIR.resolve().parents)):
+            raise AgentError(f"Claude 외부 작업 경로가 없거나 너무 넓습니다: {value}")
+        if str(path) not in paths:
+            paths.append(str(path))
+    return paths
 
-    세션 id는 시작하자마자 session_file에 저장해 두고, 끊기면 resume_id로 같은 세션을 잇는다.
-    """
+
+def claude_command(tier, resume_id=None):
+    """권한 smoke와 실제 구현이 같은 CLI·디렉터리 설정을 사용한다."""
     spec = tier_spec("claude", tier)
-    print(f"Claude 등급: {tier} ({spec['model']}, effort={spec['effort']})\n", flush=True)
     cmd = [
         "claude", "-p",
         "--permission-mode", "acceptEdits",
@@ -887,13 +1056,21 @@ def run_claude(args, prompt, log_path, tier, session_file=None, resume_id=None):
         "--effort", spec["effort"],
         # 작업 디렉터리는 research/. 프로젝트 폴더는 계획과 legacy/ 데이터를 읽는 용도.
         # --add-dir는 값을 여러 개 받으므로 프롬프트 바로 앞에 두면 프롬프트까지 경로로 읽는다.
-        "--add-dir", str(PROJECT_DIR),
+        "--add-dir", *claude_working_directories(),
         "--append-system-prompt-file", str(PROMPT_DIR / "claude_engineer.md"),
         # 연구 에이전트 전용 권한. .claude/settings.json에 두면 대화형 세션까지 막힌다.
         "--settings", str(AGENT_DIR / "claude_settings.json"),
     ]
     if resume_id:
         cmd += ["--resume", resume_id]
+    return cmd
+
+
+def run_claude(args, prompt, log_path, tier, session_file=None, resume_id=None):
+    """Claude를 실행하며 중단된 호출은 동일 권한·세션으로 재개한다."""
+    spec = tier_spec("claude", tier)
+    print(f"Claude 등급: {tier} ({spec['model']}, effort={spec['effort']})\n", flush=True)
+    cmd = claude_command(tier, resume_id)
     input_text = resource_context(args) + prompt
 
     result = {}
@@ -1451,6 +1628,8 @@ def stage_of(n):
         return f"{engineer_label(n=n)} 구현" if (d / "git.json").exists() else "계획 확인"
     if not (d / "review.json").exists():
         return "리뷰"
+    if (load_json(d / "next_iteration_decision.json") or {}).get("status") == "waiting":
+        return "다음 반복 승인 대기"
     return "리뷰 후 처리"
 
 
@@ -1599,6 +1778,11 @@ def iteration_block(n):
                     lines.append(f"  - 확인 이유: {concern}")
         elif stage == "override":
             lines.append(f"- ✏️ 사람이 {ev.get('what')}을 {ev.get('value')}(으)로 변경")
+        elif stage == "engineer_handoff":
+            lines.append(f"- 🔄 **같은 iter 구현 인계**: {ev.get('previous')} → {ev.get('engineer')} (연구 계획 유지)")
+            lines.append(f"  - 지시: {ev.get('instructions')} · 원본: {ev.get('archive')}")
+        elif stage == "iteration_boundary":
+            lines.append(f"- 🙋 **다음 반복 승인**: {ev.get('result')} — {ev.get('reply')}")
         elif stage == "claude":
             lines.append(
                 f"- 🔧 **{ev.get('engineer', 'Claude')}** ({ev.get('tier')}): {ev.get('summary') or '(요약 없음)'} "
@@ -1758,6 +1942,9 @@ iter_{n:03d}
 
 === 사람의 추가 지시 ===
 {read(d / "human_to_gpt.md", "없음")}
+
+=== 직전 반복 종료 때 사용자가 승인한 후속 방향 ===
+{next_iteration_feedback(n)}
 
 === 중단 후 보완 지시 (이전 계획보다 우선) ===
 {intervention_context(n)}
@@ -2193,6 +2380,9 @@ JSON의 연구 질문·기여 경로·baseline·재사용 조건도 확인한다
 === 사용자 추가 지시 ===
 {read(d / "human_to_claude.md", "없음")}
 
+=== 같은 반복의 구현 담당 인계 ===
+{engineer_handoff_context(n)}
+
 === 중단 후 보완 지시 (원문) ===
 {intervention_context(n)}
 
@@ -2228,11 +2418,16 @@ JSON의 연구 질문·기여 경로·baseline·재사용 조건도 확인한다
     try:
         result = load_json(d / "claude_result.raw.json")
         if result is None:
-            result = with_retries(f"{label} 구현/실험", attempt)
+            result = with_retries(f"{label} 구현/실험", attempt,
+                                  handoff_on_quota=(backend == "claude" and
+                                                    getattr(args, "engineer_fallback", "none") == "codex"))
             # 결과 응답 뒤 체크포인트/보고서 저장 중 끊겨도 모델·실험을 다시 호출하지 않는다.
             save_atomic(d / "claude_result.raw.json", json.dumps(result, ensure_ascii=False, indent=2))
-    except BaseException:
+    except BaseException as error:
         # 프로세스가 정리된 뒤에만 보존한다. 보존 실패가 원래 중단 원인을 가리지 않는다.
+        if (backend == "claude" and getattr(args, "engineer_fallback", "none") == "codex"
+                and subscription_quota(error)):
+            raise  # 잔존 worker 완료 확인과 보존은 fallback_engineer_after_quota가 수행
         try:
             checkpoint_code(n, "interrupted")
         except (AgentError, OSError) as e:
@@ -2322,6 +2517,7 @@ iter_{n:03d}
 - 구조화된 계획: agent/runs/iter_{n:03d}/plan.json
 - {label} 구현 보고서 (호환용 파일명): agent/runs/iter_{n:03d}/claude_report.md
 - {label} 구현 도구 호출 전체 기록: agent/runs/iter_{n:03d}/{stream_name}
+- 같은 반복의 담당 인계와 보존된 실행 기록(있으면 함께 검토): {engineer_handoff_context(n)}
 - 구현 담당·모델 설정: agent/runs/iter_{n:03d}/claude_meta.json
 - 코드 버전·제외 파일: agent/runs/iter_{n:03d}/commit.json (체크포인트이지 검증 승인이 아님)
 - 코드 변경 diff (구현 전 SHA → 리뷰 대상 SHA): agent/runs/iter_{n:03d}/changes.patch
@@ -2541,6 +2737,78 @@ def validate_code_assets(n, review):
             raise AgentError(f"모듈 재사용 판정 오류: {e}") from e
 
 
+def next_iteration_feedback(n):
+    if n <= 1 or goal_start(n) == n:
+        return "없음"
+    decision = load_json(iter_dir(n - 1) / "next_iteration_decision.json") or {}
+    if decision.get("status") != "approved":
+        return "없음"
+    return (f"승인한 후속 제안: {decision['next_task']}\n"
+            f"사용자 피드백(원 제안보다 우선): {decision.get('feedback') or '없음; 추천 방향대로 계획'}\n"
+            "기존 결과·한계를 보존하고 이 방향을 구체적인 다음 계획에 반영한다.")
+
+
+def confirm_next_iteration(review, n):
+    """리뷰 뒤 경계 승인. 다음 iter 폴더를 만들지 않아 대기 중 번호가 바뀌지 않는다."""
+    path = iter_dir(n) / "next_iteration_decision.json"
+    fingerprint = hashlib.sha256(json.dumps(review, sort_keys=True, ensure_ascii=False).encode()).hexdigest()
+    saved = load_json(path) or {}
+    if saved.get("status") == "approved" and saved.get("review_sha256") == fingerprint:
+        return True
+    if saved and saved.get("review_sha256") != fingerprint:
+        archive = path.parent / "boundary_decisions" / (uuid.uuid4().hex + ".json")
+        save_atomic(archive, json.dumps(saved, ensure_ascii=False, indent=2))
+    decision = {"status": "waiting", "review_sha256": fingerprint,
+                "iteration": n, "next_task": review.get("next_task", ""), "time": now()}
+    save_atomic(path, json.dumps(decision, ensure_ascii=False, indent=2))
+    summary = summary_section(review.get("review_markdown") or read(iter_dir(n) / "review.md"), "알림 요약")
+    highlight = result_highlight(review)
+    message = notice(f"🙋 iter_{n:03d} 종료 검토 | iter_{n + 1:03d} 진행 승인 요청", [
+        *context_fields(load_plan(n)),
+        ("💡🔎 중요한 관찰", highlight),
+        ("이번에 확인한 것", summary.get("결과") or review.get("one_line_summary")),
+        ("의미·남은 한계", summary.get("의미") or review.get("reason")),
+        ("필요한 결정", review.get("reason") if review.get("verdict") == "NEEDS_HUMAN" else ""),
+        ("추천하는 다음 작업", summary.get("후속") or review.get("next_task")),
+        ("다른 방향", summary.get("대안")),
+        ("진행 상태", "아직 다음 계획·실험은 시작하지 않았습니다. 승인을 기다립니다."),
+    ], reference=f"agent/runs/iter_{n:03d}/review.md", actions=(
+        "ok → 추천 방향으로 다음 계획·실험 진행\n"
+        "f 수정할 내용 → 피드백을 우선 반영해 다음 계획·실험 진행\n"
+        "q → 여기서 정지 (결과 보존, 재실행 시 다시 확인)"
+    ))
+    set_stage(n, "다음 반복 승인 대기")
+    while True:
+        reply = ask("다음 반복: ok / f 수정할 내용 / q\n> ", message)
+        if reply is None:
+            return False
+        cmd, rest = split_reply(reply)
+        if cmd == "q":
+            record_event(n, "iteration_boundary", result="정지", reply=reply)
+            return False
+        if cmd == "f" and not rest:
+            notify("수정할 내용을 함께 적어 주세요. 예: f 새 학습보다 기존 결과 분석을 먼저 해줘")
+            continue
+        if cmd not in ("", "f"):
+            notify("ok / f 수정할 내용 / q 중 하나로 답해 주세요.")
+            continue
+        decision.update(status="approved", feedback=rest if cmd == "f" else "", reply=reply,
+                        approved_at=now())
+        save_atomic(path, json.dumps(decision, ensure_ascii=False, indent=2))
+        record_event(n, "iteration_boundary", result="피드백 반영" if cmd == "f" else "추천 승인",
+                     reply=reply, next_task=decision["next_task"])
+        notify(f"✅ iter_{n:03d} 후속 방향 승인 | iter_{n + 1:03d} 계획으로 이어갑니다.\n"
+               + ("사용자 피드백을 우선 반영합니다." if cmd == "f" else "추천 방향을 구체화합니다."))
+        return True
+
+
+def boundary_confirmation_required(args, n, review):
+    # 한 번 요청한 승인은 재시작 시 플래그 누락이나 --auto/부재 설정으로 우회하지 않는다.
+    return review["verdict"] != "DONE" and (
+        getattr(args, "confirm_each_iter", False)
+        or (iter_dir(n) / "next_iteration_decision.json").exists())
+
+
 def handle_needs_human(review, n):
     """NEEDS_HUMAN 처리. False면 종료."""
     banner("사람의 결정이 필요합니다")
@@ -2618,6 +2886,11 @@ def parse_args():
     p = argparse.ArgumentParser(description="GPT 계획/리뷰 ↔ Claude 또는 Codex 구현 자동 연구 루프")
     p.add_argument("--engineer", choices=["claude", "codex"],
                    help="구현·실험 담당 선택. 선택은 저장되며 생략 시 유지 (초기값 claude)")
+    p.add_argument("--engineer-fallback", choices=["none", "codex"],
+                   help="Claude 구독 소진 시 같은 iter를 보존하고 Codex에 인계. 설정 저장, 기본 none")
+    p.add_argument("--handoff-engineer", choices=["claude", "codex"],
+                   help="중단된 구현을 같은 iter에서 담당만 바꿔 재개. 먼저 실험 종료·checkpoint 확인 필요")
+    p.add_argument("--handoff-note", help="담당 인계 기록: 종료 확인·checkpoint 경로·남은 작업 (연구 재계획 아님)")
     p.add_argument("--engineer-return-at", type=engineer_return_time,
                    help="이 시각 이후 시작하는 반복부터 복귀 (시간대 포함 ISO 날짜). 진행 중 반복은 유지")
     p.add_argument("--engineer-return-to", choices=["claude", "codex"], default="claude",
@@ -2629,6 +2902,8 @@ def parse_args():
     p.add_argument("--autonomy", choices=["manual", "smart", "full"], default="smart",
                    help="계획 확인: manual=매번, smart=애매할 때만(기본), full=안 함")
     p.add_argument("--auto", action="store_true", help="--autonomy full과 같음")
+    p.add_argument("--confirm-each-iter", action="store_true",
+                   help="매 리뷰 후 다음 반복을 사용자 승인 뒤 진행. 기본 꺼짐; --auto/부재 설정보다 우선")
     p.add_argument("--no-ask-until", help="이 시각까지는 사람에게 묻지 않고 진행. 예: 09:00 또는 '2026-09-24 09:00'")
     p.add_argument("--max-attempts", type=int, default=MAX_ATTEMPTS,
                    help="같은 접근법의 유효한 실험 재평가 기준 횟수 (자동 포기 아님)")
@@ -2653,6 +2928,13 @@ def parse_args():
     p.add_argument("--status", action="store_true", help="현재 단계·보완 대기 여부만 표시. 실행 안 함")
     p.add_argument("--usage", action="store_true", help="GPT·Claude 로컬 로그 사용량 조회. 모델·실험·알림 실행 안 함")
     args = p.parse_args()
+    if args.handoff_note and not args.handoff_engineer:
+        p.error("--handoff-note는 --handoff-engineer와 함께 사용하세요.")
+    if args.handoff_engineer:
+        if args.replan or args.reset or args.goal or args.status or args.usage or args.engineer_return_at:
+            p.error("담당 인계는 재계획·목표 변경·조회·예약 복귀와 함께 쓸 수 없습니다.")
+        if args.engineer and args.engineer != args.handoff_engineer:
+            p.error("--engineer와 --handoff-engineer의 담당이 다릅니다.")
     if args.engineer_return_at and not args.engineer:
         p.error("--engineer-return-at은 --engineer와 함께 지정하세요.")
     if (args.prepare_only or args.replan) and (args.reset or args.goal):
@@ -2811,6 +3093,7 @@ def main():
         if selection.get("return_at"):
             print(f"예약 복귀: {selection['return_at']} 이후 시작하는 반복부터 {selection['return_backend']}")
         print(f"Codex 구현 권한: {selection.get('codex_engineer_sandbox', 'workspace-write')}")
+        print(f"Claude 구독 한도 시 대체 담당: {selection.get('engineer_fallback', 'none')}")
         print(f"보완 지시 대기: {'있음' if RESUME_FILE.exists() or pending_interventions() else '없음'}")
         print(f"지시 파일: {RESUME_FILE}")
         info = load_json(iter_dir(n) / "intervention.json")
@@ -2822,9 +3105,10 @@ def main():
             raise AgentError("대기 중인 보완 지시가 있습니다. 먼저 기존 목표에서 반영한 뒤 목표 변경/초기화하세요.")
         if args.replan:
             queue_replan(args.replan)
+        prepare_engineer_handoff(args)
         target = apply_pending_replan()
         if args.prepare_only:
-            if args.engineer or args.codex_engineer_sandbox:
+            if args.engineer or args.codex_engineer_sandbox or args.engineer_fallback:
                 configure_engineer(args)
             print(f"준비 완료: iter_{current_iteration():03d}, 실험·에이전트·알림 미실행. "
                   + ("새 보완 지시를 적용했습니다." if target else "새 보완 지시가 없습니다."))
@@ -2870,11 +3154,15 @@ def run_loop(args):
             return
 
     away_text = (f"\n{args.no_ask_until:%m-%d %H:%M}까지는 묻지 않고 진행합니다 (그 후 원래 규칙)."
-                 if args.no_ask_until else "")
+                 if args.no_ask_until and not getattr(args, "confirm_each_iter", False) else "")
     startup_caution = (f"최대 {args.max_iters}회 반복." if args.max_iters
                        else "반복 횟수 제한 없이 진행하며, 사용자 결정이 필요하면 질문합니다.")
     if engineer_backend(args) == "codex":
         startup_caution += f" 구현 권한: {args.codex_engineer_sandbox}."
+    if getattr(args, "confirm_each_iter", False):
+        startup_caution += " 매 반복 리뷰 후 다음 반복 승인 대기(--confirm-each-iter)."
+    if getattr(args, "engineer_fallback", "none") == "codex":
+        startup_caution += " Claude 구독 소진 시 같은 반복을 보존하고 Codex 구현으로 전환."
     notify(stage_notice(n, stage_of(n), load_plan(n), load_plan(n - 1) if n > 1 else None,
                         load_review(n - 1) if n > 1 else None, resuming=True,
                         caution=startup_caution + away_text))
@@ -2924,7 +3212,11 @@ def run_loop(args):
                 continue
             check_stop()
             set_stage(n, f"{engineer_label(args)} 구현/실험")
-            step_claude(args, goal_for(n), n)
+            try:
+                step_claude(args, goal_for(n), n)
+            except UsageLimitError as error:
+                fallback_engineer_after_quota(args, n, error)
+                continue
         if RESUME_FILE.exists() or pending_interventions():
             continue
         if not (d / "review.json").exists():
@@ -2943,6 +3235,7 @@ def run_loop(args):
         # 리뷰 뒤 처리: 끊겼다가 다시 실행해도 각각 한 번만 한다
         set_stage(n, "리뷰 후 처리")
         review = load_review(n)
+        confirm_boundary = boundary_confirmation_required(args, n, review)
         flags = post_flags(n)
         if "paper" not in flags:
             if not review.get("skipped"):
@@ -2955,7 +3248,9 @@ def run_loop(args):
             handle_milestone(n, review)
             set_post_flag(n, "milestone")
         if "notified" not in flags:
-            if review["verdict"] == "CONTINUE" and review.get("skipped"):
+            if confirm_boundary:
+                pass  # 결과 요약과 다음 방향 질문을 한 알림으로 보낸다.
+            elif review["verdict"] == "CONTINUE" and review.get("skipped"):
                 notify(iteration_result(n, review, load_plan(n)))
             elif review["verdict"] == "CONTINUE":
                 notify(iteration_result(n, review, load_plan(n)))
@@ -2963,7 +3258,12 @@ def run_loop(args):
                 notify(iteration_result(n, review, load_plan(n)))
             set_post_flag(n, "notified")
 
-        if review["verdict"] == "NEEDS_HUMAN" and human_away(args):
+        if confirm_boundary:
+            if not confirm_next_iteration(review, n):
+                commit_records(f"research records: iter_{n:03d} waiting for next iteration approval")
+                print("다음 반복 승인 대기입니다. 재실행해도 현재 질문부터 이어집니다.")
+                return
+        elif review["verdict"] == "NEEDS_HUMAN" and human_away(args):
             record_event(n, "needs_human", question=review["reason"], reply="(사람 부재, 자동)",
                          result="GPT 제안대로 계속")
             rebuild_index()

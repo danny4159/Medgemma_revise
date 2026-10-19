@@ -3,7 +3,7 @@ import re
 from urllib.parse import urlsplit
 
 
-AXES = ("importance", "originality", "leadership", "impact", "medical_origin", "generalization", "feasibility")
+AXES = ("importance", "originality", "leadership", "impact")
 TEXT = {"type": "string"}
 BOOL = {"type": "boolean"}
 
@@ -29,19 +29,21 @@ SOURCE = obj(id=TEXT, url=TEXT, title=TEXT,
              publication_date=TEXT, checked_at=TEXT, locator=TEXT, claim=TEXT, limitations=TEXT)
 ASSESSMENT = obj(key=enum(*AXES), judgment=enum("supported", "plausible", "unknown", "unsupported"),
                  reason=TEXT, source_ids=array(TEXT))
+NEXT_WORK = obj(kind=enum("evidence", "strategy", "conflict"), decision=TEXT, difficulty=TEXT)
 CANDIDATE = obj(id=TEXT, problem_key=TEXT, title=TEXT,
                 status=enum("exploring", "investigating", "nominate", "held", "excluded"),
-                summary=TEXT, problem=TEXT, medical_origin=TEXT, users_and_workflow=TEXT,
+                summary=TEXT, problem=TEXT, medical_context=TEXT, users_and_workflow=TEXT,
                 generalization=TEXT, strongest_objection=TEXT, uncertainty=TEXT,
-                reopen_reason=TEXT, next_questions=array(TEXT), assessments=array(ASSESSMENT, 7),
+                reopen_reason=TEXT, next_questions=array(TEXT), assessments=array(ASSESSMENT, len(AXES)),
                 sources=array(SOURCE), closest_work=array(obj(source_id=TEXT, solves=TEXT, leaves_open=TEXT)),
                 report_markdown=TEXT)
 EXPLORE = obj(question=TEXT, why_this_question=TEXT, search_queries=array(TEXT), what_changed=TEXT,
               evidence_added=BOOL, next_action=enum("continue", "pause"), next_question=TEXT,
-              focus_id=TEXT, selection_reason=TEXT, candidates=array(CANDIDATE, 3), report_markdown=TEXT)
+              focus_id=TEXT, selection_reason=TEXT, next_work=NEXT_WORK,
+              candidates=array(CANDIDATE, 3), report_markdown=TEXT)
 CRITIC = obj(verdict=enum("recommend", "deepen", "hold", "exclude"), reason=TEXT,
-             next_question=TEXT, blocking_issues=array(TEXT),
-             criteria=array(obj(key=enum(*AXES), passed=BOOL, reason=TEXT), 7),
+             next_question=TEXT, next_work=NEXT_WORK, blocking_issues=array(TEXT),
+             criteria=array(obj(key=enum(*AXES), passed=BOOL, reason=TEXT), len(AXES)),
              source_checks=array(obj(source_id=TEXT, verified=BOOL, supports_claim=BOOL, notes=TEXT)),
              additional_sources=array(SOURCE), report_markdown=TEXT)
 
@@ -83,7 +85,7 @@ def sources_valid(sources):
 
 def axes_valid(items):
     if len(items) != len(AXES) or {x["key"] for x in items} != set(AXES):
-        raise ValueError("일곱 평가 축을 중복 없이 기록해야 합니다")
+        raise ValueError("네 평가 축을 중복 없이 기록해야 합니다")
 
 
 def candidate_valid(candidate):

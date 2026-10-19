@@ -16,8 +16,7 @@ class ConvergencePolicyTests(unittest.TestCase):
     def test_scoped_followup_keeps_current_experiment_fixed(self):
         policy = (ROOT / "agent/RESEARCH_POLICY.md").read_text().split(
             "## 판정 범위와 조건부 후속 투자", 1)[1].split("## 사용자 논문 추천", 1)[0]
-        for text in ("현재 iter_045는 중단·재계획하지 않는다", "원 계획의 판정은 유지",
-                     "후속 투자 자동 결정은 이 사용자 보완으로 대체", "실제 검증한 과제·조건",
+        for text in ("원 계획의 판정은 유지", "실제 검증한 과제·조건",
                      "설명/반박/미검증", "기준 미달", "검증 부족", "연구 가치 부족",
                      "결과별로 달라지는 투자 결정", "예상 비용 대비 정보 가치", "종료 조건",
                      "이후 별도 계획의 decision_contract", "method 진입 gate", "사후 가설은 탐색"):
@@ -26,7 +25,7 @@ class ConvergencePolicyTests(unittest.TestCase):
     def test_scoped_followup_is_delivered_to_next_calls_and_reports(self):
         context = loop.resource_context(argparse.Namespace(gpus="0,1", claude_timeout=0))
         self.assertIn("판정 범위와 조건부 후속 투자", context)
-        self.assertIn("현재 iter_045는 중단·재계획하지 않는다", context)
+        self.assertNotIn("현재 iter_045는 중단·재계획하지 않는다", context)
         for name in ("gpt_plan", "gpt_review"):
             self.assertIn("판정 범위와 조건부 후속 투자",
                           (ROOT / f"agent/prompts/{name}.md").read_text())
@@ -84,20 +83,18 @@ class ConvergencePolicyTests(unittest.TestCase):
     def test_current_run_and_scientific_gates_are_preserved(self):
         policy = (ROOT / "agent/RESEARCH_POLICY.md").read_text().split(
             "## 진단의 수렴과 비교군 확보", 1)[1].split("## 사용자 논문 추천", 1)[0]
-        for text in ("현재 iter_043은 원 계획", "superseded 처리하지 않는다", "과거 판정",
-                     "blocking_issues를 지우거나 gate를 우회하지 않는다", "한정 재측정",
-                     "직접 joint SFT", "MedGrounder", "보류하고 중요한 다른 질문",
-                     "종료 조건", "기계적으로 강제하지 않고"):
+        for text in ("blocking_issues를 지우거나 gate를 우회하지 않는다", "최소 재측정",
+                     "강한 비교군", "종료 조건", "원 계획의 판정은 유지"):
             self.assertIn(text, policy)
 
     def test_next_call_receives_both_updates_and_roles_reference_them(self):
         context = loop.resource_context(argparse.Namespace(gpus="0,1", claude_timeout=0))
         self.assertIn("실험 환경 구성 권한 — 2026-10-01", context)
-        self.assertIn("진단의 수렴과 비교군 확보 — 2026-10-01", context)
+        self.assertIn("진단의 수렴과 비교군 확보", context)
         for name in ("gpt_plan", "gpt_review"):
             prompt = (ROOT / f"agent/prompts/{name}.md").read_text()
             self.assertIn("진단의 수렴과 비교군 확보", prompt)
-            self.assertIn("iter_043", prompt)
+            self.assertNotIn("iter_043", prompt)
         engineer = (ROOT / "agent/prompts/claude_engineer.md").read_text()
         self.assertIn("격리 환경 생성·버전 조정", engineer)
 

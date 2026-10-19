@@ -19,6 +19,31 @@ HIGH_REASON = {"scope": "research_direction", "decision": "현재 track 유지�
 
 
 class RoutingTests(unittest.TestCase):
+    def test_usage_reduction_model_mappings(self):
+        expected = {
+            "gpt": {"deep_medium": ("gpt-6-astra", "low"),
+                    "deep_high": ("gpt-6-astra", "medium"), "deep": ("gpt-6-astra", "medium"),
+                    "normal": ("gpt-6-astra", "low"), "light": ("gpt-6-astra", "low")},
+            "codex_engineer": {"creative": ("gpt-6-astra", "medium"),
+                               "heavy": ("gpt-6-astra", "low"),
+                               "standard": ("gpt-6-astra", "low"), "light": ("gpt-6-astra", "low")},
+            "claude": {"creative": ("opus", "low"), "heavy": ("sonnet", "high"),
+                       "standard": ("sonnet", "medium"), "light": ("sonnet", "medium")},
+        }
+        for agent, tiers in expected.items():
+            for tier, (model, effort) in tiers.items():
+                with self.subTest(agent=agent, tier=tier):
+                    self.assertEqual(loop.tier_spec(agent, tier), {"model": model, "effort": effort})
+
+    def test_tier_spec_rereads_file_for_next_call(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "tiers.json"
+            with patch.object(loop, "TIERS_FILE", path):
+                path.write_text(json.dumps({"gpt": {"normal": {"model": "gpt-6-astra", "effort": "medium"}}}))
+                self.assertEqual(loop.tier_spec("gpt", "normal")["effort"], "medium")
+                path.write_text(json.dumps({"gpt": {"normal": {"model": "gpt-6-astra", "effort": "low"}}}))
+                self.assertEqual(loop.tier_spec("gpt", "normal")["effort"], "low")
+
     def test_default_legacy_and_explicit(self):
         for tier in (None, "deep", "unknown", "none"):
             self.assertEqual(routing.choose(tier)["tier"], "deep_medium")
@@ -59,7 +84,7 @@ class RoutingTests(unittest.TestCase):
             self.assertEqual(loop.plan_tier(args, 2), "deep_medium")
 
     def test_schema_and_effort_mappings(self):
-        for tier, effort in (("deep_medium", "medium"), ("deep_high", "high"), ("deep", "high")):
+        for tier, effort in (("deep_medium", "low"), ("deep_high", "medium"), ("deep", "medium")):
             self.assertEqual(loop.tier_spec("gpt", tier), {"model": "gpt-6-astra", "effort": effort})
         for name, field in (("plan", "next_think"), ("review", "next_plan")):
             schema = json.loads((loop.PROMPT_DIR / f"{name}_schema.json").read_text())
@@ -111,7 +136,7 @@ class RoundTests(unittest.TestCase):
             loop.step_plan(self.args, "목표 유지", 2)
         self.assertEqual(seen, ["deep_medium", "deep_high", "deep_medium"])
         records = [json.loads(p.read_text()) for p in sorted((self.root / "think").glob("*.tier.json"))]
-        self.assertEqual([r["effort"] for r in records], ["medium", "high", "medium"])
+        self.assertEqual([r["effort"] for r in records], ["low", "medium", "low"])
         self.assertEqual(records[1]["reason"], HIGH_REASON)
         self.assertEqual(loop.tiers_used(2)["plan"], "deep_medium")
 

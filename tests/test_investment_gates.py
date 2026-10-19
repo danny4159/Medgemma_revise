@@ -142,7 +142,7 @@ class InvestmentContextTests(unittest.TestCase):
     def test_next_call_policy_contains_pilot_and_current_run_boundary(self):
         root = Path(__file__).resolve().parents[1]
         policy = (root / "agent/RESEARCH_POLICY.md").read_text()
-        for term in ("실행 중인 iter_039", "method_stage=pilot", "method_stage=full", "decision_contract",
+        for term in ("원 계획의 판정은 유지", "method_stage=pilot", "method_stage=full", "decision_contract",
                      "research_track", "related_iterations", "횟수만으로 자동 기각하지 않는다"):
             self.assertIn(term, policy)
 

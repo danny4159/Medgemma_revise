@@ -7,6 +7,7 @@ from pathlib import Path
 from .contracts import (EXPLORE, CRITIC, validate, candidate_valid, axes_valid, sources_valid,
                         nomination_problems, recommendation_problems)
 from .runtime import now, read_json, save
+from .routing import evidence_work, select_effort, validate_work
 
 PACKAGE = Path(__file__).resolve().parent
 STATUS_LABELS = {"exploring": "탐색", "investigating": "집중 조사", "recommended": "문헌상 유망",
@@ -14,8 +15,8 @@ STATUS_LABELS = {"exploring": "탐색", "investigating": "집중 조사", "recom
 
 
 def rebuild(root):
-    state = {"round": 0, "candidates": {}, "next_question": "의료 데이터 특성과 지속적인 현장 수요가 만나는 중요한 문제는 무엇인가?",
-             "focus_id": "", "stalled": 0, "paused": False, "recent": []}
+    state = {"round": 0, "candidates": {}, "next_question": "의료 AI에서 실제 필요가 있고, 독창적인 후속 연구와 의료·사회·경제에 긍정적인 영향으로 이어질 문제는 무엇인가?",
+             "focus_id": "", "next_work": evidence_work(), "stalled": 0, "paused": False, "recent": []}
     for path in sorted((root / "rounds").glob("round_*/done.json")):
         record = read_json(path)
         if record["number"] != state["round"] + 1:
@@ -25,6 +26,7 @@ def rebuild(root):
             state["candidates"][candidate["id"]] = candidate
         state["next_question"] = record["next_question"]
         state["focus_id"] = record["focus_id"]
+        state["next_work"] = record.get("next_work", evidence_work())
         state["stalled"] = 0 if record["evidence_added"] else state["stalled"] + 1
         state["paused"] = record["next_action"] == "pause"
         state["recent"] = (state["recent"] + [{k: record[k] for k in ("number", "question", "what_changed", "next_question")}])[-5:]
@@ -39,7 +41,8 @@ def context(state):
     active = [c for c in state["candidates"].values() if c["status"] in {"exploring", "investigating"}]
     selected = ([focused] if focused else []) + [c for c in active if not focused or c["id"] != focused["id"]][:2]
     return json.dumps({"candidate_index": index, "relevant_documents": selected,
-                       "recent_decisions": state["recent"], "next_question": state["next_question"]}, ensure_ascii=False)
+                       "recent_decisions": state["recent"], "next_question": state["next_question"],
+                       "next_work": state["next_work"]}, ensure_ascii=False)
 
 
 def base_prompt(role):
@@ -51,6 +54,7 @@ def base_prompt(role):
 
 def validate_exploration(result, state):
     validate(result, EXPLORE)
+    validate_work(result["next_work"])
     if not result["question"].strip() or not result["what_changed"].strip():
         raise ValueError("질문과 판단 변화 기록 누락")
     if result["next_action"] == "continue" and not result["next_question"].strip():
@@ -99,8 +103,15 @@ def run_round(root, state, model, channel):
     number = state["round"] + 1
     folder = root / "rounds" / f"round_{number:04d}"
     folder.mkdir(parents=True, exist_ok=True)
-    save(root / "status.json", {"state": "researching", "round": number, "question": state["next_question"], "time": now()})
-    result = model.call(folder / "explore", base_prompt("explore") + "\n\n이전 근거와 다음 질문:\n" + context(state), EXPLORE)
+    effort, reason = select_effort(state)
+    # 재개 시 성공·실패 여부와 무관하게 최초 호출 등급을 유지한다.
+    settings = read_json(folder / "explore/call_settings.json", {"effort": effort, "reason": reason})
+    effort, reason = settings["effort"], settings["reason"]
+    save(root / "status.json", {"state": "researching", "round": number, "question": state["next_question"],
+                               "effort": effort, "effort_reason": reason, "time": now()})
+    print(f"연구 탐색 {number}회차 | Astra {effort} | {reason}", flush=True)
+    result = model.call(folder / "explore", base_prompt("explore") + "\n\n이전 근거와 다음 질문:\n" + context(state),
+                        EXPLORE, effort=effort, reason=reason)
     validate_exploration(result, state)
     save(folder / "research.json", result)
     save(folder / "research.md", result["report_markdown"])
@@ -117,11 +128,15 @@ def run_round(root, state, model, channel):
                 candidate["review_reason"] = candidate["review_markdown"]
                 result["focus_id"] = cid
                 result["next_question"] = "추천 전 부족한 근거를 확보할 수 있는가: " + "; ".join(problems)
+                result["next_work"] = evidence_work()
             else:
-                save(root / "status.json", {"state": "reviewing", "round": number, "candidate": cid, "time": now()})
+                save(root / "status.json", {"state": "reviewing", "round": number, "candidate": cid,
+                                           "effort": "high", "effort_reason": "최종 추천·반론 심사", "time": now()})
                 review = model.call(folder / "critic", base_prompt("critic") + "\n\n심사할 후보:\n"
-                                    + json.dumps(candidate, ensure_ascii=False), CRITIC)
+                                    + json.dumps(candidate, ensure_ascii=False), CRITIC,
+                                    effort="high", reason="최종 추천·반론 심사")
                 validate(review, CRITIC)
+                validate_work(review["next_work"])
                 axes_valid(review["criteria"])
                 sources_valid(review["additional_sources"])
                 save(folder / "review.json", review)
@@ -143,6 +158,7 @@ def run_round(root, state, model, channel):
                         f"상세: {root / 'candidates' / (cid + '.md')}"))
                 elif review["verdict"] == "deepen":
                     result["focus_id"], result["next_question"] = cid, review["next_question"]
+                    result["next_work"] = review["next_work"]
         old = state["candidates"].get(cid)
         if old and old["status"] == "recommended" and candidate["status"] != "recommended":
             notifications.append((f"reconsider-{cid}-{number}", f"🔎 기존 추천 재검토 | {candidate['title']}\n"
@@ -152,14 +168,16 @@ def run_round(root, state, model, channel):
     if focus and focus["status"] in {"recommended", "held", "excluded"}:
         result["focus_id"] = ""
         result["next_question"] = "선정·보류 후보와 겹치지 않으면서 목표에 부합하는 다음 문제는 무엇인가?"
+        result["next_work"] = evidence_work()
     if result["next_action"] == "pause":
         notifications.append((f"pause-{number}", f"⏸ 탐색 범위 재검토 필요\n{result['what_changed']}\n"
                               f"남은 질문: {result['next_question']}"))
     elif number % 3 == 0:
         notifications.append((f"progress-{number}", f"🧭 연구 탐색 | {number}회차\n"
                               f"확인: {result['what_changed']}\n다음 질문: {result['next_question']}"))
-    record = {k: result[k] for k in ("question", "what_changed", "next_question", "focus_id", "next_action", "evidence_added")}
-    record.update(number=number, candidates=candidates, notifications=notifications, time=now())
+    record = {k: result[k] for k in ("question", "what_changed", "next_question", "focus_id", "next_action", "evidence_added", "next_work")}
+    record.update(number=number, candidates=candidates, notifications=notifications, time=now(),
+                  effort=effort, effort_reason=reason)
     # done.json 단일 원자적 commit 이후 파생 파일/알림은 재개 시 재생한다.
     save(folder / "done.json", record)
     state = rebuild(root)

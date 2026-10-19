@@ -47,7 +47,8 @@ class PromptTransportTests(unittest.TestCase):
             self.assertEqual(cmd[cmd.index("--output-schema") + 1], str(schema))
             self.assertEqual(cmd[cmd.index("-m") + 1], loop.tier_spec("gpt", "deep")["model"])
             self.assertIn('web_search="live"', cmd)
-            self.assertIn('model_reasoning_effort="high"', cmd)
+            effort = loop.tier_spec("gpt", "deep")["effort"]
+            self.assertIn(f'model_reasoning_effort="{effort}"', cmd)
             self.assertNotIn(prompt, cmd)
             self.assertEqual(kwargs["stdin_text"].encode("utf-8"), payload)
             return original([sys.executable, "-c", child, str(output)], log, timeout, env,

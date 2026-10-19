@@ -30,13 +30,23 @@ python legacy/run_medgemma.py
 
 ## 현재 연구 우선순위
 
-최종 목표는 `agent/GOAL.md`, 현재 MRI 우선 전략은 `agent/RESEARCH_FOCUS.md`에 있다.
-2026-10-03 보완부터 자료·모델 적합성 확인 → 현상 탐색 → 최소 개입 → 독립 확인을 구분한다.
-MedGemma는 초기 baseline이며 MRI 과제의 기본 능력이 부족하면 적절한 다른 모델을 비교한다.
+최종 목표는 `agent/GOAL.md`, 현재 MR-RATE MRI 탐색의 연구 질문은 `agent/RESEARCH_FOCUS.md`에 있다.
+MedGemma 1.5에서 출발해 강한 대안·다른 모델과 비교한다. 자료 적합성 확인 → 현상 탐색 → 작은 원인 검증 → 독립 확인을 구분한다.
+기존 위치·근거 활용 방향은 `agent/PAUSED_GROUNDING_TRACK.md`에 재개 가능한 보류 상태로 남겼다.
+계획·리뷰는 중요한 문제 / 현재 근거 / 쉬운 해결책 / 남은 설명 / 다음 결정의 다섯 항목을 이어받는다.
+상세 구현 설계 전에 핵심 자료 조건을 확인하고, 작은 개입과 본격 방법 개발의 근거 수준을 구분한다.
 공통 기준은 `agent/RESEARCH_POLICY.md`이며 GPT 계획·리뷰와 Claude/Codex 구현 호출에 전달된다.
-전환 원문·이력은 `agent/interventions/`, 기존 결과는 각 `agent/runs/iter_NNN/`에 보존한다.
+관련 원문은 `agent/RESEARCH_HISTORY_INDEX.md`에서 찾는다. 과거 일회성 지시는 현재 명령으로 재실행하지 않는다.
+정리 전 원문·해시는 `agent/interventions/archives/20261013_policy_consolidation/`, 기존 결과는
+각 `agent/runs/iter_NNN/`에 보존한다. 정책 보완만으로 실험을 재개하거나 다음 반복 승인을 대신하지 않는다.
 
 ## 구현 담당 선택: Claude / Codex
+
+`--engineer claude --engineer-fallback codex`를 지정하면 Claude 구독 소진 시 같은 반복의 남은 작업을
+Codex에 인계한다. 실행 중 실험 종료를 기다리고 코드·세션을 보존하며 Telegram으로 알린다.
+후속 반복도 Codex로 이어진다. 기본은 전환 없음이며 `--engineer-fallback none`으로 끌 수 있다.
+MR-RATE 전환은 매 반복 승인 없이 `--autonomy full --always-review --max-iters 0`으로 실행한다.
+추가 권한·무결성 문제까지 자동 승인하는 것은 아니다.
 
 일시적으로 Codex를 사용한 뒤 정해진 시각 이후 **시작하는 반복부터** Claude로 복귀할 수 있다.
 이미 시작한 반복은 중간에 교체하지 않는다. 예약은 재시작해도 유지된다.
@@ -63,9 +73,37 @@ python orchestrator.py --engineer claude --gpus 0,1
 실행 없이 선택만 저장하려면 종료 상태에서 `--prepare-only --engineer codex`를 쓴다.
 단, 대기 중인 RESUME.md가 있으면 기존 prepare-only 동작대로 그 보완 전환도 적용한다.
 
-이미 구현을 시작한 반복에서는 담당을 조용히 교체하지 않는다. 기존 담당으로 완료하거나,
-정상 중단 후 `--engineer codex --replan "기존 코드·결과를 보존하고 남은 작업을 인계해 재계획"`처럼
-명시적으로 새 반복으로 넘긴다. 목표·원본 기록·checkpoint는 보존한다.
+이미 구현을 시작한 반복에서는 담당을 조용히 교체하지 않는다. 담당만 바꿀 때는 실험 checkpoint 저장과
+관련 프로세스의 정상 종료를 먼저 확인한 뒤, **같은 iter를 유지하는 인계**를 사용한다.
+
+```bash
+python orchestrator.py --handoff-engineer claude --handoff-note "실험 종료 확인. checkpoint 경로: …; 남은 작업: …" --prepare-only
+python orchestrator.py --gpus 0,1
+```
+
+이 명령이 실험을 자동 중단하거나 checkpoint를 대신 저장하는 것은 아니다. 원 계획·연구 코드·결과·
+전체 실행 로그를 유지하고 이전 세션/응답은 `iter_NNN/engineer_handoffs/`에 보관한다. 새 담당은 새 세션으로
+남은 작업을 재개한다. 연구 방향 자체를 바꿀 때만 기존 `--replan`으로 새 반복에서 계획한다.
+이미 남은 iter_090/091 전환 기록은 소급 변경하지 않는다.
+
+### 매 iteration마다 다음 진행을 확인받기 (선택)
+
+```bash
+python orchestrator.py --gpus 0,1 --confirm-each-iter
+```
+
+- 기본은 꺼짐: 기존 자동 진행 규칙을 유지한다.
+- 켜면 이번 iter의 리뷰·코드 보존 후, 다음 계획을 만들기 전에 Telegram으로 확인한 것·의미/한계·
+  추천 작업·대안을 요약해 보내고 기다린다. 의미 있는 관찰은 💡🔎로 강조한다.
+- `ok`: 추천 방향으로 다음 계획·실험 진행. `f 수정할 내용`: 피드백을 우선 반영해 진행. `q`: 정지.
+- 승인/피드백은 해당 iter의 `next_iteration_decision.json`에 저장된다. 대기 중에는 번호가 바뀌지 않는다.
+  재시작 때 승인 요청을 우회하지 않으며, 같은 리뷰에 이미 승인한 경우 중복해서 묻지 않는다.
+- `--auto`나 `--no-ask-until`보다 이 확인이 우선한다. 답장 경로가 없으면 자동 승인하지 않고 종료한다.
+  목표 완료(`DONE`)이면 다음 반복이 없으므로 승인 없이 종료한다.
+- 이 옵션은 **이번 실행**에 적용한다. 계속 매회 확인하려면 재실행에도 붙인다. 이미 대기 중인 질문은
+  옵션을 빼도 한 번 승인해야 하며, 승인 뒤 새 반복부터 기본 자동 규칙으로 돌아간다.
+- `--autonomy manual`은 구현 전 계획 확인이며 이 옵션과 별개다. 함께 켜면 두 지점에서 확인한다.
+  실행 중 프로세스에 새 CLI 옵션은 소급 적용되지 않는다. 안전하게 종료한 뒤 재실행해야 한다.
 
 `--engineer-tier standard`와 `--engineer-timeout 0`으로 등급·timeout을 설정할 수 있다.
 기존 `--claude-tier`, `--claude-timeout`도 같은 옵션의 호환 별칭이다. 모델 설정은
@@ -332,7 +370,7 @@ conda Python·GPU 범위·모델 등급·구독 로그인은 유지하며, 전�
 
 ## 별도 문헌·산업 수요 탐색기
 
-의료 데이터 특성에서 출발하는 연구 분야·핵심 문제 탐색은
+의료 AI를 중심으로 독창성과 후속 연구 가능성, 의료·사회·경제에 기대되는 영향을 살피는 연구 분야·핵심 문제 탐색은
 [discovery/README.md](discovery/README.md)를 참조한다. `discovery_orchestrator.py`는
-gpt-6-astra/high로 문헌 조사·후보 심사만 수행하며 기존 실험 GOAL·Telegram·상태와 독립이다.
+gpt-6-astra의 medium(일반 조사)/high(중요 판단·최종 심사)로 문헌 탐색만 수행하며 기존 실험 GOAL·Telegram·상태와 독립이다.
 기본 실행은 상태 조회이고 `--run`으로만 탐색을 시작한다.

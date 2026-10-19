@@ -21,7 +21,7 @@ def nonnegative(value):
 
 
 def parse_args(argv=None):
-    parser = argparse.ArgumentParser(description="의료 AI 문헌·산업 수요 탐색 (gpt-6-astra/high)")
+    parser = argparse.ArgumentParser(description="의료 AI 문헌·산업 수요 탐색 (Astra medium/high 자동 선택)")
     actions = parser.add_mutually_exclusive_group()
     actions.add_argument("--run", action="store_true", help="새 회차를 계속 탐색; 기본은 상태 조회")
     actions.add_argument("--status", action="store_true")
@@ -46,6 +46,7 @@ def status(root=ROOT):
     latest = read_json(root / "status.json", {"state": "not_started"})
     return (f"문헌 탐색 | 완료 {state['round']}회, 후보 {len(state['candidates'])}개\n"
             f"최근 기록 상태: {latest['state']} ({latest.get('time', '없음')})\n"
+            f"최근 호출: {latest.get('effort', '없음')} ({latest.get('effort_reason', '기록 없음')})\n"
             f"정지 요청: {'있음' if (root / 'STOP').exists() else '없음'}\n"
             f"다음 질문: {state['next_question']}\n"
             "최근 기록 상태는 프로세스 생존 확인과 다릅니다.")
@@ -71,7 +72,7 @@ def main(argv=None):
     env = None if args.no_telegram else separate_telegram(PACKAGE / ".notify.env", PACKAGE.parent / "agent/.notify.env")
     model = Codex(ROOT, args.call_timeout, args.limit_wait_hours * 3600, args.limit_poll_minutes * 60)
     print(model.preflight())
-    print("gpt-6-astra/high · live search · read-only · 구현/GPU 실행 없음")
+    print("gpt-6-astra · 기본 medium / 최초 방향·전략·충돌 해석·최종 심사 high · live search · 구현/GPU 실행 없음")
     if args.check:
         print("Telegram: 별도 설정 있음" if env else "Telegram: 미연결 (기존 봇 사용 안 함)")
         return 0
@@ -90,7 +91,10 @@ def main(argv=None):
         try:
             render(ROOT, state)
             replay_notifications(ROOT, channel)
-            channel.send(f"start-{time.time_ns()}", "▶ 의료 AI 연구 탐색 시작\n문헌·산업 수요를 조사합니다. 실험은 실행하지 않습니다.")
+            channel.send(f"start-{time.time_ns()}", "▶ 의료 AI 연구 분야 탐색 시작\n"
+                         "문헌·현장 수요를 살펴 독창적이고 후속 연구 가치가 있는 분야를 찾습니다.\n"
+                         "Astra: 일반 조사 medium · 최초 방향 설정과 중요한 판단·최종 추천 심사 high.\n"
+                         "유망 후보는 바로 알리고, 일반 진행은 3회차마다 묶어 보고합니다. 구현·실험은 하지 않습니다.")
             completed, stall_start = 0, state["stalled"] if args.resume else 0
             while not args.max_rounds or completed < args.max_rounds:
                 if (ROOT / "STOP").exists():

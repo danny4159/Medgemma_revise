@@ -34,8 +34,10 @@
   모델 설정과 필수 결과 검증은 유지하고, 원본 출처를 보존한다. 모델 교체는 추후 별도 판단한다.
 - `agent/CLAUDE_USAGE_POLICY.md`의 모델 선택·중복 작업 절감 기준을 따른다. 필수 검증·GPU 활용은 줄이지 않는다.
 - `agent/RESEARCH_POLICY.md`의 실험 판정·코드 보존·재사용 기준을 따른다.
-- `agent/RESEARCH_FOCUS.md`의 현재 우선순위를 따른다. MRI를 우선하되 MedGemma 사용을 강제하지 않으며,
-  자료·모델 적합성 → 실제 관찰 → 최소 개입 → 독립 확인으로 진행한다. 최종 GOAL과 과거 판정은 유지한다.
+- `agent/RESEARCH_FOCUS.md`의 현재 우선순위를 따른다. 2026-10-13 사용자 전환으로 MR-RATE MRI와
+  MedGemma 1.5에서 중요한 한계 후보를 탐색한다. 기존 위치·근거 활용 방향은 PAUSED_GROUNDING_TRACK.md에
+  재개 가능하게 보류했다. bbox·LoRA에 고정하지 않고 관련 과거 MRI 관찰과 타 모델·기존 대안을 비교한다.
+  최종 GOAL과 과거 판정은 유지한다. 선택 MRI 데이터는 초점 문서의 전용 외부 저장 경로도 쓸 수 있다.
 - `agent/RESOURCE_POLICY.md`의 사용자 의도와 실행 기준을 따른다.
 - 제한된 GPU란 현재 두 장의 메모리·가용 자원 안에서 실행한다는 뜻이다. CPU-only나 GPU 최소 사용을 목표로 삼지 않는다.
 - 두 GPU를 적극 활용하며, 타당성과 실행 가능성을 확인한 pilot은 필요한 본실험으로 확장한다.
@@ -88,6 +90,10 @@
   유한 실행이 필요할 때만 사용자가 지정한 양수 `--max-iters`를 사용한다.
 
 - 사용자가 보완·재계획을 요청하면 GOAL을 임의 변경하거나 --reset하지 않는다.
+- 담당(Codex/Claude)만 변경할 때는 --replan으로 새 iter를 만들지 않는다. checkpoint·실험 종료를
+  확인한 뒤 --handoff-engineer와 --handoff-note로 같은 iter를 인계한다. 상세는 RESUME_WORKFLOW.md.
+- --confirm-each-iter를 켠 실행은 매 리뷰 후 다음 계획 전에 사용자 승인을 기다린다. 기본은 꺼짐이다.
+  --auto/부재 설정으로 이 승인을 우회하지 않는다. 대기/승인/피드백은 next_iteration_decision.json에 남는다.
 - 코드/운영 규칙 수정만으로 이미 저장된 계획이 재작성되지는 않는다. 재계획이 필요하면
   RESUME.md에 사용자 의도·유지할 것·바꿀 것·검증 기준을 명시하거나 --replan을 사용한다.
 - `python orchestrator.py --prepare-only`는 보완 전환만 적용하며 모델·실험·알림은 실행하지 않는다.

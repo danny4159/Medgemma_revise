@@ -111,7 +111,7 @@ class ResourcePolicyTests(unittest.TestCase):
             stack.enter_context(patch.object(loop, "claude_tier", return_value="heavy"))
             stack.enter_context(patch.object(loop, "record_tier"))
             stack.enter_context(patch.object(loop, "record_event"))
-            stack.enter_context(patch.object(loop, "with_retries", side_effect=lambda name, call: call()))
+            stack.enter_context(patch.object(loop, "with_retries", side_effect=lambda name, call, **kwargs: call()))
             run = stack.enter_context(patch.object(loop, "run_claude", side_effect=RuntimeError("검증용 종료")))
             with self.assertRaisesRegex(RuntimeError, "검증용 종료"):
                 loop.step_claude(self.args, "현재 연구 목표", 8)

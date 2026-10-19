@@ -3815,3 +3815,12 @@ Claude 계정의 /usage 또는 Settings > Usage에서 제한을 확인한 뒤 �
   - 다음: 최소 방법 시험으로 전체 sequence 정답을 한 번 사용하는 입력별 직접 적응 pilot을 설계해, 과제 적응 뒤에도 개별·인접 처리 차이가 남는지 판단한다. iter_141의 유효한 observed 근거와 이번 전문 대조를 연결하고, 실제 문맥 처리 위치·gradient 연결·동일 관측·환자·target 노출·적응 범위를 고정한다. 작은 학습 동작 확인과 1개 seed의 실제 생성 평가를 묶고, 사전 기준에 따라 필요한 확대 또는 보류로 끝낸다. 전체 보고서를 slice별 정답으로 복제하거나 같은 6명의 frozen prompt·checkpoint 순회, 기존 출력 재채점을 발주하지 않는다.
 - 📁 원본: `agent/runs/iter_142/`
 
+## iter_143 — MRI 동일 관측 범위의 판독 대조 (4번째 시도) · 2026-10-14 02:46
+
+- 🔎 **사고 라운드 1** (GPT deep_medium): DWI 정답은 전체 sequence 단위이고 기존 환자는 56–70장이다. 입력별 SFT를 공정하게 비교할 attention·gradient 경로를 한 번 더 구체화한 뒤 pilot을 발주한다.
+  - 스스로 던진 질문: 로컬 Gemma3의 mask·position·generation cache 경로에서 국소 구간 간 정보 우회를 막으면서 전체 보고서 target만 모든 관측에 접근하도록 만들 수 있는가? 가능하면 추가 압축 없는 attention 대조를 우선한다. · attention 대조와 계층형 국소 표현 통합 중 어느 쪽이 같은 관측·학습 파라미터·target 노출을 더 명확하게 맞추는가? 선택한 방식에서 검증할 gradient 경로와 구조 변경의 해석 한계를 고정한다. · 선택한 구조에 필요한 기존 학습 코드가 어느 보존 SHA에 있으며 어떤 reuse_issues가 있는가? 관련 원 review와 실제 파일만 확인한 뒤 단일 seed의 학습량·생성 평가·조건부 확대 기준을 확정한다.
+- 🧭 **계획** (GPT deep_medium): 전체 DWI 정답을 한 번 사용하는 개별·인접 attention SFT와 native 직접 SFT를 비교한다. 실제 적응 효과와 잔여 누락을 확인하되, 변경된 attention의 효과를 3D 구조 우위로 해석하지 않는다.
+  - 대안: 1) MRI 동일 관측 범위의 판독 대조: 전체 sequence loss 아래 국소 attention 범위를 바꾸고 native 직접 SFT로 구조 변경을 통제한다. · 2) 계층형 국소 표현 통합: 메모리를 줄일 수 있으나 추가 압축·통합 구조가 새 혼동 요인이므로 이번에는 보류한다. · 3) 고정 국소 텍스트 통합기 SFT: 구현은 단순하지만 시각 문맥 경로의 적응을 검증하지 못해 우선하지 않는다.
+  - 1순위 선택 근거: 전체 target의 gradient를 유지하면서 관측·supervision·학습 범위를 맞출 구체적인 개입을 선택했다. 기존 유효 observed 근거로 method pilot이 가능하며 추가 사용자 권한은 필요하지 않다.
+- 📁 원본: `agent/runs/iter_143/`
+
